@@ -4701,6 +4701,123 @@ def test_build_import_graph_an_allowlisted_npm_launch_with_a_non_none_cwd_stays_
     assert rel not in pilot.unresolved_import_files(tracked)
 
 
+_ENV_KEYWORD = pytest.mark.parametrize("tail, expected_unresolved", [
+    pytest.param(", env={'PYTHONPATH': 'elsewhere'})", True, id="literal-mapping"),
+    pytest.param(", env=env)", True, id="non-literal-mapping"),
+    pytest.param(", env=None)", False, id="literal-none-stays-precise"),
+])
+
+
+@_ENV_KEYWORD
+def test_subprocess_env_keyword_controls_launch_resolution(tail, expected_unresolved):
+    # The launch classifier's own contract: only the explicit literal
+    # `env=None` keeps a launch resolvable. Any other spelling rewrites the
+    # child's environment, where PATH/PYTHONPATH can point the same argv at a
+    # different interpreter, module, or program -- even for an allowlisted
+    # non-Python command name.
+    node = pilot.ast.parse("subprocess.run(['git']" + tail + "\n").body[0].value
+    assert pilot._subprocess_launch_unresolved(node) is expected_unresolved
+
+
+def test_build_import_graph_a_python_launch_with_a_literal_env_mapping_fails_safe(tmp_path, monkeypatch):
+    # `[sys.executable, 'tools/worker.py']` alone keeps the precise edge; any
+    # non-None `env=` takes it away. The mapping can set PYTHONPATH, so the
+    # same script path may resolve to a different tracked file -- or none --
+    # inside the child, and the whole file fails safe.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": (
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, 'tools/worker.py'],\n"
+            "               env={'PYTHONPATH': 'elsewhere'})\n"),
+        "tools/worker.py": "W = 1\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_a_python_launch_with_a_dynamic_env_fails_safe(tmp_path, monkeypatch):
+    # A non-literal mapping (os.environ, a variable, a call result) is never
+    # proven not to rewrite PATH/PYTHONPATH: exactly the same rule as a
+    # literal non-None mapping.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": (
+            "import os, subprocess, sys\n"
+            "child_env = dict(os.environ)\n"
+            "subprocess.run([sys.executable, 'tools/worker.py'], env=child_env)\n"),
+        "tools/worker.py": "W = 1\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_an_allowlisted_command_with_a_non_none_env_fails_safe(tmp_path, monkeypatch):
+    # Unlike cwd=, env= has no allowlist exemption: PATH in the child's
+    # environment can make the same literal 'git' argv start a different
+    # program, so the file fails safe instead of returning an empty edge set.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": (
+            "import subprocess\n"
+            "subprocess.run(['git', 'status'], env={'GIT_DIR': 'elsewhere'})\n"),
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_a_python_subprocess_launch_with_literal_env_none_stays_precise(tmp_path, monkeypatch):
+    # Negative control: the accepted literal `env=None` changes nothing (the
+    # child inherits the parent's environment), so the precise script edge
+    # survives with no catch-all and no taint -- mirroring cwd=None.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": (
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, 'tools/worker.py'], env=None)\n"),
+        "tools/worker.py": "W = 1\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == {"tools/worker.py"}
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
+
+
+def test_select_pr_tests_helper_with_env_redirected_launch_taints_its_importer(tmp_path, monkeypatch):
+    # Selector-level proof that the env= catch-all EXERCISES taint: the
+    # changed `engine/b.py` and `tests/test_a.py` share no import edge (test_a
+    # reaches only its helper), so test_a is selected solely because the
+    # helper's Python launch with a non-None env= is unresolved and the #155
+    # fail-safe fans the taint out; the clean test stays out.
+    tracked = _write_repo(tmp_path, {
+        "engine/b.py": "VALUE = 2\n",
+        "tests/helper.py": (
+            "import subprocess, sys\n"
+            "\n"
+            "def go():\n"
+            "    subprocess.run([sys.executable, 'tools/worker.py'],\n"
+            "                   env={'PYTHONPATH': 'elsewhere'})\n"),
+        "tools/worker.py": "W = 1\n",
+        "tests/test_a.py": "from tests.helper import go\n\ndef test_go():\n    go()\n",
+        "tests/test_direct.py": "import engine.b\n\ndef test_b():\n    assert engine.b.VALUE == 2\n",
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    # helper's real closure genuinely cannot see b.py -- the taint (not a
+    # static edge) is what selects test_a.
+    helper_closure, _ = pilot._closure_from_roots(
+        {"tests/test_a.py"}, graph, pilot.unresolved_import_files(tracked), taint_exempt={"tests/test_a.py"})
+    assert "engine/b.py" not in helper_closure
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_a.py" in selected       # tainted through the env-redirected helper
+    assert "tests/test_direct.py" in selected  # reaches b.py by a real import edge
+    assert "tests/test_clean.py" not in selected  # clean: no edge, no taint
+
+
 # (c) process-launch: the shape-only classifier, direct and by-reference
 
 _PROCESS_LAUNCH_UNRESOLVED = [
@@ -4805,6 +4922,66 @@ def test_has_unresolved_sys_path_write_flags_every_unproven_mutation(source, tmp
     assert graph[rel] == set(tracked) - {rel}
     assert rel in pilot.dynamic_files(graph)
     assert rel in pilot.unresolved_import_files(tracked)
+
+
+# Root-alias binding safety: the top-level assignment is a proof of the root
+# only while it is that identifier's ONLY binding in the module. A nested
+# binder (a helper's parameter, a later reassignment before the insertion)
+# makes the name's value at the write statically uncertain, and the
+# conservative count in `_repo_root_names` withdraws the proof.
+
+_ROOT_ALIAS_UNRESOLVED = [
+    pytest.param(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "ROOT = Path(__file__).resolve().parents[1]\n"
+        "def label(ROOT):\n"
+        "    return ROOT.name\n"
+        "sys.path.insert(0, str(ROOT))\n",
+        id="parameter-shadows-root-alias"),
+    pytest.param(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "ROOT = Path(__file__).resolve().parents[1]\n"
+        "ROOT = '/somewhere/else'\n"
+        "sys.path.insert(0, str(ROOT))\n",
+        id="alias-reassigned-before-insert"),
+]
+
+
+@pytest.mark.parametrize("source", _ROOT_ALIAS_UNRESOLVED)
+def test_has_unresolved_sys_path_mutation_rejects_a_shadowed_or_rebound_root_alias(source, tmp_path, monkeypatch):
+    # The one-variable-hop form is trusted ONLY for a uniquely bound alias;
+    # a shadowed or rebound one classifies unresolved exactly like any other
+    # unproven target, and reaches the existing catch-all/unresolved-file
+    # behavior in the tracked graph.
+    rel = "engine/hack.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_sys_path_mutation(pilot.ast.parse(source), rel) is True
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+def test_has_unresolved_sys_path_mutation_trusts_a_root_alias_with_a_single_binding(tmp_path, monkeypatch):
+    # The negative control (and the shape `tests/conftest.py` relies on): one
+    # top-level assignment to the exact root expression, every later use a
+    # pure LOAD (call argument, nested-function read), leaves that assignment
+    # the alias's sole binding -- the insertion stays PROVEN, precise, and
+    # untainted.
+    source = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "ROOT = Path(__file__).resolve().parents[1]\n"
+        "sys.path.insert(0, str(ROOT))\n"
+        "def describe():\n"
+        "    return str(ROOT)\n")
+    rel = "engine/clean.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_sys_path_mutation(pilot.ast.parse(source), rel) is False
+    assert graph[rel] == set()
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
 
 
 def test_the_real_tests_conftest_proven_root_insert_never_taints_every_test():

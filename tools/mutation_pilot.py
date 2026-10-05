@@ -829,8 +829,12 @@ def _subprocess_launch_unresolved(node: ast.Call) -> bool:
     what it launches, before any argv analysis: an `executable=` override
     replaces the program `_python_argv_targets` would have proved, an active
     or non-literal `shell=` hands the command to a shell instead of
-    executing argv directly, and a `**kwargs` expansion could carry either --
-    each unresolved regardless of argv. A `cwd=` that is not the literal
+    executing argv directly, a `**kwargs` expansion could carry either, and
+    any `env=` mapping that is not the literal `None` rewrites the child's
+    environment, where `PATH`/`PYTHONPATH` can redirect which interpreter or
+    module a Python launch reaches -- and even which program an allowlisted
+    non-Python command name starts, so `env=` gets no allowlist exemption.
+    Each is unresolved regardless of argv. A `cwd=` that is not the literal
     `None` is unresolved whenever the argv is NOT a literal list headed by a
     `_SAFE_NON_PYTHON_COMMANDS` executable: a relative script or `-m` target
     in a Python or unknown-command launch resolves against the CHILD's
@@ -841,11 +845,11 @@ def _subprocess_launch_unresolved(node: ast.Call) -> bool:
     all, so its `cwd=` alone adds no unprovable edge and stays precise.
     Extra positional arguments (more than the one argv) are unresolved as
     well, whatever the argv heads: only `Popen` accepts them, and they can
-    carry `executable`, `shell`, or `cwd` by position, which the current
-    scanner cannot safely interpret. An explicit literal `shell=False` is the
-    one accepted shell spelling and an explicit literal `cwd=None` keeps
-    normal resolution; absent keywords and ordinary single-argv calls are
-    fine."""
+    carry `executable`, `shell`, `cwd`, or `env` by position, which the
+    current scanner cannot safely interpret. An explicit literal `shell=False`
+    is the one accepted shell spelling and explicit literal `cwd=None`/
+    `env=None` keep normal resolution; absent keywords and ordinary
+    single-argv calls are fine."""
     if len(node.args) > 1:
         return True
     argv = node.args[0] if node.args else next(
@@ -858,6 +862,9 @@ def _subprocess_launch_unresolved(node: ast.Call) -> bool:
             return True
         if kw.arg == "shell" and not (
                 isinstance(kw.value, ast.Constant) and kw.value.value is False):
+            return True
+        if kw.arg == "env" and not (
+                isinstance(kw.value, ast.Constant) and kw.value.value is None):
             return True
         if kw.arg == "cwd" and not allowlisted_non_python and not (
                 isinstance(kw.value, ast.Constant) and kw.value.value is None):
@@ -872,20 +879,23 @@ def _subprocess_targets(tree: ast.Module, tracked_set: set[str],
     sp]` or `from subprocess import run as launch`), each judged by
     `_python_argv_targets` once `_subprocess_launch_unresolved` clears its
     arguments. A call with an `executable=` override, an active or
-    non-literal `shell=`, or a `**kwargs` that could carry either is
-    unresolved whatever its argv, as is any positional argument beyond argv;
-    a non-literal `cwd=` is unresolved unless the argv is a literal list
-    headed by a `_SAFE_NON_PYTHON_COMMANDS` command -- an allowlisted
-    non-Python launch loads no tracked module, so the child's directory
-    cannot redirect an edge the graph would miss. Each such call contributes no edge: its argv
+    non-literal `shell=`, a non-None `env=`, or a `**kwargs` that could
+    carry any of them is unresolved whatever its argv, as is any positional
+    argument beyond argv; a non-literal `cwd=` is unresolved unless the argv
+    is a literal list headed by a `_SAFE_NON_PYTHON_COMMANDS` command -- an
+    allowlisted non-Python launch loads no tracked module, so the child's
+    directory cannot redirect an edge the graph would miss (a rewritten
+    child environment still can, so `env=` keeps no such exemption). Each
+    such call contributes no edge: its argv
     no longer proves what runs -- or, for `cwd=` on a Python or unknown
     command and the positional form, where a relative target resolves or
-    what `executable`/`shell`/`cwd` value landed in the child's parameter
-    slots. An explicit `shell=False` keeps the normal argv analysis, as does
-    an absent keyword (a literal `cwd=None`, or any `cwd=` on a literal
-    allowlisted non-Python argv). `unresolved` is True if ANY launch on its
-    own cannot be proven safe, in which case `build_import_graph` adds the
-    whole-file catch-all on top of whatever precise edges were found."""
+    what `executable`/`shell`/`cwd`/`env` value landed in the child's
+    parameter slots. An explicit `shell=False` keeps the normal argv
+    analysis, as does an absent keyword (a literal `cwd=None` or `env=None`,
+    or any `cwd=` on a literal allowlisted non-Python argv). `unresolved` is
+    True if ANY launch on its own cannot be proven safe, in which case
+    `build_import_graph` adds the whole-file catch-all on top of whatever
+    precise edges were found."""
     aliases, funcs = _subprocess_bindings(tree)
     sys_aliases = _bound_aliases(tree, "sys") | {"sys"}
     edges: set[str] = set()
@@ -948,7 +958,8 @@ def _has_unresolved_process_launch(tree: ast.Module) -> bool:
 
     A direct call to one of the five is deliberately NOT flagged here:
     `_subprocess_targets` decides it from argv plus its `shell=`/
-    `executable=`/`cwd=` keywords and any positional arguments beyond argv,
+    `executable=`/`cwd=`/`env=` keywords and any positional arguments beyond
+    argv,
     so an ordinary proved-safe `subprocess.run([...])` stays resolved. Module aliases (`import os as
     o`, `import subprocess as sp`, `import os.path`) and `from os import
     ...`/`from subprocess import ...` aliases are followed; a wildcard
@@ -1482,6 +1493,53 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     return False
 
 
+def _repo_root_names(tree: ast.Module, root_texts: set[str]) -> set[str]:
+    """The top-level names this module PROVES to name the repository root
+    expression (any unparse in `root_texts`): each is assigned that exact
+    expression at the top level AND that assignment is the identifier's
+    only binding anywhere in the module. The scan counts every binding
+    node across all nested scopes -- `ast.Name` in Store or Del context
+    (assignments, walrus, loop/with targets, `del`), `ast.arg` function/
+    lambda parameters, `def`/`class` names, `import`/`from`-import names
+    and asnames, `except ... as`, and `match` capture names -- and a
+    candidate with any second binding is dropped, never trusted by its
+    assignment alone: a root alias that is rebound, deleted, or shadowed
+    by a nested binder cannot be proven to still name the root wherever
+    it is later read. A `from ... import *` anywhere binds an unknown
+    name set, so no alias is trusted at all then. Bindings are counted
+    from binder NODES only -- never inferred from a name's position."""
+    counts: dict[str, int] = {}
+    wildcard = False
+
+    def bind(name: str) -> None:
+        counts[name] = counts.get(name, 0) + 1
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                bind(node.id)
+        elif isinstance(node, ast.arg):
+            bind(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            if node.name:
+                bind(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bind(node.rest)
+        elif isinstance(node, ast.alias):
+            if node.name == "*":
+                wildcard = True
+            bind(node.asname or node.name.split(".")[0])
+    if wildcard:
+        return set()
+    return {n.targets[0].id for n in tree.body
+            if isinstance(n, ast.Assign) and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name)
+            and ast.unparse(n.value) in root_texts
+            and counts[n.targets[0].id] == 1}
+
+
 def _has_unresolved_sys_path_mutation(tree: ast.Module, rel: str) -> bool:
     """True if the file at tracked path `rel` writes an import search path
     in a shape whose effect this scan cannot prove safe:
@@ -1489,8 +1547,11 @@ def _has_unresolved_sys_path_mutation(tree: ast.Module, rel: str) -> bool:
       - a `sys.path.insert`/`append` call whose path argument is not
         provably the repository root for `rel` (the file's own
         `Path(__file__).resolve().parents[<depth>]` expression, directly,
-        through a `str(...)` call, or via a plain top-level name assigned
-        that expression), however `sys` is bound -- a `sys` alias,
+        through a `str(...)` call, or via a top-level name whose only
+        binding in the whole module IS that exact assignment --
+        `_repo_root_names`; a root alias that is rebound, deleted, or
+        shadowed by any nested binder is binding-uncertain and does not
+        prove the root), however `sys` is bound -- a `sys` alias,
         `from sys import path`, or an alias of the from-imported name;
       - any `sys.path.extend(...)` call on such a receiver: unlike
         insert/append the argument is an iterable, so no single target can
@@ -1513,9 +1574,7 @@ def _has_unresolved_sys_path_mutation(tree: ast.Module, rel: str) -> bool:
     depth = rel.count("/")
     root_texts = {f"Path(__file__).resolve().parents[{depth}]",
                   f"pathlib.Path(__file__).resolve().parents[{depth}]"}
-    root_names = {n.targets[0].id for n in tree.body
-                  if isinstance(n, ast.Assign) and len(n.targets) == 1
-                  and isinstance(n.targets[0], ast.Name) and ast.unparse(n.value) in root_texts}
+    root_names = _repo_root_names(tree, root_texts)
     sysn, siten = _bound_aliases(tree, "sys") | {"sys"}, _bound_aliases(tree, "site")
     pairs = {(n.module, a.asname or a.name, a.name) for n in ast.walk(tree)
              if isinstance(n, ast.ImportFrom) and not n.level for a in n.names}

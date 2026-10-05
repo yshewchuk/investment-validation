@@ -175,12 +175,13 @@ evidence. See the models and data component contracts.
     closure file also matches, conservatively); a collected
     test file is a leaf (selects itself and its static importers, never the whole suite); the
     dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
-    catch-all graph edges apply only to a file with a genuinely unresolved dynamic target;
-    recognized constructs with resolvable targets create specific edges. Recognized unresolved
-    targets add catch-all graph edges and can widen selection through the #155 fail-safe test set;
-    this does not always mean every test is selected. `full_suite` paths, an unrecognized path, a
-    deleted test file, or a graph or scan failure returns the `__ALL__` sentinel and runs the full
-    suite. If the selector command itself errors, the CLI exits nonzero without printing a
+    catch-all graph edges apply only where a dynamic target's resolution stays uncertain -- a
+    non-`None` subprocess `env=` override, a path mutation through a shadowed or reassigned root
+    alias -- and recognized constructs with resolvable targets create specific edges. Recognized
+    unresolved targets add catch-all graph edges and can widen selection through the #155 fail-safe
+    test set; this does not always mean every test is selected. `full_suite` paths, an unrecognized
+    path, a deleted test file, or a graph or scan failure returns the `__ALL__` sentinel and runs
+    the full suite. If the selector command itself errors, the CLI exits nonzero without printing a
     selection; the workflow job fails before pytest rather than proceeding with a narrowed run.
     The full-suite allowlist includes the operator-tool namespace. The selection rule (leaf,
     taint, `full_suite`,

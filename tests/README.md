@@ -440,7 +440,7 @@ its 330-minute step timeout.
   `from pkg import *` re-exports). For the mutation-CI selector,
   `module_dependency_closure` follows precise graph edges and does not widen
   through unresolved catch-all edges, so an unrecognized runtime dependency
-  may omit a module (see issue #42). `tests/conftest.py` is a closure root
+   may omit a module (see issue #155). `tests/conftest.py` is a closure root
   for every module, but unrelated changes do not select every module;
   changing that conftest itself selects every enabled module. The selector
   tests check that its proven repository-root `sys.path` insertion is not
