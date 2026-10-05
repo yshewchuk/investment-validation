@@ -619,20 +619,31 @@ def _resolve_refresh_plan(refresh_mode, refresh_plan, *, plan=None, context_tick
             else from_document(RefreshPlan, refresh_plan))
 
 
-def _native_cached_outcome(conn, unit):
+def _native_cached_outcome(conn, store, unit):
     """S4B2: the cache-hit outcome for one market-wide session request.
 
     The lookup must reproduce ``_fetch_unit``'s request document field for
     field -- ``cache_raw_receipt`` hashes ``_jsonable`` of it, and every value
     here is already JSON-native, so ``content_hash(request)`` is that same
     hash. Found AND the stored pull was ``complete``: the cached receipt
-    id/hash classify as a complete cache hit. A stored ``legitimate_empty``
-    pull is never reused -- it may have been captured before ORATS finished
-    publishing the date, so it is always re-verified against the live source.
+    id/hash are a complete cache hit only once the receipt's own payload still
+    rebuilds a row for every ``(expected ticker, session date)`` pair, merged
+    by the provider's ``_merge_ticker_rows`` exactly as a live fetch merges.
+    A stored ``legitimate_empty`` pull is never reused -- it may have been
+    captured before ORATS finished publishing the date, so it is always
+    re-verified against the live source.
+
+    Demotion, never a refusal and never a provider call from here: a payload
+    whose shape cannot be decoded, or one that reconstructs fewer pairs than
+    the unit expects, returns ``{}``, so ``plan_refresh`` places the unit in
+    ``fetch_units`` and reserves the normal provider-call budget for it.
+    Receipt/artifact integrity errors from ``load_raw_receipt`` propagate as
+    their own typed error -- a damaged cache is a real fault, not a miss.
     """
-    from engine.v2.data.incremental import FETCH_SOURCE
+    from engine.v2.data.incremental import FETCH_SOURCE, load_raw_receipt
     from engine.v2.foundation import content_hash
     from engine.v2.ops import incremental_data
+    from engine.v2.ops.providers.orats_daily_market import _document_rows, _merge_ticker_rows
 
     request = {"request_id": unit.request_id, "table_name": unit.table_name,
                "partition_key": unit.partition_key, "keys": list(unit.expected_keys)}
@@ -643,6 +654,18 @@ def _native_cached_outcome(conn, unit):
         "ORDER BY received_at DESC",
         (FETCH_SOURCE, unit.table_name, content_hash(request))).fetchone()
     if row is None or row["response_kind"] != "complete":
+        return {}
+    try:
+        payload = json.loads(load_raw_receipt(conn, store, row["raw_receipt_id"]))
+        rows = _merge_ticker_rows(_document_rows(payload["summaries"]),
+                                  _document_rows(payload["cores"]),
+                                  expected_keys=unit.expected_keys)
+    except (KeyError, TypeError, ValueError):
+        return {}
+    session = str(unit.partition_key)[:10]
+    rebuilt = {(str(rebuilt_row["ticker"]), str(rebuilt_row["date"])[:10])
+               for rebuilt_row in rows}
+    if any((str(key), session) not in rebuilt for key in unit.expected_keys):
         return {}
     return {unit.request_id: incremental_data.classify_response(
         200, unit.expected_keys, returned_keys=unit.expected_keys,
@@ -657,10 +680,13 @@ def _build_native_refresh_plan(plan, context_tickers, *, catalog_path, objects_r
     Exactly ONE ``daily_market`` unit per session date: one ORATS market-wide
     pull per date, never a walk-back loop over a lookback window. A rerun of
     the same session date resolves through ``_native_cached_outcome`` to a
-    pure cache hit, so it acquires nothing from the provider. The four
-    remaining keyword parameters belong to the caller's deployment identity
-    and are threaded through by ``build_legacy_job_requests`` for symmetry
-    with the override path; the builder itself only reads the catalog.
+    pure cache hit, so it acquires nothing from the provider -- provided that
+    receipt's payload still reconstructs every expected ticker for the date;
+    an incomplete reconstruction demotes the unit to a budgeted fetch instead.
+    The four remaining keyword parameters belong to the caller's deployment
+    identity and are threaded through by ``build_legacy_job_requests`` for
+    symmetry with the override path; the builder itself only reads the catalog
+    and the cached receipt's artifacts.
     """
     from engine.v2.data.repository import Repository
     from engine.v2.ops import incremental_data
@@ -678,7 +704,7 @@ def _build_native_refresh_plan(plan, context_tickers, *, catalog_path, objects_r
         expected_keys=tuple(sorted(set(context_tickers))))
     return incremental_data.plan_refresh(
         Repository(conn).resolve(head["snapshot_id"]), (unit,),
-        cached_outcomes=_native_cached_outcome(conn, unit),
+        cached_outcomes=_native_cached_outcome(conn, store, unit),
         provider_account=NATIVE_DAILY_MARKET_ACCOUNT,
         expected_head_generation=head["generation"],
         calls_per_unit=ORATS_CALLS_PER_DAILY_MARKET_UNIT)

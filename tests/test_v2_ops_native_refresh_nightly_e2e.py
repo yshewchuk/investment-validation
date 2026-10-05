@@ -400,13 +400,16 @@ def test_provider_account_cli_admits_native_refresh_and_absent_row_is_refused(tm
 
 CACHED_SESSION = "2026-09-19"
 CACHED_TICKER = "AAPL"
+_CACHED_ORATS_PAYLOAD = (
+    b'{"summaries":{"data":[{"ticker":"AAPL","tradeDate":"2026-09-19"}]},'
+    b'"cores":{"data":[]}}')
 
 
 def _cached_request_id():
     return "eod-" + CACHED_SESSION + "-market"
 
 
-def _seed_market_pull(conn, store, clock, response_kind, payload=b"{}"):
+def _seed_market_pull(conn, store, clock, response_kind, payload=_CACHED_ORATS_PAYLOAD):
     """One raw receipt keyed by the exact request document ``_fetch_unit``
     builds, so ``_native_cached_outcome``'s ``content_hash`` lookup finds it.
     The payload distinguishes the receipt identity (the receipt id hashes the
@@ -463,7 +466,9 @@ def test_cached_outcome_selects_the_later_complete_receipt(tmp_path):
     _commit_parent(conn, store, clock)
     _seed_market_pull(conn, store, clock, "legitimate_empty")
     clock.advance(3600)
-    _seed_market_pull(conn, store, clock, "complete", payload=b'{"AAPL": 1}')
+    _seed_market_pull(conn, store, clock, "complete", payload=(
+        b'{"summaries":{"data":[{"ticker":"AAPL","tradeDate":"2026-09-19",'
+        b'"stockPrice":250.0}]},"cores":{"data":[]}}'))
 
     refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
     assert refresh_plan.fetch_units == ()
@@ -486,3 +491,22 @@ def test_cached_outcome_still_reuses_a_complete_pull(tmp_path):
     assert refresh_plan.cached[0].cache_hit is True
     assert refresh_plan.cached[0].receipt_ref
     assert refresh_plan.provider_calls == 0
+
+
+def test_incomplete_reconstruction_demotes_the_unit_to_a_budgeted_fetch(tmp_path):
+    """A receipt stored ``complete`` whose payload no longer reconstructs the
+    expected session row (here a ticker with no ``tradeDate``) must be caught
+    while planning, before any job is accepted: the unit lands in
+    ``fetch_units`` with no cached outcome and the full 12-call budget (three
+    planner attempts x four ORATS calls), never a zero-call cache hit."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    _seed_market_pull(conn, store, clock, "complete", payload=(
+        b'{"summaries":{"data":[{"ticker":"AAPL","stockPrice":250.0}]},'
+        b'"cores":{"data":[]}}'))
+
+    refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
+    assert [unit.request_id for unit in refresh_plan.fetch_units] == [_cached_request_id()]
+    assert refresh_plan.cached == ()
+    assert refresh_plan.provider_calls == 12

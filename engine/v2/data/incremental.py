@@ -1241,8 +1241,10 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
     catalog row before ``store.verify`` runs, else the rebuild refuses with
     ``INPUT_CHANGED`` before any artifact verification or read. A receipt that
     claims ``complete`` but whose payload no longer reconstructs every expected
-    key is a cache miss, not missing coverage: it is reacquired through
-    ``_fetch_unit`` instead of staging ``missing`` outcomes.
+    key refuses with ``INPUT_CHANGED`` here, before any provider request or new
+    receipt: this function never calls ``_fetch_unit``. Reacquisition belongs to
+    planning, where call reservations are made, which must demote such a receipt
+    to a budgeted fetch.
     """
     merge_rows = getattr(fetcher, "merge_ticker_rows", None)
     if merge_rows is None:
@@ -1274,10 +1276,15 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
         record = _staged_raw_receipt(conn, store, {"receipt_id": receipt_id})
         raw_bytes = store.read_verified(_artifact_ref(record.object_ref, RAW_SCHEMA_REF))
         ticker_rows = _cached_ticker_rows(raw_bytes, merge_rows, unit)
-        if _expected_keys_without_rows(contract, unit, ticker_rows):
-            fetched.append(_fetch_unit(conn, store, contract, unit, fetcher))
-        else:
-            fetched.append(_fetched_unit_rows(contract, unit, ticker_rows, record, observed_at))
+        missing = _expected_keys_without_rows(contract, unit, ticker_rows)
+        if missing:
+            raise errors.fail(
+                "INPUT_CHANGED",
+                "cached daily_market receipt does not reconstruct every expected key; "
+                "native planning must demote this receipt to a budgeted fetch",
+                details={"request_id": str(unit.get("request_id", "")),
+                         "missing_keys": list(missing)})
+        fetched.append(_fetched_unit_rows(contract, unit, ticker_rows, record, observed_at))
     return tuple(fetched)
 
 

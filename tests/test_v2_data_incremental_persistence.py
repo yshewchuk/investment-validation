@@ -515,9 +515,12 @@ def test_cached_fetched_units_refuses_scope_mismatch_before_store_verify(tmp_pat
 
 def test_cached_fetched_units_reacquires_when_complete_receipt_loses_a_key(tmp_path):
     """#142: a cached receipt that claims ``complete`` and carries the unit's own
-    key set but no longer reconstructs every expected key is a cache MISS, not
-    missing coverage -- the unit is reacquired through the provider instead of
-    replaying the unusable receipt and staging ``missing`` outcomes against it."""
+    key set but no longer reconstructs every expected key is refused with
+    ``INPUT_CHANGED`` in the cache-only branch -- before any provider request
+    and before any replacement receipt. Reacquisition belongs to planning,
+    which demotes the unit to a budgeted fetch where call reservations are
+    made, so no ``_FetchedUnit`` is returned and no ``missing`` outcome is
+    staged against a receipt this branch was never allowed to replay."""
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     aaa_row = dict(_obj_daily_market_rows()[0], date="2026-09-15", year=2026)
@@ -542,30 +545,24 @@ def test_cached_fetched_units_reacquires_when_complete_receipt_loses_a_key(tmp_p
 
     def fetcher(unit):
         calls.append(unit)
-        payload = {"summaries": {"data": [
-                       {"ticker": "AAA", "tradeDate": "2026-09-15",
-                        "stockPrice": 101.0}]},
-                   "cores": {"data": []}}
-        return (json.dumps(payload).encode(), "partial", {"attempts": 2},
-                [dict(aaa_row)])
+        raise AssertionError("cache-only replay must not call an unreserved provider")
 
     fetcher.merge_ticker_rows = merge_ticker_rows
 
-    fetched = data_incremental._cached_fetched_units(
-        conn, store, _DAILY_MARKET_CONTRACT,
-        _cache_scope_plan(raw.raw_receipt_id, expected_keys=("AAA", "BBB")), fetcher)
+    with pytest.raises(DataError) as err:
+        data_incremental._cached_fetched_units(
+            conn, store, _DAILY_MARKET_CONTRACT,
+            _cache_scope_plan(raw.raw_receipt_id, expected_keys=("AAA", "BBB")), fetcher)
 
-    assert [call["request_id"] for call in calls] == ["req-1"]
-    assert len(fetched) == 1
-    fetched_unit = fetched[0]
-    assert fetched_unit.receipt_id != raw.raw_receipt_id
-    assert fetched_unit.raw_payload["response_kind"] == "partial"
-    assert fetched_unit.raw_payload["response_meta"] == {"attempts": 2}
-    assert [(outcome.key.ticker, outcome.status)
-            for outcome in fetched_unit.outcomes] == [
-                ("AAA", "present"), ("BBB", "missing")]
-    assert all(outcome.receipt_id == fetched_unit.receipt_id
-               for outcome in fetched_unit.outcomes)
+    assert err.value.code == "INPUT_CHANGED"
+    message = err.value.problem.message
+    assert "does not reconstruct every expected key" in message
+    assert "demote this receipt to a budgeted fetch" in message
+    assert calls == []
+    rows = conn.execute(
+        "SELECT raw_receipt_id, response_kind FROM data_raw_receipts").fetchall()
+    assert [row["raw_receipt_id"] for row in rows] == [raw.raw_receipt_id]
+    assert rows[0]["response_kind"] == "complete"
 
 
 def _empty_keyed_unit(*, expected_keys):
