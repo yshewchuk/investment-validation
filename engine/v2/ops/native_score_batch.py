@@ -498,6 +498,12 @@ def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:
     """
     raw_event_date = doc["key"]["event_date"]
     _event_date_identity(raw_event_date)
+    quote_max_age_sessions = doc.get("quote_max_age_sessions")
+    if quote_max_age_sessions is not None and (
+            isinstance(quote_max_age_sessions, bool)
+            or not isinstance(quote_max_age_sessions, int)
+            or quote_max_age_sessions < 0):
+        raise ValueError("quote_max_age_sessions must be null or a non-negative integer")
     key = BoardRequest(
         ticker=str(doc["key"]["ticker"]), strategy=str(doc["key"]["strategy"]),
         event_date=pd.Timestamp(raw_event_date),
@@ -507,7 +513,7 @@ def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:
         panel_anchor=doc["panel_anchor"],
         tier4_row=doc["tier4_row"], quote_rows=doc["quote_rows"],
         quote_status=doc.get("quote_status"),
-        quote_max_age_sessions=doc.get("quote_max_age_sessions"))
+        quote_max_age_sessions=quote_max_age_sessions)
 
 
 def _keyed_by_board_request(items: Any) -> dict[str, Any]:

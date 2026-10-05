@@ -814,6 +814,21 @@ def test_top_level_quote_max_age_sessions_survives_to_native_inputs_context(tmp_
     assert native_inputs.context["quote_date"] == "2026-01-09"
 
 
+@pytest.mark.parametrize("bad_max_age", [-1, True, 2.0, "2"])
+def test_event_inputs_from_document_rejects_invalid_quote_max_age_sessions(bad_max_age):
+    """Issue #169: a top-level ``quote_max_age_sessions`` that is neither
+    ``null`` nor a non-negative int (negative int, bool, float, numeric
+    string) must raise ``ValueError`` during event decoding, before scoring
+    or output writes -- never flow into NightlyEventInputs as-is. Fails
+    against current production code, which passes the raw value straight
+    through; ARCHITECTURE.md's ``quote_max_age_sessions`` rule already
+    documents the required validation."""
+    doc = _event_doc()
+    doc["quote_max_age_sessions"] = bad_max_age
+    with pytest.raises(ValueError):
+        _event_inputs_from_document(doc)
+
+
 def test_event_inputs_from_document_keeps_midnight_and_intraday_success_events():
     """PR #384 companion anchor: the two canonical wire forms the producer
     itself writes must keep decoding successfully -- the legacy midnight
