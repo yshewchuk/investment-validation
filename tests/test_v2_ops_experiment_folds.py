@@ -75,3 +75,34 @@ def test_named_column_and_numeric_overflow_inputs_are_typed_refusals():
     invalid(lambda: TrainFoldRule(top_fraction=huge).fit_threshold([0.1], [0]))
     invalid(lambda: rule.fit_threshold([huge], [0]))
     invalid(lambda: rule.fit_threshold([0.1], [huge]))
+
+
+def test_invalid_fold_threshold_refuses_before_estimator_clone(monkeypatch):
+    import pytest
+
+    from engine.v2.ops.errors import OpsError
+
+    def boom(*args, **kwargs):
+        raise AssertionError("estimator must not be cloned when the fold spec is invalid")
+
+    monkeypatch.setattr("sklearn.base.clone", boom)
+
+    train_x = np.array([[-2.0, 0.0], [-1.0, 1.0], [1.0, 0.0], [2.0, 1.0]])
+    train_y = np.array([0, 0, 1, 1])
+    test_x = np.array([[0.0, 0.2], [0.5, 0.2]])
+    estimator = LogisticRegression(random_state=0)
+    rule = TrainFoldRule(top_fraction=0.0)
+    with pytest.raises(OpsError) as raised:
+        fit_walk_forward_fold(estimator, train_x, train_y, test_x, rule)
+    assert raised.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not hasattr(estimator, "coef_")
+
+
+def test_nonfinite_fold_quantile_is_a_typed_variant_failure():
+    import pytest
+
+    from engine.v2.ops.errors import OpsError
+
+    with pytest.raises(OpsError) as raised:
+        TrainFoldRule(top_fraction=0.5).fit_threshold([-1e308, 1e308], [0, 1])
+    assert raised.value.code == "EXPERIMENT_VARIANT_FAILED"

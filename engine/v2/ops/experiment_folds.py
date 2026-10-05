@@ -32,7 +32,10 @@ class TrainFoldRule:
                 or not np.all(np.isfinite(values)) or not np.all(np.isfinite(targets)) \
                 or not np.all(np.isin(targets, (0.0, 1.0))):
             raise fail("INVALID_EXPERIMENT_SPEC", "fold scores and binary labels must be finite and aligned")
-        return float(np.quantile(values, 1.0 - fraction))
+        threshold = float(np.quantile(values, 1.0 - fraction))
+        if not math.isfinite(threshold):
+            raise fail("EXPERIMENT_VARIANT_FAILED", "fold threshold calculation failed")
+        return threshold
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,15 @@ def fit_walk_forward_fold(estimator, train_features, train_labels, test_features
                           threshold_rule: TrainFoldRule) -> WalkForwardFoldFit:
     if not isinstance(threshold_rule, TrainFoldRule):
         raise fail("INVALID_EXPERIMENT_SPEC", "fold threshold rule has an unsupported type")
+    fraction = threshold_rule.top_fraction
+    if isinstance(fraction, bool) or not isinstance(fraction, numbers.Real):
+        raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
+    try:
+        fraction = float(fraction)
+    except (OverflowError, TypeError, ValueError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]") from None
+    if not math.isfinite(fraction) or not 0.0 < fraction <= 1.0:
+        raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
     _validate_feature_columns(train_features, test_features)
     matrix, labels = _training_arrays(train_features, train_labels)
     test_matrix = _feature_matrix(test_features)
