@@ -75,19 +75,11 @@ def scan_forward_board_requests(
         return board_requests(as_of, horizon_days, tickers,
                               pd.DataFrame(columns=_EVENTS_COLUMNS))
     key_filter = (KeyPredicate(column="year", operator="in", values=years),)
-    max_batch_rows = min(contract.maximum_batch_rows, 50_000)
-    max_result_rows = min(contract.maximum_result_rows, 50_000_000)
-    population_bound = repository.scan_population_bound(
+    max_result_rows = repository.scan_population_bound(
         snapshot.snapshot_id, table_name=_EVENTS_TABLE, table_contract_ref=contract_ref,
-        key_filter=key_filter, time_interval=None)
-    if population_bound > 0:
-        # Only a positive selected bound lowers the active result limit; a
-        # zero bound keeps it positive (zero-result queries arrive with slice E).
-        max_result_rows = min(max_result_rows, population_bound)
-    if max_result_rows > 0:
-        # A lowered positive result limit may not leave the batch limit above it
-        # (BATCH_EXCEEDS_RESULT is refused at decode): lower only as needed.
-        max_batch_rows = min(max_batch_rows, max_result_rows)
+        key_filter=key_filter)
+    max_batch_rows = (min(contract.maximum_batch_rows, max_result_rows)
+                      if max_result_rows > 0 else contract.maximum_batch_rows)
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id, table_contract_ref=contract_ref,
         columns=_EVENTS_COLUMNS,
@@ -143,20 +135,11 @@ def _pinned_calendar_event(repository: Repository, snapshot: SnapshotRef,
         raise fail("INVALID_REQUEST", "earnings dataset revision is missing")
     key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
                   KeyPredicate(column="year", operator="eq", values=(int(event_date[:4]),)))
-    max_batch_rows = min(contract.maximum_batch_rows, 1000)
-    max_result_rows = min(contract.maximum_result_rows, 1000)
-    population_bound = repository.scan_population_bound(
+    max_result_rows = repository.scan_population_bound(
         snapshot.snapshot_id, table_name=_EVENTS_TABLE,
-        table_contract_ref=version.table_contract_ref,
-        key_filter=key_filter, time_interval=None)
-    if population_bound > 0:
-        # Only a positive selected bound lowers the active result limit; a
-        # zero bound keeps it positive (zero-result queries arrive with slice E).
-        max_result_rows = min(max_result_rows, population_bound)
-    if max_result_rows > 0:
-        # A lowered positive result limit may not leave the batch limit above it
-        # (BATCH_EXCEEDS_RESULT is refused at decode): lower only as needed.
-        max_batch_rows = min(max_batch_rows, max_result_rows)
+        table_contract_ref=version.table_contract_ref, key_filter=key_filter)
+    max_batch_rows = (min(contract.maximum_batch_rows, max_result_rows)
+                      if max_result_rows > 0 else contract.maximum_batch_rows)
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
         columns=("event_id", *_EVENTS_COLUMNS),

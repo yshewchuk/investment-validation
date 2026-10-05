@@ -10,7 +10,7 @@ from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT
 
 
 def test_contract_id_and_table_name():
-    assert COMPUTED_MOVES_CONTRACT.contract_id == "computed_moves.v2"
+    assert COMPUTED_MOVES_CONTRACT.contract_id == "computed_moves.v3"
     assert COMPUTED_MOVES_CONTRACT.table_name == "computed_moves"
     assert COMPUTED_MOVES_TABLE_NAME == "computed_moves"
 

@@ -91,16 +91,14 @@ The caller supplies explicit naive calendar dates, with `history_start <=
 decision_session`; intraday and timezone-aware values refuse. The read uses
 the supplied snapshot/table-contract identity, one ticker predicate, a
 half-open interval (inclusive start, exclusive next-day end), primary-key
-order, and fixed resource bounds. Those query limits keep the active
-table-contract caps and the fixed caller limits; this caller may lower its
-result limit using a positive recorded membership bound, while a zero bound
-keeps the current active positive limit in this pre-E slice. The separate
-`computed_moves` and `"SPY"` `daily_market` reads may each lower
-`max_result_rows` using a positive bound from their exact pinned selection,
-while a zero bound keeps the existing positive limit; each query retains the
-minimum of its active table-contract cap and fixed caller cap, and its batch
-stays within that cap and the effective result limit. No head lookup, provider
-pull, training or legacy path occurs.
+order, and fixed resource bounds. `scan_daily_state_inputs` keeps its
+explicit caller-side result limit, which expresses a real retained-scan
+caller requirement, and the shared pinned-manifest population bound of the
+exact selection validates the query; an empty selection may use a zero
+result limit while retaining a positive batch size. The separate
+`computed_moves` and `"SPY"` `daily_market` reads follow the same rule for
+their exact pinned selections. No head lookup, provider pull, training or
+legacy path occurs.
 Rows outside that identity/date scope, duplicate dates, and invalid source
 dates refuse before arithmetic. Repository integrity, scan-validation and
 limit failures propagate. Missing tables refuse; no eligible IV-surface row
@@ -190,11 +188,11 @@ the remaining reads'. Query construction and the
 contract — see the PR body.
 
 Both bounded reads (`computed_moves` for `key.ticker`, `"SPY"`
-`daily_market`) lower `max_result_rows` only from a positive bound on their
-exact pinned selection; a zero bound leaves the existing positive limit. Each
-query still retains the minimum of its active table-contract cap and fixed
-caller cap, and its batches stay within that cap and the effective result
-limit. Normal repository scan validation and failures propagate.
+`daily_market`) keep their explicit caller-side result limits, which express
+real caller requirements, and the shared pinned-manifest population bound of
+their exact selection validates each query; an empty selection may use a
+zero result limit while retaining a positive batch size. Normal repository
+scan validation and failures propagate.
 
 | Condition (R1-R6) | Outcome |
 |---|---|

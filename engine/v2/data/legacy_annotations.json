@@ -133,8 +133,7 @@
       "finality_semantics": "The legacy schema declares no final/provisional state. A row is treated as final once the normalizer's assert_schema gate admits it to curated storage; there is no later correction/revision marker on this table.",
       "provenance_semantics": "src records which source supplied the size figure (see engine.data.schemas.SOURCE_PRIORITY['spot'] for the general orats/yfinance priority pattern); no per-row raw-object hash or normalizer version is carried.",
       "coverage_semantics": "No formal coverage watermark or expected-population declaration; completeness of a (ticker, year) partition is whatever the last curated rebuild produced. Phase 3 owns coverage watermarks (guide \u00a75.3).",
-      "maximum_batch_rows": 50000,
-      "maximum_result_rows": 2000000
+      "maximum_batch_rows": 50000
     },
     "earnings_events": {
       "columns": {
@@ -330,8 +329,7 @@
       "finality_semantics": "date_agree/date_conflict/reconciliation record how the canonical date was resolved across sources, but the schema declares no separate calendar-revision identity or supersession chain: a later correction overwrites the row in place, it is not versioned.",
       "provenance_semantics": "src_orats/src_oquants/src_nasdaq/src_yfinance flag which sources carried this event; session_src names the session winner. engine.data.schemas.SOURCE_PRIORITY['calendar'] documents the priority order (orats for history, nasdaq/yfinance for forward dates, session priority orats > yfinance > nasdaq).",
       "coverage_semantics": "No formal coverage watermark. event_cluster_id/claim_count describe how a single canonical event was reconciled from possibly-conflicting source claims, not an expected-population denominator.",
-      "maximum_batch_rows": 50000,
-      "maximum_result_rows": 2000000
+      "maximum_batch_rows": 50000
     },
     "daily_market": {
       "columns": {
@@ -586,8 +584,7 @@
       "finality_semantics": "No final/provisional marker; EOD state as normalized. mcap_asof records a separate as-of date for the carried-forward cap, which can lag date (see mcap_age_days).",
       "provenance_semantics": "src_spot/src_iv/src_mcap record which source won per field. engine.data.schemas.SOURCE_PRIORITY declares spot: orats cross-checked against yfinance close (1.3% tolerance).",
       "coverage_semantics": "No formal coverage watermark or expected-population declaration.",
-      "maximum_batch_rows": 50000,
-      "maximum_result_rows": 2000000
+      "maximum_batch_rows": 50000
     },
     "option_chains": {
       "columns": {
@@ -835,8 +832,7 @@
       "finality_semantics": "No final/provisional marker. quote_repaired flags a crossed raw quote collapsed to min(bid, ask) rather than dropped; the row is otherwise treated as final once curated.",
       "provenance_semantics": "src/src_file record the source system and the raw file a row was parsed from. engine.data.schemas.SOURCE_PRIORITY['option_chains'] = orats; this is documented as the only sanctioned P&L price source.",
       "coverage_semantics": "chain_kind (entry | exit | t14 | c2) records why a chain was pulled, not a completeness denominator. No formal coverage watermark.",
-      "maximum_batch_rows": 50000,
-      "maximum_result_rows": 2000000
+      "maximum_batch_rows": 50000
     },
     "option_daily": {
       "columns": {
@@ -1025,8 +1021,7 @@
       "finality_semantics": "No final/provisional marker. Real traded bars (Polygon daily aggregates), carrying no bid/ask by construction; exists only from 2024-08-19 (engine.data.schemas.CONVENTIONS['polygon_options_window']).",
       "provenance_semantics": "src/src_file record the source system and the Tier-1 payload a row was parsed from. engine.data.schemas.SOURCE_PRIORITY['option_daily'] = polygon (real traded bars; 2024-08-19+ only on this plan).",
       "coverage_semantics": "No formal coverage watermark. Table existence itself is bounded by the polygon_options_window convention (no rows before 2024-08-19).",
-      "maximum_batch_rows": 50000,
-      "maximum_result_rows": 2000000
+      "maximum_batch_rows": 50000
     },
     "trades": {
       "columns": {
@@ -1234,8 +1229,7 @@
       "finality_semantics": "No final/provisional marker. A trade row is written once by the producing sim/paper/live path; the legacy schema declares no correction/revision mechanism.",
       "provenance_semantics": "provenance names where the row came from; event_id is a soft FK to earnings_events (nullable, unenforced by a database constraint).",
       "coverage_semantics": "No formal coverage watermark or expected-population declaration.",
-      "maximum_batch_rows": 50000,
-      "maximum_result_rows": 2000000
+      "maximum_batch_rows": 50000
     },
     "feature_panel": {
       "columns": {
@@ -1884,8 +1878,7 @@
       "finality_semantics": "No final/provisional marker. Tier 3 is a deterministic function of Tier 2, rebuilt whole; a row's causal features can only change if Tier 2 or the causal recipe changes.",
       "provenance_semantics": "No per-row raw-object hash or normalizer version column. Each block's source is fixed by which build_panel stage produced it (oquants moves / S&P daily / yfinance or Tier-1 price history / Tier-2 daily_market); the per-block *_asof anchor dates the panel actually reads are computed but dropped before the table is written (see build_panel).",
       "coverage_semantics": "Total over admitted events: MIN_HISTORY=4 gates admission (an event needs 4 prior events in the ticker's own history), not a coverage watermark. No formal expected-population declaration.",
-      "maximum_batch_rows": 50000,
-      "maximum_result_rows": 2000000
+      "maximum_batch_rows": 50000
     },
     "tier4_forecasts": {
       "columns": {
@@ -2281,8 +2274,7 @@
       "finality_semantics": "A row's provenance is versioned by fold, not by a final/provisional flag: each producer's own *_fold_start records which strictly-prior-trained monthly fold produced it. Correcting Tier 2 at date D invalidates every fold from D onward; a rebuild's --since carry-over is refused (Tier4Error) if the carried prefix's fold boundaries, model id, or Tier-3 key coverage do not match the run about to happen.",
       "provenance_semantics": "Per-producer *_model_id and *_fold_start name which registered model and which monthly fold produced that producer's forecast for this row; tier3_snapshot (per row, not per producer) names the Tier-3 panel content hash every producer in the same build pass read features from.",
       "coverage_semantics": "Total over Tier 3: every Tier-3 (ticker, event_date) gets a row, forecast columns null where no forecast was possible (thin fold or pre-FIRST_FOLD). A missing row (not merely a null forecast) would mean the table is stale relative to Tier 3, which this schema treats as a build defect, not an expected state.",
-      "maximum_batch_rows": 50000,
-      "maximum_result_rows": 2000000
+      "maximum_batch_rows": 50000
     }
   },
   "knowledge_mode_by_table": {

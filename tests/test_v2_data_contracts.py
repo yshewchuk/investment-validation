@@ -76,7 +76,7 @@ def _build_samples() -> dict[str, object]:
         filterable_columns=("ticker", "year"), orderable_columns=("ticker", "year"),
         finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
         coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
-        maximum_batch_rows=10_000, maximum_result_rows=1_000_000)
+        maximum_batch_rows=10_000)
     obj = ObjectRef(kind="parquet_fragment", object_id="obj_1", content_hash=H, byte_size=1024)
     frag_ref = FragmentRef(fragment_id="frag_1", manifest_hash=H)
     frag = FragmentRecord(
@@ -289,6 +289,17 @@ def test_primary_key_naming_an_undeclared_column_is_refused():
     with pytest.raises(DocumentError) as err:
         decode_document(TableContract, doc)
     assert err.value.code == "UNDECLARED_COLUMN"
+
+
+def test_table_contract_batch_rows_survives_the_round_trip_positive():
+    """The serialized TableContract carries no result-row cap anymore (the
+    query's own ``max_result_rows`` is the scan's result limit); the one row
+    bound it keeps is its batch cap, and it must stay positive through
+    serialization -- no specific cap value is asserted."""
+    doc = to_document(SAMPLES["TableContract"])
+    assert "maximum_result_rows" not in doc
+    decoded = decode_document(TableContract, doc)
+    assert decoded.maximum_batch_rows > 0
 
 
 def test_duplicate_json_key_is_refused():

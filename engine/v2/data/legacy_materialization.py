@@ -6,7 +6,7 @@ own module-level imports are ``engine.v2.contracts``, ``engine.v2.foundation``,
 and this package's own ``errors``, ``price_history_table``, ``time_formats``,
 and ``query`` modules — not ``repository``, which functions needing table
 operations receive as a plain parameter (``repository.table_contract``/
-``.explain_dependencies``, etc.), never as an import.
+``.scan_population_bound``, etc.), never as an import.
 ``engine/v2/data/legacy_adapter.py`` — the
 package's one legacy-importing module — imports *from* this module at
 module level (``from . import errors, legacy_materialization``), never the
@@ -488,7 +488,7 @@ def _whole_table_copy_eligible(repository, snapshot_ref: SnapshotRef, table_name
     """Review P2-C05, decision 2: True only if ``query`` is provably a full,
     unfiltered read of ``table_name``'s pinned manifest — the one case a
     verified byte-for-byte object copy may satisfy instead of a scan. A
-    request whose declared projection, predicates or ceiling cover fewer
+    request whose declared projection, predicates or limit cover fewer
     rows than the whole table must take the scan-and-rewrite path (or
     refuse), never the copy path, no matter how the static read plan
     classifies the table."""
@@ -504,25 +504,20 @@ def _whole_table_copy_eligible(repository, snapshot_ref: SnapshotRef, table_name
 
 def explain_materialization_dependencies(repository, snapshot_ref: SnapshotRef,
                                           table_name: str, query: DataQuery):
-    """Explain a recorded query under the materializer whole-table copy policy.
+    """Explain a recorded query under the one shared pinned-membership bound.
 
-    Only a supported, provably complete pinned-manifest copy can exceed the
-    scan result cap. All original query bounds and its hash remain unchanged.
+    Every materialization query's ``max_result_rows`` is the exact selected
+    fragment count it was built with (:func:`_build_table_query`), so
+    ``Repository``'s single population-bound rule is also the materializer's:
+    a stale or hand-widened limit above the surviving membership still
+    refuses, and no copy-shaped query is exempted from anything. All original
+    query bounds and its hash remain unchanged.
     """
     if table_name not in TABLE_OUTPUT_KIND or not isinstance(query, DataQuery):
         raise errors.fail("UNSUPPORTED_CONTRACT", "unsupported materialization query")
     if query.snapshot_id != snapshot_ref.snapshot_id:
         raise errors.fail("CONTRACT_MISMATCH", "materialization query pins another snapshot")
-
-    def validate(contract, validated):
-        eligible = (table_name not in _EVIDENCE_SCOPED_TABLES
-                    and _whole_table_copy_eligible(repository, snapshot_ref, table_name,
-                                                   contract, validated))
-        if eligible:
-            contract = dataclasses.replace(contract, maximum_result_rows=validated.max_result_rows)
-        query_mod.validate_query(contract, validated)
-
-    return repository._explain_data_query(query, table_name, query_validator=validate)
+    return repository._explain_data_query(query, table_name)
 
 
 def _scope_bounds(repository, snapshot_ref: SnapshotRef, table_name: str,
@@ -562,31 +557,15 @@ def _build_table_query(repository, snapshot_ref: SnapshotRef, table_name: str,
     key_filter, time_interval = _scope_bounds(repository, snapshot_ref, table_name, contract,
                                               evidence_scope)
     columns = _plan_columns(table_name, contract)
-    probe = DataQuery(
+    max_result_rows = repository.scan_population_bound(
+        snapshot_ref.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
+        key_filter=key_filter, time_interval=time_interval)
+    max_batch_rows = (min(contract.maximum_batch_rows, max_result_rows)
+                      if max_result_rows > 0 else contract.maximum_batch_rows)
+    return DataQuery(
         snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=contract_ref, columns=columns,
         key_filter=key_filter, time_interval=time_interval, order_by=contract.primary_key,
-        max_batch_rows=contract.maximum_batch_rows, max_result_rows=contract.maximum_result_rows)
-    plan = repository.explain_dependencies(probe, table_name=table_name)
-    # Decision 2: max_result_rows is the pinned row count this exact scope
-    # touches, derived from the resolved snapshot's own fragment records
-    # (DependencyEntry.estimated_rows == FragmentRecord.row_count) — finite
-    # and manifest-derived, never the table's generic cap.
-    row_bound = max(1, sum(entry.estimated_rows for entry in plan.dependencies))
-    # Review fix P2-C05, decision 3: a whole_table output is never fed to
-    # Repository.scan() (materialize_tree byte-copies it — see
-    # _whole_table_copy_eligible), so the contract's scan-result cap does
-    # not bound it. Clamping it here anyway was the "clamp a population to
-    # a smaller limit and then copy all rows" bug the review named: the
-    # request claimed <= contract.maximum_result_rows while the byte-copy
-    # path silently wrote every manifest row regardless. The honest ceiling
-    # for a whole_table output is the exact pinned manifest row count.
-    # evidence_scoped outputs are always scanned, so they keep the cap.
-    if table_name in _EVIDENCE_SCOPED_TABLES:
-        max_result_rows = min(row_bound, contract.maximum_result_rows)
-    else:
-        max_result_rows = row_bound
-    max_batch_rows = min(contract.maximum_batch_rows, max_result_rows)
-    return dataclasses.replace(probe, max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
+        max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
 
 
 def _verify_pinned_ref_exists(store, ref: str) -> None:
@@ -607,8 +586,8 @@ def build_materialization_request(
 
     ``repository``/``store`` are not in the brief's own abbreviated signature
     but are required here (recorded as a deviation in this task's report):
-    computing a manifest-derived ``max_result_rows``/whole-table interval per
-    table needs ``Repository.explain_dependencies``/``.fragment_records``,
+    computing an exact pinned-membership ``max_result_rows``/whole-table interval per
+    table needs ``Repository.scan_population_bound``/``.fragment_records``,
     and verifying every pinned ref (decision 5) needs the object store — both
     only a live instance can answer. Publishing the registry/model/calendar
     bytes those refs name is NOT this function's job (see this task's
@@ -861,18 +840,15 @@ def _parquet_row_count(path: Path) -> int:
     return pq.ParquetFile(path).metadata.num_rows
 
 
-def _verify_materialized_rows(actual: int, expected: int, ceiling: int, table_name: str) -> None:
-    """Review P2-C05, decision 2/4: the row count actually on disk must
-    equal what this output was expected to hold — the pinned manifest count
-    for a byte copy, the post-filter scan count for a rewrite — and never
-    exceed the request's own ceiling for this table. Catches both a copy
-    that silently wrote more/fewer rows than its manifest declares and a
-    clamped ceiling a copy ignored; never a clamp-and-copy-anyway."""
-    if actual != expected or actual > ceiling:
+def _verify_materialized_rows(actual: int, expected: int, table_name: str) -> None:
+    """The row count actually on disk must equal what this output was expected
+    to hold — the pinned manifest count for a byte copy, the post-filter scan
+    count for a rewrite."""
+    if actual != expected:
         raise errors.fail("RESULT_LIMIT_EXCEEDED",
                   "materialized row count does not match this table's expected population",
                   details={"table_name": table_name, "materialized_rows": actual,
-                           "expected_rows": expected, "ceiling": ceiling})
+                           "expected_rows": expected})
 
 
 def _materialize_curated(repository, store, request: LegacyMaterializationRequest, table_name: str,
@@ -886,7 +862,7 @@ def _materialize_curated(repository, store, request: LegacyMaterializationReques
         year_paths, expected = _write_curated_table(repository, query, table_name, dest_root)
         copied = False
     actual = sum(_parquet_row_count(p) for ps in year_paths.values() for p in ps)
-    _verify_materialized_rows(actual, expected, query.max_result_rows, table_name)
+    _verify_materialized_rows(actual, expected, table_name)
     return year_paths, copied, actual
 
 
@@ -899,7 +875,7 @@ def _materialize_single(repository, store, request: LegacyMaterializationRequest
     else:
         expected = _write_single_file(repository, query, table_name, contract, path)
     actual = _parquet_row_count(path)
-    _verify_materialized_rows(actual, expected, query.max_result_rows, table_name)
+    _verify_materialized_rows(actual, expected, table_name)
     return copied, actual
 
 

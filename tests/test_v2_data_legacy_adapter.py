@@ -69,7 +69,7 @@ def test_all_eight_datasets_present_in_order():
     doc = build_legacy_mapping()
     assert tuple(doc["tables"].keys()) == EXPECTED_ORDER
     assert legacy_mapping.DATASET_ORDER == EXPECTED_ORDER
-    assert doc["schema_version"] == "legacy_table_mapping.v1.0"
+    assert doc["schema_version"] == "legacy_table_mapping.v1.1"
 
 
 def test_tier2_columns_match_legacy_source_exactly():

@@ -172,15 +172,14 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
         start_inclusive=start,
         end_exclusive=end,
     )
-    max_result_rows = min(contract.maximum_result_rows, _RESULT_LIMIT)
-    population_bound = data_repository.scan_population_bound(
+    bound = data_repository.scan_population_bound(
         snapshot.snapshot_id, table_name=_COMPUTED_MOVES_TABLE,
         table_contract_ref=version.table_contract_ref,
         key_filter=key_filter, time_interval=time_interval)
-    if population_bound > 0:
-        # Only a positive selected bound lowers the active result limit; a
-        # zero bound keeps it positive (zero-result queries arrive with slice E).
-        max_result_rows = min(max_result_rows, population_bound)
+    max_result_rows = min(_RESULT_LIMIT, bound)
+    max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_LIMIT, max_result_rows)
+                      if max_result_rows > 0
+                      else min(contract.maximum_batch_rows, _BATCH_LIMIT))
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id,
         table_contract_ref=version.table_contract_ref,
@@ -188,7 +187,7 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
         key_filter=key_filter,
         time_interval=time_interval,
         order_by=tuple(contract.primary_key),
-        max_batch_rows=min(contract.maximum_batch_rows, _BATCH_LIMIT, max_result_rows),
+        max_batch_rows=max_batch_rows,
         max_result_rows=max_result_rows,
     )
     rows = _consume(data_repository, query, _COMPUTED_MOVES_TABLE)
@@ -215,15 +214,14 @@ def _read_spy_market(data_repository: repository.Repository, snapshot: SnapshotR
         start_inclusive=history_start.date().isoformat(),
         end_exclusive=end.date().isoformat(),
     )
-    max_result_rows = min(contract.maximum_result_rows, _RESULT_LIMIT)
-    population_bound = data_repository.scan_population_bound(
+    bound = data_repository.scan_population_bound(
         snapshot.snapshot_id, table_name=_DAILY_MARKET_TABLE,
         table_contract_ref=version.table_contract_ref,
         key_filter=key_filter, time_interval=time_interval)
-    if population_bound > 0:
-        # Only a positive selected bound lowers the active result limit; a
-        # zero bound keeps it positive (zero-result queries arrive with slice E).
-        max_result_rows = min(max_result_rows, population_bound)
+    max_result_rows = min(_RESULT_LIMIT, bound)
+    max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_LIMIT, max_result_rows)
+                      if max_result_rows > 0
+                      else min(contract.maximum_batch_rows, _BATCH_LIMIT))
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id,
         table_contract_ref=version.table_contract_ref,
@@ -231,7 +229,7 @@ def _read_spy_market(data_repository: repository.Repository, snapshot: SnapshotR
         key_filter=key_filter,
         time_interval=time_interval,
         order_by=tuple(contract.primary_key),
-        max_batch_rows=min(contract.maximum_batch_rows, _BATCH_LIMIT, max_result_rows),
+        max_batch_rows=max_batch_rows,
         max_result_rows=max_result_rows,
     )
     return _consume(data_repository, query, _DAILY_MARKET_TABLE)

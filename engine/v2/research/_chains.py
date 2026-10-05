@@ -142,10 +142,12 @@ def _chain_batch_filter(tickers, wanted):
 def _chain_key_filter(tickers, wanted) -> tuple[KeyPredicate, ...]:
     """The ``option_chains`` key filter covering ``wanted``'s ticker and date sets.
 
-    Pushed into every scan's row match so the ``maximum_result_rows`` cap is checked
-    against these narrowed rows, not the whole partition -- the cartesian superset of
-    ``wanted`` (every row whose ticker AND obs_date are each individually wanted), never
-    the exact pairs, which ``KeyPredicate`` cannot express (the same limitation
+    Pushed into every scan's predicate set so the scan's explicit result limit is
+    ``Repository.scan_population_bound`` for this exact pinned table, contract ref,
+    these predicates and time interval -- the recorded rows of the fragments they
+    survive, not the whole partition. It is the cartesian superset of ``wanted``
+    (every row whose ticker AND obs_date are each individually wanted), never the
+    exact pairs, which ``KeyPredicate`` cannot express (the same limitation
     ``fill_quality._chain_key_filter`` documents for this table). ``_chain_batch_filter``
     still narrows this superset down to the exact pairs after decoding, so results are
     unchanged. An empty ``tickers``/``wanted`` returns ``()`` -- ``load_chain_index``

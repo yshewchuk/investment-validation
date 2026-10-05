@@ -87,13 +87,17 @@ Target research reads cover each full pinned partition, including null
 observation times, subject to caller predicates and batch filtering. The
 manifest population bound limits candidate rows, not RSS/process memory — the
 recorded row-count sum of pinned fragments surviving pruning
-([data scan population rule](../data/ARCHITECTURE.md#invariants)). Explicit
-smaller caller limits remain valid; runtime still enforces the table cap until
-slice E. Each interval scan — month/day split scans independently — may use
-the shared pinned `scan_population_bound` for the same selection to lower its
-`max_result_rows` only when that bound is positive; a zero bound retains the
-positive cap. Retry/split behavior, error codes, frame population and ordering
-are unchanged.
+([data scan population rule](../data/ARCHITECTURE.md#invariants)). Each
+research query interval is bound by that same pinned-manifest
+membership/population bound — the one `scan_population_bound` result the data
+query explain and scan paths use for the same snapshot, contract ref,
+predicate set and interval — so research adds no second, research-side result
+limit. An explicit smaller research request limit remains caller intent,
+honored below the bound rather than widened back to it. Each interval scan —
+month/day split scans independently — carries its own bound, and an empty
+selected membership may query with zero result rows and a positive batch size.
+Retry/split behavior, error codes, frame population and ordering are
+unchanged.
 
 The internal `_scan.read_table` and `_snapshot.read_table` readers accept an
 optional `batch_filter` callback. They invoke it immediately after each Arrow

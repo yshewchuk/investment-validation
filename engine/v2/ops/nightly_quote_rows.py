@@ -130,15 +130,14 @@ def scan_quote_rows(
     version = snapshot.table_versions[_QUOTE_TABLE]
     key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
                   KeyPredicate(column="obs_date", operator="eq", values=(session_day,)))
-    max_batch_rows = min(contract.maximum_batch_rows, _BATCH_CAP)
-    max_result_rows = min(contract.maximum_result_rows, _RESULT_CAP)
     population_bound = repository.scan_population_bound(
         snapshot.snapshot_id, table_name=_QUOTE_TABLE,
         table_contract_ref=version.table_contract_ref,
         key_filter=key_filter, time_interval=None)
-    if 0 < population_bound < max_result_rows:
-        max_result_rows = population_bound
-        max_batch_rows = min(max_batch_rows, max_result_rows)
+    max_result_rows = min(_RESULT_CAP, population_bound)
+    max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_CAP, max_result_rows)
+                      if max_result_rows > 0
+                      else min(contract.maximum_batch_rows, _BATCH_CAP))
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
         columns=_QUOTE_COLUMNS,
