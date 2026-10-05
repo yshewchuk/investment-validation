@@ -14,12 +14,18 @@ import math
 import pandas as pd
 import pytest
 
-from engine.v2.contracts.data import DatasetVersionRef, SnapshotRef, TableContractRef
+from engine.v2.contracts.data import (
+    DatasetVersionRef,
+    KeyPredicate,
+    SnapshotRef,
+    TableContractRef,
+    TimeInterval,
+)
 from engine.v2.data.computed_moves import build_rows
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
 from engine.v2.data.errors import DataError
 from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT, PRICE_HISTORY_TABLE_NAME
-from engine.v2.features import panel_math
+from engine.v2.features import panel_math, panel_row_inputs
 from engine.v2.features.panel_row_inputs import PanelRowInputs, scan_panel_row
 from engine.v2.ops.native_board_universe import BoardRequest
 from tests.data_scan_support import contract_for, contract_ref_for, fake_hash
@@ -448,10 +454,16 @@ def test_16_zero_day_computed_moves_window_returns_empty_not_a_query_error():
     batches = _default_batches()
     batches[("daily_market", "AAA")] = _dm_rows("AAA", ["2024-02-14"])
     snapshot = _snapshot()
-    repo = _FakeRepository(snapshot, _contracts(), batches)
+    repo = _BoundRecordingRepository(snapshot, _contracts(), batches)
     result = scan_panel_row(repo, snapshot, _key(),
                             history_start=_DECISION, decision_session=_DECISION)
     assert result.panel_row["n_prior"] == 0
+    # The zero-day window returns before any bound planning or scan: no
+    # computed_moves bound call and no computed_moves query is ever emitted.
+    assert not [call for call in repo.bound_calls
+                if call["table_name"] == COMPUTED_MOVES_TABLE_NAME]
+    assert not [query for table, query in repo.scans
+                if table == COMPUTED_MOVES_TABLE_NAME]
 
 
 def test_17_zero_day_window_still_validates_missing_computed_moves_table():
@@ -664,6 +676,24 @@ def test_24_event_day_decision_reads_identically_for_midnight_and_intraday_event
     """
     event_day_decision = pd.Timestamp("2024-02-15")
 
+    class _WindowedDailyMarketRepository(_FakeRepository):
+        """The shared fake, but honoring the emitted half-open window on the
+        ``daily_market`` scan (which the base fake ignores, returning every
+        stored row for the ticker): the dense SPY fixture's rows are filtered by
+        ``query.time_interval`` before yielding, so the in-window rows agree with
+        the interval-aware population bound. Key/table selection and every
+        fixture value are otherwise unchanged."""
+
+        def scan(self, query, *, table_name):
+            rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
+            interval = query.time_interval
+            if table_name == "daily_market" and interval is not None:
+                start = pd.Timestamp(interval.start_inclusive)
+                end = pd.Timestamp(interval.end_exclusive)
+                rows = [row for row in rows
+                        if start <= pd.Timestamp(row[interval.column]) < end]
+            yield _Batch(rows)
+
     def _scan_with(event_date):
         batches = _default_batches()
         spy_days = [str(d.date()) for d in pd.date_range(end="2024-02-15", periods=320, freq="D")]
@@ -676,7 +706,7 @@ def test_24_event_day_decision_reads_identically_for_midnight_and_intraday_event
         prices[-1] = {**prices[-1], "close_adj": 4000.0}  # the event day's own close, spiked
         batches[(PRICE_HISTORY_TABLE_NAME, "AAA")] = prices
         snapshot = _snapshot()
-        repo = _FakeRepository(snapshot, _contracts(), batches)
+        repo = _WindowedDailyMarketRepository(snapshot, _contracts(), batches)
         key = BoardRequest(ticker="AAA", strategy="STR-X", event_date=event_date, session="AMC")
         return scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
                               decision_session=event_day_decision)
@@ -896,3 +926,119 @@ def test_30_used_history_alone_resolves_anchor():
     assert panel["signed_streak"] == 1.0
     assert panel["ema12r_abs"] == 2.0
     assert math.isnan(panel["ret5"])
+
+
+# --------------------------------------------------------------------------
+# shared-bound preparation (scan_population_bound -> emitted query limits)
+# --------------------------------------------------------------------------
+
+
+class _BoundRecordingRepository(_FakeRepository):
+    """The shared fake, recording every bound-plan call and emitted scan,
+    with a selected bound injected per table. ``scan`` yields the full
+    selected fixture rows without clipping to the query's limit, so the
+    returned-row assertions are real checks. Tables absent from ``bounds``
+    keep the base fake's row-count bound, so unrelated reads are
+    unaffected."""
+
+    def __init__(self, snapshot, contracts, batches, bounds=None) -> None:
+        super().__init__(snapshot, contracts, batches)
+        self._bounds = dict(bounds or {})
+        self.bound_calls: list[dict] = []
+        self.scans: list[tuple] = []
+
+    def scan_population_bound(self, snapshot_id, *, table_name, table_contract_ref,
+                              key_filter=(), time_interval=None):
+        self.bound_calls.append({"snapshot_id": snapshot_id, "table_name": table_name,
+                                 "table_contract_ref": table_contract_ref,
+                                 "key_filter": key_filter, "time_interval": time_interval})
+        if table_name in self._bounds:
+            return self._bounds[table_name]
+        return super().scan_population_bound(snapshot_id, table_name=table_name,
+                                             table_contract_ref=table_contract_ref,
+                                             key_filter=key_filter,
+                                             time_interval=time_interval)
+
+    def scan(self, query, *, table_name):
+        self.scans.append((table_name, query))
+        rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
+        yield _Batch(rows)
+
+
+def _bound_reads(bounds):
+    """Both bounded reads through the recording fake on the default fixture."""
+    snapshot = _snapshot()
+    batches = _default_batches()
+    cm_fixture = batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")]
+    spy_fixture = batches[("daily_market", "SPY")]
+    repo = _BoundRecordingRepository(snapshot, _contracts(), batches, bounds)
+    computed = panel_row_inputs._read_computed_moves(repo, snapshot, "AAA",
+                                                     _HISTORY_START, _DECISION, _EVENT)
+    spy = panel_row_inputs._read_spy_market(repo, snapshot, _HISTORY_START, _DECISION)
+    return computed, spy, repo, cm_fixture, spy_fixture
+
+
+def _assert_bound_matches_query(call, table_name, expected_ref, query):
+    """The bound plan saw exactly the identity the read's DataQuery carries."""
+    assert call["snapshot_id"] == query.snapshot_id == "snap-panel"
+    assert call["table_name"] == table_name
+    assert call["table_contract_ref"] == expected_ref == query.table_contract_ref
+    assert call["key_filter"] == query.key_filter
+    assert call["time_interval"] == query.time_interval
+
+
+def test_31_bound_plan_receives_the_exact_query_identity_for_both_reads():
+    _, _, repo, _, _ = _bound_reads(
+        {COMPUTED_MOVES_TABLE_NAME: 5, "daily_market": 25})
+    assert [call["table_name"] for call in repo.bound_calls] == [
+        COMPUTED_MOVES_TABLE_NAME, "daily_market"]
+    (cm_table, cm_query), (spy_table, spy_query) = repo.scans
+    assert (cm_table, spy_table) == (COMPUTED_MOVES_TABLE_NAME, "daily_market")
+    _assert_bound_matches_query(repo.bound_calls[0], COMPUTED_MOVES_TABLE_NAME, _CM_REF, cm_query)
+    _assert_bound_matches_query(repo.bound_calls[1], "daily_market", _DM_REF, spy_query)
+    # And the exact literals, not just internal consistency.
+    assert repo.bound_calls[0]["key_filter"] == (
+        KeyPredicate(column="ticker", operator="eq", values=("AAA",)),)
+    assert repo.bound_calls[1]["key_filter"] == (
+        KeyPredicate(column="ticker", operator="eq", values=("SPY",)),)
+    assert repo.bound_calls[0]["time_interval"] == TimeInterval(
+        column="event_date", start_inclusive="2024-01-02",
+        end_exclusive=_DECISION.date().isoformat())
+    assert repo.bound_calls[1]["time_interval"] == TimeInterval(
+        column="date", start_inclusive="2024-01-02",
+        end_exclusive=(_DECISION + pd.Timedelta(days=1)).date().isoformat())
+
+
+def test_32_positive_selected_bound_lowers_query_limits_and_rows_match_fixtures():
+    cm_count = len(_computed_rows([("2024-01-10", 2.0, False),
+                                   ("2024-01-11", -1.0, False)]))
+    spy_count = len(_spy_rows())
+    computed, spy, repo, cm_fixture, spy_fixture = _bound_reads(
+        {COMPUTED_MOVES_TABLE_NAME: cm_count, "daily_market": spy_count})
+    (_cm, cm_query), (_spy, spy_query) = repo.scans
+    cases = ((cm_query, len(cm_fixture), COMPUTED_MOVES_CONTRACT.maximum_result_rows),
+             (spy_query, len(spy_fixture), _DM.maximum_result_rows))
+    for query, bound, contract_cap in cases:
+        cap = min(contract_cap, panel_row_inputs._RESULT_LIMIT)
+        assert 0 < bound < cap  # the selected bound really is below the existing cap
+        assert query.max_result_rows == bound
+        assert 0 < query.max_batch_rows <= bound
+    assert len(computed) <= cm_query.max_result_rows
+    assert computed == cm_fixture  # both fixture rows, in fixture order
+    assert len(spy) <= spy_query.max_result_rows
+    assert spy == spy_fixture
+
+
+def test_33_zero_selected_bound_keeps_positive_limits_at_the_cap():
+    computed, spy, repo, cm_fixture, spy_fixture = _bound_reads(
+        {COMPUTED_MOVES_TABLE_NAME: 0, "daily_market": 0})
+    (_cm, cm_query), (_spy, spy_query) = repo.scans
+    assert cm_query.max_result_rows == min(COMPUTED_MOVES_CONTRACT.maximum_result_rows,
+                                           panel_row_inputs._RESULT_LIMIT) > 0
+    assert 0 < cm_query.max_batch_rows <= cm_query.max_result_rows
+    assert spy_query.max_result_rows == min(_DM.maximum_result_rows,
+                                            panel_row_inputs._RESULT_LIMIT) > 0
+    assert 0 < spy_query.max_batch_rows <= spy_query.max_result_rows
+    # The preparation never turns a zero bound into a zero-result query.
+    assert computed == cm_fixture
+    assert spy == spy_fixture

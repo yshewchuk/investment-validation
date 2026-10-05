@@ -268,20 +268,36 @@ def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contr
                    *, batch_filter=None) -> list[pd.DataFrame]:
     """One bounded scan over ``interval`` (or the whole partition when ``None``).
 
+    The query's result cap starts at the contract's ``maximum_result_rows`` and
+    is lowered — never raised — by ``Repository.scan_population_bound`` for
+    exactly this snapshot, table, pinned contract ref, predicate set and
+    interval. Only a positive bound lowers it: a zero bound keeps the active
+    positive table cap (a zero-result query still needs a positive limit), and
+    the batch cap keeps its own contract cap while never exceeding the result
+    cap it shares with that query.
+
     Each Arrow batch becomes pandas, passes through ``batch_filter`` when one
     is given, and only the surviving (non-empty) frames are returned — so rows
     the filter rejects never outlive their batch, and batches that match
     nothing contribute nothing. The returned frames are local to this call: a
     ``RESULT_LIMIT_EXCEEDED`` raised after batches were yielded keeps none of
     them, so callers retry narrower intervals from a clean slate. The scan's
-    own error contracts are unchanged.
+    own error contracts are unchanged, and bound planning adds no retry: a
+    planning ``DataError`` propagates exactly as raised.
     """
+    predicates = tuple(key_filter)
+    contract_ref = snapshot_ref.table_versions[table_name].table_contract_ref
     result_cap = contract.maximum_result_rows
+    population_bound = repository.scan_population_bound(
+        snapshot_ref.snapshot_id, table_name=table_name,
+        table_contract_ref=contract_ref, key_filter=predicates, time_interval=interval)
+    if population_bound > 0:
+        result_cap = min(result_cap, population_bound)
     batch_cap = min(contract.maximum_batch_rows, result_cap)
     query = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id,
-        table_contract_ref=snapshot_ref.table_versions[table_name].table_contract_ref,
-        columns=tuple(columns), key_filter=tuple(key_filter), time_interval=interval,
+        table_contract_ref=contract_ref,
+        columns=tuple(columns), key_filter=predicates, time_interval=interval,
         order_by=contract.primary_key, max_batch_rows=batch_cap, max_result_rows=result_cap)
     frames: list[pd.DataFrame] = []
     for batch in repository.scan(query, table_name=table_name):
