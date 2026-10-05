@@ -1297,7 +1297,7 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 
 | Condition | Outcome |
 |---|---|
-| General operation outcomes | Malformed specs and unsafe feature reads are refused before candidate publication; failed candidates and reports stay unpublished; retries reuse existing durable outcomes; clean worker exits reap live stragglers. Slice 2a exposes no sweep or holdout reads; the typed R5 exclusion belongs to the pinned trade-loader slice. |
+| General operation outcomes | Malformed specs and unsafe feature reads are refused before candidate publication; failed candidates and reports stay unpublished; retries reuse existing durable outcomes; clean worker exits reap live stragglers. Slice 2a exposes no sweep or holdout reads; typed `HOLDOUT_ACCESS_DENIED` is deferred to the pinned trade-loader slice. |
 | Registered primary identity (slice 2a) | The report, durable evidence, and primary ledger `spec_hash` use the registered legacy hash. |
 | Synthetic primary identity (slice 2a) | The report, durable evidence, and primary ledger `spec_hash` use `ExperimentSpec.spec_hash`. |
 | Smoke identity (slice 2a) | The report and durable evidence use `ExperimentSpec.spec_hash`; the runner receives `--no-ledger` and writes no legacy ledger row. |
