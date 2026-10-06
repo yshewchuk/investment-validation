@@ -1132,6 +1132,23 @@ def _hash_or_none(path: Path) -> str | None:
         return None
 
 
+def _validate_watched_sources(watched, before) -> None:
+    import stat
+
+    for name, path in watched:
+        try:
+            entry = os.lstat(path)
+        except OSError:
+            entry = None
+        after = _hash_or_none(path) if entry is not None and stat.S_ISREG(entry.st_mode) else None
+        if (entry is None or not stat.S_ISREG(entry.st_mode)
+                or entry.st_nlink != 1 or after is None or after != before[name]):
+            raise fail("VALIDATION_FAILED",
+                       "registered legacy runner source changed during execution",
+                       details={"path": name, "before_hash": before[name],
+                               "after_hash": after})
+
+
 def run_legacy_script(root, script, args=(), *, staging_dir_fd: int | None = None,
                       declared_runtime_sources: tuple[str, ...] = ()):
     """Run a registered legacy runner in a private root with smoke protection.
@@ -1165,7 +1182,6 @@ def run_legacy_script(root, script, args=(), *, staging_dir_fd: int | None = Non
         raise fail("INVALID_REQUEST", "legacy experiment runner is unaudited")
     if tuple(args):
         raise fail("INVALID_REQUEST", "legacy runner may not enable ledger writes")
-    import stat
     import subprocess
 
     _rooted_import(root)
@@ -1183,18 +1199,7 @@ def run_legacy_script(root, script, args=(), *, staging_dir_fd: int | None = Non
     completed = subprocess.run([sys.executable, "-u", str(executable), "--no-ledger"],
                                cwd=base, env=env, check=False, capture_output=True,
                                text=True, timeout=LEGACY_RUNNER_TIMEOUT_S)
-    for name, path in watched:
-        try:
-            entry = os.lstat(path)
-        except OSError:
-            entry = None
-        after = _hash_or_none(path) if entry is not None and stat.S_ISREG(entry.st_mode) else None
-        if (entry is None or not stat.S_ISREG(entry.st_mode)
-                or entry.st_nlink != 1 or after != before[name]):
-            raise fail("VALIDATION_FAILED",
-                       "registered legacy runner source changed during execution",
-                       details={"path": name, "before_hash": before[name],
-                                "after_hash": after})
+    _validate_watched_sources(watched, before)
     return completed
 
 

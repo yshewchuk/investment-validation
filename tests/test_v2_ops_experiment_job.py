@@ -1264,3 +1264,45 @@ def test_worker_refuses_a_declared_source_tampered_during_the_run(tmp_path, monk
     assert ledger.read_bytes() == ledger_before
     assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
     conn.close()
+
+
+def test_worker_refuses_a_declared_source_that_cannot_be_hashed(tmp_path, monkeypatch):
+    """An unhashable declared source -- null before AND after -- is a typed,
+    non-retryable refusal naming the path with both null hashes, never a
+    silent pass on ``None == None``; the stub runner exits 0, and only the
+    failed receipt and its evidence are left, with no committed run or
+    ledger row."""
+    from engine.v2.ops import legacy_adapter
+
+    checkout, _ = _registered_checkout(tmp_path)
+    declared = experiments.RUNNER_INVENTORY[REGISTERED_RUNNER]["declared_runtime_sources"][0]
+    ledger_before = (ledger := checkout / "experiments" / "LEDGER.csv").read_bytes()
+    (checkout / "spec.json").write_text(json.dumps(_spec_document(
+        experiment_id="EXP-182", runner=REGISTERED_RUNNER, economic_params={})))
+
+    original_hash_or_none = legacy_adapter._hash_or_none
+
+    def unhashable_declared_source(path):
+        return None if str(path).endswith(declared) else original_hash_or_none(path)
+
+    def successful_run(command, **kwargs):
+        assert "--no-ledger" in command
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(legacy_adapter, "_hash_or_none", unhashable_declared_source)
+    monkeypatch.setattr(subprocess, "run", successful_run)
+    conn, _, _ = catalog(tmp_path)
+    with pytest.raises(OpsError) as excinfo:
+        worker.dispatch("experiment", {"runner": REGISTERED_RUNNER, "no_ledger": False,
+                                       "preregistration_root": str(checkout)}, checkout)
+    assert excinfo.value.code == "VALIDATION_FAILED" and excinfo.value.problem.retryable is False
+    details = excinfo.value.problem.details
+    assert details["path"] == declared
+    assert details["before_hash"] is None and details["after_hash"] is None
+    receipt = json.loads((checkout / "experiment_receipt.json").read_text())
+    failure = receipt["evidence"]["failure_details"]
+    assert receipt["status"] == "failed" and failure.items() <= details.items()
+    assert _ledger_rows(ledger) == [{"id": "EXP-182", "stage": "planned"}]
+    assert ledger.read_bytes() == ledger_before
+    assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+    conn.close()
