@@ -346,8 +346,9 @@ source retry policy owns retry.
 
 For neutral inventory export, missing relational members or invalid receipt
 lineage refuse `INPUT_CHANGED`; inconsistent fragment metadata or row counts
-refuse `MANIFEST_CORRUPT`; changed object bytes or length refuse
-`OBJECT_CORRUPT`. Retryability follows the table above. There is no automatic
+refuse `MANIFEST_CORRUPT`; a missing object or changed object bytes or length
+refuse `OBJECT_CORRUPT`; an absent or unopenable catalog refuses
+`INPUT_CHANGED`. Retryability follows the table above. There is no automatic
 retry, cache, repair or catalog write. An active caller transaction refuses
 `INPUT_CHANGED` without altering it. The pinned head is checked again before
 publication; a moved head refuses without replacing the destination. A failed
