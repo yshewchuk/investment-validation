@@ -1,6 +1,7 @@
 """Small operations fixtures. No market data, numerical imports or network."""
 import json
 import os
+import re
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -253,10 +254,60 @@ def _read_progress_rows(conn, job_id):
     return [json.loads(row[0]) for row in rows]
 
 
+_TRACEBACK_MARKER = re.compile(r"^Traceback \(most recent call last\):$")
+_TRACEBACK_FRAME = re.compile(
+    r"^(?P<indent>\s*)File \"(?P<path>.*)\", line (?P<line>\d+)"
+    r"(?:, in (?P<func>\S+))?$")
+_EXCEPTION_CLASS = re.compile(
+    r"^(?P<cls>[A-Za-z_][A-Za-z0-9_.]*"
+    r"(?:Error|Exception|Warning|Exit|Interrupt|Failure|Iteration))"
+    r"(?:: (?P<msg>.*))?$")
+
+
+def _sanitize_worker_stderr_tail(text: str) -> str:
+    """Keep only safe Python traceback structure from a worker stderr tail:
+    the ``Traceback (most recent call last):`` marker, frame lines with every
+    frame path replaced by ``<path>`` (line number and function name kept),
+    and the exception class with its message replaced by
+    ``<message redacted>``. Every source-code line and every other
+    unstructured stderr line becomes ``<diagnostic text redacted>``, so no
+    raw paths, exception messages, source lines or free text survive. A
+    non-empty tail from which no safe traceback structure remains returns
+    that placeholder alone; empty input stays empty."""
+    if not text:
+        return text
+    kept = False
+    out = []
+    for line in text.splitlines():
+        frame = _TRACEBACK_FRAME.match(line)
+        if frame is not None:
+            kept = True
+            rendered = (f"{frame.group('indent')}File \"<path>\", "
+                        f"line {frame.group('line')}")
+            if frame.group("func") is not None:
+                rendered += f", in {frame.group('func')}"
+            out.append(rendered)
+            continue
+        exception = _EXCEPTION_CLASS.match(line)
+        if exception is not None:
+            kept = True
+            out.append(exception.group("cls") + (
+                ": <message redacted>" if exception.group("msg") is not None else ""))
+            continue
+        if _TRACEBACK_MARKER.match(line):
+            kept = True
+            out.append(line)
+            continue
+        out.append("<diagnostic text redacted>")
+    return "\n".join(out) if kept else "<diagnostic text redacted>"
+
+
 def _worker_stderr_tail(conn, attempts) -> str:
     """Bounded tail (latest 4096 bytes, replacement-decoded) of the latest
-    attempt's ``worker.stderr``, the path never printed; ``unavailable (...)``
-    for an absent attempt, database path, file or read error. Never raises."""
+    attempt's ``worker.stderr``, sanitized to safe traceback structure only
+    (:func:`_sanitize_worker_stderr_tail`), the path never printed;
+    ``unavailable (...)`` for an absent attempt, database path, file or read
+    error. Never raises."""
     try:
         if attempts is None or not len(attempts) or attempts[-1] is None:
             return "unavailable (no attempt recorded)"
@@ -277,25 +328,34 @@ def _worker_stderr_tail(conn, attempts) -> str:
             size = fh.tell()
             fh.seek(max(0, size - 4096))
             data = fh.read(4096)
-        return data.decode("utf-8", errors="replace")
+        return _sanitize_worker_stderr_tail(data.decode("utf-8", errors="replace"))
     except Exception as exc:
         return f"unavailable (worker stderr read failed: {type(exc).__name__})"
 
 
 def _tracked_process_diagnostics(conn, job_id) -> str:
-    """Per tracked pid of this job: the delta of ``utime + stime`` between two
-    complete ``/proc/<pid>/stat`` samples one second apart, the final state,
-    ``/proc/<pid>/wchan`` and ``/proc/<pid>/task/<pid>/children``; values the
-    diagnostic cannot read render ``unavailable`` per pid. No tracked pids
-    reports that without sleeping. Never raises and never prints command
-    lines, absolute paths, environment values or raw exception text."""
+    """Per tracked process identity of this job -- the distinct
+    ``(pid, start_ticks, attempts.host_boot_id)`` tuples -- the delta of
+    ``utime + stime`` between two complete ``/proc/<pid>/stat`` samples one
+    second apart, the final state, ``/proc/<pid>/wchan`` and
+    ``/proc/<pid>/task/<pid>/children``. A record is reported only when its
+    stored boot id equals the live boot id and both samples' start time
+    equals the stored ``start_ticks``, so a reused pid is never reported as
+    this job's worker; a record whose stat sample is unreadable or that fails
+    either identity check renders ``unavailable`` with its pid, no samples.
+    No tracked processes reports that without sleeping. Never raises and
+    never prints command lines, absolute paths, environment values, boot ids
+    or raw exception text."""
     try:
         rows = conn.execute(
-            "SELECT DISTINCT pm.pid FROM process_members pm "
+            "SELECT DISTINCT pm.pid, pm.start_ticks, a.host_boot_id "
+            "FROM process_members pm "
             "JOIN attempts a ON a.attempt_id = pm.attempt_id "
             "WHERE a.job_id = ?", (job_id,)).fetchall()
-        pids = sorted({row[0] for row in rows if row[0] is not None})
-        if not pids:
+        identities = sorted(
+            {(row[0], row[1], row[2]) for row in rows if row[0] is not None},
+            key=lambda identity: (identity[0], str(identity[1]), str(identity[2])))
+        if not identities:
             return "unavailable (no tracked pids)"
 
         def read_stat(pid):
@@ -307,10 +367,12 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
             if ")" not in text:
                 return None
             fields = text[text.rfind(")") + 1:].split()
-            if len(fields) < 13:
+            if len(fields) < 20:
                 return None
             try:
-                return {"state": fields[0], "ticks": int(fields[11]) + int(fields[12])}
+                return {"state": fields[0],
+                        "ticks": int(fields[11]) + int(fields[12]),
+                        "start_ticks": int(fields[19])}
             except ValueError:
                 return None
 
@@ -321,26 +383,34 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
             except Exception:
                 return None
 
+        pids = sorted({identity[0] for identity in identities})
+
         def sample_all():
             return {pid: read_stat(pid) for pid in pids}
 
+        boot_id = read_boot_id()
         first = sample_all()
         time.sleep(1.0)
         second = sample_all()
         parts = []
-        for index, pid in enumerate(pids, start=1):
-            label = f"tracked process {index} of {len(pids)} (pid {pid})"
-            final = second.get(pid)
-            if final is None:
-                parts.append(f"{label}: unavailable (stat unreadable)")
+        for index, identity in enumerate(identities, start=1):
+            pid, stored_start_ticks, stored_boot_id = identity
+            label = f"tracked process {index} of {len(identities)} (pid {pid})"
+            if stored_boot_id != boot_id:
+                parts.append(f"{label}: unavailable (boot id mismatch)")
                 continue
             earlier = first.get(pid)
-            cpu_text = (f"{final['ticks'] - earlier['ticks']} ticks" if earlier is not None
-                        else "unavailable (first sample missing)")
+            final = second.get(pid)
+            if (earlier is None or final is None
+                    or earlier.get("start_ticks") != stored_start_ticks
+                    or final.get("start_ticks") != stored_start_ticks):
+                parts.append(f"{label}: unavailable (stat unreadable or start time mismatch)")
+                continue
             wchan = read_small(f"/proc/{pid}/wchan")
             children = read_small(f"/proc/{pid}/task/{pid}/children")
             parts.append(
-                f"{label}: cpu {cpu_text}, state {final['state']}, "
+                f"{label}: cpu {final['ticks'] - earlier['ticks']} ticks, "
+                f"state {final['state']}, "
                 f"wchan {wchan if wchan is not None else 'unavailable'}, "
                 f"children {children if children is not None else 'unavailable'}")
         return "; ".join(parts)

@@ -1211,7 +1211,7 @@ shared scheduler reserves against them uniformly, keyed or not.
 
 ## Failure semantics
 
-Every stage/effect follows the root doc's 4c R1–R6 template (missing input, cache, retry, transaction, partial write, idempotency); these conventions apply package-wide unless a subsystem table says otherwise. Test-owned `run_until` timeout diagnostics include the staged worker stderr tail and, for each tracked pid, CPU ticks sampled twice one second apart, state, wait channel, and child pids; the timeout remains observational.
+Every stage/effect follows the root doc's 4c R1–R6 template (missing input, cache, retry, transaction, partial write, idempotency); these conventions apply package-wide unless a subsystem table says otherwise. Test-owned `run_until` timeout diagnostics include a sanitized worker stderr tail and, for each tracked pid whose recorded boot ID matches the live boot and whose start ticks match both `/proc` samples, CPU tick delta, state, wait channel, and child pids; a mismatched identity is unavailable. Timeout handling does not retry or extend the polling budget; collecting process samples adds one second after the deadline when tracked pids exist.
 
 | # | Convention |
 |---|---|

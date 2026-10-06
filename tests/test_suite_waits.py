@@ -387,11 +387,16 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
     beside the temporary catalog. A never-ticking fake service keeps the job
     nonterminal until ``run_until`` times out, and the timeout message must
     then carry the stderr tail, the tracked pid, a CPU tick delta, the
-    process state, the wait channel and the child pid. Only the fake
+    process state, the wait channel and the child pid. The stderr tail
+    surfaces the traceback frame and exception line while the frame's
+    absolute path, the source line and the secret text stay redacted, and a
+    recorded start ticks that no longer matches the live process reports the
+    pid identity unavailable with no cpu delta for that pid. Only the fake
     service's tick is stubbed; the stderr tail, the tracked-process
-    diagnostics, /proc and ``run_until`` itself stay real. The subprocess
-    tree is terminated and reaped in ``finally`` even when an assertion
-    fails."""
+    diagnostics, /proc and ``run_until`` itself stay real. The parent and
+    its child are terminated and reaped in ``finally`` even when an
+    assertion fails, the child killed by pid independently of the parent's
+    exit timing."""
     conn, job_id = _queued_job(tmp_path, {"code": "DEPENDENCY_PENDING"})
     boot_id = read_boot_id()
     epoch = conn.execute("SELECT epoch_id FROM supervisor_epochs").fetchone()[0]
@@ -402,9 +407,9 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
             [sys.executable, "-c",
              "import signal, subprocess, sys\n"
              "child = subprocess.Popen([sys.executable, '-c', 'while True: pass'])\n"
-             "print(child.pid, flush=True)\n"
              "signal.signal(signal.SIGTERM,\n"
              "              lambda *_: (child.kill(), child.wait(), sys.exit(1)))\n"
+             "print(child.pid, flush=True)\n"
              "child.wait()\n"],
             stdout=subprocess.PIPE, text=True, start_new_session=True)
         child_pid = int(parent.stdout.readline())
@@ -432,16 +437,33 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
         stderr_path = (tmp_path / "attempts" / "att_live" / "staging" /
                        "diagnostics" / "worker.stderr")
         stderr_path.parent.mkdir(parents=True)
-        stderr_path.write_text("boom-1234: worker crashed in stage ramp\n")
+        fake_secret = "fake-credential-7f3d9a2b"
+        fake_path = "/opt/fake-secret-stage/worker_impl.py"
+        fake_source_line = f'    return load_credential("{fake_secret}")'
+        stderr_path.write_text(
+            "Traceback (most recent call last):\n"
+            f'  File "{fake_path}", line 9, in ramp\n'
+            f"{fake_source_line}\n"
+            f"ValueError: credential {fake_secret} rejected by stage ramp\n")
 
         class _NeverTicks:
             def tick(self):
                 pass
 
+        diagnostic_started = time.monotonic()
         with pytest.raises(AssertionError) as excinfo:
             run_until(_NeverTicks(), conn, job_id, timeout=0.2)
+        diagnostic_elapsed = time.monotonic() - diagnostic_started
         message = str(excinfo.value)
-        assert "boom-1234" in message
+        assert diagnostic_elapsed >= 1.0
+        # stderr privacy: the traceback frame and the exception line surface
+        # with the path and message redacted; the absolute path, the source
+        # line and the secret text do not
+        assert 'File "<path>"' in message
+        assert "ValueError: <message redacted>" in message
+        assert fake_path not in message
+        assert fake_source_line not in message
+        assert fake_secret not in message
         assert str(parent.pid) in message
         assert str(child_pid) in message
         assert "cpu " in message and " ticks" in message
@@ -450,6 +472,34 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
         assert "wchan " in message
         assert "children " in message
         assert "'queued'" in message and "never admitted" in message
+
+        # pid identity: a recorded start_ticks that no longer matches the live
+        # process reports the pid identity unavailable, with no cpu delta for
+        # that pid
+        conn.execute(
+            "UPDATE process_members SET start_ticks=? WHERE attempt_id=? AND pid=?",
+            (identity.start_ticks + 1, "att_live", identity.pid))
+        with pytest.raises(AssertionError) as excinfo:
+            run_until(_NeverTicks(), conn, job_id, timeout=0.2)
+        message2 = str(excinfo.value)
+        tracked2 = [part for part in message2.split("; ")
+                    if part.startswith("tracked process diagnostics:")]
+        assert len(tracked2) == 1
+        assert "unavailable" in tracked2[0]
+        assert "cpu " not in message2 and " ticks" not in message2
+
+        # pid identity: a recorded host boot id that differs from the live
+        # boot reports the pid identity unavailable with no cpu delta
+        conn.execute("UPDATE attempts SET host_boot_id=? WHERE attempt_id=?",
+                     ("stale-test-boot-id", "att_live"))
+        with pytest.raises(AssertionError) as excinfo:
+            run_until(_NeverTicks(), conn, job_id, timeout=0.2)
+        message3 = str(excinfo.value)
+        tracked3 = [part for part in message3.split("; ")
+                    if part.startswith("tracked process diagnostics:")]
+        assert len(tracked3) == 1
+        assert "unavailable" in tracked3[0]
+        assert "cpu " not in message3 and " ticks" not in message3
     finally:
         if parent is not None:
             if parent.poll() is None:
@@ -457,11 +507,6 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
             try:
                 parent.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                if child_pid:
-                    try:
-                        os.kill(child_pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
                 parent.kill()
                 try:
                     parent.wait(timeout=10)
@@ -469,6 +514,11 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
                     pass
             if parent.stdout is not None:
                 parent.stdout.close()
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path, monkeypatch):
