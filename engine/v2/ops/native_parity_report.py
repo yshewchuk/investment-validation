@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -472,6 +472,48 @@ def _as_of_from_expected_ids(expected_ids) -> str | None:
     return candidate
 
 
+def _keyed_refusal_matches_legacy_day(
+    native_refusals: Mapping[str, str],
+    legacy_rows: Mapping[str, dict],
+) -> bool:
+    """Whether some keyed native refusal explains an empty native side.
+
+    A refusal explains the absence when it names the same
+    ``(ticker, strategy)`` as a legacy row and its event date falls on that
+    legacy row's calendar day. Legacy rows carry day-granularity event
+    dates; an intraday native refusal carries a full ISO datetime in the
+    same field, so the refusal's third field is compared by
+    ``datetime.fromisoformat(...).date().isoformat()`` against the legacy
+    key's ``date.fromisoformat(...).isoformat()``. Malformed keys and parse
+    failures are skipped -- neither mapping is modified -- so an unrelated
+    or unparseable refusal can never explain an empty native side.
+    """
+    for refusal_key in native_refusals:
+        refusal_parts = refusal_key.split("|")
+        if len(refusal_parts) != 3:
+            continue
+        refusal_date = refusal_parts[2]
+        if len(refusal_date) <= 10:
+            continue
+        try:
+            refusal_day = datetime.fromisoformat(refusal_date).date().isoformat()
+        except ValueError:
+            continue
+        for legacy_key in legacy_rows:
+            legacy_parts = legacy_key.split("|")
+            if len(legacy_parts) != 3:
+                continue
+            if legacy_parts[0] != refusal_parts[0] or legacy_parts[1] != refusal_parts[1]:
+                continue
+            try:
+                legacy_day = date.fromisoformat(legacy_parts[2]).isoformat()
+            except ValueError:
+                continue
+            if refusal_day == legacy_day:
+                return True
+    return False
+
+
 def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
                              clock: Clock = SystemClock()) -> dict[str, Any]:
     """The ``native_parity`` job kind's worker entrypoint.
@@ -526,12 +568,12 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
     native_rows = {key: _native_comparison_row(record)
                    for key, record in native_rows.items()}
     shared = set(legacy_rows) & set(native_rows)
-    if legacy_rows and not shared:
-        fully_refused = set(legacy_rows) <= set(native_refusals)
-        refusal_explains_absence = fully_refused or (
-            not native_rows and bool(native_refusals or unkeyable_refusals))
-    else:
-        refusal_explains_absence = False
+    refusal_explains_absence = bool(
+        legacy_rows and not shared and (
+            set(legacy_rows) <= set(native_refusals)
+            or not native_rows and (
+                _keyed_refusal_matches_legacy_day(native_refusals, legacy_rows)
+                or not native_refusals and unkeyable_refusals)))
     if refusal_explains_absence:
         report = _empty_native_report(
             legacy_rows, native_rows, PARITY_DIMENSIONS, SCORE_RECORD_V1)

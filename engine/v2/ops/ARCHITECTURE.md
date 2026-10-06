@@ -331,10 +331,13 @@ submission path reads either edge (the rule Part 4 established for
   native side and a comparison with no shared key. The worker first rejects
   empty `legacy_rows`, then computes shared keys before calling the
   comparator. With no shared key, it builds `_empty_native_report` when
-  every legacy key has its own keyed refusal, or when `native_rows` is
-  empty and any keyed or unkeyable refusal exists. Thus timestamp-keyed
-  refusals remain unmatched with their exact identity; they are never
-  normalized to a legacy day key. No row or comparison value is invented.
+  every legacy key has its own keyed refusal, when an empty native side has
+  an unkeyable refusal and no keyed refusals, or when an empty native side
+  has a timestamp-keyed refusal for the same population and calendar day as
+  a legacy key. Thus timestamp-keyed refusals remain unmatched with their
+  exact identity; they are never normalized to a legacy day key. An
+  unrelated keyed refusal cannot explain an absent legacy row. No row or
+  comparison value is invented.
   Empty native rows with no refusals still fail `VALIDATION_FAILED`.
   Non-empty disjoint native rows still require matching refusals for every
   legacy key; an unrelated refusal does not explain an absent legacy row.
@@ -1308,7 +1311,7 @@ job.
 | Condition | Outcome |
 |---|---|
 | `legacy_rows` is empty | `VALIDATION_FAILED`, unconditionally — a missing legacy input is never explained by a native refusal |
-| no shared key and either every legacy key has its own keyed refusal or native rows are empty with any refusal | reported normally; unmatched refusals keep their exact timestamp identity |
+| no shared key and every legacy key has its own keyed refusal, or native rows are empty with a same-population/day timestamp refusal (or only unkeyable refusals) | reported normally; unmatched refusals keep their exact timestamp identity |
 | no shared key and neither condition above applies, including empty native rows with no refusals | `VALIDATION_FAILED`; missing native input has no silent default |
 | identical inputs, clock, and code are re-run | byte-identical report, including refusal identity and classification |
 | the records/refusals schema tag is stale, no `native_parity` job exists yet for this identity | `submit_native_parity_if_ready`'s pre-submission check raises `VALIDATION_FAILED` (`reason: "schema_mismatch"`), submitting nothing |

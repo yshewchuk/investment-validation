@@ -303,6 +303,8 @@ def test_run_native_parity_worker_disjoint_native_rows_with_keyed_refusal(tmp_pa
 
 
 def test_run_native_parity_worker_intraday_refusal_preserves_timestamp(tmp_path):
+    """An intraday refusal keeps its full timestamp in the unmatched entry and
+    the report bytes are identical on a deterministic rerun."""
     row = _legacy_row(ticker="AAA")
     refusal_key = _canonical_key(
         "AAA", "STR-THRU", "2026-01-15T09:30:00", session="am")
@@ -327,7 +329,24 @@ def test_run_native_parity_worker_intraday_refusal_preserves_timestamp(tmp_path)
     assert (tmp_path / "native_parity_report.json").read_bytes() == report_bytes
 
 
+def test_run_native_parity_worker_unrelated_refusal_does_not_justify_empty_report(tmp_path):
+    """A keyed refusal for an unrelated row does not excuse absent native rows for
+    the legacy row; the worker still fails validation."""
+    row = _legacy_row(ticker="AAA")
+    unrelated_key = _canonical_key(
+        "ZZZ", "STR-THRU", "2026-01-15T09:30:00", session="am")
+    _write_inputs(tmp_path, rows=[row], records={},
+                  refusals={unrelated_key: {"code": "RELEASE_MISSING_ROLE",
+                                            "detail": "..."}})
+
+    with pytest.raises(OpsError) as exc:
+        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
 def test_run_native_parity_worker_bytes_match_the_comparator_path(tmp_path):
+    """The worker's serialized report equals the one the unchanged shared-key
+    comparator and stamping path produce for the same inputs."""
     rows, records = _happy_rows_and_records()
     _write_inputs(tmp_path, rows=rows, records=records)
 
