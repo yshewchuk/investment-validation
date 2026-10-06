@@ -131,11 +131,12 @@ The replay parsed **467 CI failure occurrences with zero misses** across the
 because their runs were cancelled or logs expired; that unknown history cannot
 be recovered. The original all-40 acceptance bar was not met.
 
-**Supervisor's judgment call, for the user to confirm at review:** with no
-shadow mode, acceptance before code is zero misses on recoverable evidence,
+**Supervisor's judgment call — pending user confirmation:** with no shadow
+mode, the proposed acceptance bar is zero misses on recoverable evidence,
 with `main` running the full suite after every merge as the backstop and the
-ratchet check itself as the guard against silent narrowing. This is a changed
-acceptance bar, not a claim that the former bar was met.
+ratchet check itself as the guard against silent narrowing. If the user
+confirms this proposal, it becomes Slice 1's acceptance criterion. Until then,
+it remains a proposal; the former all-40 bar was not met.
 
 ## Failure semantics (R1–R6)
 
