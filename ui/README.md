@@ -73,6 +73,12 @@ index.html`) via `compatibilityLink()` (`src/format.ts`).
   manual reload button — reloading is the only thing that re-resolves
   `current`, matching the compatibility preview's own "R1 readers retain
   R1; a new session resolves R2" rule (guide §9 L02).
+  Publication evidence follows the latest request: an older poll reply cannot
+  replace a newer one, a failed current read clears the displayed identity
+  and drift hint as unknown, and a successful rollback to the pin clears the
+  hint. Operations status compares against only the latest successful
+  publication identity. The existing scheduled poll cadence is unchanged;
+  reads do not retry.
 - **Auth**: same-origin cookie (`operations_token`), mirroring
   `engine/v2/serving/operations.py`. `src/api/client.ts` is the only module
   that calls `fetch`; every request sets `credentials: "same-origin"` and

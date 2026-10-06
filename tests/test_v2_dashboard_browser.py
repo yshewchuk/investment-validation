@@ -497,6 +497,110 @@ def test_release_switch_mid_session_keeps_pinned_release_and_shows_notice(browse
 
 
 # --------------------------------------------------------------------------
+# issue #408 regressions: a failed current poll clears the published identity
+# rather than reusing the drifted id; a rollback to the pin clears the drift
+# hint; and out-of-order polls never let a superseded reply publish
+# --------------------------------------------------------------------------
+
+
+def _pinned_board_page(browser, server):
+    """An r1-pinned board, frozen clock, valid r1 operations sidecar."""
+    status = {
+        "schema_version": "operations_status.v1.0", "generated_at": "2026-10-04T00:00:00Z",
+        "release_id": "r1", "attempted_release_id": "r1",
+        "requested_session": "eng-night-2026-10-03", "resolved_session": "eng-night-2026-10-03",
+        "engineering_history": [{"occurrence": "2026-10-03", "status": "pass"}],
+        "stale": False, "withheld": False, "failed_update": False,
+    }
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    page.route("**/api/v1/operations", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(status)))
+    page.add_init_script(
+        'Date.now = function () { return Date.parse("2026-10-04T00:00:00Z"); };')
+    return context, page, base
+
+
+def test_current_poll_failure_after_drift_clears_published_identity(browser, server, state):
+    context, page, base = _pinned_board_page(browser, server)
+    try:
+        page.goto(base + "/?pollMs=100")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+
+        state.set_current("r2")
+        expect(page.get_by_test_id("release-changed-notice")).to_contain_text("r2")
+
+        # A failed read is never an authority: the r2 drift goes with it.
+        page.route("**/api/v1/releases/current", lambda route: route.fulfill(
+            status=503, content_type="application/json", body="{}"))
+
+        expect(page.get_by_test_id("release-changed-notice")).to_have_count(0)
+        expect(page.get_by_test_id("operations-identities")).to_contain_text(
+            "latest published unavailable")
+        status = page.get_by_test_id("operations-status")
+        expect(status).to_contain_text("operations: unknown")
+        expect(status).to_contain_text("latest published release identity unavailable")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+    finally:
+        context.close()
+
+
+def test_current_switch_then_rollback_to_pin_clears_drift_hint(browser, server, state):
+    context, page, base = _pinned_board_page(browser, server)
+    try:
+        page.goto(base + "/?pollMs=100")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+
+        state.set_current("r2")
+        expect(page.get_by_test_id("release-changed-notice")).to_contain_text("r2")
+
+        state.set_current("r1")
+        expect(page.get_by_test_id("release-changed-notice")).to_have_count(0)
+        expect(page.get_by_test_id("operations-identities")).to_contain_text("latest published r1")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+    finally:
+        context.close()
+
+
+def test_out_of_order_current_polls_keep_newest_successful_identity(browser, server, state):
+    held: list = []
+    seen = [0]
+    r2_release = state.releases["r2"].release
+
+    def _ordered_current(route):
+        seen[0] += 1
+        if seen[0] == 2:
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(r2_release))
+        else:
+            held.append(route)  # every other poll waits: r2 lands first
+
+    context, page, base = _pinned_board_page(browser, server)
+    try:
+        page.goto(base + "/?pollMs=100")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+
+        page.route("**/api/v1/releases/current", handler=_ordered_current)
+        expect(page.get_by_test_id("release-changed-notice")).to_contain_text("r2")
+        expect(page.get_by_test_id("operations-identities")).to_contain_text("latest published r2")
+
+        with page.expect_event(
+            "requestfinished",
+            predicate=lambda request: request.url.endswith("/api/v1/releases/current"),
+        ):
+            held[0].fulfill(status=200, content_type="application/json",
+                            body=json.dumps({**r2_release, "release_id": "r3"}))
+
+        expect(page.get_by_test_id("release-changed-notice")).to_contain_text("r2")
+        identities = page.get_by_test_id("operations-identities")
+        expect(identities).to_contain_text("latest published r2")
+        expect(identities).not_to_contain_text("latest published r3")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+    finally:
+        context.close()
+
+
+# --------------------------------------------------------------------------
 # empty release / API error state
 # --------------------------------------------------------------------------
 
