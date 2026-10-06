@@ -1017,13 +1017,26 @@ def test_cli_export_wrapper_matches_inventory_and_reruns_byte_identically(tmp_pa
     assert table["coverage_receipt_refs"] == [RECEIPT]
     assert [frag["fragment_id"] for frag in table["fragments"]] == [
         fixture["record"].fragment_id]
-    assert table["fragments"][0]["primary_key_min"]
-    assert table["fragments"][0]["primary_key_max"]
+    rec = fixture["record"]
+    frag = table["fragments"][0]
+    assert frag["object"] == {"kind": rec.object_ref.kind,
+                              "object_id": rec.object_ref.object_id,
+                              "content_hash": rec.object_ref.content_hash,
+                              "byte_size": rec.object_ref.byte_size}
+    assert frag["partition_key"] == rec.partition_key
+    assert frag["row_count"] == rec.row_count
+    assert frag["primary_key_min"] == list(rec.primary_key_min)
+    assert frag["primary_key_max"] == list(rec.primary_key_max)
+    assert frag["time_min"] == rec.time_min
+    assert frag["time_max"] == rec.time_max
     assert wrapper["inventory"]["references"] == [
         {"kind": "model_registry", "legacy_path": "refs/model_registry.json",
          "object_id": ref.object_id, "content_hash": ref.content_hash,
          "byte_size": ref.byte_size, "fold": ""}]
     assert wrapper["inventory"]["lineage"]["receipt_ids"] == ["receipt-1"]
+    planted = json.loads(first.read_text())["inventory"]
+    planted["tables"][0]["fragments"][0]["row_count"] += 1
+    assert content_hash(planted) != wrapper["content_hash"]
     assert second.read_bytes() == first.read_bytes()
     assert json.loads(second.read_text())["content_hash"] == wrapper["content_hash"]
 
