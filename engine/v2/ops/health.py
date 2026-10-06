@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
 from engine.v2.foundation import format_timestamp, fsync_directory
 from engine.v2.ops.catalog import dumps, transaction
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 
 
 def _record_check(conn, occurrence, kind, ok, receipt):
@@ -168,26 +169,148 @@ def budget_streak(conn):
             "override": None}
 
 
+#: A canonical session is a plain ``YYYY-MM-DD`` calendar date string -- the
+#: one form the durable receipts carry and the only form accepted as evidence.
+_CANONICAL_SESSION = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _receipt_document(text, *, kind, logical_key):
+    """Decode one delivered outbox receipt. Missing text, malformed JSON or a
+    non-object payload are the same ``VALIDATION_FAILED`` class as a missing
+    chain -- never a fallback."""
+    details = {"kind": kind, "logical_key": logical_key}
+    if not isinstance(text, str):
+        raise fail("VALIDATION_FAILED", f"delivered {kind} receipt is missing or not durable JSON text",
+                   details=details)
+    try:
+        receipt = json.loads(text)
+    except ValueError:
+        raise fail("VALIDATION_FAILED", f"delivered {kind} receipt is malformed JSON",
+                   details=details) from None
+    if not isinstance(receipt, dict):
+        raise fail("VALIDATION_FAILED", f"delivered {kind} receipt is not a JSON object",
+                   details=details)
+    return receipt
+
+
+def _canonical_session(value, *, field, details):
+    if not isinstance(value, str) or not _CANONICAL_SESSION.fullmatch(value):
+        raise fail("VALIDATION_FAILED", f"{field} is not a canonical YYYY-MM-DD session", details=details)
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise fail("VALIDATION_FAILED", f"{field} is not a real calendar date", details=details) from None
+
+
+def _export_chain_sessions(conn, logical_key, *, release_id):
+    """The chain's authoritative ``ledger_export_receipt.v1.0`` -- its
+    ``requested_session`` and ``session`` (the resolved one) returned verbatim,
+    never re-derived."""
+    row = conn.execute("SELECT state,receipt_json FROM outbox WHERE kind='export' AND logical_key=?",
+                       (logical_key,)).fetchone()
+    if row is None or row["state"] != "delivered":
+        raise fail("VALIDATION_FAILED", "the release_intent chain has no delivered export receipt",
+                   details={"release_id": release_id, "logical_key": logical_key})
+    receipt = _receipt_document(row["receipt_json"], kind="export", logical_key=logical_key)
+    details = {"release_id": release_id, "logical_key": logical_key}
+    if receipt.get("schema_version") != "ledger_export_receipt.v1.0":
+        raise fail("VALIDATION_FAILED", "the export receipt is not an authoritative "
+                   "ledger_export_receipt.v1.0", details=details)
+    scope = receipt.get("scope")
+    if not isinstance(scope, str) or not scope:
+        raise fail("VALIDATION_FAILED", "the export receipt scope is not a non-empty string", details=details)
+    requested = _canonical_session(receipt.get("requested_session"),
+                                   field="export receipt requested_session", details=details)
+    resolved = _canonical_session(receipt.get("session"), field="export receipt session", details=details)
+    if resolved > requested:
+        raise fail("VALIDATION_FAILED", "the export receipt resolved a session later than the session "
+                   "it requested", details=details)
+    return receipt["requested_session"], receipt["session"]
+
+
+def _release_session_evidence(conn, current):
+    """``(requested_session, resolved_session)`` for the delivered release
+    ``current`` names, copied ONLY from the durable catalog receipt chain: the
+    one delivered ``release_intent`` outbox row whose
+    ``receipt_json.release_id`` equals ``current.release_id`` selects, by its
+    ``logical_key``, the paired delivered ``export`` row carrying the
+    authoritative ``ledger_export_receipt.v1.0``. Missing, malformed,
+    ambiguous or mismatched evidence is ``VALIDATION_FAILED`` -- never
+    ``clock.now()``, never the release occurrence alone, never an equality
+    default, never a fabricated value. The ``health()`` contract ALWAYS
+    requires one unique, complete chain for its current delivered release:
+    with no delivered release selected the required evidence is absent and
+    this refuses rather than emitting null/default session values. A
+    ``release_intent`` row whose receipt cannot be decoded or is not an
+    object cannot match the current release, so the scan skips it; if that
+    leaves zero matching chains the refusal below reports the missing
+    evidence. A malformed receipt inside the matched chain -- the export
+    receipt -- still refuses. The ``release_intent`` scan is keyed and
+    ordered deterministically so identical catalog contents always produce
+    the same result."""
+    if current is None:
+        raise fail("VALIDATION_FAILED", "the required session evidence is absent: no delivered "
+                   "release is selected for the health contract")
+    release_id = current["release_id"]
+    logical_keys = []
+    for row in conn.execute("SELECT logical_key,receipt_json FROM outbox WHERE kind='release_intent' "
+                             "AND state='delivered' ORDER BY logical_key"):
+        try:
+            receipt = _receipt_document(row["receipt_json"], kind="release_intent",
+                                        logical_key=row["logical_key"])
+        except OpsError:
+            continue  # an undecodable UNRELATED receipt cannot match the current release
+        if receipt.get("release_id") == release_id:
+            logical_keys.append(row["logical_key"])
+    if len(logical_keys) != 1:
+        raise fail("VALIDATION_FAILED", "the current delivered release does not resolve to exactly one "
+                   "complete release_intent receipt chain",
+                   details={"release_id": release_id, "matching_release_intent_rows": len(logical_keys)})
+    requested, resolved = _export_chain_sessions(conn, logical_keys[0], release_id=release_id)
+    if resolved != current["occurrence"]:
+        raise fail("VALIDATION_FAILED", "the export receipt session does not equal the delivered "
+                   "release occurrence",
+                   details={"release_id": release_id, "occurrence": current["occurrence"],
+                            "resolved_session": resolved})
+    return requested, resolved
+
+
+def _withheld_release(conn, current=None):
+    """The withheld-release projection shared by :func:`health` and the
+    operations-status sidecar, as the same dict-or-None value: the latest
+    INELIGIBLE release, reported only while no later occurrence has been
+    delivered since -- once delivery catches up to (or passes) it, the banner
+    must clear rather than stick forever.
+
+    ``current`` is the already-read current delivered-release row; when absent
+    it is queried here. Internal only: it emits no health document and never
+    invents a session field, so a caller can read the banner before any export
+    receipt exists -- where the public ``health()`` producer must still refuse.
+    """
+    if current is None:
+        current = conn.execute("SELECT release_id,occurrence,delivered_at FROM releases "
+                               "WHERE delivered_at IS NOT NULL ORDER BY occurrence DESC, release_id DESC LIMIT 1").fetchone()
+    withheld = conn.execute("SELECT release_id,occurrence FROM releases WHERE eligible=0 "
+                            "ORDER BY occurrence DESC, release_id DESC LIMIT 1").fetchone()
+    show = withheld is not None and (
+        current is None or withheld["occurrence"] > current["occurrence"])
+    return dict(withheld) if show else None
+
+
 def health(conn, *, clock, executor_mode="watchdog"):
     jobs = [dict(row) for row in conn.execute(
         "SELECT job_id,kind,state,created_at,updated_at,queue_reason_json FROM jobs "
-        "WHERE state NOT IN ('succeeded','cancelled') ORDER BY created_at")]
+        "WHERE state NOT IN ('succeeded','cancelled') ORDER BY created_at, job_id")]
     current = conn.execute("SELECT release_id,occurrence,delivered_at FROM releases "
-                           "WHERE delivered_at IS NOT NULL ORDER BY occurrence DESC LIMIT 1").fetchone()
-    withheld = conn.execute("SELECT release_id,occurrence FROM releases WHERE eligible=0 "
-                            "ORDER BY occurrence DESC LIMIT 1").fetchone()
-    # A withheld night only stays reportable while no later occurrence has been
-    # delivered since: once delivery catches up to (or passes) it, the banner
-    # must clear rather than stick forever.
-    show_withheld = withheld is not None and (
-        current is None or withheld["occurrence"] > current["occurrence"])
+                           "WHERE delivered_at IS NOT NULL ORDER BY occurrence DESC, release_id DESC LIMIT 1").fetchone()
+    withheld_release = _withheld_release(conn, current)
     # A nonzero count here (any scope) means some run recorded evidence that
     # a later generation/legacy line disagreed with an already-committed
     # decision instead of overwriting it (guide §5.5 item 1; includes the
     # ``legacy_settlement`` scope's contract-field divergences) -- surfaced
     # here so an operator sees it without reading the ledger directly.
     divergences = {row["scope"]: row["count"] for row in conn.execute(
-        "SELECT scope, COUNT(*) AS count FROM decision_divergences GROUP BY scope")}
+        "SELECT scope, COUNT(*) AS count FROM decision_divergences GROUP BY scope ORDER BY scope")}
     # 2026-09-15: a generation_ref IS NULL outcome row can never dedupe a
     # same-session legacy_settlement rerun (decision_commit.
     # _match_same_session matches only a recorded generation_ref) --
@@ -198,11 +321,13 @@ def health(conn, *, clock, executor_mode="watchdog"):
     undetermined_outcome_sessions = conn.execute(
         "SELECT COUNT(*) FROM decisions WHERE kind='outcome' "
         "AND generation_ref IS NULL").fetchone()[0]
-    return {"schema_version": "operations_health.v1.0", "generated_at": format_timestamp(clock.now()),
+    requested_session, resolved_session = _release_session_evidence(conn, current)
+    return {"schema_version": "operations_health.v1.1", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
-            "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks")],
+            "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks ORDER BY pipeline, scope, stage")],
             "current_release": dict(current) if current else None,
-            "withheld_release": dict(withheld) if show_withheld else None,
+            "requested_session": requested_session, "resolved_session": resolved_session,
+            "withheld_release": withheld_release,
             "code_budgets": budget_streak(conn), "activation": "shadow_only",
             "decision_divergences": divergences,
             "undetermined_outcome_sessions": undetermined_outcome_sessions}

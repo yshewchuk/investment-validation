@@ -32,9 +32,9 @@ from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.health import (
+    _withheld_release,
     engineering_history,
     engineering_streak_from_history,
-    health,
     record_check,
     trailing_occurrences,
 )
@@ -426,7 +426,7 @@ def _write_operations_status(conn, store, target, *, scope, requested_session, r
     history = tuple(EngineeringNight(**row) for row in engineering_history(conn, occurrences))
     conflicts, degraded = _bundle_flags(store, bundle_ref) if bundle_ref is not None else ((), ())
     selfcheck_doc = _selfcheck_document(conn, store, bindings)
-    snapshot = health(conn, clock=clock)
+    withheld_release = _withheld_release(conn)
     current_release_id = release_current(target)
     # A judgement call (guide §5.5 item 2's own report should note it): a
     # served release that is NOT the one this latest attempt just tried to
@@ -435,7 +435,6 @@ def _write_operations_status(conn, store, target, *, scope, requested_session, r
     # a failed update they differ because the old release was kept.
     stale = current_release_id != attempted_release_id
     failed_update_reason = f"{failure.code}: {failure.problem.message}" if failure is not None else None
-    withheld_release = snapshot.get("withheld_release")
     withheld_reason = None
     if withheld_release is not None:
         withheld_reason = (f"occurrence {withheld_release['occurrence']} release "

@@ -5,9 +5,12 @@ import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops.bootstrap import open_catalog
+from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.diagnostics import process_family_liveness
 from engine.v2.ops.lifecycle import attempt_receipts
+from engine.v2.ops.outbox import enqueue
 from engine.v2.ops.profiles import DEFAULT_POLICY, MIB
 from engine.v2.ops.recovery import begin_epoch, read_boot_id
 from engine.v2.ops.scheduler import Supervisor
@@ -58,6 +61,38 @@ def catalog(tmp_path):
     conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
     epoch = begin_epoch(conn, clock=clock, boot_id="boot", pid=1)
     return conn, clock, Supervisor(epoch, "boot")
+
+
+def seed_delivered_health_release(conn, *, release_id, requested_session, resolved_session):
+    """One delivered ``releases`` row plus the complete delivered
+    ``release_intent`` -> ``export`` outbox receipt chain ``health()`` requires
+    for it, seeded inside the catalog transaction (synthetic test setup; the
+    production producer is never called here). The release occurrence and the
+    export receipt ``session`` are both the explicit ``resolved_session``;
+    sessions never default."""
+    scope = "shadow"
+    validation = content_hash({"release_id": release_id, "scope": scope,
+                               "requested_session": requested_session,
+                               "session": resolved_session})
+    release_key = content_hash([scope, resolved_session, validation])
+    manifest = {"schema_version": "release_manifest.v1.0", "release_id": release_id,
+                "occurrence": resolved_session}
+    export_receipt = {"schema_version": "ledger_export_receipt.v1.0", "scope": scope,
+                      "requested_session": requested_session, "session": resolved_session}
+    intent_receipt = {"release_id": release_id, "bound_at": resolved_session}
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO releases(release_id,occurrence,manifest_json,manifest_hash,"
+            "expected_current,eligible,published_at,delivered_at) VALUES (?,?,?,?,?,?,?,?)",
+            (release_id, resolved_session, dumps(manifest), content_hash(manifest),
+             None, 1, resolved_session, resolved_session))
+        enqueue(conn, "export", release_key, {"validation": validation})
+        conn.execute("UPDATE outbox SET state='delivered',attempts=attempts+1,receipt_json=? "
+                     "WHERE kind='export' AND logical_key=?", (dumps(export_receipt), release_key))
+        enqueue(conn, "release_intent", release_key, {"validation": validation})
+        conn.execute("UPDATE outbox SET state='delivered',attempts=attempts+1,receipt_json=? "
+                     "WHERE kind='release_intent' AND logical_key=?",
+                     (dumps(intent_receipt), release_key))
 
 
 # -- bounded admission waits ---------------------------------------------------
