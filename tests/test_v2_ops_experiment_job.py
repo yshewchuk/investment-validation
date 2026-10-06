@@ -64,6 +64,31 @@ def test_experiment_worker_runs_synthetic_runner_and_writes_receipt(tmp_path):
                                        "runner": "synthetic", "no_ledger": True}, tmp_path)
 
 
+def test_worker_dispatch_refuses_a_malformed_fixed_arm_before_the_runner(tmp_path,
+                                                                         monkeypatch):
+    """The component contract's order, on the worker path: a fixed-arm run
+    validates its one primary arm before any runner execution. Through the
+    real dispatch on a synthetic staging directory -- document parsing and
+    ``resolve_experiment_plan`` stay in the path -- a staged spec declaring
+    two arms is the resolver's typed ``INVALID_EXPERIMENT_SPEC``, so the
+    synthetic runner sentinel is never invoked and no report output exists."""
+    (tmp_path / "spec.json").write_text(json.dumps(
+        _spec_document(economic_params={}, arms=["fixture", "control"])))
+    invoked = []
+
+    def sentinel(*, run_dir, no_ledger):
+        invoked.append(run_dir)
+
+    monkeypatch.setattr(experiments, "synthetic_fixture_runner", sentinel)
+    with pytest.raises(OpsError) as excinfo:
+        worker.dispatch("experiment", {"expected_ids": ["experiment:x"],
+                                       "runner": "synthetic", "no_ledger": True}, tmp_path)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not invoked
+    assert not (tmp_path / "REPORT.md").exists()
+    assert not (tmp_path / "experiment_receipt.json").exists()
+
+
 def _planned_ledger(path, experiment_id="x", stage="planned"):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("id,spec_hash,date,stage,oos_mean_mid,sharpe_trade,promoted\n"
