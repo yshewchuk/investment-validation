@@ -422,6 +422,46 @@ def test_worker_refuses_a_report_swapped_to_a_link_during_integrity_check(tmp_pa
     assert _ledger_rows(ledger) == [{"id": "EXP-182", "stage": "planned"}]
 
 
+def test_worker_refuses_unreadable_report_bytes_during_integrity_check(tmp_path, monkeypatch):
+    """A post-run ``Path.read_bytes`` that raises ``OSError`` on the report is
+    the same typed, non-retryable ``VALIDATION_FAILED`` as a refused ``lstat``:
+    the failed receipt's ``failure_details`` name the report path with both
+    ``before_hash`` and ``after_hash`` -- null values, because the report was
+    absent before the run and unreadable after -- the checkout ledger still
+    holds only its PLANNED row, and the catalog registers no run. Before the
+    ``_check_report_integrity`` read guard the bare ``OSError`` bypassed typed
+    evidence entirely."""
+    checkout, _ = _registered_checkout(tmp_path)
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    (checkout / "spec.json").write_text(json.dumps(_spec_document(
+        experiment_id="EXP-182", economic_params={})))
+    real_read_bytes = Path.read_bytes
+
+    def unreadable_report(self):
+        if self.name == "REPORT.md":
+            raise OSError(5, "Input/output error")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable_report)
+    conn, _, _ = catalog(checkout)
+    try:
+        with pytest.raises(OpsError) as excinfo:
+            worker.dispatch("experiment", {"expected_ids": ["experiment:EXP-182"],
+                                           "runner": "synthetic", "no_ledger": False,
+                                           "preregistration_root": str(checkout)}, checkout)
+        assert excinfo.value.code == "VALIDATION_FAILED"
+        assert excinfo.value.problem.retryable is False
+        receipt = json.loads((checkout / "experiment_receipt.json").read_text())
+        failure = receipt["evidence"]["failure_details"]
+        assert receipt["status"] == "failed"
+        assert failure["path"] == str(checkout / "REPORT.md")
+        assert failure["before_hash"] is None and failure["after_hash"] is None
+        assert _ledger_rows(ledger) == [{"id": "EXP-182", "stage": "planned"}]
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path,
                                                                         monkeypatch):
     """Review fix item 1: the ops root and the checkout are DIFFERENT tmp
@@ -1230,6 +1270,43 @@ def test_primary_cli_submission_handoffs_registered_runner_sources(tmp_path, mon
             {"id": "EXP-182", "stage": "planned"}, {"id": "EXP-182", "stage": "ran"}]
     finally:
         conn.close()
+
+
+def test_primary_runner_bindings_publish_exp185_declared_simulation_dependency():
+    """The EXP-185 runner reaches its EXP-142 simulation only through a
+    ``sys.path`` insert plus a bare ``import simulation`` inside the declared
+    EXP-144 source -- invisible to the static closure -- so the inventory's
+    ``declared_runtime_sources`` is the only record carrying that edge.
+    Exercise the real ``cli._primary_runner_bindings`` (real ``runner_manifest``
+    over this checkout, real inventory entry) with a tiny capturing store whose
+    ``publish_bytes`` returns the bytes, and assert the bindings include the
+    dependency path with its exact repository bytes. An inventory/closure
+    omission fails here with no stubbed source file; a missing or indirect
+    dependency keeps refusing at submit as the existing typed
+    ``VALIDATION_FAILED`` before durable run or ledger effects."""
+    runner = "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py"
+    dependency = "experiments/EXP-142_str_runup_t14_factor_simulation_pnl_gate/simulation.py"
+    assert dependency in experiments.RUNNER_INVENTORY[runner]["declared_runtime_sources"]
+
+    class _CapturingStore:
+        def __init__(self):
+            self.published = []
+
+        def publish_bytes(self, data, *, schema_ref):
+            self.published.append((schema_ref, data))
+            return data
+
+    store = _CapturingStore()
+    plan = {"kind": "experiment", "mode": "primary",
+            "spec_document": _spec_document(experiment_id="EXP-185", runner=runner),
+            "parameters": {"runner": runner, "no_ledger": False},
+            "preregistration_root": str(REPO)}
+    bindings = dict(cli._primary_runner_bindings(plan, store))
+
+    assert bindings[dependency] == (REPO / dependency).read_bytes()
+    assert store.published
+    assert all(schema_ref == "experiment_runner_source.v1.0"
+               for schema_ref, _ in store.published)
 
 
 def test_worker_refuses_a_declared_source_tampered_during_the_run(tmp_path, monkeypatch):

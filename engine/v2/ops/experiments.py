@@ -610,6 +610,7 @@ RUNNER_INVENTORY = {
         "spec_source": "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/spec.yaml",
         "declared_runtime_sources": (
             "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/run.py",
+            "experiments/EXP-142_str_runup_t14_factor_simulation_pnl_gate/simulation.py",
         ),
         "ledger_write_behavior": (
             "appends experiments/LEDGER.csv rows via main()'s --no-ledger gate unless "
@@ -817,7 +818,10 @@ def _check_report_integrity(report: Path, before: str | None) -> str:
         raise _report_integrity_failure(report, before, None) from None
     if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
         raise _report_integrity_failure(report, before, None)
-    return "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
+    try:
+        return "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
+    except OSError:
+        raise _report_integrity_failure(report, before, None) from None
 
 
 def _stage_capabilities(destination: Path, spec: ExperimentSpec, base: Path, mode: str,
