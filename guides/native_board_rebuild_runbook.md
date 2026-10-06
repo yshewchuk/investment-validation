@@ -40,7 +40,7 @@ explicit. No step has been shown unsafe or error-prone enough to justify sequenc
 ## Preconditions and operator rules
 
 - The Tier-1 raw cache is complete and usable; the implemented steps of this procedure never call providers or repair raw inputs. The future computed-moves capture (step 2, not implemented yet) must be held to the same cache-only rule — read only the frozen `SOURCE_ROOT` and refuse a cache miss before any provider/network I/O — while the current production binding instead uses yfinance for uncached units. One frozen legacy checkout is the absolute `SOURCE_ROOT` for the whole run.
-- Only the supervisor runs heavy steps; agents never run them. The bounded example here is the legacy rebuild: `python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.data.rebuild` — heavy steps serially, one-heavy-job admission built into `--heavy`; never lower a limit to start sooner. The measured snapshot import job (~5.9 GiB free headroom) runs through the bounded `serve --once` invocation in step 1.
+- Only the supervisor runs heavy steps; agents never run them. The bounded example here is the legacy rebuild: `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.data.rebuild` — heavy steps serially, one-heavy-job admission built into `--heavy`; never lower a limit to start sooner. The measured snapshot import job (~5.9 GiB free headroom) runs through the bounded `serve --once` invocation in step 1.
 - Before `snapshot plan-import`, read the shadow head's (`snapshot_id`, `generation`) from `data_snapshot_heads` and pass both, or
   for an absent head follow step 1's no-head alternative; a stale head must stop the run, and never plan while the trades replay runs.
 
@@ -53,9 +53,9 @@ to the same tree later imported from `SOURCE_ROOT` (operator requirement, not lo
 
 | Start tier | Legacy rebuild work |
 |---|---|
-| 1 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 -m engine.data.rebuild`, then `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 -m engine.build_trades` |
-| 2 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 -m engine.data.rebuild --table panel --table tier4` |
-| 3 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 -m engine.data.rebuild --table tier4` |
+| 1 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.data.rebuild`, then `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.build_trades` |
+| 2 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.data.rebuild --table panel --table tier4` |
+| 3 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.data.rebuild --table tier4` |
 | 4 | none — go straight to the import |
 
 1. Open the operations root and import the rebuilt tree — before planning, read the catalog head state and set `HEAD_SNAPSHOT_ID` and `HEAD_GENERATION` from the
