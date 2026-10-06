@@ -285,6 +285,8 @@ def test_run_native_parity_worker_all_refused_unkeyable_only(tmp_path):
 
 
 def test_run_native_parity_worker_disjoint_native_rows_with_keyed_refusal(tmp_path):
+    """A matching keyed refusal lets the disjoint native row be reported
+    instead of raising."""
     row = _legacy_row(ticker="AAA")
     native_key = _canonical_key("ZZZ", "STR-THRU", "2026-01-15", session="am")
     refusal_key = _canonical_key("AAA", "STR-THRU", "2026-01-15", session="am")
@@ -370,6 +372,7 @@ def test_run_native_parity_worker_bytes_match_the_comparator_path(tmp_path):
 
 
 def test_run_native_parity_worker_genuinely_missing_native_rows_raises(tmp_path):
+    """Empty native rows with no refusals still raise VALIDATION_FAILED."""
     _write_inputs(tmp_path, rows=[_legacy_row()], records={}, refusals={},
                   unkeyable=[])
 
