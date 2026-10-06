@@ -39,16 +39,17 @@ explicit. No step has been shown unsafe or error-prone enough to justify sequenc
 
 ## Preconditions and operator rules
 
-- The Tier-1 raw cache is complete and usable; the implemented steps of this procedure never call providers or repair raw inputs. The future computed-moves capture (step 2, not implemented yet) must be held to the same cache-only rule — read only the frozen `SOURCE_ROOT` and refuse a cache miss before any provider/network I/O — while the current production binding instead uses yfinance for uncached units. One frozen legacy checkout is `SOURCE_ROOT` for the whole run.
+- The Tier-1 raw cache is complete and usable; the implemented steps of this procedure never call providers or repair raw inputs. The future computed-moves capture (step 2, not implemented yet) must be held to the same cache-only rule — read only the frozen `SOURCE_ROOT` and refuse a cache miss before any provider/network I/O — while the current production binding instead uses yfinance for uncached units. One frozen legacy checkout is the absolute `SOURCE_ROOT` for the whole run.
 - Only the supervisor runs heavy steps; agents never run them. The bounded example here is the legacy rebuild: `python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.data.rebuild` — heavy steps serially, one-heavy-job admission built into `--heavy`; never lower a limit to start sooner. The measured snapshot import job (~5.9 GiB free headroom) runs through the bounded `serve --once` invocation in step 1.
-- Before `snapshot plan-import`, read the shadow head's (`snapshot_id`, `generation`) from
-  `data_snapshot_heads` and pass both, or for an absent head follow step 1's no-head alternative; a stale head must stop the
-  run, and never plan while the trades replay runs.
+- Before `snapshot plan-import`, read the shadow head's (`snapshot_id`, `generation`) from `data_snapshot_heads` and pass both, or
+  for an absent head follow step 1's no-head alternative; a stale head must stop the run, and never plan while the trades replay runs.
 
 ## Ordered procedure
 
-Set `SOURCE_ROOT`, `OPS_ROOT`, `AS_OF` (the legacy tree's selected session), and
-`MODEL_RELEASE_ROOT`. Run the start-tier legacy work to completion first:
+Set `SOURCE_ROOT` to one absolute path — the frozen legacy checkout — plus `OPS_ROOT`, `AS_OF` (the legacy tree's selected session), and
+`MODEL_RELEASE_ROOT`; make `OPS_ROOT` and `MODEL_RELEASE_ROOT` absolute too, so they remain valid after the `cd "$SOURCE_ROOT"` before the
+tier table changes the directory. Run the Tier 2–4 rebuild commands with the current directory set to that checkout, binding their rebuild output
+to the same tree later imported from `SOURCE_ROOT` (operator requirement, not locally verified). Complete the start-tier legacy work first:
 
 | Start tier | Legacy rebuild work |
 |---|---|
@@ -57,21 +58,21 @@ Set `SOURCE_ROOT`, `OPS_ROOT`, `AS_OF` (the legacy tree's selected session), and
 | 3 | `python3 -m engine.data.rebuild --table tier4` |
 | 4 | none — go straight to the import |
 
-1. Open the operations root and import the rebuilt tree — before planning, read the catalog head state and set
-   `HEAD_SNAPSHOT_ID` and `HEAD_GENERATION` from the shadow head row; with no head row, leave `HEAD_SNAPSHOT_ID` unset — the
-   conditional below passes the stored ID and generation for an existing head, or omits the snapshot-ID option entirely
-   (never an empty string) with generation 0 for an absent head. Wait for the trades replay to exit first; save the returned
-   `plan_ref` as `PLAN_REF` before submitting; `$IMPORT_KEY` is a source-bound stable key (`rebuild-<source-hash>-import`):
+1. Open the operations root and import the rebuilt tree — before planning, read the catalog head state and set `HEAD_SNAPSHOT_ID` and `HEAD_GENERATION` from the
+   shadow head row; with no head row, leave `HEAD_SNAPSHOT_ID` unset — the block passes the stored ID and generation for an existing head, or omits the snapshot-ID
+   option entirely (never an empty string) with generation 0 for an absent head, and stops on any nonzero step while preserving its status. Wait for the trades replay
+   to exit first; it parses `plan_ref` from the `plan-import` JSON into `PLAN_REF` before submitting; `$IMPORT_KEY` is a source-bound stable key (`rebuild-<source-hash>-import`):
 
    ```bash
+   set -euo pipefail
    python3 -m engine.v2.ops --root "$OPS_ROOT" init
-   if [ -n "$HEAD_SNAPSHOT_ID" ]; then
-     python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot plan-import --source-root "$SOURCE_ROOT" --scope shadow --expected-head-snapshot-id "$HEAD_SNAPSHOT_ID" --expected-head-generation "$HEAD_GENERATION"
+   if [ -n "${HEAD_SNAPSHOT_ID-}" ]; then
+     PLAN_RESULT=$(python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot plan-import --source-root "$SOURCE_ROOT" --scope shadow --expected-head-snapshot-id "$HEAD_SNAPSHOT_ID" --expected-head-generation "$HEAD_GENERATION")
    else
-     python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot plan-import --source-root "$SOURCE_ROOT" --scope shadow --expected-head-generation 0
+     PLAN_RESULT=$(python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot plan-import --source-root "$SOURCE_ROOT" --scope shadow --expected-head-generation 0)
    fi
-   python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot submit \
-     "$PLAN_REF" --idempotency-key "$IMPORT_KEY"
+   PLAN_REF=$(printf '%s' "$PLAN_RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["plan_ref"])')
+   python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot submit "$PLAN_REF" --idempotency-key "$IMPORT_KEY"
    python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.v2.ops --root "$OPS_ROOT" serve --once --store-root "$SOURCE_ROOT"
    ```
 
@@ -83,8 +84,7 @@ Set `SOURCE_ROOT`, `OPS_ROOT`, `AS_OF` (the legacy tree's selected session), and
 3. Capture price history LAST — the final generation then carries both native tables and pins:
    `python3 -m engine.v2.ops --root "$OPS_ROOT" price-history capture --source-root "$SOURCE_ROOT" --scope shadow`.
 
-4. Import decision history through the rebuilt as-of session: `python3 -m engine.v2.ops
-   --root "$OPS_ROOT" ledger import-history --source-root "$SOURCE_ROOT" --through "$AS_OF"`.
+4. Import decision history through the rebuilt as-of session: `python3 -m engine.v2.ops --root "$OPS_ROOT" ledger import-history --source-root "$SOURCE_ROOT" --through "$AS_OF"`.
 
 5. Complete the Phase 5 staged model release under `MODEL_RELEASE_ROOT` (inventory, calibration,
    training, preparation, acceptance, staging) — a separate heavy workflow (report step 12).
