@@ -101,6 +101,7 @@ produce only the eight legacy tables, and price-history capture is the existing 
 
 - R1: validate the source sits at `AS_OF` and required legacy inputs exist before submitting.
 - R2: run steps serially; for a snapshot-producing step, failure before its commit leaves the prior head current.
+  If any legacy rebuild exits nonzero or is interrupted, stop before the import and before continuing the tier table; treat its generated outputs and metadata as potentially inconsistent — this runbook has no verified safe in-place retry or restore procedure — and resume only after the supervisor independently establishes `SOURCE_ROOT` is complete and current to `AS_OF`.
 - R3: plans carry the expected head snapshot ID and generation; a mismatch must meet a typed
   stale-head refusal — never bypass the head fence — then reread the latest pair and replan.
 - R4: resume an interrupted import by resubmitting its saved plan under the SAME idempotency key;
