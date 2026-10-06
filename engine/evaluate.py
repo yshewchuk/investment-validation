@@ -958,9 +958,12 @@ def walk_forward(
     <max train year>``) stamped on its diagnostics row and on each of its
     score rows. A fold whose local train frame is empty (allowed when
     ``min_train_years=0`` with an upstream/precomputed fit) still runs
-    ``fit``/``select`` in the same order, but is marked unfitted — Gate has
-    no provenance field for what happened before the harness — so its
-    identity is null and it is never predicted. A year skipped for
+    ``fit`` first, but is marked unfitted — Gate has no provenance field
+    for what happened before the harness, so the evaluator cannot validate
+    what was fitted — and is neither predicted nor selected: its identity
+    is null and it contributes no selected OOS trades (``n_selected`` is
+    zero; empty-local-history folds without validated provenance are
+    excluded from selected OOS results). A year skipped for
     insufficient history is never predicted: its score rows exist with null
     ``proba`` and ``fitted=False`` so the OOS accounting stays complete, and
     calibration filters them out. The returned ``selected`` frame carries the
@@ -1034,12 +1037,13 @@ def walk_forward(
         row["ungated"] = False
         if not len(train):
             # A fold that passes min_train_years with an empty local train
-            # frame trades on a fit made upstream/precomputed: Gate carries no
-            # provenance field for that, so the evaluator cannot see what was
-            # fitted or when. The fold keeps its selection behavior (this
-            # gate.fit(train) then gate.select(test) below are still called),
-            # but it is marked unfitted — no identity, no prediction, and
-            # null score rows if probabilities are configured.
+            # frame would trade on a fit made upstream/precomputed: Gate
+            # carries no provenance field for that, so the evaluator cannot
+            # see what was fitted or when. Without validated provenance the
+            # fold selects nothing — neither predict_proba nor select runs,
+            # no test ID enters kept_ids, and n_selected is zero — while it
+            # is marked unfitted: no identity, and null score rows if
+            # probabilities are configured.
             row["fitted"] = False
             row["fit_identity"] = None
             row["unfitted_reason"] = (
@@ -1054,10 +1058,7 @@ def walk_forward(
                     "fitted": False,
                     "fit_identity": None,
                 }))
-            mask = gate.select(test)
-            mask = pd.Series(np.asarray(mask, dtype=bool), index=test.index)
-            row["n_selected"] = int(mask.sum())
-            kept_ids.extend(test.loc[mask, "event_id"].tolist())
+            row["n_selected"] = 0
             diagnostics.append(row)
             continue
         fold_identity = (

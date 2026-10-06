@@ -328,13 +328,13 @@ class TestWalkForward:
         assert select_saw == [(2022, 2021), (2023, 2022)]
 
     def test_min_train_years_zero_folds_but_empty_history_is_never_predicted(self):
-        """min_train_years=0: the empty-local-history fold fits and selects, never predicts.
+        """min_train_years=0: the empty-local-history fold fits, never predicts or selects.
 
         With no minimum, 2020 is an eligible fold whose local train frame is
-        empty (an upstream/precomputed fit): the harness still calls ``fit``
-        then ``select`` in order, but marks the fold unfitted — Gate carries
-        no provenance for what happened before the harness — so it is never
-        scored and its kept trades carry a null identity.
+        empty (an upstream/precomputed fit): the harness calls ``fit``, but
+        marks the fold unfitted — Gate carries no provenance for what
+        happened before the harness — so it is never scored, never selects,
+        and contributes no selected OOS trades.
         """
         trades = self.trades3y()
         calls: list[tuple[str, int | None, int | None]] = []
@@ -365,20 +365,22 @@ class TestWalkForward:
         sel = wf["selected"]
         sel_years = pd.to_datetime(sel["event_date"]).dt.year
 
-        # 2020's empty-local-history fold: fit runs first, then select, and
-        # predict_proba is never called on the unprovenanced fold.
-        assert calls[:2] == [("fit", None, None), ("select", 2020, None)]
-        assert [c[0] for c in calls] == ["fit", "select", "fit", "proba",
-                                         "select", "fit", "proba", "select"]
+        # 2020's empty-local-history fold: fit runs, but neither select nor
+        # predict_proba is called on the unprovenanced fold.
+        assert calls[0] == ("fit", None, None)
+        assert [c[0] for c in calls] == ["fit", "fit", "proba", "select",
+                                         "fit", "proba", "select"]
         assert diag[2020]["fitted"] is False
         assert diag[2020]["fit_identity"] is None
+        assert diag[2020]["n_selected"] == 0
         assert "empty local train history" in diag[2020]["unfitted_reason"]
         rows20 = scores[scores["year"] == 2020]
         assert len(rows20) == 5
         assert not rows20["fitted"].any()
         assert rows20["proba"].isna().all()
         assert rows20["fit_identity"].isna().all()
-        assert sel[sel_years == 2020]["fit_identity"].isna().all()
+        # The unprovenanced 2020 trades enter no selected OOS results.
+        assert not (sel_years == 2020).any()
 
         # 2021 and 2022 are ordinary fitted folds; their predictions and
         # selections see the just-fitted model and the expected identities.
@@ -396,7 +398,7 @@ class TestWalkForward:
         assert set(sel[sel_years == 2022]["fit_identity"]) == {diag[2022]["fit_identity"]}
         # Every call saw its own fold's fit, in the harness's fixed order.
         assert calls == [
-            ("fit", None, None), ("select", 2020, None),
+            ("fit", None, None),
             ("fit", None, 2020), ("proba", 2021, 2020), ("select", 2021, 2020),
             ("fit", None, 2021), ("proba", 2022, 2021), ("select", 2022, 2021),
         ]
