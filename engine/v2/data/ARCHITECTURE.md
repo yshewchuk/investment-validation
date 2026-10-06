@@ -326,9 +326,9 @@ source retry policy owns retry.
 
 | Requirement | Outcome |
 |---|---|
-| R1 — missing or unsupported input | Missing members raise their typed refusal codes above; unsupported contract schemas refuse `UNSUPPORTED_CONTRACT` before rows are returned. |
+| R1 — missing or unsupported input | Missing members raise their typed refusal codes above; unsupported `TableContract` schema versions raise `UNSUPPORTED_VERSION` before rows are returned. |
 | R2 — cache | Bounds come from the pinned fragment membership; no current-head fallback or cached bound from another snapshot. |
-| R3 — retry | Limit and integrity refusals are not retried. Registration retries retain the head fence. |
+| R3 — retry | `RESULT_LIMIT_EXCEEDED`, `OBJECT_CORRUPT`, and `MANIFEST_CORRUPT` are non-retryable; `INPUT_CHANGED` is retryable. Registration retries retain the head fence. |
 | R4 — transaction | Re-registration commits complete new identities and the head CAS atomically; changed definitions never overwrite registered contracts. |
 | R5 — partial result/write | Invalid surviving counts refuse `MANIFEST_CORRUPT` before streams open; footer/count mismatch refuses `MANIFEST_CORRUPT` before rows. Earlier batches are provisional until exhaustion. Failed registration leaves the head unchanged and staged objects unreferenced. |
 | R6 — idempotency | Under a pinned snapshot, byte-identical reads return identical rows; scan completion requires exhaustion without an error. An identical registration reuses its receipt through the same head fence; conflicting identity refuses. |
