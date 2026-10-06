@@ -585,6 +585,7 @@ RUNNER_INVENTORY = {
         "declared_runtime_sources": (
             "experiments/EXP-181_d_1_gated_execution_parity/run.py",
         ),
+        "fixed_arm_args": {"d1": ("--clock", "d1")},
         "ledger_write_behavior": ("appends experiments/LEDGER.csv rows via main(record=...) "
                                   "unless --no-ledger is passed; the adapter always passes it"),
         "registry_effects": "none; champion promotion is a separately authorized job",
@@ -653,6 +654,7 @@ def runner_manifest(root: Path | str, script: str) -> dict:
             "spec_hash": file_hash(spec_path),
             "source_closure": closure,
             "no_ledger_support": True,
+            "fixed_arm_args": entry.get("fixed_arm_args", {}),
             "ledger_write_behavior": entry["ledger_write_behavior"],
             "registry_effects": entry["registry_effects"],
             "report_path": entry["report_path"],

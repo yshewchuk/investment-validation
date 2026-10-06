@@ -128,7 +128,8 @@ def _tiny_checkout(tmp_path, *, with_metrics=True):
                       path=ledger)
     spec_path = checkout / "spec.json"
     spec_path.write_text(json.dumps(_experiment_document(
-        experiment_id="EXP-182", runner=REGISTERED_RUNNER, economic_params={})))
+        experiment_id="EXP-182", runner=REGISTERED_RUNNER, economic_params={},
+        primary_arm_id="d1", arms=["d1"])))
     return checkout, spec_path, ledger, planned_hash
 
 

@@ -366,6 +366,36 @@ def _experiment_failure(receipt):
                 "experiment run did not succeed", details=details)
 
 
+def _registered_experiment_runner(root, runner_id, primary_arm_id):
+    """The runner closure for a registered legacy runner (P6 slice 10).
+
+    The one audited selector tuple is ``RUNNER_INVENTORY[runner_id]
+    ["fixed_arm_args"][primary_arm_id]``; anything else is a non-retryable
+    ``INVALID_EXPERIMENT_SPEC`` naming the runner and arm, raised before any
+    resolved plan is written or the runner is invoked. The closure preserves
+    the nonzero-return refusal (typed ``VALIDATION_FAILED`` with the stderr
+    tail) and the ledger headline.
+    """
+    from engine.v2.ops.experiments import RUNNER_INVENTORY
+    from engine.v2.ops.legacy_adapter import run_legacy_script
+
+    fixed_arm_args = RUNNER_INVENTORY.get(runner_id, {}).get("fixed_arm_args", {})
+    selected_args = fixed_arm_args.get(primary_arm_id)
+    if selected_args is None:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "registered runner has no audited selector for the primary arm",
+                   details={"runner": runner_id, "primary_arm_id": primary_arm_id})
+
+    def runner(*, run_dir, no_ledger):
+        completed = run_legacy_script(root, runner_id, args=selected_args)
+        if completed.returncode != 0:
+            raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
+                       details={"returncode": completed.returncode,
+                                "stderr_tail": (completed.stderr or "")[-2000:]})
+        return {"returncode": completed.returncode, "headline": _runner_headline(root)}
+    return runner
+
+
 def _dispatch_experiment(parameters, root):
     """P6 slice 10: run one experiment under admission. Pure function of
     ``parameters`` and staging, like ``_dispatch_adhoc_rescore`` — the runner
@@ -400,7 +430,6 @@ def _dispatch_experiment(parameters, root):
         run_experiment,
         synthetic_fixture_runner,
     )
-    from engine.v2.ops.legacy_adapter import run_legacy_script
 
     mode = "smoke" if parameters.get("no_ledger", True) else "primary"
     document = json.loads((root / "spec.json").read_text())
@@ -422,13 +451,7 @@ def _dispatch_experiment(parameters, root):
     if runner_id == "synthetic":
         runner, synthetic = synthetic_fixture_runner, True
     else:
-        def runner(*, run_dir, no_ledger):
-            completed = run_legacy_script(root, runner_id)
-            if completed.returncode != 0:
-                raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
-                           details={"returncode": completed.returncode,
-                                    "stderr_tail": (completed.stderr or "")[-2000:]})
-            return {"returncode": completed.returncode, "headline": _runner_headline(root)}
+        runner = _registered_experiment_runner(root, runner_id, spec.primary_arm_id)
         synthetic = False
     (root / "resolved_experiment_plan.json").write_bytes(plan.json_bytes())
     receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
