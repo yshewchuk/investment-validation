@@ -239,3 +239,17 @@ def test_cli_reads_real_git_and_accepts_a_staged_move(tmp_path, monkeypatch):
 
 def test_cli_checks_the_submitted_checkout():
     assert tb.main(["--quiet"]) == 0
+
+
+def test_cli_fallback_counts_only_root_budget_pattern(tmp_path):
+    root = tmp_path / "repo"
+    (root / "tests").mkdir(parents=True)
+    (root / "checks").mkdir()
+    _git(root, "init")
+    _git(root, "symbolic-ref", "HEAD", "refs/heads/main")
+    (root / "tests/test_a.py").write_text("")
+    (root / "tests/foo_test.py").write_text("")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "base")
+    (root / "checks/test_layout_budget.txt").write_text("1\n")
+    assert tb.main(["--repo-root", str(root), "--base-ref", "main", "--quiet"]) == 0

@@ -108,7 +108,7 @@ def main(argv=None):
                                f"{args.base_ref}:{BUDGET_PATH}"], capture_output=True,
                               env=_git_env())
         base_budget = (int(proc.stdout.decode().strip()) if proc.returncode == 0
-                       else sum(1 for path in base if path.count("/") == 1 and is_test(path)))
+                       else sum(1 for path in base if _rooted(path)))
         budget = int((root / BUDGET_PATH).read_text().strip())
     except (RuntimeError, OSError, ValueError) as exc:
         print(f"test-layout ratchet: cannot read base or budget: {exc}", file=sys.stderr)
