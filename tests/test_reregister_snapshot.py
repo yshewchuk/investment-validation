@@ -1309,6 +1309,10 @@ _REGISTER_REFUSALS = [
         out, lambda inv: inv["tables"][0].update(contract_document={
             "schema_version": "table_contract.v1.0", "contract_id": "securities.v1",
             "table_name": "securities", "columns": []}))),
+    ("knowledge-mode-object", "MANIFEST_CORRUPT", lambda fx, out: _rehash_export(
+        out, lambda inv: inv["tables"][0].update(knowledge_mode={"mode": "reconstructed"}))),
+    ("knowledge-mode-list", "MANIFEST_CORRUPT", lambda fx, out: _rehash_export(
+        out, lambda inv: inv["tables"][0].update(knowledge_mode=["reconstructed"]))),
 ]
 
 
@@ -1404,6 +1408,49 @@ def test_lone_surrogate_in_exported_inventory_is_a_typed_corrupt_refusal(tmp_pat
         reregister_snapshot.register(conn, inventory_path=out,
                                      objects_root=fixture["store"].root)
     assert excinfo.value.code == "MANIFEST_CORRUPT"
+    assert str(tmp_path) not in excinfo.value.problem.message
+    assert catalog.read_bytes() == before_bytes
+    assert _catalog_rows(conn) == before_rows
+
+
+_NESTED_JSON_DEPTH = 20000
+
+
+def test_register_deeply_nested_json_export_is_manifest_corrupt_and_read_only(
+        tmp_path, monkeypatch):
+    """A balanced array nested past the recursive parser's depth is refused typed.
+
+    This interpreter's C ``json`` scanner is iterative, so nesting depth alone
+    cannot raise: both the confirmed condition and register's own
+    ``json.loads`` run through the stdlib's pure-Python recursive scanner, a
+    substitution that only proves the refusal -- the depth is still what makes
+    ``json.loads`` raise ``RecursionError``, and register must surface
+    ``MANIFEST_CORRUPT`` and leave every catalog byte and row untouched.
+    """
+    fixture = _securities_fixture(tmp_path)
+    deeply = tmp_path / "deeply-nested-export.json"
+    deeply.write_bytes(b"[" * _NESTED_JSON_DEPTH + b"]" * _NESTED_JSON_DEPTH)
+
+    recursive = json.JSONDecoder()
+    recursive.scan_once = json.scanner.py_make_scanner(recursive)
+    monkeypatch.setattr(
+        json, "loads",
+        lambda payload: recursive.decode(
+            payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else payload))
+
+    with pytest.raises(RecursionError):
+        json.loads(deeply.read_bytes())
+    conn, catalog = fixture["conn"], fixture["catalog_path"]
+    before_bytes, before_rows = catalog.read_bytes(), _catalog_rows(conn)
+    read_conn = reregister_snapshot._open_read_only(catalog)
+    try:
+        with pytest.raises(DataError) as excinfo:
+            reregister_snapshot.register(read_conn, inventory_path=deeply,
+                                         objects_root=fixture["store"].root)
+    finally:
+        read_conn.close()
+    assert excinfo.value.code == "MANIFEST_CORRUPT"
+    assert excinfo.value.problem.message == "the inventory file is not valid JSON"
     assert str(tmp_path) not in excinfo.value.problem.message
     assert catalog.read_bytes() == before_bytes
     assert _catalog_rows(conn) == before_rows

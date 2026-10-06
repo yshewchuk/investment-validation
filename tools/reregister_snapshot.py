@@ -432,7 +432,7 @@ def _validate_shape(inventory):
     for table in inventory["tables"]:
         _exact(table, _TABLE_KEYS, "table")
         if not all(isinstance(table[name], str) for name in
-                   ("table_name", "dataset_version_id", "contract_id")):
+                   ("table_name", "dataset_version_id", "contract_id", "knowledge_mode")):
             raise _corrupt("table")
         _strings(table["coverage_receipt_refs"], "coverage_receipt_refs")
         _strings(table["availability_evidence_refs"], "availability_evidence_refs")
@@ -488,7 +488,7 @@ def _load_export(inventory_path):
         raise errors.fail("INPUT_CHANGED", "the inventory file could not be read") from exc
     try:
         wrapper = json.loads(raw)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise errors.fail("MANIFEST_CORRUPT", "the inventory file is not valid JSON") from exc
     _exact(wrapper, _WRAPPER_KEYS, "export wrapper")
     if (wrapper["schema_version"] != EXPORT_SCHEMA_VERSION
