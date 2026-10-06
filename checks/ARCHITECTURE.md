@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`checks/` provides standalone verification tools for repository invariants, budgets, and phase evidence; production code does not depend on it.
+`checks/` provides standalone verification tools for repository invariants, budgets, and phase evidence. The v2 release gate also invokes its bundle scanner in an isolated subprocess.
 
 ## Primary contracts and public interfaces
 
@@ -46,5 +46,5 @@ check defines missing-input and failure outcomes:
 
 ## Invariants
 
-`checks/import_layers.py` rejects `checks` imports from `engine/v2`, not the
-legacy tree. Each checker owns its input, status, and artifact guarantees.
+`checks/import_layers.py` bars direct v2 imports of `checks`; the bundle-scanner
+exception runs in `legacy_adapter.py`'s isolated subprocess; legacy `engine/**` imports are outside its scope.
