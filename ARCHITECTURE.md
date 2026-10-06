@@ -189,6 +189,11 @@ evidence. See the models and data component contracts.
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
 
+Target PR selection maps changed packages through `checks/layer_map.py` and
+selects their tests plus reverse dependents; see [package test selection by
+layer](guides/test_selection_by_layer.md). The current selector stays until
+implementation slices land; pushes to `main` keep the full-suite backstop.
+
 ## 2. Layers and allowed dependency direction
 
 The rule is **strictly less than**: a package may import a package on a
