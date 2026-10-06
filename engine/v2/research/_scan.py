@@ -1,56 +1,18 @@
 """Pinned-snapshot reads shared by the ``engine/v2/research`` tools.
 
-One ``DataQuery`` per manifest partition, scoped to that partition's own key
-and, when splitting is needed, bounded by its fragment ``time_min``/``time_max``
-records — the same manifest-derived rule
-``engine.v2.data.legacy_materialization`` applies to a whole-table read, never
-a sentinel bound invented out of thin air. Every read therefore stays inside
-``Repository.scan``'s bounded-scan contract (§8.2): no ``read_table()``
-convenience, no implicit "latest".
+One ``DataQuery`` per manifest partition, scoped to its partition key and the
+caller's key predicates, without an observation-time interval. The selected
+fragment membership bound lets each read return the complete partition,
+including null and non-midnight observation times. Every read stays inside
+``Repository.scan``'s bounded-scan contract (§8.2), never an implicit latest.
 
-Each scan is bounded by its own pinned membership bound —
-``Repository.scan_population_bound`` for exactly that scan's snapshot, table,
-pinned contract ref, predicates and interval, the recorded row counts of the
-fragments that selection survives — so a complete partition is read whole.
-Each partition is first scanned scoped to its own partition key by a
-``KeyPredicate`` and with NO time interval — so a row whose observation time is
-NULL (a normal state when the observation column is nullable, as
-``trades.entry_date`` is) comes back like any other row. A scan that still
-overflows its bound needs finer splits: its calendar months are scanned (days
-on a further overflow), every scan still scoped to the partition key and
-bounded to the fragments its own interval survives. Because an interval can
-never match a NULL observation time, the month/day split would silently drop
-null-valued rows — so a partition that overflows while its
-``observation_time_column`` is nullable refuses with ``RESULT_LIMIT_EXCEEDED``
-instead of splitting, and only a single day that still overflows refuses for a
-non-nullable column. Every split keeps the one ``snapshot_id`` the caller
-resolved.
-
-A caller's ``key_filter`` is threaded into every one of those scans (alongside
-this module's own partition-key equality), so a reader that needs only specific
-keys (``fill_quality`` needs only the traded contracts' chain rows) never reads
-a whole table to discard most of it.
-
-A caller's ``batch_filter`` (optional, default ``None`` — omitted and explicit
-``None`` behave identically) is applied to each Arrow batch the moment it
-becomes pandas, *before* any batch or partition accumulation, so unmatched
-rows never outlive the batch that carried them. It can only narrow what
-accumulates, never prune a scan on its own: scan pruning stays with the
-validated/encoded ``key_filter`` predicates. A scan attempt that yields
-batches and then raises ``RESULT_LIMIT_EXCEEDED`` has its retained rows
-discarded before any narrower-interval retry, so a late overflow can never
-leave duplicate rows behind.
-
-Frames are assembled with ``batch.to_pandas()`` per Arrow batch and one
-``pd.concat``; converting each batch to a list of Python dicts first would
-cost multiples of the frame it produces, so this module does not.
-
-Internal to the package: nothing here is part of ``engine.v2.research``'s
-public interface.
+The manifest population bound is an upper bound on candidate rows, not process
+memory. ``batch_filter`` runs on each pandas batch before accumulation and may
+only narrow retained rows. A typed scan failure returns no partial frame.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -94,10 +56,8 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
     caller wants (``None`` may be returned for "keep nothing"); a ``None`` or
     omitted ``batch_filter`` changes nothing. Every scan is bounded by its own
     pinned membership bound, so a complete partition is read fully. A table
-    absent from the snapshot refuses with ``CONTRACT_MISMATCH``; a partition
-    that must fall back to calendar splitting still needs its fragments'
-    recorded time bounds and refuses with ``CONTRACT_MISMATCH`` when they are
-    missing rather than scanning a guess.
+    absent from the snapshot refuses with ``CONTRACT_MISMATCH``; selected
+    partitions are scanned in full without an observation-time interval.
     """
     if table_name not in snapshot_ref.table_versions:
         raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
@@ -122,51 +82,13 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
 def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
                     columns, records: list, *, key_filter,
                     batch_filter=None) -> list[pd.DataFrame]:
-    """One partition's rows: one full-partition scan first, split only on overflow.
-
-    The first attempt scans the whole partition scoped to its own key, with NO
-    time interval, so it returns every row — including one whose observation
-    time is NULL, which no interval can match — bounded by the recorded row
-    counts of the partition's own fragments. Only a scan that still overflows
-    that bound falls back to calendar month/day scans; that fallback can only
-    place rows with a non-NULL observation time in an interval, so a nullable
-    observation column refuses ``RESULT_LIMIT_EXCEEDED`` instead of silently
-    dropping its null-valued rows. A day that still overflows its bound
-    propagates the error — the table needs finer partitions than this rule can
-    supply.
-
-    The full-scan attempt returns its (already batch-filtered) frames only on
-    success, so a late ``RESULT_LIMIT_EXCEEDED`` — one raised after batches
-    were yielded — leaves none of them retained, and the narrower-interval
-    retry cannot duplicate those rows.
-    """
+    """Read one manifest partition completely in a single bounded scan."""
     partition_filter = _partition_filter(contract, table_name, records)
-    if partition_filter is None:
-        return _split_by_calendar(
-            repository, snapshot_ref, table_name, contract, columns,
-            _partition_interval(contract, table_name, records), tuple(key_filter),
-            batch_filter=batch_filter)
-    predicates = (*key_filter, partition_filter)
-    try:
-        return _scan_interval(repository, snapshot_ref, table_name, contract, columns,
-                              predicates, None, batch_filter=batch_filter)
-    except errors.DataError as exc:
-        if exc.code != "RESULT_LIMIT_EXCEEDED":
-            raise
-        if _observation_column_is_nullable(contract):
-            raise errors.fail(
-                "RESULT_LIMIT_EXCEEDED",
-                f"{table_name}: partition {records[0].partition_key!r} exceeds "
-                "its scan result bound and its observation-time column "
-                f"{contract.observation_time_column!r} is nullable, so a row with a null "
-                "observation time cannot be placed in any time interval and would be "
-                "silently dropped; this table needs a different split strategy before "
-                "this partition can overflow its bound",
-                details={"table_name": table_name, "partition_key": records[0].partition_key})
-    return _split_by_calendar(
-        repository, snapshot_ref, table_name, contract, columns,
-        _partition_interval(contract, table_name, records), predicates,
-        batch_filter=batch_filter)
+    predicates = tuple(key_filter)
+    if partition_filter is not None:
+        predicates = (*predicates, partition_filter)
+    return _scan_interval(repository, snapshot_ref, table_name, contract, columns,
+                          predicates, None, batch_filter=batch_filter)
 
 
 def _partition_filter(contract, table_name: str, records: list) -> KeyPredicate | None:
@@ -199,60 +121,6 @@ def _partition_filter(contract, table_name: str, records: list) -> KeyPredicate 
     return KeyPredicate(column=column, operator="eq", values=(value,))
 
 
-def _observation_column_is_nullable(contract) -> bool:
-    """True when the contract declares its observation-time column nullable.
-
-    A null observation time can never fall inside a ``TimeInterval``, so the
-    month/day split can never return such a row — the overflow refusal in
-    :func:`_scan_partition` needs this to decide between splitting and
-    refusing. An undeclared column is never called nullable here: the split
-    path itself will surface the missing declaration.
-    """
-    column = contract.observation_time_column
-    for declared in getattr(contract, "columns", ()):
-        if declared.name == column:
-            return declared.nullable
-    return False
-
-
-def _split_by_calendar(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
-                       columns, interval: TimeInterval, predicates: tuple,
-                       *, batch_filter=None) -> list[pd.DataFrame]:
-    """Calendar month scans over ``interval`` (its days on month overflow).
-
-    Every scan carries ``predicates`` — the caller's ``key_filter`` plus the
-    partition-key equality — so no month or day read can escape its partition,
-    and each one bounds itself to the fragments its own interval survives. A
-    month scan that yields batches and then overflows late retains none of
-    them: its frames are local to the failed call and the day-by-day retry
-    starts from an empty list, so no row is duplicated between the failed
-    month scan and its narrower retries. A day that still overflows its bound
-    propagates ``RESULT_LIMIT_EXCEEDED``.
-    """
-    frames: list[pd.DataFrame] = []
-    for month in _calendar_intervals(interval, "month"):
-        retry_days: list[TimeInterval] | None = None
-        try:
-            month_frames = _scan_interval(
-                repository, snapshot_ref, table_name, contract, columns,
-                predicates, month, batch_filter=batch_filter)
-        except errors.DataError as exc:
-            if exc.code != "RESULT_LIMIT_EXCEEDED":
-                raise
-            days = _calendar_intervals(month, "day")
-            if not days:
-                raise
-            retry_days = days
-        if retry_days is not None:
-            for day in retry_days:
-                frames.extend(_scan_interval(
-                    repository, snapshot_ref, table_name, contract, columns,
-                    predicates, day, batch_filter=batch_filter))
-            continue
-        frames.extend(month_frames)
-    return frames
-
-
 def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
                    columns, key_filter, interval: TimeInterval | None,
                    *, batch_filter=None) -> list[pd.DataFrame]:
@@ -268,11 +136,10 @@ def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contr
     Each Arrow batch becomes pandas, passes through ``batch_filter`` when one
     is given, and only the surviving (non-empty) frames are returned — so rows
     the filter rejects never outlive their batch, and batches that match
-    nothing contribute nothing. The returned frames are local to this call: a
-    ``RESULT_LIMIT_EXCEEDED`` raised after batches were yielded keeps none of
-    them, so callers retry narrower intervals from a clean slate. The scan's
-    own error contracts are unchanged, and bound planning adds no retry: a
-    planning ``DataError`` propagates exactly as raised.
+    nothing contribute nothing. Frames stay local to this call: a typed failure
+    after batches were yielded discards them, and the failure propagates without
+    retry. The scan's own error contracts are unchanged, and bound planning adds
+    no retry: a planning ``DataError`` propagates exactly as raised.
     """
     predicates = tuple(key_filter)
     contract_ref = snapshot_ref.table_versions[table_name].table_contract_ref
@@ -295,66 +162,3 @@ def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contr
         if frame is not None and not frame.empty:
             frames.append(frame)
     return frames
-
-
-def _calendar_intervals(interval: TimeInterval, step: str) -> list[TimeInterval]:
-    """``interval`` cut at calendar boundaries (``"month"`` or ``"day"``),
-    keeping the half-open shape and the source bound's own encoding."""
-    start = _parse_bound(interval.start_inclusive)
-    end = _parse_bound(interval.end_exclusive)
-    if start is None or end is None or start >= end:
-        return []
-    wire = (time_formats.is_naive_timestamp(interval.start_inclusive)
-            or time_formats.is_naive_timestamp(interval.end_exclusive))
-    intervals: list[TimeInterval] = []
-    cursor = start
-    while cursor < end:
-        stop = min(_next_boundary(cursor, step), end)
-        intervals.append(TimeInterval(
-            column=interval.column,
-            start_inclusive=_format_bound(cursor, wire),
-            end_exclusive=_format_bound(stop, wire)))
-        cursor = stop
-    return intervals
-
-
-def _next_boundary(value: datetime, step: str) -> datetime:
-    """The next calendar boundary strictly after ``value`` for ``step``."""
-    if step == "day":
-        return (value + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0)
-    return (value.replace(day=1) + timedelta(days=32)).replace(day=1)
-
-
-def _parse_bound(value: str | None) -> datetime | None:
-    """A recorded time bound as a naive UTC datetime (bare dates at midnight)."""
-    if value is None:
-        return None
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-    return parsed
-
-
-def _format_bound(value: datetime, wire: bool) -> str:
-    """A boundary back in the interval's own encoding: naive-timestamp wire
-    form when the partition bounds use it, a bare date otherwise."""
-    if wire:
-        return time_formats.format_naive_timestamp(value)
-    return value.date().isoformat()
-
-
-def _partition_interval(contract, table_name: str, records: list) -> TimeInterval:
-    column = contract.observation_time_column
-    if not column:
-        raise errors.fail("CONTRACT_MISMATCH",
-                          "a research read requires an observation_time_column",
-                          details={"table_name": table_name})
-    minima = [record.time_min for record in records if record.time_min is not None]
-    maxima = [record.time_max for record in records if record.time_max is not None]
-    if not minima or not maxima:
-        raise errors.fail("CONTRACT_MISMATCH",
-                          "a research read needs recorded fragment time bounds",
-                          details={"table_name": table_name})
-    return TimeInterval(column=column, start_inclusive=min(minima),
-                        end_exclusive=next_representable(max(maxima)))

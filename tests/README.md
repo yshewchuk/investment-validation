@@ -168,6 +168,30 @@ python3 tools/bounded_run.py --cores 8 -- python3 -m pytest -q -n 4 --dist loadg
 
 The `heavy_host` and `browser` tests keep their existing procedure (see above).
 
+### PR test selection
+
+On pull requests, `tools/mutation_pilot.py select-tests` uses the tracked-file
+import graph to select test files that can depend on changed files. Static
+imports and supported literal dynamic imports create specific graph edges.
+A file is treated as dynamic only when its own source contains a construct
+whose target cannot be resolved safely; that file's conservative fan-out is
+the selector's backstop for such unresolved dependencies. Conftest ancestors
+remain part of each test's roots, and the existing #155 fail-safe for
+dynamic or tainted selections remains in force.
+
+Selection preserves every test with a statically discoverable import chain to
+a changed file. Supported literal dynamic imports and tracked Python subprocess
+targets add precise edges too. Other runtime loading or process-launch patterns
+may not be discoverable by this static analysis, so a test that depends on a
+changed file only through such a pattern may be omitted from a narrowed PR run;
+recognized unresolved targets add catch-all edges and can widen the selection
+through the #155 fail-safe test set, but do not always select every test. The
+full suite on pushes to `main` is the final backstop.
+Unknown changed paths, graph construction or scan failures also return
+`__ALL__`. If the selector command itself errors, the CLI exits nonzero
+without printing a selection and the workflow job fails before pytest; it does
+not continue with a narrowed selection.
+
 ## Known thin spots
 
 Honest list, so nobody has to rediscover it:
@@ -395,28 +419,32 @@ its 330-minute step timeout.
 | trigger | mode | state |
 |---|---|---|
 | push to main | incremental | restores the module's newest cached mutmut state |
-| pull_request, via `workflow_run` once its `Tests` run succeeds | incremental, matrix narrowed to the modules the PR's diff can affect | restores the module's newest cached mutmut state; `plan` diffs the PR against its base (`git diff -z --no-renames --name-only`) and passes `--changed-files` to `matrix`, which selects every ENABLED module that owns a changed path OR transitively depends on it (a static `ast` import-graph closure over every tracked `.py` file, ALLOWLIST-classified (`build_import_graph`/`_is_dynamic_file`): a plain import, the one literal `importlib.import_module("x.y")` call, or a conftest.py's plain `pytest_plugins` list resolve to specific edges (including `conftest.py` closure roots); anything else the file references at all -- `sys.path`, `subprocess`, a loader construct, `__import__` in any form, or a short list of other dangerous names/modules -- fails the WHOLE FILE safe, depending on every other tracked file (`module_dependency_closure`), else nothing for a path on the small docs-only `[pr_selection] inert` allowlist minus `inert_skip` (`tools/mutation_pilot.toml`), else EVERY enabled module for anything else -- an unrecognized path, or one the import graph itself cannot be built for (a syntax error or any other failure), is never assumed safe to skip, so a PR touching the selector's own files (`tools/mutation_pilot.py`, `tools/gremlin_pilot.py`, `tools/mutation_results.py`, either mutation workflow) runs the full matrix. Never saves back to the cache: a PR run must not overwrite main's incremental state. |
+| pull_request, via `workflow_run` once its `Tests` run succeeds | incremental, matrix narrowed to the modules the PR's diff can affect | restores the module's newest cached mutmut state; `plan` diffs the PR against its base (`git diff -z --no-renames --name-only`) and passes `--changed-files` to `matrix`, which selects every ENABLED module that owns a changed path OR transitively depends on it (a static `ast` import-graph closure over every tracked `.py` file): supported static imports, literal dynamic imports, and conftest `pytest_plugins` entries resolve to specific edges; the shared graph adds catch-all edges only where a dynamic import, import-path mutation, or process launch remains unresolved. `module_dependency_closure` follows precise graph edges only; it does not widen through catch-all edges, so an unresolved runtime dependency may omit a module (see issue #155). Docs-only paths use the small `[pr_selection] inert` allowlist minus `inert_skip` (`tools/mutation_pilot.toml`). Anything else -- an unrecognized path, or one the import graph cannot be built for (a syntax error or other failure) -- is never assumed safe to skip, so a PR touching the selector's own files (`tools/mutation_pilot.py`, `tools/gremlin_pilot.py`, `tools/mutation_results.py`, either mutation workflow) runs the full matrix. Never saves back to the cache: a PR run must not overwrite main's incremental state. |
 | weekly (gremlins Sun 05:23 UTC, mutmut Sun 22:23 UTC — staggered) | full | no restore: every mutant from scratch |
 | workflow_dispatch | full by default; untick `fresh` for incremental | `modules` picks a comma-separated subset |
 
-- **Static analysis is conservative, not sound.** The import-graph
-  classifier used above (`build_import_graph`/`_is_dynamic_file`) only
-  resolves the three shapes named in the table row; anything else fails
-  the whole file DYNAMIC rather than guessing narrower. That is
-  conservative for the constructs it recognizes, NOT a sound analysis in
-  general -- see [issue #42](https://github.com/yshewchuk/investment-validation/issues/42)
+- **Static analysis is conservative, not sound.** The import graph records
+  resolved import and supported subprocess targets as precise edges. It adds
+  catch-all edges only for constructs whose dynamic target remains unresolved;
+  recognized unresolved targets can widen the PR test set through the #155
+  fail-safe, but do not always select every test. Unknown paths and graph or
+  scan failures select the full suite; unsupported runtime loading can still
+  escape static analysis. That is
+  conservative for unresolved constructs, NOT a sound analysis in general --
+  see [issue #42](https://github.com/yshewchuk/investment-validation/issues/42)
   for constructs it does not recognize at all (string-target
   `monkeypatch.setattr`/`mock.patch`, `pytest.importorskip`,
   `getattr`-based imports, `__import__` via `globals()`/`builtins`,
   `asyncio.create_subprocess_exec`, `__path__`/`sys.meta_path` edits,
   `pytest_plugins` outside a conftest.py or under an `if`, and
-  `from pkg import *` re-exports). None of those holes matter today:
-  `tests/conftest.py` itself always classifies DYNAMIC (its own
-  `sys.path.insert`), every test file's closure includes
-  `tests/conftest.py`, and so every non-inert PR change already selects
-  every enabled module regardless of the holes. `tests/test_mutation_ci.py`
-  has a synthetic-tree test that fails loudly, naming issue #42, the
-  moment `tests/conftest.py` stops classifying DYNAMIC.
+  `from pkg import *` re-exports). For the mutation-CI selector,
+  `module_dependency_closure` follows precise graph edges and does not widen
+  through unresolved catch-all edges, so an unrecognized runtime dependency
+   may omit a module (see issue #155). `tests/conftest.py` is a closure root
+  for every module, but unrelated changes do not select every module;
+  changing that conftest itself selects every enabled module. The selector
+  tests check that its proven repository-root `sys.path` insertion is not
+  classified as unresolved.
 
 - **Scope.** All of `engine/v2`, split into 23 modules plus the six pilot
   modules. The only legacy files are the pilot's `engine/pnl_sim.py` and

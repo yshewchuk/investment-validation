@@ -163,6 +163,8 @@ def test_promote_then_rollback_restores_the_exact_prior_state(tmp_path):
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
 
     promote(tmp_path, "r1")
     assert current_pointer(tmp_path).release_id == "r1"
@@ -178,6 +180,7 @@ def test_promote_then_rollback_restores_the_exact_prior_state(tmp_path):
 def test_rollback_with_no_prior_release_refuses(tmp_path):
     release, inventory, payloads = _fixture("r1")
     stage_release(tmp_path, release, inventory, payloads)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
     promote(tmp_path, "r1")
     with pytest.raises(NoPriorRelease):
         rollback(tmp_path)
@@ -193,6 +196,8 @@ def test_replay_after_later_promotion_resolves_the_old_release_by_id(tmp_path):
     r2, inv2, pay2 = _fixture("r2", intercept=100.0, coefficient=200.0)
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
     promote(tmp_path, "r1")
     resolved_r1_before = resolve_release(tmp_path, "r1")
 
@@ -215,6 +220,8 @@ def test_pointer_history_is_append_only(tmp_path):
     r2, inv2, pay2 = _fixture("r2", intercept=5.0, coefficient=6.0)
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
 
     promote(tmp_path, "r1")
     first_entry = (tmp_path / "history" / "000000.json").read_bytes()
@@ -234,6 +241,8 @@ def test_interrupted_promote_leaves_the_old_pointer(tmp_path, monkeypatch):
     other, inv2, pay2 = _fixture("r2", intercept=9.0, coefficient=9.0)
     stage_release(tmp_path, release, inventory, payloads)
     stage_release(tmp_path, other, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
     promote(tmp_path, "r1")
     before = current_pointer(tmp_path)
 
@@ -343,6 +352,8 @@ def test_repeated_promote_is_idempotent_and_rolls_back_to_the_real_predecessor(t
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
 
     promote(tmp_path, "r1")
     prior_b = promote(tmp_path, "r2")
@@ -364,6 +375,8 @@ def test_promote_after_crash_between_pointer_write_and_history_repairs_history(t
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
     promote(tmp_path, "r1")
 
     real_append = deployment_module._append_history
@@ -386,6 +399,53 @@ def test_promote_after_crash_between_pointer_write_and_history_repairs_history(t
     state = rollback(tmp_path)
     assert state.release_id == "r1"
     assert current_pointer(tmp_path).release_id == "r1"
+
+
+def test_rollback_refuses_failed_target_without_repairing_crash_window_history(
+        tmp_path, monkeypatch):
+    """A rollback whose target's staging completion says failed refuses
+    StagingNotSuccessful (non-retryable) despite the pending crash repair:
+    DEPLOYED and every recorded history entry keep their exact bytes, the
+    missing history entry for the crash-window pointer is never appended,
+    and the pointer still names r2 -- the refusal leaves both pointer and
+    history untouched."""
+    r1, inv1, pay1 = _fixture("r1", intercept=1.0, coefficient=2.0)
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    staged_r1 = stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
+    promote(tmp_path, "r1")
+
+    real_append = deployment_module._append_history
+
+    def _crash(root, state):
+        raise RuntimeError("simulated crash between pointer write and history append")
+
+    monkeypatch.setattr(deployment_module, "_append_history", _crash)
+    with pytest.raises(RuntimeError):
+        promote(tmp_path, "r2")
+    monkeypatch.setattr(deployment_module, "_append_history", real_append)
+
+    status_path = tmp_path / "releases" / "r1" / "staging-status.json"
+    status_path.write_text(json.dumps({
+        "release_id": "r1",
+        "release_hash": staged_r1.release_hash,
+        "state": "failed",
+    }))
+
+    deployed_bytes = (tmp_path / "DEPLOYED").read_bytes()
+    first_entry_bytes = (tmp_path / "history" / "000000.json").read_bytes()
+
+    with pytest.raises(deployment_module.StagingNotSuccessful) as error:
+        rollback(tmp_path)
+    assert error.value.retryable is False
+
+    assert (tmp_path / "DEPLOYED").read_bytes() == deployed_bytes
+    assert (tmp_path / "history" / "000000.json").read_bytes() == first_entry_bytes
+    assert not (tmp_path / "history" / "000001.json").exists()
+    assert current_pointer(tmp_path).release_id == "r2"
+    assert [item.release_id for item in pointer_history(tmp_path)] == ["r1"]
 
 
 def test_rollback_refuses_a_pointer_that_is_its_own_predecessor(tmp_path):
@@ -419,6 +479,8 @@ def test_rollback_refuses_when_the_target_manifest_is_corrupted(tmp_path):
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
     promote(tmp_path, "r1")
     promote(tmp_path, "r2")
 
@@ -440,6 +502,8 @@ def test_rollback_refuses_when_a_history_entry_is_corrupted(tmp_path):
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
     promote(tmp_path, "r1")
     promote(tmp_path, "r2")
     assert len(list((tmp_path / "history").glob("*.json"))) == 2
@@ -463,6 +527,9 @@ def test_rollback_refuses_when_a_history_entry_is_missing_from_the_middle(tmp_pa
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
     stage_release(tmp_path, r3, inv3, pay3)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
+    deployment_module.mark_staging_succeeded(tmp_path, "r3")
     promote(tmp_path, "r1")
     promote(tmp_path, "r2")
     promote(tmp_path, "r3")
@@ -551,6 +618,71 @@ def test_promote_refuses_a_staged_manifest_with_duplicate_bindings(tmp_path):
     assert current_pointer(tmp_path) is None
 
 
+def test_promote_refuses_manifest_from_failed_staging_job(tmp_path):
+    """A staged manifest whose staging job recorded a failed completion is not
+    promotable: the durable staging-completion record bound to that exact
+    release_id and release_hash is what makes a staged release promotable, and
+    a failed one refuses typed, non-retryable StagingNotSuccessful before any
+    pointer or history write, leaving the staged store intact."""
+    release, inventory, payloads = _fixture("r1")
+    staged = stage_release(tmp_path, release, inventory, payloads)
+    status_path = tmp_path / "releases" / "r1" / "staging-status.json"
+    status_path.write_text(json.dumps({
+        "release_id": "r1",
+        "release_hash": staged.release_hash,
+        "state": "failed",
+    }))
+
+    with pytest.raises(deployment_module.StagingNotSuccessful) as error:
+        promote(tmp_path, "r1")
+    assert error.value.retryable is False
+
+    assert not (tmp_path / "DEPLOYED").exists()
+    assert not (tmp_path / "history").exists()
+    assert (tmp_path / "releases" / "r1" / "manifest.json").is_file()
+    for binding in staged.release.bindings:
+        for member in binding.members:
+            assert (tmp_path / member.path).is_file()
+
+
+def test_promote_refuses_staged_manifest_without_staging_status(tmp_path):
+    """A manifest staged without any completion record is not promotable:
+    promote refuses typed StagingNotSuccessful before touching the pointer
+    or history, leaving the staged manifest intact."""
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    manifest_path = tmp_path / "releases" / "r1" / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+
+    with pytest.raises(deployment_module.StagingNotSuccessful):
+        promote(tmp_path, "r1")
+
+    assert not (tmp_path / "DEPLOYED").exists()
+    assert not (tmp_path / "history").exists()
+    assert manifest_path.read_bytes() == manifest_bytes
+
+
+def test_successful_staging_status_allows_promotion(tmp_path):
+    """mark_staging_succeeded publishes the completion record that makes a
+    staged release promotable: exactly the staged manifest's release_id and
+    release_hash at state "succeeded", after which promote lands DEPLOYED on
+    r1."""
+    release, inventory, payloads = _fixture("r1")
+    staged = stage_release(tmp_path, release, inventory, payloads)
+
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+
+    status = json.loads((tmp_path / "releases" / "r1" / "staging-status.json").read_text())
+    assert status == {
+        "release_id": "r1",
+        "release_hash": staged.release_hash,
+        "state": "succeeded",
+    }
+
+    promote(tmp_path, "r1")
+    assert current_pointer(tmp_path).release_id == "r1"
+
+
 def test_chained_rollback_undoes_chained_promotions_not_the_release_just_left(tmp_path):
     r1, inv1, pay1 = _fixture("r1")
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
@@ -558,6 +690,9 @@ def test_chained_rollback_undoes_chained_promotions_not_the_release_just_left(tm
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
     stage_release(tmp_path, r3, inv3, pay3)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
+    deployment_module.mark_staging_succeeded(tmp_path, "r3")
     promote(tmp_path, "r1")
     promote(tmp_path, "r2")
     promote(tmp_path, "r3")
@@ -575,6 +710,8 @@ def test_rollback_after_a_direct_repromote_of_an_old_release_undoes_that_repromo
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
     promote(tmp_path, "r1")
     promote(tmp_path, "r2")
     promote(tmp_path, "r1")
@@ -586,6 +723,7 @@ def test_rollback_after_a_direct_repromote_of_an_old_release_undoes_that_repromo
 def test_deployment_gate_fixes_do_not_break_an_existing_single_release_production_layout(tmp_path):
     release, inventory, payloads = _fixture("p5-6-2026-09-21b")
     stage_release(tmp_path, release, inventory, payloads)
+    deployment_module.mark_staging_succeeded(tmp_path, "p5-6-2026-09-21b")
     promote(tmp_path, "p5-6-2026-09-21b")
 
     assert current_pointer(tmp_path).sequence == 0
@@ -596,6 +734,7 @@ def test_deployment_gate_fixes_do_not_break_an_existing_single_release_productio
 
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
     assert promote(tmp_path, "r2").release_id == "r2"
     rollback(tmp_path)
     assert current_pointer(tmp_path).release_id == "p5-6-2026-09-21b"
@@ -664,6 +803,7 @@ def test_promote_refuses_a_legacy_hashed_release_and_restage_clears_it(tmp_path)
     restaged = restage_semantic_hash(tmp_path, "r1")
     assert restaged.release_hash_version == deployment_module.RELEASE_HASH_SEMANTIC_V2
 
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
     state = promote(tmp_path, "r1")
     assert state.release_id == "r1"
     assert current_pointer(tmp_path).release_id == "r1"
@@ -674,10 +814,12 @@ def test_rollback_refuses_when_the_previous_release_is_legacy_hashed(tmp_path):
     back TO is legacy-hashed, not only the one being replaced."""
     _stage_legacy_hashed(tmp_path, "r1")
     restage_semantic_hash(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
     promote(tmp_path, "r1")
 
     r2, inv2, pay2 = _fixture("r2")
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
     promote(tmp_path, "r2")
 
     # r1 is legacy-hashed on disk again: simulate it having never been
@@ -701,6 +843,7 @@ def test_repromoting_the_currently_deployed_release_refuses_once_its_manifest_tu
     the gate is not bypassed by the no-op short-circuit."""
     release, inventory, payloads = _fixture("r1")
     stage_release(tmp_path, release, inventory, payloads)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
     promote(tmp_path, "r1")
     assert current_pointer(tmp_path).release_id == "r1"
 
@@ -771,6 +914,7 @@ def test_restage_semantic_hash_then_promote_then_resolve_release_round_trip(tmp_
     the same ModelRelease the legacy manifest originally staged."""
     original = _stage_legacy_hashed(tmp_path, "r1")
     restage_semantic_hash(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
     promote(tmp_path, "r1")
     resolved = resolve_release(tmp_path, "r1")
     assert resolved == original
@@ -852,6 +996,7 @@ def test_current_release_refuses_an_unreadable_manifest(tmp_path):
     (issue #207)."""
     release, inventory, payloads = _fixture("r1")
     stage_release(tmp_path, release, inventory, payloads)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
     promote(tmp_path, "r1")
     manifest_path = deployment_module._manifest_path(tmp_path, "r1")
     manifest_path.write_text("not json")
@@ -896,6 +1041,8 @@ def test_rollback_refuses_an_unreadable_target_manifest(tmp_path):
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
     stage_release(tmp_path, r1, inv1, pay1)
     stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
     promote(tmp_path, "r1")
     promote(tmp_path, "r2")
     manifest_path = deployment_module._manifest_path(tmp_path, "r1")
@@ -904,3 +1051,52 @@ def test_rollback_refuses_an_unreadable_target_manifest(tmp_path):
         rollback(tmp_path)
     assert error.value.issues[0].code == "MANIFEST_UNREADABLE"
     assert deployment_module.current_pointer(tmp_path).release_id == "r2"
+
+
+def test_promote_refuses_stale_staging_status_after_restage(tmp_path):
+    """A success record bound to a legacy hash is never trusted across a
+    restage: marking success while the legacy manifest hash is current, then
+    restaging to the semantic hash (which rewrites the manifest but leaves the
+    old sidecar in place), refuses promote with StagingNotSuccessful -- the
+    stale record binds a hash the live manifest no longer carries -- before
+    any pointer or history write, and the sidecar itself is untouched."""
+    _stage_legacy_hashed(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    status_path = tmp_path / "releases" / "r1" / "staging-status.json"
+    old_hash = json.loads(status_path.read_text())["release_hash"]
+
+    restaged = restage_semantic_hash(tmp_path, "r1")
+    assert restaged.release_hash != old_hash
+
+    with pytest.raises(deployment_module.StagingNotSuccessful):
+        promote(tmp_path, "r1")
+
+    assert not (tmp_path / "DEPLOYED").exists()
+    assert not (tmp_path / "history").exists()
+    assert json.loads(status_path.read_text())["release_hash"] == old_hash
+
+
+def test_mark_staging_succeeded_converts_status_write_oserror_to_typed_refusal(
+        tmp_path, monkeypatch):
+    """A status-record write that fails with a bare OSError is converted to a
+    typed, non-retryable StagingRefused(STATUS_UNWRITABLE) -- chained from the
+    original OSError -- before anything lands: no staging-status.json, no
+    DEPLOYED, no history/."""
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+
+    boom = OSError("simulated status-write failure")
+
+    def _fail(path, data):
+        raise boom
+
+    monkeypatch.setattr(deployment_module, "_atomic_write_bytes", _fail)
+
+    with pytest.raises(deployment_module.StagingRefused) as error:
+        deployment_module.mark_staging_succeeded(tmp_path, "r1")
+
+    assert error.value.issues[0].code == "STATUS_UNWRITABLE"
+    assert error.value.__cause__ is boom
+    assert not (tmp_path / "releases" / "r1" / "staging-status.json").exists()
+    assert not (tmp_path / "DEPLOYED").exists()
+    assert not (tmp_path / "history").exists()

@@ -20,7 +20,11 @@ Given a release root written by ``tools/phase5_prepare_release.py`` (layout:
    and a planted cache write must both be detected, or the watch itself fails.
 4. **Rollback.** On a scratch copy of the deployment pointer state, promote
    the candidate, roll back, and check the pointer resolves to the incumbent
-   again with byte-identical manifest bytes and untouched history.
+   again with byte-identical manifest bytes and untouched history. The
+   rehearsal copies the incumbent's existing durable record with the release
+   store and invents none: an incumbent whose record is missing, failed,
+   malformed or stale is left untouched and its refusal is the
+   ``P5_ROLLBACK_REFUSED`` finding, never a traceback.
 5. **Phase 4.** With ``--phase4-corpus``, every traced pair is verified by
    Phase 4's own trace verifier, its frozen model bindings are rebound by
    content hash to the staged release's objects, and it is scored with
@@ -96,6 +100,7 @@ GUARD_CONTROL_FAILED = "P5_GUARD_CONTROL_FAILED"
 ROLLBACK_NO_INCUMBENT = "P5_ROLLBACK_NO_INCUMBENT"
 ROLLBACK_CANDIDATE_LIVE = "P5_ROLLBACK_CANDIDATE_ALREADY_DEPLOYED"
 ROLLBACK_NOT_EXACT = "P5_ROLLBACK_NOT_EXACT"
+ROLLBACK_REFUSED = "P5_ROLLBACK_REFUSED"
 PROMOTE_REFUSED = "P5_PROMOTE_REFUSED"
 REPORT_INCOMPLETE = "P5_REPORT_INCOMPLETE"
 
@@ -106,7 +111,7 @@ FINDING_CODES = (
     CONSUMER_UNRESOLVED, CONSUMER_NO_REFUSAL, CONSUMER_ERROR, CONSUMER_PENDING,
     CONSUMER_BLOCKED, RUNTIME_FIT, MODEL_CACHE_WRITE, GUARD_CONTROL_FAILED,
     ROLLBACK_NO_INCUMBENT, ROLLBACK_CANDIDATE_LIVE, ROLLBACK_NOT_EXACT,
-    PROMOTE_REFUSED, *REPLAY_CODES, REPORT_INCOMPLETE,
+    ROLLBACK_REFUSED, PROMOTE_REFUSED, *REPLAY_CODES, REPORT_INCOMPLETE,
 )
 
 
@@ -511,7 +516,9 @@ def _scoring_pass(ctx, consumers, watch_dirs, findings) -> tuple[list[dict], dic
 
 
 def _copy_pointer_state(source: Path, dest: Path) -> None:
-    """Manifests, pointer and history only: promotion never reads objects."""
+    """Manifests, staging-status records, pointer and history only: promotion
+    never reads objects, and the incumbent's durable success record travels
+    with its release directory."""
     for name in ("releases", "history"):
         if (source / name).is_dir():
             shutil.copytree(source / name, dest / name)
@@ -529,6 +536,19 @@ def _rollback_round_trip(release_root: Path, candidate: str, first_deployment: b
     with tempfile.TemporaryDirectory(prefix="p5-6-rollback-") as scratch:
         root = Path(scratch)
         _copy_pointer_state(deployment_root(release_root), root)
+        # The rehearsal's promote requires a staging-completion record. The
+        # incumbent's comes from the real store with the copied pointer state
+        # -- its own durable record exactly as found, and scratch invents
+        # none. Only the candidate's temporary record is bound here, inside
+        # this copy; the real release root is never written (the candidate's
+        # real record waits for `main`). An incumbent whose record is
+        # missing, failed, malformed or stale is left untouched: its
+        # rollback refuses with ROLLBACK_REFUSED in ``_round_trip``.
+        try:
+            deployment.mark_staging_succeeded(root, candidate)
+        except deployment.DeploymentError as exc:
+            findings.add(PROMOTE_REFUSED, "rollback", type(exc).__name__)
+            return {"status": PROMOTE_REFUSED}
         return _round_trip(root, candidate, first_deployment, findings)
 
 
@@ -559,7 +579,11 @@ def _round_trip(root: Path, candidate: str, first_deployment: bool, findings) ->
             checks["first_deployment_rollback_refused"] = True
         checks["pointer_unchanged_by_refusal"] = deployment.current_pointer(root) == promoted
     else:
-        back = deployment.rollback(root)
+        try:
+            back = deployment.rollback(root)
+        except deployment.DeploymentError as exc:
+            findings.add(ROLLBACK_REFUSED, "rollback", type(exc).__name__)
+            return {"status": ROLLBACK_REFUSED}
         after_files = _snapshot(root)
         checks.update({
             "pointer_release_id_restored": back.release_id == incumbent.release_id,
@@ -746,6 +770,10 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
             ctx, active_consumers, dirs, findings)
         _progress("p5-accept", f"consumers: {len(evidence['consumers'])} scored", started)
 
+        # Fail closed on the incumbent's own durable record: the rehearsal
+        # copies whatever the real store holds and invents nothing. A missing,
+        # failed, malformed or stale incumbent record makes ``rollback`` refuse
+        # with ROLLBACK_REFUSED inside ``_round_trip``, never a traceback.
         _progress("p5-accept", "rollback: running promote/rollback round trip", started)
         evidence["rollback"] = _rollback_round_trip(
             release_root, release_id, first_deployment, findings)
@@ -815,7 +843,22 @@ def main(argv=None) -> int:
         print(f"refusing to write report: {exc}", file=sys.stderr)
         return 2
     out = args.artifact_root / "evidence.json"
-    out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    evidence_json = json.dumps(evidence, indent=2, sort_keys=True) + "\n"
+    if evidence["release_ok"] is True:
+        # The last release-store side effect: publish the success record that
+        # makes the accepted release promotable in the real store. Any prior
+        # evidence.json goes first and the file is rewritten only once the
+        # status call succeeds, so a DeploymentError refusal leaves nothing
+        # on disk claiming release_ok: true.
+        out.unlink(missing_ok=True)
+        try:
+            deployment.mark_staging_succeeded(deployment_root(args.release_root),
+                                               evidence["release_id"])
+        except deployment.DeploymentError:
+            print("refusing to publish the staging success record for this release",
+                  file=sys.stderr)
+            return 2
+    out.write_text(evidence_json)
     print(json.dumps({"status": evidence["status"], "evidence": str(out),
                       "report": evidence.get("report"),
                       "finding_codes": evidence["finding_codes"]}, indent=2))

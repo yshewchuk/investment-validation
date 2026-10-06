@@ -327,29 +327,29 @@ submission path reads either edge (the rule Part 4 established for
   lands, not two.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
   dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
-  gap caused by the comparator's empty-input and no-shared-key refusals.
-  The worker handles empty shared-key sets separately from comparator
-  empty-input and no-shared-key failures.
-  Its unchanged guards reject empty native input and non-empty disjoint rows;
-  the worker bypasses them only when refusal evidence explains the gap.
-  `legacy_rows` must be non-empty; a missing legacy input always fails.
-  The worker then checks `shared` keys before choosing the special report path.
-  It takes that path only if every legacy key has its matching keyed refusal,
-  or all native/keyed-refusal inputs are empty and unkeyable refusals exist.
-  Otherwise, missing legacy or unexplained native rows keep `VALIDATION_FAILED`.
-  - Unkeyable-only refusal batches are covered when no native row or keyed
-    refusal exists; they cannot match an individual legacy key.
-  - For non-empty disjoint rows, every legacy key must have its own keyed
-    refusal; unrelated native-only rows do not explain a missing key.
-  - The all-keyable case is covered by the same rule when `native_rows` is
-    empty and keyed refusals name every legacy key.
+  gap in `compare_native_vs_legacy`: its unchanged guards reject an empty
+  native side and a comparison with no shared key. The worker first rejects
+  empty `legacy_rows`, then computes shared keys before calling the
+  comparator. With no shared key, it builds `_empty_native_report` when
+  every legacy key has its own keyed refusal, when an empty native side has
+  an unkeyable refusal and no keyed refusals, or when an empty native side
+  has a timestamp-keyed refusal for the same population and calendar day as
+  a legacy key. Thus timestamp-keyed refusals remain unmatched with their
+  exact identity; they are never normalized to a legacy day key. An
+  unrelated keyed refusal cannot explain an absent legacy row. No row or
+  comparison value is invented.
+  Empty native rows with no refusals still fail `VALIDATION_FAILED`.
+  Non-empty disjoint native rows still require matching refusals for every
+  legacy key; an unrelated refusal does not explain an absent legacy row.
+  Shared-key inputs keep using the unchanged comparator path.
 
-  The result keeps the comparator's schema and tolerance ID, with empty
-  `compared`/`mismatches`, sorted `only_legacy`/`only_native`, then passes
-  through `apply_native_refusals`. Empty legacy input or an unexplained gap
-  still fails `VALIDATION_FAILED`. `compare_native_vs_legacy` is unchanged;
-  the test-only `run_shadow_nightly` path calls its handler directly and
-  never reaches this worker-only branch.
+  `_empty_native_report` preserves the comparator's report shape: all
+  legacy keys are `only_legacy`, all native keys are `only_native`, and
+  `compared`/`mismatches` are empty. `apply_native_refusals` then classifies
+  refusals as it does for comparator reports. The decision is private to
+  `run_native_parity_worker`; `compare_native_vs_legacy` gains no branch.
+  The test-only `run_shadow_nightly` path calls `native_parity_handler`
+  directly and does not reach this worker branch.
 - **`native_parity_report.apply_native_refusals(report, native_refusals,
   unkeyable_refusals=()) -> dict`** (new) — the mechanism for "missing or
   refused native rows are counted separately" (user decision, option (c)).
@@ -627,7 +627,7 @@ materialization request construction or registration; equality keeps that ref.
 Omitting the expected id preserves direct and legacy caller behavior.
 `nightly_raw_rows.scan_forward_board_requests` enumerates pinned forward events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_version`.
 `nightly_raw_rows.scan_calendar_row(repository, snapshot, key, **staged)` returns `CalendarRowInputs(calendar_revision, calendar_row)` with the matched event row ID and the pinned earnings-events dataset version, not the snapshot calendar placeholder.
-These two earnings-event reads take their result bound from the pinned manifest's selected-population bound for the exact selection — the one shared bound the scan enforces before any row streams — so the broad forward enumeration carries no result ceiling of its own, and an empty selection is simply a zero-row query with a positive batch limit; this module's exact-key calendar read now takes that same shared population bound instead of its own result-row cap, and explicit local ceilings stay only where they encode the caller's own operational requirement: `nightly_calendar_inputs`, `nightly_quote_rows`, `computed_moves_store` and `forward_calendar_store`, each keeping its own batch limit and every other retained guard, deadline and invariant unchanged.
+These two earnings-event reads take their result bound from the pinned manifest's selected-population bound for the exact selection — the one shared bound the scan enforces before any row streams — so the broad forward enumeration carries no result ceiling of its own, and an empty selection is simply a zero-row query with a positive batch limit; this module's exact-key calendar read now takes that same shared population bound instead of its own result-row cap, and explicit local ceilings stay only where they encode the caller's own operational requirement: `nightly_calendar_inputs`, `nightly_quote_rows`, `computed_moves_store` and `forward_calendar_store`, each keeping its own batch limit and every other retained guard, deadline and invariant unchanged. Both native readers publish catalog refresh output only at the final catalog commit. A source-scan refusal in either reader or a forward-calendar provider refusal before that commit prevents partial catalog publication; successful forward-calendar provider receipts may remain cached.
 Ordinary repository scan validation and failure behavior still apply.
 Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validation covers shape, not strategy or sourcing.
 No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged/key/identity input → `INVALID_REQUEST`; repository failures propagate.
@@ -1215,6 +1215,7 @@ All three provider accounts are operator-provisioned budget rows so the
 shared scheduler reserves against them uniformly, keyed or not.
 
 ## Failure semantics
+
 Every stage/effect follows the root doc's 4c R1–R6 template (missing input, cache, retry, transaction, partial write, idempotency); these conventions apply package-wide unless a subsystem table says otherwise.
 
 | # | Convention |
@@ -1225,14 +1226,9 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | R4 | Catalog writes go through `catalog.transaction`. A coordinator effect's own filesystem write must be replay-safe and idempotent, not atomic with the DB commit (root doc §6) — one exception, legacy `experiment_effect`, appends a ledger CSV row inside the transaction and recovers by replay. The target v2 two-holdout contract excludes the union of a fixed, versioned hash of immutable canonical event identity at 3% and the latest six calendar months (reset monthly) from training, selection folds, and sweeps. Random membership survives monthly release, so only rolling-only events re-enter training and strategy selection; overlap remains held out under both memberships, counts in both metrics, and is disclosed. Each report, ledger row, and final read pins the rolling-window as-of month (`YYYY-MM`), its membership version, the pinned snapshot, and random membership version; monthly release changes selection eligibility, never registered variant identity or prior artifacts. Released-month results used for later selection must be labeled post-release selection, not holdout evidence. A winner's final read on either set is spent for that decision. Reports show per-set event counts and random and rolling results side by side, never averaged, and disclose temporal-neighbour correlation in the random sample. Training reads of the random set and sweep reads of either set are refused as `HOLDOUT_ACCESS_DENIED`; always record a private refusal receipt and, when ledgering is enabled, a `refused` row for the resolved variant, with no holdout metric or partial report. Per-variant reports/rows remain identity-bound, variant counts are reported, and smoke/subset runs use `--no-ledger`. The `computed_moves_refresh` and `native_parity` tick-loop paths submit individually (`submission.submit`, not `submit_graph`); this does not describe `native_score_batch`, whose snapshot-pinned identity may be refused before a matching job exists. Separate submission also does not guarantee legacy progress: a pre-plan resume can wait for snapshot import while `run_trigger` holds the legacy nightly lock. |
 | R5 | Artifact publication is atomic (`ArtifactStore`): a killed process leaves the old artifact or nothing. |
 | R6 | Job identity is `job_id_for("shadow", key)`; a same-key/different-digest resubmission is refused `IDEMPOTENCY_CONFLICT`, never merged. A new key scheme is checked against legacy's own keyspace, not only sibling native writers. |
-
-Experiment staging uses a trusted local directory owned by the same user. Protection against concurrent filesystem manipulation is explicitly out of scope.
-
-| Condition | Outcome |
+| Experiment execution condition | Outcome |
 |---|---|
-| Experiment integrity detection | Staging is trusted local state owned by the same user; protection against concurrent filesystem manipulation is out of scope. Before execution, record SHA-256 for the registered wrapper and declared runtime sources. After execution, compare hashes and `lstat` those sources and `REPORT.md`; a change, symlink, or `nlink > 1` raises non-retryable `VALIDATION_FAILED` with path and before/after hashes. The failed run is not committed and writes no ledger row. This detects damage after the run, it does not prevent it. |
-| Variant identity, report, receipt, and ledger outcomes | Successful reports publish as `experiment_variant_report` with variant identity/count, and every receipt counts attempted variants including failures; a failed report stays staged and unpublished. Registered primary report, durable evidence, and primary ledger `spec_hash` use the registered legacy hash; synthetic and smoke runs use `ExperimentSpec.spec_hash`, and smoke passes `--no-ledger` and adds no legacy row. Missing/malformed/empty variant evidence, missing/empty/mismatched `variant_id` (against resolved identity), or `variants_tried` not exact integer 1 is non-retryable `INVALID_EXPERIMENT_SPEC` before ledger append; rollback leaves no run/hypothesis row and preserves prior ledger bytes. Annotation failure leaves the staged report unpublished and commits no index/ledger row. |
-| Retry, worker, and holdout additions | A retryable attempt may relaunch the worker and runner; a clean exit with a live straggler reaps without that failure; identical primary replay reuses its run without a duplicate ledger row, while changed input conflicts. Slice 2a exposes no sweep or holdout reads; `HOLDOUT_ACCESS_DENIED` is deferred to the pinned trade-loader slice. |
+| Runtime integrity and variant identity | Trusted, local, same-user staging; protection against concurrent filesystem manipulation is out of scope. Before execution, hash the registered wrapper and declared sources; after execution, compare hashes and `lstat` the sources and report. A change, symlink, or hardlink is non-retryable `VALIDATION_FAILED`; the failed receipt records path and before/after hashes, with no committed run or ledger row. Variant reports and ledger rows retain per-variant identity/counts. Smoke passes `--no-ledger`. Slice 2a exposes no sweep or holdout-read path, so the final test set is unreachable. |
 | Unknown/unused spec field, mismatched resolved plan, economics without `execution_plan`, malformed fold rows/labels/rule, numeric overflow, mismatched named columns, or mixed named/positional features | `INVALID_EXPERIMENT_SPEC`; refuse before work, return no result, and write no artifact, report, or ledger row. |
 | Plan write, later runner failure, or fold clone/fit/score/threshold failure, including absent or malformed fitted `classes_` | Typed attempt failure; candidate stays unpublished. A failed plan write may leave partial bytes in the failed attempt root. Worker exit status determines `WORKER_FAILED`; fold scoring failure is non-retryable `EXPERIMENT_VARIANT_FAILED`, with no fitted result retained, no artifact, report, or ledger row written, and the source estimator unchanged. |
 | Feature read: snapshot mismatch; no match; any post-entry match; conflicting tie at latest eligible instant<br>Successful fold helper call | `SNAPSHOT_UNRESOLVED`; `FEATURES_MISSING`; non-retryable `FEATURE_LOOKAHEAD` (no clipping, shifting, or dropping); `INVALID_EXPERIMENT_SPEC`, respectively. Refusal returns no feature value and writes no artifact or report.<br>Returns only an in-memory result; writes no artifact, report, or ledger row. |
@@ -1240,6 +1236,7 @@ Experiment staging uses a trusted local directory owned by the same user. Protec
 Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row supplies the retry receipt and short-circuits the effect. Two distinct heartbeats govern a live attempt: `attempts.heartbeat_at` is the fenced lease-renewal stamp (`lifecycle.heartbeat`), while a `progress_events` row of `kind="heartbeat"` is only a throttled supervisor observation event (`HEARTBEAT_EVENT_SECONDS` or a state change) and never a lease signal; failure diagnostics expose the lease heartbeat stamp and the worker process-family liveness (recorded launch `ProcessIdentity`, ownership proof) separately from the latest progress event/step.<br>`fit_walk_forward_fold(estimator, train_features, train_labels, test_features, threshold_rule: TrainFoldRule) -> WalkForwardFoldFit` and `TrainFoldRule.fit_threshold(scores, labels) -> float` are pure fold-local helpers; `TrainFoldRule` accepts an optional `top_fraction`. The threshold uses training-fold scores and binary labels only; the estimator fits only on training rows, then scores test rows. Positive scores use the probability column whose fitted `classes_` label is `1`; `classes_` must be exactly binary `{0, 1}` in either order. Test labels are not accepted. Feature matrices are copied before estimator calls so caller-owned rows remain unchanged across folds, and threshold scoring uses original-value training rows even if fitting mutates its input. Named train/test frames require identical column names in identical order; unnamed arrays use positional columns, and mixed named/positional inputs are refused. Callers must apply `ExperimentFeatureContext` while building feature rows to enforce `FEATURE_LOOKAHEAD`; `fit_walk_forward_fold` does not inspect temporal metadata.
 
 ### `board_requests` (`native_board_universe.py`)
+
 | Condition | Outcome |
 |---|---|
 | `events_table` missing/duplicated `ticker`/`event_date`/`session`, or `event_date` numeric/unparseable/`NaT`/timezone-aware | `INVALID_REQUEST`, before any row is read |
@@ -1247,6 +1244,7 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | valid input | pure, deterministic `tuple[BoardRequest]` — same input always returns the same tuple in the same order; no cache, no job identity of its own |
 
 ### `forward_calendar_store.py` / `calendar_moves_jobs.py`
+
 | Condition | Outcome |
 |---|---|
 | any submit-time argument malformed (`catalog_path`, snapshot/plan-hash shape, `as_of`, `tickers`, `horizon_days`, `scope`, head expectations) | `INVALID_REQUEST` before the catalog opens or any provider call |
@@ -1260,6 +1258,7 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | merged rows equal the parent's | `status=noop`, head unmoved |
 
 ### `nightly.submit_computed_moves_refresh_if_ready` (`computed_moves_refresh`)
+
 | Condition | Outcome |
 |---|---|
 | no succeeded native `"refresh"` job yet, no shadow head, or a resolved target list that comes back empty | returns without submitting anything — not a failure, since `computed_moves_refresh` has no receipt to degrade until an attempt exists |
@@ -1312,8 +1311,9 @@ job.
 | Condition | Outcome |
 |---|---|
 | `legacy_rows` is empty | `VALIDATION_FAILED`, unconditionally — a missing legacy input is never explained by a native refusal |
-| no shared key between native and legacy, but every legacy key is covered by its own matching keyed refusal (or nothing was ever keyable at all) | reported as a normal (degenerate) parity report, not a job failure — an unrelated refusal naming a different population key never counts |
-| no shared key and no refusal explains it | job fails, same as a genuinely missing native input |
+| no shared key and every legacy key has its own keyed refusal, or native rows are empty with a same-population/day timestamp refusal (or only unkeyable refusals) | reported normally; unmatched refusals keep their exact timestamp identity |
+| no shared key and neither condition above applies, including empty native rows with no refusals | `VALIDATION_FAILED`; missing native input has no silent default |
+| identical inputs, clock, and code are re-run | byte-identical report, including refusal identity and classification |
 | the records/refusals schema tag is stale, no `native_parity` job exists yet for this identity | `submit_native_parity_if_ready`'s pre-submission check raises `VALIDATION_FAILED` (`reason: "schema_mismatch"`), submitting nothing |
 | the records/refusals schema tag is stale, a `native_parity` job already exists for this identity | the existing-job short-circuit returns `None` before the check ever runs |
 | a `native_parity` job reaches `run_native_parity_worker` with a stale schema tag anyway (e.g. the generic job-submission API used directly) | the worker's own independent check fails `VALIDATION_FAILED` |
