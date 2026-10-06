@@ -153,17 +153,18 @@ interface section; this names only the load-bearing entry points.
   `engine.v2.contracts.data.DATA_FAILURE_CODES`; its dependency on the data
   error catalog is part of this contract.
 - **Register inventory verification** — `tools.reregister_snapshot.register`
-  validates the neutral export hash and shape, rejects embedded contract
-  documents without parsing them, compares complete table/fragment membership
-  and metadata with the pinned catalog, and verifies every object byte. It
-  returns an immutable canonical verification result and never writes the
-  catalog, bindings, receipts or head. Missing inputs and metadata drift refuse
-  `INPUT_CHANGED`, a malformed export `MANIFEST_CORRUPT`, object-byte drift
-  `OBJECT_CORRUPT`, incomplete membership `CONTRACT_MISMATCH`, and an embedded
-  contract document `UNSUPPORTED_CONTRACT`. Refusals are not retried; there are
-  no compatibility flags, parser shims or financial recomputation. Repeating
-  the same verification yields byte-identical output, and every outcome leaves
-  catalog bytes and rows unchanged.
+  validates a depth-bounded JSON inventory's exact keys and types, closed
+  `knowledge_mode` values (`observed`, `attested_stable`, `reconstructed`), and
+  UTF-8 strings before checking its hash or comparing catalog values. Malformed
+  input is `MANIFEST_CORRUPT`; missing inputs and well-formed value drift are
+  `INPUT_CHANGED`; incomplete table/fragment membership is `CONTRACT_MISMATCH`;
+  object-byte drift is `OBJECT_CORRUPT`; embedded contract documents are
+  `UNSUPPORTED_CONTRACT`. Canonical JSON comparison preserves boolean, integer
+  and float distinctions. It returns an immutable canonical result and never
+  writes the catalog, bindings, receipts or head. Refusals are not retried;
+  there are no compatibility flags, parser shims or financial recomputation.
+  Repeated verification is byte-identical, and every outcome leaves catalog
+  bytes and rows unchanged.
 
 ## Inputs
 
