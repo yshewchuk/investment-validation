@@ -927,7 +927,8 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
             txn, spec, receipt["input_hash"], mode=mode, run_id=claim.attempt_id)
         _record_variant_evidence(txn, run_id, variant_id)
         if mode == "primary":
-            _append_ledger_row(txn, checkout_root, spec, receipt, run_id=run_id)
+            _append_ledger_row(txn, checkout_root, spec, receipt, run_id=run_id,
+                               variant_id=variant_id)
 
     return _commit, ()
 
@@ -1007,7 +1008,7 @@ def _mark_metrics_source(conn, run_id, source):
                  (json.dumps(evidence, sort_keys=True), run_id))
 
 
-def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
+def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id, variant_id):
     """Append the "ran" row for one primary experiment to the checkout's
     ``experiments/LEDGER.csv`` (``experiments_ledger_path``), never to the
     operations store root.
@@ -1028,7 +1029,7 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
     """
     from datetime import datetime, timezone
 
-    from engine.v2.ops.experiments import expected_variant_identity, experiments_ledger_path
+    from engine.v2.ops.experiments import experiments_ledger_path
     from experiments.lib import LEDGER_COLUMNS, ledger_append
 
     ledger = experiments_ledger_path(checkout_root)
@@ -1039,7 +1040,7 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
             _mark_metrics_source(conn, run_id, "unavailable")
         return
     row = {"id": spec.experiment_id,
-           "spec_hash": expected_variant_identity(checkout_root, spec, "primary"),
+           "spec_hash": variant_id,
            "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
            "stage": "ran", "oos_mean_mid": mean, "sharpe_trade": sharpe,
            "promoted": "False"}

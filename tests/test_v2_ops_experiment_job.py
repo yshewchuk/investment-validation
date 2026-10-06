@@ -406,11 +406,12 @@ def test_experiment_effect_retry_after_crash_appends_exactly_one_row(tmp_path, m
     real_append = effects_graph._append_ledger_row
     crashed = []
 
-    def flaky(txn, checkout_root, spec, receipt, *, run_id):
+    def flaky(txn, checkout_root, spec, receipt, *, run_id, variant_id):
         if not crashed:
             crashed.append(True)
             raise RuntimeError("crash after register, before append")
-        return real_append(txn, checkout_root, spec, receipt, run_id=run_id)
+        return real_append(txn, checkout_root, spec, receipt, run_id=run_id,
+                           variant_id=variant_id)
 
     monkeypatch.setattr(effects_graph, "_append_ledger_row", flaky)
     try:
@@ -476,7 +477,7 @@ def test_effect_refuses_receipt_evidence_that_declares_no_valid_variant(tmp_path
         conn.close()
 
 
-def test_registered_primary_effect_persists_registered_variant_identity(tmp_path):
+def test_registered_primary_effect_persists_registered_variant_identity(tmp_path, monkeypatch):
     """The registered branch end to end: a primary commit through a
     registered runner binds the legacy spec.yaml identity its PLANNED row
     preregistered -- in the durable evidence and in the checkout's ran row."""
@@ -489,12 +490,20 @@ def test_registered_primary_effect_persists_registered_variant_identity(tmp_path
     registered = experiments.legacy_spec_hash(lib.load_spec(legacy_spec))
     assert registered == experiments.expected_variant_identity(checkout, spec, "primary")
 
+    lookups = []
+
+    def shifting_identity(checkout_root, spec_for_lookup, mode):
+        lookups.append(mode)
+        return registered if len(lookups) <= 2 else registered + "-changed"
+
+    monkeypatch.setattr(experiments, "expected_variant_identity", shifting_identity)
     conn, clock, claim, effect, checkout = _claimed_primary_effect(
         tmp_path, document=document, checkout=checkout)
     try:
         commit_attempt(conn, claim.attempt_id, claim.fence,
                        Outcome(True, "verified_dead", 0), clock=clock,
                        effects=lambda txn: effect(txn))
+        assert lookups == ["primary", "primary"]
         evidence = json.loads(conn.execute(
             "SELECT evidence_json FROM experiment_runs").fetchone()[0])
         assert evidence["variant_id"] == registered
