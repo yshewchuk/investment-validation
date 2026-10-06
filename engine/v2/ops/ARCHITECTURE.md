@@ -669,10 +669,7 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences
   in "Primary contracts", plus injected Nasdaq date and yfinance
   pending-ticker fetchers.
-- Shared `ops.pinned_partition_reader` streams pinned PK batches;
-  `computed_moves_store._scan_once` consumes both source tables through the shared reader as per-lease DataFrame chunks, while `forward_calendar_store._scan_rows` does not yet. It tracks live/peak
-  rows under `MAX_SCAN_ROWS`. One lease is live: consume before advancing
-  (advance clears it; `list(iterator)` retains empty leases). R1 missing,
+- `ops.pinned_partition_reader` yields bounded leases to both stores; forward-calendar builds daily-market DataFrames from each lease and indexes existing earnings rows there. `MAX_SCAN_ROWS` bounds live input; consume before advancing (advance clears it; `list(iterator)` retains empty leases). R1 missing,
   corrupt or incompatible pin → typed refusal, never empty/newer; R2 provisional
   until full validation; R3 integrity refusal terminal/no retry; R4 each
   partition uses the same pin/scope; R5 failure discards attempt state/output;
