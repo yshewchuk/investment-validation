@@ -126,46 +126,8 @@ interface section; this names only the load-bearing entry points.
   `Repository.get_price_series`/`.get_close`.
 - **Errors** — `errors.DataError`, built only from a registered
   `DATA_FAILURE_CODES` entry.
-- **Neutral snapshot export** — `tools.reregister_snapshot.export` uses
-  `neutral_inventory` with explicit snapshot, receipt, scope and generation
-  pins. The supported source catalog is read-only. Export verifies the pinned
-  snapshot and receipt, complete table/object membership, and every immutable
-  object's recorded length and content hash. The deterministic payload carries
-  table/object membership, partition/count/bound metadata, reference bindings
-  and native capture provenance; it contains no contract document. Price-history
-  captures follow the pinned receipt lineage; computed-moves captures retain
-  their contract-wide scope. A canonical content hash covers the payload.
-  Publication fsyncs a temporary beside the destination, then renames atomically.
-  It refuses output resolving to the catalog or a SQLite sidecar, or anywhere
-  under the object store's `objects` namespace, before any write (path in
-  details; an accident guard, not race protection). A crash before rename
-  exposes no partial file; refusals and pre-rename failures preserve existing
-  output. The same pinned source produces byte-identical output and hash.
-  Missing catalog, snapshot, receipt or object, source drift (including a moved
-  pinned head), and incomplete membership are typed refusals. There is no retry,
-  repair, financial recomputation or compatibility mode.
-
-  `neutral_inventory` accepts explicit pins and returns deterministic
-  table/object membership, partition/count/bound metadata, reference bindings
-  and native capture history. It never parses contract documents or recomputes
-  native values; one read transaction pins the inventory. Internally the tool
-  builds typed refusals through `engine.v2.data.errors` and
-  `engine.v2.contracts.data.DATA_FAILURE_CODES`; its dependency on the data
-  error catalog is part of this contract.
-- **Register inventory verification** — `tools.reregister_snapshot.register`
-  validates a depth-bounded JSON inventory's exact keys and types, closed
-  `knowledge_mode` values (`observed`, `attested_stable`, `reconstructed`), and
-  UTF-8 strings before checking its hash or comparing catalog values. Malformed
-  input is `MANIFEST_CORRUPT`; missing inventory/catalog rows and well-formed
-  value drift are `INPUT_CHANGED`; export/catalog membership drift is
-  `CONTRACT_MISMATCH`; missing objects and object-byte drift are `OBJECT_CORRUPT`;
-  embedded contract documents are `UNSUPPORTED_CONTRACT`. Canonical JSON
-  comparison preserves boolean, integer and float distinctions. The result is
-  immutable and canonical; register writes no catalog, binding, receipt or head
-  data. Refusals are not retried;
-  there are no compatibility flags, parser shims or financial recomputation.
-  Repeated verification is byte-identical, and every outcome leaves catalog
-  bytes and rows unchanged.
+- **Contract changes** — Recalculate data tables through the standard import
+  and rebuild commands; stored identities are not migrated.
 
 ## Inputs
 
@@ -359,20 +321,9 @@ source retry policy owns retry.
 | R1 — missing or unsupported input | Missing members raise their typed refusal codes above; unsupported `TableContract` schema versions raise `DocumentError` with code `UNSUPPORTED_VERSION` before rows are returned. |
 | R2 — cache | Bounds come from the pinned fragment membership; no current-head fallback or cached bound from another snapshot. |
 | R3 — retry | `RESULT_LIMIT_EXCEEDED`, `OBJECT_CORRUPT`, and `MANIFEST_CORRUPT` are non-retryable; `INPUT_CHANGED` is retryable. Registration retries retain the head fence. |
-| R4 — transaction | Re-registration commits complete new identities and the head CAS atomically; changed definitions never overwrite registered contracts. |
+| R4 — transaction | Changed definitions never overwrite registered contracts. |
 | R5 — partial result/write | Invalid surviving counts refuse `MANIFEST_CORRUPT` before streams open; footer/count mismatch refuses `MANIFEST_CORRUPT` before rows. Earlier batches are provisional until exhaustion. Failed registration leaves the head unchanged and staged objects unreferenced. |
 | R6 — idempotency | Under a pinned snapshot, byte-identical reads return identical rows; scan completion requires exhaustion without an error. An identical registration reuses its receipt through the same head fence; conflicting identity refuses. |
-
-For neutral inventory export, missing relational members or invalid receipt
-lineage refuse `INPUT_CHANGED`; inconsistent fragment metadata or row counts
-refuse `MANIFEST_CORRUPT`; a missing object or changed object bytes or length
-refuse `OBJECT_CORRUPT`; an absent or unopenable catalog refuses
-`INPUT_CHANGED`. Retryability follows the table above. There is no automatic
-retry, cache, repair or catalog write. An active caller transaction refuses
-`INPUT_CHANGED` without altering it. The pinned head is checked again before
-publication; a moved head refuses without replacing the destination. A failed
-temporary write or pre-rename refusal preserves the prior output. Identical
-source pins and bytes produce identical inventory bytes and content hash.
 
 **Snapshot commit (4c R1–R6).** Missing input: `INPUT_CHANGED`/
 `CONTRACT_MISMATCH` before any write; every contract/fragment/manifest is
