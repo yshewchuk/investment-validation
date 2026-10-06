@@ -996,20 +996,20 @@ def test_export_release_intent_publication_backup_independently_verifiable(tmp_p
         conn.close()
 
 
-def test_same_session_rerun_associates_release_and_health_reads_export_receipt(tmp_path):
+@pytest.mark.parametrize("rerun_is_larger", [True, False])
+def test_same_session_rerun_associates_release_and_health_reads_export_receipt(tmp_path, rerun_is_larger):
     """Gate #433: a real same-session rerun publishes a NEWER release while the
     already-delivered ``release_intent`` row must keep the first release as its
     primary ``release_id`` and accrue the rerun in ``release_ids`` -- all from
     the actual ``ledger_export_effect``/``publication_effect`` producers.
 
-    ``health()`` then selects the current delivered release by ``occurrence
-    DESC, release_id DESC``; the two same-session releases tie on occurrence, so
-    the rerun is deliberately the lexicographically larger release id (the
-    initial/rerun order is chosen from the producers' own derived ids). Its
-    ``requested_session``/``resolved_session`` must come from that release's
-    real delivered ``ledger_export_receipt.v1.0``. Before the producer change
-    the rerun had no intent association and ``health()`` refused
-    ``VALIDATION_FAILED``.
+    ``health()`` selects the current delivered release from ``CURRENT``, not
+    from a lexical ``release_id DESC`` ordering; both possible release-id orders
+    (rerun larger or smaller) are exercised, and ``CURRENT`` must determine the
+    published release either way. Its ``requested_session``/``resolved_session``
+    must come from that release's real delivered
+    ``ledger_export_receipt.v1.0``. Before the producer change the rerun had no
+    intent association and ``health()`` refused ``VALIDATION_FAILED``.
     """
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
@@ -1023,13 +1023,12 @@ def test_same_session_rerun_associates_release_and_health_reads_export_receipt(t
         release_a, release_b = (_release_id_for(gen_a, scope, SESSION),
                                 _release_id_for(gen_b, scope, SESSION))
         assert release_a != release_b
-        # health selects by release_id DESC among same-occurrence rows: make the
-        # rerun the larger id so the regression proves the RERUN's association.
-        if release_a < release_b:
+        # Exercise both lexical orders; CURRENT, not lexical ordering, defines current.
+        if (release_a < release_b) == rerun_is_larger:
             initial, rerun, initial_id, rerun_id = gen_a, gen_b, release_a, release_b
         else:
             initial, rerun, initial_id, rerun_id = gen_b, gen_a, release_b, release_a
-        assert initial_id < rerun_id
+        assert (initial_id < rerun_id) is rerun_is_larger
 
         export_claim = _submit_and_claim(conn, clock, supervisor, kind="ledger_export",
                                          key="rerun-export",
@@ -1063,6 +1062,17 @@ def test_same_session_rerun_associates_release_and_health_reads_export_receipt(t
         assert document["current_release"]["release_id"] == rerun_id
         assert document["requested_session"] == export_receipt["requested_session"]
         assert document["resolved_session"] == export_receipt["session"]
+
+        # A corrupted intent association (primary release_id preserved, but the
+        # published rerun missing from release_ids) must be refused, not read
+        # from some other release row.
+        intent["release_ids"] = [rerun_id]
+        with transaction(conn):
+            conn.execute("UPDATE outbox SET receipt_json=? WHERE kind='release_intent' "
+                         "AND logical_key=?", (json.dumps(intent), release_key))
+        with pytest.raises(OpsError) as excinfo:
+            health(conn, clock=clock)
+        assert excinfo.value.code == "VALIDATION_FAILED"
     finally:
         conn.close()
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from engine.v2.foundation import format_timestamp, fsync_directory
 from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.publication import current as release_current
 
 
 def _record_check(conn, occurrence, kind, ok, receipt):
@@ -261,9 +262,18 @@ def _release_session_evidence(conn, current):
         except OpsError:
             continue  # an undecodable UNRELATED receipt cannot match the current release
         release_ids = receipt.get("release_ids")
-        if (receipt.get("release_id") == release_id
-                or (isinstance(release_ids, list) and release_id in release_ids)):
-            logical_keys.append(row["logical_key"])
+        matches_current = (receipt.get("release_id") == release_id
+                           or (isinstance(release_ids, list) and release_id in release_ids))
+        if not matches_current:
+            continue
+        if "release_ids" in receipt:
+            primary = receipt.get("release_id")
+            if not (isinstance(release_ids, list) and all(isinstance(item, str) for item in release_ids)
+                    and isinstance(primary, str) and primary in release_ids):
+                raise fail("VALIDATION_FAILED", "the current release_intent receipt has inconsistent "
+                                                "release associations",
+                           details={"release_id": release_id, "logical_key": row["logical_key"]})
+        logical_keys.append(row["logical_key"])
     if len(logical_keys) != 1:
         raise fail("VALIDATION_FAILED", "the current delivered release does not resolve to exactly one "
                    "complete release_intent receipt chain",
@@ -299,12 +309,44 @@ def _withheld_release(conn, current=None):
     return dict(withheld) if show else None
 
 
+def _current_delivered_release(conn):
+    """The current delivered release as the on-disk publication pointers define
+    it: every ``nightly``/``publication`` watermark scope has its own
+    ``releases/<scope>/CURRENT`` pointer, and only a release one of those
+    pointers actually names -- and which the catalog holds as delivered -- is a
+    candidate. The previous selection was the highest stored ``occurrence`` in
+    ``releases``, which can name a release no pointer carries anymore (a
+    rollback, or a same-scope republish), so health would report as current a
+    release nothing is serving. Scopes are visited in sorted order and the
+    cross-scope winner is deterministic
+    (``occurrence``, then ``delivered_at``, then ``release_id``)."""
+    database_file = ""
+    for row in conn.execute("PRAGMA database_list"):
+        if row["name"] == "main":
+            database_file = row["file"] or ""
+    if not database_file:
+        raise fail("VALIDATION_FAILED", "the operations catalog has no filesystem path for release pointers")
+    release_root = Path(database_file).parent / "releases"
+    candidates = []
+    for scope_row in conn.execute("SELECT DISTINCT scope FROM watermarks WHERE pipeline='nightly' "
+                                  "AND stage='publication' ORDER BY scope"):
+        release_id = release_current(release_root / scope_row["scope"])
+        if release_id is None:
+            continue
+        row = conn.execute("SELECT release_id,occurrence,delivered_at FROM releases WHERE release_id=? "
+                           "AND delivered_at IS NOT NULL", (release_id,)).fetchone()
+        if row is not None:
+            candidates.append(dict(row))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: (row["occurrence"], row["delivered_at"], row["release_id"]))
+
+
 def health(conn, *, clock, executor_mode="watchdog"):
     jobs = [dict(row) for row in conn.execute(
         "SELECT job_id,kind,state,created_at,updated_at,queue_reason_json FROM jobs "
         "WHERE state NOT IN ('succeeded','cancelled') ORDER BY created_at, job_id")]
-    current = conn.execute("SELECT release_id,occurrence,delivered_at FROM releases "
-                           "WHERE delivered_at IS NOT NULL ORDER BY occurrence DESC, release_id DESC LIMIT 1").fetchone()
+    current = _current_delivered_release(conn)
     withheld_release = _withheld_release(conn, current)
     # A nonzero count here (any scope) means some run recorded evidence that
     # a later generation/legacy line disagreed with an already-committed

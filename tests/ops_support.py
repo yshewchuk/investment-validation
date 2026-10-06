@@ -4,13 +4,14 @@ import os
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.diagnostics import process_family_liveness
 from engine.v2.ops.lifecycle import attempt_receipts
-from engine.v2.ops.outbox import enqueue
+from engine.v2.ops.outbox import enqueue, watermark
 from engine.v2.ops.profiles import DEFAULT_POLICY, MIB
 from engine.v2.ops.recovery import begin_epoch, read_boot_id
 from engine.v2.ops.scheduler import Supervisor
@@ -64,10 +65,11 @@ def catalog(tmp_path):
 
 
 def seed_delivered_health_release(conn, *, release_id, requested_session, resolved_session):
-    """One delivered ``releases`` row plus the complete delivered
-    ``release_intent`` -> ``export`` outbox receipt chain ``health()`` requires
-    for it, seeded inside the catalog transaction (synthetic test setup; the
-    production producer is never called here). The release occurrence and the
+    """Seed one delivered ``releases`` row and its complete delivered
+    ``release_intent`` -> ``export`` receipt chain in a catalog transaction,
+    then write the scope's ``releases/<scope>/CURRENT`` pointer and its
+    ``nightly``/``publication`` watermark. This is synthetic test setup; the
+    production producer is never called here. The release occurrence and the
     export receipt ``session`` are both the explicit ``resolved_session``;
     sessions never default."""
     scope = "shadow"
@@ -93,6 +95,13 @@ def seed_delivered_health_release(conn, *, release_id, requested_session, resolv
         conn.execute("UPDATE outbox SET state='delivered',attempts=attempts+1,receipt_json=? "
                      "WHERE kind='release_intent' AND logical_key=?",
                      (dumps(intent_receipt), release_key))
+    database_file = conn.execute("PRAGMA database_list").fetchone()["file"]
+    release_dir = Path(database_file).parent / "releases" / scope
+    release_dir.mkdir(parents=True, exist_ok=True)
+    (release_dir / "CURRENT").write_text(release_id + "\n")
+    with transaction(conn):
+        watermark(conn, "nightly", scope, "publication", resolved_session, release_id,
+                  clock=FakeClock())
 
 
 # -- bounded admission waits ---------------------------------------------------

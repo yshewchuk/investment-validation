@@ -20,12 +20,13 @@ legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_scor
 
 ## Primary contracts and public interfaces
 
-**Operations health output.** `health` emits `operations_health.v1.1`; `requested_session` and `resolved_session` come from the unique delivered `ledger_export_receipt.v1.0` associated through `release_intent` with the current delivered release, including same-session reruns; they never come from `generated_at`. Invalid or ambiguous evidence is `VALIDATION_FAILED`; the CLI removes its output and does not retry. Identical catalog/clock inputs produce byte-identical JSON; evolution follows `guides/component_contracts.md` §2.3 and older versions remain valid. **I/O outcomes:**
+**Operations health output.** `health` emits `operations_health.v1.1`; it selects the current delivered release from each published scope's `CURRENT` pointer, then orders those releases by occurrence, delivery time and release ID. `requested_session` and `resolved_session` come from the unique delivered `ledger_export_receipt.v1.0` associated through a consistent `release_intent` receipt with that release, including same-session reruns; they never come from `generated_at`. Invalid or ambiguous evidence is `VALIDATION_FAILED`; the CLI removes its output and does not retry. Identical catalog, pointer and clock inputs produce byte-identical JSON; evolution follows `guides/component_contracts.md` §2.3 and older versions remain valid. **I/O outcomes:**
 
 | Condition | Outcome |
 |---|---|
 | Catalog read | Uses the supplied connection directly; no health-specific transaction or cache (an existing caller transaction still applies). |
 | Receipt evidence invalid | `VALIDATION_FAILED`; CLI removes the configured output and does not retry. |
+| Persisted release association omits its primary ID | `VALIDATION_FAILED`; session evidence is not emitted. |
 | Temporary write, file fsync or replace fails | Before replacement, the prior destination remains; a partial or complete sibling temporary file may remain. |
 | Directory fsync fails after replacement | The new destination exists; crash durability is uncertain. |
 
