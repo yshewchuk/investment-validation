@@ -527,6 +527,59 @@ def test_primary_effect_replay_refuses_conflicting_stored_variant_evidence(tmp_p
         conn.close()
 
 
+def test_primary_effect_replay_refuses_historical_ran_row_identity_conflict(tmp_path):
+    """A legacy primary run whose durable evidence predates the variant
+    fields, beside a ran ledger row written under a DIFFERENT historical
+    identity, can never adopt the incoming identity: the replay's evidence
+    backfill rolls back with the non-retryable ``INVALID_EXPERIMENT_SPEC``
+    and the historical ledger bytes stay untouched."""
+    conn, clock, claim, effect, checkout = _claimed_primary_effect(
+        tmp_path, key="primary-legacy-ran")
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    run_id = claim.attempt_id
+
+    def stored_evidence():
+        row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?",
+                           (run_id,)).fetchone()
+        return json.loads(row[0])
+
+    try:
+        commit_attempt(conn, claim.attempt_id, claim.fence,
+                       Outcome(True, "verified_dead", 0), clock=clock,
+                       effects=lambda txn: effect(txn))
+        assert conn.execute(
+            "SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 1
+        with open(ledger, newline="") as fh:
+            ran_rows = [row for row in csv.DictReader(fh) if row["stage"] == "ran"]
+        historical = ran_rows[0]["spec_hash"]
+        assert stored_evidence()["variant_id"] == historical
+        assert stored_evidence()["variants_tried"] == 1
+
+        # Historical durable state, written through SQL and the file only now
+        # that the real commit created it: the evidence loses ONLY its two
+        # variant fields and the ran row's spec_hash becomes a foreign one.
+        raw = ledger.read_text()
+        assert raw.count(historical) == 1
+        with transaction(conn):
+            conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                         (json.dumps({key: value for key, value in stored_evidence().items()
+                                      if key not in ("variant_id", "variants_tried")},
+                                     sort_keys=True), run_id))
+            ledger.write_text(raw.replace(historical, "historical-spec", 1))
+        historical_bytes = ledger.read_bytes()
+
+        with pytest.raises(OpsError) as excinfo:
+            with transaction(conn):
+                effect(conn)
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert excinfo.value.problem.retryable is False
+        assert ledger.read_bytes() == historical_bytes
+        after = stored_evidence()
+        assert "variant_id" not in after and "variants_tried" not in after
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("build_evidence", (
     pytest.param(lambda vid: None, id="none-evidence"),
     pytest.param(lambda vid: [], id="list-evidence"),

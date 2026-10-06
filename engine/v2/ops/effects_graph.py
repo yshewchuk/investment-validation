@@ -989,21 +989,40 @@ def _record_variant_evidence(conn, run_id, variant_id):
                  (json.dumps(evidence, sort_keys=True), run_id))
 
 
-def _ran_row_exists(ledger, experiment_id):
-    """True iff ``ledger`` already carries this experiment's "ran" row.
+def _ran_row_exists(ledger, experiment_id, variant_id):
+    """True iff ``ledger`` already carries this experiment's "ran" row, every
+    such row's ``spec_hash`` matching the incoming variant identity.
 
     The fixed ledger format has no ``run_id`` column, and the durable run
     identity lives in ``experiment_runs.run_id`` (the attempt identity used
     by ``register_hypothesis``); the row key here is therefore
     ``(experiment_id, stage="ran")`` -- one primary run per experiment, so
-    it is the same identity the retry sees.
+    it is the same identity the retry sees. On every reuse -- including a
+    durable run whose historical evidence carries neither variant field -- a
+    stored ran row whose ``spec_hash`` is absent or differs from the
+    receipt-validated identity would otherwise commit the new durable
+    identity while an old ledger identity stays behind, so it is the
+    non-retryable ``INVALID_EXPERIMENT_SPEC`` refusal, raised inside the
+    caller's fenced transaction before the idempotent skip (or any
+    unavailable-metrics recording) can return.
     """
     if not ledger.is_file():
         return False
     import csv
     with open(ledger, newline="") as fh:
-        return any(row.get("id") == experiment_id and row.get("stage") == "ran"
-                   for row in csv.DictReader(fh))
+        stored = [row.get("spec_hash") for row in csv.DictReader(fh)
+                  if row.get("id") == experiment_id and row.get("stage") == "ran"]
+    if not stored:
+        return False
+    foreign = list(dict.fromkeys(spec_hash for spec_hash in stored
+                                 if spec_hash != variant_id))
+    if foreign:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment ledger already carries a different ran identity",
+                   details={"experiment_id": experiment_id,
+                            "expected_variant_id": variant_id,
+                            "stored_spec_hashes": foreign})
+    return True
 
 
 def _ledger_metrics(receipt):
@@ -1056,7 +1075,7 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id, variant_id
     ledger = experiments_ledger_path(checkout_root)
     mean, sharpe = _ledger_metrics(receipt)
     available = mean not in ("", None) or sharpe not in ("", None)
-    if _ran_row_exists(ledger, spec.experiment_id):
+    if _ran_row_exists(ledger, spec.experiment_id, variant_id):
         if not available:
             _mark_metrics_source(conn, run_id, "unavailable")
         return
