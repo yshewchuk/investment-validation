@@ -45,6 +45,7 @@ request body and, if durable, in the operator guides instead — see
 
 | Component | Doc |
 |---|---|
+| `checks/` | [`checks/ARCHITECTURE.md`](checks/ARCHITECTURE.md) |
 | `engine/v2/contracts/` | (pending) |
 | `engine/v2/foundation/` | [`engine/v2/foundation/ARCHITECTURE.md`](engine/v2/foundation/ARCHITECTURE.md) |
 | `engine/v2/data/` | [`engine/v2/data/ARCHITECTURE.md`](engine/v2/data/ARCHITECTURE.md) |
