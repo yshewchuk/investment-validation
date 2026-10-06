@@ -1352,6 +1352,24 @@ def test_whole_copy_keeps_exact_query_provenance_and_public_cap(tmp_path):
     conn.close()
 
 
+def test_materialization_explain_propagates_limit_refusal_once(tmp_path, monkeypatch):
+    conn, _, _, repo, snapshot, query = oversized_case(tmp_path)
+    calls = 0
+    explain = repo.explain_dependencies
+
+    def count_explain(query, *, table_name=None, snapshot_ref=None):
+        nonlocal calls
+        calls += 1
+        return explain(query, table_name=table_name, snapshot_ref=snapshot_ref)
+
+    monkeypatch.setattr(repo, "explain_dependencies", count_explain)
+    widened = dataclasses.replace(query, max_result_rows=ROW_COUNT + 1)
+    with pytest.raises(DataError, match="QUERY_NOT_BOUNDED"):
+        lm.explain_materialization_dependencies(repo, snapshot, "daily_market", widened)
+    assert calls == 1
+    conn.close()
+
+
 @pytest.mark.parametrize("change, admitted", [
     ({"time_interval": None}, False),
     ({"max_batch_rows": ROW_COUNT}, False),
