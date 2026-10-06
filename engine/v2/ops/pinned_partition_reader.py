@@ -115,7 +115,7 @@ class RetainedBatch:
             return
         self._released = True
         self._retained_rows.discharge(len(self._rows))
-        self._rows = []
+        self._rows.clear()
 
 
 def _bounded_limits(contract: TableContract, population_bound: int,
@@ -161,6 +161,9 @@ def iter_pinned_scan_batches(repository: Repository, snapshot: SnapshotRef,
     years = tuple(sorted({int(record.partition_key)
                           for record in repository.fragment_records(snapshot, table_name)}))
     if not years:
+        repository.scan_population_bound(
+            snapshot.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
+            key_filter=(), time_interval=None)
         return
     key_filter = (KeyPredicate(column=_PARTITION_COLUMN, operator="in", values=years),)
     population_bound = repository.scan_population_bound(

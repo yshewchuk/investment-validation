@@ -36,6 +36,7 @@ from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.ops import computed_moves_store
 from engine.v2.ops.pinned_partition_reader import (
+    RetainedBatch,
     RetainedRowCount,
     iter_pinned_scan_batches,
 )
@@ -61,23 +62,24 @@ class _PartitionRecord:
 
 
 class _Batch:
-    """A batch whose rows are handed back exactly as built (no copy)."""
+    """A batch returning fresh row dictionaries like PyArrow ``to_pylist()``."""
 
     def __init__(self, rows) -> None:
         self._rows = rows
 
     def to_pylist(self):
-        return self._rows
+        return copy.deepcopy(self._rows)
 
 
 class _PinnedFakeRepository:
     """The ``Repository`` surface ``iter_pinned_scan_batches`` walks, with the
     runtime ``DataQuery``/``KeyPredicate`` contract and ``to_pylist()`` batches.
-    Records every query and scan call so a test can prove the scan scope and
-    that R1 refusals never reach ``scan``."""
+    Records every query, bound and scan call so a test can prove the scan scope
+    and that R1 refusals never reach ``scan``."""
 
     def __init__(self, snapshot, *, partition_keys, batches, population=None,
-                 pre_scan_failure=None, scan_failure=None, scan_failure_after=0) -> None:
+                 pre_scan_failure=None, scan_failure=None, scan_failure_after=0,
+                 bound_failure=None) -> None:
         self._snapshot = snapshot
         self._records = tuple(_PartitionRecord(key) for key in partition_keys)
         self._batches = [list(rows) for rows in batches]
@@ -85,8 +87,10 @@ class _PinnedFakeRepository:
         self._pre_scan_failure = pre_scan_failure
         self._scan_failure = scan_failure
         self._scan_failure_after = scan_failure_after
+        self._bound_failure = bound_failure
         self.scan_calls = 0
         self.queries = []
+        self.bound_calls = []
 
     @property
     def selected_population(self) -> int:
@@ -107,6 +111,11 @@ class _PinnedFakeRepository:
 
     def scan_population_bound(self, snapshot_id, *, table_name, table_contract_ref,
                               key_filter=(), time_interval=None) -> int:
+        self.bound_calls.append({"snapshot_id": snapshot_id, "table_name": table_name,
+                                 "table_contract_ref": table_contract_ref,
+                                 "key_filter": key_filter, "time_interval": time_interval})
+        if self._bound_failure is not None:
+            raise self._bound_failure
         version = self._snapshot.table_versions.get(table_name)
         if version is None or table_contract_ref != version.table_contract_ref:
             raise data_fail("CONTRACT_MISMATCH",
@@ -304,6 +313,40 @@ def test_missing_pinned_input_propagates_without_reaching_scan(code):
     assert account.live_rows == 0
 
 
+def test_no_year_discovery_probes_the_unfiltered_bound_and_empty_population_yields_nothing():
+    snapshot = _snapshot()
+    problem = data_fail("MANIFEST_CORRUPT", "synthetic unfiltered population-bound failure")
+    corrupt = _PinnedFakeRepository(snapshot, partition_keys=(), batches=(),
+                                    population=1, bound_failure=problem)
+    account = RetainedRowCount()
+
+    with pytest.raises(DataError) as exc:
+        list(iter_pinned_scan_batches(corrupt, snapshot, _TABLE, _COLUMNS,
+                                      max_retained_rows=50_000, retained_rows=account))
+
+    # R1: the bound's typed refusal propagates as the very same exception ...
+    assert exc.value is problem
+    assert exc.value.code == "MANIFEST_CORRUPT"
+    # ... reached only through the unfiltered no-year probe, never a scan,
+    # and nothing is left live.
+    (call,) = corrupt.bound_calls
+    assert call["key_filter"] == ()
+    assert corrupt.scan_calls == 0
+    assert account.live_rows == 0
+
+    # A valid empty population (bound 0, no year records) is not a failure: the
+    # unfiltered bound is probed exactly once, nothing is scanned, nothing
+    # yields.
+    empty = _PinnedFakeRepository(snapshot, partition_keys=(), batches=(), population=0)
+    leases = list(iter_pinned_scan_batches(empty, snapshot, _TABLE, _COLUMNS,
+                                           max_retained_rows=50_000,
+                                           retained_rows=RetainedRowCount()))
+    assert leases == []
+    assert len(empty.bound_calls) == 1
+    assert empty.bound_calls[0]["key_filter"] == ()
+    assert empty.scan_calls == 0
+
+
 # --------------------------------------------------------------------------
 # R2/R3/R5: a mid-partition integrity refusal is terminal and discards the
 # provisional read — nothing published, the live lease released
@@ -345,3 +388,33 @@ def test_mid_stream_integrity_failure_discards_provisional_output():
     assert provisional == []
     # ... but the failure prevented full exhaustion, so nothing was ever published.
     assert published is None
+
+
+def test_lease_release_clears_the_exact_list_handed_back_by_the_context():
+    snapshot = _snapshot()
+    repository = _PinnedFakeRepository(
+        snapshot, partition_keys=("2022", "2023", "2024", "2025"),
+        batches=[_GOLDEN_ROWS[:2], _GOLDEN_ROWS[2:5], _GOLDEN_ROWS[5:]])
+    account = RetainedRowCount()
+
+    held: list[list[dict]] = []
+    read_back: list[list[dict]] = []
+    for lease in iter_pinned_scan_batches(repository, snapshot, _TABLE, _COLUMNS,
+                                          max_retained_rows=50_000, retained_rows=account):
+        assert isinstance(lease, RetainedBatch)
+        with lease as rows:
+            held.append(rows)  # the exact list object the ``with`` handed back
+            read_back.append(list(rows))  # a copy taken while the lease is live
+            assert account.live_rows == len(rows)
+        # Leaving the context releases the lease: that same list object is now
+        # empty, the lease reports itself released, and nothing is left charged.
+        assert rows == []
+        assert lease.released
+        assert account.live_rows == 0
+
+    # Every batch arrived whole and in order while leased ...
+    assert read_back == [_GOLDEN_ROWS[:2], _GOLDEN_ROWS[2:5], _GOLDEN_ROWS[5:]]
+    # ... and every list retained past its context is emptied by the release.
+    assert all(rows == [] for rows in held)
+    assert account.live_rows == 0
+    assert account.peak_rows == 3
