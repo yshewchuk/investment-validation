@@ -1246,7 +1246,7 @@ def test_worker_refuses_a_declared_source_tampered_during_the_run(tmp_path, monk
     def tampering_run(command, **kwargs):
         assert "--no-ledger" in command
         target = Path(kwargs["cwd"]) / declared
-        target.write_bytes(target.read_bytes() + b"\\n# tampered during the run\\n")
+        target.write_bytes(target.read_bytes() + b"\n# tampered during the run\n")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", tampering_run)
