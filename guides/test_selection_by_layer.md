@@ -17,7 +17,7 @@ allowed importer above it.
 |---|---|
 | `engine/v2/<package>/...` | The package named by the longest matching directory in `checks/layer_map.py`. |
 | `tests/v2/<package>/...` | The matching package, including package-local helpers. |
-| `tests/v2/integration/...` | Run when any package declared by that test changes; a test declares packages on one `# packages: ...` line. |
+| `tests/v2/integration/...` | Always run a changed integration test itself; also run it when any declared package changes. A test declares packages on one `# packages: ...` line. |
 | `checks/`, `tools/`, `ui/`, root configuration, or `.github/` | Full suite: these paths are outside the layer map and can affect any package. This includes the selector and workflow themselves. |
 | Root-level `tests/` files or helpers outside `tests/v2/` | Full suite until moved into a package folder or declared integration folder. In particular, move `tests/ops_support.py` to `tests/v2/ops/` and `tests/data_scan_support.py` to `tests/v2/data/`. |
 | Markdown under `guides/` or `ARCHITECTURE.md` files | The always-run documentation/meta tests. |
@@ -52,7 +52,8 @@ package currently provides most of their imports.
 
 Add a small selector module under `checks/`, with focused tests of path
 mapping, reverse closure, integration declarations, unmapped paths and
-failure behavior. `.github/workflows/tests.yml` supplies the changed paths
+failure behavior, plus a cache regression proving stale selected paths cannot
+override the current base/head diff. `.github/workflows/tests.yml` supplies the changed paths
 and consumes the selected test directories or an explicit full-suite result.
 It does not call or modify `tools/mutation_pilot.py select-tests`; that
 selector remains untouched for its existing mutation-testing role. If the
@@ -90,7 +91,7 @@ until the replay report meets this bar or the rule is adjusted and replayed.
 |---|---|
 | **R1 — unmapped path** | Select `tests/` in full and print the path and the reason it is outside the declared path policy. Never treat an empty selection as success. |
 | **R2 — deleted or renamed file** | Classify changed paths from the base-to-head diff even when a path no longer exists in the checkout. Treat a rename as deletion plus addition; if either side is unmapped, run the full suite. |
-| **R3 — moved test** | A package-test move selects both old and new package closures. A move into or out of integration also validates its declaration and selects the declared packages; an invalid move falls back to the full suite. |
+| **R3 — moved test** | A package-test move selects both old and new package closures. A changed integration test selects itself even if none of its declared packages changed; a move into or out of integration also validates its declaration and selects the declared packages. An invalid move falls back to the full suite. |
 | **R4 — stale integration declaration** | Validate each one-line declaration against `checks/layer_map.py` and the test location. Missing, duplicate, unknown or misplaced declarations select the full suite and fail the declaration check. |
 | **R5 — selector crash or bad output** | The workflow reports the failure and runs `tests/` in full. A selector error must never leave pytest with a partial or empty target list. |
 | **R6 — CI cache** | Recompute selection from the current base/head diff on every PR run. Do not restore selected paths from a cache; dependency caches must not supply or override the selection result. |
