@@ -2,16 +2,35 @@
 
 ``neutral_inventory`` reads catalog metadata only: no ``data_contracts``, object
 bytes or mutable head; the caller attests ``content_hash(payload)``.
+
+``export`` (the CLI) additionally checks the explicit pins against the mutable
+head, verifies every object descriptor against the artifact store and publishes
+the inventory as one atomically written, canonical-JSON export file. The
+catalog is only ever opened read-only; no register path lives here.
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
+import os
 import sqlite3
+import sys
+import uuid
+from pathlib import Path
 
+from engine.v2.contracts import ArtifactRef
 from engine.v2.data import errors
+from engine.v2.foundation import (
+    CONTENT_HASH_PREFIX,
+    ArtifactError,
+    ArtifactStore,
+    canonical_json,
+    content_hash,
+)
 
 SCHEMA_VERSION = "reregister_snapshot.v1"
+EXPORT_SCHEMA_VERSION = "reregister_snapshot_export.v1"
 PRICE_HISTORY = "price_history"
 COMPUTED_MOVES = "computed_moves"
 _MAX_LINEAGE_DEPTH = 64
@@ -209,3 +228,140 @@ def neutral_inventory(conn, *, scope, snapshot_id, receipt_id, generation):
                 "finality_receipt_refs": finality,
                 "tables": tables, "references": references, "lineage": lineage,
                 "captures": _captures(conn, tables, lineage_ids)}
+
+
+def _open_read_only(catalog_path):
+    """The one catalog open: a ``mode=ro`` URI, so no write or DDL is possible."""
+    try:
+        conn = sqlite3.connect(Path(catalog_path).resolve().as_uri() + "?mode=ro",
+                               uri=True, isolation_level=None, timeout=5.0)
+    except sqlite3.Error as exc:
+        raise errors.fail("INPUT_CHANGED", "the catalog could not be opened read-only") from exc
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _verify_head(conn, *, scope, snapshot_id, receipt_id, generation):
+    row = _execute(conn, "SELECT snapshot_id, generation, update_receipt_ref"
+                         " FROM data_snapshot_heads WHERE scope = ?", (scope,)).fetchone()
+    if (row is None or row["snapshot_id"] != snapshot_id or row["generation"] != generation
+            or row["update_receipt_ref"] != receipt_id):
+        raise errors.fail("INPUT_CHANGED", "the mutable head does not match the explicit pins")
+
+
+def _artifact_ref(descriptor):
+    content_hash_value = descriptor["content_hash"]
+    if (not isinstance(content_hash_value, str)
+            or not content_hash_value.startswith(CONTENT_HASH_PREFIX)
+            or isinstance(descriptor["byte_size"], bool)
+            or not isinstance(descriptor["byte_size"], int)):
+        raise errors.fail("OBJECT_CORRUPT", "a pinned object descriptor cannot be verified")
+    digest = content_hash_value.removeprefix(CONTENT_HASH_PREFIX)
+    return ArtifactRef(artifact_id=descriptor["object_id"], content_hash=content_hash_value,
+                       schema_ref=descriptor["kind"], byte_size=descriptor["byte_size"],
+                       storage_key=f"objects/{digest[:2]}/{digest}")
+
+
+def _object_descriptors(inventory):
+    for table in inventory["tables"]:
+        for fragment in table["fragments"]:
+            yield fragment["object"]
+    yield from inventory["references"]
+
+
+def _verify_objects(inventory, objects_root):
+    """Re-hash every recorded object against the store; nothing is decoded or repaired."""
+    store = ArtifactStore(objects_root)
+    for descriptor in _object_descriptors(inventory):
+        try:
+            store.verify(_artifact_ref(descriptor))
+        except ArtifactError as exc:
+            raise errors.fail("OBJECT_CORRUPT",
+                              "a pinned object does not match the object store") from exc
+
+
+def _export_bytes(inventory):
+    wrapper = {"schema_version": EXPORT_SCHEMA_VERSION, "inventory": inventory,
+               "content_hash": content_hash(inventory)}
+    return canonical_json(wrapper).encode("utf-8") + b"\n"
+
+
+def _publish(out_path, data, recheck):
+    """Temp file in the existing parent, fsync, head recheck, then one replace.
+
+    The destination is never opened or truncated before the rename; any failure
+    before it removes the temp and leaves the prior destination byte-identical.
+    """
+    out_path = Path(out_path)
+    tmp = out_path.parent / f".{out_path.name}.{uuid.uuid4().hex}.part"
+    replaced = False
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        recheck()
+        os.replace(tmp, out_path)
+        replaced = True
+    except OSError as exc:
+        raise errors.fail("INPUT_CHANGED", "the export file could not be written") from exc
+    finally:
+        if not replaced:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
+def export_inventory(conn, *, scope, snapshot_id, receipt_id, generation,
+                     objects_root, out):
+    """Export the pinned snapshot's verified neutral inventory, or refuse typed."""
+    _validate_pin(scope, snapshot_id, receipt_id, generation)
+    _verify_head(conn, scope=scope, snapshot_id=snapshot_id, receipt_id=receipt_id,
+                 generation=generation)
+    inventory = neutral_inventory(conn, scope=scope, snapshot_id=snapshot_id,
+                                  receipt_id=receipt_id, generation=generation)
+    _verify_objects(inventory, objects_root)
+    data = _export_bytes(inventory)
+    _publish(out, data, lambda: _verify_head(conn, scope=scope, snapshot_id=snapshot_id,
+                                             receipt_id=receipt_id, generation=generation))
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    export = commands.add_parser("export", help="write one pinned snapshot's verified export")
+    export.add_argument("--snapshot-id", required=True)
+    export.add_argument("--receipt-id", required=True)
+    export.add_argument("--generation", required=True, type=int)
+    export.add_argument("--scope", required=True)
+    export.add_argument("--catalog", required=True, type=Path)
+    export.add_argument("--objects", required=True, type=Path, help="ArtifactStore root")
+    export.add_argument("--out", required=True, type=Path, help="export file destination")
+    return parser
+
+
+def main(argv=None) -> int:
+    args = _build_parser().parse_args(argv)
+    conn = None
+    try:
+        conn = _open_read_only(args.catalog)
+        export_inventory(conn, scope=args.scope, snapshot_id=args.snapshot_id,
+                         receipt_id=args.receipt_id, generation=args.generation,
+                         objects_root=args.objects, out=args.out)
+    except errors.DataError as exc:
+        print(json.dumps({"refused": exc.code, "message": exc.problem.message},
+                         sort_keys=True), file=sys.stderr)
+        return 2
+    finally:
+        if conn is not None:
+            conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
