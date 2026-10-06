@@ -679,7 +679,8 @@ def build_equity(
 #: Columns that identify a trade well enough to look it up in a chain file.
 _LOG_IDENTITY = ("trade_id", "event_id", "ticker", "event_date", "session", "strategy",
                  "variant", "entry_date", "exit_date", "strike", "expiry", "dte_entry",
-                 "fill_alpha", "entry_cost", "exit_value", "ret", "provenance")
+                 "fill_alpha", "entry_cost", "exit_value", "ret", "provenance",
+                 "fit_identity")
 
 
 def _flatten_legs(blob: Any, max_legs: int = 2) -> dict[str, Any]:
@@ -766,10 +767,16 @@ def transaction_log(trades: pd.DataFrame, equity: Mapping[str, Any],
     log = pd.concat([log, accounting], axis=1)
 
     if scores is not None and len(scores) and "event_id" in log.columns:
-        cols = [c for c in ("event_id", "proba") if c in scores.columns]
-        if len(cols) == 2:
+        # The walk-forward score rows carry the fold's fit identity; it is
+        # joined as gate_fit_identity beside the probability, so a log row
+        # shows both what selected it and what the fold's model scored it.
+        # Older/direct score frames with only event_id and proba keep the
+        # plain probability join.
+        cols = [c for c in ("event_id", "proba", "fit_identity") if c in scores.columns]
+        if "event_id" in cols and "proba" in cols:
             log = log.merge(scores[cols].drop_duplicates("event_id").rename(
-                columns={"proba": "gate_proba"}), on="event_id", how="left")
+                columns={"proba": "gate_proba", "fit_identity": "gate_fit_identity"}),
+                on="event_id", how="left")
 
     log.insert(0, "row", np.arange(1, len(log) + 1))
     return log
@@ -949,9 +956,15 @@ def walk_forward(
     just-fitted fold model, never a stale one. Every eligible fold carries a
     deterministic ``fit_identity`` (``walk-forward:<test_year>:train-through:
     <max train year>``) stamped on its diagnostics row and on each of its
-    score rows. A year skipped for insufficient history is never predicted:
-    its score rows exist with null ``proba`` and ``fitted=False`` so the OOS
-    accounting stays complete, and calibration filters them out.
+    score rows. A fold whose local train frame is empty (allowed when
+    ``min_train_years=0`` with an upstream/precomputed fit) still runs
+    ``fit``/``select`` in the same order, but is marked unfitted — Gate has
+    no provenance field for what happened before the harness — so its
+    identity is null and it is never predicted. A year skipped for
+    insufficient history is never predicted: its score rows exist with null
+    ``proba`` and ``fitted=False`` so the OOS accounting stays complete, and
+    calibration filters them out. The returned ``selected`` frame carries the
+    same ``fit_identity`` on every kept row, mapped from its event-date year.
 
     Returns ``{selected, diagnostics, audit, scores}`` where ``selected`` carries the
     kept rows at every alpha (selection is decided at mid and applied to the
@@ -1018,9 +1031,38 @@ def walk_forward(
         # from this same just-fitted fold — scoring before fitting would
         # silently hand back the previous fold's model (or none at all).
         gate.fit(train)
+        row["ungated"] = False
+        if not len(train):
+            # A fold that passes min_train_years with an empty local train
+            # frame trades on a fit made upstream/precomputed: Gate carries no
+            # provenance field for that, so the evaluator cannot see what was
+            # fitted or when. The fold keeps its selection behavior (this
+            # gate.fit(train) then gate.select(test) below are still called),
+            # but it is marked unfitted — no identity, no prediction, and
+            # null score rows if probabilities are configured.
+            row["fitted"] = False
+            row["fit_identity"] = None
+            row["unfitted_reason"] = (
+                "empty local train history: gate fitted upstream with no "
+                "evaluator-visible provenance"
+            )
+            if gate.predict_proba is not None:
+                score_rows.append(pd.DataFrame({
+                    "event_id": test["event_id"].to_numpy(),
+                    "proba": np.full(int(len(test)), np.nan),
+                    "year": int(year),
+                    "fitted": False,
+                    "fit_identity": None,
+                }))
+            mask = gate.select(test)
+            mask = pd.Series(np.asarray(mask, dtype=bool), index=test.index)
+            row["n_selected"] = int(mask.sum())
+            kept_ids.extend(test.loc[mask, "event_id"].tolist())
+            diagnostics.append(row)
+            continue
         fold_identity = (
             f"walk-forward:{year}:train-through:"
-            f"{int(train['year'].max()) if len(train) else 'none'}"
+            f"{int(train['year'].max())}"
         )
         row["fitted"] = True
         row["fit_identity"] = fold_identity
@@ -1045,6 +1087,13 @@ def walk_forward(
 
     kept_set = set(kept_ids)
     selected = trades[trades["event_id"].isin(kept_set)].copy()
+    # Each kept row inherits the fold identity of its event-date year, so a
+    # trade in the log can be traced to the exact fit that selected it. Rows
+    # from unfitted folds carry a null identity.
+    selected["fit_identity"] = (
+        pd.to_datetime(selected["event_date"]).dt.year.map(
+            {int(d["year"]): d.get("fit_identity") for d in diagnostics})
+    )
     # Leak discipline is enforced structurally — fit never receives the test
     # year (the assert above) — and the receipt records the max year every fit
     # saw so the poison test and the report auditor can verify it.

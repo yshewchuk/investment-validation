@@ -251,15 +251,25 @@ class TestWalkForward:
         fold's fit) the first insufficient-history year would call
         ``predict_proba`` on an unfitted model and this test fails there.
         """
-        trades = self.trades3y()
+        dates23 = pd.date_range("2023-01-01", periods=5, freq="30D")
+        trades = pd.concat([
+            self.trades3y(),
+            make_trades([0.01] * 5, start=str(dates23[0].date()), freq="30D").assign(
+                event_date=dates23,
+                entry_date=dates23 - pd.Timedelta(days=1),
+                exit_date=dates23 + pd.Timedelta(days=1),
+                event_id=[f"2023_{i}" for i in range(5)]),
+        ], ignore_index=True)
         proba_saw: list[tuple[int, int | None]] = []
         select_saw: list[tuple[int, int | None]] = []
         active = {"fit_year": None}
 
         def fit(train):
+            """Set the active model to this fold's max train year."""
             active["fit_year"] = int(train["year"].max()) if len(train) else None
 
         def predict_proba(rows):
+            """Score with the active fit and record the year pair it saw."""
             assert active["fit_year"] is not None, "predict_proba ran on an unfitted fold"
             year = int(pd.to_datetime(rows["event_date"]).dt.year.iloc[0])
             assert active["fit_year"] < year, "predict_proba saw its own test year"
@@ -267,6 +277,7 @@ class TestWalkForward:
             return np.full(len(rows), float(active["fit_year"] - 2019) / 10)
 
         def select(rows):
+            """Record the year pair the active fit was selecting for."""
             year = int(pd.to_datetime(rows["event_date"]).dt.year.iloc[0])
             select_saw.append((year, active["fit_year"]))
             return pd.Series(True, index=rows.index)
@@ -276,10 +287,12 @@ class TestWalkForward:
                           min_train_years=2)
         diag = {d["year"]: d for d in wf["diagnostics"]}
         scores = wf["scores"]
+        sel = wf["selected"]
+        sel_years = pd.to_datetime(sel["event_date"]).dt.year
 
         # No prediction for the insufficient-history years; their score rows
         # are explicitly unfitted and null.
-        assert [year for year, _ in proba_saw] == [2022]
+        assert [year for year, _ in proba_saw] == [2022, 2023]
         for year in (2020, 2021):
             rows = scores[scores["year"] == year]
             assert len(rows) == 5
@@ -288,18 +301,105 @@ class TestWalkForward:
             assert rows["fit_identity"].isna().all()
             assert diag[year]["fitted"] is False
             assert diag[year]["fit_identity"] is None
+            assert sel[sel_years == year]["fit_identity"].isna().all()
 
-        # The eligible fold was fit first; every probability encodes that fit,
-        # and the diagnostics identity matches every score-row identity.
+        # The eligible folds are consecutive: 2022 trains through 2021, 2023
+        # trains through 2022. Each was fit first; every probability encodes
+        # that fit, and the diagnostics identity matches every score row and
+        # every kept trade for that year.
         rows = scores[scores["year"] == 2022]
         assert diag[2022]["fitted"] is True
         assert diag[2022]["fit_identity"] == "walk-forward:2022:train-through:2021"
         assert set(rows["fit_identity"]) == {diag[2022]["fit_identity"]}
         assert rows["fitted"].all()
         assert rows["proba"].notna().all() and (rows["proba"] == 0.2).all()
-        # Prediction and selection saw the same active fit.
-        assert proba_saw == [(2022, 2021)]
-        assert select_saw == [(2022, 2021)]
+        kept = sel[sel_years == 2022]
+        assert set(kept["fit_identity"]) == {diag[2022]["fit_identity"]}
+        rows = scores[scores["year"] == 2023]
+        assert diag[2023]["fitted"] is True
+        assert diag[2023]["fit_identity"] == "walk-forward:2023:train-through:2022"
+        assert set(rows["fit_identity"]) == {diag[2023]["fit_identity"]}
+        assert rows["fitted"].all()
+        assert rows["proba"].notna().all() and (rows["proba"] == 0.3).all()
+        kept = sel[sel_years == 2023]
+        assert set(kept["fit_identity"]) == {diag[2023]["fit_identity"]}
+        # Prediction and selection saw the same active fit, fold by fold.
+        assert proba_saw == [(2022, 2021), (2023, 2022)]
+        assert select_saw == [(2022, 2021), (2023, 2022)]
+
+    def test_min_train_years_zero_folds_but_empty_history_is_never_predicted(self):
+        """min_train_years=0: the empty-local-history fold fits and selects, never predicts.
+
+        With no minimum, 2020 is an eligible fold whose local train frame is
+        empty (an upstream/precomputed fit): the harness still calls ``fit``
+        then ``select`` in order, but marks the fold unfitted — Gate carries
+        no provenance for what happened before the harness — so it is never
+        scored and its kept trades carry a null identity.
+        """
+        trades = self.trades3y()
+        calls: list[tuple[str, int | None, int | None]] = []
+        active = {"fit_year": None}
+
+        def fit(train):
+            """Set the active model to this fold's max train year, if any."""
+            active["fit_year"] = int(train["year"].max()) if len(train) else None
+            calls.append(("fit", None, active["fit_year"]))
+
+        def predict_proba(rows):
+            """Score with the active fit and record what it saw."""
+            year = int(pd.to_datetime(rows["event_date"]).dt.year.iloc[0])
+            calls.append(("proba", year, active["fit_year"]))
+            return np.full(len(rows), float(active["fit_year"] - 2019) / 10)
+
+        def select(rows):
+            """Select with the active fit and record what it saw."""
+            year = int(pd.to_datetime(rows["event_date"]).dt.year.iloc[0])
+            calls.append(("select", year, active["fit_year"]))
+            return pd.Series(True, index=rows.index)
+
+        wf = walk_forward(trades, Gate(fit=fit, select=select,
+                                       predict_proba=predict_proba),
+                          min_train_years=0)
+        diag = {d["year"]: d for d in wf["diagnostics"]}
+        scores = wf["scores"]
+        sel = wf["selected"]
+        sel_years = pd.to_datetime(sel["event_date"]).dt.year
+
+        # 2020's empty-local-history fold: fit runs first, then select, and
+        # predict_proba is never called on the unprovenanced fold.
+        assert calls[:2] == [("fit", None, None), ("select", 2020, None)]
+        assert [c[0] for c in calls] == ["fit", "select", "fit", "proba",
+                                         "select", "fit", "proba", "select"]
+        assert diag[2020]["fitted"] is False
+        assert diag[2020]["fit_identity"] is None
+        assert "empty local train history" in diag[2020]["unfitted_reason"]
+        rows20 = scores[scores["year"] == 2020]
+        assert len(rows20) == 5
+        assert not rows20["fitted"].any()
+        assert rows20["proba"].isna().all()
+        assert rows20["fit_identity"].isna().all()
+        assert sel[sel_years == 2020]["fit_identity"].isna().all()
+
+        # 2021 and 2022 are ordinary fitted folds; their predictions and
+        # selections see the just-fitted model and the expected identities.
+        rows21 = scores[scores["year"] == 2021]
+        assert diag[2021]["fitted"] is True
+        assert diag[2021]["fit_identity"] == "walk-forward:2021:train-through:2020"
+        assert rows21["fitted"].all() and (rows21["proba"] == 0.1).all()
+        assert set(rows21["fit_identity"]) == {diag[2021]["fit_identity"]}
+        assert set(sel[sel_years == 2021]["fit_identity"]) == {diag[2021]["fit_identity"]}
+        rows22 = scores[scores["year"] == 2022]
+        assert diag[2022]["fitted"] is True
+        assert diag[2022]["fit_identity"] == "walk-forward:2022:train-through:2021"
+        assert rows22["fitted"].all() and (rows22["proba"] == 0.2).all()
+        assert set(rows22["fit_identity"]) == {diag[2022]["fit_identity"]}
+        assert set(sel[sel_years == 2022]["fit_identity"]) == {diag[2022]["fit_identity"]}
+        # Every call saw its own fold's fit, in the harness's fixed order.
+        assert calls == [
+            ("fit", None, None), ("select", 2020, None),
+            ("fit", None, 2020), ("proba", 2021, 2020), ("select", 2021, 2020),
+            ("fit", None, 2021), ("proba", 2022, 2021), ("select", 2022, 2021),
+        ]
 
     def test_empty(self):
         wf = walk_forward(make_trades([]).iloc[0:0], None)
@@ -818,6 +918,9 @@ class TestCalibrationStage:
         years = pd.to_datetime(trades["event_date"]).dt.year
         expected_n = int((years > years.min()).sum())
         assert cal["available"] and cal["n"] == expected_n
+        # expected_n checks the fitted-year calibration count; the 400-row
+        # assertion keeps the input fixture size fixed.
+        assert len(trades) == 400
         assert cal["n"] < int(len(trades))
         assert cal["brier_skill"] > 0  # the synthetic gate is genuinely predictive
 
@@ -908,10 +1011,18 @@ class TestTransactionLog:
         from engine.evaluate import build_equity, transaction_log
 
         trades = self._trades()
-        scores = pd.DataFrame({"event_id": trades["event_id"], "proba": 0.42})
+        identity = "walk-forward:2024:train-through:2023"
+        trades["fit_identity"] = identity
+        scores = pd.DataFrame({"event_id": trades["event_id"], "proba": 0.42,
+                               "fit_identity": identity})
         log = transaction_log(trades, build_equity(trades, 0.05, record=True),
                               scores=scores)
         assert "gate_proba" in log.columns and log["gate_proba"].notna().all()
+        assert (log["gate_proba"] == 0.42).all()
+        assert "gate_fit_identity" in log.columns
+        assert set(log["gate_fit_identity"]) == {identity}
+        # The kept trade's own fold identity is retained beside the gate's.
+        assert set(log["fit_identity"]) == {identity}
 
     def test_evaluate_emits_the_log_beside_the_report(self, tmp_path):
         from engine.evaluate import evaluate
