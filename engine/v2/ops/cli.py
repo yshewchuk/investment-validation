@@ -688,6 +688,74 @@ def _recheck_experiment_preregistration(plan):
     require_preregistration(checkout_root, experiment_spec_from_document(plan["spec_document"]))
 
 
+def _registered_runner_manifest(plan):
+    """The audited manifest for a primary experiment's single registered runner.
+
+    Refuses an unknown or malformed inventory entry as the non-retryable
+    ``INVALID_EXPERIMENT_SPEC`` before any source is read, and maps the
+    manifest helper's missing or indirect source refusals to the
+    non-retryable ``VALIDATION_FAILED``. Returns ``(declared_sources,
+    resolved_checkout_root, manifest)``.
+    """
+    from engine.v2.ops.experiments import (
+        RUNNER_INVENTORY,
+        default_checkout_root,
+        runner_manifest,
+    )
+
+    runner = plan["spec_document"].get("runner")
+    entry = RUNNER_INVENTORY.get(runner) if isinstance(runner, str) else None
+    spec_source = entry.get("spec_source") if isinstance(entry, dict) else None
+    declared = entry.get("declared_runtime_sources") if isinstance(entry, dict) else None
+    if (not isinstance(spec_source, str) or not spec_source
+            or not isinstance(declared, (list, tuple)) or not declared
+            or not all(isinstance(item, str) and item for item in declared)):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment runner registration is unknown or ambiguous",
+                   details={"runner": runner})
+    recorded = plan.get("preregistration_root")
+    checkout_root = Path(recorded) if recorded else default_checkout_root()
+    try:
+        manifest = runner_manifest(checkout_root, runner)
+    except OpsError as exc:
+        if exc.code == "INPUT_CHANGED":
+            raise fail("VALIDATION_FAILED",
+                       "registered runner source is missing or indirect",
+                       details={"runner": runner}) from exc
+        raise fail("INVALID_EXPERIMENT_SPEC", "experiment runner is not registered",
+                   details={"runner": runner}) from exc
+    return declared, Path(checkout_root).resolve(), manifest
+
+
+def _primary_runner_bindings(plan, store):
+    """Publish the audited source closure of a primary experiment's runner.
+
+    The runner is identified only through the registered inventory/manifest
+    (never an arbitrary path carried by the plan); the wrapper, the registered
+    ``spec.yaml``, the declared runtime sources and each file in the runner's
+    transitive source closure are deduplicated, preflighted as regular,
+    non-symlink files beneath the recorded checkout root before any byte is
+    published, and each is published as immutable bytes. Returns the ordered
+    ``[(relative, ArtifactRef), ...]`` bindings.
+    """
+    declared, base, manifest = _registered_runner_manifest(plan)
+    relative_paths = list(dict.fromkeys(
+        [manifest["runner"], manifest["spec_source"], *declared,
+         *manifest["source_closure"]]))
+    for relative in relative_paths:
+        parts = relative.split("/")
+        path = base / relative
+        if (relative.startswith("/") or any(part in ("", ".", "..") for part in parts)
+                or path.is_symlink() or not path.is_file()
+                or not path.resolve().is_relative_to(base)):
+            raise fail("VALIDATION_FAILED",
+                       "registered runner source is missing or indirect",
+                       details={"path": relative})
+    return [(relative, store.publish_bytes((base / relative).read_bytes(),
+                                           schema_ref="experiment_runner_source.v1.0"))
+            for relative in relative_paths]
+
+
 def _submit_command(args, root, conn, clock):
     store = ArtifactStore(root)
     ref = artifact(conn, store, args.plan)
@@ -696,14 +764,21 @@ def _submit_command(args, root, conn, clock):
     if plan.get("kind") == "nightly":
         return _submit_nightly(plan, conn, store, policy, clock)
     if plan.get("kind") == "experiment":
+        binding_refs = []
         if plan.get("parameters", {}).get("no_ledger", True) is False:
             _recheck_experiment_preregistration(plan)
+            binding_refs = _primary_runner_bindings(plan, store)
         spec_ref = store.publish_bytes(json.dumps(plan["spec_document"], sort_keys=True).encode(),
                                        schema_ref="experiment_spec.v1.0")
         with transaction(conn):
             register_artifact(conn, spec_ref, None, clock)
-        plan["input_refs"] = [spec_ref.artifact_id]
-        plan["parameters"]["input_bindings"] = {"spec.json": spec_ref.artifact_id}
+            for _, binding_ref in binding_refs:
+                register_artifact(conn, binding_ref, None, clock)
+        plan["input_refs"] = [spec_ref.artifact_id,
+                              *(binding_ref.artifact_id for _, binding_ref in binding_refs)]
+        plan["parameters"]["input_bindings"] = {
+            "spec.json": spec_ref.artifact_id,
+            **{relative: binding_ref.artifact_id for relative, binding_ref in binding_refs}}
     return submit(conn, registry(), policy, request_from_plan(plan, args.idempotency_key), clock=clock)
 
 

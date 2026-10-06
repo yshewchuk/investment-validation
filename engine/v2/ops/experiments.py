@@ -5,6 +5,8 @@ import hashlib
 import inspect
 import json
 import math
+import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -725,204 +727,102 @@ def _annotate_variant_identity(report_path: Path, variant_id: str) -> dict:
 
     One fixed variant per run: the section always states
     ``Variants tried: 1``, and a rerun replaces its prior section between the
-    markers rather than duplicating it, so annotation is idempotent.
-
-    The report is opened once, read/write with ``O_NOFOLLOW`` -- failing
-    closed when no-follow is unavailable or the open fails -- and the opened
-    descriptor itself is validated with ``os.fstat``: a non-regular file or a
-    hardlink (``st_nlink > 1``) is refused before any write with a generic,
-    public-safe ``VALIDATION_FAILED`` -- registered non-retryable -- leaving
-    the staged report's link and target bytes unchanged, because the pathname
-    is never followed or reopened after the one open. ``run_experiment``
-    captures that refusal as the typed failure receipt the worker re-raises,
-    so no successful report artifact, durable run, or ledger row is committed.
+    markers rather than duplicating it, so annotation is idempotent. Trusted
+    local path I/O: one ``Path.read_text()`` and one ``Path.write_bytes()``
+    inside this call, so any read or write error propagates untouched into
+    ``run_experiment``'s failed uncommitted receipt. ``run_experiment``'s
+    after-the-runner integrity detection, which runs before this call reads
+    the report, is what refuses a missing, linked, or otherwise invalid
+    report, typed as ``VALIDATION_FAILED``.
     """
-    import os
-    import stat
-
-    if not hasattr(os, "O_NOFOLLOW"):
-        raise fail("VALIDATION_FAILED", "experiment report is not a regular file")
-    try:
-        fd = os.open(report_path, os.O_RDWR | os.O_NOFOLLOW)
-    except OSError:
-        raise fail("VALIDATION_FAILED",
-                   "experiment report is not a regular file") from None
-    pinned = False
-    try:
-        entry = os.fstat(fd)
-        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
-            raise fail("VALIDATION_FAILED", "experiment report is not a regular file")
-        with os.fdopen(fd, "r+b") as handle:
-            pinned = True
-            text = handle.read().decode("utf-8")
-            start = "<!-- variant-identity:start -->"
-            end = "<!-- variant-identity:end -->"
-            section = (f"{start}\n## Variant identity\n\n"
-                       f"Variant ID: {variant_id}\nVariants tried: 1\n{end}")
-            if start in text and end in text:
-                head, _, rest = text.partition(start)
-                _, _, tail = rest.partition(end)
-                text = head + section + tail
-            else:
-                text = text.rstrip("\n") + "\n\n" + section + "\n"
-            annotated = text.encode("utf-8")
-            handle.seek(0)
-            handle.write(annotated)
-            handle.truncate()
-            handle.flush()
-    finally:
-        if not pinned:
-            os.close(fd)
+    start = "<!-- variant-identity:start -->"
+    end = "<!-- variant-identity:end -->"
+    section = (f"{start}\n## Variant identity\n\n"
+               f"Variant ID: {variant_id}\nVariants tried: 1\n{end}")
+    text = report_path.read_text()
+    if start in text and end in text:
+        head, _, rest = text.partition(start)
+        _, _, tail = rest.partition(end)
+        text = head + section + tail
+    else:
+        text = text.rstrip("\n") + "\n\n" + section + "\n"
+    annotated = text.encode("utf-8")
+    report_path.write_bytes(annotated)
     return {"report_hash": "sha256:" + hashlib.sha256(annotated).hexdigest(),
             "report_bytes": len(annotated)}
 
 
-def _open_staging_child(parent_fd: int, component: str, *, create: bool,
-                        flags: int, unsafe: str) -> int:
-    """Open one no-follow directory component relative to ``parent_fd``.
+def _open_staging_directory(directory: Path | str) -> int:
+    """Open one staging root by path and return its directory descriptor.
 
-    A missing component is created with ``os.mkdir(..., dir_fd=parent_fd)``
-    and immediately reopened with the same no-follow flags when ``create``
-    is set; a concurrent creation may retry the open. Every other failure --
-    a symlink, a missing path without ``create``, or an I/O error -- is the
-    caller's generic, public-safe ``VALIDATION_FAILED``. Returns the opened
-    descriptor; the caller validates and owns it.
+    For callers that hold a staging root pinned while a supervised run
+    addresses ordinary paths under it: the descriptor stays open until the
+    caller closes it, and this function promises nothing about what a
+    concurrent pathname swap means for path-addressed reads and writes.
     """
-    import os
+    return os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
 
+
+def _report_integrity_failure(report: Path, before: str | None,
+                              after: str | None) -> OpsError:
+    """The registered, non-retryable ``VALIDATION_FAILED`` for one detection.
+
+    The failure evidence names the report ``path`` with its SHA-256
+    ``before_hash`` and ``after_hash`` -- ``before_hash`` is null when the
+    report was absent, linked, or not a regular single-link file before
+    execution, ``after_hash`` is null when the post-run ``lstat`` refused an
+    absent path, a link, or a non-regular file.
+    """
+    return fail("VALIDATION_FAILED",
+                "experiment report failed after-run integrity detection",
+                details={"path": str(report), "before_hash": before,
+                         "after_hash": after})
+
+
+def _report_before(report: Path) -> str | None:
+    """The report's SHA-256 before execution, only for a regular single-link file.
+
+    A cheap pre-run digest behind one ``lstat``: a missing path, a symlink, a
+    non-regular file, or ``st_nlink != 1`` records null without the report
+    ever being opened; only a regular file with exactly one link is read and
+    hashed.
+    """
     try:
-        return os.open(component, flags, dir_fd=parent_fd)
-    except FileNotFoundError:
-        if not create:
-            raise fail("VALIDATION_FAILED", unsafe) from None
-        try:
-            os.mkdir(component, dir_fd=parent_fd)
-        except FileExistsError:
-            pass
-        except OSError:
-            raise fail("VALIDATION_FAILED", unsafe) from None
-        try:
-            return os.open(component, flags, dir_fd=parent_fd)
-        except OSError:
-            raise fail("VALIDATION_FAILED", unsafe) from None
+        entry = os.lstat(report)
     except OSError:
-        raise fail("VALIDATION_FAILED", unsafe) from None
-
-
-def _open_staging_directory(path: Path, *, create: bool = True,
-                            expected_fd: int | None = None) -> int:
-    """Securely open (and optionally create) one absolute staging directory.
-
-    The lexical path is walked from ``/`` one component at a time, always
-    relative to its parent's descriptor: every component is opened with
-    ``os.open(component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=parent_fd)``
-    and no component is ever reopened by pathname, so ``Path.resolve()`` is
-    unnecessary and a symlinked or swapped component is refused at the step
-    that meets it rather than followed. A ``..`` component and a platform
-    without the no-follow or directory flags are refused outright, as is any
-    I/O error. With ``create``, a missing component is made with
-    ``os.mkdir(..., dir_fd=parent_fd)`` and immediately reopened with the same
-    no-follow flags; directories created before a later component's refusal
-    may remain empty, and existing staging bytes are never touched. When
-    ``expected_fd`` is supplied, the final descriptor's ``(st_dev, st_ino)``
-    must equal ``os.fstat(expected_fd)``'s, so a directory swap under a pinned
-    descriptor is refused. Every refusal is a generic, public-safe
-    ``VALIDATION_FAILED`` (registered non-retryable); no unsafe path is ever
-    followed or written through. Returns the final open descriptor;
-    intermediate descriptors are closed on success and every opened descriptor
-    is closed on failure.
-    """
-    import os
-    import stat
-
-    unsafe = "staging directory path is not safe"
-    lexical = PurePosixPath(path)
-    if not lexical.is_absolute():
-        raise fail("VALIDATION_FAILED", unsafe)
-    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
-        raise fail("VALIDATION_FAILED", unsafe)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    opened: list[int] = []
+        return None
+    if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+        return None
     try:
-        try:
-            opened.append(os.open("/", os.O_RDONLY | os.O_DIRECTORY))
-        except OSError:
-            raise fail("VALIDATION_FAILED", unsafe) from None
-        for component in lexical.parts[1:]:
-            if component == "..":
-                raise fail("VALIDATION_FAILED", unsafe)
-            parent = opened[-1]
-            child = _open_staging_child(parent, component, create=create,
-                                        flags=flags, unsafe=unsafe)
-            if not stat.S_ISDIR(os.fstat(child).st_mode):
-                os.close(child)
-                raise fail("VALIDATION_FAILED", unsafe)
-            opened.append(child)
-        if expected_fd is not None:
-            try:
-                pinned = os.fstat(expected_fd)
-                final = os.fstat(opened[-1])
-            except OSError:
-                raise fail("VALIDATION_FAILED",
-                           "staging directory does not match the pinned "
-                           "directory") from None
-            if (final.st_dev, final.st_ino) != (pinned.st_dev, pinned.st_ino):
-                raise fail("VALIDATION_FAILED",
-                           "staging directory does not match the pinned directory")
-        while len(opened) > 1:
-            os.close(opened.pop(0))
-        return opened.pop()
-    finally:
-        for handle in opened:
-            os.close(handle)
+        return "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
-def _pinned_staging(lexical: Path, staging_dir_fd: int | None) -> tuple[int, bool]:
-    """Pin (or validate) one staging directory before anything writes to it.
+def _check_report_integrity(report: Path, before: str | None) -> str:
+    """``lstat`` the report after the runner returns, before its evidence is read.
 
-    With no caller descriptor the directory is created one no-follow component
-    at a time, so an unsafe path, a symlink or an I/O error is the generic,
-    public-safe ``VALIDATION_FAILED`` refusal -- raised while no run directory,
-    ``CAPABILITIES.json``, receipt, durable run or ledger row exists. With a
-    caller's descriptor supplied, the lexical path must still lead to exactly
-    that pinned directory: the check's own descriptor is opened and closed
-    here and the caller's stays caller-owned. Returns the descriptor every
-    staging write addresses through, and whether the caller owns it.
+    An absent report, a symlink, a non-regular file, or ``st_nlink != 1`` is
+    the registered, non-retryable ``VALIDATION_FAILED`` naming the path with
+    its before/after hashes (the after one null when the check refused); the
+    failure receipt keeps those details, and no run or ledger commit follows
+    it. This is detection after the fact, not a guard: it prevents neither a
+    read nor a write race, and it never rejects changed report content --
+    generating a report is expected. A valid regular report is hashed once
+    here and its SHA-256 is returned for the evidence.
     """
-    import os
-
-    if staging_dir_fd is None:
-        return _open_staging_directory(lexical, create=True), False
-    validated = _open_staging_directory(lexical, create=False, expected_fd=staging_dir_fd)
-    os.close(validated)
-    return staging_dir_fd, True
-
-
-def _pinned_report_evidence(lexical: Path, destination: Path, fd: int, variant: str) -> dict:
-    """Read and annotate the pinned report, but only while the pin still holds.
-
-    The lexical path is validated against ``fd`` once more here, before a single
-    report byte is read: a run directory replaced or re-pointed while the runner
-    worked is refused as the non-retryable ``VALIDATION_FAILED`` rather than
-    published as if it had come from wherever the path now leads. The staged
-    bytes stay in the directory ``fd`` pinned, and the annotation, the hash and
-    the size are taken through it, never through the lexical name.
-    """
-    import os
-
-    checked = _open_staging_directory(lexical, create=False, expected_fd=fd)
-    os.close(checked)
-    report = _report_evidence(destination)
-    report.update(_annotate_variant_identity(destination / "REPORT.md", variant))
-    # A descriptor alias says nothing once the fd is closed, so the receipt
-    # keeps naming the lexical report the caller asked for.
-    report["report"] = str(lexical / "REPORT.md")
-    return report
+    try:
+        entry = os.lstat(report)
+    except OSError:
+        raise _report_integrity_failure(report, before, None) from None
+    if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+        raise _report_integrity_failure(report, before, None)
+    return "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
 
 
 def _stage_capabilities(destination: Path, spec: ExperimentSpec, base: Path, mode: str,
                         variant: str) -> ExperimentReceipt:
-    """Write the capability manifest into the pinned directory and start its receipt.
+    """Write the capability manifest into the run directory and start its receipt.
 
     The attempted variant is recorded before the runner is invoked, so a failed
     receipt still names the variant identity and its count.
@@ -959,13 +859,20 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                    staging_dir_fd: int | None = None) -> dict:
     """Run one isolated hypothesis; retries reuse its exact spec/input identity.
 
-    Every staging write, the runner call, the report read and its annotation
-    address the staging directory through one pinned descriptor, never through
-    the lexical path a concurrent writer could re-point mid-run; the pin is
-    taken in :func:`_pinned_staging` and held through
-    :func:`_pinned_report_evidence`. A caller that pinned the directory itself
-    may hand over ``staging_dir_fd``, which stays caller-owned: this function
-    closes only the descriptors it opened.
+    Trusted-local staging: every write, the runner call, the report read and
+    its annotation address ordinary local paths under the supplied runner;
+    after the runner returns, before :func:`_report_evidence` or the
+    annotation reads ``REPORT.md``, :func:`_check_report_integrity` ``lstat``s
+    it: a missing report, a symlink, a non-regular file, or ``st_nlink != 1``
+    is the registered, non-retryable ``VALIDATION_FAILED`` whose details --
+    kept on the uncommitted failed receipt, with no run or ledger row -- name
+    the ``path``, ``before_hash`` and ``after_hash`` (the after hash null
+    when the check refused). A valid regular report contributes its
+    ``report_after_hash`` to the evidence; changed report content is never
+    rejected, because generating a report is expected, and this is post-run
+    detection with no race-proofing. A caller-supplied ``staging_dir_fd`` is
+    preserved in the interface and forwarded to a runner that declares it;
+    nothing here closes it.
     """
     if mode not in ("smoke", "primary"):
         raise fail("INVALID_REQUEST", "unknown experiment mode")
@@ -989,28 +896,28 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
     # a runner with no ``execution_plan`` channel is refused, typed, before
     # the run directory, ``CAPABILITIES.json``, or any receipt can exist.
     _execution_plan_compatibility(runner, plan)
-    import os
 
     base = Path(root).resolve()
-    lexical = Path(run_dir)
-    fd, caller_owned = _pinned_staging(lexical, staging_dir_fd)
+    destination = Path(run_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    variant = spec.spec_hash if variant_id is None else variant_id
+    receipt = _stage_capabilities(destination, spec, base, mode, variant)
+    report_path = destination / "REPORT.md"
+    before = _report_before(report_path)
     try:
-        destination = Path(f"/proc/self/fd/{fd}")
-        variant = spec.spec_hash if variant_id is None else variant_id
-        receipt = _stage_capabilities(destination, spec, base, mode, variant)
-        try:
-            result = _call_runner(runner, destination, no_ledger=(mode == "smoke" or synthetic),
-                                  execution_plan=plan, staging_dir_fd=fd)
-            receipt.evidence.update(_pinned_report_evidence(lexical, destination, fd, variant))
-            receipt.evidence["runner_result"] = (result if isinstance(result, dict)
-                                                 else str(result))
-            receipt.evidence["synthetic"] = bool(synthetic)
-            receipt.status = "succeeded"
-        except Exception as exc:
-            return _runner_failure_receipt(receipt, exc)
-    finally:
-        if not caller_owned:
-            os.close(fd)
+        result = _call_runner(runner, destination, no_ledger=(mode == "smoke" or synthetic),
+                              execution_plan=plan, staging_dir_fd=staging_dir_fd)
+        after = _check_report_integrity(report_path, before)
+        evidence = _report_evidence(destination)
+        evidence["report_after_hash"] = after
+        evidence.update(_annotate_variant_identity(report_path, variant))
+        receipt.evidence.update(evidence)
+        receipt.evidence["runner_result"] = (result if isinstance(result, dict)
+                                             else str(result))
+        receipt.evidence["synthetic"] = bool(synthetic)
+        receipt.status = "succeeded"
+    except Exception as exc:
+        return _runner_failure_receipt(receipt, exc)
     if mode == "primary" and backup is not None and not synthetic:
         try:
             receipt.backup_receipt = backup(receipt.as_dict())

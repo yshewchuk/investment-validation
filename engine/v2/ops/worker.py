@@ -390,10 +390,11 @@ def _dispatch_experiment(parameters, root):
     """P6 slice 10: run one experiment under admission. Pure function of ``parameters`` and
     staging, like ``_dispatch_adhoc_rescore`` — the runner subprocess writes only inside
     ``root``, never the shared legacy tree, so this carries no ``store_domains`` lease. The
-    staging directory is pinned once, before any read or write, and every path here --
-    ``spec.json``, the plan, the receipt -- travels through the pinned ``/proc/self/fd`` alias,
-    so a lexical root swapped for a symlink mid-run is the non-retryable ``VALIDATION_FAILED``,
-    nothing published, no durable row.
+    staging root is trusted local state owned by this worker: ``spec.json``, the plan and
+    the receipt are addressed as ordinary paths under it, and protection against concurrent
+    filesystem manipulation is out of scope by contract. A malformed plan is the
+    non-retryable ``INVALID_EXPERIMENT_SPEC`` before any write, and a failure leaves no
+    committed run or ledger row.
 
     ``no_ledger=False`` (P6 slice 11) selects ``mode="primary"`` for the coordinator's durable
     registration and ledger append. The runner subprocess itself is ALWAYS invoked through
@@ -406,7 +407,6 @@ def _dispatch_experiment(parameters, root):
     details. ``resolve_experiment_plan`` runs before any artifact is written and its canonical
     ``json_bytes`` are persisted beside the receipt; a non-empty economic stance is refused."""
     from engine.v2.ops.experiments import (
-        _open_staging_directory,
         experiment_spec_from_document,
         registered_spec_hash,
         resolve_experiment_plan,
@@ -416,44 +416,40 @@ def _dispatch_experiment(parameters, root):
     from engine.v2.ops.legacy_adapter import run_legacy_script
 
     mode = "smoke" if parameters.get("no_ledger", True) else "primary"
-    fd = _open_staging_directory(Path(root), create=True)
-    try:
-        pinned_root = Path(f"/proc/self/fd/{fd}")
-        document = json.loads((pinned_root / "spec.json").read_text())
-        spec = experiment_spec_from_document(document)
-        plan = resolve_experiment_plan(spec)
-        if plan.economic_params:
-            raise fail("INVALID_EXPERIMENT_SPEC",
-                       "the experiment worker's runner declares no execution_plan input",
-                       details={"economic_keys": sorted(plan.economic_params)})
-        runner_id = parameters["runner"]
-        if runner_id == "synthetic":
-            runner, synthetic = synthetic_fixture_runner, True
-        else:
-            sources = _declared_experiment_sources(runner_id)
-            def runner(*, run_dir, no_ledger, staging_dir_fd):
-                completed = run_legacy_script(run_dir, runner_id, staging_dir_fd=staging_dir_fd,
-                                              declared_runtime_sources=sources)
-                if completed.returncode != 0:
-                    raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
-                               details={"returncode": completed.returncode,
-                                        "stderr_tail": (completed.stderr or "")[-2000:]})
-                return {"returncode": completed.returncode, "headline": _runner_headline(run_dir)}
-            synthetic = False
-        # The report's variant identity: smoke/synthetic runs carry the resolved
-        # ``spec_hash``; a primary run carries the registered legacy hash its
-        # PLANNED row used, so report and ledger row join on one identity. A
-        # ``registered_spec_hash`` refusal propagates typed, before any report or
-        # output set exists.
-        variant = spec.spec_hash
-        if mode == "primary" and parameters.get("preregistration_root"):
-            variant = registered_spec_hash(parameters["preregistration_root"], spec) or variant
-        (pinned_root / "resolved_experiment_plan.json").write_bytes(plan.json_bytes())
-        receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
-                                 resolved_plan=plan, variant_id=variant, staging_dir_fd=fd)
-        (pinned_root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
-    finally:
-        os.close(fd)
+    stage = Path(root)
+    document = json.loads((stage / "spec.json").read_text())
+    spec = experiment_spec_from_document(document)
+    plan = resolve_experiment_plan(spec)
+    if plan.economic_params:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "the experiment worker's runner declares no execution_plan input",
+                   details={"economic_keys": sorted(plan.economic_params)})
+    runner_id = parameters["runner"]
+    if runner_id == "synthetic":
+        runner, synthetic = synthetic_fixture_runner, True
+    else:
+        sources = _declared_experiment_sources(runner_id)
+        def runner(*, run_dir, no_ledger):
+            completed = run_legacy_script(run_dir, runner_id,
+                                          declared_runtime_sources=sources)
+            if completed.returncode != 0:
+                raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
+                           details={"returncode": completed.returncode,
+                                    "stderr_tail": (completed.stderr or "")[-2000:]})
+            return {"returncode": completed.returncode, "headline": _runner_headline(run_dir)}
+        synthetic = False
+    # The report's variant identity: smoke/synthetic runs carry the resolved
+    # ``spec_hash``; a primary run carries the registered legacy hash its
+    # PLANNED row used, so report and ledger row join on one identity. A
+    # ``registered_spec_hash`` refusal propagates typed, before any report or
+    # output set exists.
+    variant = spec.spec_hash
+    if mode == "primary" and parameters.get("preregistration_root"):
+        variant = registered_spec_hash(parameters["preregistration_root"], spec) or variant
+    (stage / "resolved_experiment_plan.json").write_bytes(plan.json_bytes())
+    receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
+                             resolved_plan=plan, variant_id=variant)
+    (stage / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
         raise _experiment_failure(receipt)
     expected = parameters["expected_ids"]

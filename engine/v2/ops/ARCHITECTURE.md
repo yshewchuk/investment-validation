@@ -327,84 +327,29 @@ submission path reads either edge (the rule Part 4 established for
   lands, not two.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
   dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
-  gap `compare_native_vs_legacy`'s own row-sharing checks would otherwise
-  cause (CodeRabbit round 3; widened by an Opus gate finding, both real).
-  Two EXISTING, UNCHANGED checks inside `compare_native_vs_legacy` can both
-  fire even though a refusal fully explains the gap: `_refuse_empty_inputs`
-  (`not native_rows` → `VALIDATION_FAILED`) when native produced nothing at
-  all, and the function's own `if not compared: raise fail("VALIDATION_FAILED",
-  "native parity report shares no row key", ...)` (`native_parity_report.py:178`,
-  pre-existing, unchanged by this redo) whenever `legacy_rows` and
-  `native_rows` share NO key — which happens not only when `native_rows`
-  is empty, but also when `native_rows` is non-empty yet none of its keys
-  overlap `legacy_rows`'s (every row that would have overlapped was
-  instead refused). `run_native_parity_worker` therefore checks
-  `legacy_rows` is non-empty FIRST — an empty `legacy_rows` is a genuinely
-  missing legacy input, never something a native refusal can explain, so
-  it ALWAYS falls through to `compare_native_vs_legacy`'s existing checks
-  and fails `VALIDATION_FAILED`, exactly as before this redo, regardless
-  of how many native refusals exist. Only once `legacy_rows` is confirmed
-  non-empty does it compute `shared = set(legacy_rows) & set(native_rows)`
-  BEFORE calling `compare_native_vs_legacy` at all, and take this path
-  whenever `shared` is empty AND EITHER (a) `set(legacy_rows) <=
-  set(native_refusals)` — every legacy key specifically named by a keyed
-  refusal, not merely "some refusal exists somewhere" (CodeRabbit gate
-  round 1, real finding: an unrelated refusal for a DIFFERENT population
-  key must never explain a DIFFERENT legacy row's absence — that case
-  still falls through and fails) — OR (b) `native_rows` and
-  `native_refusals` are BOTH empty while `unkeyable_refusals` is non-empty
-  (nothing was ever keyable at all, so nothing could have matched
-  anything, which vacuously explains every legacy key's absence). This
-  covers every case the narrower "`native_rows` empty" check alone would
-  miss:
-  - **All refused, none keyable.** Every row refused `INVALID_KEY_FIELD`
-    (above): `native_rows` and the keyed `native_refusals` are BOTH empty,
-    but `unkeyable_refusals` is fully populated. The narrower check (only
-    testing keyed `native_refusals`) would wrongly fall through to a
-    normal `compare_native_vs_legacy` call and hit `_refuse_empty_inputs`.
-  - **Disjoint keys, native_rows non-empty.** Every legacy row's native
-    counterpart was refused BY ITS OWN matching population key (case (a)
-    above — an unkeyable refusal carries no population key, so it can
-    never stand in for a specific legacy row's own counterpart here),
-    while `native_rows`
-    itself holds OTHER rows entirely (different tickers/strategies,
-    genuinely `only_native`) that share no key with `legacy_rows`. Because
-    `native_rows` is non-empty, `_refuse_empty_inputs` would not fire, but
-    `shared` is still empty, so the pre-existing "no shared key" check
-    (`native_parity_report.py:178`, above) would — even though every legacy row's absence IS
-    explained by a refusal, exactly `native_refused`/`native_refused_unmatched`'s
-    (below) reportable outcome, not a missing-input failure.
-  - **All refused, keyable.** The ORIGINAL narrower case (`native_rows`
-    empty, keyed `native_refusals` fully populated): still covered, since
-    `shared` is trivially empty when `native_rows` is.
+  gap caused by the comparator's empty-input and no-shared-key refusals.
+  The worker handles empty shared-key sets separately from comparator
+  empty-input and no-shared-key failures.
+  Its unchanged guards reject empty native input and non-empty disjoint rows;
+  the worker bypasses them only when refusal evidence explains the gap.
+  `legacy_rows` must be non-empty; a missing legacy input always fails.
+  The worker then checks `shared` keys before choosing the special report path.
+  It takes that path only if every legacy key has its matching keyed refusal,
+  or all native/keyed-refusal inputs are empty and unkeyable refusals exist.
+  Otherwise, missing legacy or unexplained native rows keep `VALIDATION_FAILED`.
+  - Unkeyable-only refusal batches are covered when no native row or keyed
+    refusal exists; they cannot match an individual legacy key.
+  - For non-empty disjoint rows, every legacy key must have its own keyed
+    refusal; unrelated native-only rows do not explain a missing key.
+  - The all-keyable case is covered by the same rule when `native_rows` is
+    empty and keyed refusals name every legacy key.
 
-  In every covered case, `_empty_native_report` builds the SAME dict shape
-  `compare_native_vs_legacy` would return for a would-be comparison with no
-  shared keys — `{"schema_version": SCHEMA_VERSION, "tolerance_policy_id":
-  tolerance_policy.policy_id, "compared": [], "only_legacy":
-  sorted(legacy_rows), "only_native": sorted(native_rows), "mismatches":
-  []}` (unlike the original narrower version, `only_native` is NOT
-  hardcoded `[]`: because `shared` is empty by construction on this path,
-  EVERY key of `native_rows` is, by definition, `only_native` — never
-  `compared`, since nothing shared) — WITHOUT calling
-  `compare_native_vs_legacy` (there is no numeric comparison to make:
-  nothing shared was scored against anything), and `apply_native_refusals`
-  runs on it exactly as it would on a real comparison's output, narrowing
-  `only_legacy` by `native_refused`/`native_refused_unmatched` the
-  identical way. If `shared` is empty and BOTH `native_refusals` and
-  `unkeyable_refusals` are empty (native_score_batch produced nothing at
-  all AND refused nothing — a genuinely missing native input, nothing to
-  explain the gap), or if `legacy_rows` is empty, `run_native_parity_worker`
-  calls `compare_native_vs_legacy` normally and lets its EXISTING checks
-  raise `VALIDATION_FAILED` — the correct outcome for THAT case is
-  unchanged. `compare_native_vs_legacy` itself gains no new parameter and
-  no new branch for this: the decision of which path to take is
-  `run_native_parity_worker`'s own (still unbuilt — Phase 2), so
-  `run_shadow_nightly`'s test-only path, which calls `native_parity_handler`
-  directly and never `run_native_parity_worker`, never reaches this
-  `_empty_native_report` branch at all — see the next bullet,
-  `apply_native_refusals`, for the one behavior change that DOES already
-  reach that existing test-only path today.
+  The result keeps the comparator's schema and tolerance ID, with empty
+  `compared`/`mismatches`, sorted `only_legacy`/`only_native`, then passes
+  through `apply_native_refusals`. Empty legacy input or an unexplained gap
+  still fails `VALIDATION_FAILED`. `compare_native_vs_legacy` is unchanged;
+  the test-only `run_shadow_nightly` path calls its handler directly and
+  never reaches this worker-only branch.
 - **`native_parity_report.apply_native_refusals(report, native_refusals,
   unkeyable_refusals=()) -> dict`** (new) — the mechanism for "missing or
   refused native rows are counted separately" (user decision, option (c)).
@@ -1281,9 +1226,11 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | R5 | Artifact publication is atomic (`ArtifactStore`): a killed process leaves the old artifact or nothing. |
 | R6 | Job identity is `job_id_for("shadow", key)`; a same-key/different-digest resubmission is refused `IDEMPOTENCY_CONFLICT`, never merged. A new key scheme is checked against legacy's own keyspace, not only sibling native writers. |
 
+Experiment staging uses a trusted local directory owned by the same user. Protection against concurrent filesystem manipulation is explicitly out of scope.
+
 | Condition | Outcome |
 |---|---|
-| Experiment runner path confinement | Every path derived from experiment input or staging state — the registered runner executable and declared runtime sources, and the output/report/annotation targets — resolves component by component beneath its specific allowed root: executable and runtime sources beneath the pinned staging directory, output, report and annotation targets beneath their own registered root. Any symlink component, `..`, absolute escape, or path resolving outside that root, and any unsafe linked/replaced staging component or pinned runner unable to start, is refused before open, execute, read/write, or annotation as a non-retryable `VALIDATION_FAILED`: no candidate is published, no report is published or annotated, external bytes remain unchanged, and no run or ledger row commits. Registered wrapper dependencies keep ROOT/HERE/SOURCE/RESULTS anchored to the pinned stage for the full run. |
+| Experiment integrity detection | Staging is trusted local state owned by the same user; protection against concurrent filesystem manipulation is out of scope. Before execution, record SHA-256 for the registered wrapper and declared runtime sources. After execution, compare hashes and `lstat` those sources and `REPORT.md`; a change, symlink, or `nlink > 1` raises non-retryable `VALIDATION_FAILED` with path and before/after hashes. The failed run is not committed and writes no ledger row. This detects damage after the run, it does not prevent it. |
 | Variant identity, report, receipt, and ledger outcomes | Successful reports publish as `experiment_variant_report` with variant identity/count, and every receipt counts attempted variants including failures; a failed report stays staged and unpublished. Registered primary report, durable evidence, and primary ledger `spec_hash` use the registered legacy hash; synthetic and smoke runs use `ExperimentSpec.spec_hash`, and smoke passes `--no-ledger` and adds no legacy row. Missing/malformed/empty variant evidence, missing/empty/mismatched `variant_id` (against resolved identity), or `variants_tried` not exact integer 1 is non-retryable `INVALID_EXPERIMENT_SPEC` before ledger append; rollback leaves no run/hypothesis row and preserves prior ledger bytes. Annotation failure leaves the staged report unpublished and commits no index/ledger row. |
 | Retry, worker, and holdout additions | A retryable attempt may relaunch the worker and runner; a clean exit with a live straggler reaps without that failure; identical primary replay reuses its run without a duplicate ledger row, while changed input conflicts. Slice 2a exposes no sweep or holdout reads; `HOLDOUT_ACCESS_DENIED` is deferred to the pinned trade-loader slice. |
 | Unknown/unused spec field, mismatched resolved plan, economics without `execution_plan`, malformed fold rows/labels/rule, numeric overflow, mismatched named columns, or mixed named/positional features | `INVALID_EXPERIMENT_SPEC`; refuse before work, return no result, and write no artifact, report, or ledger row. |

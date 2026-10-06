@@ -8,19 +8,10 @@ import os
 import sys
 from pathlib import Path
 
-pinned_root = os.environ.get("INVESTING_PLAN_ROOT")
-pinned_source = os.environ.get("INVESTING_PLAN_PINNED_SOURCE")
-if pinned_root:
-    ROOT = Path(pinned_root)
-    HERE = ROOT / "experiments" / "EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered"
-    if pinned_source:
-        SOURCE = Path(pinned_source)
-    else:
-        SOURCE = ROOT / "experiments" / "EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline" / "run.py"
-else:
-    ROOT = Path(__file__).resolve().parents[2]
-    HERE = Path(__file__).resolve().parent
-    SOURCE = ROOT / "experiments" / "EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline" / "run.py"
+ROOT = Path(os.environ.get("INVESTING_PLAN_ROOT") or Path(__file__).parents[2])
+HERE = ROOT / "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered"
+SOURCE = Path(os.environ.get("INVESTING_PLAN_PINNED_SOURCE")
+              or ROOT / "experiments" / "EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline" / "run.py")
 sys.path.insert(0, str(ROOT))
 
 loader = importlib.machinery.SourceFileLoader("exp185_runner", str(SOURCE))

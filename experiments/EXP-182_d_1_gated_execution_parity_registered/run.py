@@ -8,19 +8,10 @@ import os
 import sys
 from pathlib import Path
 
-pinned_root = os.environ.get("INVESTING_PLAN_ROOT")
-pinned_source = os.environ.get("INVESTING_PLAN_PINNED_SOURCE")
-if pinned_root:
-    ROOT = Path(pinned_root)
-    HERE = ROOT / "experiments" / "EXP-182_d_1_gated_execution_parity_registered"
-    if pinned_source:
-        SOURCE = Path(pinned_source)
-    else:
-        SOURCE = ROOT / "experiments" / "EXP-181_d_1_gated_execution_parity" / "run.py"
-else:
-    ROOT = Path(__file__).resolve().parents[2]
-    HERE = Path(__file__).resolve().parent
-    SOURCE = ROOT / "experiments" / "EXP-181_d_1_gated_execution_parity" / "run.py"
+ROOT = Path(os.environ.get("INVESTING_PLAN_ROOT") or Path(__file__).parents[2])
+HERE = ROOT / "experiments" / "EXP-182_d_1_gated_execution_parity_registered"
+SOURCE = Path(os.environ.get("INVESTING_PLAN_PINNED_SOURCE")
+              or ROOT / "experiments" / "EXP-181_d_1_gated_execution_parity" / "run.py")
 sys.path.insert(0, str(ROOT))
 
 loader = importlib.machinery.SourceFileLoader("exp182_runner", str(SOURCE))
