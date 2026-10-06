@@ -1204,6 +1204,25 @@ def test_same_session_rerun_associates_release_and_health_reads_export_receipt(t
         assert document["requested_session"] == export_receipt["requested_session"]
         assert document["resolved_session"] == export_receipt["session"]
 
+        # A delivered export receipt whose scope contradicts the selected
+        # publication scope must be refused on its own: the requested/resolved
+        # dates and the release association are still correct here, so the
+        # scope mismatch alone has to trigger VALIDATION_FAILED.
+        assert export_receipt["scope"] == scope
+        original_receipt_json = conn.execute(
+            "SELECT receipt_json FROM outbox WHERE kind='export' AND logical_key=?",
+            (release_key,)).fetchone()["receipt_json"]
+        export_receipt["scope"] = "unrelated"
+        with transaction(conn):
+            conn.execute("UPDATE outbox SET receipt_json=? WHERE kind='export' AND logical_key=?",
+                         (json.dumps(export_receipt), release_key))
+        with pytest.raises(OpsError) as scope_excinfo:
+            health(conn, clock=clock)
+        assert scope_excinfo.value.code == "VALIDATION_FAILED"
+        with transaction(conn):
+            conn.execute("UPDATE outbox SET receipt_json=? WHERE kind='export' AND logical_key=?",
+                         (original_receipt_json, release_key))
+
         # A corrupted intent association (primary release_id preserved, but the
         # published rerun missing from release_ids) must be refused, not read
         # from some other release row.

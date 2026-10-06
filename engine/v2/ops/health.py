@@ -203,10 +203,12 @@ def _canonical_session(value, *, field, details):
         raise fail("VALIDATION_FAILED", f"{field} is not a real calendar date", details=details) from None
 
 
-def _export_chain_sessions(conn, logical_key, *, release_id):
+def _export_chain_sessions(conn, logical_key, *, release_id, expected_scope):
     """The chain's authoritative ``ledger_export_receipt.v1.0`` -- its
     ``requested_session`` and ``session`` (the resolved one) returned verbatim,
-    never re-derived."""
+    never re-derived. The receipt's ``scope`` must equal ``expected_scope``,
+    the publication-pointer scope that selected the release this chain
+    evidences; an export receipt from another scope is not evidence."""
     row = conn.execute("SELECT state,receipt_json FROM outbox WHERE kind='export' AND logical_key=?",
                        (logical_key,)).fetchone()
     if row is None or row["state"] != "delivered":
@@ -220,6 +222,11 @@ def _export_chain_sessions(conn, logical_key, *, release_id):
     scope = receipt.get("scope")
     if not isinstance(scope, str) or not scope:
         raise fail("VALIDATION_FAILED", "the export receipt scope is not a non-empty string", details=details)
+    if scope != expected_scope:
+        raise fail("VALIDATION_FAILED", "the export receipt scope does not match the scope of the "
+                   "publication pointer that selected the current release",
+                   details={"release_id": release_id, "logical_key": logical_key,
+                            "expected_scope": expected_scope, "actual_scope": scope})
     requested = _canonical_session(receipt.get("requested_session"),
                                    field="export receipt requested_session", details=details)
     resolved = _canonical_session(receipt.get("session"), field="export receipt session", details=details)
@@ -229,13 +236,15 @@ def _export_chain_sessions(conn, logical_key, *, release_id):
     return receipt["requested_session"], receipt["session"]
 
 
-def _release_session_evidence(conn, current):
+def _release_session_evidence(conn, current, *, expected_scope):
     """``(requested_session, resolved_session)`` for the delivered release
     ``current`` names, copied ONLY from the durable catalog receipt chain: the
     one delivered ``release_intent`` outbox row whose
     ``receipt_json.release_id`` equals ``current.release_id`` selects, by its
     ``logical_key``, the paired delivered ``export`` row carrying the
-    authoritative ``ledger_export_receipt.v1.0``. Missing, malformed,
+    authoritative ``ledger_export_receipt.v1.0``. ``expected_scope`` is the
+    watermark scope of the ``CURRENT`` pointer that selected ``current``; the
+    export receipt must carry exactly that scope. Missing, malformed,
     ambiguous or mismatched evidence is ``VALIDATION_FAILED`` -- never
     ``clock.now()``, never the release occurrence alone, never an equality
     default, never a fabricated value. The ``health()`` contract ALWAYS
@@ -278,7 +287,8 @@ def _release_session_evidence(conn, current):
         raise fail("VALIDATION_FAILED", "the current delivered release does not resolve to exactly one "
                    "complete release_intent receipt chain",
                    details={"release_id": release_id, "matching_release_intent_rows": len(logical_keys)})
-    requested, resolved = _export_chain_sessions(conn, logical_keys[0], release_id=release_id)
+    requested, resolved = _export_chain_sessions(conn, logical_keys[0], release_id=release_id,
+                                                 expected_scope=expected_scope)
     if resolved != current["occurrence"]:
         raise fail("VALIDATION_FAILED", "the export receipt session does not equal the delivered "
                    "release occurrence",
@@ -317,17 +327,21 @@ def _withheld_release(conn, current=None, *, fallback_to_latest=True):
     return dict(withheld) if show else None
 
 
-def _current_delivered_release(conn):
-    """The current delivered release as the on-disk publication pointers define
-    it: every ``nightly``/``publication`` watermark scope has its own
-    ``releases/<scope>/CURRENT`` pointer, and only a release one of those
-    pointers actually names -- and which the catalog holds as delivered -- is a
-    candidate. The previous selection was the highest stored ``occurrence`` in
-    ``releases``, which can name a release no pointer carries anymore (a
-    rollback, or a same-scope republish), so health would report as current a
-    release nothing is serving. Scopes are visited in sorted order and the
-    cross-scope winner is deterministic
-    (``occurrence``, then ``delivered_at``, then ``release_id``)."""
+def _current_delivered_release_with_scope(conn):
+    """``(row, scope)`` for the current delivered release as the on-disk
+    publication pointers define it: every ``nightly``/``publication``
+    watermark scope has its own ``releases/<scope>/CURRENT`` pointer, and only
+    a release one of those pointers actually names -- and which the catalog
+    holds as delivered -- is a candidate. The previous selection was the
+    highest stored ``occurrence`` in ``releases``, which can name a release no
+    pointer carries anymore (a rollback, or a same-scope republish), so health
+    would report as current a release nothing is serving. Scopes are visited
+    in sorted order and the cross-scope winner is deterministic
+    (``occurrence``, then ``delivered_at``, then ``release_id``). The winning
+    pointer's scope is carried alongside the row, never inside it, so evidence
+    validation can bind the export receipt to the scope that selected the
+    release without the public ``current_release`` shape growing a scope
+    field."""
     database_file = ""
     for row in conn.execute("PRAGMA database_list"):
         if row["name"] == "main":
@@ -344,17 +358,25 @@ def _current_delivered_release(conn):
         row = conn.execute("SELECT release_id,occurrence,delivered_at FROM releases WHERE release_id=? "
                            "AND delivered_at IS NOT NULL", (release_id,)).fetchone()
         if row is not None:
-            candidates.append(dict(row))
+            candidates.append((dict(row), scope_row["scope"]))
     if not candidates:
-        return None
-    return max(candidates, key=lambda row: (row["occurrence"], row["delivered_at"], row["release_id"]))
+        return None, None
+    return max(candidates, key=lambda item: (item[0]["occurrence"], item[0]["delivered_at"],
+                                             item[0]["release_id"]))
+
+
+def _current_delivered_release(conn):
+    """Row-only wrapper over :func:`_current_delivered_release_with_scope` for
+    callers that select the current release but never validate its evidence
+    chain and so must not see (or leak) the pointer scope."""
+    return _current_delivered_release_with_scope(conn)[0]
 
 
 def health(conn, *, clock, executor_mode="watchdog"):
     jobs = [dict(row) for row in conn.execute(
         "SELECT job_id,kind,state,created_at,updated_at,queue_reason_json FROM jobs "
         "WHERE state NOT IN ('succeeded','cancelled') ORDER BY created_at, job_id")]
-    current = _current_delivered_release(conn)
+    current, current_scope = _current_delivered_release_with_scope(conn)
     withheld_release = _withheld_release(conn, current)
     # A nonzero count here (any scope) means some run recorded evidence that
     # a later generation/legacy line disagreed with an already-committed
@@ -373,7 +395,8 @@ def health(conn, *, clock, executor_mode="watchdog"):
     undetermined_outcome_sessions = conn.execute(
         "SELECT COUNT(*) FROM decisions WHERE kind='outcome' "
         "AND generation_ref IS NULL").fetchone()[0]
-    requested_session, resolved_session = _release_session_evidence(conn, current)
+    requested_session, resolved_session = _release_session_evidence(conn, current,
+                                                                    expected_scope=current_scope)
     return {"schema_version": "operations_health.v1.1", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks ORDER BY pipeline, scope, stage")],
