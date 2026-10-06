@@ -48,6 +48,58 @@ shared helpers with their owning package (`ops_support.py` to `ops`,
 that depend on more than one package belong in integration even if one
 package currently provides most of their imports.
 
+## Test-layout ratchet
+
+Use a blocking, checked-in budget with the same absolute, no-exemptions,
+no-grandfathering convention as `checks/code_budgets.py`. Slice 1 adds
+`checks/test_layout_budget.txt`; it records the exact count of the unmoved set,
+initially **403**. The unmoved set is the current root-level
+`tests/test_*.py` paths. The check derives membership from that path pattern
+and requires the recorded count to equal the current set size. Its budget may
+only decrease from the PR base to its head.
+
+This ratchet does not change the merged path policy: root-level tests and
+helpers, `tools/` and `checks/` continue to select the full suite. The current
+33-of-40 fallback rate is accepted while the layout improves incrementally.
+
+Add the ratchet check to the always-run meta set. It fails when a new
+`test_*.py` file is added outside `tests/v2/<package>/` or
+`tests/v2/integration/`, when the unmoved set grows, when a package directory
+is not a package in `checks/layer_map.py`, or when the budget is stale. A test
+removed from the unmoved set must lower the budget in the same PR; a move that
+does not update the budget therefore fails. A `git mv` with no content edits
+costs zero added lines. Git reporting a move as delete plus add does not
+change accounting: validate both paths, count the root removal, and require
+the approved destination and matching budget decrease.
+
+### Touch it, move it
+
+Recommendation, subject to the gate and user decision: encourage a PR that
+edits an unmoved test to move it into its package folder in the same PR when
+the move remains reviewable. This is not required. Moving while editing can
+reduce future full-suite fallbacks, but combining a rename and behavioral
+change can make review harder. Keep the test at root while it imports an
+unmoved shared helper; move the helper with its owning package, then move the
+test. In particular, move `tests/ops_support.py` to `tests/v2/ops/` and
+`tests/data_scan_support.py` to `tests/v2/data/`. A test and its helper may
+move together when the package ownership is clear.
+
+Concurrent PRs can edit or move the same file and conflict on the old path,
+new path, or imports. Coordinate by letting the first change merge, then rebase
+and preserve both changes; the gate and user decide whether the combined move
+is still reviewable.
+
+### Ratchet check failure semantics (R1–R6)
+
+| Case | Contract |
+|---|---|
+| **R1 — new test outside the layout** | Fail for a newly added test file outside `tests/v2/<package>/` or `tests/v2/integration/`; never silently add it to the unmoved set. |
+| **R2 — unmoved set grows** | Fail if the root-level set grows. A new root test that replaces a different root test is also rejected by R1, even when the set size stays constant. |
+| **R3 — stale or increased budget** | Fail unless the file's count equals the current root-level set and does not increase from base to head. Moving a root test requires the budget to shrink in that PR. |
+| **R4 — unknown package** | Fail if a `tests/v2/<package>/` directory names no package in `checks/layer_map.py`. |
+| **R5 — rename appears as delete plus add** | Apply the same path checks and budget accounting without relying on Git rename detection: root deletion, approved destination, and one lower budget count. A path-only `git mv` adds zero lines. |
+| **R6 — revert restores a moved test** | Fail if a later PR restores that file at root or increases the budget. Move it forward again; the budget never grows. |
+
 ## Selector and workflow boundary
 
 Add a small selector module under `checks/`, with focused tests of path
@@ -61,7 +113,7 @@ selector process crashes or emits invalid output, the workflow prints the
 error and runs `tests/` in full. Pushes to `main`, scheduled runs and manual
 dispatch continue to run `tests/` in full as the post-merge backstop.
 
-## Evidence and validation before code
+## Evidence and acceptance before code
 
 The owner-provided `test-selection-hubs.md` reports that 34 of 40 recent PRs
 selected more than half of the suite, with fan-out often coming from selector
@@ -74,16 +126,17 @@ package edge cannot see. Running the supplied `pkggraph.py` and `pkgsim.py`
 on this worktree printed a 161-file median (40%), compared with the brief's
 approximate 150 (39%); treat both as estimates until the fixed replay below.
 
-Before the first code slice, replay the last 40 merged PRs against their
-changed paths and recorded CI results. For each PR, record the base/head,
-selected test files, tests that actually failed in CI, and whether each
-failure is covered by the package rule. Report every PR where a real CI
-failure would have been missed, including the failing test and the changed
-path that failed to select it. The acceptance bar is zero known misses across
-all 40 PRs. If CI history cannot establish the actual failure set for a PR,
-mark that replay inconclusive and keep that path class on full-suite
-selection; unknown evidence does not count as a pass. No code slice starts
-until the replay report meets this bar or the rule is adjusted and replayed.
+The replay parsed **467 CI failure occurrences with zero misses** across the
+13 PRs whose CI history is recoverable. **Twenty-seven PRs are inconclusive**
+because their runs were cancelled or logs expired; that unknown history cannot
+be recovered. The original all-40 acceptance bar was not met.
+
+**Supervisor's judgment call — pending user confirmation:** with no shadow
+mode, the proposed acceptance bar is zero misses on recoverable evidence,
+with `main` running the full suite after every merge as the backstop and the
+ratchet check itself as the guard against silent narrowing. If the user
+confirms this proposal, it becomes Slice 1's acceptance criterion. Until then,
+it remains a proposal; the former all-40 bar was not met.
 
 ## Failure semantics (R1–R6)
 
@@ -114,7 +167,7 @@ lowest-risk, narrow-closure packages and finish with shared lower layers.
 
 | Order | Slice | Code / tests / docs |
 |---:|---|---:|
-| 1 | Selector module, selector tests and checks; no moves | 35 / 55 / 15 |
+| 1 | Selector module, selector tests, ratchet check and initial unmoved-set budget; no moves | 55 / 70 / 15, plus a one-line count file |
 | 2 | `dashboard` | 0 / 10 / 5 |
 | 3 | `research` | 0 / 15 / 5 |
 | 4 | `diagnosis` | 0 / 20 / 5 |
@@ -137,8 +190,12 @@ lowest-risk, narrow-closure packages and finish with shared lower layers.
 | 21 | `contracts` | 0 / 20 / 5 |
 | 22 | Remaining cross-package integration moves, one owning package per PR | 0 / 20 / 5 |
 
-Contracts, foundation and data are last because their real reverse closures
-are broad; if the replay shows that their package rule selects nearly the
-whole suite, leave those tests in place rather than moving them for layout
-alone. Every follow-up slice stays within the code-PR size limits and updates
-this design or the architecture contract only when its behavior differs.
+Start with the narrowest reverse closures: dashboard, research, diagnosis and
+serving, then follow the listed schedule. Slices 2–22 remain scheduled work
+and the opportunistic path described above. Contracts, foundation and data
+have broad closures and may never need to move if package selection remains
+broad; do not move them for layout alone. Slice 1 is estimated at 55
+non-test code lines, 70 test lines and 15 documentation lines, plus the
+one-line initial count file, within the small-PR limits. Every follow-up slice
+updates this design or the architecture contract only when its behavior
+differs.
