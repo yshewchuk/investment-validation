@@ -6,9 +6,8 @@
 
 ## Primary contracts and public interfaces
 
-There is no package-wide runner or argument schema. Invoke a selected script,
-such as `python3 checks/repo_hygiene.py` or `python3 checks/phase0_audit.py --report <path>`;
-its CLI defines options. Some checks expose callable functions returning reports.
+No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.
+Some checks also expose callable report functions.
 
 ## Inputs
 
@@ -34,7 +33,8 @@ check defines missing-input and failure outcomes:
 | Condition | Outcome |
 |---|---|
 | Required input missing | Check-specific refusal, skip, or documented default |
-| `.env` missing/empty (`repo_hygiene.py`) | Warn; secret scan inactive; other checks continue |
+| `.env` missing/empty (`check_files`) | Warn; secret scan inactive; other checks continue |
+| No secret needles (`check_bundle`) | Record `no-secrets-loaded`; still check bundle files |
 | `repo_hygiene.py` scan | Clean: exit 0; violations: exit 1 |
 | Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
 | Worktree hygiene read failure | Default returns empty bytes; `strict=True` raises `OSError`; missing non-symlink paths return empty bytes in either mode |
