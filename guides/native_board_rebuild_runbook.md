@@ -104,9 +104,9 @@ produce only the eight legacy tables, and price-history capture is the existing 
   If any legacy rebuild exits nonzero or is interrupted, stop before the import and before continuing the tier table; treat its generated outputs and metadata as potentially inconsistent — this runbook has no verified safe in-place retry or restore procedure — and resume only after the supervisor independently establishes `SOURCE_ROOT` is complete and current to `AS_OF`.
 - R3: plans carry the expected head snapshot ID and generation; a mismatch must meet a typed
   stale-head refusal — never bypass the head fence — then reread the latest pair and replan.
-- R4: resume an interrupted import by resubmitting its saved plan under the SAME idempotency key;
-  a changed source or head requires a new plan and key. Operator instruction (requirement, not
-  verified fact): rerun price-history capture and computed-moves capture for the same `as_of` after a failure.
+- R4: resubmit an interrupted import's saved plan under the SAME idempotency key only while its job is still active — same-key resubmission returns the existing job
+  unchanged and never resumes a terminally failed job (`submission.py:298-307`); on a terminal failure, stop pending an
+  established recovery procedure. A changed source or head requires a new plan and key. Operator instruction (requirement, not verified fact): rerun price-history capture and computed-moves capture for the same `as_of` after a failure.
 - R5: a command success is step completion, never readiness; the checklist is manual sign-off, not a software refusal.
 - R6: never start nightly work from an incomplete head; repair by rerunning the producer owning the missing item, then recheck everything.
 
