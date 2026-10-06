@@ -1196,9 +1196,13 @@ def run_legacy_script(root, script, args=(), *, staging_dir_fd: int | None = Non
     env = dict(os.environ, INVESTING_PLAN_ROOT=str(base))
     if len(watched) > 1:
         env["INVESTING_PLAN_PINNED_SOURCE"] = str(watched[1][1])
-    completed = subprocess.run([sys.executable, "-u", str(executable), "--no-ledger"],
-                               cwd=base, env=env, check=False, capture_output=True,
-                               text=True, timeout=LEGACY_RUNNER_TIMEOUT_S)
+    try:
+        completed = subprocess.run([sys.executable, "-u", str(executable), "--no-ledger"],
+                                   cwd=base, env=env, check=False, capture_output=True,
+                                   text=True, timeout=LEGACY_RUNNER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _validate_watched_sources(watched, before)
+        raise
     _validate_watched_sources(watched, before)
     return completed
 

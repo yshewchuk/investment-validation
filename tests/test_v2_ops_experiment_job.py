@@ -1306,3 +1306,60 @@ def test_worker_refuses_a_declared_source_that_cannot_be_hashed(tmp_path, monkey
     assert ledger.read_bytes() == ledger_before
     assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
     conn.close()
+
+
+def test_worker_refuses_a_declared_source_tampered_before_runner_timeout(tmp_path, monkeypatch):
+    """A stub runner appends newline bytes to the first declared source under
+    its cwd and then raises ``TimeoutExpired``: the integrity refusal validated
+    on the timeout path supersedes the timeout, naming the relative path with
+    differing before/after hashes in the details and the failed receipt, and
+    committing no ledger row or durable run."""
+    checkout, _ = _registered_checkout(tmp_path)
+    declared = experiments.RUNNER_INVENTORY[REGISTERED_RUNNER]["declared_runtime_sources"][0]
+    ledger_before = (ledger := checkout / "experiments" / "LEDGER.csv").read_bytes()
+    (checkout / "spec.json").write_text(json.dumps(_spec_document(
+        experiment_id="EXP-182", runner=REGISTERED_RUNNER, economic_params={})))
+
+    def tampering_run(command, **kwargs):
+        assert "--no-ledger" in command
+        target = Path(kwargs["cwd"]) / declared
+        target.write_bytes(target.read_bytes() + b"\n# tampered before the timeout\n")
+        raise subprocess.TimeoutExpired(command, 1)
+
+    monkeypatch.setattr(subprocess, "run", tampering_run)
+    conn, _, _ = catalog(tmp_path)
+    with pytest.raises(OpsError) as excinfo:
+        worker.dispatch("experiment", {"runner": REGISTERED_RUNNER, "no_ledger": False,
+                                       "preregistration_root": str(checkout)}, checkout)
+    assert excinfo.value.code == "VALIDATION_FAILED" and excinfo.value.problem.retryable is False
+    details = excinfo.value.problem.details
+    assert details["path"] == declared and details["before_hash"] != details["after_hash"]
+    receipt = json.loads((checkout / "experiment_receipt.json").read_text())
+    failure = receipt["evidence"]["failure_details"]
+    assert receipt["status"] == "failed" and failure.items() <= details.items()
+    assert _ledger_rows(ledger) == [{"id": "EXP-182", "stage": "planned"}]
+    assert ledger.read_bytes() == ledger_before
+    assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+    conn.close()
+
+
+def test_legacy_runner_preserves_timeout_when_watched_sources_are_unchanged(tmp_path, monkeypatch):
+    """A stub runner raises ``TimeoutExpired`` without touching any watched
+    file: the adapter's re-hash passes, so the timeout propagates as the very
+    instance raised -- a direct adapter call, with no receipt, run, or ledger
+    side effects."""
+    from engine.v2.ops import legacy_adapter
+
+    checkout, _ = _registered_checkout(tmp_path)
+    declared_sources = experiments.RUNNER_INVENTORY[REGISTERED_RUNNER]["declared_runtime_sources"]
+    timeout = subprocess.TimeoutExpired(["run.py"], 1)
+
+    def unchanged_run(command, **kwargs):
+        assert "--no-ledger" in command
+        raise timeout
+
+    monkeypatch.setattr(subprocess, "run", unchanged_run)
+    with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+        legacy_adapter.run_legacy_script(checkout, REGISTERED_RUNNER,
+                                         declared_runtime_sources=declared_sources)
+    assert excinfo.value is timeout
