@@ -1108,6 +1108,9 @@ REGISTERED_RUNNERS = frozenset({
     "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py",
 })
 
+_FIXED_ARM_RUNNER = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
+_FIXED_ARM_ARGS = frozenset({("--clock", "d1")})
+
 #: Wall-clock budget for one registered legacy runner subprocess. Sized to
 #: the experiment_heavy resource profile (profiles.py: 5 CPUs, 5.5 GiB,
 #: 10 GiB scratch, heavy+disk_heavy) -- long enough for a full OOS
@@ -1127,10 +1130,11 @@ def run_legacy_script(root, script, args=()):
     script_path = (base / relative).resolve()
     if relative not in REGISTERED_RUNNERS or not script_path.is_relative_to(base):
         raise fail("INVALID_REQUEST", "legacy experiment runner is unaudited")
-    if tuple(args):
+    arguments = tuple(args)
+    if arguments and (relative != _FIXED_ARM_RUNNER or arguments not in _FIXED_ARM_ARGS):
         raise fail("INVALID_REQUEST", "legacy runner may not enable ledger writes")
     import subprocess
-    command = [sys.executable, "-u", str(script_path), "--no-ledger"]
+    command = [sys.executable, "-u", str(script_path), *arguments, "--no-ledger"]
     return subprocess.run(command, cwd=base, check=False,
                           capture_output=True, text=True, timeout=LEGACY_RUNNER_TIMEOUT_S)
 

@@ -128,7 +128,8 @@ def _tiny_checkout(tmp_path, *, with_metrics=True):
                       path=ledger)
     spec_path = checkout / "spec.json"
     spec_path.write_text(json.dumps(_experiment_document(
-        experiment_id="EXP-182", runner=REGISTERED_RUNNER, economic_params={})))
+        experiment_id="EXP-182", runner=REGISTERED_RUNNER, economic_params={},
+        primary_arm_id="d1", arms=["d1"])))
     return checkout, spec_path, ledger, planned_hash
 
 
@@ -154,7 +155,7 @@ def test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger(
     result = worker.dispatch("experiment", plan["parameters"], checkout)
     assert result["completed_ids"] == ["experiment:EXP-182"]
     assert [output["name"] for output in result["outputs"]] == [
-        "experiment_receipt", "resolved_experiment_plan"]
+        "experiment_receipt", "resolved_experiment_plan", "experiment_variant_report"]
     plan_artifact = checkout / "resolved_experiment_plan.json"
     assert plan_artifact.is_file()
     persisted = plan_artifact.read_bytes()
@@ -174,7 +175,8 @@ def test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger(
     spec = experiments.experiment_spec_from_document(document)
     conn, _clock, _ = catalog(ops)
     try:
-        effects_graph._append_ledger_row(conn, checkout, spec, receipt, run_id="exp-run")
+        effects_graph._append_ledger_row(conn, checkout, spec, receipt, run_id="exp-run",
+                                         variant_id=receipt["evidence"]["variant_id"])
     finally:
         conn.close()
 
@@ -217,7 +219,8 @@ def test_ran_row_records_metrics_source_unavailable_when_the_runner_wrote_none(t
         effects_graph._append_ledger_row(
             conn, checkout, spec,
             {"status": "succeeded", "evidence": {"runner_result": {"returncode": 0}}},
-            run_id=run_id)
+            run_id=run_id,
+            variant_id=experiments.expected_variant_identity(checkout, spec, "primary"))
 
         from experiments import lib
 
