@@ -49,7 +49,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `ledger {import-history,status,calibrate,book}` — history summaries count new provenance writes as `imported` (excluding new divergences), and remaining lines as `already_present`; identical committed content under another purpose writes no provenance. Dry runs report the same projected counts and roll back writes.
 - `decisions supersede --row-id --reason --from-json`
 - `price-refresh --session [--dry-run]`
-- `price-history capture --source-root --scope [--dry-run]`
+- `price-history capture --source-root --scope [--dry-run]` (rebuild: [guide](../../../guides/native_board_rebuild_runbook.md))
 - `get`/`logs`/`cancel`/`resume`/`explain <job_id>`
 
 Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`, `NO_JOB_STAGES`, `build_nightly_plan`,
