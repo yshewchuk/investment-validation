@@ -133,10 +133,10 @@ evidence. See the models and data component contracts.
     selection. `module_dependency_closure` walks ONLY
     `build_import_graph`'s real, statically-resolved edges
     (`_ImportGraph.precise`), never a DYNAMIC file's catch-all edge
-    (`build_import_graph` gives a file it cannot parse precisely — e.g. one
-    referencing `sys.path`, `subprocess`, or a non-literal
-    `importlib.import_module` — an edge to every other tracked file, never a
-    narrower guess): reaching a DYNAMIC file adds it to that module's own
+    (`build_import_graph` adds an edge to every other tracked file only when
+    an import, import-path mutation, or subprocess target remains unresolved;
+    recognized literal imports, paths, scripts, and modules add edges only to
+    their resolved targets): reaching a DYNAMIC file adds it to that module's own
     closure via its real edges only, and a DYNAMIC file changing directly
     selects every module whose closure reaches it -- narrow for most DYNAMIC
     files (just their own owners/reachers, e.g. `tests/dynamic.py` selecting
@@ -175,11 +175,18 @@ evidence. See the models and data component contracts.
     closure file also matches, conservatively); a collected
     test file is a leaf (selects itself and its static importers, never the whole suite); the
     dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
-    `full_suite` paths, an unrecognized path, a deleted test file, or a graph failure still select
-    everything. The current full-suite allowlist includes the operator-tool
-    namespace; a graph failure also selects everything. The selection rule
-    (leaf, taint, `full_suite`, conftest ancestors) is documented in
-    `select_pr_tests`'s and `_has_unresolved_import_attempt`'s docstrings, not here.
+    resolved dependencies produce precise edges; a literal script launch to a non-root path is
+    unresolved (resolvable root-level script and `-m` launches retain precise behavior; untracked
+    `-m` targets and Python launches with a non-`None` `cwd` are unresolved); recognized
+    unresolved dependencies produce catch-all edges and may widen selection through the #155
+    fail-safe test set, without necessarily selecting every test. `full_suite` paths, an unrecognized
+    path, a deleted test file, or a graph or scan failure returns the `__ALL__` sentinel and runs
+    the full suite. If the selector command itself errors, the CLI exits nonzero without printing a
+    selection; the workflow job fails before pytest rather than proceeding with a narrowed run.
+    The full-suite allowlist includes the operator-tool namespace. The selection rule (leaf,
+    taint, `full_suite`,
+    conftest ancestors) is documented in `select_pr_tests`'s and
+    `_has_unresolved_import_attempt`'s docstrings, not here.
 
 ## 2. Layers and allowed dependency direction
 
