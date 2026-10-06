@@ -241,6 +241,66 @@ class TestWalkForward:
         assert wf["audit"]["leak_free"]
         assert wf["audit"]["fit_years_seen"] == [2020, 2021]
 
+    def test_probabilities_come_from_the_just_fitted_fold(self):
+        """The sentinel: prediction and selection must both see the fold's fit.
+
+        A stateful gate whose ``fit`` sets the active model to the max train
+        year; ``predict_proba`` returns a normalized sentinel derived from
+        that active fit year per row and records
+        what it saw. With the old call order (score collected before the
+        fold's fit) the first insufficient-history year would call
+        ``predict_proba`` on an unfitted model and this test fails there.
+        """
+        trades = self.trades3y()
+        proba_saw: list[tuple[int, int | None]] = []
+        select_saw: list[tuple[int, int | None]] = []
+        active = {"fit_year": None}
+
+        def fit(train):
+            active["fit_year"] = int(train["year"].max()) if len(train) else None
+
+        def predict_proba(rows):
+            assert active["fit_year"] is not None, "predict_proba ran on an unfitted fold"
+            year = int(pd.to_datetime(rows["event_date"]).dt.year.iloc[0])
+            assert active["fit_year"] < year, "predict_proba saw its own test year"
+            proba_saw.append((year, active["fit_year"]))
+            return np.full(len(rows), float(active["fit_year"] - 2019) / 10)
+
+        def select(rows):
+            year = int(pd.to_datetime(rows["event_date"]).dt.year.iloc[0])
+            select_saw.append((year, active["fit_year"]))
+            return pd.Series(True, index=rows.index)
+
+        wf = walk_forward(trades, Gate(fit=fit, select=select,
+                                       predict_proba=predict_proba),
+                          min_train_years=2)
+        diag = {d["year"]: d for d in wf["diagnostics"]}
+        scores = wf["scores"]
+
+        # No prediction for the insufficient-history years; their score rows
+        # are explicitly unfitted and null.
+        assert [year for year, _ in proba_saw] == [2022]
+        for year in (2020, 2021):
+            rows = scores[scores["year"] == year]
+            assert len(rows) == 5
+            assert not rows["fitted"].any()
+            assert rows["proba"].isna().all()
+            assert rows["fit_identity"].isna().all()
+            assert diag[year]["fitted"] is False
+            assert diag[year]["fit_identity"] is None
+
+        # The eligible fold was fit first; every probability encodes that fit,
+        # and the diagnostics identity matches every score-row identity.
+        rows = scores[scores["year"] == 2022]
+        assert diag[2022]["fitted"] is True
+        assert diag[2022]["fit_identity"] == "walk-forward:2022:train-through:2021"
+        assert set(rows["fit_identity"]) == {diag[2022]["fit_identity"]}
+        assert rows["fitted"].all()
+        assert rows["proba"].notna().all() and (rows["proba"] == 0.2).all()
+        # Prediction and selection saw the same active fit.
+        assert proba_saw == [(2022, 2021)]
+        assert select_saw == [(2022, 2021)]
+
     def test_empty(self):
         wf = walk_forward(make_trades([]).iloc[0:0], None)
         assert wf["selected"].empty
@@ -752,7 +812,13 @@ class TestCalibrationStage:
         result = evaluate(spec, trades, gate=gate, mc_paths=30, stress=False,
                           write_report=False)
         cal = result.results["calibration"]
-        assert cal["available"] and cal["n"] == 400
+        # min_train_years=1 leaves the first year unfitted: calibration counts
+        # only eligible fitted years, derived from this frame — the unfitted
+        # rows must not enter the math.
+        years = pd.to_datetime(trades["event_date"]).dt.year
+        expected_n = int((years > years.min()).sum())
+        assert cal["available"] and cal["n"] == expected_n
+        assert cal["n"] < int(len(trades))
         assert cal["brier_skill"] > 0  # the synthetic gate is genuinely predictive
 
         from engine.report import Report

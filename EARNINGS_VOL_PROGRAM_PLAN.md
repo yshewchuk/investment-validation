@@ -290,7 +290,9 @@ auto-generated.
      margin of safety on the mid-fill assumption).
    - **Walk-forward** — expanding window by year, parameters frozen before
      each test year (the existing convention: train ≤Y−1, trade Y). Headline
-     numbers come ONLY from walk-forward out-of-sample years.
+     numbers come ONLY from walk-forward out-of-sample years. Fit each eligible
+     fold before collecting probabilities or trades, record its fit identity
+     beside both, and leave insufficient-history probabilities unfitted.
    - **Monte Carlo** — block-bootstrap (block=20, preserving earnings-week
      clustering) on the walk-forward trade sequence: P(loss), drawdown
      percentiles, terminal-equity distribution, and a sizing curve

@@ -917,10 +917,14 @@ class Gate:
     name: str = "gate"
     seen: list = field(default_factory=list)
     #: Optional P(win) ∈ [0, 1] per row. When present, the walk-forward
-    #: collects out-of-sample probabilities for every traded year and
-    #: evaluate() turns them into the calibration block — which is what makes
-    #: the promotion Brier-skill rule live instead of a permanent WARN. Gates
-    #: without one are still evaluated; their calibration reports unavailable.
+    #: collects out-of-sample probabilities for every eligible (fitted) test
+    #: year — always AFTER that fold's ``fit``, so a probability comes from
+    #: the same model the fold trades with — and evaluate() turns them into
+    #: the calibration block, which is what makes the promotion Brier-skill
+    #: rule live instead of a permanent WARN. Years skipped for insufficient
+    #: fit history are never predicted: their score rows carry null proba and
+    #: explicit unfitted markers that calibration excludes. Gates without one
+    #: are still evaluated; their calibration reports unavailable.
     predict_proba: Callable[[pd.DataFrame], np.ndarray] | None = None
 
 
@@ -937,9 +941,19 @@ def walk_forward(
     fixes the year-by-year accounting the headline numbers come from. Years
     with fewer than ``min_train_years`` preceding years are traded ungated (a
     gate with no training history has no business selecting) and are flagged as
-    ``ungated`` in the diagnostics so the report says so.
+    ``ungated`` and explicitly unfitted in the diagnostics so the report says
+    so.
 
-    Returns ``{selected, diagnostics, audit}`` where ``selected`` carries the
+    With a gate the order inside a fold is fixed: ``fit(train)`` runs FIRST,
+    then ``predict_proba(test)`` and ``select(test)`` — both against the
+    just-fitted fold model, never a stale one. Every eligible fold carries a
+    deterministic ``fit_identity`` (``walk-forward:<test_year>:train-through:
+    <max train year>``) stamped on its diagnostics row and on each of its
+    score rows. A year skipped for insufficient history is never predicted:
+    its score rows exist with null ``proba`` and ``fitted=False`` so the OOS
+    accounting stays complete, and calibration filters them out.
+
+    Returns ``{selected, diagnostics, audit, scores}`` where ``selected`` carries the
     kept rows at every alpha (selection is decided at mid and applied to the
     whole alpha grid — the contracts a structure selects must not depend on the
     fill assumption) and ``audit`` is the leak receipt the report checklist
@@ -963,18 +977,30 @@ def walk_forward(
         train_years = int(train["year"].nunique())
         row: dict[str, Any] = {"year": int(year), "n_train": int(len(train)),
                                "n_test": int(len(test)), "train_years": train_years}
-        if gate is not None and gate.predict_proba is not None and len(test):
-            # OOS probabilities for the calibration block — collected for EVERY
-            # traded year (ungated ones included): calibration is measured on
-            # the whole out-of-sample universe, never on the selected subset.
-            score_rows.append(pd.DataFrame({
-                "event_id": test["event_id"].to_numpy(),
-                "proba": np.asarray(gate.predict_proba(test), dtype=float),
-                "year": int(year),
-            }))
         if gate is None or train_years < min_train_years or test.empty:
             row["n_selected"] = int(len(test))
             row["ungated"] = gate is not None and train_years < min_train_years
+            # The fold is marked unfitted explicitly, not by the absence of a
+            # marker: a diagnostics row that merely lacks the field cannot be
+            # told apart from one that fitted and forgot to say so.
+            row["fitted"] = False
+            row["fit_identity"] = None
+            row["unfitted_reason"] = (
+                "insufficient train history" if row["ungated"]
+                else "no gate in this run" if gate is None else "empty test year"
+            )
+            if gate is not None and gate.predict_proba is not None and len(test):
+                # Skipped year: the gate is never called — predict_proba on an
+                # unfitted model would fabricate probabilities. The rows are
+                # still recorded, with null proba, so the OOS accounting is
+                # complete; calibration excludes them via `fitted`.
+                score_rows.append(pd.DataFrame({
+                    "event_id": test["event_id"].to_numpy(),
+                    "proba": np.full(int(len(test)), np.nan),
+                    "year": int(year),
+                    "fitted": False,
+                    "fit_identity": None,
+                }))
             kept_ids.extend(test["event_id"].tolist())
             diagnostics.append(row)
             continue
@@ -987,7 +1013,29 @@ def walk_forward(
             assert int(train["year"].max()) < year, "walk-forward handed the test year to fit()"
             fit_years_seen.append(int(train["year"].max()))
             gate.seen.append(int(train["year"].max()))
+        # Fit FIRST. The fold identity is minted from the model that is about
+        # to trade, and both the probabilities and the selection must come
+        # from this same just-fitted fold — scoring before fitting would
+        # silently hand back the previous fold's model (or none at all).
         gate.fit(train)
+        fold_identity = (
+            f"walk-forward:{year}:train-through:"
+            f"{int(train['year'].max()) if len(train) else 'none'}"
+        )
+        row["fitted"] = True
+        row["fit_identity"] = fold_identity
+        if gate.predict_proba is not None:
+            # OOS probabilities for the calibration block — collected for every
+            # eligible traded year, after that year's fit: calibration is
+            # measured on the whole out-of-sample universe, never on the
+            # selected subset, and never on an unfitted model.
+            score_rows.append(pd.DataFrame({
+                "event_id": test["event_id"].to_numpy(),
+                "proba": np.asarray(gate.predict_proba(test), dtype=float),
+                "year": int(year),
+                "fitted": True,
+                "fit_identity": fold_identity,
+            }))
         mask = gate.select(test)
         mask = pd.Series(np.asarray(mask, dtype=bool), index=test.index)
         row["n_selected"] = int(mask.sum())
@@ -1587,11 +1635,19 @@ def evaluate(
     }
 
     # Calibration of the gate's OOS probabilities. Computed on the WHOLE
-    # out-of-sample universe, not the selected subset — measuring calibration
-    # on what the gate kept would condition on the very thing being measured.
+    # fitted out-of-sample universe, not the selected subset — measuring
+    # calibration on what the gate kept would condition on the very thing
+    # being measured. Rows a fold never fitted (insufficient train history)
+    # carry null proba and are excluded here: an unfitted row has no model's
+    # probability behind it, and averaging one into the Brier would score
+    # nothing.
     scores = wf.get("scores")
-    if scores is not None and len(scores):
-        merged = scores.merge(
+    eligible = (
+        scores[scores["fitted"].astype(bool) & scores["proba"].notna()]
+        if scores is not None and len(scores) else pd.DataFrame()
+    )
+    if len(eligible):
+        merged = eligible.merge(
             base_mid[["event_id", "ret"]], on="event_id", how="inner")
         results["calibration"] = calibration_block(
             merged["proba"].to_numpy(),
@@ -1600,7 +1656,9 @@ def evaluate(
     else:
         results["calibration"] = {
             "available": False,
-            "reason": "gate provides no predict_proba; calibration not measured",
+            "reason": ("no fitted OOS probabilities to calibrate: the gate has "
+                       "no predict_proba, or every test year was skipped for "
+                       "insufficient fit history"),
         }
 
     # -- stage 3: Monte Carlo on the WF OOS sequence ------------------------
