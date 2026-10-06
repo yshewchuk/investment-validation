@@ -1407,3 +1407,22 @@ def test_register_missing_catalog_is_a_typed_cli_refusal(tmp_path, capsys):
     assert str(catalog) not in stderr
     assert json.loads(stderr)["refused"] == "INPUT_CHANGED"
     assert not catalog.exists()
+
+
+def test_register_cli_success_writes_exact_verified_bytes_to_stdout(tmp_path, capsys):
+    fixture = _securities_fixture(tmp_path)
+    export_path = tmp_path / "export.json"
+    _export(fixture, export_path)
+    read_conn = reregister_snapshot._open_read_only(fixture["catalog_path"])
+    try:
+        verified = reregister_snapshot.register(
+            read_conn, inventory_path=export_path, objects_root=fixture["store"].root)
+    finally:
+        read_conn.close()
+    assert reregister_snapshot.main([
+        "register", "--inventory", str(export_path),
+        "--catalog", str(fixture["catalog_path"]),
+        "--objects", str(fixture["store"].root)]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.encode("utf-8") == verified.to_bytes()
