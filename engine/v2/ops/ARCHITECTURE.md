@@ -1254,6 +1254,7 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | Condition | Outcome |
 |---|---|
 | no succeeded native `"refresh"` job yet, no shadow head, or a resolved target list that comes back empty | returns without submitting anything — not a failure, since `computed_moves_refresh` has no receipt to degrade until an attempt exists |
+| shadow head has scoreable targets but no committed import receipt | planner raises `SNAPSHOT_NOT_READY` before job submission; the sidecar records a failed build attempt and backs off this identity |
 | a job already exists under today's session key, in any state | never rebuilt or resubmitted |
 | idempotency key | session-only, never `scope_hash`-qualified — this job's target set is the whole scoreable universe, independent of which watchlist's `"score"` job happened to trigger the tick |
 
