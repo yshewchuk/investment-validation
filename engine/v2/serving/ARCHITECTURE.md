@@ -7,17 +7,9 @@ Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 
 ## Primary contracts and public interfaces
 
-**Operations health currency.** The producer emits `operations_health.v1.1`
-with `requested_session` and `resolved_session` copied from the unique
-`ledger_export_receipt.v1.0` bound through `release_intent` to its current
-delivered release; it never derives either from `generated_at`. Missing,
-ambiguous, or mismatched receipt evidence is `VALIDATION_FAILED` (the CLI
-writes no file, and does not retry); the same catalog and clock yield
-byte-identical JSON. The consumer accepts v1.0 and v1.1; an older v1.0
-document remains valid, while either absent or malformed session field leaves
-currency `unknown` without a default. This additive response uses the
-minor-version rule in
-`guides/component_contracts.md` §2.3; older versions remain readable.
+**Operations health currency.** Serving accepts `operations_health.v1.0` and
+`operations_health.v1.1`. Older v1.0 documents remain valid; either absent or
+malformed session field leaves currency `unknown` without a default.
 The [README](README.md) lists the checked exports (the only names other packages may import). By module:
 - `operations.create_server` (authenticated HTTP listener).
 - `api`: `create_app` (authenticated read-only JSON API), `ApiError`; run as

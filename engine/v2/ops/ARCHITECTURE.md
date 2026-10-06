@@ -1,10 +1,8 @@
 # `engine/v2/ops` — architecture
 
-Layer 7.0 in the root `/ARCHITECTURE.md` layer table. Replaces the new
-supervisor/catalog design, `dashboard/nightly.py` (as a job graph) and
-`tools/bounded_run.py` (as an executor adapter). See the root doc for the
-layer rules this package is checked against; this doc covers the detail
-specific to this package.
+Layer 7.0 in the root `/ARCHITECTURE.md` layer table. Replaces the new supervisor/catalog design,
+`dashboard/nightly.py` (as a job graph) and `tools/bounded_run.py` (as an executor adapter). The root doc covers shared
+layer rules; this doc covers package detail.
 
 ## Purpose
 
@@ -14,17 +12,24 @@ boundary. It does not decide research conclusions (`engine/v2/evaluation`)
 and does not compute a score (`engine/v2/scoring`) — it only sequences and
 persists the jobs that call into those packages.
 
-This doc also covers `native_board_universe.py`: a pure, answer-free
-enumerator that reproduces legacy `engine.score.score_calendar`'s event ×
-strategy enumeration for the strategies native scoring supports, without
-touching the legacy chain index or constructing a legacy `Scorer`. It has
-no production caller yet — see "Dependencies" below; schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
+This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy
+`engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a
+legacy `Scorer`. It has no production caller yet (see "Dependencies"); schema migrations follow the
+[checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
 
 ## Primary contracts and public interfaces
 
-The operator interface is the versioned command protocol
-`engine/v2/ops/cli.py` exposes (`python3 -m engine.v2.ops <command>`),
-derived directly from its `argparse` definitions:
+**Operations health output.** `health` emits `operations_health.v1.1` with
+`requested_session` and `resolved_session` copied from the unique delivered
+`ledger_export_receipt.v1.0` bound through `release_intent` to the current
+delivered release; neither comes from `generated_at`. Missing, malformed,
+ambiguous or mismatched evidence is `VALIDATION_FAILED`; the CLI writes no
+document and does not retry. The same catalog and clock produce byte-identical
+JSON. This additive response follows the minor-version rule in
+`guides/component_contracts.md` §2.3; older versions remain valid.
+
+The operator interface is the versioned command protocol exposed by `engine/v2/ops/cli.py`
+(`python3 -m engine.v2.ops <command>`), derived directly from its `argparse` definitions:
 
 - `init`, `doctor`, `health`
 - `serve` — starts the supervisor loop
@@ -45,24 +50,17 @@ derived directly from its `argparse` definitions:
 - `price-history capture --source-root --scope [--dry-run]`
 - `get`/`logs`/`cancel`/`resume`/`explain <job_id>`
 
-Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`,
-`NO_JOB_STAGES`, `build_nightly_plan`, `build_legacy_job_requests`,
-`_stage_sequence` (see "Diagrams" below); `supervisor.Service`/`serve`;
-the coordinator-effect functions in `effects_graph.py`; `training.py`'s
-`training_job_kind`/`promote_job_kind` (registered in
-`stages.py::_core_kinds`, not in `supervisor._COORDINATOR_EFFECT_KINDS`),
-`training_plan`/`promote_plan`, `run_training_worker`/`run_promote_worker`;
-`BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
-(`native_board_universe.py`) — a pure key `(ticker, strategy, event_date,
-session)` and the function that enumerates one per event × native-covered
-strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
-`computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/
-`calendar_moves_parameter_problems`/`calendar_moves_job_spec`, and
-`run_computed_moves_worker`/`run_forward_calendar_worker` (dispatched by
-`worker.py`). `forward_calendar_refresh` has a `JobKind` (worker dispatch,
-loader callback, parameter validation) but no `nightly.py` `GRAPH`/
-`OPTIONAL` node and no `supervisor.Service` submitter yet — not on the
-nightly schedule.
+Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`, `NO_JOB_STAGES`, `build_nightly_plan`,
+`build_legacy_job_requests`, `_stage_sequence` (see "Diagrams" below); `supervisor.Service`/`serve`; the
+coordinator-effect functions in `effects_graph.py`; `training.py`'s `training_job_kind`/`promote_job_kind` (registered in
+`stages.py::_core_kinds`, not in `supervisor._COORDINATOR_EFFECT_KINDS`), `training_plan`/`promote_plan`,
+`run_training_worker`/`run_promote_worker`; `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
+(`native_board_universe.py`) — a pure key `(ticker, strategy, event_date, session)` and the function that enumerates
+one per event × native-covered strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
+`computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
+`calendar_moves_job_spec`, and `run_computed_moves_worker`/`run_forward_calendar_worker` (dispatched by `worker.py`).
+`forward_calendar_refresh` has a `JobKind` (worker dispatch, loader callback, parameter validation) but no `nightly.py`
+`GRAPH`/`OPTIONAL` node and no `supervisor.Service` submitter yet — not on the nightly schedule.
 
 `forward_calendar_store.py` is one of a small number of natively-fetched
 data stores living directly in this package rather than delegating to
