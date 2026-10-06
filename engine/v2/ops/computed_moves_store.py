@@ -28,6 +28,7 @@ import hashlib
 import io
 import json
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -35,7 +36,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from engine.v2.contracts import DataQuery, KeyPredicate, ObjectRef, TableContractRef
+from engine.v2.contracts import ObjectRef, TableContractRef
 from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests, objects
 from engine.v2.data.computed_moves import MIN_SCOREABLE, build_rows
@@ -50,6 +51,11 @@ from engine.v2.ops.incremental_data import (
     refresh_job_kind,
 )
 from engine.v2.ops.lifecycle import validated_attempt_fence_pair, verify_fence
+from engine.v2.ops.pinned_partition_reader import (
+    RetainedBatch,
+    RetainedRowCount,
+    iter_pinned_scan_batches,
+)
 from engine.v2.ops.unit_receipts import (
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     cached_unit_outcomes,
@@ -129,52 +135,70 @@ def _as_of_day(as_of) -> str:
 # --------------------------------------------------------------------------
 
 
-def _scan_rows(repository: Repository, snapshot, table_name: str, columns) -> list[dict]:
-    contract_ref = snapshot.table_versions[table_name].table_contract_ref
-    contract = repository.table_contract(snapshot, table_name)
-    years = tuple(sorted({int(record.partition_key)
-                          for record in repository.fragment_records(snapshot, table_name)}))
-    if not years:
-        return []
-    key_filter = (KeyPredicate(column="year", operator="in", values=years),)
-    population_bound = repository.scan_population_bound(
-        snapshot.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
-        key_filter=key_filter, time_interval=None)
-    max_result_rows = min(MAX_SCAN_ROWS, population_bound)
-    max_batch_rows = min(contract.maximum_batch_rows, 50_000)
-    if population_bound > 0:
-        # A zero bound is a valid empty population: max_result_rows stays 0,
-        # but the batch ceiling must not be capped to zero -- only positive
-        # bounds keep max_batch_rows <= max_result_rows.
-        max_batch_rows = min(max_batch_rows, population_bound, max_result_rows)
-    query = DataQuery(
-        snapshot_id=snapshot.snapshot_id, table_contract_ref=contract_ref,
-        columns=tuple(columns),
-        key_filter=key_filter,
-        order_by=tuple(contract.primary_key),
-        max_batch_rows=max_batch_rows,
-        max_result_rows=max_result_rows)
-    rows: list[dict] = []
-    for batch in repository.scan(query, table_name=table_name):
-        rows.extend(batch.to_pylist())
-    return rows
+def _scan_rows(repository: Repository, snapshot, table_name: str,
+               columns) -> Iterator[RetainedBatch]:
+    """One pinned snapshot's ``table_name``, in the table contract's primary-key
+    order, through the shared bounded pinned-partition reader.
+
+    The reader keeps this store's exact query scope -- the snapshot's own
+    contract ref, every represented year partition, these ``columns`` -- and
+    yields the selection as the ordered :class:`RetainedBatch` leases accounted
+    by a fresh local live-row account: each lease is the caller's to enter,
+    process and exit before the reader advances, so the live count stays
+    bounded by ``max_retained_rows`` (``MAX_SCAN_ROWS``, unchanged) and every
+    batch is discharged as the reader advances, on scan error and on iterator
+    close. Exhaustion simply ends the lease sequence once the selection's last
+    batch has been released. Every repository exception (a missing or corrupt
+    pinned input, a scan exceeding that bound) propagates as the repository's
+    own typed refusal -- never an empty result.
+    """
+    account = RetainedRowCount()
+    yield from iter_pinned_scan_batches(
+        repository, snapshot, table_name, columns,
+        max_retained_rows=MAX_SCAN_ROWS, retained_rows=account)
+
+
+def _scan_frame(repository: Repository, snapshot, table_name: str,
+                columns) -> pd.DataFrame:
+    """One pinned snapshot's ``table_name`` as one frame, built per leased batch.
+
+    Consumes the ordered :class:`RetainedBatch` leases from :func:`_scan_rows`.
+    Handing released row dictionaries to ``pd.DataFrame`` after the fact would
+    fail -- a lease clears its rows on release -- so exactly one frame chunk is
+    constructed per batch while that batch's lease is live, the lease exits
+    before the reader advances, and the completed chunks concatenate --
+    ``ignore_index=True`` -- only after full exhaustion. A scan whose lease
+    sequence yields no batches returns an empty frame, the previous generator's
+    shape. Every repository or integrity error propagates unchanged as this
+    helper unwinds, discarding the local provisional chunks; no row dictionary
+    is ever retained or accumulated across batches.
+    """
+    chunks: list[pd.DataFrame] = []
+    for lease in _scan_rows(repository, snapshot, table_name, columns):
+        with lease as batch:
+            chunks.append(pd.DataFrame(batch))
+    if not chunks:
+        return pd.DataFrame()
+    return pd.concat(chunks, ignore_index=True)
 
 
 def _scan_once(repository: Repository, snapshot) -> tuple[pd.DataFrame, pd.DataFrame]:
     """One scan of each source table, shared by target selection and capture.
 
     Returns the ORATS-confirmed ``earnings_events`` frame (``event_date``
-    parsed) and the ``daily_market`` frame, both sorted by key. Every consumer
-    in this run indexes these frames; nothing scans per ticker again.
+    parsed) and the ``daily_market`` frame, both sorted by key. Each frame
+    arrives through the batch-aware :func:`_scan_frame` consumer, so no scan
+    retains the whole selection's row dictionaries at once. Every consumer in
+    this run indexes these frames; nothing scans per ticker again.
     """
-    events = pd.DataFrame(_scan_rows(repository, snapshot, "earnings_events",
-                                     ("ticker", "event_date", "session", "src_orats")))
+    events = _scan_frame(repository, snapshot, "earnings_events",
+                         ("ticker", "event_date", "session", "src_orats"))
     if not events.empty:
         events = events[events["src_orats"] & events["session"].notna()].copy()
         events["event_date"] = pd.to_datetime(events["event_date"])
         events = events.sort_values("event_date").reset_index(drop=True)
-    daily = pd.DataFrame(_scan_rows(repository, snapshot, "daily_market",
-                                    ("ticker", "date", "implied_move")))
+    daily = _scan_frame(repository, snapshot, "daily_market",
+                        ("ticker", "date", "implied_move"))
     if not daily.empty:
         daily = daily.sort_values("date").reset_index(drop=True)
     return events, daily
