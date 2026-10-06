@@ -327,84 +327,26 @@ submission path reads either edge (the rule Part 4 established for
   lands, not two.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
   dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
-  gap `compare_native_vs_legacy`'s own row-sharing checks would otherwise
-  cause (CodeRabbit round 3; widened by an Opus gate finding, both real).
-  Two EXISTING, UNCHANGED checks inside `compare_native_vs_legacy` can both
-  fire even though a refusal fully explains the gap: `_refuse_empty_inputs`
-  (`not native_rows` → `VALIDATION_FAILED`) when native produced nothing at
-  all, and the function's own `if not compared: raise fail("VALIDATION_FAILED",
-  "native parity report shares no row key", ...)` (`native_parity_report.py:178`,
-  pre-existing, unchanged by this redo) whenever `legacy_rows` and
-  `native_rows` share NO key — which happens not only when `native_rows`
-  is empty, but also when `native_rows` is non-empty yet none of its keys
-  overlap `legacy_rows`'s (every row that would have overlapped was
-  instead refused). `run_native_parity_worker` therefore checks
-  `legacy_rows` is non-empty FIRST — an empty `legacy_rows` is a genuinely
-  missing legacy input, never something a native refusal can explain, so
-  it ALWAYS falls through to `compare_native_vs_legacy`'s existing checks
-  and fails `VALIDATION_FAILED`, exactly as before this redo, regardless
-  of how many native refusals exist. Only once `legacy_rows` is confirmed
-  non-empty does it compute `shared = set(legacy_rows) & set(native_rows)`
-  BEFORE calling `compare_native_vs_legacy` at all, and take this path
-  whenever `shared` is empty AND EITHER (a) `set(legacy_rows) <=
-  set(native_refusals)` — every legacy key specifically named by a keyed
-  refusal, not merely "some refusal exists somewhere" (CodeRabbit gate
-  round 1, real finding: an unrelated refusal for a DIFFERENT population
-  key must never explain a DIFFERENT legacy row's absence — that case
-  still falls through and fails) — OR (b) `native_rows` and
-  `native_refusals` are BOTH empty while `unkeyable_refusals` is non-empty
-  (nothing was ever keyable at all, so nothing could have matched
-  anything, which vacuously explains every legacy key's absence). This
-  covers every case the narrower "`native_rows` empty" check alone would
-  miss:
-  - **All refused, none keyable.** Every row refused `INVALID_KEY_FIELD`
-    (above): `native_rows` and the keyed `native_refusals` are BOTH empty,
-    but `unkeyable_refusals` is fully populated. The narrower check (only
-    testing keyed `native_refusals`) would wrongly fall through to a
-    normal `compare_native_vs_legacy` call and hit `_refuse_empty_inputs`.
-  - **Disjoint keys, native_rows non-empty.** Every legacy row's native
-    counterpart was refused BY ITS OWN matching population key (case (a)
-    above — an unkeyable refusal carries no population key, so it can
-    never stand in for a specific legacy row's own counterpart here),
-    while `native_rows`
-    itself holds OTHER rows entirely (different tickers/strategies,
-    genuinely `only_native`) that share no key with `legacy_rows`. Because
-    `native_rows` is non-empty, `_refuse_empty_inputs` would not fire, but
-    `shared` is still empty, so the pre-existing "no shared key" check
-    (`native_parity_report.py:178`, above) would — even though every legacy row's absence IS
-    explained by a refusal, exactly `native_refused`/`native_refused_unmatched`'s
-    (below) reportable outcome, not a missing-input failure.
-  - **All refused, keyable.** The ORIGINAL narrower case (`native_rows`
-    empty, keyed `native_refusals` fully populated): still covered, since
-    `shared` is trivially empty when `native_rows` is.
+  gap in `compare_native_vs_legacy`: its unchanged guards reject an empty
+  native side and a comparison with no shared key. The worker first rejects
+  empty `legacy_rows`, then computes shared keys before calling the
+  comparator. With no shared key, it builds `_empty_native_report` when
+  every legacy key has its own keyed refusal, or when `native_rows` is
+  empty and any keyed or unkeyable refusal exists. Thus timestamp-keyed
+  refusals remain unmatched with their exact identity; they are never
+  normalized to a legacy day key. No row or comparison value is invented.
+  Empty native rows with no refusals still fail `VALIDATION_FAILED`.
+  Non-empty disjoint native rows still require matching refusals for every
+  legacy key; an unrelated refusal does not explain an absent legacy row.
+  Shared-key inputs keep using the unchanged comparator path.
 
-  In every covered case, `_empty_native_report` builds the SAME dict shape
-  `compare_native_vs_legacy` would return for a would-be comparison with no
-  shared keys — `{"schema_version": SCHEMA_VERSION, "tolerance_policy_id":
-  tolerance_policy.policy_id, "compared": [], "only_legacy":
-  sorted(legacy_rows), "only_native": sorted(native_rows), "mismatches":
-  []}` (unlike the original narrower version, `only_native` is NOT
-  hardcoded `[]`: because `shared` is empty by construction on this path,
-  EVERY key of `native_rows` is, by definition, `only_native` — never
-  `compared`, since nothing shared) — WITHOUT calling
-  `compare_native_vs_legacy` (there is no numeric comparison to make:
-  nothing shared was scored against anything), and `apply_native_refusals`
-  runs on it exactly as it would on a real comparison's output, narrowing
-  `only_legacy` by `native_refused`/`native_refused_unmatched` the
-  identical way. If `shared` is empty and BOTH `native_refusals` and
-  `unkeyable_refusals` are empty (native_score_batch produced nothing at
-  all AND refused nothing — a genuinely missing native input, nothing to
-  explain the gap), or if `legacy_rows` is empty, `run_native_parity_worker`
-  calls `compare_native_vs_legacy` normally and lets its EXISTING checks
-  raise `VALIDATION_FAILED` — the correct outcome for THAT case is
-  unchanged. `compare_native_vs_legacy` itself gains no new parameter and
-  no new branch for this: the decision of which path to take is
-  `run_native_parity_worker`'s own (still unbuilt — Phase 2), so
-  `run_shadow_nightly`'s test-only path, which calls `native_parity_handler`
-  directly and never `run_native_parity_worker`, never reaches this
-  `_empty_native_report` branch at all — see the next bullet,
-  `apply_native_refusals`, for the one behavior change that DOES already
-  reach that existing test-only path today.
+  `_empty_native_report` preserves the comparator's report shape: all
+  legacy keys are `only_legacy`, all native keys are `only_native`, and
+  `compared`/`mismatches` are empty. `apply_native_refusals` then classifies
+  refusals as it does for comparator reports. The decision is private to
+  `run_native_parity_worker`; `compare_native_vs_legacy` gains no branch.
+  The test-only `run_shadow_nightly` path calls `native_parity_handler`
+  directly and does not reach this worker branch.
 - **`native_parity_report.apply_native_refusals(report, native_refusals,
   unkeyable_refusals=()) -> dict`** (new) — the mechanism for "missing or
   refused native rows are counted separately" (user decision, option (c)).
@@ -1366,8 +1308,9 @@ job.
 | Condition | Outcome |
 |---|---|
 | `legacy_rows` is empty | `VALIDATION_FAILED`, unconditionally — a missing legacy input is never explained by a native refusal |
-| no shared key between native and legacy, but every legacy key is covered by its own matching keyed refusal (or nothing was ever keyable at all) | reported as a normal (degenerate) parity report, not a job failure — an unrelated refusal naming a different population key never counts |
-| no shared key and no refusal explains it | job fails, same as a genuinely missing native input |
+| no shared key and either every legacy key has its own keyed refusal or native rows are empty with any refusal | reported normally; unmatched refusals keep their exact timestamp identity |
+| no shared key and neither condition above applies, including empty native rows with no refusals | `VALIDATION_FAILED`; missing native input has no silent default |
+| identical inputs, clock, and code are re-run | byte-identical report, including refusal identity and classification |
 | the records/refusals schema tag is stale, no `native_parity` job exists yet for this identity | `submit_native_parity_if_ready`'s pre-submission check raises `VALIDATION_FAILED` (`reason: "schema_mismatch"`), submitting nothing |
 | the records/refusals schema tag is stale, a `native_parity` job already exists for this identity | the existing-job short-circuit returns `None` before the check ever runs |
 | a `native_parity` job reaches `run_native_parity_worker` with a stale schema tag anyway (e.g. the generic job-submission API used directly) | the worker's own independent check fails `VALIDATION_FAILED` |

@@ -528,9 +528,8 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
     shared = set(legacy_rows) & set(native_rows)
     if legacy_rows and not shared:
         fully_refused = set(legacy_rows) <= set(native_refusals)
-        nothing_keyable_at_all = (
-            not native_rows and not native_refusals and bool(unkeyable_refusals))
-        refusal_explains_absence = fully_refused or nothing_keyable_at_all
+        refusal_explains_absence = fully_refused or (
+            not native_rows and bool(native_refusals or unkeyable_refusals))
     else:
         refusal_explains_absence = False
     if refusal_explains_absence:

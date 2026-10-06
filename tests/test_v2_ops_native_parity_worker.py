@@ -18,11 +18,16 @@ from engine.v2.foundation import format_timestamp, to_document
 from engine.v2.ops import worker
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_parity_report import (
+    PARITY_DIMENSIONS,
     SCHEMA_VERSION,
     _empty_native_report,
+    _native_comparison_row,
+    _stamp_report_identity,
+    apply_native_refusals,
     compare_native_vs_legacy,
     run_native_parity_worker,
 )
+from engine.v2.ops.nightly import legacy_parity_rows
 from engine.v2.parity.tolerance import SCORE_RECORD_V1
 from tests.ops_support import FakeClock
 
@@ -297,15 +302,52 @@ def test_run_native_parity_worker_disjoint_native_rows_with_keyed_refusal(tmp_pa
         {"row_key": _row_key(row), "refusal_code": "RELEASE_MISSING_ROLE"}]
 
 
-def test_run_native_parity_worker_unrelated_refusal_does_not_justify_empty_report(tmp_path):
+def test_run_native_parity_worker_intraday_refusal_preserves_timestamp(tmp_path):
     row = _legacy_row(ticker="AAA")
-    unrelated_key = _canonical_key("ZZZ", "STR-THRU", "2026-01-15", session="am")
+    refusal_key = _canonical_key(
+        "AAA", "STR-THRU", "2026-01-15T09:30:00", session="am")
     _write_inputs(tmp_path, rows=[row], records={},
-                  refusals={unrelated_key: {"code": "RELEASE_MISSING_ROLE", "detail": "..."}})
+                  refusals={refusal_key: {"code": "RELEASE_MISSING_ROLE",
+                                          "detail": "not applicable"}})
 
-    with pytest.raises(OpsError) as exc:
-        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
-    assert exc.value.code == "VALIDATION_FAILED"
+    result = run_native_parity_worker(
+        {"expected_ids": ("2026-01-15|scope",)}, tmp_path, clock=FakeClock())
+
+    assert result["outputs"] == _OUTPUTS
+    report = _read_report(tmp_path)
+    assert report["only_legacy"] == [_row_key(row)]
+    assert report["native_refused"] == []
+    assert report["native_refused_unmatched"] == [
+        {"row_key": "AAA|STR-THRU|2026-01-15T09:30:00",
+         "refusal_code": "RELEASE_MISSING_ROLE"}]
+
+    report_bytes = (tmp_path / "native_parity_report.json").read_bytes()
+    run_native_parity_worker(
+        {"expected_ids": ("2026-01-15|scope",)}, tmp_path, clock=FakeClock())
+    assert (tmp_path / "native_parity_report.json").read_bytes() == report_bytes
+
+
+def test_run_native_parity_worker_bytes_match_the_comparator_path(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records)
+
+    run_native_parity_worker(
+        {"expected_ids": ("a",)}, tmp_path, clock=FakeClock())
+
+    legacy_rows = legacy_parity_rows({"rows": rows})
+    native_rows = {
+        "|".join(key.split("|")[:3]): _native_comparison_row(record)
+        for key, record in records.items()
+    }
+    expected = compare_native_vs_legacy(
+        legacy_rows, native_rows, PARITY_DIMENSIONS,
+        tolerance_policy=SCORE_RECORD_V1)
+    expected = apply_native_refusals(expected, {}, ())
+    expected = _stamp_report_identity(expected, as_of=None, clock=FakeClock())
+
+    assert json.dumps(
+        expected, sort_keys=True, separators=(",", ":")).encode() == (
+            tmp_path / "native_parity_report.json").read_bytes()
 
 
 def test_run_native_parity_worker_genuinely_missing_native_rows_raises(tmp_path):
