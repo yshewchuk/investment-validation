@@ -184,8 +184,37 @@ export function useResolvedRelease(
   useEffect(() => {
     let cancelled = false;
     let sequence = 0;
-    const timer = window.setInterval(() => {
-      if (pinnedIdRef.current === null) return;
+    let inFlight = false;
+    let visibleCheckQueued = false;
+    let timer: number | null = null;
+
+    function clearTimer() {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    }
+
+    // Keep at most one timer pending; re-arm after settlement or while the
+    // initial pin is unresolved, and never while the document is hidden.
+    function schedule() {
+      clearTimer();
+      if (cancelled || document.hidden) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        poll();
+      }, pollMs);
+    }
+
+    function poll() {
+      // Single flight: no timer or visibility event may start a second read
+      // while one is outstanding, and a hidden document polls never.
+      if (cancelled || document.hidden || inFlight) return;
+      if (pinnedIdRef.current === null) {
+        schedule();
+        return;
+      }
+      inFlight = true;
       const request = ++sequence;
       client
         .getRelease()
@@ -221,11 +250,44 @@ export function useResolvedRelease(
               : prev,
           );
           setChangedReleaseId(null);
+        })
+        .finally(() => {
+          inFlight = false;
+          if (cancelled) return;
+          if (visibleCheckQueued) {
+            // Exactly one coalesced follow-up, and only while still visible
+            // (a hide before settlement already discarded it).
+            visibleCheckQueued = false;
+            if (!document.hidden) poll();
+            return;
+          }
+          // A failed read is not retried immediately: its next attempt is on
+          // the same interval, counted from this settlement.
+          schedule();
         });
-    }, pollMs);
+    }
+
+    function onVisibilityChange() {
+      if (cancelled) return;
+      if (document.hidden) {
+        clearTimer();
+        visibleCheckQueued = false;
+        return;
+      }
+      if (inFlight) {
+        visibleCheckQueued = true;
+        return;
+      }
+      clearTimer();
+      poll();
+    }
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    schedule();
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      clearTimer();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [client, pollMs]);
 
