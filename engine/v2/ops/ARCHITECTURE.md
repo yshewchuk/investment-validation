@@ -672,11 +672,14 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
 - The shared `ops.pinned_partition_reader` is additive; both `_scan_rows`
   callers stay unchanged until slices 2/3. It streams ordered batches from
   one pinned snapshot and scope, accounting live/peak input rows under the
-  unchanged `MAX_SCAN_ROWS`. R1 preserves typed refusal for missing, corrupt
-  or incompatible input; R2 keeps output provisional through full validation;
-  R3 does not retry integrity refusals; R4 pins every partition; R5 discards
-  failed attempts without publication; R6 gives byte-identical output for
-  identical complete inputs.
+  unchanged `MAX_SCAN_ROWS`. Only one `RetainedBatch` lease is live at a time:
+  consumers must finish processing it before advancing, because advancing
+  releases and clears that batch; buffering the iterator with `list(...)`
+  therefore produces released, empty leases. R1 preserves typed refusal for
+  missing, corrupt or incompatible input; R2 keeps output provisional through
+  full validation; R3 does not retry integrity refusals; R4 pins every
+  partition; R5 discards failed attempts without publication; R6 gives
+  byte-identical output for identical complete inputs.
 - `board_requests`: an already-loaded events table (`ticker`, `event_date`,
   `session` columns), an `as_of` date, a horizon in days, and an optional
   ticker filter. It performs no I/O itself — the caller loads the table; see

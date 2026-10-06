@@ -363,6 +363,7 @@ def test_mid_stream_integrity_failure_discards_provisional_output():
     account = RetainedRowCount()
 
     provisional: list[dict] = []
+    first_batch_delivered = None
     published = None  # only ever assigned after the iterator is fully exhausted
     batches_seen = 0
     with pytest.raises(DataError) as exc:
@@ -372,6 +373,8 @@ def test_mid_stream_integrity_failure_discards_provisional_output():
                 batches_seen += 1
                 with lease as rows:
                     assert account.live_rows >= len(rows)
+                    if batches_seen == 1:
+                        first_batch_delivered = copy.deepcopy(rows)
                     provisional.extend(rows)
             published = list(provisional)
         except DataError:
@@ -386,6 +389,7 @@ def test_mid_stream_integrity_failure_discards_provisional_output():
     assert account.live_rows == 0
     # The one batch reached the consumer as provisional input ...
     assert provisional == []
+    assert first_batch_delivered == _GOLDEN_ROWS[:3]
     # ... but the failure prevented full exhaustion, so nothing was ever published.
     assert published is None
 
