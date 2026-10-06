@@ -210,11 +210,15 @@ def neutral_inventory(conn, *, scope, snapshot_id, receipt_id, generation):
                 or receipt["scope"] != scope or receipt["result_snapshot_id"] != snapshot_id):
             raise errors.fail("INPUT_CHANGED", "pinned receipt does not match scope and snapshot")
         snapshot = _execute(conn, "SELECT calendar_version, source_priority_version,"
-                            " finality_receipt_refs_json FROM data_snapshots"
+                            " finality_receipt_refs_json, knowledge_mode_by_table_json"
+                            " FROM data_snapshots"
                             " WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
         if snapshot is None:
             raise errors.fail("INPUT_CHANGED", "unknown snapshot")
         tables = _tables(conn, snapshot_id)
+        if {table["table_name"] for table in tables} != set(
+                _stored_json(snapshot["knowledge_mode_by_table_json"], dict)):
+            raise errors.fail("INPUT_CHANGED", "snapshot table membership is incomplete")
         references = [dict(row) for row in _execute(conn,
             "SELECT kind, legacy_path, object_id, content_hash, byte_size, fold"
             " FROM data_import_reference_inputs WHERE receipt_id = ? ORDER BY legacy_path",

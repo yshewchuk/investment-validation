@@ -588,6 +588,15 @@ def test_missing_fragment_row_is_input_changed(tmp_path):
     expect_refusal(chain, "INPUT_CHANGED")
 
 
+def test_missing_snapshot_table_membership_row_is_input_changed(tmp_path):
+    chain = build_chain(tmp_path, tables=[{"name": "daily_market"}])
+    conn = chain["conn"]
+    conn.execute("DROP TRIGGER data_snapshot_tables_no_delete")
+    conn.execute("DELETE FROM data_snapshot_tables WHERE snapshot_id = ?"
+                 " AND table_name = ?", (chain["snapshot_id"], "daily_market"))
+    _chain_export_refused(chain, tmp_path, "INPUT_CHANGED", sentinel=_SENTINEL)
+
+
 def test_missing_object_row_is_input_changed(tmp_path):
     chain = build_chain(tmp_path, tables=[{"name": "daily_market"}])
     conn = chain["conn"]
