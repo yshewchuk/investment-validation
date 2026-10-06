@@ -325,17 +325,6 @@ source retry policy owns retry.
 | R5 — partial result/write | Invalid surviving counts refuse `MANIFEST_CORRUPT` before streams open; footer/count mismatch refuses `MANIFEST_CORRUPT` before rows. Earlier batches are provisional until exhaustion. Failed registration leaves the head unchanged and staged objects unreferenced. |
 | R6 — idempotency | Under a pinned snapshot, byte-identical reads return identical rows; scan completion requires exhaustion without an error. An identical registration reuses its receipt through the same head fence; conflicting identity refuses. |
 
-For neutral inventory export, missing relational members or invalid receipt
-lineage refuse `INPUT_CHANGED`; inconsistent fragment metadata or row counts
-refuse `MANIFEST_CORRUPT`; a missing object or changed object bytes or length
-refuse `OBJECT_CORRUPT`; an absent or unopenable catalog refuses
-`INPUT_CHANGED`. Retryability follows the table above. There is no automatic
-retry, cache, repair or catalog write. An active caller transaction refuses
-`INPUT_CHANGED` without altering it. The pinned head is checked again before
-publication; a moved head refuses without replacing the destination. A failed
-temporary write or pre-rename refusal preserves the prior output. Identical
-source pins and bytes produce identical inventory bytes and content hash.
-
 **Snapshot commit (4c R1–R6).** Missing input: `INPUT_CHANGED`/
 `CONTRACT_MISMATCH` before any write; every contract/fragment/manifest is
 re-verified before the transaction opens. A caller-supplied `fence_check`
