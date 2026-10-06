@@ -9,6 +9,10 @@
 No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.
 Some checks also expose callable report functions.
 
+The test selector maps changed paths through `checks/layer_map.py`, then
+selects tests for those packages and their allowed importers. Unsafe or
+unmapped input selects the full suite.
+
 ## Inputs
 
 Inputs vary: source files/Git state, policy or baselines, application data, or prepared artifacts. Options select paths, scope, years, or outputs.
@@ -43,6 +47,7 @@ check defines missing-input and failure outcomes:
 | Transaction | No package-wide transaction contract |
 | Partial write | No shared atomic-write or rollback guarantee |
 | Repeat invocation | No package-wide idempotency guarantee; effects vary |
+| Selector input or declaration is unsafe | Report the reason and select the full suite |
 
 ## Invariants
 
