@@ -677,9 +677,7 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   until full validation; R3 integrity refusal terminal/no retry; R4 each
   partition uses the same pin/scope; R5 failure discards attempt state/output;
   R6 identical inputs yield byte-identical output. Cache: no row/result cache;
-  each fragment re-hashes on open (stat-tuple cache deferred); hash failures are
-  terminal typed refusals. Transactions: read-only catalog reads roll back on success/error;
-  reader writes/commits none. Caller publishes after validation; failures or early close publish nothing.
+  exact per-process stat-tuple match with real directories skips hashing; first open/stat drift re-hashes; digest mismatch/instability gives terminal `OBJECT_CORRUPT`. Transactions: read-only catalog reads roll back on success/error; reader writes/commits nothing. Caller publishes after validation; failures/early close publish nothing.
 - `board_requests`: an already-loaded events table (`ticker`, `event_date`,
   `session` columns), an `as_of` date, a horizon in days, and an optional
   ticker filter. It performs no I/O itself — the caller loads the table; see

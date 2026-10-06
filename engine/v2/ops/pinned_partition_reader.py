@@ -88,13 +88,20 @@ class RetainedBatch:
     block releases it: the live count drops and the row list is cleared, so
     released rows cannot be read again — the caller processes a lease before
     advancing, and advancing releases it.
+
+    Consumers must not resize the exposed list while the lease is live. Its
+    charge stays fixed at creation, and release clears the list and discharges
+    that charge even if a caller violated the rule.
     """
 
     def __init__(self, rows: list[dict[str, Any]], retained_rows: RetainedRowCount) -> None:
         self._rows = rows
+        # The charge is fixed at creation: callers hold the mutable row list and
+        # may change its length, so release discharges this, never len(rows).
+        self._row_charge = len(rows)
         self._retained_rows = retained_rows
         self._released = False
-        retained_rows.retain(len(rows))
+        retained_rows.retain(self._row_charge)
 
     @property
     def released(self) -> bool:
@@ -114,7 +121,7 @@ class RetainedBatch:
         if self._released:
             return
         self._released = True
-        self._retained_rows.discharge(len(self._rows))
+        self._retained_rows.discharge(self._row_charge)
         self._rows.clear()
 
 

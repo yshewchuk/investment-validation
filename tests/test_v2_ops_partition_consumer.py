@@ -470,3 +470,27 @@ def test_iterator_close_releases_an_open_lease():
     assert rows == []
     assert lease.released
     assert account.live_rows == 0
+
+
+@pytest.mark.parametrize("mutation", ["pop", "append"])
+def test_release_discharges_the_creation_charge_after_the_list_is_edited(mutation):
+    account = RetainedRowCount()
+    lease = RetainedBatch([_row("AAA", "2024-01-01", 2024, 0.01, 0),
+                           _row("BBB", "2024-01-02", 2024, 0.02, 0)], account)
+    rows = []
+    try:
+        rows = lease.__enter__()  # the exact mutable list the lease holds
+        assert account.live_rows == 2
+        if mutation == "pop":
+            rows.pop()
+        else:
+            rows.append(_row("CCC", "2024-01-03", 2024, 0.03, 0))
+        # The charge was fixed at creation: caller edits move neither it nor the
+        # account until the release.
+        assert account.live_rows == 2
+    finally:
+        lease.release()  # cleanup, so a failure never leaves a live lease
+    assert rows == []
+    assert lease.released
+    assert account.live_rows == 0
+    assert account.peak_rows == 2
