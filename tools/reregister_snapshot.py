@@ -270,14 +270,28 @@ def _object_descriptors(inventory):
 
 
 def _verify_objects(inventory, objects_root):
-    """Re-hash every recorded object against the store; nothing is decoded or repaired."""
+    """Re-hash every recorded object; return its verified path."""
     store = ArtifactStore(objects_root)
+    paths = []
     for descriptor in _object_descriptors(inventory):
         try:
-            store.verify(_artifact_ref(descriptor))
+            paths.append(store.verify(_artifact_ref(descriptor)))
         except ArtifactError as exc:
             raise errors.fail("OBJECT_CORRUPT",
                               "a pinned object does not match the object store") from exc
+    return paths
+
+
+def _refuse_destination_collisions(out_path, source_paths):
+    out_real = os.path.realpath(out_path)
+    for source_path in source_paths:
+        source_real = os.path.realpath(source_path)
+        same_file = (out_real == source_real or
+                     (os.path.exists(out_path) and os.path.exists(source_path)
+                      and os.path.samefile(out_path, source_path)))
+        if same_file:
+            raise errors.fail("INPUT_CHANGED", "the export destination resolves to an input",
+                              details={"path": source_real})
 
 
 def _export_bytes(inventory):
@@ -318,14 +332,15 @@ def _publish(out_path, data, recheck):
 
 
 def export_inventory(conn, *, scope, snapshot_id, receipt_id, generation,
-                     objects_root, out):
+                     catalog_path, objects_root, out):
     """Export the pinned snapshot's verified neutral inventory, or refuse typed."""
     _validate_pin(scope, snapshot_id, receipt_id, generation)
     _verify_head(conn, scope=scope, snapshot_id=snapshot_id, receipt_id=receipt_id,
                  generation=generation)
     inventory = neutral_inventory(conn, scope=scope, snapshot_id=snapshot_id,
                                   receipt_id=receipt_id, generation=generation)
-    _verify_objects(inventory, objects_root)
+    object_paths = _verify_objects(inventory, objects_root)
+    _refuse_destination_collisions(out, [catalog_path, *object_paths])
     data = _export_bytes(inventory)
     _publish(out, data, lambda: _verify_head(conn, scope=scope, snapshot_id=snapshot_id,
                                              receipt_id=receipt_id, generation=generation))
@@ -352,7 +367,7 @@ def main(argv=None) -> int:
         conn = _open_read_only(args.catalog)
         export_inventory(conn, scope=args.scope, snapshot_id=args.snapshot_id,
                          receipt_id=args.receipt_id, generation=args.generation,
-                         objects_root=args.objects, out=args.out)
+                         catalog_path=args.catalog, objects_root=args.objects, out=args.out)
     except errors.DataError as exc:
         print(json.dumps({"refused": exc.code, "message": exc.problem.message},
                          sort_keys=True), file=sys.stderr)

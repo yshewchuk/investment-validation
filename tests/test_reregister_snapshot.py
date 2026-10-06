@@ -977,8 +977,35 @@ def _cli_argv(fixture, out):
 
 
 def _export(fixture, out):
-    return reregister_snapshot.export_inventory(fixture["conn"], **fixture["pins"],
-                                                objects_root=fixture["store"].root, out=out)
+    return reregister_snapshot.export_inventory(
+        fixture["conn"], **fixture["pins"], catalog_path=fixture["catalog_path"],
+        objects_root=fixture["store"].root, out=out)
+
+
+def test_catalog_destination_collision_refuses_without_changing_source(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    catalog = fixture["catalog_path"]
+    before = catalog.read_bytes()
+    out = tmp_path / "catalog-alias.sqlite"
+    out.hardlink_to(catalog)
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, out)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["path"] == str(catalog.resolve())
+    assert catalog.read_bytes() == before
+    assert not list(tmp_path.glob(".catalog-alias.sqlite.*.part"))
+
+
+def test_object_destination_collision_refuses_without_changing_source(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    obj = fixture["object_path"]
+    before = obj.read_bytes()
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, obj)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["path"] == str(obj.resolve())
+    assert obj.read_bytes() == before
+    assert not list(obj.parent.glob(f".{obj.name}.*.part"))
 
 
 def _chain_export_refused(chain, tmp_path, code, *, sentinel=None):
@@ -987,8 +1014,9 @@ def _chain_export_refused(chain, tmp_path, code, *, sentinel=None):
     if sentinel is not None:
         out.write_bytes(sentinel)
     with pytest.raises(DataError) as excinfo:
-        reregister_snapshot.export_inventory(chain["conn"], **pins,
-                                             objects_root=tmp_path / "store", out=out)
+        reregister_snapshot.export_inventory(
+            chain["conn"], **pins, catalog_path=tmp_path / "in-memory-catalog.sqlite",
+            objects_root=tmp_path / "store", out=out)
     assert excinfo.value.code == code
     if sentinel is None:
         assert not out.exists()
