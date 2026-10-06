@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from engine.v2.data import documents
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import content_hash, format_timestamp
+from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, format_timestamp
 from engine.v2.ops.bootstrap import open_catalog
 from tests.data_scan_support import (
     RECEIPT,
@@ -29,6 +30,7 @@ from tests.data_scan_support import (
     contract_for,
     contract_ref_for,
     publish_and_inspect,
+    publish_bytes,
 )
 from tests.ops_support import FakeClock
 from tools import reregister_snapshot
@@ -586,6 +588,15 @@ def test_missing_fragment_row_is_input_changed(tmp_path):
     expect_refusal(chain, "INPUT_CHANGED")
 
 
+def test_missing_snapshot_table_membership_row_is_input_changed(tmp_path):
+    chain = build_chain(tmp_path, tables=[{"name": "daily_market"}])
+    conn = chain["conn"]
+    conn.execute("DROP TRIGGER data_snapshot_tables_no_delete")
+    conn.execute("DELETE FROM data_snapshot_tables WHERE snapshot_id = ?"
+                 " AND table_name = ?", (chain["snapshot_id"], "daily_market"))
+    _chain_export_refused(chain, tmp_path, "INPUT_CHANGED", sentinel=_SENTINEL)
+
+
 def test_missing_object_row_is_input_changed(tmp_path):
     chain = build_chain(tmp_path, tables=[{"name": "daily_market"}])
     conn = chain["conn"]
@@ -944,3 +955,271 @@ def test_wal_reader_pins_one_snapshot_across_a_concurrent_capture(tmp_path, monk
     fresh = inventory(chain)
     assert [row["capture_id"] for row in fresh["captures"]["price_history"]] == [
         "cap-during-read"]
+
+
+_SENTINEL = b"pre-existing export\n"
+
+
+def _securities_fixture(tmp_path):
+    """One real committed ``securities`` snapshot: conn, store, head pins, object."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    securities = contract_for("securities")
+    record = publish_and_inspect(store, securities, contract_ref_for(securities),
+                                 [_SECURITIES_ROW], "2024")
+    commit_tables(conn, clock, {"securities": [record]}, {"securities": securities},
+                  scope="shadow", receipt_id="receipt-1", store=store)
+    head = conn.execute("SELECT snapshot_id, generation FROM data_snapshot_heads"
+                        " WHERE scope = 'shadow'").fetchone()
+    digest = record.object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
+    return {"conn": conn, "store": store, "record": record,
+            "pins": {"scope": "shadow", "snapshot_id": head["snapshot_id"],
+                     "receipt_id": "receipt-1", "generation": head["generation"]},
+            "catalog_path": tmp_path / "catalog.sqlite",
+            "object_path": store.root / "objects" / digest[:2] / digest}
+
+
+def _cli_argv(fixture, out):
+    pins = fixture["pins"]
+    return ["export", "--scope", pins["scope"], "--snapshot-id", pins["snapshot_id"],
+            "--receipt-id", pins["receipt_id"], "--generation", str(pins["generation"]),
+            "--catalog", str(fixture["catalog_path"]), "--objects", str(fixture["store"].root),
+            "--out", str(out)]
+
+
+def _export(fixture, out):
+    return reregister_snapshot.export_inventory(
+        fixture["conn"], **fixture["pins"], catalog_path=fixture["catalog_path"],
+        objects_root=fixture["store"].root, out=out)
+
+
+def test_catalog_destination_collision_refuses_without_changing_source(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    catalog = fixture["catalog_path"]
+    before = catalog.read_bytes()
+    out = tmp_path / "catalog-alias.sqlite"
+    out.hardlink_to(catalog)
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, out)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["path"] == str(catalog.resolve())
+    assert catalog.read_bytes() == before
+    assert not list(tmp_path.glob(".catalog-alias.sqlite.*.part"))
+
+
+def test_object_destination_collision_refuses_without_changing_source(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    obj = fixture["object_path"]
+    before = obj.read_bytes()
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, obj)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["path"] == str(obj.resolve())
+    assert obj.read_bytes() == before
+    assert not list(obj.parent.glob(f".{obj.name}.*.part"))
+
+
+def test_unlisted_object_destination_collision_refuses_without_changing_source(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    ref = publish_bytes(fixture["store"], b"unrelated synthetic object\n")
+    digest = ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
+    out = fixture["store"].root / "objects" / digest[:2] / digest
+    before = out.read_bytes()
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, out)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["path"] == str(out.resolve())
+    assert out.read_bytes() == before
+    assert not list(out.parent.glob(f".{out.name}.*.part"))
+
+
+def test_catalog_wal_destination_collision_refuses_without_changing_source(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    catalog = fixture["catalog_path"]
+    out = Path(str(catalog) + "-wal")
+    catalog_before = catalog.read_bytes()
+    wal_existed = out.exists()
+    wal_before = out.read_bytes() if wal_existed else None
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, out)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["path"] == str(out.resolve())
+    assert catalog.read_bytes() == catalog_before
+    if wal_existed:
+        assert out.read_bytes() == wal_before
+    else:
+        assert not out.exists()
+    assert not list(tmp_path.glob(".catalog.sqlite-wal.*.part"))
+
+
+def _chain_export_refused(chain, tmp_path, code, *, sentinel=None):
+    pins = {key: chain[key] for key in ("scope", "snapshot_id", "receipt_id", "generation")}
+    out = tmp_path / "export.json"
+    if sentinel is not None:
+        out.write_bytes(sentinel)
+    with pytest.raises(DataError) as excinfo:
+        reregister_snapshot.export_inventory(
+            chain["conn"], **pins, catalog_path=tmp_path / "in-memory-catalog.sqlite",
+            objects_root=tmp_path / "store", out=out)
+    assert excinfo.value.code == code
+    if sentinel is None:
+        assert not out.exists()
+    else:
+        assert out.read_bytes() == sentinel
+    assert not list(tmp_path.glob(".export.json.*.part"))
+
+
+def test_cli_export_wrapper_matches_inventory_and_reruns_byte_identically(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    ref = publish_bytes(fixture["store"], b"synthetic reference bytes\n")
+    insert_reference(fixture["conn"], receipt_id=fixture["pins"]["receipt_id"],
+                     legacy_path="refs/model_registry.json", kind="model_registry",
+                     object_id=ref.object_id, object_hash=ref.content_hash,
+                     byte_size=ref.byte_size, fold="")
+    first, second = tmp_path / "first.json", tmp_path / "second.json"
+    assert reregister_snapshot.main(_cli_argv(fixture, first)) == 0
+    assert reregister_snapshot.main(_cli_argv(fixture, second)) == 0
+    wrapper = json.loads(first.read_text())
+    expected = reregister_snapshot.neutral_inventory(fixture["conn"], **fixture["pins"])
+    assert wrapper["schema_version"] == "reregister_snapshot_export.v1"
+    assert wrapper["inventory"] == expected
+    assert wrapper["content_hash"] == content_hash(expected)
+    table = wrapper["inventory"]["tables"][0]
+    assert table["table_name"] == "securities" and table["dataset_version_id"]
+    assert table["coverage_receipt_refs"] == [RECEIPT]
+    assert [frag["fragment_id"] for frag in table["fragments"]] == [
+        fixture["record"].fragment_id]
+    rec = fixture["record"]
+    frag = table["fragments"][0]
+    assert frag["object"] == {"kind": rec.object_ref.kind,
+                              "object_id": rec.object_ref.object_id,
+                              "content_hash": rec.object_ref.content_hash,
+                              "byte_size": rec.object_ref.byte_size}
+    assert frag["partition_key"] == rec.partition_key
+    assert frag["row_count"] == rec.row_count
+    assert frag["primary_key_min"] == list(rec.primary_key_min)
+    assert frag["primary_key_max"] == list(rec.primary_key_max)
+    assert frag["time_min"] == rec.time_min
+    assert frag["time_max"] == rec.time_max
+    assert wrapper["inventory"]["references"] == [
+        {"kind": "model_registry", "legacy_path": "refs/model_registry.json",
+         "object_id": ref.object_id, "content_hash": ref.content_hash,
+         "byte_size": ref.byte_size, "fold": ""}]
+    assert wrapper["inventory"]["lineage"]["receipt_ids"] == ["receipt-1"]
+    planted = json.loads(first.read_text())["inventory"]
+    planted["tables"][0]["fragments"][0]["row_count"] += 1
+    assert content_hash(planted) != wrapper["content_hash"]
+    assert second.read_bytes() == first.read_bytes()
+    assert json.loads(second.read_text())["content_hash"] == wrapper["content_hash"]
+
+
+@pytest.mark.parametrize("drift", [
+    lambda data: data[:-1] + bytes([data[-1] ^ 0xFF]),
+    lambda data: data + b"\x00",
+], ids=["same-length-bytes", "changed-length"])
+def test_object_drift_refuses_nonzero_and_leaves_output_untouched(tmp_path, drift, capsys):
+    fixture = _securities_fixture(tmp_path)
+    out = tmp_path / "export.json"
+    out.write_bytes(_SENTINEL)
+    fixture["object_path"].chmod(0o644)
+    fixture["object_path"].write_bytes(drift(fixture["object_path"].read_bytes()))
+    assert reregister_snapshot.main(_cli_argv(fixture, out)) == 2
+    assert json.loads(capsys.readouterr().err)["refused"] == "OBJECT_CORRUPT"
+    assert out.read_bytes() == _SENTINEL
+
+
+def test_removed_object_is_a_typed_corrupt_refusal(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    out = tmp_path / "export.json"
+    out.write_bytes(_SENTINEL)
+    fixture["object_path"].unlink()
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, out)
+    assert excinfo.value.code == "OBJECT_CORRUPT"
+    assert out.read_bytes() == _SENTINEL
+
+
+def test_incomplete_membership_refuses_before_any_write(tmp_path):
+    chain = build_chain(tmp_path, tables=[{
+        "name": "price_history", "contract": "price_history.v1",
+        "fragments": [{"partition_key": "2026"}, {"partition_key": "2025"}]}])
+    conn = chain["conn"]
+    conn.execute("DROP TRIGGER data_version_fragments_no_delete")
+    conn.execute("DELETE FROM data_version_fragments WHERE dataset_version_id = ?"
+                 " AND ordinal = 0", ("price_history-dsv",))
+    _chain_export_refused(chain, tmp_path, "INPUT_CHANGED", sentinel=_SENTINEL)
+
+
+def test_absent_catalog_is_a_typed_cli_refusal_with_no_output(tmp_path, capsys):
+    out = tmp_path / "export.json"
+    catalog_path = tmp_path / "absent.sqlite"
+    assert reregister_snapshot.main([
+        "export", "--scope", "shadow", "--snapshot-id", "snap-1",
+        "--receipt-id", "receipt-1", "--generation", "1",
+        "--catalog", str(catalog_path),
+        "--objects", str(tmp_path / "store"), "--out", str(out)]) == 2
+    stderr = capsys.readouterr().err
+    assert str(catalog_path) not in stderr
+    assert json.loads(stderr)["refused"] == "INPUT_CHANGED"
+    assert not out.exists()
+
+
+def test_absent_pinned_receipt_is_refused_with_no_output(tmp_path):
+    chain = build_chain(tmp_path, tables=[{"name": "daily_market"}])
+    conn = chain["conn"]
+    conn.execute("DROP TRIGGER data_import_receipts_no_delete")
+    conn.execute("DELETE FROM data_import_receipts WHERE receipt_id = 'receipt-1'")
+    _chain_export_refused(chain, tmp_path, "INPUT_CHANGED")
+
+
+def test_absent_snapshot_row_is_refused_with_no_output(tmp_path):
+    chain = build_chain(tmp_path, tables=[{"name": "daily_market"}])
+    conn = chain["conn"]
+    conn.execute("DROP TRIGGER data_snapshots_no_delete")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("DELETE FROM data_snapshots WHERE snapshot_id = 'snap-1'")
+    conn.execute("PRAGMA foreign_keys = ON")
+    _chain_export_refused(chain, tmp_path, "INPUT_CHANGED")
+
+
+def test_replace_failure_keeps_old_bytes_and_leaves_no_temp(tmp_path, monkeypatch):
+    fixture = _securities_fixture(tmp_path)
+    out = tmp_path / "export.json"
+    out.write_bytes(_SENTINEL)
+
+    def boom(src, dst):
+        raise OSError("injected crash before the rename")
+
+    monkeypatch.setattr(reregister_snapshot.os, "replace", boom)
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, out)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.message == "the export file could not be written"
+    assert out.read_bytes() == _SENTINEL
+    assert list(tmp_path.glob(".export.json.*.part")) == []
+
+
+def test_head_advance_after_fsync_is_a_source_drift_refusal(tmp_path, monkeypatch):
+    fixture = _securities_fixture(tmp_path)
+    conn = fixture["conn"]
+    out = tmp_path / "export.json"
+    out.write_bytes(_SENTINEL)
+    real_fsync = reregister_snapshot.os.fsync
+    fired = []
+
+    def hooked_fsync(fd):
+        if not fired:
+            fired.append(True)
+            conn.execute("DROP TRIGGER data_snapshot_heads_update_generation")
+            conn.execute("UPDATE data_snapshot_heads SET generation = 2"
+                         " WHERE scope = 'shadow'")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(reregister_snapshot.os, "fsync", hooked_fsync)
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, out)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.message == (
+        "the mutable head does not match the explicit pins")
+    assert fired
+    assert out.read_bytes() == _SENTINEL
+    assert list(tmp_path.glob(".export.json.*.part")) == []
