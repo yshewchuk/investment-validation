@@ -956,12 +956,33 @@ def _require_receipt_variant(receipt, variant_id):
 
 def _record_variant_evidence(conn, run_id, variant_id):
     """Persist the run's immutable variant identity/count in durable evidence,
-    preserving every other evidence field already recorded."""
+    preserving every other evidence field already recorded.
+
+    A durable run that already carries variant evidence is never silently
+    overwritten: when either ``variant_id`` or ``variants_tried`` is stored,
+    the stored ID must equal the incoming one and the stored count must be
+    exactly integer 1 (a ``bool`` is not an integer count here) -- anything
+    else is the non-retryable ``INVALID_EXPERIMENT_SPEC`` refusal, leaving
+    the stored evidence untouched so the enclosing catalog transaction rolls
+    back with it. The same identity/count replayed is idempotent (a no-op on
+    the stored bytes); only a run with neither key has them populated here.
+    """
     row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?",
                        (run_id,)).fetchone()
     if row is None:
         return
     evidence = json.loads(row[0]) if row[0] else {}
+    if "variant_id" in evidence or "variants_tried" in evidence:
+        stored_id = evidence.get("variant_id")
+        stored_count = evidence.get("variants_tried")
+        if (stored_id != variant_id or isinstance(stored_count, bool)
+                or not isinstance(stored_count, int) or stored_count != 1):
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "experiment run already carries different variant evidence",
+                       details={"run_id": run_id, "stored_variant_id": stored_id,
+                                "stored_variants_tried": stored_count,
+                                "incoming_variant_id": variant_id})
+        return
     evidence["variant_id"] = variant_id
     evidence["variants_tried"] = 1
     conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",

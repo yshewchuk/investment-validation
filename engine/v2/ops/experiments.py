@@ -746,6 +746,25 @@ def _annotate_report_variant(report: Path, variant_id: str) -> None:
     report.write_text(text)
 
 
+def _resolved_variant_id(spec: ExperimentSpec,
+                         variant_id: str | None) -> str:
+    """The variant identity ``run_experiment`` executes under.
+
+    Only an exactly-``None`` argument takes the resolved spec hash as its
+    default; an explicitly supplied ID must be a non-blank string -- never
+    normalized, never pattern-constrained -- and anything else is the typed
+    non-retryable ``INVALID_EXPERIMENT_SPEC`` refusal, raised before any
+    filesystem effect or runner invocation.
+    """
+    if variant_id is None:
+        return spec.spec_hash
+    if not isinstance(variant_id, str) or not variant_id.strip():
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment variant ID must be a non-blank string",
+                   details={"type": type(variant_id).__name__})
+    return variant_id
+
+
 def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                    *, runner: Callable, mode="smoke", backup: Callable | None = None,
                    synthetic=False,
@@ -756,7 +775,7 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
         raise fail("INVALID_REQUEST", "unknown experiment mode")
     if mode == "smoke" and backup is not None:
         raise fail("INVALID_REQUEST", "smoke runs cannot request backup")
-    variant_id = variant_id or spec.spec_hash
+    variant_id = _resolved_variant_id(spec, variant_id)
     # Resolved once, here: an unused economic declaration is a typed refusal
     # before any directory is created, any evidence persisted, or the runner
     # is invoked, and the very plan is the one handed to the callable below.

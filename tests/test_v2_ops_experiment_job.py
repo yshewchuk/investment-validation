@@ -463,6 +463,70 @@ def test_experiment_effect_retry_after_crash_appends_exactly_one_row(tmp_path, m
         conn.close()
 
 
+def test_primary_effect_replay_refuses_conflicting_stored_variant_evidence(tmp_path):
+    """A durable primary run's variant evidence is immutable: after one real
+    successful commit created the run row and the ran ledger row, replaying
+    the same effect/receipt against stored evidence that a later attempt
+    corrupted through SQL is the non-retryable ``INVALID_EXPERIMENT_SPEC``
+    refusal -- first for a conflicting stored ID (count 1), then for a
+    conflicting stored count (same ID, count 2) -- the conflicting stored
+    evidence is never overwritten, and the ran ledger row keeps the original
+    identity throughout."""
+    conn, clock, claim, effect, checkout = _claimed_primary_effect(tmp_path,
+                                                                   key="primary-replay")
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    run_id = claim.attempt_id
+
+    def stored_evidence():
+        row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?",
+                           (run_id,)).fetchone()
+        return json.loads(row[0])
+
+    def ran_rows():
+        with open(ledger, newline="") as fh:
+            return [row for row in csv.DictReader(fh) if row["stage"] == "ran"]
+
+    try:
+        commit_attempt(conn, claim.attempt_id, claim.fence,
+                       Outcome(True, "verified_dead", 0), clock=clock,
+                       effects=lambda txn: effect(txn))
+        assert len(ran_rows()) == 1
+        original_id = ran_rows()[0]["spec_hash"]
+        assert stored_evidence()["variant_id"] == original_id
+        assert stored_evidence()["variants_tried"] == 1
+
+        # First replay: a conflicting stored variant ID (count 1), written
+        # through SQL only now that the real commit created the row.
+        with transaction(conn):
+            conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                         (json.dumps({**stored_evidence(), "variant_id": "foreign-variant"},
+                                     sort_keys=True), run_id))
+        with pytest.raises(OpsError) as excinfo:
+            with transaction(conn):
+                effect(conn)
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert excinfo.value.problem.retryable is False
+        assert stored_evidence()["variant_id"] == "foreign-variant"
+        assert stored_evidence()["variants_tried"] == 1
+        assert [row["spec_hash"] for row in ran_rows()] == [original_id]
+
+        # Second replay: the original incoming ID, but a conflicting count.
+        with transaction(conn):
+            conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                         (json.dumps({**stored_evidence(), "variant_id": original_id,
+                                      "variants_tried": 2}, sort_keys=True), run_id))
+        with pytest.raises(OpsError) as excinfo:
+            with transaction(conn):
+                effect(conn)
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert excinfo.value.problem.retryable is False
+        assert stored_evidence()["variant_id"] == original_id
+        assert stored_evidence()["variants_tried"] == 2
+        assert [row["spec_hash"] for row in ran_rows()] == [original_id]
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("build_evidence", (
     pytest.param(lambda vid: None, id="none-evidence"),
     pytest.param(lambda vid: [], id="list-evidence"),
@@ -766,6 +830,62 @@ def test_unused_economic_key_refuses_before_the_runner_is_invoked(tmp_path):
                                    mode="smoke", synthetic=True)
     assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
     assert not invoked and not (tmp_path / "run").exists()
+
+
+@pytest.mark.parametrize("malformed_variant_id", (
+    pytest.param("", id="empty-string"),
+    pytest.param("   \t\n", id="whitespace-only"),
+    pytest.param(7, id="non-string-integer"),
+    pytest.param(b"sha256:deadbeef", id="non-string-bytes"),
+))
+def test_run_experiment_refuses_malformed_explicit_variant_ids_before_any_effect(
+        tmp_path, malformed_variant_id):
+    """An explicitly supplied variant ID that is not a non-empty string is the
+    typed non-retryable ``INVALID_EXPERIMENT_SPEC`` refusal, fired before the
+    resolved plan exists, before the destination directory is created and
+    before the runner could ever be invoked -- an empty or whitespace-only ID
+    is never silently defaulted to the spec hash the way a falsy ``or``
+    chain would."""
+    spec = experiments.experiment_spec_from_document(_spec_document(economic_params={}))
+    invoked = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        invoked.append(run_dir)
+
+    run_dir = tmp_path / "run"
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                   mode="smoke", synthetic=True,
+                                   variant_id=malformed_variant_id)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", malformed_variant_id
+    assert excinfo.value.problem.retryable is False
+    assert not invoked
+    assert not run_dir.exists()
+
+
+def test_run_experiment_defaults_an_exactly_none_variant_id_to_the_spec_hash(tmp_path):
+    """The default branch is the exactly-``None`` argument only: both the
+    omitted ID and an explicit ``None`` resolve to the spec hash, and a valid
+    supplied ID keeps its exact bytes (never normalized)."""
+    spec = experiments.experiment_spec_from_document(_spec_document(economic_params={}))
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        (run_dir / "REPORT.md").write_text(
+            "# variant default\n\n*Generated by engine.report v1.0.*\n")
+
+    omitted = experiments.run_experiment(spec, tmp_path, tmp_path / "omitted",
+                                         runner=runner, mode="smoke", synthetic=True)
+    explicit_none = experiments.run_experiment(spec, tmp_path, tmp_path / "explicit-none",
+                                               runner=runner, mode="smoke", synthetic=True,
+                                               variant_id=None)
+    assert omitted["status"] == "succeeded" and explicit_none["status"] == "succeeded"
+    assert omitted["evidence"]["variant_id"] == spec.spec_hash
+    assert explicit_none["evidence"]["variant_id"] == spec.spec_hash
+    padded = experiments.run_experiment(spec, tmp_path, tmp_path / "padded",
+                                        runner=runner, mode="smoke", synthetic=True,
+                                        variant_id="  padded  ")
+    assert padded["status"] == "succeeded"
+    assert padded["evidence"]["variant_id"] == "  padded  "
 
 
 @pytest.mark.parametrize("changes", (
