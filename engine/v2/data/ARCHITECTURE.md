@@ -219,9 +219,10 @@ truly-stored dataset-version row — Invariants); a `computed_moves`/
 `price_history` fragment per ticker (whole-partition rewrite — Invariants),
 committed by `engine.v2.ops.computed_moves_store.py`/
 `.price_history_store.py` (this package supplies only the math and the
-`TableContract`); refusals as a `DataError`/`Problem` from
-`DATA_FAILURE_CODES`, intended to carry no local path or row value — not
-fully enforced today (Invariants).
+`TableContract`); refusals created through `errors.fail` use a
+`DataError`/`Problem` from `DATA_FAILURE_CODES`, intended to carry no local
+path or row value — not fully enforced today (Invariants). Strict document
+decoding can instead raise `DocumentError` directly.
 
 **`computed_moves.v3` — point-in-time availability.** `available_as_of_date`
 is the calendar day following the close that made `realized_move_pct`
@@ -268,9 +269,11 @@ by the caller as a plain callable.
 
 ## Failure semantics
 
-Every refusal is a `DataError` wrapping a `Problem` built only from a
-registered `engine.v2.contracts.data.DATA_FAILURE_CODES` entry — category
-and retryability come from that table, never guessed at a call site.
+Refusals created through `errors.fail` are `DataError`s wrapping `Problem`s
+built only from a registered `engine.v2.contracts.data.DATA_FAILURE_CODES`
+entry — category and retryability come from that table, never guessed at a
+call site. Strict document decoding can instead raise `DocumentError`
+directly, without conversion to `DataError`.
 
 | Code | Category | Retryable | When |
 |---|---|---|---|
@@ -326,7 +329,7 @@ source retry policy owns retry.
 
 | Requirement | Outcome |
 |---|---|
-| R1 — missing or unsupported input | Missing members raise their typed refusal codes above; unsupported `TableContract` schema versions raise `UNSUPPORTED_VERSION` before rows are returned. |
+| R1 — missing or unsupported input | Missing members raise their typed refusal codes above; unsupported `TableContract` schema versions raise `DocumentError` with code `UNSUPPORTED_VERSION` before rows are returned. |
 | R2 — cache | Bounds come from the pinned fragment membership; no current-head fallback or cached bound from another snapshot. |
 | R3 — retry | `RESULT_LIMIT_EXCEEDED`, `OBJECT_CORRUPT`, and `MANIFEST_CORRUPT` are non-retryable; `INPUT_CHANGED` is retryable. Registration retries retain the head fence. |
 | R4 — transaction | Re-registration commits complete new identities and the head CAS atomically; changed definitions never overwrite registered contracts. |
