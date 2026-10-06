@@ -260,7 +260,9 @@ def _release_session_evidence(conn, current):
                                         logical_key=row["logical_key"])
         except OpsError:
             continue  # an undecodable UNRELATED receipt cannot match the current release
-        if receipt.get("release_id") == release_id:
+        release_ids = receipt.get("release_ids")
+        if (receipt.get("release_id") == release_id
+                or (isinstance(release_ids, list) and release_id in release_ids)):
             logical_keys.append(row["logical_key"])
     if len(logical_keys) != 1:
         raise fail("VALIDATION_FAILED", "the current delivered release does not resolve to exactly one "

@@ -20,7 +20,7 @@ legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_scor
 
 ## Primary contracts and public interfaces
 
-**Operations health output.** `health` emits `operations_health.v1.1`; `requested_session` and `resolved_session` come from the unique delivered `ledger_export_receipt.v1.0` bound through `release_intent` to the current delivered release, never `generated_at`. Invalid or ambiguous evidence is `VALIDATION_FAILED`; the CLI removes its output and does not retry. Identical catalog/clock inputs produce byte-identical JSON; evolution follows `guides/component_contracts.md` §2.3 and older versions remain valid. **I/O outcomes:**
+**Operations health output.** `health` emits `operations_health.v1.1`; `requested_session` and `resolved_session` come from the unique delivered `ledger_export_receipt.v1.0` associated through `release_intent` with the current delivered release, including same-session reruns; they never come from `generated_at`. Invalid or ambiguous evidence is `VALIDATION_FAILED`; the CLI removes its output and does not retry. Identical catalog/clock inputs produce byte-identical JSON; evolution follows `guides/component_contracts.md` §2.3 and older versions remain valid. **I/O outcomes:**
 
 | Condition | Outcome |
 |---|---|
