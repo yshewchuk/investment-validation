@@ -32,9 +32,9 @@ from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.health import (
+    _withheld_release,
     engineering_history,
     engineering_streak_from_history,
-    health,
     record_check,
     trailing_occurrences,
 )
@@ -313,6 +313,31 @@ def _generation_ref(claim):
                          "manifest": manifest, "input_bindings": input_bindings})
 
 
+def _parsed_release_receipt(raw, logical_key):
+    """Parse a delivered ``release_intent`` receipt without losing any prior
+    association: a receipt that cannot be read back as JSON, is not a
+    mapping, or carries a ``release_id``/``release_ids`` pair that does not
+    contain its own primary is refused as ``INTEGRITY_FAILED`` (never
+    silently overwritten, which would discard earlier bindings). The legacy
+    single-``release_id`` shape is accepted and treated as a one-element
+    ``release_ids``."""
+    try:
+        prior = json.loads(raw)
+    except (TypeError, ValueError):
+        raise fail("INTEGRITY_FAILED", "release_intent receipt is not valid JSON",
+                   details={"logical_key": logical_key})
+    if not isinstance(prior, dict) or not isinstance(prior.get("release_id"), str):
+        raise fail("INTEGRITY_FAILED", "release_intent receipt is missing its release association",
+                   details={"logical_key": logical_key})
+    release_ids = prior.get("release_ids", [prior["release_id"]])
+    if (not isinstance(release_ids, list)
+            or not all(isinstance(value, str) for value in release_ids)
+            or prior["release_id"] not in release_ids):
+        raise fail("INTEGRITY_FAILED", "release_intent receipt has inconsistent associations",
+                   details={"logical_key": logical_key})
+    return prior
+
+
 def _bind_release_intent(conn, scope, session, release_id, *, clock):
     """Mark the ``release_intent`` outbox row this release is bound to as
     delivered (P2-C06 decision 2): "bound to a release", never "published" —
@@ -325,16 +350,39 @@ def _bind_release_intent(conn, scope, session, release_id, *, clock):
     ``state IN (...)`` guard is a no-op once already delivered), so a retried
     ``publication_effect`` call after a failed ``publish_local`` re-uses the
     same binding without conflict.
+
+    Durable and idempotent across same-session reruns: a delivered row keeps
+    its original primary ``release_id`` (and ``bound_at``) while accruing
+    every later associated ID in a sorted, unique ``release_ids`` list, so a
+    rerun that publishes a newer release leaves the earlier binding intact
+    instead of silently rebinding the row. Re-binding an ID already present
+    is a no-op (no ``attempts`` bump); a newly added ID bumps ``attempts``
+    once.
     """
     row = _watermark_row(conn, scope, "decisions")
     if row is None or row["occurrence"] != session:
         return
-    receipt = {"release_id": release_id, "bound_at": format_timestamp(clock.now())}
+    new_receipt = {"release_id": release_id, "bound_at": format_timestamp(clock.now()),
+                   "release_ids": [release_id]}
     with transaction(conn):
+        existing = conn.execute(
+            "SELECT state, receipt_json FROM outbox WHERE kind='release_intent' AND logical_key=?",
+            (row["receipt_ref"],)).fetchone()
+        if existing is not None and existing["state"] == "delivered":
+            prior = _parsed_release_receipt(existing["receipt_json"], row["receipt_ref"])
+            release_ids = prior.get("release_ids", [prior["release_id"]])
+            if release_id in release_ids:
+                return
+            receipt = {**prior, "release_ids": sorted(set(release_ids) | {release_id})}
+            conn.execute(
+                "UPDATE outbox SET attempts=attempts+1, receipt_json=? "
+                "WHERE kind='release_intent' AND logical_key=? AND state='delivered'",
+                (dumps(receipt), row["receipt_ref"]))
+            return
         conn.execute(
             "UPDATE outbox SET state='delivered', attempts=attempts+1, receipt_json=? "
             "WHERE kind='release_intent' AND logical_key=? AND state IN ('pending','running')",
-            (dumps(receipt), row["receipt_ref"]))
+            (dumps(new_receipt), row["receipt_ref"]))
 
 
 def _publication_files(conn, store, bindings):
@@ -426,8 +474,18 @@ def _write_operations_status(conn, store, target, *, scope, requested_session, r
     history = tuple(EngineeringNight(**row) for row in engineering_history(conn, occurrences))
     conflicts, degraded = _bundle_flags(store, bundle_ref) if bundle_ref is not None else ((), ())
     selfcheck_doc = _selfcheck_document(conn, store, bindings)
-    snapshot = health(conn, clock=clock)
+    # FIX-409: this sidecar describes ONE scope, so the withheld projection is
+    # compared against this scope's OWN delivered pointer. The aggregate
+    # ``health._current_delivered_release`` walk reads every publication scope's
+    # CURRENT, so one unrelated damaged pointer would abort this scope's
+    # successful publication status write; only ``health()`` may report that.
     current_release_id = release_current(target)
+    current_delivered = None
+    if current_release_id is not None:
+        current_delivered = conn.execute(
+            "SELECT release_id,occurrence,delivered_at FROM releases WHERE release_id=? "
+            "AND delivered_at IS NOT NULL", (current_release_id,)).fetchone()
+    withheld_release = _withheld_release(conn, current_delivered, fallback_to_latest=False)
     # A judgement call (guide §5.5 item 2's own report should note it): a
     # served release that is NOT the one this latest attempt just tried to
     # publish is, by definition, stale relative to that attempt -- on
@@ -435,7 +493,6 @@ def _write_operations_status(conn, store, target, *, scope, requested_session, r
     # a failed update they differ because the old release was kept.
     stale = current_release_id != attempted_release_id
     failed_update_reason = f"{failure.code}: {failure.problem.message}" if failure is not None else None
-    withheld_release = snapshot.get("withheld_release")
     withheld_reason = None
     if withheld_release is not None:
         withheld_reason = (f"occurrence {withheld_release['occurrence']} release "

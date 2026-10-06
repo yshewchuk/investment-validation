@@ -37,7 +37,7 @@ from engine.v2.ops.publication import current, publish_local, stage_release
 from engine.v2.ops.scheduler import claim_next
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
-from tests.ops_support import catalog, enqueue_claim, sample
+from tests.ops_support import catalog, enqueue_claim, sample, seed_delivered_health_release
 
 STAMP = "2026-09-12T00:00:00.000000Z"
 REQUIRED = ("causality", "coverage", "finality", "replay", "selection")
@@ -304,6 +304,8 @@ def test_o22_budget_failure_withholds_publication_only(tmp_path):
     record_check(conn, "2026-09-12", "engineering", False, {"failed": ["fan_out"]})
     record_check(conn, "2026-09-12", "engineering", False,
                  {"failed": ["fan_out"], "attempt": 2})
+    seed_delivered_health_release(conn, release_id="rel-0", requested_session="2026-09-12",
+                                  resolved_session="2026-09-12")
     document = health(conn, clock=clock)
     budgets = document["code_budgets"]
     assert budgets["ok"] is False
@@ -382,6 +384,8 @@ def test_o23_no_override_replaces_a_gate_receipt(tmp_path):
     # The health document exposes no override: the streak stands.
     record_check(conn, "2026-09-12", "engineering", False,
                  {"override": {"approved": True}})
+    seed_delivered_health_release(conn, release_id="rel-0", requested_session="2026-09-12",
+                                  resolved_session="2026-09-12")
     budgets = health(conn, clock=clock)["code_budgets"]
     assert budgets["override"] is None
     assert budgets["ok"] is False and budgets["consecutive_nights"] == 1

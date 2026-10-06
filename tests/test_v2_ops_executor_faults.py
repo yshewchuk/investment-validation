@@ -33,7 +33,8 @@ from engine.v2.ops.scheduler import claim_next
 from engine.v2.ops.stages import registry, validate_result
 from engine.v2.ops.submission import submit
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import POLICY, TEST_POLICY, catalog, request, sample
+from tests.ops_support import (POLICY, TEST_POLICY, catalog, request, sample,
+                               seed_delivered_health_release)
 
 # Real subprocess spawn/kill/signal, a real cgroup probe, and real watchdog
 # calls against this host's process table (see tests/conftest.py's grouping
@@ -204,6 +205,8 @@ def test_o14_watchdog_containment_is_declared_not_implied(tmp_path):
     else:
         assert admission.reason is not None
     conn, clock, _ = catalog(tmp_path)
+    seed_delivered_health_release(conn, release_id="o14", requested_session="2026-09-12",
+                                  resolved_session="2026-09-12")
     document = health(conn, clock=clock)
     assert document["executor_mode"] == "watchdog"
     assert document["containment"] == "best_effort"
@@ -261,7 +264,7 @@ def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
     details = json.loads((tmp_path / "diagnostics" / "failure_details.json").read_text())
     assert details == {"exception_type": "RuntimeError",
                        "location": details["location"]}
-    assert details["location"].endswith("test_v2_ops_executor_faults.py:239")
+    assert details["location"].endswith("test_v2_ops_executor_faults.py:242")
     assert "S3CRET-VALUE" not in json.dumps(details)
 
 

@@ -5,14 +5,17 @@ bytes or mutable head; the caller attests ``content_hash(payload)``.
 
 ``export`` (the CLI) additionally checks the explicit pins against the mutable
 head, verifies every object descriptor against the artifact store and publishes
-the inventory as one atomically written, canonical-JSON export file. The
-catalog is only ever opened read-only; no register path lives here.
+the inventory as one atomically written, canonical-JSON export file. ``register``
+re-verifies one such export against the live catalog and object store and returns
+a :class:`VerifiedInventory`; the catalog is only ever opened read-only.
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -363,6 +366,176 @@ def export_inventory(conn, *, scope, snapshot_id, receipt_id, generation,
                                              receipt_id=receipt_id, generation=generation))
 
 
+# Register verification: validate a neutral export against the live catalog and
+# object store with typed refusals only; no catalog write happens here.
+
+VERIFIED_SCHEMA_VERSION = "reregister_snapshot_verified.v1"
+_MAX_JSON_DEPTH = 32
+_KNOWLEDGE_MODES = {"observed", "attested_stable", "reconstructed"}
+_PRICE_CAPTURE_KEYS = {"capture_id", "receipt_id", "ticker", "source_kind", "source_hash", "retrieved_at", "outcome", "rows_added", "rows_tombstoned", "created_at", "contract_id"}
+_PRICE_CAPTURE_TEXT = ("capture_id", "receipt_id", "ticker", "source_kind", "source_hash", "retrieved_at", "outcome", "created_at", "contract_id")
+_MOVES_CAPTURE_KEYS = {"capture_id", "ticker", "created_at", "contract_id", "outcome"}
+_POS, _NAT, _MODE = object(), object(), object()
+_SPECIAL = {_POS: lambda v: type(v) is int and v > 0, _NAT: lambda v: type(v) is int and v >= 0,
+            _MODE: lambda v: type(v) is str and v in _KNOWLEDGE_MODES}
+_EXPORT_SCHEMA = {
+    "schema_version": str, "content_hash": str, "inventory": {
+        "schema_version": str, "scope": str, "snapshot_id": str, "receipt_id": str,
+        "calendar_version": str, "source_priority_version": str, "generation": _POS,
+        "finality_receipt_refs": [str], "tables": [{
+            "table_name": str, "dataset_version_id": str, "contract_id": str,
+            "knowledge_mode": _MODE, "coverage_receipt_refs": [str],
+            "availability_evidence_refs": [str], "fragments": [{
+                "fragment_id": str, "partition_key": str, "row_count": _NAT,
+                "object": {"kind": str, "object_id": str, "content_hash": str, "byte_size": int},
+                "primary_key_min": [(str, int, bool, float)],
+                "primary_key_max": [(str, int, bool, float)],
+                "time_min": (str, type(None)), "time_max": (str, type(None))}]}],
+        "references": [{
+            "kind": str, "legacy_path": str, "object_id": str, "content_hash": str,
+            "byte_size": int, "fold": (str, int, type(None))}],
+        "lineage": {"receipt_ids": [str], "edges": [[str]]}, "captures": dict}}
+
+
+def _corrupt(name):
+    return errors.fail("MANIFEST_CORRUPT", f"the exported {name} has an unexpected shape")
+
+
+def _utf8(text):
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise _corrupt("string") from exc
+
+
+def _walk_json(root):
+    stack = [(root, 1)]
+    while stack:
+        value, depth = stack.pop()
+        kind = type(value)
+        if kind is dict:
+            if depth > _MAX_JSON_DEPTH:
+                raise _corrupt("nesting depth")
+            if (type(value.get("schema_version")) is str and value["schema_version"].startswith(("table_contract.", "column_contract."))) or {"contract_id", "table_name", "columns"} <= set(value):
+                raise errors.fail("UNSUPPORTED_CONTRACT", "the export embeds a contract document; only contract_id refs are allowed")
+            for key, item in value.items():
+                _utf8(key)
+                stack.append((item, depth + 1))
+        elif kind is list:
+            if depth > _MAX_JSON_DEPTH:
+                raise _corrupt("nesting depth")
+            stack.extend((item, depth + 1) for item in value)
+        elif kind is str:
+            _utf8(value)
+        elif kind is float:
+            if not math.isfinite(value):
+                raise _corrupt("number")
+        elif kind is not int and kind is not bool and value is not None:
+            raise _corrupt("value")
+
+
+def _match(value, spec, name):
+    if type(spec) is dict:
+        if type(value) is not dict or set(value) != set(spec):
+            raise _corrupt(name)
+        for key, sub in spec.items():
+            _match(value[key], sub, name)
+    elif type(spec) is list:
+        if type(value) is not list:
+            raise _corrupt(name)
+        for item in value:
+            _match(item, spec[0], name)
+    else:
+        check = _SPECIAL.get(spec)
+        ok = check(value) if check is not None else type(value) in (spec if type(spec) is tuple else (spec,))
+        if not ok:
+            raise _corrupt(name)
+
+
+def _capture_rows(captures, tables):
+    if type(captures) is not dict or not set(captures) <= set(tables):
+        raise _corrupt("captures")
+    for table, rows in captures.items():
+        if table == PRICE_HISTORY:
+            keys, text, counts = _PRICE_CAPTURE_KEYS, _PRICE_CAPTURE_TEXT, ("rows_added", "rows_tombstoned")
+        elif table == COMPUTED_MOVES:
+            keys, text, counts = _MOVES_CAPTURE_KEYS, _MOVES_CAPTURE_KEYS, ()
+        else:
+            raise _corrupt("captures")
+        if type(rows) is not list:
+            raise _corrupt("captures")
+        for row in rows:
+            if type(row) is not dict or set(row) != keys:
+                raise _corrupt("captures")
+            if (any(type(row[name]) is not str for name in text)
+                    or any(type(row[name]) is not int or row[name] < 0 for name in counts)):
+                raise _corrupt("captures")
+
+
+def _validate_export(wrapper):
+    _walk_json(wrapper)
+    _match(wrapper, _EXPORT_SCHEMA, "export wrapper")
+    inventory = wrapper["inventory"]
+    if wrapper["schema_version"] != EXPORT_SCHEMA_VERSION or inventory["schema_version"] != SCHEMA_VERSION:
+        raise _corrupt("export wrapper")
+    if any(len(edge) != 2 for edge in inventory["lineage"]["edges"]):
+        raise _corrupt("lineage edges")
+    names = [table["table_name"] for table in inventory["tables"]]
+    if len(set(names)) != len(names):
+        raise _corrupt("tables")
+    _capture_rows(inventory["captures"], names)
+    return inventory
+
+
+def _load_export(inventory_path):
+    try:
+        raw = Path(inventory_path).read_bytes()
+    except OSError as exc:
+        raise errors.fail("INPUT_CHANGED", "the inventory file could not be read") from exc
+    try:
+        wrapper = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise errors.fail("MANIFEST_CORRUPT", "the inventory file is not valid JSON") from exc
+    inventory = _validate_export(wrapper)
+    if wrapper["content_hash"] != content_hash(inventory):
+        raise _corrupt("content hash")
+    return inventory
+
+
+def _membership(tables):
+    return {table["table_name"]: (len(table["fragments"]), frozenset(
+        (fragment["fragment_id"], fragment["object"]["object_id"], fragment["partition_key"])
+        for fragment in table["fragments"])) for table in tables}
+
+
+def _verify_live_inventory(inventory, live):
+    if _membership(inventory["tables"]) != _membership(live["tables"]):
+        raise errors.fail("CONTRACT_MISMATCH", "the exported table or fragment membership does not match the current catalog")
+    encoding = {"sort_keys": True, "ensure_ascii": True, "separators": (",", ":")}
+    if json.dumps(live, **encoding) != json.dumps(inventory, **encoding):
+        raise errors.fail("INPUT_CHANGED", "the exported inventory does not match the current catalog")
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class VerifiedInventory:
+    payload_bytes: bytes
+
+    def to_bytes(self) -> bytes:
+        return self.payload_bytes
+
+
+def register(conn, *, inventory_path, objects_root):
+    inventory = _load_export(inventory_path)
+    live = neutral_inventory(conn, scope=inventory["scope"], snapshot_id=inventory["snapshot_id"],
+                              receipt_id=inventory["receipt_id"], generation=inventory["generation"])
+    _verify_live_inventory(inventory, live)
+    _verify_objects(inventory, objects_root)
+    payload = {"schema_version": VERIFIED_SCHEMA_VERSION, "scope": inventory["scope"],
+               "snapshot_id": inventory["snapshot_id"], "generation": inventory["generation"],
+               "receipt_id": inventory["receipt_id"], "content_hash": content_hash(inventory)}
+    return VerifiedInventory(payload_bytes=(canonical_json(payload) + "\n").encode("utf-8"))
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -374,6 +547,11 @@ def _build_parser():
     export.add_argument("--catalog", required=True, type=Path)
     export.add_argument("--objects", required=True, type=Path, help="ArtifactStore root")
     export.add_argument("--out", required=True, type=Path, help="export file destination")
+    register_cmd = commands.add_parser(
+        "register", help="verify one export and write its verified inventory to stdout")
+    register_cmd.add_argument("--inventory", required=True, type=Path, help="export file to verify")
+    register_cmd.add_argument("--catalog", required=True, type=Path)
+    register_cmd.add_argument("--objects", required=True, type=Path, help="ArtifactStore root")
     return parser
 
 
@@ -382,9 +560,13 @@ def main(argv=None) -> int:
     conn = None
     try:
         conn = _open_read_only(args.catalog)
-        export_inventory(conn, scope=args.scope, snapshot_id=args.snapshot_id,
-                         receipt_id=args.receipt_id, generation=args.generation,
-                         catalog_path=args.catalog, objects_root=args.objects, out=args.out)
+        if args.command == "register":
+            verified = register(conn, inventory_path=args.inventory, objects_root=args.objects)
+            sys.stdout.buffer.write(verified.to_bytes())
+        else:
+            export_inventory(conn, scope=args.scope, snapshot_id=args.snapshot_id,
+                             receipt_id=args.receipt_id, generation=args.generation,
+                             catalog_path=args.catalog, objects_root=args.objects, out=args.out)
     except errors.DataError as exc:
         print(json.dumps({"refused": exc.code, "message": exc.problem.message},
                          sort_keys=True), file=sys.stderr)

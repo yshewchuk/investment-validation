@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
+from engine.v2.ops import cli
+from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.serving.operations import create_server
+from tests.ops_support import FakeClock, seed_delivered_health_release
 
 # Drives a real Playwright browser (see tests/conftest.py's grouping rule).
 pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]  # drives a real Playwright browser or needs node/npm (ui/ build)
@@ -353,6 +356,108 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
             assert state.startswith("unknown")
             assert "published current unavailable" in state
             assert "/release/r1/" in (page.locator("#legacy").get_attribute("src") or "")
+
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+
+def test_shell_treats_cli_produced_missing_or_mismatched_sessions_as_unknown(tmp_path):
+    """Real CLI health starts current, then missing/mismatched sessions go unknown."""
+    static = Path("engine/dashboard/static")
+    root = tmp_path
+    now_iso = "2026-10-04T00:00:00Z"
+    requested_session = "2026-10-04"
+    resolved_session = "2026-10-02"
+
+    assert cli.main(["--root", str(root), "init"]) == 0
+    release = root / "releases" / "r1"
+    shutil.copytree(static / "assets", release / "assets")
+    (release / "data").mkdir(parents=True)
+    shutil.copy(static / "index.html", release / "index.html")
+    scripts = {"meta.js": "window.META={};", "board.js": "window.BOARD={rows:[]};",
+               "health.js": "window.HEALTH={};", "flags.js": "window.FLAGS={flags:[]};",
+               "strategies.js": "window.STRATEGIES=[];", "book.js": "window.BOOK={};"}
+    for name, text in scripts.items():
+        (release / "data" / name).write_text(text)
+    (root / "CURRENT").write_text("r1\n")
+
+    clock = FakeClock()
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        seed_delivered_health_release(conn, release_id="r1",
+                                      requested_session=requested_session,
+                                      resolved_session=resolved_session)
+    finally:
+        conn.close()
+
+    health_path = root / "health.json"
+    assert cli.main(["--root", str(root), "health", "--out", str(health_path)]) == 0
+    health_document = json.loads(health_path.read_text())
+    assert health_document["schema_version"] == "operations_health.v1.1"
+    assert health_document["requested_session"] == requested_session
+    assert health_document["resolved_session"] == resolved_session
+    assert health_document["current_release"]["release_id"] == "r1"
+    assert health_document["current_release"]["occurrence"] == resolved_session
+
+    server = create_server(("127.0.0.1", 0), token="browser-secret",
+                           health_path=health_path, release_root=root, frozen_at=now_iso)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:" + str(server.server_port)
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context()
+            context.add_cookies([{"name": "operations_token", "value": "browser-secret",
+                                  "url": base}])
+            page = context.new_page()
+            page.add_init_script(
+                'var _setInterval = window.setInterval;'
+                'window.setInterval = function (fn, ms) {'
+                ' return _setInterval(fn, Math.min(ms, 200)); };'
+            )
+            page.goto(base + "/")
+            page.wait_for_function(
+                '() => document.querySelector("#state").textContent === "current"',
+                timeout=2000,
+            )
+            assert page.locator("#published").inner_text() == "published release: r1"
+            assert page.locator("#release").inner_text() == "pinned release: r1"
+
+            missing_sessions = {key: value for key, value in health_document.items()
+                                if key not in ("requested_session", "resolved_session")}
+            missing_sessions["schema_version"] = "operations_health.v1.0"
+            health_path.write_text(json.dumps(missing_sessions))
+            page.wait_for_function(
+                '() => { const st = document.querySelector("#state").textContent; '
+                'return st.indexOf("unknown") === 0 && '
+                'st.indexOf("session identity evidence missing or malformed") >= 0; }',
+                timeout=2000,
+            )
+            state = page.locator("#state").inner_text()
+            assert state.startswith("unknown")
+            assert "current" not in state
+            assert "session identity evidence missing or malformed" in state
+            assert page.locator("#published").inner_text() == "published release: r1"
+            assert page.locator("#release").inner_text() == "pinned release: r1"
+
+            mismatched_sessions = dict(health_document,
+                                       requested_session=resolved_session,
+                                       resolved_session=requested_session)
+            health_path.write_text(json.dumps(mismatched_sessions))
+            page.wait_for_function(
+                '() => { const st = document.querySelector("#state").textContent; '
+                'return st.indexOf("unknown") === 0 && '
+                'st.indexOf("resolved session is later than requested session") >= 0; }',
+                timeout=2000,
+            )
+            state = page.locator("#state").inner_text()
+            assert state.startswith("unknown")
+            assert "current" not in state
+            assert "resolved session is later than requested session" in state
 
             browser.close()
     finally:

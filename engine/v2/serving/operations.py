@@ -106,7 +106,8 @@ def _read_health(path: Path) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise ValueError("health artifact is indirect")
     document = json.loads(path.read_text())
-    if not isinstance(document, dict) or document.get("schema_version") != "operations_health.v1.0":
+    if not isinstance(document, dict) or document.get("schema_version") not in (
+            "operations_health.v1.0", "operations_health.v1.1"):
         raise ValueError("unsupported health artifact")
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
@@ -119,16 +120,17 @@ def _read_calibration_health(path: Path) -> bytes:
     (``engine.v2.ledger.calibration.export_health_file``). That document --
     like the legacy ``health.json`` it mirrors -- carries no
     ``schema_version``, so it is recognized by ``generated_at`` and canonicalized
-    exactly as ``/health.json`` does. An ``operations_health.v1.0`` document is
-    accepted too (the same reader then serves either exported health file);
-    anything else is refused, never served as empty JSON.
+    exactly as ``/health.json`` does. An ``operations_health.v1.0`` or
+    ``operations_health.v1.1`` document is accepted too (the same reader then
+    serves either exported health file); anything else is refused, never served
+    as empty JSON.
     """
     if path.is_symlink() or not path.is_file():
         raise ValueError("health artifact is indirect")
     document = json.loads(path.read_text())
     if not isinstance(document, dict):
         raise ValueError("unsupported health artifact")
-    if document.get("schema_version") == "operations_health.v1.0":
+    if document.get("schema_version") in ("operations_health.v1.0", "operations_health.v1.1"):
         return _read_health(path)
     if "generated_at" not in document or "n_scored" not in document:
         raise ValueError("unsupported health artifact")
@@ -153,8 +155,9 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
     they differ the shell says the displayed board is stale, shows the health
     observation's age, and offers a reload button to opt into current -- the
     frame is never re-pointed automatically. ``/health.json`` polls every 30s
-    and is usable only as an ``operations_health.v1.0`` object with a
-    parseable, non-future ``generated_at``; age shows in whole days/hours
+    and is usable only as an ``operations_health.v1.0`` or
+    ``operations_health.v1.1`` object with a parseable, non-future
+    ``generated_at``; age shows in whole days/hours
     (minimum one hour when nonzero, more than 24h stale). "current" requires
     age <=24h, a health ``current_release.release_id`` matching BOTH the pin
     and the latest published id, no withheld release, zero consecutive failed
@@ -176,7 +179,7 @@ const FROZEN='{frozen}',DAY=86400000;
 const state=document.querySelector('#state'),stamp=document.querySelector('#stamp'),banner=document.querySelector('#ops'),releaseEl=document.querySelector('#release'),publishedEl=document.querySelector('#published'),driftEl=document.querySelector('#drift'),optin=document.querySelector('#optin'),frame=document.querySelector('#legacy');
 let pinned=null,published,health=null,healthNote='health not fetched yet',currentSeq=0,healthSeq=0;
 function age(ms){{let h=Math.floor(ms/3600000);if(ms>0&&h<1)h=1;const d=Math.floor(h/24);return d?d+'d '+(h%24)+'h':h+'h';}}
-function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||j.schema_version!=='operations_health.v1.0')return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
+function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||!['operations_health.v1.0','operations_health.v1.1'].includes(j.schema_version))return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
 async function pollHealth(){{const seq=++healthSeq;try{{const r=await fetch('/health.json',{{credentials:'same-origin'}});if(seq!==healthSeq)return;if(!r.ok)throw Error('http');const j=await r.json();if(seq!==healthSeq)return;if(usable(j)){{health=j;healthNote='';}}else{{health=null;healthNote='health artifact unusable: schema or generated_at';}}}}catch(e){{if(seq!==healthSeq)return;health=null;healthNote='health fetch failed: unavailable';}}if(seq!==healthSeq)return;render();}}
 async function pollCurrent(){{const seq=++currentSeq;let ok=false,id=null;try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();id=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;ok=true;}}catch(e){{}}if(seq!==currentSeq)return;published=ok?id:null;render();}}
 function sessionDate(s){{if(typeof s!=='string'||!s)return null;const m=/^(?:eng-night-)?([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})$/.exec(s);if(!m)return null;const tail=m[1];const at=Date.parse(tail);if(Number.isNaN(at))return null;return new Date(at).toISOString().slice(0,10)===tail?at:null;}}
