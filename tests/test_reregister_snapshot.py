@@ -1248,16 +1248,20 @@ def test_register_verified_inventory_is_idempotent_and_read_only(tmp_path):
     before_bytes = fixture["catalog_path"].read_bytes()
     before_rows = _catalog_rows(conn)
 
-    first = reregister_snapshot.register(conn, inventory_path=export_path,
-                                         objects_root=fixture["store"].root)
-    assert isinstance(first, reregister_snapshot.VerifiedInventory)
-    assert fixture["catalog_path"].read_bytes() == before_bytes
-    assert _catalog_rows(conn) == before_rows
+    read_conn = reregister_snapshot._open_read_only(fixture["catalog_path"])
+    try:
+        first = reregister_snapshot.register(read_conn, inventory_path=export_path,
+                                             objects_root=fixture["store"].root)
+        assert isinstance(first, reregister_snapshot.VerifiedInventory)
+        assert fixture["catalog_path"].read_bytes() == before_bytes
+        assert _catalog_rows(conn) == before_rows
 
-    second = reregister_snapshot.register(conn, inventory_path=export_path,
-                                          objects_root=fixture["store"].root)
-    assert fixture["catalog_path"].read_bytes() == before_bytes
-    assert _catalog_rows(conn) == before_rows
+        second = reregister_snapshot.register(read_conn, inventory_path=export_path,
+                                              objects_root=fixture["store"].root)
+        assert fixture["catalog_path"].read_bytes() == before_bytes
+        assert _catalog_rows(conn) == before_rows
+    finally:
+        read_conn.close()
 
     assert first.to_bytes() == second.to_bytes()
     document = json.loads(first.to_bytes())
