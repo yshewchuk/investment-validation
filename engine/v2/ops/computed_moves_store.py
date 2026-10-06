@@ -573,7 +573,13 @@ def _validate_document_identity(document: dict) -> None:
         if not isinstance(value, str) or not value:
             raise fail("INVALID_REQUEST",
                        f"computed moves refresh input document needs a non-empty string {name}")
-    if "parent_receipt_id" in document:
+    if document.get("parent_receipt_id") is not None:
+        # An explicit null is the same legacy/unpinned state as an omitted
+        # field: production documents staged before ``parent_receipt_id``
+        # existed serialize it as null, and ``_parent_receipt_id_for_commit``
+        # resolves the receipt for that state. Every non-null value is still
+        # validated here, and a non-null pin that disagrees with the job or is
+        # not committed for the parent is still refused.
         _validated_parent_receipt_id(document["parent_receipt_id"])
     if not Path(document["catalog_path"]).is_file():
         # ``sqlite3.connect`` is never allowed to silently create a fresh,
@@ -749,17 +755,18 @@ def _validate_job_identity(parameters) -> None:
     _validated_refresh_plan_hash(parameters.refresh_plan_hash)
 
 
-def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> RefreshCallbackResult:
+def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
+                               use_cached_receipts: bool = True) -> RefreshCallbackResult:
     """This job's own callback (spec s4b Change 3), called directly -- NOT
     bound to ``RefreshCallback`` via a bare ``functools.partial``: ``main``'s
     ``RefreshParameters`` has no ``as_of`` field, so ``as_of`` is an explicit,
     validated, required keyword. Validates the staged input document up front,
     selects targets from the pinned parent snapshot with ONE scan per source
-    table, and commits one new snapshot. A cached unit is never re-fetched,
-    and a same-``as_of`` rerun genuinely no-ops: every committed row's
-    ``computed_at`` derives from ``as_of``, so identical inputs commit
-    identical bytes.
-    """
+    table, and commits one new snapshot. A same-``as_of`` rerun genuinely
+    no-ops: every committed row's ``computed_at`` derives from ``as_of``, so
+    identical inputs commit identical bytes. ``use_cached_receipts`` picks the
+    plan's cache policy (``_plan_cached_outcomes``); the supervised default
+    is unchanged."""
     as_of_day = _as_of_day(as_of)  # validated before any I/O; a bad value raises
     _validate_job_identity(parameters)
     root = Path(root)
@@ -788,9 +795,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
         units = computed_moves_units(targets, as_of=as_of)
         plan = plan_refresh(
             parent.snapshot, units,
-            cached_outcomes=cached_unit_outcomes(
-                conn, units, source=COMPUTED_MOVES_TABLE_NAME,
-                endpoint=COMPUTED_MOVES_TABLE_NAME),
+            cached_outcomes=_plan_cached_outcomes(conn, units, use_cached_receipts),
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(document["expected_head_generation"]))
         fragment_records, attempts = _capture_targets(
@@ -828,6 +833,25 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
             candidate_snapshot_id=receipt.resulting_head_snapshot_id)
     finally:
         conn.close()
+
+
+def _plan_cached_outcomes(conn, units, use_cached_receipts):
+    """The plan's cache set under this run's explicit policy.
+
+    ``use_cached_receipts`` is the narrowest explicit control over the catalog
+    raw-receipt cache. ``True`` -- the supervised worker's existing behavior --
+    reuses a durable same-unit receipt instead of re-fetching (spec R2). The
+    local ``computed-moves capture`` CLI sets it ``False`` because its selected
+    Tier-1 source root is authoritative: an old same-unit catalog receipt must
+    never override changed bytes, or a missing entry, in that selected source.
+    Both the CLI and the runner build their plan with this same policy, so
+    their plan identity agrees.
+    """
+    if not use_cached_receipts:
+        return {}
+    return cached_unit_outcomes(
+        conn, units, source=COMPUTED_MOVES_TABLE_NAME,
+        endpoint=COMPUTED_MOVES_TABLE_NAME)
 
 
 def _unit_history(conn, store, unit, fetcher, cached, *, created_at):

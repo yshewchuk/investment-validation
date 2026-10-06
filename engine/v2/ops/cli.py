@@ -1117,15 +1117,11 @@ def _computed_moves_capture_report(dry_run, targets, cache):
 
 def computed_moves_command(args, root, conn, clock):
     """Build one computed_moves.v3 generation from the local Tier-1 cache."""
-    from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
     from engine.v2.data.repository import Repository
     from engine.v2.ops import computed_moves_store
     from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
     from engine.v2.ops.incremental_data import plan_refresh
-    from engine.v2.ops.unit_receipts import (
-        NATIVE_COMPUTED_MOVES_ACCOUNT,
-        cached_unit_outcomes,
-    )
+    from engine.v2.ops.unit_receipts import NATIVE_COMPUTED_MOVES_ACCOUNT
 
     if not args.source_root.is_dir():
         raise fail("INVALID_REQUEST", "--source-root must be an existing directory",
@@ -1152,9 +1148,7 @@ def computed_moves_command(args, root, conn, clock):
         units = computed_moves_store.computed_moves_units(targets, as_of=as_of)
         plan = plan_refresh(
             parent, units,
-            cached_outcomes=cached_unit_outcomes(
-                conn, units, source=COMPUTED_MOVES_TABLE_NAME,
-                endpoint=COMPUTED_MOVES_TABLE_NAME),
+            cached_outcomes={},
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(head["generation"]))
         report = _computed_moves_capture_report(args.dry_run, targets, cache)
@@ -1187,7 +1181,7 @@ def computed_moves_command(args, root, conn, clock):
             as_of=as_of,
         )
         result = computed_moves_store.run_computed_moves_refresh(
-            parameters, root, as_of=as_of, fetcher=fetcher)
+            parameters, root, as_of=as_of, fetcher=fetcher, use_cached_receipts=False)
         report["result"] = to_document(result)
         return report
     finally:

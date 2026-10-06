@@ -143,6 +143,23 @@ def _closes_csv() -> bytes:
     return "\n".join(lines).encode()
 
 
+def _series_csv(base: float) -> bytes:
+    """The same date grid with a caller-chosen close level: lets a test tell
+    two same-request-id series apart by the bytes the runner actually parsed."""
+    lines = ["Date,Close"] + [f"{d.date()},{base + i}" for i, d in enumerate(_BDAYS)]
+    return "\n".join(lines).encode()
+
+
+def _seed_catalog_receipt(conn, store, clock, ticker, csv_bytes):
+    """Persist one durable catalog unit receipt for ``ticker``'s request id,
+    exactly the shape ``cached_unit_outcomes`` later reads back."""
+    from engine.v2.ops.unit_receipts import record_unit_receipt
+
+    record_unit_receipt(
+        conn, store, _unit(ticker, _AS_OF), csv_bytes, source="computed_moves",
+        endpoint="computed_moves", received_at=clock.now().isoformat())
+
+
 def _head_row(conn, scope="shadow"):
     row = conn.execute(
         "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
@@ -499,6 +516,176 @@ def test_parent_receipt_id_validation_rejects_missing_and_oversized_values():
         assert err.value.code == "INVALID_REQUEST"
 
 
+# --------------------------------------------------------------------------
+# The local ``computed-moves capture`` CLI's selected Tier-1 source root is
+# authoritative over the catalog raw-receipt cache: a same-unit catalog
+# receipt must not override changed bytes or a missing entry in the selected
+# source. The supervised worker default (catalog receipt reuse) is unchanged.
+# --------------------------------------------------------------------------
+
+
+def test_selected_source_fetcher_overrides_cached_catalog_receipt(tmp_path, monkeypatch):
+    """Bypassing catalog receipts, the selected fetcher's different history is
+    the series the runner parses and commits -- never the older catalog
+    receipt for the same request id."""
+    import numpy as np
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", d) for d in _EVENT_DAYS])
+    cached_csv = _series_csv(200.0)
+    selected_csv = _series_csv(100.0)
+    _seed_catalog_receipt(conn, store, clock, "AAAA", cached_csv)
+
+    captured = {}
+    real_build_rows = computed_moves_store.build_rows
+
+    def _spy_build_rows(ticker, events, sd, sc, daily, **kwargs):
+        captured["closes"] = np.array(sc)
+        return real_build_rows(ticker, events, sd, sc, daily, **kwargs)
+
+    monkeypatch.setattr(computed_moves_store, "build_rows", _spy_build_rows)
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+    fetcher = _CountingFetcher(selected_csv)
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=fetcher, use_cached_receipts=False)
+
+    assert result.status == "complete"
+    assert fetcher.calls == ["AAAA"]  # the catalog receipt really was bypassed
+    selected_closes = computed_moves_store._parse_history(selected_csv)[1]
+    cached_closes = computed_moves_store._parse_history(cached_csv)[1]
+    assert np.array_equal(captured["closes"], selected_closes)
+    assert not np.array_equal(captured["closes"], cached_closes)
+    row = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
+        ("AAAA",)).fetchone()
+    assert row["outcome"] == "added"  # a fresh capture, not the cached row
+
+
+def test_selected_source_missing_entry_is_no_history_not_cached(tmp_path, monkeypatch):
+    """With an existing catalog receipt but no entry in the selected source,
+    the attempt is ``no_history`` -- the catalog receipt never stands in for
+    the missing selected-source entry."""
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", d) for d in _EVENT_DAYS])
+    _seed_catalog_receipt(conn, store, clock, "AAAA", _series_csv(200.0))
+
+    calls: list[str] = []
+
+    def missing_fetcher(ticker):
+        calls.append(ticker)
+        return b"", "legitimate_empty", {}, []
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=missing_fetcher, use_cached_receipts=False)
+
+    assert calls == ["AAAA"]
+    assert result.status == "noop"
+    row = conn.execute(
+        "SELECT outcome, capture_id FROM data_computed_moves_captures WHERE ticker = ?",
+        ("AAAA",)).fetchone()
+    assert row["outcome"] == "no_history"
+    assert row["capture_id"] == _capture_id_for(_unit("AAAA", _AS_OF))
+    current = _head_row(conn)
+    assert (current["snapshot_id"], current["generation"]) == (
+        head["snapshot_id"], head["generation"])
+
+
+def test_supervised_default_still_reuses_cached_catalog_receipt(tmp_path, monkeypatch):
+    """The supervised default (no bypass) keeps the existing cache behavior: a
+    durable same-unit receipt is reused and the fetcher is never called."""
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", d) for d in _EVENT_DAYS])
+    _seed_catalog_receipt(conn, store, clock, "AAAA", _series_csv(200.0))
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+    fetcher = _CountingFetcher(_series_csv(100.0))
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=fetcher)  # supervised default
+
+    assert result.status == "complete"
+    assert fetcher.calls == []  # the cached receipt was reused, not refetched
+    row = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
+        ("AAAA",)).fetchone()
+    assert row["outcome"] == "cached"
+
+
+def test_legacy_serialized_null_parent_receipt_is_accepted_and_resolves(tmp_path, monkeypatch):
+    """Production documents for older jobs serialize ``parent_receipt_id`` as
+    an explicit null. The real ``refresh_staging.stage_refresh_input``
+    serializer must produce that document (field present, value null), and the
+    real runner must accept it as the legacy/unpinned state and resolve the
+    parent receipt at commit time -- without the field being removed."""
+    import json
+    from types import SimpleNamespace
+
+    from engine.v2.data import reference_catalog
+    from engine.v2.foundation import to_document
+    from engine.v2.ops.refresh_staging import stage_refresh_input
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", d) for d in _EVENT_DAYS])
+    parameters = _parameters(
+        head, expected_ids=("AAAA",), catalog_path=tmp_path / "ops.sqlite",
+        objects_root=tmp_path, overrides={"parent_receipt_id": None, "as_of": _AS_OF})
+    claim = SimpleNamespace(
+        spec=SimpleNamespace(kind="computed_moves_refresh",
+                             parameters=to_document(parameters)),
+        attempt_id=None, fence=None)
+    root = tmp_path / "attempt"
+    root.mkdir()
+
+    stage_refresh_input(claim, root)
+
+    document = json.loads((root / computed_moves_store.INPUT_PATH).read_text())
+    assert "parent_receipt_id" in document
+    assert document["parent_receipt_id"] is None  # explicit null, not removed
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(_closes_csv()))
+
+    assert result.status == "complete"
+    child_receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=result.candidate_snapshot_id)
+    assert reference_catalog.reference_inputs_for_receipt(
+        conn, receipt_id=child_receipt_id) == reference_catalog.reference_inputs_for_receipt(
+            conn, receipt_id=head["parent_receipt_id"])
+    lineage = conn.execute(
+        "SELECT base_receipt_id FROM data_receipt_lineage WHERE receipt_id = ?",
+        (child_receipt_id,)).fetchone()
+    assert lineage["base_receipt_id"] == head["parent_receipt_id"]
+
+
 def test_computed_moves_command_stages_parent_receipt_pin(tmp_path, monkeypatch):
     import json
     from types import SimpleNamespace
@@ -517,10 +704,13 @@ def test_computed_moves_command_stages_parent_receipt_pin(tmp_path, monkeypatch)
     class Staged(Exception):
         pass
 
-    def stop_after_staging(parameters, root, *, as_of, fetcher):
+    def stop_after_staging(parameters, root, *, as_of, fetcher, use_cached_receipts):
         document = json.loads((root / computed_moves_store.INPUT_PATH).read_text())
         assert document["parent_receipt_id"] == head["parent_receipt_id"]
         assert parameters.parent_receipt_id == head["parent_receipt_id"]
+        # The CLI's selected Tier-1 source root is authoritative: it must tell
+        # the runner to bypass the catalog receipt cache.
+        assert use_cached_receipts is False
         raise Staged
 
     monkeypatch.setattr(computed_moves_store, "run_computed_moves_refresh", stop_after_staging)

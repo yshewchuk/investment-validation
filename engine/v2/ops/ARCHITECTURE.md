@@ -660,13 +660,13 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture`, `price-refresh`, and
   `computed-moves capture`.
-- `computed_moves_store.run_computed_moves_refresh(...)` reads
-  `earnings_events` and `daily_market` from the pinned parent.
-  `computed-moves capture` uses the newest successful Tier-1 yfinance
-  `history(period=max)` entry, treats a missing one as `legitimate_empty`,
-  and never fetches live; dry-run reports cache coverage without writing.
-  The worker binds `as_of` and the fetcher; selection follows the legacy
-  ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
+- `computed_moves_store.run_computed_moves_refresh(...)` reads `earnings_events` and
+  `daily_market` from the pinned parent. `computed-moves capture` uses the newest
+  successful Tier-1 yfinance `history(period=max)` entry; missing history is
+  `legitimate_empty`, it never fetches live, and dry-run reports cache coverage
+  without writing. The selected source root is authoritative: catalog unit
+  receipts do not substitute for missing or changed Tier-1 entries. The worker
+  binds `as_of` and the fetcher; target selection follows the legacy ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
 - `forward_calendar_store` derives per-ticker trading calendars from pinned
   `daily_market` (weekday fallback if absent), then uses the `catalog_path`,
   `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences
