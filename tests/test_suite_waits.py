@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -376,6 +377,100 @@ def _install_controlled_process_table(monkeypatch, tmp_path, pid: int, start_tic
                         lambda boot_id: real(boot_id, proc=proc))
 
 
+def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_path):
+    """Regression: the ``run_until`` deadline diagnostics must describe the
+    tracked process family from the real ``/proc`` tree and surface the
+    worker's stderr, not only catalog rows. A real long-lived parent Python
+    subprocess owns one long-lived CPU-spinning child; the parent pid is
+    registered for the job with its real /proc identity (start ticks and
+    process group), and a ``worker.stderr`` sits at the attempt staging path
+    beside the temporary catalog. A never-ticking fake service keeps the job
+    nonterminal until ``run_until`` times out, and the timeout message must
+    then carry the stderr tail, the tracked pid, a CPU tick delta, the
+    process state, the wait channel and the child pid. Only the fake
+    service's tick is stubbed; the stderr tail, the tracked-process
+    diagnostics, /proc and ``run_until`` itself stay real. The subprocess
+    tree is terminated and reaped in ``finally`` even when an assertion
+    fails."""
+    conn, job_id = _queued_job(tmp_path, {"code": "DEPENDENCY_PENDING"})
+    boot_id = read_boot_id()
+    epoch = conn.execute("SELECT epoch_id FROM supervisor_epochs").fetchone()[0]
+    parent = None
+    child_pid = None
+    try:
+        parent = subprocess.Popen(
+            [sys.executable, "-c",
+             "import signal, subprocess, sys\n"
+             "child = subprocess.Popen([sys.executable, '-c', 'while True: pass'])\n"
+             "print(child.pid, flush=True)\n"
+             "signal.signal(signal.SIGTERM,\n"
+             "              lambda *_: (child.kill(), child.wait(), sys.exit(1)))\n"
+             "child.wait()\n"],
+            stdout=subprocess.PIPE, text=True, start_new_session=True)
+        child_pid = int(parent.stdout.readline())
+        live_stat = Path(f"/proc/{parent.pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        identity = ProcessIdentity(boot_id=boot_id, pid=parent.pid,
+                                   start_ticks=int(live_stat[19]),
+                                   process_group=int(live_stat[2]))
+        resources = ResolvedResources(
+            effective_host_budget_bytes=1 << 30, reserved_memory_bytes=1 << 29,
+            assigned_cpu_ids=(0,), thread_count=1, scratch_limit_bytes=1 << 28,
+            executor_mode="fake", containment="none", provider_leases=(),
+            resource_profile_version="test")
+        conn.execute(
+            "INSERT INTO attempts (attempt_id, job_id, attempt_number, fence, "
+            "supervisor_epoch, host_boot_id, state, process_state, process_json, "
+            "resources_json, created_at, heartbeat_at, lease_expires_at) "
+            "VALUES (?, ?, 1, 1, ?, ?, 'failed', 'exited', ?, ?, ?, ?, ?)",
+            ("att_live", job_id, epoch, boot_id, dumps(identity), dumps(resources),
+             "2026-09-12T00:00:00+00:00", "2026-09-12T00:00:05+00:00",
+             "2026-09-12T00:00:35+00:00"))
+        conn.execute("INSERT INTO process_members (attempt_id, pid, start_ticks, "
+                     "identity_json) VALUES (?, ?, ?, ?)",
+                     ("att_live", identity.pid, identity.start_ticks, dumps(identity)))
+        conn.execute("UPDATE jobs SET attempt_count = 1 WHERE job_id = ?", (job_id,))
+        stderr_path = (tmp_path / "attempts" / "att_live" / "staging" /
+                       "diagnostics" / "worker.stderr")
+        stderr_path.parent.mkdir(parents=True)
+        stderr_path.write_text("boom-1234: worker crashed in stage ramp\n")
+
+        class _NeverTicks:
+            def tick(self):
+                pass
+
+        with pytest.raises(AssertionError) as excinfo:
+            run_until(_NeverTicks(), conn, job_id, timeout=0.2)
+        message = str(excinfo.value)
+        assert "boom-1234" in message
+        assert str(parent.pid) in message
+        assert str(child_pid) in message
+        assert "cpu " in message and " ticks" in message
+        state = Path(f"/proc/{parent.pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+        assert f"state {state}" in message
+        assert "wchan " in message
+        assert "children " in message
+        assert "'queued'" in message and "never admitted" in message
+    finally:
+        if parent is not None:
+            if parent.poll() is None:
+                parent.terminate()
+            try:
+                parent.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                if child_pid:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                parent.kill()
+                try:
+                    parent.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+            if parent.stdout is not None:
+                parent.stdout.close()
+
+
 def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path, monkeypatch):
     """The fenced lease stamp (``attempts.heartbeat_at``), a throttled
     supervisor ``heartbeat`` observation event, the latest meaningful
@@ -442,10 +537,8 @@ def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path, monkeypat
     assert "log tail: heartbeat at 2026-09-12T00:00:12+00:00: still running" in message
     assert "cgroup" not in message
     assert "command line" not in message
-    # the documented family output is only the live/tracked counts: that one
-    # rendered field carries nothing beyond them -- no pid or boot identity --
-    # and the controlled live row above makes BOTH counts nonzero, so a
-    # "0 live" that only proves an impossible pid can never pass here
+    # The aggregate family field remains limited to counts, while the new
+    # tracked-process diagnostic names the pid whose /proc data it reports.
     family_fields = [part for part in message.split("; ")
                      if part.startswith("process family liveness:")]
     assert family_fields == ["process family liveness: 1 live / 1 tracked "
@@ -453,7 +546,10 @@ def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path, monkeypat
     counts = family_fields[0].split(": ", 1)[1].split(" (", 1)[0]
     live_text, tracked_text = counts.split(" live / ")
     assert int(live_text) > 0 and int(tracked_text.split()[0]) > 0
-    assert str(identity.pid) not in message and boot_id not in message
+    tracked_fields = [part for part in message.split("; ")
+                      if part.startswith("tracked process diagnostics:")]
+    assert len(tracked_fields) == 1 and f"(pid {identity.pid})" in tracked_fields[0]
+    assert boot_id not in message
 
 
 @pytest.mark.parametrize("workers", [["-p", "no:xdist"], ["-n", "2"]], ids=["serial", "xdist"])

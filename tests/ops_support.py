@@ -253,6 +253,101 @@ def _read_progress_rows(conn, job_id):
     return [json.loads(row[0]) for row in rows]
 
 
+def _worker_stderr_tail(conn, attempts) -> str:
+    """Bounded tail (latest 4096 bytes, replacement-decoded) of the latest
+    attempt's ``worker.stderr``, the path never printed; ``unavailable (...)``
+    for an absent attempt, database path, file or read error. Never raises."""
+    try:
+        if attempts is None or not len(attempts) or attempts[-1] is None:
+            return "unavailable (no attempt recorded)"
+        attempt_id = getattr(attempts[-1], "attempt_id", None)
+        if attempt_id is None:
+            return "unavailable (no attempt id on the latest attempt receipt)"
+        database_file = None
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row["file"]:
+                database_file = row["file"]
+                break
+        if not database_file:
+            return "unavailable (no catalog database path)"
+        path = (Path(database_file).parent / "attempts" / str(attempt_id) /
+                "staging" / "diagnostics" / "worker.stderr")
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 4096))
+            data = fh.read(4096)
+        return data.decode("utf-8", errors="replace")
+    except Exception as exc:
+        return f"unavailable (worker stderr read failed: {type(exc).__name__})"
+
+
+def _tracked_process_diagnostics(conn, job_id) -> str:
+    """Per tracked pid of this job: the delta of ``utime + stime`` between two
+    complete ``/proc/<pid>/stat`` samples one second apart, the final state,
+    ``/proc/<pid>/wchan`` and ``/proc/<pid>/task/<pid>/children``; values the
+    diagnostic cannot read render ``unavailable`` per pid. No tracked pids
+    reports that without sleeping. Never raises and never prints command
+    lines, absolute paths, environment values or raw exception text."""
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT pm.pid FROM process_members pm "
+            "JOIN attempts a ON a.attempt_id = pm.attempt_id "
+            "WHERE a.job_id = ?", (job_id,)).fetchall()
+        pids = sorted({row[0] for row in rows if row[0] is not None})
+        if not pids:
+            return "unavailable (no tracked pids)"
+
+        def read_stat(pid):
+            try:
+                with open(f"/proc/{pid}/stat", "rb") as fh:
+                    text = fh.read().decode("utf-8", errors="replace")
+            except Exception:
+                return None
+            if ")" not in text:
+                return None
+            fields = text[text.rfind(")") + 1:].split()
+            if len(fields) < 13:
+                return None
+            try:
+                return {"state": fields[0], "ticks": int(fields[11]) + int(fields[12])}
+            except ValueError:
+                return None
+
+        def read_small(path):
+            try:
+                with open(path, "rb") as fh:
+                    return fh.read().decode("utf-8", errors="replace").strip()
+            except Exception:
+                return None
+
+        def sample_all():
+            return {pid: read_stat(pid) for pid in pids}
+
+        first = sample_all()
+        time.sleep(1.0)
+        second = sample_all()
+        parts = []
+        for index, pid in enumerate(pids, start=1):
+            label = f"tracked process {index} of {len(pids)} (pid {pid})"
+            final = second.get(pid)
+            if final is None:
+                parts.append(f"{label}: unavailable (stat unreadable)")
+                continue
+            earlier = first.get(pid)
+            cpu_text = (f"{final['ticks'] - earlier['ticks']} ticks" if earlier is not None
+                        else "unavailable (first sample missing)")
+            wchan = read_small(f"/proc/{pid}/wchan")
+            children = read_small(f"/proc/{pid}/task/{pid}/children")
+            parts.append(
+                f"{label}: cpu {cpu_text}, state {final['state']}, "
+                f"wchan {wchan if wchan is not None else 'unavailable'}, "
+                f"children {children if children is not None else 'unavailable'}")
+        return "; ".join(parts)
+    except Exception as exc:
+        return f"unavailable (tracked process diagnostics failed: {type(exc).__name__})"
+
+
 def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
     """Deadline diagnostics from the existing ops read helpers (``get_job``,
     ``attempt_receipts``, ``diagnostics.process_family_liveness``) plus the
@@ -377,6 +472,12 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
                           label="attempt lease heartbeat")
         family = field(render_family, missing="unavailable (no liveness summary)",
                        label="process family liveness")
+        stderr_tail = field(lambda: _worker_stderr_tail(conn, attempts),
+                            missing="unavailable (worker stderr unavailable)",
+                            label="worker stderr tail")
+        process_details = field(lambda: _tracked_process_diagnostics(conn, job_id),
+                                missing="unavailable (tracked process diagnostics unavailable)",
+                                label="tracked process diagnostics")
         return head + "; ".join([
             f"attempt count: {count}",
             f"queue/admission reason: {reason_text}",
@@ -385,13 +486,16 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
             f"latest non-heartbeat progress event: {step_text}",
             f"process family liveness: {family}",
             f"log tail: {tail}",
+            f"worker stderr tail: {stderr_tail}",
+            f"tracked process diagnostics: {process_details}",
         ]) + "."
     except Exception as exc:  # last resort: a diagnostic bug must never blank the failure
         na = f"unavailable (diagnostics failed: {type(exc).__name__})"
         return (head + f"attempt count: {na}; queue/admission reason: {na}; "
                 f"attempt lease heartbeat: {na}; latest progress event: {na}; "
                 f"latest non-heartbeat progress event: {na}; process family "
-                f"liveness: {na}; log tail: {na}.")
+                f"liveness: {na}; log tail: {na}; worker stderr tail: {na}; "
+                f"tracked process diagnostics: {na}.")
 
 
 class RunUntilTimeout(AssertionError):
