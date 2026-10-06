@@ -1168,14 +1168,18 @@ def run_legacy_script(root, script, args=(), *, staging_dir_fd: int | None = Non
     descriptor explicitly with ``SourceFileLoader`` -- no loader is inferred
     from a suffix here.
 
-    Detection after execution, never prevention: the resolved wrapper and
-    every declared source are SHA-256'd before ``subprocess.run``, then
-    re-hashed and ``lstat``ed when it returns. A missing, symlinked,
-    non-regular, ``st_nlink != 1``, or content-changed path raises the
-    non-retryable ``VALIDATION_FAILED`` naming that relative path with its
-    ``before_hash``/``after_hash`` (null when unavailable); the worker turns
-    it into a failed receipt, so no run or ledger commit follows. An
-    unchanged run returns the child's ``CompletedProcess`` untouched.
+    Detection after execution, never prevention: once the child ends --
+    normally or at ``LEGACY_RUNNER_TIMEOUT_S`` -- only the registered wrapper
+    and the declared runtime sources are ``lstat``ed and re-hashed. A
+    missing, symlinked, non-regular, multi-link (``st_nlink != 1``),
+    unhashable, or content-changed path raises the non-retryable
+    ``VALIDATION_FAILED`` naming that relative path with its
+    ``before_hash``/``after_hash`` (null when unavailable), leaving only the
+    failed receipt and its evidence: no run and no ledger commit. On a
+    timeout, unchanged sources preserve the original
+    ``subprocess.TimeoutExpired``; an integrity failure takes precedence.
+    The report is not in this watched set -- ``run_experiment`` owns report
+    integrity validation and annotation.
     """
     relative = str(Path(script))
     if relative not in REGISTERED_RUNNERS:
