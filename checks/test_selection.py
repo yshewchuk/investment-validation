@@ -64,9 +64,6 @@ def declaration(root, path, known):
     return names, None
 
 
-parse_declaration = declaration
-
-
 def _eligible(importer, dependency):
     if importer.sink:
         return True
@@ -87,7 +84,7 @@ def closure(changed):
 
 def select(changed, root=ROOT):
     root = Path(root)
-    paths = sorted({str(p).replace("\\", "/").lstrip("./") for p in changed if p})
+    paths = sorted({re.sub(r"^(?:\./)+", "", str(p).replace("\\", "/")) for p in changed if p})
     if not paths:
         return full("no changed paths")
     changed, selected = set(paths), set()

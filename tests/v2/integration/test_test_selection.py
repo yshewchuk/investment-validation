@@ -59,11 +59,13 @@ def test_only_imports_and_sink_edges(tmp_path):
 
 @pytest.mark.parametrize("path", [
     "tools/mutation_pilot.py", "README.md", "tests/test_legacy.py", "checks/x.py",
-    "engine/v2/__init__.py",
+    "engine/v2/__init__.py", ".github/workflows/x.yml",
 ])
 def test_unmapped_paths_are_full_suite(tmp_path, path):
     selection = ts.select([path], root=tmp_path)
     assert selection.full_suite and path in selection.reason
+    if path.startswith(".github/"):
+        assert selection.reason == f"{path} is outside the layer map"
 
 
 def test_markdown_selects_meta_not_the_full_suite(tmp_path):
