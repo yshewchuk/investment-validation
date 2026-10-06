@@ -326,12 +326,12 @@ source retry policy owns retry.
 
 | Requirement | Outcome |
 |---|---|
-| R1 — missing or unsupported input | Missing members refuse with the codes above; snapshots containing an unsupported contract schema refuse `UNSUPPORTED_CONTRACT` before rows are returned. |
+| R1 — missing or unsupported input | Missing members raise their typed refusal codes above; unsupported contract schemas refuse `UNSUPPORTED_CONTRACT` before rows are returned. |
 | R2 — cache | Bounds come from the pinned fragment membership; no current-head fallback or cached bound from another snapshot. |
-| R3 — retry | No internal scan retry; integrity and result-limit refusals require corrected inputs. Registration retries retain the head fence. |
+| R3 — retry | Limit and integrity refusals are not retried. Registration retries retain the head fence. |
 | R4 — transaction | Re-registration commits complete new identities and the head CAS atomically; changed definitions never overwrite registered contracts. |
-| R5 — partial result/write | Invalid surviving counts refuse `MANIFEST_CORRUPT` before streams open. A fragment footer count differing from its recorded count refuses `MANIFEST_CORRUPT` before that fragment yields rows. Earlier streamed batches may already have been consumed; they are not a successful complete result. Failed registration leaves the head unchanged and staged objects unreferenced. |
-| R6 — idempotency | An identical registration request reuses its committed receipt through the same head fence; a conflicting identity refuses. Scan completion requires exhaustion without an error. |
+| R5 — partial result/write | Invalid surviving counts refuse `MANIFEST_CORRUPT` before streams open; footer/count mismatch refuses `MANIFEST_CORRUPT` before rows. Earlier batches are provisional until exhaustion. Failed registration leaves the head unchanged and staged objects unreferenced. |
+| R6 — idempotency | Under a pinned snapshot, byte-identical reads return identical rows; scan completion requires exhaustion without an error. An identical registration reuses its receipt through the same head fence; conflicting identity refuses. |
 
 For neutral inventory reads, missing relational members or invalid receipt
 lineage refuse `INPUT_CHANGED`; inconsistent fragment metadata or row counts
