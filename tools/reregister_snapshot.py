@@ -17,7 +17,7 @@ import os
 import sqlite3
 import sys
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data import errors
@@ -282,9 +282,22 @@ def _verify_objects(inventory, objects_root):
     return paths
 
 
-def _refuse_destination_collisions(out_path, source_paths):
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _refuse_destination_collisions(out_path, catalog_path, object_paths, objects_root):
     out_real = os.path.realpath(out_path)
-    for source_path in source_paths:
+    catalog_real = os.path.realpath(catalog_path)
+    for refused in (catalog_real,
+                    *(catalog_real + suffix for suffix in _SQLITE_SIDECAR_SUFFIXES)):
+        if out_real == refused:
+            raise errors.fail("INPUT_CHANGED", "the export destination resolves to an input",
+                              details={"path": refused})
+    namespace_real = os.path.realpath(os.path.join(objects_root, "objects"))
+    if PurePath(out_real).is_relative_to(PurePath(namespace_real)):
+        raise errors.fail("INPUT_CHANGED", "the export destination resolves to an input",
+                          details={"path": out_real})
+    for source_path in (catalog_path, *object_paths):
         source_real = os.path.realpath(source_path)
         same_file = (out_real == source_real or
                      (os.path.exists(out_path) and os.path.exists(source_path)
@@ -340,7 +353,7 @@ def export_inventory(conn, *, scope, snapshot_id, receipt_id, generation,
     inventory = neutral_inventory(conn, scope=scope, snapshot_id=snapshot_id,
                                   receipt_id=receipt_id, generation=generation)
     object_paths = _verify_objects(inventory, objects_root)
-    _refuse_destination_collisions(out, [catalog_path, *object_paths])
+    _refuse_destination_collisions(out, catalog_path, object_paths, objects_root)
     data = _export_bytes(inventory)
     _publish(out, data, lambda: _verify_head(conn, scope=scope, snapshot_id=snapshot_id,
                                              receipt_id=receipt_id, generation=generation))

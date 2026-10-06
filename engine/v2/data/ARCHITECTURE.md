@@ -136,13 +136,13 @@ interface section; this names only the load-bearing entry points.
   captures follow the pinned receipt lineage; computed-moves captures retain
   their contract-wide scope. A canonical content hash covers the payload.
   Publication fsyncs a temporary beside the destination, then renames atomically.
-  It refuses output resolving to the catalog or a verified object before any
-  write (path in details; accident guard only, not race protection). A crash
-  before rename exposes no partial file; refusals and pre-rename failures
-  preserve existing output. The same pinned source produces byte-identical
-  output and hash. Missing
-  catalog, snapshot, receipt or object, source drift (including a moved pinned
-  head), and incomplete membership are typed refusals. There is no retry,
+  It refuses output resolving to the catalog or a SQLite sidecar, or anywhere
+  under the object store, before any write (path in details; an accident guard,
+  not race protection). A crash before rename exposes no partial file; refusals
+  and pre-rename failures preserve existing output. The same pinned source
+  produces byte-identical output and hash. Missing catalog, snapshot, receipt
+  or object, source drift (including a moved pinned head), and incomplete
+  membership are typed refusals. There is no retry,
   repair, financial recomputation or compatibility mode.
 
   `neutral_inventory` accepts explicit pins and returns deterministic

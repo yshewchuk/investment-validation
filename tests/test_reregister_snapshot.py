@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -1006,6 +1007,39 @@ def test_object_destination_collision_refuses_without_changing_source(tmp_path):
     assert excinfo.value.problem.details["path"] == str(obj.resolve())
     assert obj.read_bytes() == before
     assert not list(obj.parent.glob(f".{obj.name}.*.part"))
+
+
+def test_unlisted_object_destination_collision_refuses_without_changing_source(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    ref = publish_bytes(fixture["store"], b"unrelated synthetic object\n")
+    digest = ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
+    out = fixture["store"].root / "objects" / digest[:2] / digest
+    before = out.read_bytes()
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, out)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["path"] == str(out.resolve())
+    assert out.read_bytes() == before
+    assert not list(out.parent.glob(f".{out.name}.*.part"))
+
+
+def test_catalog_wal_destination_collision_refuses_without_changing_source(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    catalog = fixture["catalog_path"]
+    out = Path(str(catalog) + "-wal")
+    catalog_before = catalog.read_bytes()
+    wal_existed = out.exists()
+    wal_before = out.read_bytes() if wal_existed else None
+    with pytest.raises(DataError) as excinfo:
+        _export(fixture, out)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["path"] == str(out.resolve())
+    assert catalog.read_bytes() == catalog_before
+    if wal_existed:
+        assert out.read_bytes() == wal_before
+    else:
+        assert not out.exists()
+    assert not list(tmp_path.glob(".catalog.sqlite-wal.*.part"))
 
 
 def _chain_export_refused(chain, tmp_path, code, *, sentinel=None):
