@@ -90,11 +90,13 @@ Set `SOURCE_ROOT`, `OPS_ROOT`, `AS_OF` (the legacy tree's selected session), and
 6. Verify every readiness item below before starting the nightly trigger; the population document
    is placed by hand at `reports/phase6/nightly_trigger/expected_population.json` (`nightly_trigger.py:652`) (report step 13).
 
-## Resume and failure contract (R1–R6)
+## Proposed requirements R1–R6 (not current end-to-end guarantees)
 
-A runbook, not one transaction: only snapshot-producing steps commit an atomic snapshot
-generation; ledger and model steps have their own operation boundaries. There is NO whole-run
-rollback — earlier commits remain; never serve or score from an incomplete head.
+A runbook, not one transaction: only snapshot-producing steps commit an atomic snapshot generation; ledger and model steps have
+their own operation boundaries. There is NO whole-run rollback — earlier commits remain; never serve or score from an incomplete
+head. Verified for existing commands only: snapshot import is fenced by the expected head, a fresh-root import was observed to
+produce only the eight legacy tables, and price-history capture is the existing reference-pin copy-forward path — those
+observations do not prove the proposed R1–R6 contract, and computed-moves pin copy-forward remains proposed.
 
 - R1: validate the source sits at `AS_OF` and required legacy inputs exist before submitting.
 - R2: run steps serially; for a snapshot-producing step, failure before its commit leaves the prior head current.
@@ -140,7 +142,7 @@ retention-vs-producers decision, a measured rebuild duration.
 
 | Slice | Scope | Estimate |
 |---|---|---:|
-| 1 | This design guide plus the two one-line pointer updates. | 146 guide lines; 148 added doc lines including pointers |
-| 2 | `ops computed-moves capture`: CLI + producer commit-path pin propagation in the native producer, committing a generation that copies reference pins forward. | ≤~120 code + tests |
+| 1 | This design guide plus the two one-line pointer updates. | 148 guide lines; 150 added doc lines including pointers |
+| 2 | `ops computed-moves capture`: CLI + producer commit-path pin propagation in the native producer, committing a generation that copies reference pins forward. | est. ~70 code / ~35 tests / ~10 docs lines |
 | — | No sequencer or readiness CLI proposed; readiness stays this checklist. | 0 |
 | Later | Automate invalidation steps or retained-input producers, each after its own scope decision. | separate PRs |
