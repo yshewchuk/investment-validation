@@ -20,11 +20,14 @@ legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_scor
 
 ## Primary contracts and public interfaces
 
-**Operations health output.** `health` emits `operations_health.v1.1` with
-`requested_session` and `resolved_session` copied from the unique delivered
-`ledger_export_receipt.v1.0` bound through `release_intent` to the current
-delivered release; neither comes from `generated_at`. Missing, malformed, ambiguous or mismatched evidence is `VALIDATION_FAILED`; the CLI removes the configured output artifact and re-raises without retry.
-Identical catalog/clock inputs produce byte-identical JSON; version evolution follows `guides/component_contracts.md` §2.3; older versions remain valid.
+**Operations health output.** `health` emits `operations_health.v1.1`; `requested_session` and `resolved_session` come from the unique delivered `ledger_export_receipt.v1.0` bound through `release_intent` to the current delivered release, never `generated_at`. Invalid or ambiguous evidence is `VALIDATION_FAILED`; the CLI removes its output and does not retry. Identical catalog/clock inputs produce byte-identical JSON; evolution follows `guides/component_contracts.md` §2.3 and older versions remain valid. **I/O outcomes:**
+
+| Condition | Outcome |
+|---|---|
+| Catalog read | Uses the supplied connection directly; no health-specific transaction or cache (an existing caller transaction still applies). |
+| Receipt evidence invalid | `VALIDATION_FAILED`; CLI removes the configured output and does not retry. |
+| Temporary write, file fsync or replace fails | Before replacement, the prior destination remains; a partial or complete sibling temporary file may remain. |
+| Directory fsync fails after replacement | The new destination exists; crash durability is uncertain. |
 
 The operator interface is the versioned command protocol exposed by `engine/v2/ops/cli.py`
 (`python3 -m engine.v2.ops <command>`), derived directly from its `argparse` definitions:
