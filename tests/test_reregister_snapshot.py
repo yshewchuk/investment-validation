@@ -1299,6 +1299,9 @@ _REGISTER_REFUSALS = [
         out, lambda inv: inv["tables"][0]["fragments"][0].update(row_count=999))),
     ("fragment-bound-field", "INPUT_CHANGED", lambda fx, out: _rehash_export(
         out, lambda inv: inv["tables"][0]["fragments"][0].update(primary_key_max=["ZZZ"]))),
+    ("fragment-object-size", "INPUT_CHANGED", lambda fx, out: _rehash_export(
+        out, lambda inv: inv["tables"][0]["fragments"][0]["object"].update(
+            byte_size=fx["record"].object_ref.byte_size + 1))),
     ("fragment-membership", "CONTRACT_MISMATCH", lambda fx, out: _rehash_export(
         out, lambda inv: inv["tables"][0]["fragments"].append(
             {**inv["tables"][0]["fragments"][0], "fragment_id": "extra-fragment"}))),
@@ -1370,6 +1373,38 @@ def test_register_rejects_invalid_export_hash_without_writes(tmp_path):
         reregister_snapshot.register(conn, inventory_path=out,
                                      objects_root=fixture["store"].root)
     assert excinfo.value.code == "MANIFEST_CORRUPT"
+    assert catalog.read_bytes() == before_bytes
+    assert _catalog_rows(conn) == before_rows
+
+
+def test_lone_surrogate_in_exported_inventory_is_a_typed_corrupt_refusal(tmp_path):
+    """One real lone surrogate in an exported inventory field is refused typed.
+
+    The file keeps the surrogate escaped, so register holds a value it cannot
+    hash: the refusal must be ``MANIFEST_CORRUPT``, never an uncaught
+    ``UnicodeEncodeError`` from the hash's strict UTF-8 encoding.
+    """
+    fixture = _securities_fixture(tmp_path)
+    out = tmp_path / "export.json"
+    _export(fixture, out)
+    wrapper = json.loads(out.read_text())
+    fragment = wrapper["inventory"]["tables"][0]["fragments"][0]
+    fragment["partition_key"] += "\ud800"
+    out.write_text(json.dumps(wrapper))
+    raw = out.read_bytes()
+    assert rb"\ud800" in raw
+    assert "\ud800".encode("utf-8", "surrogatepass") not in raw
+    tampered = json.loads(raw)["inventory"]
+    assert tampered["tables"][0]["fragments"][0]["partition_key"].endswith("\ud800")
+    with pytest.raises(UnicodeEncodeError):
+        content_hash(tampered)
+    conn, catalog = fixture["conn"], fixture["catalog_path"]
+    before_bytes, before_rows = catalog.read_bytes(), _catalog_rows(conn)
+    with pytest.raises(DataError) as excinfo:
+        reregister_snapshot.register(conn, inventory_path=out,
+                                     objects_root=fixture["store"].root)
+    assert excinfo.value.code == "MANIFEST_CORRUPT"
+    assert str(tmp_path) not in excinfo.value.problem.message
     assert catalog.read_bytes() == before_bytes
     assert _catalog_rows(conn) == before_rows
 

@@ -6,9 +6,8 @@ bytes or mutable head; the caller attests ``content_hash(payload)``.
 ``export`` (the CLI) additionally checks the explicit pins against the mutable
 head, verifies every object descriptor against the artifact store and publishes
 the inventory as one atomically written, canonical-JSON export file. ``register``
-re-verifies one such export against the current catalog and object store and
-returns a :class:`VerifiedInventory` of canonical verification-result bytes. The
-catalog is only ever opened read-only; no writer is called here.
+re-verifies one such export against the live catalog and object store and returns
+a :class:`VerifiedInventory`; the catalog is only ever opened read-only.
 """
 from __future__ import annotations
 
@@ -366,10 +365,8 @@ def export_inventory(conn, *, scope, snapshot_id, receipt_id, generation,
                                              receipt_id=receipt_id, generation=generation))
 
 
-# ---------------------------------------------------------------------------
-# register inventory verification: validate a neutral export against the live catalog
-# and object store, typed refusals only. No catalog write happens here.
-# ---------------------------------------------------------------------------
+# Register verification: validate a neutral export against the live catalog and
+# object store with typed refusals only; no catalog write happens here.
 
 VERIFIED_SCHEMA_VERSION = "reregister_snapshot_verified.v1"
 _WRAPPER_KEYS = ("schema_version", "inventory", "content_hash")
@@ -406,26 +403,24 @@ def _strings(value, name):
 
 
 def _refuse_embedded_contracts(value):
-    if isinstance(value, list):
-        for item in value:
-            _refuse_embedded_contracts(item)
-    elif isinstance(value, dict):
+    if isinstance(value, dict):
+        children = value.values()
         version = value.get("schema_version")
-        if (isinstance(version, str)
-                and version.startswith(("table_contract.", "column_contract."))) \
-                or {"contract_id", "table_name", "columns"} <= set(value):
+        if (isinstance(version, str) and version.startswith(("table_contract.", "column_contract."))
+                or {"contract_id", "table_name", "columns"} <= set(value)):
             raise errors.fail("UNSUPPORTED_CONTRACT",
                               "the export embeds a contract document; only contract_id refs are allowed")
-        for item in value.values():
-            _refuse_embedded_contracts(item)
+    else:
+        children = value if isinstance(value, list) else ()
+    for item in children:
+        _refuse_embedded_contracts(item)
 
 
 def _validate_shape(inventory):
     """Exact-key, no-silent-defaults validation of every field register uses."""
     if inventory["schema_version"] != SCHEMA_VERSION:
         raise _corrupt("inventory schema_version")
-    for name in ("scope", "snapshot_id", "receipt_id", "calendar_version",
-                 "source_priority_version"):
+    for name in ("scope", "snapshot_id", "receipt_id", "calendar_version", "source_priority_version"):
         if not isinstance(inventory[name], str):
             raise _corrupt(name)
     if not _is_int(inventory["generation"]) or inventory["generation"] <= 0:
@@ -447,12 +442,10 @@ def _validate_shape(inventory):
         for fragment in table["fragments"]:
             _exact(fragment, _FRAGMENT_KEYS, "fragment")
             descriptor = _exact(fragment["object"], _DESCRIPTOR_KEYS, "object descriptor")
-            if (not isinstance(fragment["fragment_id"], str)
-                    or not isinstance(fragment["partition_key"], str)
+            if (not all(isinstance(value, str) for value in
+                        (fragment["fragment_id"], fragment["partition_key"], descriptor["kind"],
+                         descriptor["object_id"], descriptor["content_hash"]))
                     or not _is_int(fragment["row_count"]) or fragment["row_count"] < 0
-                    or not isinstance(descriptor["kind"], str)
-                    or not isinstance(descriptor["object_id"], str)
-                    or not isinstance(descriptor["content_hash"], str)
                     or not _is_int(descriptor["byte_size"])):
                 raise _corrupt("fragment")
             for name in ("primary_key_min", "primary_key_max"):
@@ -475,16 +468,14 @@ def _validate_shape(inventory):
             raise _corrupt("reference")
     lineage = _exact(inventory["lineage"], _LINEAGE_KEYS, "lineage")
     _strings(lineage["receipt_ids"], "lineage receipt_ids")
-    if not isinstance(lineage["edges"], list) or not all(
-            isinstance(edge, list) and len(edge) == 2 and all(isinstance(item, str) for item in edge)
-            for edge in lineage["edges"]):
+    if not isinstance(lineage["edges"], list) or not all(isinstance(edge, list) and len(edge) == 2
+            and all(isinstance(item, str) for item in edge) for edge in lineage["edges"]):
         raise _corrupt("lineage edges")
     if not isinstance(inventory["captures"], dict) or not set(inventory["captures"]) <= set(names):
         raise _corrupt("captures")
     for rows in inventory["captures"].values():
-        if not isinstance(rows, list) or not all(
-                isinstance(row, dict) and all(
-                    isinstance(value, (str, int, float, bool, type(None))) for value in row.values())
+        if not isinstance(rows, list) or not all(isinstance(row, dict) and all(
+                isinstance(value, (str, int, float, bool, type(None))) for value in row.values())
                 for row in rows):
             raise _corrupt("captures")
 
@@ -500,26 +491,26 @@ def _load_export(inventory_path):
     except ValueError as exc:
         raise errors.fail("MANIFEST_CORRUPT", "the inventory file is not valid JSON") from exc
     _exact(wrapper, _WRAPPER_KEYS, "export wrapper")
-    if (not isinstance(wrapper["schema_version"], str)
-            or wrapper["schema_version"] != EXPORT_SCHEMA_VERSION
+    if (wrapper["schema_version"] != EXPORT_SCHEMA_VERSION
             or not isinstance(wrapper["content_hash"], str)):
         raise _corrupt("export wrapper")
     inventory = _exact(wrapper["inventory"], _INVENTORY_KEYS, "inventory")
-    if wrapper["content_hash"] != content_hash(inventory):
+    try:
+        hashed = content_hash(inventory)
+    except UnicodeEncodeError as exc:
+        raise _corrupt("content hash") from exc
+    if wrapper["content_hash"] != hashed:
         raise _corrupt("content hash")
     _refuse_embedded_contracts(inventory)
     _validate_shape(inventory)
     return inventory
 
 
-def _fragment_membership(table):
-    return frozenset((fragment["fragment_id"], canonical_json(fragment["object"]),
-                      fragment["partition_key"]) for fragment in table["fragments"])
-
-
 def _membership(tables):
-    return {table["table_name"]: (len(table["fragments"]), _fragment_membership(table))
-            for table in tables}
+    """Identity only: descriptor metadata drift must reach the live-inventory comparison."""
+    return {table["table_name"]: (len(table["fragments"]), frozenset(
+        (fragment["fragment_id"], fragment["object"]["object_id"], fragment["partition_key"])
+        for fragment in table["fragments"])) for table in tables}
 
 
 def _verify_live_inventory(inventory, live):
