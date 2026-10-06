@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from checks.layer_map import PACKAGES, package_of  # noqa: E402
+from checks.layer_map import PACKAGES  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 V2, TESTS = "engine/v2/", "tests/v2/"
@@ -36,8 +36,15 @@ def full(reason, *errors):
 
 def package_for(path, prefix):
     rel = path[len(prefix):] if path.startswith(prefix) else ""
-    rel = rel[:-3] if rel.endswith(".py") else rel
-    return package_of("engine.v2." + rel.replace("/", ".")) if rel else None
+    if not rel:
+        return None
+    best = None
+    for pkg in PACKAGES:
+        declared = pkg.path[len(V2):]
+        if rel == declared or rel.startswith(declared + "/"):
+            if best is None or len(pkg.path) > len(best.path):
+                best = pkg
+    return best
 
 
 def read(root, path):
@@ -89,6 +96,8 @@ def select(changed, root=ROOT):
         return full("no changed paths")
     changed, selected = set(paths), set()
     for path in paths:
+        if path.startswith("/") or any(c in (".", "..") for c in path.split("/")):
+            return full(f"{path} is an unsafe path")
         if path.startswith(_FULL):
             return full(f"{path} is outside the layer map")
         if (path == "ARCHITECTURE.md" or path.endswith("/ARCHITECTURE.md")

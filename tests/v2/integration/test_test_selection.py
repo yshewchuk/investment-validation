@@ -4,7 +4,7 @@
 # packages: engine.v2.contracts, engine.v2.foundation, engine.v2.data, engine.v2.features, engine.v2.models, engine.v2.registry, engine.v2.domain.generation, engine.v2.domain.scenarios, engine.v2.domain.valuation, engine.v2.domain.simulation, engine.v2.scoring, engine.v2.evaluation, engine.v2.research, engine.v2.ledger, engine.v2.models.training, engine.v2.serving, engine.v2.ops, engine.v2.dashboard, engine.v2.diagnosis, engine.v2.parity
 
 Path mapping, the reverse-import closure, integration declarations,
-unmapped-path failure, and a cache regression.
+unmapped-path and unsafe-path failure, and a cache regression.
 """
 from __future__ import annotations
 
@@ -49,6 +49,15 @@ def test_longest_directory_selects_models_training_not_models(tmp_path):
     assert "tests/v2/models" not in selection.targets
 
 
+@pytest.mark.parametrize("path", [
+    "engine/v2/models/training.py", "tests/v2/models/training.py",
+])
+def test_conflicting_names_map_to_the_containing_package(tmp_path, path):
+    selection = ts.select([path], root=tmp_path)
+    assert not selection.full_suite
+    assert "tests/v2/models" in selection.targets
+
+
 def test_only_imports_and_sink_edges(tmp_path):
     foundation = ts.select(["engine/v2/foundation/env.py"], root=tmp_path)
     assert "tests/v2/parity" in foundation.targets          # parity only_imports 0.5
@@ -66,6 +75,15 @@ def test_unmapped_paths_are_full_suite(tmp_path, path):
     assert selection.full_suite and path in selection.reason
     if path.startswith(".github/"):
         assert selection.reason == f"{path} is outside the layer map"
+
+
+@pytest.mark.parametrize("path", [
+    "/etc/passwd", "engine/v2/./ops/x.py", "engine/v2/ops/../../checks/x.py",
+])
+def test_traversal_paths_are_full_suite(tmp_path, path):
+    selection = ts.select([path], root=tmp_path)
+    assert selection.full_suite
+    assert "unsafe" in selection.reason and path in selection.reason
 
 
 def test_markdown_selects_meta_not_the_full_suite(tmp_path):
