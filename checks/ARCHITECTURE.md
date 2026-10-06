@@ -33,7 +33,7 @@ check defines missing-input and failure outcomes:
 | Condition | Outcome |
 |---|---|
 | Required input missing | Check-specific refusal, skip, or documented default |
-| `.env` missing/empty (`check_files`) | Warn; secret scan inactive; other checks continue |
+| `.env` missing/empty (`check_files`) | Warn; current-value matching inactive; credential-pattern checks remain active; other checks continue |
 | No secret needles (`check_bundle`) | Record `no-secrets-loaded`; still check bundle files |
 | `repo_hygiene.py` scan | Clean: exit 0; violations: exit 1 |
 | Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
