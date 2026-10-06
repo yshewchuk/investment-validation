@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openrouter/qwen/qwen3.8-flash",
+  "model": "openrouter/z-ai/glm-5.3-flash",
   "permission": {
     "bash": {
       "*": "deny",
@@ -63,7 +63,7 @@
             "output": 32000
           }
         },
-        "z-ai/glm-5.3": {
+        "z-ai/glm-5.3-flash": {
           "limit": {
             "context": 160000,
             "output": 32000
