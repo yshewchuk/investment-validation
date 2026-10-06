@@ -46,5 +46,5 @@ check defines missing-input and failure outcomes:
 
 ## Invariants
 
-`checks/import_layers.py` bars direct v2 imports of `checks`; the bundle-scanner
-exception runs in `legacy_adapter.py`'s isolated subprocess; legacy `engine/**` imports are outside its scope.
+`checks/import_layers.py` bars v2 imports of `checks`/`tests` and legacy imports
+of `engine/v2`; the bundle scanner runs in `legacy_adapter.py`'s isolated subprocess.
