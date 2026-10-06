@@ -895,6 +895,7 @@ mutate = [
     "engine/v2/ops/training.py",
     "engine/v2/ops/unit_receipts.py",
     "engine/v2/ops/computed_moves_store.py",
+    "engine/v2/ops/pinned_partition_reader.py",
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
@@ -902,6 +903,7 @@ tests = [
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",
     "tests/test_v2_ops_computed_moves_store.py",
+    "tests/test_v2_ops_partition_consumer.py",
     "tests/test_v2_ops_coordinator_lease.py",
     "tests/test_v2_ops_effect_receipt_collision.py",
     "tests/test_v2_ops_explain_from_logs.py",

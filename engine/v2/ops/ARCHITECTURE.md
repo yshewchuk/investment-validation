@@ -654,28 +654,26 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   and other bound inputs.
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture` and `price-refresh`.
-- `computed_moves_store.py`'s `run_computed_moves_refresh` (`parameters,
-  root, *, as_of, fetcher=None`; not itself a bare `RefreshCallback` since
-  `as_of` varies per dispatch and cannot be pre-bound at import time —
-  `calendar_moves_jobs.run_computed_moves_worker` adapts it by decoding the
-  job's `CalendarMovesParameters` and binding a closure with `as_of` and the
-  injected yfinance fetcher; see "Outputs" for the nightly wiring): reads
-  `earnings_events`/`daily_market` off the pinned parent snapshot exactly
-  once per run, then calls the injected yfinance history fetcher (never
-  `legacy_adapter.new_fetcher`) per target ticker, where target tickers are
-  the ORATS-confirmed-session rule `target_tickers_from_snapshot`
-  re-implements from the legacy pull, read through the v2 snapshot instead.
-- `forward_calendar_store.py`'s own inputs: the pinned parent snapshot's
-  `daily_market` sessions (grouped by ticker, fed to
-  `engine.v2.data.computed_moves.native_trading_calendar` for the horizon
-  calendar — a snapshot with no `daily_market` session falls back to plain
-  weekdays); `run_forward_calendar_refresh`'s own explicit keyword arguments
-  (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
-  `as_of`, `tickers`, `horizon_days`, `scope`, head-expectation and
-  attempt-fence fields — most come off the job's own `CalendarMovesParameters`,
-  see "Primary contracts"); and two injected network edges, one Nasdaq
-  calendar fetch per discovery date and one yfinance earnings fetch per
-  ticker still missing a session after the Nasdaq pass.
+- `computed_moves_store.run_computed_moves_refresh(parameters, root, *,
+  as_of, fetcher=None)` reads `earnings_events` and `daily_market` once from
+  the pinned parent snapshot, then fetches yfinance history per selected
+  ticker. `calendar_moves_jobs.run_computed_moves_worker` binds the varying
+  `as_of` and injected fetcher; selection follows the legacy
+  ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
+- `forward_calendar_store` derives per-ticker trading calendars from pinned
+  `daily_market` (weekday fallback if absent), then uses the `catalog_path`,
+  `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences
+  in "Primary contracts", plus injected Nasdaq date and yfinance
+  pending-ticker fetchers.
+- Shared `ops.pinned_partition_reader` streams pinned PK batches; both
+  `_scan_rows` callers stay unchanged through slices 2/3. It tracks live/peak
+  rows under `MAX_SCAN_ROWS`. One lease is live: consume before advancing
+  (advance clears it; `list(iterator)` retains empty leases). R1 missing,
+  corrupt or incompatible pin → typed refusal, never empty/newer; R2 provisional
+  until full validation; R3 integrity refusal terminal/no retry; R4 each
+  partition uses the same pin/scope; R5 failure discards attempt state/output;
+  R6 identical inputs yield byte-identical output. Cache: no row/result cache;
+  exact per-process stat-tuple match with real directories skips hashing; first open/stat drift re-hashes; digest mismatch/instability gives terminal `OBJECT_CORRUPT`. Transactions: read-only catalog reads roll back on success/error; reader writes/commits nothing. Caller publishes after validation; failures/early close publish nothing.
 - `board_requests`: an already-loaded events table (`ticker`, `event_date`,
   `session` columns), an `as_of` date, a horizon in days, and an optional
   ticker filter. It performs no I/O itself — the caller loads the table; see

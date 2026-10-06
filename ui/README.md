@@ -67,7 +67,7 @@ index.html`) via `compatibilityLink()` (`src/format.ts`).
   never re-resolved for that session. Every later request
   (`listEvents`/`getEventScores`/`getScore`) carries that pinned
   `release_id` explicitly, and the compatibility link is built from it too.
-  A background poll (default 4s, `?pollMs=` overrides it for tests) keeps
+  A background poll (default 30s, `?pollMs=` overrides it for tests) keeps
   checking `current` without ever moving the pin; a mismatch surfaces as a
   banner ("the current release changed to X ... reload to see X") with a
   manual reload button — reloading is the only thing that re-resolves
@@ -77,8 +77,9 @@ index.html`) via `compatibilityLink()` (`src/format.ts`).
   replace a newer one, a failed latest current read clears the displayed identity
   and drift hint as unknown, and a successful rollback to the pin clears the
   hint. Operations status compares against only the latest successful
-  publication identity. The existing scheduled poll cadence is unchanged;
-  reads do not retry.
+  publication identity. Failed polls leave evidence unknown until the next
+  scheduled poll; failures do not retry or change the cadence. Hidden tabs
+  make no calls; becoming visible starts one check and resumes the interval.
 - **Auth**: same-origin cookie (`operations_token`), mirroring
   `engine/v2/serving/operations.py`. `src/api/client.ts` is the only module
   that calls `fetch`; every request sets `credentials: "same-origin"` and

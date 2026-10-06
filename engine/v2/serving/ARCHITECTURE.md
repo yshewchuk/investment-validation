@@ -95,15 +95,10 @@ the status cannot be read. The shell accepts requested/resolved session ids
 only in the producer `YYYY-MM-DD` form or the UI `eng-night-YYYY-MM-DD` form,
 with valid calendar dates and resolved no later than requested; missing or
 unrecognized evidence refuses `current` without raising and displays unknown.
-It ignores superseded health and current-release poll replies; unavailable
-health or publication identity is unknown. For the dashboard, each current
-publication read replaces the previous publication evidence only when that
-request is the latest one; a failed latest read clears the displayed identity
-and drift hint, so historical evidence is never presented as current. Status
-uses only the latest successful publication identity, and a successful
-rollback to the pinned release clears the drift hint. These read failures do
-not change the pin; clients only re-read on their next scheduled poll, and
-serving never retries. Reads have no write or partial artifact.
+Current-release discovery is an authenticated read. An unavailable or
+unrecognized publication identity is unknown to clients; failed reads do not
+change a release pin. Serving never retries. Reads have no write or partial
+artifact.
 
 `GET /api/v1/native_parity` exposes report identity and the existing aggregate.
 `/native_parity/mismatches` pages row-key/dimension entries with known fields
