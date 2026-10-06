@@ -2,16 +2,35 @@
 
 ``neutral_inventory`` reads catalog metadata only: no ``data_contracts``, object
 bytes or mutable head; the caller attests ``content_hash(payload)``.
+
+``export`` (the CLI) additionally checks the explicit pins against the mutable
+head, verifies every object descriptor against the artifact store and publishes
+the inventory as one atomically written, canonical-JSON export file. The
+catalog is only ever opened read-only; no register path lives here.
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
+import os
 import sqlite3
+import sys
+import uuid
+from pathlib import Path, PurePath
 
+from engine.v2.contracts import ArtifactRef
 from engine.v2.data import errors
+from engine.v2.foundation import (
+    CONTENT_HASH_PREFIX,
+    ArtifactError,
+    ArtifactStore,
+    canonical_json,
+    content_hash,
+)
 
 SCHEMA_VERSION = "reregister_snapshot.v1"
+EXPORT_SCHEMA_VERSION = "reregister_snapshot_export.v1"
 PRICE_HISTORY = "price_history"
 COMPUTED_MOVES = "computed_moves"
 _MAX_LINEAGE_DEPTH = 64
@@ -191,11 +210,15 @@ def neutral_inventory(conn, *, scope, snapshot_id, receipt_id, generation):
                 or receipt["scope"] != scope or receipt["result_snapshot_id"] != snapshot_id):
             raise errors.fail("INPUT_CHANGED", "pinned receipt does not match scope and snapshot")
         snapshot = _execute(conn, "SELECT calendar_version, source_priority_version,"
-                            " finality_receipt_refs_json FROM data_snapshots"
+                            " finality_receipt_refs_json, knowledge_mode_by_table_json"
+                            " FROM data_snapshots"
                             " WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
         if snapshot is None:
             raise errors.fail("INPUT_CHANGED", "unknown snapshot")
         tables = _tables(conn, snapshot_id)
+        if {table["table_name"] for table in tables} != set(
+                _stored_json(snapshot["knowledge_mode_by_table_json"], dict)):
+            raise errors.fail("INPUT_CHANGED", "snapshot table membership is incomplete")
         references = [dict(row) for row in _execute(conn,
             "SELECT kind, legacy_path, object_id, content_hash, byte_size, fold"
             " FROM data_import_reference_inputs WHERE receipt_id = ? ORDER BY legacy_path",
@@ -209,3 +232,168 @@ def neutral_inventory(conn, *, scope, snapshot_id, receipt_id, generation):
                 "finality_receipt_refs": finality,
                 "tables": tables, "references": references, "lineage": lineage,
                 "captures": _captures(conn, tables, lineage_ids)}
+
+
+def _open_read_only(catalog_path):
+    """The one catalog open: a ``mode=ro`` URI, so no write or DDL is possible."""
+    try:
+        conn = sqlite3.connect(Path(catalog_path).resolve().as_uri() + "?mode=ro",
+                               uri=True, isolation_level=None, timeout=5.0)
+    except sqlite3.Error as exc:
+        raise errors.fail("INPUT_CHANGED", "the catalog could not be opened read-only") from exc
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _verify_head(conn, *, scope, snapshot_id, receipt_id, generation):
+    row = _execute(conn, "SELECT snapshot_id, generation, update_receipt_ref"
+                         " FROM data_snapshot_heads WHERE scope = ?", (scope,)).fetchone()
+    if (row is None or row["snapshot_id"] != snapshot_id or row["generation"] != generation
+            or row["update_receipt_ref"] != receipt_id):
+        raise errors.fail("INPUT_CHANGED", "the mutable head does not match the explicit pins")
+
+
+def _artifact_ref(descriptor):
+    content_hash_value = descriptor["content_hash"]
+    if (not isinstance(content_hash_value, str)
+            or not content_hash_value.startswith(CONTENT_HASH_PREFIX)
+            or isinstance(descriptor["byte_size"], bool)
+            or not isinstance(descriptor["byte_size"], int)):
+        raise errors.fail("OBJECT_CORRUPT", "a pinned object descriptor cannot be verified")
+    digest = content_hash_value.removeprefix(CONTENT_HASH_PREFIX)
+    return ArtifactRef(artifact_id=descriptor["object_id"], content_hash=content_hash_value,
+                       schema_ref=descriptor["kind"], byte_size=descriptor["byte_size"],
+                       storage_key=f"objects/{digest[:2]}/{digest}")
+
+
+def _object_descriptors(inventory):
+    for table in inventory["tables"]:
+        for fragment in table["fragments"]:
+            yield fragment["object"]
+    yield from inventory["references"]
+
+
+def _verify_objects(inventory, objects_root):
+    """Re-hash every recorded object; return its verified path."""
+    store = ArtifactStore(objects_root)
+    paths = []
+    for descriptor in _object_descriptors(inventory):
+        try:
+            paths.append(store.verify(_artifact_ref(descriptor)))
+        except ArtifactError as exc:
+            raise errors.fail("OBJECT_CORRUPT",
+                              "a pinned object does not match the object store") from exc
+    return paths
+
+
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _refuse_destination_collisions(out_path, catalog_path, object_paths, objects_root):
+    out_real = os.path.realpath(out_path)
+    catalog_real = os.path.realpath(catalog_path)
+    for refused in (catalog_real,
+                    *(catalog_real + suffix for suffix in _SQLITE_SIDECAR_SUFFIXES)):
+        if out_real == refused:
+            raise errors.fail("INPUT_CHANGED", "the export destination resolves to an input",
+                              details={"path": refused})
+    namespace_real = os.path.realpath(os.path.join(objects_root, "objects"))
+    if PurePath(out_real).is_relative_to(PurePath(namespace_real)):
+        raise errors.fail("INPUT_CHANGED", "the export destination resolves to an input",
+                          details={"path": out_real})
+    for source_path in (catalog_path, *object_paths):
+        source_real = os.path.realpath(source_path)
+        same_file = (out_real == source_real or
+                     (os.path.exists(out_path) and os.path.exists(source_path)
+                      and os.path.samefile(out_path, source_path)))
+        if same_file:
+            raise errors.fail("INPUT_CHANGED", "the export destination resolves to an input",
+                              details={"path": source_real})
+
+
+def _export_bytes(inventory):
+    wrapper = {"schema_version": EXPORT_SCHEMA_VERSION, "inventory": inventory,
+               "content_hash": content_hash(inventory)}
+    return canonical_json(wrapper).encode("utf-8") + b"\n"
+
+
+def _publish(out_path, data, recheck):
+    """Temp file in the existing parent, fsync, head recheck, then one replace.
+
+    The destination is never opened or truncated before the rename; any failure
+    before it removes the temp and leaves the prior destination byte-identical.
+    """
+    out_path = Path(out_path)
+    tmp = out_path.parent / f".{out_path.name}.{uuid.uuid4().hex}.part"
+    replaced = False
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        recheck()
+        os.replace(tmp, out_path)
+        replaced = True
+    except OSError as exc:
+        raise errors.fail("INPUT_CHANGED", "the export file could not be written") from exc
+    finally:
+        if not replaced:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
+def export_inventory(conn, *, scope, snapshot_id, receipt_id, generation,
+                     catalog_path, objects_root, out):
+    """Export the pinned snapshot's verified neutral inventory, or refuse typed."""
+    _validate_pin(scope, snapshot_id, receipt_id, generation)
+    _verify_head(conn, scope=scope, snapshot_id=snapshot_id, receipt_id=receipt_id,
+                 generation=generation)
+    inventory = neutral_inventory(conn, scope=scope, snapshot_id=snapshot_id,
+                                  receipt_id=receipt_id, generation=generation)
+    object_paths = _verify_objects(inventory, objects_root)
+    _refuse_destination_collisions(out, catalog_path, object_paths, objects_root)
+    data = _export_bytes(inventory)
+    _publish(out, data, lambda: _verify_head(conn, scope=scope, snapshot_id=snapshot_id,
+                                             receipt_id=receipt_id, generation=generation))
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    export = commands.add_parser("export", help="write one pinned snapshot's verified export")
+    export.add_argument("--snapshot-id", required=True)
+    export.add_argument("--receipt-id", required=True)
+    export.add_argument("--generation", required=True, type=int)
+    export.add_argument("--scope", required=True)
+    export.add_argument("--catalog", required=True, type=Path)
+    export.add_argument("--objects", required=True, type=Path, help="ArtifactStore root")
+    export.add_argument("--out", required=True, type=Path, help="export file destination")
+    return parser
+
+
+def main(argv=None) -> int:
+    args = _build_parser().parse_args(argv)
+    conn = None
+    try:
+        conn = _open_read_only(args.catalog)
+        export_inventory(conn, scope=args.scope, snapshot_id=args.snapshot_id,
+                         receipt_id=args.receipt_id, generation=args.generation,
+                         catalog_path=args.catalog, objects_root=args.objects, out=args.out)
+    except errors.DataError as exc:
+        print(json.dumps({"refused": exc.code, "message": exc.problem.message},
+                         sort_keys=True), file=sys.stderr)
+        return 2
+    finally:
+        if conn is not None:
+            conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
