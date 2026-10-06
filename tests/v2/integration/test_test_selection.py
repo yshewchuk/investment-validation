@@ -1,14 +1,15 @@
-"""The package test selector.
+"""The package test selector and the test-layout ratchet.
 
 # land: always-run
 # packages: engine.v2.contracts, engine.v2.foundation, engine.v2.data, engine.v2.features, engine.v2.models, engine.v2.registry, engine.v2.domain.generation, engine.v2.domain.scenarios, engine.v2.domain.valuation, engine.v2.domain.simulation, engine.v2.scoring, engine.v2.evaluation, engine.v2.research, engine.v2.ledger, engine.v2.models.training, engine.v2.serving, engine.v2.ops, engine.v2.dashboard, engine.v2.diagnosis, engine.v2.parity
 
 Path mapping, the reverse-import closure, integration declarations,
-unmapped-path and unsafe-path failure, and a cache regression.
+unmapped-path and unsafe-path failure, and a cache regression. Ratchet: R1-R6.
 """
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from checks import test_layout_budget as tb  # noqa: E402
 from checks import test_selection as ts  # noqa: E402
 
 
@@ -123,3 +125,90 @@ def test_a_stale_cache_cannot_widen_or_replace_the_selection(tmp_path):
     selection = ts.select(["engine/v2/dashboard/app.py"], root=tmp_path)
     assert not selection.full_suite and "tests/" not in selection.targets
     assert "tests/v2/dashboard" in selection.targets
+
+
+# --------------------------------------------------------------------------
+# ratchet (R1-R6)
+# --------------------------------------------------------------------------
+
+
+def test_r1_a_new_test_outside_the_layout_fails(tmp_path):
+    report = tb.check_layout({"tests/test_a.py"}, {"tests/test_a.py", "tests/test_b.py"},
+                             1, 1, tmp_path)
+    assert any("tests/test_b.py" in finding for finding in report.findings)
+
+
+@pytest.mark.parametrize("path", ["checks/test_selection.py", "checks/test_layout_budget.py"])
+def test_r1_ignores_new_check_implementation_modules(tmp_path, path):
+    report = tb.check_layout({"tests/test_a.py"}, {"tests/test_a.py", path}, 1, 1, tmp_path)
+    assert report.ok
+
+
+def test_r2_root_growth_fails(tmp_path):
+    report = tb.check_layout({"tests/test_a.py"}, {"tests/test_a.py", "tests/test_b.py"},
+                             1, 2, tmp_path)
+    assert any(finding.startswith("root test set grew") for finding in report.findings)
+
+
+def test_r3_stale_or_increased_budget_fails(tmp_path):
+    base = {"tests/test_a.py", "tests/test_b.py"}
+    head = {"tests/test_a.py", "tests/v2/ops/test_b.py"}
+    assert any("budget 2 != root test count 1" in f
+               for f in tb.check_layout(base, head, 2, 2, tmp_path).findings)
+    assert tb.check_layout(base, head, 2, 1, tmp_path).ok
+    assert any("grew" in f for f in tb.check_layout({"tests/test_a.py"}, {"tests/test_a.py"},
+                                                    1, 2, tmp_path).findings)
+
+
+def test_r4_unknown_package_directory_fails(tmp_path):
+    report = tb.check_layout(set(), {"tests/v2/nope/test_x.py"}, 0, 0, tmp_path)
+    assert any("names no package" in finding for finding in report.findings)
+
+
+def test_r4_unknown_package_helper_module_fails(tmp_path):
+    report = tb.check_layout(set(), {"tests/v2/nope/helper.py"}, 0, 0, tmp_path)
+    assert any("names no package" in finding for finding in report.findings)
+
+
+def test_r5_rename_as_delete_plus_add_lowers_the_budget(tmp_path):
+    base = {"tests/test_a.py", "tests/test_b.py"}
+    head = {"tests/v2/ops/test_a.py", "tests/test_b.py"}
+    assert tb.check_layout(base, head, 2, 1, tmp_path).ok
+    assert tb.check_layout(base, head, 2, 2, tmp_path).findings
+
+
+def test_r6_a_revert_restoring_a_root_test_fails(tmp_path):
+    report = tb.check_layout({"tests/v2/ops/test_a.py", "tests/test_b.py"},
+                             {"tests/test_a.py", "tests/test_b.py"}, 1, 2, tmp_path)
+    assert any(finding.startswith("root test set grew") for finding in report.findings)
+    assert any(finding.startswith("budget grew") for finding in report.findings)
+
+
+def test_ratchet_validates_integration_declarations(tmp_path):
+    path = _integration(tmp_path, "test_x.py", "# packages: ops\n")
+    assert tb.check_layout(set(), {path}, 0, 0, tmp_path).ok
+    (tmp_path / path).write_text("# packages: nope\n")
+    report = tb.check_layout(set(), {path}, 0, 0, tmp_path)
+    assert any("unknown package" in finding for finding in report.findings)
+
+
+def _git(root, *args):
+    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+
+def test_cli_reads_real_git_and_accepts_a_staged_move(tmp_path):
+    root = tmp_path / "repo"
+    (root / "tests").mkdir(parents=True)
+    (root / "checks").mkdir()
+    _git(root, "init")
+    _git(root, "symbolic-ref", "HEAD", "refs/heads/main")
+    (root / "tests/test_a.py").write_text("")
+    (root / "tests/test_b.py").write_text("")
+    (root / "checks/test_layout_budget.txt").write_text("2\n")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "base")
+    (root / "tests/v2/ops").mkdir(parents=True)
+    _git(root, "mv", "tests/test_a.py", "tests/v2/ops/test_a.py")
+    (root / "checks/test_layout_budget.txt").write_text("1\n")
+    _git(root, "add", "-A")
+    assert tb.main(["--repo-root", str(root), "--base-ref", "main", "--quiet"]) == 0

@@ -12,6 +12,9 @@ Some checks also expose callable report functions.
 The test selector maps changed paths through `checks/layer_map.py`, then
 selects tests for those packages and their allowed importers. Unsafe or
 unmapped input selects the full suite.
+The test-layout ratchet blocks new tests outside `tests/v2/<package>/` and
+`tests/v2/integration/`, and permits the root-level unmoved test count to
+decrease only.
 
 ## Inputs
 
@@ -48,6 +51,7 @@ check defines missing-input and failure outcomes:
 | Partial write | No shared atomic-write or rollback guarantee |
 | Repeat invocation | No package-wide idempotency guarantee; effects vary |
 | Selector input or declaration is unsafe | Report the reason and select the full suite |
+| Root test count or layout budget grows/stales | Ratchet check fails |
 
 ## Invariants
 
