@@ -32,6 +32,7 @@ import json
 import logging
 import numbers
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +49,7 @@ from engine.v2.data import generic_incremental, incremental_tables
 from engine.v2.data.computed_moves import native_trading_calendar
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.ops import pinned_partition_reader
 from engine.v2.ops.errors import fail
 from engine.v2.ops.incremental_data import (
     RefreshCallbackResult,
@@ -56,6 +58,10 @@ from engine.v2.ops.incremental_data import (
 )
 from engine.v2.ops.lifecycle import validated_attempt_fence_pair as _validated_attempt_fence_pair
 from engine.v2.ops.lifecycle import verify_fence
+from engine.v2.ops.pinned_partition_reader import (
+    RetainedBatch,
+    iter_pinned_scan_batches,
+)
 from engine.v2.ops.unit_receipts import (
     NATIVE_NASDAQ_ACCOUNT,
     NATIVE_YFINANCE_ACCOUNT,
@@ -126,46 +132,38 @@ def horizon_dates(as_of, horizon_days: int, *, calendar=None) -> list[pd.Timesta
 # --------------------------------------------------------------------------
 
 
-def _scan_rows(repository: Repository, snapshot, table_name: str, columns) -> list[dict]:
-    from engine.v2.contracts import DataQuery, KeyPredicate
-
-    contract_ref = snapshot.table_versions[table_name].table_contract_ref
-    contract = repository.table_contract(snapshot, table_name)
-    years = tuple(sorted({int(record.partition_key)
-                          for record in repository.fragment_records(snapshot, table_name)}))
-    if not years:
-        return []
-    key_filter = (KeyPredicate(column="year", operator="in", values=years),)
-    population_bound = repository.scan_population_bound(
-        snapshot.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
-        key_filter=key_filter, time_interval=None)
-    max_result_rows = min(MAX_SCAN_ROWS, population_bound)
-    max_batch_rows = min(contract.maximum_batch_rows, 50_000)
-    if max_result_rows > 0:
-        max_batch_rows = min(max_batch_rows, max_result_rows)
-    query = DataQuery(
-        snapshot_id=snapshot.snapshot_id, table_contract_ref=contract_ref,
-        columns=tuple(columns),
-        key_filter=key_filter,
-        order_by=tuple(contract.primary_key),
-        max_batch_rows=max_batch_rows,
-        max_result_rows=max_result_rows)
-    rows: list[dict] = []
-    for batch in repository.scan(query, table_name=table_name):
-        rows.extend(batch.to_pylist())
-    return rows
+def _scan_rows(repository: Repository, snapshot, table_name: str,
+               columns) -> Iterator[RetainedBatch]:
+    """Yield the complete ordered pinned selection as bounded, caller-owned
+    ``RetainedBatch`` leases from the shared pinned-partition reader: the
+    snapshot's own contract ref, every represented year partition, these
+    ``columns``, the table's primary-key order, accounted by a fresh
+    per-invocation live-row counter at ``MAX_SCAN_ROWS``. A valid empty pin
+    with no represented years yields no leases. Every repository
+    refusal propagates typed -- no empty or newer fallback ever replaces a
+    missing, corrupt or unbounded pinned read.
+    """
+    account = pinned_partition_reader.RetainedRowCount()
+    yield from iter_pinned_scan_batches(
+        repository, snapshot, table_name, columns,
+        max_retained_rows=MAX_SCAN_ROWS, retained_rows=account)
 
 
 def daily_by_ticker(repository: Repository, snapshot) -> dict[str, pd.DataFrame]:
     """One scan of the pinned snapshot's ``daily_market``, grouped by ticker.
 
     This single scan feeds ``native_trading_calendar`` (spec s4c Rewrite 1) --
-    there is no second daily_market read and no legacy CSV touch.
+    there is no second daily_market read and no legacy CSV touch. Empty leases
+    are skipped; a valid empty selection returns ``{}``.
     """
-    rows = _scan_rows(repository, snapshot, "daily_market", ("ticker", "date"))
-    frame = pd.DataFrame(rows)
-    if frame.empty:
+    chunks: list[pd.DataFrame] = []
+    for lease in _scan_rows(repository, snapshot, "daily_market", ("ticker", "date")):
+        with lease as rows:
+            if rows:
+                chunks.append(pd.DataFrame(rows))
+    if not chunks:
         return {}
+    frame = pd.concat(chunks, ignore_index=True)
     frame["date"] = pd.to_datetime(frame["date"])
     return {str(ticker): group for ticker, group in frame.groupby("ticker")}
 
@@ -588,9 +586,11 @@ def _existing_index(repository, snapshot) -> dict[tuple[str, str], dict]:
     """Every existing ``earnings_events`` row, keyed ``(ticker, event_date)``."""
     contract = next(item for item in snapshot.contracts if item.table_name == TABLE_NAME)
     rows = {}
-    for row in _scan_rows(repository, snapshot.snapshot, TABLE_NAME,
-                          tuple(column.name for column in contract.columns)):
-        rows[(str(row["ticker"]), str(row["event_date"])[:10])] = row
+    for lease in _scan_rows(repository, snapshot.snapshot, TABLE_NAME,
+                            tuple(column.name for column in contract.columns)):
+        with lease as batch:
+            for row in batch:
+                rows[(str(row["ticker"]), str(row["event_date"])[:10])] = row
     return rows
 
 

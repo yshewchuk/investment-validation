@@ -53,16 +53,40 @@ def _cached(unit):
                              cache_hit=True)
 
 
-def _seeded_parent(conn, store, clock, *, scope: str):
+def _seeded_parent(conn, store, clock, *, scope: str, daily_market_rows=None):
     """A minimal, synthetic ``earnings_events`` base snapshot (no real
     ``data/`` dependency -- built the same way
     ``tests/test_v2_data_generic_incremental.py``'s
     ``test_generic_refresh_worker_commits_json_timestamp_rows`` does),
     committed at generation 0 -> 1, for exercising ``_commit_claims``
-    directly against a real resolvable parent snapshot."""
+    directly against a real resolvable parent snapshot. ``daily_market_rows``,
+    when provided (an empty sequence seeds a zero-row table), additionally
+    seeds a real ``daily_market`` table pinned in the same snapshot."""
+    receipt_ref = content_hash({"fixture": "forward_calendar_fence_" + scope})
+
+    def _seeded_table(contract, rows, partition):
+        contract_ref = TableContractRef(contract_id=contract.contract_id,
+                                        definition_hash=contract.definition_hash)
+        base_bytes = generic_incremental._parquet_bytes(contract, rows)
+        published = store.publish_bytes(base_bytes, schema_ref="parquet_fragment.v1.0")
+        obj = generic_incremental.ObjectRef(kind="parquet_fragment",
+                                            object_id=published.artifact_id,
+                                            content_hash=published.content_hash,
+                                            byte_size=published.byte_size)
+        inspection = inspect_fragment(store, obj, contract, contract_ref, partition)
+        # An empty fragment carries no key bounds, and a fragment record
+        # requires a non-empty partition, so it commits with no record.
+        records = ()
+        if inspection.primary_key_min is not None:
+            records = (generic_incremental.manifests.fragment_record(
+                inspection, contract_ref, input_receipt_refs=(receipt_ref,),
+                import_request_hash=receipt_ref),)
+        manifest = dataset_manifest(
+            contract_ref, records, knowledge_mode="reconstructed",
+            coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+        return contract, obj, records, manifest
+
     contract = from_document(TableContract, build_legacy_mapping()["tables"]["earnings_events"])
-    contract_ref = TableContractRef(contract_id=contract.contract_id,
-                                    definition_hash=contract.definition_hash)
     base_row = {
         "event_id": "event-1", "ticker": "AAA", "event_date": datetime(2025, 1, 15),
         "year": 2025, "session": "AMC", "session_src": None, "annc_tod": None,
@@ -70,25 +94,24 @@ def _seeded_parent(conn, store, clock, *, scope: str):
         "date_agree": True, "date_conflict": False, "updated_at": None,
         "event_cluster_id": None, "claim_count": None, "reconciliation": None,
     }
-    base_bytes = generic_incremental._parquet_bytes(contract, (base_row,))
-    published = store.publish_bytes(base_bytes, schema_ref="parquet_fragment.v1.0")
-    obj = generic_incremental.ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
-                                        content_hash=published.content_hash,
-                                        byte_size=published.byte_size)
-    inspection = inspect_fragment(store, obj, contract, contract_ref, "2025")
-    receipt_ref = content_hash({"fixture": "forward_calendar_fence_" + scope})
-    record = generic_incremental.manifests.fragment_record(
-        inspection, contract_ref, input_receipt_refs=(receipt_ref,),
-        import_request_hash=receipt_ref)
-    manifest = dataset_manifest(
-        contract_ref, (record,), knowledge_mode="reconstructed",
-        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    tables = [_seeded_table(contract, (base_row,), "2025")]
+    if daily_market_rows is not None:
+        daily_contract = from_document(TableContract,
+                                       build_legacy_mapping()["tables"]["daily_market"])
+        daily = tuple(daily_market_rows)
+        partition = ("/".join(str(daily[0][name]) for name in daily_contract.partition_columns)
+                     if daily else "0")
+        tables.append(_seeded_table(daily_contract, daily, partition))
+    contracts = tuple(item[0] for item in tables)
+    table_objects = tuple(item[1] for item in tables)
+    records = sum((item[2] for item in tables), ())
+    table_manifests = tuple(item[3] for item in tables)
     parent_ref = snapshot_ref(
-        {"earnings_events": manifest}, calendar_version="cal.v1",
+        {item[0].table_name: item[3] for item in tables}, calendar_version="cal.v1",
         source_priority_version="fixture", finality_receipt_refs=(receipt_ref,))
     data_commit_snapshot(
         conn, scope=scope, request_hash=content_hash({"base": scope}),
-        contracts=(contract,), objects=(obj,), records=(record,), manifests=(manifest,),
+        contracts=contracts, objects=table_objects, records=records, manifests=table_manifests,
         snapshot=parent_ref, expected_head_snapshot_id=None, expected_head_generation=0,
         receipt_id="base-receipt-" + scope, attempt_id="base-attempt-" + scope, fence=1,
         fence_check=lambda _conn: None, clock=clock, store=store)
@@ -505,14 +528,20 @@ def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp
         key_filter=(KeyPredicate(column="year", operator="in", values=years),),
         time_interval=None)
     monkeypatch.setattr(forward_calendar_store, "MAX_SCAN_ROWS", pinned)
-    baseline = forward_calendar_store._scan_rows(
-        repository, snapshot, table_name, columns)
+    baseline = []
+    for lease in forward_calendar_store._scan_rows(
+            repository, snapshot, table_name, columns):
+        with lease as batch:
+            baseline.extend(batch)
     contract = repository.table_contract(snapshot, table_name)
     expected = forward_calendar_store.MAX_SCAN_ROWS
     captured = _capture_population_scan(monkeypatch, repository, expected)
 
-    result = forward_calendar_store._scan_rows(
-        repository, snapshot, table_name, columns)
+    result = []
+    for lease in forward_calendar_store._scan_rows(
+            repository, snapshot, table_name, columns):
+        with lease as batch:
+            result.extend(batch)
 
     assert result == baseline
     assert result == [{"ticker": "AAA", "event_date": datetime(2025, 1, 15),
@@ -540,11 +569,18 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
         key_filter=(KeyPredicate(column="year", operator="in", values=years),),
         time_interval=None)
     assert 0 < bound < existing
-    baseline = forward_calendar_store._scan_rows(
-        repository, snapshot, table_name, columns)
+    baseline = []
+    for lease in forward_calendar_store._scan_rows(
+            repository, snapshot, table_name, columns):
+        with lease as batch:
+            baseline.extend(batch)
     captured = _capture_scan_queries(monkeypatch, repository)
 
-    result = forward_calendar_store._scan_rows(repository, snapshot, table_name, columns)
+    result = []
+    for lease in forward_calendar_store._scan_rows(
+            repository, snapshot, table_name, columns):
+        with lease as batch:
+            result.extend(batch)
 
     assert result == baseline
     assert result == [{"ticker": "AAA", "event_date": datetime(2025, 1, 15),
@@ -553,3 +589,331 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     assert captured[0].max_batch_rows <= captured[0].max_result_rows
     assert captured[0].max_batch_rows == min(contract.maximum_batch_rows, 50_000,
                                              min(existing, bound))
+
+
+def test_daily_by_ticker_matches_old_scan_and_bounds_live_rows(tmp_path, monkeypatch):
+    """Retention parity over a real pinned ``daily_market``: the reader-backed
+    ``_scan_rows`` returns exactly the rows the PRE-PR materializing scan
+    returned -- the pinned snapshot's own contract ref, every represented year
+    partition, the selected population bound as the result limit and the
+    primary-key order, nulls and the populated corrected ``implied_move``
+    included -- while ``daily_by_ticker`` converts each real lease only while
+    it is charged: no batch is retained past ``MAX_SCAN_ROWS``, each run's
+    account peaks at exactly the cap and returns to zero, and a second run
+    serializes byte-identical per-ticker frames (R6)."""
+    from engine.v2.contracts import DataQuery
+    from engine.v2.ops import pinned_partition_reader
+
+    daily_contract = from_document(TableContract,
+                                   build_legacy_mapping()["tables"]["daily_market"])
+    defaults = {column.name: None for column in daily_contract.columns if column.nullable}
+
+    def _daily_row(ticker, day, implied_move):
+        row = dict(defaults)
+        row.update(ticker=ticker, date=day, year=2026, implied_move=implied_move)
+        return row
+
+    rows = (
+        _daily_row("AAA", datetime(2026, 1, 2), None),
+        _daily_row("AAA", datetime(2026, 3, 16), 4.5),
+        _daily_row("AAA", datetime(2026, 6, 15), 3.0),
+        _daily_row("AAA", datetime(2026, 12, 31), None),
+        _daily_row("BBB", datetime(2026, 1, 2), 7.0),
+        _daily_row("BBB", datetime(2026, 6, 15), None),
+        _daily_row("BBB", datetime(2026, 12, 31), 1.25),
+    )
+    conn, clock, _supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    parent = _seeded_parent(conn, store, clock, scope="fwd-cal-retention-parity",
+                            daily_market_rows=rows)
+    repository = Repository(conn, store)
+    snapshot = parent.snapshot
+
+    # The PRE-PR ``_scan_rows`` query, rebuilt straight from the repository:
+    # the pinned contract ref, every represented sorted year partition, the
+    # selected population bound (never this run's lowered retention guard) and
+    # the table's primary-key order, flattened from real ``repository.scan``
+    # batches -- never the changed ``_scan_rows`` and never a mocked scan.
+    table_name = "daily_market"
+    contract = repository.table_contract(snapshot, table_name)
+    contract_ref = snapshot.table_versions[table_name].table_contract_ref
+    key_filter = (KeyPredicate(column="year", operator="in", values=tuple(sorted(
+        {int(record.partition_key)
+         for record in repository.fragment_records(snapshot, table_name)}))),)
+    bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
+        key_filter=key_filter, time_interval=None)
+    old_max_scan_rows = forward_calendar_store.MAX_SCAN_ROWS
+
+    def old_scan(columns):
+        max_result_rows = min(old_max_scan_rows, bound)
+        max_batch_rows = min(contract.maximum_batch_rows, 50_000)
+        if max_result_rows > 0:
+            max_batch_rows = min(max_batch_rows, max_result_rows)
+        query = DataQuery(
+            snapshot_id=snapshot.snapshot_id, table_contract_ref=contract_ref,
+            columns=tuple(columns), key_filter=key_filter,
+            order_by=tuple(contract.primary_key),
+            max_batch_rows=max_batch_rows,
+            max_result_rows=max_result_rows)
+        flat = []
+        for batch in repository.scan(query, table_name=table_name):
+            flat.extend(batch.to_pylist())
+        return flat
+
+    # With the retained cap at 2 the streamed read still yields all seven rows:
+    # exact list equality with the old scan proves the rewrite changed nothing
+    # about what a caller sees, and 7 > cap proves the cap is no longer a
+    # result limit.
+    monkeypatch.setattr(forward_calendar_store, "MAX_SCAN_ROWS", 2)
+    collected = []
+    for lease in forward_calendar_store._scan_rows(
+            repository, snapshot, table_name, ("ticker", "date", "implied_move")):
+        with lease as batch:
+            assert lease.released is False
+            collected.extend(batch)
+        assert lease.released is True
+    assert collected == old_scan(("ticker", "date", "implied_move"))
+    assert len(collected) == 7 > forward_calendar_store.MAX_SCAN_ROWS
+
+    # ``daily_by_ticker`` over the same pin: a fresh per-run account minted by
+    # the real shared-reader ``RetainedRowCount`` (captured as it is created),
+    # and a pandas proxy that records every conversion and asserts it happened
+    # while exactly that live batch was charged, at or under the retained cap.
+    real_counter = pinned_partition_reader.RetainedRowCount
+    accounts: list = []
+    charged: dict = {}
+
+    def _fresh_counter():
+        account = real_counter()
+        accounts.append(account)
+        charged["current"] = account
+        return account
+
+    conversions: list = []
+
+    class _ProxyPandas:
+        def __getattr__(self, name):
+            return getattr(pd, name)
+
+        def DataFrame(self, data=None, *args, **kwargs):
+            account = charged["current"]
+            assert isinstance(data, list), type(data)
+            assert account.live_rows == len(data) <= forward_calendar_store.MAX_SCAN_ROWS
+            conversions.append(len(data))
+            return pd.DataFrame(data, *args, **kwargs)
+
+    monkeypatch.setattr(pinned_partition_reader, "RetainedRowCount", _fresh_counter)
+    monkeypatch.setattr(forward_calendar_store, "pd", _ProxyPandas())
+
+    expected_frame = pd.DataFrame(old_scan(("ticker", "date")))
+    expected_frame["date"] = pd.to_datetime(expected_frame["date"])
+    expected = {str(ticker): group
+                for ticker, group in expected_frame.groupby("ticker")}
+
+    before = len(accounts)
+    first = forward_calendar_store.daily_by_ticker(repository, snapshot)
+    [first_account] = accounts[before:]
+    assert set(first) == set(expected) == {"AAA", "BBB"}
+    for ticker, group in expected.items():
+        pd.testing.assert_frame_equal(first[ticker], group)
+    first_bytes = {ticker: frame.to_json(orient="split", date_format="iso").encode()
+                   for ticker, frame in first.items()}
+    assert sum(conversions) == 7
+    assert all(length <= 2 for length in conversions)
+    assert first_account.peak_rows == 2
+    assert first_account.live_rows == 0
+    conversions.clear()
+
+    before = len(accounts)
+    repeat = forward_calendar_store.daily_by_ticker(repository, snapshot)
+    [repeat_account] = accounts[before:]
+    repeat_bytes = {ticker: frame.to_json(orient="split", date_format="iso").encode()
+                    for ticker, frame in repeat.items()}
+    for ticker, frame in first.items():
+        pd.testing.assert_frame_equal(repeat[ticker], frame)
+    assert repeat_bytes == first_bytes
+    assert sum(conversions) == 7
+    assert all(length <= 2 for length in conversions)
+    assert repeat_account.peak_rows == 2
+    assert repeat_account.live_rows == 0
+
+
+def test_daily_by_ticker_preserves_typed_refusals_and_discards_partial_batches(tmp_path,
+                                                                               monkeypatch):
+    """Typed refusals and partial-read discipline over two real pinned
+    snapshots (R1-R5). An events-only pin carries no ``daily_market``:
+    ``daily_by_ticker`` refuses with the repository's own ``CONTRACT_MISMATCH``
+    missing-table code, never an empty grouped frame or a newer source. Over a
+    ``daily_market`` pin whose scan dies on a pre-created ``MANIFEST_CORRUPT``
+    after its first real one-row batch, the identical error object propagates
+    terminal (exactly one scan, no retry), the one query is the pinned
+    snapshot's own id, its contract ref and its year selection, the first
+    lease is charged (``peak_rows == 1``) and every provisional lease row is
+    discharged on unwind (``live_rows == 0``) with nothing returned."""
+    from engine.v2.data import errors
+    from engine.v2.ops import pinned_partition_reader
+
+    missing_root = tmp_path / "missing-pin"
+    missing_root.mkdir()
+    missing_repository, missing_snapshot = _scan_fixture(missing_root)
+    with pytest.raises(errors.DataError) as missing:
+        forward_calendar_store.daily_by_ticker(missing_repository, missing_snapshot)
+    assert missing.value.code == "CONTRACT_MISMATCH"
+    assert missing.value.problem.details == {"table_name": "daily_market"}
+
+    daily_contract = from_document(TableContract,
+                                   build_legacy_mapping()["tables"]["daily_market"])
+    defaults: dict = {}
+    for column in daily_contract.columns:
+        if column.name in ("ticker", "date", "year"):
+            continue
+        if column.nullable:
+            defaults[column.name] = None
+        elif column.physical_type == "string":
+            defaults[column.name] = "synthetic"
+        elif column.physical_type == "float64":
+            defaults[column.name] = 1.0
+        elif column.physical_type == "int64":
+            defaults[column.name] = 1
+        elif column.physical_type == "bool":
+            defaults[column.name] = False
+        elif column.physical_type.startswith("timestamp["):
+            defaults[column.name] = datetime(2026, 1, 2)
+        else:
+            raise AssertionError(column.physical_type)
+
+    def _daily_row(day):
+        row = dict(defaults)
+        row.update(ticker="AAA", date=day, year=2026)
+        return row
+
+    rows = (_daily_row(datetime(2026, 1, 2)), _daily_row(datetime(2026, 3, 16)),
+            _daily_row(datetime(2026, 6, 15)))
+    mid_root = tmp_path / "mid-scan-pin"
+    mid_root.mkdir()
+    conn, clock, _supervisor = catalog(mid_root)
+    store = ArtifactStore(mid_root / "objects")
+    parent = _seeded_parent(conn, store, clock, scope="fwd-cal-typed-refusals",
+                            daily_market_rows=rows)
+    mid_repository = Repository(conn, store)
+    mid_snapshot = parent.snapshot
+
+    incompatible = errors.fail("CONTRACT_MISMATCH", "synthetic incompatible pinned contract")
+    real_table_contract = mid_repository.table_contract
+
+    def _incompatible_pin(snapshot, table_name):
+        if table_name == "daily_market":
+            raise incompatible
+        return real_table_contract(snapshot, table_name)
+
+    monkeypatch.setattr(mid_repository, "table_contract", _incompatible_pin)
+    incompatible_result = None
+    with pytest.raises(errors.DataError) as incompatible_refusal:
+        incompatible_result = forward_calendar_store.daily_by_ticker(
+            mid_repository, mid_snapshot)
+    assert incompatible_refusal.value is incompatible
+    assert incompatible_result is None
+    monkeypatch.setattr(mid_repository, "table_contract", real_table_contract)
+
+    scan_error = errors.fail("MANIFEST_CORRUPT", "synthetic mid-scan integrity refusal")
+    queries: list = []
+    real_scan = mid_repository.scan
+
+    def _scan(query, **kwargs):
+        queries.append(query)
+        for batch in real_scan(query, **kwargs):
+            yield batch
+            raise scan_error
+
+    monkeypatch.setattr(mid_repository, "scan", _scan)
+
+    real_counter = pinned_partition_reader.RetainedRowCount
+    accounts: list = []
+
+    def _fresh_counter():
+        account = real_counter()
+        accounts.append(account)
+        return account
+
+    monkeypatch.setattr(pinned_partition_reader, "RetainedRowCount", _fresh_counter)
+    monkeypatch.setattr(forward_calendar_store, "MAX_SCAN_ROWS", 1)
+
+    before = len(accounts)
+    result = None
+    with pytest.raises(errors.DataError) as refused:
+        result = forward_calendar_store.daily_by_ticker(mid_repository, mid_snapshot)
+    [account] = accounts[before:]
+    [query] = queries
+    assert refused.value is scan_error
+    assert result is None
+    assert len(queries) == 1
+    assert query.snapshot_id == mid_snapshot.snapshot_id
+    assert (query.table_contract_ref
+            == mid_snapshot.table_versions["daily_market"].table_contract_ref)
+    assert query.key_filter == (KeyPredicate(column="year", operator="in", values=(2026,)),)
+    assert account.peak_rows == 1
+    assert account.live_rows == 0
+
+
+def test_daily_by_ticker_skips_an_empty_lease(monkeypatch):
+    """A genuine reader lease can carry zero rows: ``daily_by_ticker`` must
+    skip it instead of appending a columnless ``pd.DataFrame`` chunk -- a
+    ``concat`` of which has no ``date`` column to convert, dying with
+    ``KeyError("date")``. The lease itself is real (the shared reader mints
+    it against a fresh account); only ``_scan_rows`` is patched, with opaque
+    sentinels standing in for the repository and snapshot it never touches.
+    """
+    from engine.v2.ops.pinned_partition_reader import RetainedBatch, RetainedRowCount
+
+    account = RetainedRowCount()
+    lease = RetainedBatch([], account)
+
+    def _scan_rows(_repository, _snapshot, _table_name, _columns):
+        yield lease
+
+    monkeypatch.setattr(forward_calendar_store, "_scan_rows", _scan_rows)
+
+    grouped = forward_calendar_store.daily_by_ticker(object(), object())
+
+    assert grouped == {}
+    assert lease.released is True
+    assert account.live_rows == 0
+
+
+def test_daily_by_ticker_returns_empty_for_empty_pinned_history(tmp_path, monkeypatch):
+    """A valid pinned ``daily_market`` with zero represented year partitions
+    keeps its empty result empty: the pin is real (the snapshot carries its
+    own ``daily_market`` version and contract ref), but with no fragment
+    record at all the reader's year selection is empty and yields no lease,
+    so the real, unpatched ``daily_by_ticker`` returns ``{}`` while the
+    fresh shared-reader account it minted is never charged -- ``peak_rows``
+    and ``live_rows`` both stay zero. Empty input, not a refusal: a missing
+    table still raises ``CONTRACT_MISMATCH`` (the test above)."""
+    from engine.v2.ops import pinned_partition_reader
+
+    conn, clock, _supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    parent = _seeded_parent(conn, store, clock, scope="fwd-cal-empty-history",
+                            daily_market_rows=())
+    repository = Repository(conn, store)
+    snapshot = parent.snapshot
+    assert "daily_market" in snapshot.table_versions
+    assert repository.fragment_records(snapshot, "daily_market") == ()
+
+    real_counter = pinned_partition_reader.RetainedRowCount
+    accounts: list = []
+
+    def _fresh_counter():
+        account = real_counter()
+        accounts.append(account)
+        return account
+
+    monkeypatch.setattr(pinned_partition_reader, "RetainedRowCount", _fresh_counter)
+
+    before = len(accounts)
+    result = forward_calendar_store.daily_by_ticker(repository, snapshot)
+    assert result == {}
+    [account] = accounts[before:]
+    assert account.peak_rows == 0
+    assert account.live_rows == 0
