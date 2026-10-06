@@ -1008,7 +1008,7 @@ waits without submitting until its paired succeeded inputs are ready.
   and lineage. Legacy unpinned jobs resolve a receipt at commit for compatibility.
   Lineage uses `price_history_capture`; captures are append-only and deduped by
   `capture_id`; no-fragment runs persist attempts only after fence and parent receipt validation, without a generation.
-  `computed_at` derives from `as_of`; identical same-`as_of` inputs resolve to the parent without a generation, and legacy unpinned commits resolve the parent receipt before inserting the candidate receipt, so an unchanged candidate cannot resolve to itself.
+  `computed_at` derives from `as_of`; identical same-`as_of` inputs resolve to the parent without a generation.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
   here since the list can drift) — catalog/outbox/filesystem writes
