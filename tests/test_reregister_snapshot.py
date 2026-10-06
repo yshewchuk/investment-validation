@@ -1290,8 +1290,18 @@ def _drift_object(fixture, *, same_length):
         data[:-1] + bytes([data[-1] ^ 0xFF]) if same_length else data + b"\x00")
 
 
+def _drop_snapshot_row(fx):
+    conn = fx["conn"]
+    conn.execute("DROP TRIGGER data_snapshots_no_delete")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("DELETE FROM data_snapshots WHERE snapshot_id = ?",
+                 (fx["pins"]["snapshot_id"],))
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
 _REGISTER_REFUSALS = [
     ("missing-inventory", "INPUT_CHANGED", lambda fx, out: out.unlink()),
+    ("missing-snapshot-row", "INPUT_CHANGED", lambda fx, out: _drop_snapshot_row(fx)),
     ("object-same-length", "OBJECT_CORRUPT", lambda fx, out: _drift_object(fx, same_length=True)),
     ("object-length-drift", "OBJECT_CORRUPT", lambda fx, out: _drift_object(fx, same_length=False)),
     ("object-missing", "OBJECT_CORRUPT", lambda fx, out: fx["object_path"].unlink()),

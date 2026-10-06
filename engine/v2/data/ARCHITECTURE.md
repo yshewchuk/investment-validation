@@ -156,12 +156,13 @@ interface section; this names only the load-bearing entry points.
   validates a depth-bounded JSON inventory's exact keys and types, closed
   `knowledge_mode` values (`observed`, `attested_stable`, `reconstructed`), and
   UTF-8 strings before checking its hash or comparing catalog values. Malformed
-  input is `MANIFEST_CORRUPT`; missing inputs and well-formed value drift are
-  `INPUT_CHANGED`; incomplete table/fragment membership is `CONTRACT_MISMATCH`;
-  object-byte drift is `OBJECT_CORRUPT`; embedded contract documents are
-  `UNSUPPORTED_CONTRACT`. Canonical JSON comparison preserves boolean, integer
-  and float distinctions. It returns an immutable canonical result and never
-  writes the catalog, bindings, receipts or head. Refusals are not retried;
+  input is `MANIFEST_CORRUPT`; missing inventory/catalog rows and well-formed
+  value drift are `INPUT_CHANGED`; export/catalog membership drift is
+  `CONTRACT_MISMATCH`; missing objects and object-byte drift are `OBJECT_CORRUPT`;
+  embedded contract documents are `UNSUPPORTED_CONTRACT`. Canonical JSON
+  comparison preserves boolean, integer and float distinctions. The result is
+  immutable and canonical; register writes no catalog, binding, receipt or head
+  data. Refusals are not retried;
   there are no compatibility flags, parser shims or financial recomputation.
   Repeated verification is byte-identical, and every outcome leaves catalog
   bytes and rows unchanged.
