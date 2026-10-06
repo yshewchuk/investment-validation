@@ -6,6 +6,10 @@ API/projection contracts over saved records, financial display values and releas
 Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 
 ## Primary contracts and public interfaces
+
+**Operations health currency.** Serving accepts `operations_health.v1.0` and
+`operations_health.v1.1`. Older v1.0 documents remain valid; either absent or
+malformed session field leaves currency `unknown` without a default.
 The [README](README.md) lists the checked exports (the only names other packages may import). By module:
 - `operations.create_server` (authenticated HTTP listener).
 - `api`: `create_app` (authenticated read-only JSON API), `ApiError`; run as

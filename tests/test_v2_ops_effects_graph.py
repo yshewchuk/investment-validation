@@ -32,7 +32,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import JobSpec, SubmitRequest
-from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
+from engine.v2.foundation import ArtifactError, ArtifactStore, content_hash, format_timestamp
 from engine.v2.ledger.decisions import insert, set_authority
 from engine.v2.ledger.export import export_generation
 from engine.v2.ops import worker
@@ -42,12 +42,15 @@ from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.cli import explain_command
 from engine.v2.ops.effects_graph import (
     EXPORT_PURPOSES,
+    _generation_ref,
+    _write_operations_status,
     backup_effect,
     engineering_gate_effect,
     ledger_export_effect,
     publication_effect,
 )
 from engine.v2.ops.errors import OpsError, make_problem
+from engine.v2.ops.health import health
 from engine.v2.ops.input_bindings import resolve_and_record, resolve_bindings
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
@@ -605,7 +608,8 @@ def _bundle_tar(*, secret=False):
 
 def _publication_setup(conn, clock, supervisor, store, *, scope, session,
                        selfcheck="ok", engineering="ok", secret=False,
-                       decisions_session=None, no_entry=False, finality_session=None):
+                       decisions_session=None, no_entry=False, finality_session=None,
+                       suffix="", decision_clock=None):
     """A publication job with real, resolvable job-id bindings to a fake
     render bundle plus fake selfcheck/engineering-gate parent outputs.
 
@@ -615,10 +619,15 @@ def _publication_setup(conn, clock, supervisor, store, *, scope, session,
     watermark, mirroring a genuine no-entry night's commit. ``finality_session``
     lets the bound finality document resolve somewhere other than ``session``
     (P2-C03 walk-back); it defaults to ``session`` (no walk-back).
+
+    ``suffix`` disambiguates a second, same-session publication's parent jobs
+    and its own idempotency key; ``decision_clock`` is threaded into the
+    publication parameters so a rerun gets its own generation (and therefore
+    its own release id) instead of colliding with the first.
     """
     _seed_decisions(conn, clock, scope, decisions_session or session,
                     predictions=() if no_entry else [_row("evt-1", "pred")])
-    tag = scope + ":" + session
+    tag = scope + ":" + session + suffix
     finality_doc = {"date": finality_session or session, "is_final": True, "market_wide": True,
                     "daily_share": 1.0, "chain_share": 1.0, "covered": 1, "detail": "final"}
     finality_ref = _publish(store, conn, clock, finality_doc, "legacy_action.v1.0")
@@ -642,9 +651,12 @@ def _publication_setup(conn, clock, supervisor, store, *, scope, session,
     input_bindings["engineering_gate.json"] = engineering_job + "#engineering_gate"
     dependency_job_ids.append(engineering_job)
 
+    parameters = _params("publication", session, scope, input_bindings=input_bindings)
+    if decision_clock is not None:
+        parameters["decision_clock"] = decision_clock
     claim = _submit_and_claim(
         conn, clock, supervisor, kind="publication", key="pub-" + tag,
-        parameters=_params("publication", session, scope, input_bindings=input_bindings),
+        parameters=parameters,
         dependency_job_ids=tuple(dependency_job_ids))
     resolve_and_record(conn, store, claim)
     return claim
@@ -787,6 +799,146 @@ def test_publication_older_occurrence_cannot_replace_newer(tmp_path):
         conn.close()
 
 
+def test_publication_sidecar_withheld_banner_ignores_an_orphan_delivered_row(tmp_path):
+    """FIX-409 regression, isolated to ONE scope: the sidecar's withheld banner
+    compares against the release the publication pointers actually serve, never
+    the global newest delivered ``releases`` row.
+
+    The catalog holds three rows: the older scope's own CURRENT, delivered at
+    2026-09-10; an ineligible 2026-09-11 staged release (the banner's subject);
+    and a LATER delivered 2026-09-12 catalog row that no pointer names any more
+    -- what a rollback or a same-scope republish leaves behind. The old
+    no-argument ``_withheld_release(conn)`` selected that orphan 2026-09-12 row
+    as "current", so ``withheld["occurrence"] > current["occurrence"]`` was
+    false and the banner cleared even though the scope is genuinely serving
+    2026-09-10. Selecting CURRENT per scope keeps the banner up.
+    """
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session="2026-09-10")
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        target = root / "releases" / scope
+        current_release_id = release_current(target)
+        assert current_release_id is not None
+
+        def insert_catalog_release(occurrence, *, tag, eligible, delivered):
+            """A direct ``releases`` row with a genuine manifest, so the
+            catalog can hold a delivered or an ineligible release that no
+            pointer (or no delivery) backs."""
+            release_id = "rel" + content_hash([scope, occurrence, tag]).split(":")[1][:24]
+            manifest = {"schema_version": "release_manifest.v1.0", "release_id": release_id,
+                        "occurrence": occurrence, "files": {}, "gates": {}}
+            with transaction(conn):
+                conn.execute("INSERT INTO releases(release_id,occurrence,manifest_json,"
+                             "manifest_hash,expected_current,eligible,published_at,delivered_at) "
+                             "VALUES (?,?,?,?,?,?,?,?)",
+                             (release_id, occurrence, json.dumps(manifest, sort_keys=True),
+                              content_hash(manifest), None, int(eligible), delivered, delivered))
+            return release_id
+
+        withheld_release_id = insert_catalog_release("2026-09-11", tag="withheld",
+                                                     eligible=False, delivered=None)
+        # Delivered, eligible, strictly newer -- and named by no CURRENT.
+        insert_catalog_release("2026-09-12", tag="orphan", eligible=True,
+                               delivered="2026-09-12T21:00:00.000000Z")
+
+        _write_operations_status(conn, store, target, scope=scope,
+                                 requested_session="2026-09-10", resolved_session="2026-09-10",
+                                 bindings={}, bundle_ref=None, clock=clock,
+                                 attempted_release_id=current_release_id,
+                                 failed_update=False, failure=None)
+        status = json.loads((target / "operations_status.json").read_text())
+        assert status["withheld"] is True
+        assert withheld_release_id in status["withheld_reason"]
+    finally:
+        conn.close()
+
+
+def test_publication_sidecar_ignores_an_unrelated_damaged_pointer(tmp_path):
+    """FIX-409 follow-up: a healthy scope's sidecar never reads another scope's
+    CURRENT.
+
+    The sidecar reads only its own ``target`` pointer and the delivered
+    catalog row it names, so its write succeeds. The unsafe ``../escape`` in
+    ``releases/unrelated/CURRENT`` is registered as an active publication
+    scope by its own ``nightly``/``publication`` watermark, so the aggregate
+    ``health()`` — not the sidecar — is the reader that still walks every
+    publication scope's CURRENT, inspects it, and raises ``ArtifactError``.
+    """
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION)
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        target = root / "releases" / scope
+        current_release_id = release_current(target)
+        assert current_release_id is not None
+
+        unrelated = root / "releases" / "unrelated"
+        unrelated.mkdir(parents=True)
+        (unrelated / "CURRENT").write_text("../escape")
+        with transaction(conn):
+            watermark(conn, "nightly", "unrelated", "publication", SESSION,
+                      content_hash(["unrelated-damaged-pointer"]), clock=clock)
+
+        _write_operations_status(conn, store, target, scope=scope,
+                                 requested_session=SESSION, resolved_session=SESSION,
+                                 bindings={}, bundle_ref=None, clock=clock,
+                                 attempted_release_id=current_release_id,
+                                 failed_update=False, failure=None)
+        assert (target / "operations_status.json").is_file()
+
+        with pytest.raises(ArtifactError):
+            health(conn, clock=clock)
+    finally:
+        conn.close()
+
+
+def test_publication_sidecar_withheld_banner_ignores_a_cross_scope_delivery_without_local_current(
+        tmp_path):
+    """FIX-409 regression, the other half of the selector: NO local CURRENT.
+
+    Scope ``shadow`` has never published here -- no ``releases/shadow/CURRENT``,
+    no ``nightly``/``publication`` watermark -- while a DIFFERENT scope,
+    ``served``, genuinely delivered 2026-09-12. The one ineligible ``releases``
+    row is a staged 2026-09-11 release. With the old global fallback the sidecar
+    read ``served``'s later delivery as "current", so
+    ``withheld["occurrence"] > current["occurrence"]`` was false and the banner
+    cleared for a scope serving nothing at all; with the fallback opted out
+    current is simply absent and 2026-09-11 stays withheld.
+    """
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        claim = _publication_setup(conn, clock, supervisor, store, scope="served", session=SESSION)
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        assert release_current(root / "releases" / "served") is not None
+
+        target = root / "releases" / "shadow"
+        assert release_current(target) is None
+        assert conn.execute("SELECT 1 FROM watermarks WHERE pipeline='nightly' AND scope='shadow' "
+                            "AND stage='publication'").fetchone() is None
+
+        withheld_release_id = "rel" + content_hash(["shadow", "2026-09-11", "withheld"]).split(":")[1][:24]
+        manifest = {"schema_version": "release_manifest.v1.0", "release_id": withheld_release_id,
+                    "occurrence": "2026-09-11", "files": {}, "gates": {}}
+        with transaction(conn):
+            conn.execute("INSERT INTO releases(release_id,occurrence,manifest_json,manifest_hash,"
+                         "expected_current,eligible,published_at,delivered_at) VALUES (?,?,?,?,?,?,?,?)",
+                         (withheld_release_id, "2026-09-11", json.dumps(manifest, sort_keys=True),
+                          content_hash(manifest), None, 0, None, None))
+
+        _write_operations_status(conn, store, target, scope="shadow",
+                                 requested_session="2026-09-11", resolved_session="2026-09-11",
+                                 bindings={}, bundle_ref=None, clock=clock,
+                                 attempted_release_id=None, failed_update=False, failure=None)
+        status = json.loads((target / "operations_status.json").read_text())
+        assert status["withheld"] is True
+        assert withheld_release_id in status["withheld_reason"]
+    finally:
+        conn.close()
+
+
 def test_publication_refused_when_decisions_watermark_is_an_earlier_session(tmp_path):
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
@@ -832,6 +984,13 @@ def _decisions_release_key(conn, scope):
     return conn.execute(
         "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
         "AND stage='decisions'", (scope,)).fetchone()[0]
+
+
+def _release_id_for(claim, scope, session):
+    """The exact ``release_id`` ``publication_effect`` derives for ``claim``."""
+    generation = _generation_ref(claim)
+    parts = [scope, session, generation] if generation else [scope, session]
+    return "rel" + content_hash(parts).split(":")[1][:24]
 
 
 def test_publication_binds_and_delivers_release_intent(tmp_path):
@@ -974,6 +1133,106 @@ def test_export_release_intent_publication_backup_independently_verifiable(tmp_p
         backup_wm = conn.execute("SELECT occurrence FROM watermarks WHERE pipeline='nightly' "
                                  "AND scope=? AND stage='backup'", (scope,)).fetchone()
         assert backup_wm["occurrence"] == SESSION
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("rerun_is_larger", [True, False])
+def test_same_session_rerun_associates_release_and_health_reads_export_receipt(tmp_path, rerun_is_larger):
+    """Gate #433: a real same-session rerun publishes a NEWER release while the
+    already-delivered ``release_intent`` row must keep the first release as its
+    primary ``release_id`` and accrue the rerun in ``release_ids`` -- all from
+    the actual ``ledger_export_effect``/``publication_effect`` producers.
+
+    ``health()`` selects the current delivered release from ``CURRENT``, not
+    from a lexical ``release_id DESC`` ordering; both possible release-id orders
+    (rerun larger or smaller) are exercised, and ``CURRENT`` must determine the
+    published release either way. Its ``requested_session``/``resolved_session``
+    must come from that release's real delivered
+    ``ledger_export_receipt.v1.0``. Before the producer change the rerun had no
+    intent association and ``health()`` refused ``VALIDATION_FAILED``.
+    """
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        requested = "2026-09-13"  # walk-back: requested later than the resolved session
+        gen_a = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION,
+                                   suffix="-gen-a", decision_clock="2026-09-12T01:00:00Z")
+        gen_b = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION,
+                                   suffix="-gen-b", decision_clock="2026-09-12T02:00:00Z")
+        release_key = _decisions_release_key(conn, scope)
+        release_a, release_b = (_release_id_for(gen_a, scope, SESSION),
+                                _release_id_for(gen_b, scope, SESSION))
+        assert release_a != release_b
+        # Exercise both lexical orders; CURRENT, not lexical ordering, defines current.
+        if (release_a < release_b) == rerun_is_larger:
+            initial, rerun, initial_id, rerun_id = gen_a, gen_b, release_a, release_b
+        else:
+            initial, rerun, initial_id, rerun_id = gen_b, gen_a, release_b, release_a
+        assert (initial_id < rerun_id) is rerun_is_larger
+
+        export_claim = _submit_and_claim(conn, clock, supervisor, kind="ledger_export",
+                                         key="rerun-export",
+                                         parameters=_params("ledger_export", requested, scope))
+        export_result = ledger_export_effect(conn, store, export_claim, root, REPO, clock=clock)
+        _commit(conn, clock, export_claim, export_result)
+
+        publication_effect(conn, store, initial, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        commit_attempt(conn, initial.attempt_id, initial.fence, Outcome(True, "verified_dead", 0),
+                       clock=clock)
+        publication_effect(conn, store, rerun, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        commit_attempt(conn, rerun.attempt_id, rerun.fence, Outcome(True, "verified_dead", 0),
+                       clock=clock)
+
+        assert release_current(root / "releases" / scope) == rerun_id
+
+        export_receipt = json.loads(conn.execute(
+            "SELECT receipt_json FROM outbox WHERE kind='export' AND logical_key=?",
+            (release_key,)).fetchone()["receipt_json"])
+        assert export_receipt["schema_version"] == "ledger_export_receipt.v1.0"
+        assert export_receipt["requested_session"] == requested
+        assert export_receipt["session"] == SESSION
+
+        intent = json.loads(conn.execute(
+            "SELECT receipt_json FROM outbox WHERE kind='release_intent' AND logical_key=?",
+            (release_key,)).fetchone()["receipt_json"])
+        assert intent["release_id"] == initial_id
+        assert intent["release_ids"] == sorted({initial_id, rerun_id})
+
+        document = health(conn, clock=clock)
+        assert document["current_release"]["release_id"] == rerun_id
+        assert document["requested_session"] == export_receipt["requested_session"]
+        assert document["resolved_session"] == export_receipt["session"]
+
+        # A delivered export receipt whose scope contradicts the selected
+        # publication scope must be refused on its own: the requested/resolved
+        # dates and the release association are still correct here, so the
+        # scope mismatch alone has to trigger VALIDATION_FAILED.
+        assert export_receipt["scope"] == scope
+        original_receipt_json = conn.execute(
+            "SELECT receipt_json FROM outbox WHERE kind='export' AND logical_key=?",
+            (release_key,)).fetchone()["receipt_json"]
+        export_receipt["scope"] = "unrelated"
+        with transaction(conn):
+            conn.execute("UPDATE outbox SET receipt_json=? WHERE kind='export' AND logical_key=?",
+                         (json.dumps(export_receipt), release_key))
+        with pytest.raises(OpsError) as scope_excinfo:
+            health(conn, clock=clock)
+        assert scope_excinfo.value.code == "VALIDATION_FAILED"
+        with transaction(conn):
+            conn.execute("UPDATE outbox SET receipt_json=? WHERE kind='export' AND logical_key=?",
+                         (original_receipt_json, release_key))
+
+        # A corrupted intent association (primary release_id preserved, but the
+        # published rerun missing from release_ids) must be refused, not read
+        # from some other release row.
+        intent["release_ids"] = [rerun_id]
+        with transaction(conn):
+            conn.execute("UPDATE outbox SET receipt_json=? WHERE kind='release_intent' "
+                         "AND logical_key=?", (json.dumps(intent), release_key))
+        with pytest.raises(OpsError) as excinfo:
+            health(conn, clock=clock)
+        assert excinfo.value.code == "VALIDATION_FAILED"
     finally:
         conn.close()
 
