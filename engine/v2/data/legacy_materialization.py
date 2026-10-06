@@ -513,11 +513,11 @@ def explain_materialization_dependencies(repository, snapshot_ref: SnapshotRef,
     refuses, and no copy-shaped query is exempted from anything. All original
     query bounds and its hash remain unchanged.
     """
-    if table_name not in TABLE_OUTPUT_KIND or not isinstance(query, DataQuery):
+    if table_name not in TABLE_OUTPUT_KIND:
         raise errors.fail("UNSUPPORTED_CONTRACT", "unsupported materialization query")
-    if query.snapshot_id != snapshot_ref.snapshot_id:
+    if isinstance(query, DataQuery) and query.snapshot_id != snapshot_ref.snapshot_id:
         raise errors.fail("CONTRACT_MISMATCH", "materialization query pins another snapshot")
-    return repository._explain_data_query(query, table_name)
+    return repository.explain_dependencies(query, table_name=table_name)
 
 
 def _scope_bounds(repository, snapshot_ref: SnapshotRef, table_name: str,
