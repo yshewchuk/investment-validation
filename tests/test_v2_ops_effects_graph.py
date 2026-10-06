@@ -32,7 +32,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import JobSpec, SubmitRequest
-from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
+from engine.v2.foundation import ArtifactError, ArtifactStore, content_hash, format_timestamp
 from engine.v2.ledger.decisions import insert, set_authority
 from engine.v2.ledger.export import export_generation
 from engine.v2.ops import worker
@@ -851,6 +851,46 @@ def test_publication_sidecar_withheld_banner_ignores_an_orphan_delivered_row(tmp
         status = json.loads((target / "operations_status.json").read_text())
         assert status["withheld"] is True
         assert withheld_release_id in status["withheld_reason"]
+    finally:
+        conn.close()
+
+
+def test_publication_sidecar_ignores_an_unrelated_damaged_pointer(tmp_path):
+    """FIX-409 follow-up: a healthy scope's sidecar never reads another scope's
+    CURRENT.
+
+    The sidecar reads only its own ``target`` pointer and the delivered
+    catalog row it names, so its write succeeds. The unsafe ``../escape`` in
+    ``releases/unrelated/CURRENT`` is registered as an active publication
+    scope by its own ``nightly``/``publication`` watermark, so the aggregate
+    ``health()`` — not the sidecar — is the reader that still walks every
+    publication scope's CURRENT, inspects it, and raises ``ArtifactError``.
+    """
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION)
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        target = root / "releases" / scope
+        current_release_id = release_current(target)
+        assert current_release_id is not None
+
+        unrelated = root / "releases" / "unrelated"
+        unrelated.mkdir(parents=True)
+        (unrelated / "CURRENT").write_text("../escape")
+        with transaction(conn):
+            watermark(conn, "nightly", "unrelated", "publication", SESSION,
+                      content_hash(["unrelated-damaged-pointer"]), clock=clock)
+
+        _write_operations_status(conn, store, target, scope=scope,
+                                 requested_session=SESSION, resolved_session=SESSION,
+                                 bindings={}, bundle_ref=None, clock=clock,
+                                 attempted_release_id=current_release_id,
+                                 failed_update=False, failure=None)
+        assert (target / "operations_status.json").is_file()
+
+        with pytest.raises(ArtifactError):
+            health(conn, clock=clock)
     finally:
         conn.close()
 

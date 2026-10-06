@@ -32,7 +32,6 @@ from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.health import (
-    _current_delivered_release,
     _withheld_release,
     engineering_history,
     engineering_streak_from_history,
@@ -475,9 +474,18 @@ def _write_operations_status(conn, store, target, *, scope, requested_session, r
     history = tuple(EngineeringNight(**row) for row in engineering_history(conn, occurrences))
     conflicts, degraded = _bundle_flags(store, bundle_ref) if bundle_ref is not None else ((), ())
     selfcheck_doc = _selfcheck_document(conn, store, bindings)
-    current_delivered = _current_delivered_release(conn)
-    withheld_release = _withheld_release(conn, current_delivered)
+    # FIX-409: this sidecar describes ONE scope, so the withheld projection is
+    # compared against this scope's OWN delivered pointer. The aggregate
+    # ``health._current_delivered_release`` walk reads every publication scope's
+    # CURRENT, so one unrelated damaged pointer would abort this scope's
+    # successful publication status write; only ``health()`` may report that.
     current_release_id = release_current(target)
+    current_delivered = None
+    if current_release_id is not None:
+        current_delivered = conn.execute(
+            "SELECT release_id,occurrence,delivered_at FROM releases WHERE release_id=? "
+            "AND delivered_at IS NOT NULL", (current_release_id,)).fetchone()
+    withheld_release = _withheld_release(conn, current_delivered)
     # A judgement call (guide §5.5 item 2's own report should note it): a
     # served release that is NOT the one this latest attempt just tried to
     # publish is, by definition, stale relative to that attempt -- on
