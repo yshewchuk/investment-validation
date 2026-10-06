@@ -32,6 +32,7 @@ from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.health import (
+    _current_delivered_release,
     _withheld_release,
     engineering_history,
     engineering_streak_from_history,
@@ -474,7 +475,8 @@ def _write_operations_status(conn, store, target, *, scope, requested_session, r
     history = tuple(EngineeringNight(**row) for row in engineering_history(conn, occurrences))
     conflicts, degraded = _bundle_flags(store, bundle_ref) if bundle_ref is not None else ((), ())
     selfcheck_doc = _selfcheck_document(conn, store, bindings)
-    withheld_release = _withheld_release(conn)
+    current_delivered = _current_delivered_release(conn)
+    withheld_release = _withheld_release(conn, current_delivered)
     current_release_id = release_current(target)
     # A judgement call (guide §5.5 item 2's own report should note it): a
     # served release that is NOT the one this latest attempt just tried to

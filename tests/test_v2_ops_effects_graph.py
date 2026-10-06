@@ -43,6 +43,7 @@ from engine.v2.ops.cli import explain_command
 from engine.v2.ops.effects_graph import (
     EXPORT_PURPOSES,
     _generation_ref,
+    _write_operations_status,
     backup_effect,
     engineering_gate_effect,
     ledger_export_effect,
@@ -794,6 +795,62 @@ def test_publication_older_occurrence_cannot_replace_newer(tmp_path):
             publish_local(conn, older, store, older_target, older_release_id,
                           scope=older_scope, clock=clock)
         assert release_current(older_target) == pointer_after_older
+    finally:
+        conn.close()
+
+
+def test_publication_sidecar_withheld_banner_ignores_an_orphan_delivered_row(tmp_path):
+    """FIX-409 regression, isolated to ONE scope: the sidecar's withheld banner
+    compares against the release the publication pointers actually serve, never
+    the global newest delivered ``releases`` row.
+
+    The catalog holds three rows: the older scope's own CURRENT, delivered at
+    2026-09-10; an ineligible 2026-09-11 staged release (the banner's subject);
+    and a LATER delivered 2026-09-12 catalog row that no pointer names any more
+    -- what a rollback or a same-scope republish leaves behind. The old
+    no-argument ``_withheld_release(conn)`` selected that orphan 2026-09-12 row
+    as "current", so ``withheld["occurrence"] > current["occurrence"]`` was
+    false and the banner cleared even though the scope is genuinely serving
+    2026-09-10. Selecting CURRENT per scope keeps the banner up.
+    """
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session="2026-09-10")
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        target = root / "releases" / scope
+        current_release_id = release_current(target)
+        assert current_release_id is not None
+
+        def insert_catalog_release(occurrence, *, tag, eligible, delivered):
+            """A direct ``releases`` row with a genuine manifest, so the
+            catalog can hold a delivered or an ineligible release that no
+            pointer (or no delivery) backs."""
+            release_id = "rel" + content_hash([scope, occurrence, tag]).split(":")[1][:24]
+            manifest = {"schema_version": "release_manifest.v1.0", "release_id": release_id,
+                        "occurrence": occurrence, "files": {}, "gates": {}}
+            with transaction(conn):
+                conn.execute("INSERT INTO releases(release_id,occurrence,manifest_json,"
+                             "manifest_hash,expected_current,eligible,published_at,delivered_at) "
+                             "VALUES (?,?,?,?,?,?,?,?)",
+                             (release_id, occurrence, json.dumps(manifest, sort_keys=True),
+                              content_hash(manifest), None, int(eligible), delivered, delivered))
+            return release_id
+
+        withheld_release_id = insert_catalog_release("2026-09-11", tag="withheld",
+                                                     eligible=False, delivered=None)
+        # Delivered, eligible, strictly newer -- and named by no CURRENT.
+        insert_catalog_release("2026-09-12", tag="orphan", eligible=True,
+                               delivered="2026-09-12T21:00:00.000000Z")
+
+        _write_operations_status(conn, store, target, scope=scope,
+                                 requested_session="2026-09-10", resolved_session="2026-09-10",
+                                 bindings={}, bundle_ref=None, clock=clock,
+                                 attempted_release_id=current_release_id,
+                                 failed_update=False, failure=None)
+        status = json.loads((target / "operations_status.json").read_text())
+        assert status["withheld"] is True
+        assert withheld_release_id in status["withheld_reason"]
     finally:
         conn.close()
 
