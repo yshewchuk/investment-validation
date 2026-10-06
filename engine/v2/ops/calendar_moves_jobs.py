@@ -113,6 +113,7 @@ class CalendarMovesParameters:
 
     expected_ids: tuple[str, ...]
     parent_snapshot_id: str = ""
+    parent_receipt_id: str | None = None
     refresh_plan_hash: str = ""
     provider_calls: int = 0
     catalog_path: str = ""

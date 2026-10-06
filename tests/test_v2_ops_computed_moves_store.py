@@ -17,7 +17,8 @@ from engine.v2.ops import computed_moves_store
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.computed_moves_store import _capture_id_for, _fence_check_for
 from engine.v2.ops.errors import OpsError
-from engine.v2.ops.incremental_data import RefreshParameters, RefreshUnit
+from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
+from engine.v2.ops.incremental_data import RefreshUnit
 from engine.v2.ops.pinned_partition_reader import RetainedRowCount
 from tests.data_scan_support import (
     commit_tables, contract_for, contract_ref_for, hand_built_record, publish_and_inspect,
@@ -143,9 +144,15 @@ def _closes_csv() -> bytes:
 
 
 def _head_row(conn, scope="shadow"):
-    return conn.execute(
+    row = conn.execute(
         "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
         (scope,)).fetchone()
+    if row is None:
+        return None
+    from engine.v2.data import reference_catalog
+    receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope=scope, snapshot_id=row["snapshot_id"])
+    return {**dict(row), "parent_receipt_id": receipt_id}
 
 
 def _build_parent(conn, clock, store, *, events_rows=()):
@@ -170,7 +177,7 @@ def _build_parent(conn, clock, store, *, events_rows=()):
         byte_size=1)
     with transaction(conn):
         reference_catalog.insert_reference_inputs(conn, receipt_id, [pin])
-    return head
+    return dict(head)
 
 
 class _CountingFetcher:
@@ -222,15 +229,16 @@ def test_tier1_yfinance_history_fetcher_uses_newest_success_and_empty_for_missin
 
 
 def _parameters(head, *, expected_ids, catalog_path, objects_root,
-                overrides=None) -> RefreshParameters:
+                overrides=None) -> CalendarMovesParameters:
     kwargs = dict(
         expected_ids=expected_ids, parent_snapshot_id=head["snapshot_id"],
         refresh_plan_hash="sha256:" + "d" * 64, provider_calls=1,
+        parent_receipt_id=head["parent_receipt_id"],
         catalog_path=str(catalog_path), objects_root=str(objects_root), scope="shadow",
         expected_head_generation=head["generation"], expected_head_snapshot_id=head["snapshot_id"])
     if overrides:
         kwargs.update(overrides)
-    return RefreshParameters(**kwargs)
+    return CalendarMovesParameters(**kwargs)
 
 
 def _write_input(root, *, catalog_path, objects_root, head, as_of=_AS_OF, overrides=None):
@@ -238,7 +246,8 @@ def _write_input(root, *, catalog_path, objects_root, head, as_of=_AS_OF, overri
     document = {
         "catalog_path": str(catalog_path), "objects_root": str(objects_root),
         "scope": "shadow", "expected_head_generation": head["generation"],
-        "expected_head_snapshot_id": head["snapshot_id"], "as_of": as_of,
+        "expected_head_snapshot_id": head["snapshot_id"],
+        "parent_receipt_id": head["parent_receipt_id"], "as_of": as_of,
     }
     if overrides:
         document.update(overrides)
@@ -303,6 +312,195 @@ def test_missing_tier1_history_is_logged_no_history_without_failing(tmp_path, mo
         "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?", ("BBBB",)
     ).fetchone()
     assert row["outcome"] == "no_history"
+
+
+def test_all_missing_tier1_persists_no_history_without_generation(tmp_path, monkeypatch):
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA", "BBBB"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events_rows = ([_event_row(ticker, day) for ticker in ("AAAA", "BBBB")
+                    for day in _EVENT_DAYS])
+    head = _build_parent(conn, clock, store, events_rows=events_rows)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA", "BBBB"),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF,
+        fetcher=lambda ticker: (b"", "legitimate_empty", {}, []))
+
+    assert result.status == "noop"
+    current = _head_row(conn)
+    assert (current["snapshot_id"], current["generation"]) == (
+        head["snapshot_id"], head["generation"])
+    rows = conn.execute(
+        "SELECT ticker, outcome FROM data_computed_moves_captures ORDER BY ticker").fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("AAAA", "no_history"), ("BBBB", "no_history")]
+
+
+def test_refresh_uses_the_parent_receipt_pinned_before_a_reference_reimport(
+        tmp_path, monkeypatch):
+    from engine.v2.data import reference_catalog
+    from engine.v2.data.reference_catalog import ReferenceInput
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+    parent_inputs = reference_catalog.reference_inputs_for_receipt(
+        conn, receipt_id=head["parent_receipt_id"])
+    later_receipt_id = "receipt_reference_reimport"
+    later_input = ReferenceInput(
+        kind="calendar", legacy_path="calendar/reimported.csv",
+        object_id="object-reference-calendar", content_hash="sha256:" + "a" * 64,
+        byte_size=1)
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO data_import_receipts (receipt_id, attempt_id, fence, scope, "
+            "source_manifest_hash, result_snapshot_id, status, problem_json, registered_at) "
+            "VALUES (?, ?, 1, ?, ?, ?, 'committed', NULL, ?)",
+            (later_receipt_id, "attempt-reference-reimport", "shadow", "sha256:" + "f" * 64,
+             head["snapshot_id"], clock.now().isoformat()))
+        reference_catalog.insert_reference_inputs(conn, later_receipt_id, [later_input])
+    assert reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=head["snapshot_id"]) == later_receipt_id
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(_closes_csv()))
+
+    child_receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=result.candidate_snapshot_id)
+    assert reference_catalog.reference_inputs_for_receipt(
+        conn, receipt_id=child_receipt_id) == parent_inputs
+    lineage = conn.execute(
+        "SELECT base_receipt_id FROM data_receipt_lineage WHERE receipt_id = ?",
+        (child_receipt_id,)).fetchone()
+    assert lineage["base_receipt_id"] == head["parent_receipt_id"]
+
+
+def test_legacy_refresh_without_parent_receipt_pin_resolves_parent_receipt(tmp_path, monkeypatch):
+    import json
+    from engine.v2.data import reference_catalog
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    root = tmp_path / "legacy_attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    document_path = root / computed_moves_store.INPUT_PATH
+    document = json.loads(document_path.read_text())
+    document.pop("parent_receipt_id")
+    document_path.write_text(canonical_json(document))
+    parameters = _parameters(
+        head, expected_ids=("AAAA",), catalog_path=tmp_path / "ops.sqlite",
+        objects_root=tmp_path, overrides={"parent_receipt_id": None})
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(_closes_csv()))
+
+    assert result.status == "complete"
+    child_receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=result.candidate_snapshot_id)
+    assert reference_catalog.reference_inputs_for_receipt(
+        conn, receipt_id=child_receipt_id) == reference_catalog.reference_inputs_for_receipt(
+            conn, receipt_id=head["parent_receipt_id"])
+
+
+def test_refresh_refuses_input_receipt_that_disagrees_with_job(tmp_path, monkeypatch):
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                 overrides={"parent_receipt_id": "receipt_other"})
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+    fetcher = _CountingFetcher(_closes_csv())
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+
+    assert err.value.code == "INVALID_REQUEST"
+    assert fetcher.calls == []
+
+
+def test_refresh_refuses_a_pinned_receipt_not_committed_for_parent(tmp_path, monkeypatch):
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    root = tmp_path / "attempt"
+    bogus_receipt_id = "receipt_not_committed"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                 overrides={"parent_receipt_id": bogus_receipt_id})
+    parameters = _parameters(
+        head, expected_ids=("AAAA",), catalog_path=tmp_path / "ops.sqlite",
+        objects_root=tmp_path, overrides={"parent_receipt_id": bogus_receipt_id})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(_closes_csv()))
+
+    assert err.value.code == "SNAPSHOT_NOT_READY"
+    current = _head_row(conn)
+    assert (current["snapshot_id"], current["generation"]) == (
+        head["snapshot_id"], head["generation"])
+
+
+def test_parent_receipt_id_validation_rejects_missing_and_oversized_values():
+    for value in (None, "", "r" * 129):
+        with pytest.raises(OpsError) as err:
+            computed_moves_store._validated_parent_receipt_id(value)
+        assert err.value.code == "INVALID_REQUEST"
+
+
+def test_computed_moves_command_stages_parent_receipt_pin(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from engine.v2.ops.cli import computed_moves_command
+
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    source_root = tmp_path / "legacy"
+    source_root.mkdir()
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    monkeypatch.setattr(computed_moves_store, "iter_raw_fetch_cache", lambda *a, **k: [])
+
+    class Staged(Exception):
+        pass
+
+    def stop_after_staging(parameters, root, *, as_of, fetcher):
+        document = json.loads((root / computed_moves_store.INPUT_PATH).read_text())
+        assert document["parent_receipt_id"] == head["parent_receipt_id"]
+        assert parameters.parent_receipt_id == head["parent_receipt_id"]
+        raise Staged
+
+    monkeypatch.setattr(computed_moves_store, "run_computed_moves_refresh", stop_after_staging)
+    args = SimpleNamespace(source_root=source_root, as_of=_AS_OF,
+                           scope="shadow", dry_run=False)
+    with pytest.raises(Staged):
+        computed_moves_command(args, tmp_path, conn, clock)
 
 
 def test_computed_moves_command_refuses_missing_source_root(tmp_path):
@@ -741,7 +939,9 @@ def test_run_computed_moves_refresh_cached_rerun_refetches_nothing(tmp_path, mon
     assert conn.execute(
         "SELECT COUNT(*) FROM data_computed_moves_captures WHERE ticker = ?",
         ("AAAA",)).fetchone()[0] == 1  # stable capture_id (round 2 fix) dedups the rerun
-    assert dict(_head_row(conn)) == dict(new_head)  # the head never actually moved
+    current_head = _head_row(conn)
+    assert (current_head["snapshot_id"], current_head["generation"]) == (
+        new_head["snapshot_id"], new_head["generation"])
 
 
 def test_run_computed_moves_refresh_provider_failure_maps_to_its_code(tmp_path, monkeypatch):
@@ -1005,7 +1205,9 @@ def test_run_computed_moves_refresh_rerun_at_a_different_clock_time_is_a_true_no
     assert second.status == "noop"
     assert second.coverage_advanced is False
     assert fetcher.calls == ["AAAA"]  # never re-fetched
-    assert dict(_head_row(conn)) == dict(new_head)  # the head never actually moved
+    current_head = _head_row(conn)
+    assert (current_head["snapshot_id"], current_head["generation"]) == (
+        new_head["snapshot_id"], new_head["generation"])
 
     fragment2 = _fragment(new_head["snapshot_id"])
     assert fragment1.fragment_id == fragment2.fragment_id

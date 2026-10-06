@@ -282,9 +282,13 @@ def test_real_targets_build_a_refresh_plan_with_matching_expected_ids(tmp_path, 
         "2026-09-18", catalog_path=None, objects_root=None,
         conn=conn, store=store, clock=clock)
     assert built is not None
-    refresh_plan, expected_ids = built
+    from engine.v2.data import reference_catalog
+
+    refresh_plan, expected_ids, parent_receipt_id = built
     assert expected_ids == ("AAPL", "MSFT")
     assert refresh_plan.parent_snapshot_id == head["snapshot_id"]
+    assert parent_receipt_id == reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=head["snapshot_id"])
     assert refresh_plan.provider_account == NATIVE_COMPUTED_MOVES_ACCOUNT
 
 
@@ -364,6 +368,14 @@ def test_submits_after_refresh_succeeds_and_is_idempotent_on_a_same_session_reru
     assert receipt.job_id == job_id_for("shadow", _computed_moves_refresh_key("2026-09-18"))
     row = conn.execute("SELECT kind FROM jobs WHERE job_id = ?", (receipt.job_id,)).fetchone()
     assert row["kind"] == COMPUTED_MOVES_REFRESH_ACTION
+
+    from engine.v2.data import reference_catalog
+
+    job = conn.execute("SELECT spec_json FROM jobs WHERE job_id = ?",
+                       (receipt.job_id,)).fetchone()
+    params = json.loads(job["spec_json"])["parameters"]
+    assert params["parent_receipt_id"] == reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=params["parent_snapshot_id"])
 
     again = submit_computed_moves_refresh_if_ready(
         conn, registry(), _POLICY, store, catalog_path=str(tmp_path / "ops.sqlite"),

@@ -1003,11 +1003,13 @@ waits without submitting until its paired succeeded inputs are ready.
   (the full event-date instant is in the key, so distinct instants remain distinct),
   the worker raises before either output file is written, rather than silently
   dropping one row.
-- `computed_moves_store.py` commits only changed content, one fragment per
-  ticker, carrying other tables and parent reference pins forward; lineage
-  uses the schema's existing `price_history_capture` kind. Capture rows are
-  append-only and deduped by `capture_id`. `computed_at` derives from `as_of`,
-  so identical same-`as_of` inputs resolve to the parent without a generation.
+- `computed_moves_store.py` commits only changed content, one fragment per ticker, carrying other tables and parent pins forward. New job parameters
+  pin the parent receipt before execution; commits use it for reference inputs
+  and lineage. Legacy unpinned jobs resolve a receipt at commit for compatibility.
+  Lineage uses `price_history_capture`; captures are append-only and deduped by
+  `capture_id`; no-fragment runs persist attempts without a generation.
+  `computed_at` derives from `as_of`; identical same-`as_of` inputs
+  resolve to the parent without a generation.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
   here since the list can drift) — catalog/outbox/filesystem writes

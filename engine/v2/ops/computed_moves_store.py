@@ -95,8 +95,8 @@ _CONTRACT_REF = TableContractRef(contract_id=COMPUTED_MOVES_CONTRACT.contract_id
 #: refused rather than silently ignored (Opus review, PR #39).
 _ALLOWED_DOCUMENT_KEYS = frozenset({
     "catalog_path", "objects_root", "scope", "expected_head_generation",
-    "expected_head_snapshot_id", "attempt_id", "fence", "all_scoreable",
-    "since", "as_of",
+    "expected_head_snapshot_id", "parent_receipt_id", "attempt_id", "fence",
+    "all_scoreable", "since", "as_of",
 })
 
 #: The namespaces this store's document may commit into. This store has no
@@ -135,6 +135,15 @@ def tier1_yfinance_history_fetcher(source_root):
         return entry.body(), "complete", {}, []
 
     return cache, fetch
+
+
+def parent_receipt_id_for_snapshot(conn, scope, snapshot_id) -> str:
+    receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope=scope, snapshot_id=snapshot_id)
+    if receipt_id is None:
+        raise fail("SNAPSHOT_NOT_READY", "scope's parent snapshot has no committed import receipt",
+                   details={"scope": scope, "snapshot_id": snapshot_id})
+    return _validated_parent_receipt_id(receipt_id)
 
 
 def _as_of_day(as_of) -> str:
@@ -431,8 +440,8 @@ def _fence_check_for(staged_attempt_id, staged_fence, clock):
                                            clock.now())
 
 
-def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempts, clock,
-                       expected_head, generation, request_hash, as_of,
+def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records_by_ticker,
+                       attempts, clock, expected_head, generation, request_hash, as_of,
                        staged_attempt_id=None, staged_fence=None):
     prior_manifest = parent.table_manifests.get(COMPUTED_MOVES_TABLE_NAME)
     prior_records = tuple(record for record in parent.records
@@ -486,19 +495,16 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
                          for record in all_records}.values())
     receipt_id = "receipt_cm_" + request_hash.removeprefix("sha256:")[:32]
     attempt_id = "attempt_cm_" + request_hash.removeprefix("sha256:")[:32]
-    old_receipt_id = reference_catalog.committed_receipt_for_snapshot(
-        conn, scope=scope, snapshot_id=parent.snapshot.snapshot_id)
-    if old_receipt_id is None:
-        raise fail("SNAPSHOT_NOT_READY", "scope's parent snapshot has no committed import receipt",
-                   details={"scope": scope, "snapshot_id": parent.snapshot.snapshot_id})
 
     def _record_references(connection, rid):
+        resolved_receipt_id = _parent_receipt_id_for_commit(
+            connection, scope, parent.snapshot.snapshot_id, parent_receipt_id)
         inputs = reference_catalog.reference_inputs_for_receipt(
-            connection, receipt_id=old_receipt_id)
+            connection, receipt_id=resolved_receipt_id)
         reference_catalog.insert_reference_inputs(connection, rid, inputs)
         _insert_captures(connection, attempts)
         record_price_history_lineage(
-            connection, receipt_id=rid, base_receipt_id=old_receipt_id)
+            connection, receipt_id=rid, base_receipt_id=resolved_receipt_id)
 
     return data_catalog.commit_snapshot(
         conn, scope=scope, request_hash=request_hash, contracts=tuple(contracts.values()),
@@ -529,6 +535,13 @@ def _noop_result(parameters, completed_ids) -> RefreshCallbackResult:
         refresh_plan_hash=parameters.refresh_plan_hash)
 
 
+def _no_fragment_result(conn, parameters, attempts, targets):
+    """Persist audit attempts without publishing a generation when no fragment exists."""
+    with conn:
+        _insert_captures(conn, attempts)
+    return _noop_result(parameters, tuple(sorted(targets)))
+
+
 def _input_document(root: Path) -> dict | None:
     path = root / INPUT_PATH
     if not path.is_file():
@@ -555,6 +568,8 @@ def _validate_document_identity(document: dict) -> None:
         if not isinstance(value, str) or not value:
             raise fail("INVALID_REQUEST",
                        f"computed moves refresh input document needs a non-empty string {name}")
+    if "parent_receipt_id" in document:
+        _validated_parent_receipt_id(document["parent_receipt_id"])
     if not Path(document["catalog_path"]).is_file():
         # ``sqlite3.connect`` is never allowed to silently create a fresh,
         # empty database at a path that does not already hold the real
@@ -643,6 +658,9 @@ def _validate_document_matches_job(document: dict, parameters, *, as_of: str) ->
     if document["scope"] != parameters.scope:
         raise fail("INVALID_REQUEST", "computed moves refresh input document's scope disagrees "
                                        "with the job's RefreshParameters")
+    if document.get("parent_receipt_id") != parameters.parent_receipt_id:
+        raise fail("INVALID_REQUEST", "computed moves input parent_receipt_id disagrees "
+                                      "with the job parameters")
     if document.get("expected_head_generation") != parameters.expected_head_generation:
         raise fail("INVALID_REQUEST", "computed moves refresh input document's "
                                        "expected_head_generation disagrees with the job's "
@@ -676,6 +694,32 @@ def _validated_parent_snapshot_id(parent_snapshot_id) -> str:
     return parent_snapshot_id
 
 
+def _validated_parent_receipt_id(parent_receipt_id) -> str:
+    if (not isinstance(parent_receipt_id, str) or not parent_receipt_id
+            or len(parent_receipt_id) > 128):
+        raise fail("INVALID_REQUEST",
+                   f"parent_receipt_id must be a bounded nonempty str, "
+                   f"got {parent_receipt_id!r}")
+    return parent_receipt_id
+
+
+def _parent_receipt_id_for_commit(conn, scope, snapshot_id, pinned_receipt_id):
+    if pinned_receipt_id is None:
+        # Compatibility for jobs serialized before parent_receipt_id was added.
+        return parent_receipt_id_for_snapshot(conn, scope, snapshot_id)
+    receipt_id = _validated_parent_receipt_id(pinned_receipt_id)
+    row = conn.execute(
+        "SELECT 1 FROM data_import_receipts WHERE receipt_id = ? AND scope = ? "
+        "AND status = 'committed' AND result_snapshot_id = ?",
+        (receipt_id, scope, snapshot_id)).fetchone()
+    if row is None:
+        raise fail("SNAPSHOT_NOT_READY",
+                   "pinned parent receipt is not committed for the parent snapshot",
+                   details={"scope": scope, "snapshot_id": snapshot_id,
+                            "receipt_id": receipt_id})
+    return receipt_id
+
+
 def _validated_refresh_plan_hash(refresh_plan_hash) -> str:
     """Matches ``incremental_data._is_hash``'s own sha256-hex check for this
     same field (mirrored rather than imported: that name is private, and #40's
@@ -695,6 +739,8 @@ def _validate_job_identity(parameters) -> None:
     runner is called directly, not through the job-submission pipeline that
     would otherwise have validated them via ``refresh_parameter_problems``."""
     _validated_parent_snapshot_id(parameters.parent_snapshot_id)
+    if parameters.parent_receipt_id is not None:
+        _validated_parent_receipt_id(parameters.parent_receipt_id)
     _validated_refresh_plan_hash(parameters.refresh_plan_hash)
 
 
@@ -747,10 +793,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
             events_by_ticker=_group_by_ticker(events),
             daily_by_ticker=_group_by_ticker(daily), as_of_day=as_of_day)
         if not fragment_records:
-            # ``targets`` -- the whole derived universe -- is what "completed"
-            # means here, whether or not this particular run wrote a fragment
-            # for every one of them.
-            return _noop_result(parameters, tuple(sorted(targets)))
+            return _no_fragment_result(conn, parameters, attempts, targets)
 
         request_hash = content_hash({
             "kind": "computed_moves_generation", "scope": document["scope"],
@@ -759,6 +802,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
                           for ticker, record in sorted(fragment_records.items())}})
         receipt = _commit_generation(
             conn, store, str(document["scope"]), parent=parent,
+            parent_receipt_id=parameters.parent_receipt_id,
             records_by_ticker=fragment_records, attempts=attempts, clock=clock, as_of=as_of_day,
             expected_head=document.get("expected_head_snapshot_id",
                                        parameters.parent_snapshot_id),

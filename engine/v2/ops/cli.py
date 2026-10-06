@@ -1104,6 +1104,17 @@ def price_history_command(args, root, conn, clock):
                    dry_run=args.dry_run, clock=clock)
 
 
+def _computed_moves_capture_report(dry_run, targets, cache):
+    with_cache = sum(ticker in cache for ticker in targets)
+    return {
+        "schema_version": "computed_moves_capture_report.v1.0",
+        "dry_run": bool(dry_run),
+        "target_count": len(targets),
+        "with_tier1_entry": with_cache,
+        "without_tier1_entry": len(targets) - with_cache,
+    }
+
+
 def computed_moves_command(args, root, conn, clock):
     """Build one computed_moves.v3 generation from the local Tier-1 cache."""
     from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
@@ -1134,6 +1145,8 @@ def computed_moves_command(args, root, conn, clock):
         store = ArtifactStore(root)
         repository = Repository(conn, store)
         parent = repository.resolve(head["snapshot_id"])
+        parent_receipt_id = computed_moves_store.parent_receipt_id_for_snapshot(
+            conn, args.scope, parent.snapshot_id)
         targets, _ = computed_moves_store.target_tickers_from_snapshot(
             repository, head["snapshot_id"], all_scoreable=True, as_of=as_of)
         units = computed_moves_store.computed_moves_units(targets, as_of=as_of)
@@ -1144,14 +1157,7 @@ def computed_moves_command(args, root, conn, clock):
                 endpoint=COMPUTED_MOVES_TABLE_NAME),
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(head["generation"]))
-        with_cache = sum(ticker in cache for ticker in targets)
-        report = {
-            "schema_version": "computed_moves_capture_report.v1.0",
-            "dry_run": bool(args.dry_run),
-            "target_count": len(targets),
-            "with_tier1_entry": with_cache,
-            "without_tier1_entry": len(targets) - with_cache,
-        }
+        report = _computed_moves_capture_report(args.dry_run, targets, cache)
         if args.dry_run:
             return report
 
@@ -1163,12 +1169,14 @@ def computed_moves_command(args, root, conn, clock):
             "scope": args.scope,
             "expected_head_generation": plan.expected_head_generation,
             "expected_head_snapshot_id": plan.parent_snapshot_id,
+            "parent_receipt_id": parent_receipt_id,
             "as_of": as_of,
         }
         (root / computed_moves_store.INPUT_PATH).write_text(canonical_json(document))
         parameters = CalendarMovesParameters(
             expected_ids=tuple(sorted(targets)),
             parent_snapshot_id=plan.parent_snapshot_id,
+            parent_receipt_id=parent_receipt_id,
             refresh_plan_hash=plan.plan_hash,
             provider_calls=plan.provider_calls,
             catalog_path=catalog_path,
