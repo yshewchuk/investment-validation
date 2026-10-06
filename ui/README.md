@@ -74,7 +74,7 @@ index.html`) via `compatibilityLink()` (`src/format.ts`).
   `current`, matching the compatibility preview's own "R1 readers retain
   R1; a new session resolves R2" rule (guide §9 L02).
   Publication evidence follows the latest request: an older poll reply cannot
-  replace a newer one, a failed current read clears the displayed identity
+  replace a newer one, a failed latest current read clears the displayed identity
   and drift hint as unknown, and a successful rollback to the pin clears the
   hint. Operations status compares against only the latest successful
   publication identity. The existing scheduled poll cadence is unchanged;

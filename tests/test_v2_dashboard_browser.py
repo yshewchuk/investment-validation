@@ -590,6 +590,8 @@ def test_out_of_order_current_polls_keep_newest_successful_identity(browser, ser
         ):
             held[0].fulfill(status=200, content_type="application/json",
                             body=json.dumps({**r2_release, "release_id": "r3"}))
+        # Let the resolved fetch continuation and React commit reach a paint.
+        page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
 
         expect(page.get_by_test_id("release-changed-notice")).to_contain_text("r2")
         identities = page.get_by_test_id("operations-identities")
