@@ -237,7 +237,34 @@ def test_cli_reads_real_git_and_accepts_a_staged_move(tmp_path, monkeypatch):
     assert tb.main(["--repo-root", str(root), "--base-ref", "main", "--quiet"]) == 0
 
 
+def _require_origin_main_for_cli_test():
+    args = ["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet",
+            "refs/remotes/origin/main"]
+    probe = subprocess.run(args, capture_output=True, env=tb._git_env())
+    if probe.returncode == 1:
+        pytest.skip("origin/main not fetched (shallow manual run); the ratchet is enforced on pull_request runs")
+    assert probe.returncode == 0, probe.stderr.decode().strip()
+
+
+def test_submitted_checkout_guard_skips_when_origin_main_is_missing(monkeypatch):
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(pytest.skip.Exception, match="origin/main not fetched"):
+        _require_origin_main_for_cli_test()
+
+
+def test_submitted_checkout_guard_allows_origin_main_when_present(monkeypatch):
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, b"abc123\n", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _require_origin_main_for_cli_test()
+
+
 def test_cli_checks_the_submitted_checkout():
+    _require_origin_main_for_cli_test()
     assert tb.main(["--quiet"]) == 0
 
 
