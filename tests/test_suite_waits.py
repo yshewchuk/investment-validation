@@ -64,29 +64,75 @@ def test_profile_exceeds_capacity_fails_on_the_first_check(tmp_path):
     assert "at least 6 CPUs" in message
 
 
-def test_run_until_fails_at_its_explicit_budget_on_an_own_catalog_heavy_slot_wait(tmp_path):
+def test_run_until_fails_at_its_explicit_budget_on_an_own_catalog_heavy_slot_wait(tmp_path, monkeypatch):
     """Regression (corpus timeout): a ``HEAVY_SLOT`` wait comes from the
     test's own catalog, so it is never environmental -- ``run_until`` must
     fall through to the caller's explicit deadline and raise
-    ``RunUntilTimeout`` inside that budget, carrying the queue reason and
-    the attempt/lease diagnostics, not fail ``RESOURCE WAIT`` or overrun."""
+    ``RunUntilTimeout`` at exactly that budget, not fail ``RESOURCE WAIT``
+    or overrun. A controlled fake clock (``monotonic()`` reads a mutable
+    timestamp, ``sleep`` advances it) pins the budget down; the deadline
+    diagnostics are the separate
+    ``test_run_until_fails_at_its_deadline_with_catalog_diagnostics``'s job."""
     conn, job_id = _queued_job(tmp_path, {"code": "HEAVY_SLOT"})
 
     class _NeverAdmits:
         def tick(self):
             pass
 
+    clock = {"t": 0.0}
+
+    class _FakeTime:
+        def monotonic(self):
+            return clock["t"]
+
+        def sleep(self, seconds):
+            clock["t"] += seconds
+
+    monkeypatch.setattr("tests.ops_support.time", _FakeTime())
     timeout = 0.2
-    started = time.monotonic()
-    with pytest.raises(RunUntilTimeout) as excinfo:
+    with pytest.raises(RunUntilTimeout):
         run_until(_NeverAdmits(), conn, job_id, timeout=timeout, poll=0.01)
-    # budget + 0.1 s for the deadline-edge diagnostics only: no retry, no extension
-    assert time.monotonic() - started <= timeout + 0.1
+    # the fake clock lands on the caller's deadline: no retry, no extension
+    assert clock["t"] >= timeout
+
+
+def test_run_until_deadline_wins_when_host_wait_window_expires(tmp_path, monkeypatch):
+    """The admission window clamped to the caller's deadline, on its exact
+    edge: ``MEMORY_HEADROOM`` first sampled at fake t=0.25 with a 0.75 s
+    window would expire at t=1.0 -- the caller's deadline too -- so the
+    watch must go silent there and let ``RunUntilTimeout`` speak, its
+    diagnostics carrying the queue reason and no ``RESOURCE WAIT``. The fake
+    clock (``monotonic()`` reads mutable time, ``sleep`` advances it) makes
+    the edge deterministic: no real wait."""
+    conn, job_id = _queued_job(tmp_path, {
+        "code": "MEMORY_HEADROOM",
+        "needed": {"memory_bytes": 256 << 20, "owed_unconsumed_bytes": 0},
+        "available": {"headroom_bytes": 100 << 20}})
+
+    clock = {"t": 0.0}
+
+    class _FakeTime:
+        def monotonic(self):
+            return clock["t"]
+
+        def sleep(self, seconds):
+            clock["t"] += seconds
+
+    class _AdvancingTwice:
+        def __init__(self):
+            self._advances = [0.25, 0.5]
+
+        def tick(self):
+            if self._advances:
+                clock["t"] += self._advances.pop(0)
+
+    monkeypatch.setattr("tests.ops_support.time", _FakeTime())
+    monkeypatch.setattr("tests.ops_support.ADMISSION_WAIT_SECONDS", 0.75)
+    with pytest.raises(RunUntilTimeout) as excinfo:
+        run_until(_AdvancingTwice(), conn, job_id, timeout=1.0, poll=0.25)
     message = str(excinfo.value)
-    assert "state 'queued'" in message
-    assert "HEAVY_SLOT" in message
-    assert "attempt count:" in message
-    assert "attempt lease heartbeat:" in message
+    assert "MEMORY_HEADROOM" in message
+    assert "RESOURCE WAIT" not in message
 
 
 def test_memory_headroom_waits_out_the_window_then_fails_with_the_numbers(tmp_path):
