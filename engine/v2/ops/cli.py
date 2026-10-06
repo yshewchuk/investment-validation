@@ -563,14 +563,24 @@ def _ensure_outcome_sessions_backfilled(conn, root, clock):
     return backfill_outcome_sessions(conn, ArtifactStore(root), clock=clock)
 
 
+def _health_command(args, conn, clock):
+    try:
+        document = health(conn, clock=clock)
+    except OpsError as exc:
+        if (exc.code == "VALIDATION_FAILED" and getattr(args, "out", None) is not None
+                and (args.out.is_file() or args.out.is_symlink())):
+            args.out.unlink(missing_ok=True)
+        raise
+    if getattr(args, "out", None) is not None:
+        write_health(args.out, document)
+    return document
+
+
 def dispatch(args, root, conn, clock):
     if args.command == "init":
         return {"initialized": True, "activation": "shadow_only"}
     if args.command == "health":
-        document = health(conn, clock=clock)
-        if getattr(args, "out", None) is not None:
-            write_health(args.out, document)
-        return document
+        return _health_command(args, conn, clock)
     if args.command == "serve":
         store_root = getattr(args, "store_root", None)
         if store_root is not None and not store_root.is_dir():

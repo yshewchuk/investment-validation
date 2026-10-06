@@ -24,7 +24,8 @@ from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
-from tests.ops_support import DEFAULT_POLICY, FakeClock, sample
+from tests.ops_support import (DEFAULT_POLICY, FakeClock, sample,
+                               seed_delivered_health_release)
 
 STAMP = "2026-09-13T12:00:00.000000Z"
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -95,6 +96,9 @@ def test_first_production_open_backfills_once_second_open_does_not_rescan(tmp_pa
         import_lines(conn, "legacy_file_2026-09-01", [_raw(old_row)], kind="outcome",
                     created_at=STAMP)
     assert rows(conn, kind="outcome")[0]["generation_ref"] is None
+    seed_delivered_health_release(conn, release_id="r1",
+                                  requested_session="2026-09-12",
+                                  resolved_session="2026-09-12")
     conn.close()
 
     calls = []
@@ -144,8 +148,34 @@ def test_init_marks_a_fresh_catalog_applied_immediately(tmp_path, monkeypatch):
     assert cli.main(["--root", str(root), "init"]) == 0
     assert len(calls) == 1
 
+    clock = FakeClock()
+    seeded = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        seed_delivered_health_release(seeded, release_id="r1",
+                                      requested_session="2026-09-12",
+                                      resolved_session="2026-09-12")
+    finally:
+        seeded.close()
+
     assert cli.main(["--root", str(root), "health"]) == 0
     assert len(calls) == 1
+
+
+def test_missing_receipt_chain_leaves_no_stale_health_artifact(tmp_path, capsys):
+    """A missing delivered-receipt chain makes ``health()`` refuse with
+    ``VALIDATION_FAILED``; the CLI must not leave an older artifact behind
+    for the next reader. An empty catalog has no delivered release at all,
+    so the pre-existing ``--out`` file must be removed and the exit code is
+    2."""
+    conn, _, _ = _catalog_at(tmp_path)
+    output = tmp_path / "health.json"
+    output.write_text("stale artifact")
+    conn.close()
+
+    code = cli.main(["--root", str(tmp_path), "health", "--out", str(output)])
+    assert code == 2
+    assert "VALIDATION_FAILED" in capsys.readouterr().out
+    assert not output.exists()
 
 
 # --------------------------------------------------------------------------
@@ -169,6 +199,9 @@ def test_doctor_and_health_report_the_undetermined_count(tmp_path, capsys):
     with transaction(conn):
         import_lines(conn, "legacy_good", [_raw(good_row)], kind="outcome", created_at=STAMP)
         import_lines(conn, "legacy_bad", [_raw(bad_row)], kind="outcome", created_at=STAMP)
+    seed_delivered_health_release(conn, release_id="r1",
+                                  requested_session="2026-09-12",
+                                  resolved_session="2026-09-12")
     conn.close()
 
     # Before any write-opening command has run against this root, doctor
@@ -214,6 +247,9 @@ def test_same_session_rerun_after_automatic_backfill_commits_zero(tmp_path):
     with transaction(conn):
         import_lines(conn, source_hash, [_raw(old_row)], kind="outcome", created_at=STAMP)
     assert rows(conn, kind="outcome")[0]["generation_ref"] is None
+    seed_delivered_health_release(conn, release_id="r1",
+                                  requested_session="2026-09-13",
+                                  resolved_session="2026-09-10")
     conn.close()
 
     # The real production entry point -- not a direct call to

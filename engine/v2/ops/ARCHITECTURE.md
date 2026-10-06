@@ -14,7 +14,8 @@ persists the jobs that call into those packages.
 
 This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy
 `engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a
-legacy `Scorer`. It has no production caller yet (see "Dependencies"); schema migrations follow the
+legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_score_batch_shadow` →
+`build_native_score_batch_events` → `scan_forward_board_requests` → `board_requests` (see "Dependencies"); schema migrations follow the
 [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
 
 ## Primary contracts and public interfaces
@@ -22,11 +23,8 @@ legacy `Scorer`. It has no production caller yet (see "Dependencies"); schema mi
 **Operations health output.** `health` emits `operations_health.v1.1` with
 `requested_session` and `resolved_session` copied from the unique delivered
 `ledger_export_receipt.v1.0` bound through `release_intent` to the current
-delivered release; neither comes from `generated_at`. Missing, malformed,
-ambiguous or mismatched evidence is `VALIDATION_FAILED`; the CLI writes no
-document and does not retry. The same catalog and clock produce byte-identical
-JSON. This additive response follows the minor-version rule in
-`guides/component_contracts.md` §2.3; older versions remain valid.
+delivered release; neither comes from `generated_at`. Missing, malformed, ambiguous or mismatched evidence is `VALIDATION_FAILED`; the CLI removes the configured output artifact and re-raises without retry.
+Identical catalog/clock inputs produce byte-identical JSON; version evolution follows `guides/component_contracts.md` §2.3; older versions remain valid.
 
 The operator interface is the versioned command protocol exposed by `engine/v2/ops/cli.py`
 (`python3 -m engine.v2.ops <command>`), derived directly from its `argparse` definitions:
