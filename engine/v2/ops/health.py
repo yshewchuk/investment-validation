@@ -287,7 +287,7 @@ def _release_session_evidence(conn, current):
     return requested, resolved
 
 
-def _withheld_release(conn, current=None):
+def _withheld_release(conn, current=None, *, fallback_to_latest=True):
     """The withheld-release projection shared by :func:`health` and the
     operations-status sidecar, as the same dict-or-None value: the latest
     INELIGIBLE release, reported only while no later occurrence has been
@@ -298,8 +298,16 @@ def _withheld_release(conn, current=None):
     it is queried here. Internal only: it emits no health document and never
     invents a session field, so a caller can read the banner before any export
     receipt exists -- where the public ``health()`` producer must still refuse.
+
+    ``fallback_to_latest`` controls that absent-``current`` query. It defaults
+    to true, so the global latest-delivered-release lookup runs exactly as
+    before for ``health()`` and every pre-existing caller. A caller passing a
+    scope-local ``current`` for a SCOPE-LOCAL projection (the sidecar) can set
+    it false to disable the fallback: when ``current`` is None nothing is
+    queried, so current stays absent and the withheld projection is not
+    cleared against a global latest-delivered row from another scope.
     """
-    if current is None:
+    if current is None and fallback_to_latest:
         current = conn.execute("SELECT release_id,occurrence,delivered_at FROM releases "
                                "WHERE delivered_at IS NOT NULL ORDER BY occurrence DESC, release_id DESC LIMIT 1").fetchone()
     withheld = conn.execute("SELECT release_id,occurrence FROM releases WHERE eligible=0 "

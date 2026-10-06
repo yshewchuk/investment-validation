@@ -895,6 +895,50 @@ def test_publication_sidecar_ignores_an_unrelated_damaged_pointer(tmp_path):
         conn.close()
 
 
+def test_publication_sidecar_withheld_banner_ignores_a_cross_scope_delivery_without_local_current(
+        tmp_path):
+    """FIX-409 regression, the other half of the selector: NO local CURRENT.
+
+    Scope ``shadow`` has never published here -- no ``releases/shadow/CURRENT``,
+    no ``nightly``/``publication`` watermark -- while a DIFFERENT scope,
+    ``served``, genuinely delivered 2026-09-12. The one ineligible ``releases``
+    row is a staged 2026-09-11 release. With the old global fallback the sidecar
+    read ``served``'s later delivery as "current", so
+    ``withheld["occurrence"] > current["occurrence"]`` was false and the banner
+    cleared for a scope serving nothing at all; with the fallback opted out
+    current is simply absent and 2026-09-11 stays withheld.
+    """
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        claim = _publication_setup(conn, clock, supervisor, store, scope="served", session=SESSION)
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        assert release_current(root / "releases" / "served") is not None
+
+        target = root / "releases" / "shadow"
+        assert release_current(target) is None
+        assert conn.execute("SELECT 1 FROM watermarks WHERE pipeline='nightly' AND scope='shadow' "
+                            "AND stage='publication'").fetchone() is None
+
+        withheld_release_id = "rel" + content_hash(["shadow", "2026-09-11", "withheld"]).split(":")[1][:24]
+        manifest = {"schema_version": "release_manifest.v1.0", "release_id": withheld_release_id,
+                    "occurrence": "2026-09-11", "files": {}, "gates": {}}
+        with transaction(conn):
+            conn.execute("INSERT INTO releases(release_id,occurrence,manifest_json,manifest_hash,"
+                         "expected_current,eligible,published_at,delivered_at) VALUES (?,?,?,?,?,?,?,?)",
+                         (withheld_release_id, "2026-09-11", json.dumps(manifest, sort_keys=True),
+                          content_hash(manifest), None, 0, None, None))
+
+        _write_operations_status(conn, store, target, scope="shadow",
+                                 requested_session="2026-09-11", resolved_session="2026-09-11",
+                                 bindings={}, bundle_ref=None, clock=clock,
+                                 attempted_release_id=None, failed_update=False, failure=None)
+        status = json.loads((target / "operations_status.json").read_text())
+        assert status["withheld"] is True
+        assert withheld_release_id in status["withheld_reason"]
+    finally:
+        conn.close()
+
+
 def test_publication_refused_when_decisions_watermark_is_an_earlier_session(tmp_path):
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:

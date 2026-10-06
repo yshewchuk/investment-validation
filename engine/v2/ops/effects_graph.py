@@ -485,7 +485,7 @@ def _write_operations_status(conn, store, target, *, scope, requested_session, r
         current_delivered = conn.execute(
             "SELECT release_id,occurrence,delivered_at FROM releases WHERE release_id=? "
             "AND delivered_at IS NOT NULL", (current_release_id,)).fetchone()
-    withheld_release = _withheld_release(conn, current_delivered)
+    withheld_release = _withheld_release(conn, current_delivered, fallback_to_latest=False)
     # A judgement call (guide §5.5 item 2's own report should note it): a
     # served release that is NOT the one this latest attempt just tried to
     # publish is, by definition, stale relative to that attempt -- on
