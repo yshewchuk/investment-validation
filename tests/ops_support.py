@@ -382,7 +382,10 @@ def run_until(service, conn, job_id, *, timeout, states=TERMINAL_STATES, poll=0.
         if state in states:
             return state
         watch.check()
-        time.sleep(poll)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break  # the deadline arrived during the check above: never sleep past it
+        time.sleep(min(poll, remaining))
     # A job completing during the final sleep (after the deadline elapsed) is a
     # success, not a timeout: refresh once more before failing.
     state = job_state(conn, job_id)

@@ -93,7 +93,8 @@ def test_run_until_fails_at_its_explicit_budget_on_an_own_catalog_heavy_slot_wai
     with pytest.raises(RunUntilTimeout):
         run_until(_NeverAdmits(), conn, job_id, timeout=timeout, poll=0.01)
     # the fake clock lands on the caller's deadline: no retry, no extension
-    assert clock["t"] >= timeout
+    assert clock["t"] == pytest.approx(timeout)
+    assert clock["t"] <= timeout
 
 
 def test_run_until_deadline_wins_when_host_wait_window_expires(tmp_path, monkeypatch):
@@ -133,6 +134,7 @@ def test_run_until_deadline_wins_when_host_wait_window_expires(tmp_path, monkeyp
     message = str(excinfo.value)
     assert "MEMORY_HEADROOM" in message
     assert "RESOURCE WAIT" not in message
+    assert clock["t"] == 1.0
 
 
 def test_memory_headroom_waits_out_the_window_then_fails_with_the_numbers(tmp_path):
