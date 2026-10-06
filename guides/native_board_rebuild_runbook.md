@@ -53,15 +53,15 @@ to the same tree later imported from `SOURCE_ROOT` (operator requirement, not lo
 
 | Start tier | Legacy rebuild work |
 |---|---|
-| 1 | `python3 -m engine.data.rebuild`, then `python3 -m engine.build_trades` |
-| 2 | `python3 -m engine.data.rebuild --table panel --table tier4` |
-| 3 | `python3 -m engine.data.rebuild --table tier4` |
+| 1 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 -m engine.data.rebuild`, then `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 -m engine.build_trades` |
+| 2 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 -m engine.data.rebuild --table panel --table tier4` |
+| 3 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 -m engine.data.rebuild --table tier4` |
 | 4 | none — go straight to the import |
 
 1. Open the operations root and import the rebuilt tree — before planning, read the catalog head state and set `HEAD_SNAPSHOT_ID` and `HEAD_GENERATION` from the
    shadow head row; with no head row, leave `HEAD_SNAPSHOT_ID` unset — the block passes the stored ID and generation for an existing head, or omits the snapshot-ID
    option entirely (never an empty string) with generation 0 for an absent head, and stops on any nonzero step while preserving its status. Wait for the trades replay
-   to exit first; it parses `plan_ref` from the `plan-import` JSON into `PLAN_REF` before submitting; `$IMPORT_KEY` is a source-bound stable key (`rebuild-<source-hash>-import`):
+   to exit first; it parses `plan_ref` from the `plan-import` JSON into `PLAN_REF`, then defines the plan/source-bound stable key `IMPORT_KEY="rebuild-${PLAN_REF}-import"` before submitting:
 
    ```bash
    set -euo pipefail
@@ -72,6 +72,7 @@ to the same tree later imported from `SOURCE_ROOT` (operator requirement, not lo
      PLAN_RESULT=$(python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot plan-import --source-root "$SOURCE_ROOT" --scope shadow --expected-head-generation 0)
    fi
    PLAN_REF=$(printf '%s' "$PLAN_RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["plan_ref"])')
+   IMPORT_KEY="rebuild-${PLAN_REF}-import"
    python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot submit "$PLAN_REF" --idempotency-key "$IMPORT_KEY"
    python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.v2.ops --root "$OPS_ROOT" serve --once --store-root "$SOURCE_ROOT"
    ```
@@ -86,8 +87,7 @@ to the same tree later imported from `SOURCE_ROOT` (operator requirement, not lo
 
 4. Import decision history through the rebuilt as-of session: `python3 -m engine.v2.ops --root "$OPS_ROOT" ledger import-history --source-root "$SOURCE_ROOT" --through "$AS_OF"`.
 
-5. Complete the Phase 5 staged model release under `MODEL_RELEASE_ROOT` (inventory, calibration,
-   training, preparation, acceptance, staging) — a separate heavy workflow (report step 12).
+5. Complete the Phase 5 staged model release under `MODEL_RELEASE_ROOT` (inventory, calibration, training, preparation, acceptance, staging) — a separate heavy workflow (report step 12).
 
 6. Verify every readiness item below before starting the nightly trigger; the population document
    is placed by hand at `reports/phase6/nightly_trigger/expected_population.json` (`nightly_trigger.py:652`) (report step 13).
@@ -112,7 +112,7 @@ produce only the eight legacy tables, and price-history capture is the existing 
 ## Readiness checklist (manual, against the operations catalog and release directory)
 
 - [ ] Current `shadow` head holds all eight legacy tables, `price_history.v3`, `computed_moves.v3`.
-- [ ] Newest head receipt carries the required reference pins; capture receipts have `data_receipt_lineage` entries.
+- [ ] Newest head receipt carries the required reference pins; the price-history capture receipt has a `data_receipt_lineage` entry.
 - [ ] Catalog `decisions` holds the imported prediction/outcome history the rebuilt tree needs.
 - [ ] Legacy selected session is exactly `AS_OF` — wait for currency, never import later/partial.
 - [ ] A staged model release exists under `MODEL_RELEASE_ROOT` and passed Phase 5 acceptance.
