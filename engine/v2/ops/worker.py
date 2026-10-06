@@ -366,6 +366,36 @@ def _experiment_failure(receipt):
                 "experiment run did not succeed", details=details)
 
 
+def _registered_experiment_runner(root, runner_id, primary_arm_id):
+    """The runner closure for a registered legacy runner (P6 slice 10).
+
+    The one audited selector tuple is ``RUNNER_INVENTORY[runner_id]
+    ["fixed_arm_args"][primary_arm_id]``; anything else is a non-retryable
+    ``INVALID_EXPERIMENT_SPEC`` naming the runner and arm, raised before any
+    resolved plan is written or the runner is invoked. The closure preserves
+    the nonzero-return refusal (typed ``VALIDATION_FAILED`` with the stderr
+    tail) and the ledger headline.
+    """
+    from engine.v2.ops.experiments import RUNNER_INVENTORY
+    from engine.v2.ops.legacy_adapter import run_legacy_script
+
+    fixed_arm_args = RUNNER_INVENTORY.get(runner_id, {}).get("fixed_arm_args", {})
+    selected_args = fixed_arm_args.get(primary_arm_id)
+    if selected_args is None:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "registered runner has no audited selector for the primary arm",
+                   details={"runner": runner_id, "primary_arm_id": primary_arm_id})
+
+    def runner(*, run_dir, no_ledger):
+        completed = run_legacy_script(root, runner_id, args=selected_args)
+        if completed.returncode != 0:
+            raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
+                       details={"returncode": completed.returncode,
+                                "stderr_tail": (completed.stderr or "")[-2000:]})
+        return {"returncode": completed.returncode, "headline": _runner_headline(root)}
+    return runner
+
+
 def _dispatch_experiment(parameters, root):
     """P6 slice 10: run one experiment under admission. Pure function of
     ``parameters`` and staging, like ``_dispatch_adhoc_rescore`` — the runner
@@ -394,12 +424,12 @@ def _dispatch_experiment(parameters, root):
     economics.
     """
     from engine.v2.ops.experiments import (
+        expected_variant_identity,
         experiment_spec_from_document,
         resolve_experiment_plan,
         run_experiment,
         synthetic_fixture_runner,
     )
-    from engine.v2.ops.legacy_adapter import run_legacy_script
 
     mode = "smoke" if parameters.get("no_ledger", True) else "primary"
     document = json.loads((root / "spec.json").read_text())
@@ -409,21 +439,23 @@ def _dispatch_experiment(parameters, root):
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "the experiment worker's runner declares no execution_plan input",
                    details={"economic_keys": sorted(plan.economic_params)})
+    # The variant identity is bound to the run here: the registered legacy
+    # runner's own spec.yaml identity for a primary run (obtained from the
+    # preregistration root the plan recorded), the resolved spec hash for a
+    # smoke run or a synthetic primary fallback. No runner dependency file is
+    # read or staged.
+    checkout_root = parameters.get("preregistration_root")
+    variant_id = expected_variant_identity(Path(checkout_root) if checkout_root else root,
+                                           spec, mode)
     runner_id = parameters["runner"]
     if runner_id == "synthetic":
         runner, synthetic = synthetic_fixture_runner, True
     else:
-        def runner(*, run_dir, no_ledger):
-            completed = run_legacy_script(root, runner_id)
-            if completed.returncode != 0:
-                raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
-                           details={"returncode": completed.returncode,
-                                    "stderr_tail": (completed.stderr or "")[-2000:]})
-            return {"returncode": completed.returncode, "headline": _runner_headline(root)}
+        runner = _registered_experiment_runner(root, runner_id, spec.primary_arm_id)
         synthetic = False
     (root / "resolved_experiment_plan.json").write_bytes(plan.json_bytes())
     receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
-                             resolved_plan=plan)
+                             resolved_plan=plan, variant_id=variant_id)
     (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
         raise _experiment_failure(receipt)
@@ -432,7 +464,9 @@ def _dispatch_experiment(parameters, root):
                          "schema": "experiment_receipt.v1.0"},
                         {"name": "resolved_experiment_plan",
                          "path": "resolved_experiment_plan.json",
-                         "schema": "experiment_execution_plan.v1.0"}],
+                         "schema": "experiment_execution_plan.v1.0"},
+                        {"name": "experiment_variant_report", "path": "REPORT.md",
+                         "schema": "experiment_variant_report.v1.0"}],
             "completed_ids": list(expected), "no_work": False}
 
 
