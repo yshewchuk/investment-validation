@@ -45,6 +45,7 @@ cookie. Build output is static assets; serving those bytes is transport.
 |---|---|
 | Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
 | Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
+| Release-current polling | Default 30 seconds (`?pollMs=` test override); hidden tabs make no calls; becoming visible runs one check; requests never overlap. Only the latest request may replace publication evidence; a failed latest read clears identity and drift to unknown, a successful rollback to the pin clears drift, and operations status uses only the latest successful identity. The pin never moves, and failures wait for the next unchanged interval without immediate retry. |
 | Operations status | Show its observation age, requested/resolved sessions, engineering history (including scheduled `unknown` occurrences), latest attempt outcome, its described release, the board pin, and the latest published release separately. More than 24 hours old is stale; a scheduled `unknown` or `fail` observation is never current. Requested/resolved session dates must use the producer's `YYYY-MM-DD` form or the UI's `eng-night-YYYY-MM-DD` form, be valid calendar dates, and resolved must not be later than requested. Never label the board current unless its pin equals the latest successful current-release discovery. |
 | Missing, malformed, stale-session, or wrong-release operations status | Show unknown/stale with the observation age and reason; absent or malformed session dates, unrecognized session prefixes, resolved sessions later than requested, and unavailable publication identity are unknown. Do not turn a failed read into current. A status release mismatch never repins the board. |
 | Parity loading, 401 or `no_report` | Explicit loading/auth/no-report state, independent of release resolution; no-report rendering reads status only. |
@@ -52,7 +53,7 @@ cookie. Build output is static assets; serving those bytes is transport.
 | Parity `unavailable` | Explicit error; failed data is withheld, never presented as an empty comparison. |
 | Parity zero counts or no refusal reasons | Saved zero counts remain visible; an explicit message identifies absent refusal reasons. |
 | Parity `partial` | Saved counts remain visible with an alert that refusal data is incomplete. |
-| Retry or navigation | Reads keep pinned identity; reload opts into current. Failed operations-status reads leave the board and pin in place, with status unknown; failed current-release discovery clears the displayed publication identity and prior drift hint. The next scheduled client poll may recover either read; neither the UI nor serving retries immediately, and no durable transaction or partial publication is left behind. |
+| Retry or navigation | Reads keep pinned identity; reload opts into current. Failed operations-status reads leave the board and pin in place, with status unknown; failed current-release discovery clears the displayed publication identity and prior drift hint. No read retries immediately, and no durable transaction or partial publication is left behind. |
 
 ## Invariants
 All new application rendering belongs here. Serving returns data/API responses

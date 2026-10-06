@@ -613,25 +613,25 @@ def test_default_release_poll_does_not_recheck_within_four_seconds(browser, serv
 def test_visibility_gates_release_poll_and_checks_once_on_return(browser, server, state):
     """A hidden document polls never; returning to visible issues exactly one
     immediate current read (not a burst), and the next read still waits out
-    the long `pollMs` interval."""
+    the `pollMs` interval."""
     base = f"http://127.0.0.1:{server.server_port}"
     context, page = _authed_page(browser, server, base)
     hits = _count_current_requests(page)
     page.add_init_script(_HIDDEN_OVERRIDE)
     try:
-        page.goto(base + "/?pollMs=10000")
+        page.goto(base + "/?pollMs=200")
         expect(page.get_by_test_id("release-id")).to_contain_text("r1")
         assert hits[0] == 1
 
         _dispatch_visibility(page, True)
         page.wait_for_timeout(300)
-        assert hits[0] == 1  # hidden: no poll
+        assert hits[0] == 1  # hidden: no poll even after the interval is due
 
         with page.expect_request("**/api/v1/releases/current"):
             _dispatch_visibility(page, False)
         assert hits[0] == 2  # exactly one check on return
-        page.wait_for_timeout(300)
-        assert hits[0] == 2  # next read is 10000ms away
+        page.wait_for_timeout(50)
+        assert hits[0] == 2  # next read is 200ms away
     finally:
         context.close()
 
