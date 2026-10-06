@@ -58,10 +58,9 @@ to the same tree later imported from `SOURCE_ROOT` (operator requirement, not lo
 | 3 | `INVESTING_PLAN_ROOT="$SOURCE_ROOT" python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.data.rebuild --table tier4` |
 | 4 | none — go straight to the import |
 
-1. Open the operations root and import the rebuilt tree — before planning, read the catalog head state and set `HEAD_SNAPSHOT_ID` and `HEAD_GENERATION` from the
-   shadow head row; with no head row, leave `HEAD_SNAPSHOT_ID` unset — the block passes the stored ID and generation for an existing head, or omits the snapshot-ID
-   option entirely (never an empty string) with generation 0 for an absent head, and stops on any nonzero step while preserving its status. Wait for the trades replay
-   to exit first; it parses `plan_ref` from the `plan-import` JSON into `PLAN_REF`, then defines the plan/source-bound stable key `IMPORT_KEY="rebuild-${PLAN_REF}-import"` before submitting:
+1. Open the operations root and import the rebuilt tree — before planning, read the catalog head state and set `HEAD_SNAPSHOT_ID` and `HEAD_GENERATION` from the shadow head row; with no head row, leave `HEAD_SNAPSHOT_ID` unset — the block passes the stored ID and generation for an existing head, or omits the snapshot-ID option entirely (never an empty string) with generation 0 for an absent head, and stops on any nonzero step while preserving its status.
+   Wait for the trades replay to exit first; the block parses `plan_ref` from the `plan-import` JSON into `PLAN_REF`, defines the plan/source-bound stable key `IMPORT_KEY="rebuild-${PLAN_REF}-import"`, and captures the submitted receipt's `job_id` into `IMPORT_JOB` only after `snapshot submit` prints that receipt — submit prints a receipt carrying `job_id` and `state` (`submission.py:349-383` reads the stored job back; `contracts/jobs.py:138-161` carries both fields; `succeeded` is a schema-enforced state — `schema.py:27-28,53`).
+   After the bounded serve, the block must recheck the job through the existing read-only command `get` and require its JSON `job.state` to be `succeeded` before step 2 — necessary because `serve --once` also exits 0 when idle (`supervisor.py:1685-1688` returns "once_idle"; `cli.py:591-592` returns `{"stopped": True}`), so its exit code alone is insufficient; `get JOB_ID` is registered read-only (`cli.py:322-325, 609, 1189-1192`):
 
    ```bash
    set -euo pipefail
@@ -73,8 +72,9 @@ to the same tree later imported from `SOURCE_ROOT` (operator requirement, not lo
    fi
    PLAN_REF=$(printf '%s' "$PLAN_RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["plan_ref"])')
    IMPORT_KEY="rebuild-${PLAN_REF}-import"
-   python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot submit "$PLAN_REF" --idempotency-key "$IMPORT_KEY"
+   IMPORT_JOB=$(python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot submit "$PLAN_REF" --idempotency-key "$IMPORT_KEY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
    python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.v2.ops --root "$OPS_ROOT" serve --once --store-root "$SOURCE_ROOT"
+   [ "$(python3 -m engine.v2.ops --root "$OPS_ROOT" get "$IMPORT_JOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"]["state"])')" = succeeded ] || { echo "stop: import job $IMPORT_JOB is not succeeded" >&2; exit 1; }
    ```
 
 2. Run the new `ops computed-moves capture` (not implemented yet — slice 2). Design requirement, not implemented in the current
