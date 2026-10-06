@@ -1032,13 +1032,14 @@ def test_cli_export_wrapper_matches_inventory_and_reruns_byte_identically(tmp_pa
     lambda data: data[:-1] + bytes([data[-1] ^ 0xFF]),
     lambda data: data + b"\x00",
 ], ids=["same-length-bytes", "changed-length"])
-def test_object_drift_refuses_nonzero_and_leaves_output_untouched(tmp_path, drift):
+def test_object_drift_refuses_nonzero_and_leaves_output_untouched(tmp_path, drift, capsys):
     fixture = _securities_fixture(tmp_path)
     out = tmp_path / "export.json"
     out.write_bytes(_SENTINEL)
     fixture["object_path"].chmod(0o644)
     fixture["object_path"].write_bytes(drift(fixture["object_path"].read_bytes()))
     assert reregister_snapshot.main(_cli_argv(fixture, out)) == 2
+    assert json.loads(capsys.readouterr().err)["refused"] == "OBJECT_CORRUPT"
     assert out.read_bytes() == _SENTINEL
 
 
