@@ -152,6 +152,18 @@ interface section; this names only the load-bearing entry points.
   builds typed refusals through `engine.v2.data.errors` and
   `engine.v2.contracts.data.DATA_FAILURE_CODES`; its dependency on the data
   error catalog is part of this contract.
+- **Register inventory verification** — `tools.reregister_snapshot.register`
+  validates the neutral export hash and shape, rejects embedded contract
+  documents without parsing them, compares complete table/fragment membership
+  and metadata with the pinned catalog, and verifies every object byte. It
+  returns an immutable canonical verification result and never writes the
+  catalog, bindings, receipts or head. Missing inputs and metadata drift refuse
+  `INPUT_CHANGED`, a malformed export `MANIFEST_CORRUPT`, object-byte drift
+  `OBJECT_CORRUPT`, incomplete membership `CONTRACT_MISMATCH`, and an embedded
+  contract document `UNSUPPORTED_CONTRACT`. Refusals are not retried; there are
+  no compatibility flags, parser shims or financial recomputation. Repeating
+  the same verification yields byte-identical output, and every outcome leaves
+  catalog bytes and rows unchanged.
 
 ## Inputs
 

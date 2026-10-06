@@ -1223,3 +1223,183 @@ def test_head_advance_after_fsync_is_a_source_drift_refusal(tmp_path, monkeypatc
     assert fired
     assert out.read_bytes() == _SENTINEL
     assert list(tmp_path.glob(".export.json.*.part")) == []
+
+
+def _catalog_rows(conn):
+    """A stable snapshot of every catalog table's rows, read order preserved."""
+    names = [row["name"] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
+    return {name: [tuple(row) for row in conn.execute(f'SELECT * FROM "{name}"')]
+            for name in names}
+
+
+def test_register_verified_inventory_is_idempotent_and_read_only(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    conn = fixture["conn"]
+    ref = publish_bytes(fixture["store"], b"synthetic reference bytes\n")
+    insert_reference(conn, receipt_id=fixture["pins"]["receipt_id"],
+                     legacy_path="refs/model_registry.json", kind="model_registry",
+                     object_id=ref.object_id, object_hash=ref.content_hash,
+                     byte_size=ref.byte_size, fold="")
+    export_path = tmp_path / "plan-export.json"
+    _export(fixture, export_path)
+    inventory = json.loads(export_path.read_text())["inventory"]
+
+    before_bytes = fixture["catalog_path"].read_bytes()
+    before_rows = _catalog_rows(conn)
+
+    first = reregister_snapshot.register(conn, inventory_path=export_path,
+                                         objects_root=fixture["store"].root)
+    assert isinstance(first, reregister_snapshot.VerifiedInventory)
+    assert fixture["catalog_path"].read_bytes() == before_bytes
+    assert _catalog_rows(conn) == before_rows
+
+    second = reregister_snapshot.register(conn, inventory_path=export_path,
+                                          objects_root=fixture["store"].root)
+    assert fixture["catalog_path"].read_bytes() == before_bytes
+    assert _catalog_rows(conn) == before_rows
+
+    assert first.to_bytes() == second.to_bytes()
+    document = json.loads(first.to_bytes())
+    assert document == {
+        "schema_version": reregister_snapshot.VERIFIED_SCHEMA_VERSION,
+        "scope": "shadow",
+        "snapshot_id": fixture["pins"]["snapshot_id"],
+        "generation": 1,
+        "receipt_id": "receipt-1",
+        "content_hash": content_hash(inventory),
+    }
+
+
+def _rehash_export(out, mutate):
+    """Mutate one export's inventory and recompute its wrapper content_hash."""
+    wrapper = json.loads(out.read_text())
+    mutate(wrapper["inventory"])
+    wrapper["content_hash"] = content_hash(wrapper["inventory"])
+    out.write_text(json.dumps(wrapper))
+
+
+def _drift_object(fixture, *, same_length):
+    data = fixture["object_path"].read_bytes()
+    fixture["object_path"].chmod(0o644)
+    fixture["object_path"].write_bytes(
+        data[:-1] + bytes([data[-1] ^ 0xFF]) if same_length else data + b"\x00")
+
+
+_REGISTER_REFUSALS = [
+    ("missing-inventory", "INPUT_CHANGED", lambda fx, out: out.unlink()),
+    ("object-same-length", "OBJECT_CORRUPT", lambda fx, out: _drift_object(fx, same_length=True)),
+    ("object-length-drift", "OBJECT_CORRUPT", lambda fx, out: _drift_object(fx, same_length=False)),
+    ("object-missing", "OBJECT_CORRUPT", lambda fx, out: fx["object_path"].unlink()),
+    ("fragment-row-count", "INPUT_CHANGED", lambda fx, out: _rehash_export(
+        out, lambda inv: inv["tables"][0]["fragments"][0].update(row_count=999))),
+    ("fragment-bound-field", "INPUT_CHANGED", lambda fx, out: _rehash_export(
+        out, lambda inv: inv["tables"][0]["fragments"][0].update(primary_key_max=["ZZZ"]))),
+    ("fragment-membership", "CONTRACT_MISMATCH", lambda fx, out: _rehash_export(
+        out, lambda inv: inv["tables"][0]["fragments"].append(
+            {**inv["tables"][0]["fragments"][0], "fragment_id": "extra-fragment"}))),
+    ("embedded-contract", "UNSUPPORTED_CONTRACT", lambda fx, out: _rehash_export(
+        out, lambda inv: inv["tables"][0].update(contract_document={
+            "schema_version": "table_contract.v1.0", "contract_id": "securities.v1",
+            "table_name": "securities", "columns": []}))),
+]
+
+
+@pytest.mark.parametrize("name,code,tamper", _REGISTER_REFUSALS,
+                         ids=[case for case, _, _ in _REGISTER_REFUSALS])
+def test_register_refusals_are_typed_and_read_only(tmp_path, name, code, tamper):
+    fixture = _securities_fixture(tmp_path)
+    out = tmp_path / "export.json"
+    _export(fixture, out)
+    tamper(fixture, out)
+    conn, catalog = fixture["conn"], fixture["catalog_path"]
+    before_bytes = catalog.read_bytes()
+    before_rows = _catalog_rows(conn)
+    with pytest.raises(DataError) as excinfo:
+        reregister_snapshot.register(conn, inventory_path=out,
+                                     objects_root=fixture["store"].root)
+    assert excinfo.value.code == code
+    assert catalog.read_bytes() == before_bytes
+    assert _catalog_rows(conn) == before_rows
+    assert str(tmp_path) not in excinfo.value.problem.message
+
+
+def test_register_reference_object_drift_is_typed_corrupt_and_read_only(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    conn = fixture["conn"]
+    ref = publish_bytes(fixture["store"], b"synthetic reference bytes\n")
+    insert_reference(conn, receipt_id=fixture["pins"]["receipt_id"],
+                     legacy_path="refs/model_registry.json", kind="model_registry",
+                     object_id=ref.object_id, object_hash=ref.content_hash,
+                     byte_size=ref.byte_size, fold="")
+    out = tmp_path / "export.json"
+    _export(fixture, out)
+    digest = ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
+    ref_path = fixture["store"].root / "objects" / digest[:2] / digest
+    data = ref_path.read_bytes()
+    ref_path.chmod(0o644)
+    ref_path.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+    catalog = fixture["catalog_path"]
+    before_bytes = catalog.read_bytes()
+    before_rows = _catalog_rows(conn)
+    with pytest.raises(DataError) as excinfo:
+        reregister_snapshot.register(conn, inventory_path=out,
+                                     objects_root=fixture["store"].root)
+    assert excinfo.value.code == "OBJECT_CORRUPT"
+    assert catalog.read_bytes() == before_bytes
+    assert _catalog_rows(conn) == before_rows
+    assert str(tmp_path) not in excinfo.value.problem.message
+
+
+def test_register_rejects_invalid_export_hash_without_writes(tmp_path):
+    fixture = _securities_fixture(tmp_path)
+    out = tmp_path / "export.json"
+    _export(fixture, out)
+    wrapper = json.loads(out.read_text())
+    digest = wrapper["content_hash"]
+    wrapper["content_hash"] = digest[:-1] + ("0" if digest[-1] != "0" else "1")
+    out.write_text(json.dumps(wrapper))
+    conn, catalog = fixture["conn"], fixture["catalog_path"]
+    before_bytes = catalog.read_bytes()
+    before_rows = _catalog_rows(conn)
+    with pytest.raises(DataError) as excinfo:
+        reregister_snapshot.register(conn, inventory_path=out,
+                                     objects_root=fixture["store"].root)
+    assert excinfo.value.code == "MANIFEST_CORRUPT"
+    assert catalog.read_bytes() == before_bytes
+    assert _catalog_rows(conn) == before_rows
+
+
+@pytest.mark.parametrize("pin,value", [
+    ("receipt_id", "receipt-nonexistent"),
+    ("snapshot_id", "snap-nonexistent"),
+], ids=["missing_receipt", "missing_snapshot"])
+def test_register_missing_pinned_row_is_read_only_input_changed(tmp_path, pin, value):
+    fixture = _securities_fixture(tmp_path)
+    out = tmp_path / "export.json"
+    _export(fixture, out)
+    _rehash_export(out, lambda inv: inv.update(**{pin: value}))
+    conn, catalog = fixture["conn"], fixture["catalog_path"]
+    before_bytes = catalog.read_bytes()
+    before_rows = _catalog_rows(conn)
+    with pytest.raises(DataError) as excinfo:
+        reregister_snapshot.register(conn, inventory_path=out,
+                                     objects_root=fixture["store"].root)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert catalog.read_bytes() == before_bytes
+    assert _catalog_rows(conn) == before_rows
+    assert str(tmp_path) not in excinfo.value.problem.message
+
+
+def test_register_missing_catalog_is_a_typed_cli_refusal(tmp_path, capsys):
+    fixture = _securities_fixture(tmp_path)
+    export_path = tmp_path / "export.json"
+    _export(fixture, export_path)
+    catalog = tmp_path / "absent-register.sqlite"
+    assert reregister_snapshot.main([
+        "register", "--inventory", str(export_path), "--catalog", str(catalog),
+        "--objects", str(fixture["store"].root)]) == 2
+    stderr = capsys.readouterr().err
+    assert str(catalog) not in stderr
+    assert json.loads(stderr)["refused"] == "INPUT_CHANGED"
+    assert not catalog.exists()
