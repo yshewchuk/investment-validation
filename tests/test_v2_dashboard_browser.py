@@ -499,8 +499,36 @@ def test_release_switch_mid_session_keeps_pinned_release_and_shows_notice(browse
 # --------------------------------------------------------------------------
 # issue #408 regressions: a failed current poll clears the published identity
 # rather than reusing the drifted id; a rollback to the pin clears the drift
-# hint; and out-of-order polls never let a superseded reply publish
+# hint; and a visibility change during an in-flight poll coalesces to a single
+# follow-up read instead of overlapping the held one
 # --------------------------------------------------------------------------
+
+# `document.hidden` is read-only, so shadow it with a mutable window flag the
+# tests can flip before dispatching `visibilitychange`.
+_HIDDEN_OVERRIDE = (
+    "window.__hidden = false;"
+    "Object.defineProperty(document, 'hidden',"
+    " {configurable: true, get: function () { return window.__hidden; }});"
+)
+
+
+def _dispatch_visibility(page, hidden: bool) -> None:
+    page.evaluate(
+        "hidden => { window.__hidden = hidden;"
+        " document.dispatchEvent(new Event('visibilitychange')); }",
+        hidden,
+    )
+
+
+def _count_current_requests(page) -> list[int]:
+    hits = [0]
+
+    def _record(request):
+        if request.url.endswith("/api/v1/releases/current"):
+            hits[0] += 1
+
+    page.on("request", _record)
+    return hits
 
 
 def _pinned_board_page(browser, server):
@@ -562,42 +590,98 @@ def test_current_switch_then_rollback_to_pin_clears_drift_hint(browser, server, 
         context.close()
 
 
-def test_out_of_order_current_polls_keep_newest_successful_identity(browser, server, state):
-    held: list = []
-    seen = [0]
-    r2_release = state.releases["r2"].release
+def test_default_release_poll_does_not_recheck_within_four_seconds(browser, server, state):
+    """With no `?pollMs=` override the recurring release poll is the 30s
+    production default, not 4s: the board makes exactly one
+    `/releases/current` read -- the initial pin resolution -- and none again
+    over the next 4.2 seconds."""
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    hits = _count_current_requests(page)
+    try:
+        page.goto(base + "/")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        expect(page.get_by_test_id("event-table")).to_be_visible()
+        assert hits[0] == 1
 
-    def _ordered_current(route):
+        page.wait_for_timeout(4200)
+        assert hits[0] == 1
+    finally:
+        context.close()
+
+
+def test_visibility_gates_release_poll_and_checks_once_on_return(browser, server, state):
+    """A hidden document polls never; returning to visible issues exactly one
+    immediate current read (not a burst), and the next read still waits out
+    the long `pollMs` interval."""
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    hits = _count_current_requests(page)
+    page.add_init_script(_HIDDEN_OVERRIDE)
+    try:
+        page.goto(base + "/?pollMs=10000")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        assert hits[0] == 1
+
+        _dispatch_visibility(page, True)
+        page.wait_for_timeout(300)
+        assert hits[0] == 1  # hidden: no poll
+
+        with page.expect_request("**/api/v1/releases/current"):
+            _dispatch_visibility(page, False)
+        assert hits[0] == 2  # exactly one check on return
+        page.wait_for_timeout(300)
+        assert hits[0] == 2  # next read is 10000ms away
+    finally:
+        context.close()
+
+
+def test_visibility_during_inflight_poll_coalesces_and_refreshes(browser, server, state):
+    """Single-flight: a hide then show while a scheduled current poll is held
+    must neither start an overlapping read nor drop the check. The show is
+    coalesced into exactly one follow-up read after the held reply settles,
+    and that follow-up reads the server's actual current (r2) -- the held
+    reply's r3 never latches as the published identity."""
+    r2_release = state.releases["r2"].release
+    seen = [0]
+    held: list = []
+
+    def _current(route):
         seen[0] += 1
         if seen[0] == 2:
-            route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps(r2_release))
+            held.append(route)  # the first scheduled poll waits
         else:
-            held.append(route)  # every other poll waits: r2 lands first
+            route.continue_()
 
     context, page, base = _pinned_board_page(browser, server)
+    page.add_init_script(_HIDDEN_OVERRIDE)
     try:
-        page.goto(base + "/?pollMs=100")
+        page.route("**/api/v1/releases/current", handler=_current)
+        page.goto(base + "/?pollMs=1000")
         expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        assert seen[0] == 1  # initial resolution already went through
 
-        page.route("**/api/v1/releases/current", handler=_ordered_current)
-        expect(page.get_by_test_id("release-changed-notice")).to_contain_text("r2")
-        expect(page.get_by_test_id("operations-identities")).to_contain_text("latest published r2")
+        with page.expect_request("**/api/v1/releases/current"):
+            pass  # the first scheduled poll is issued and held
+        page.wait_for_timeout(50)
+        assert len(held) == 1
 
-        with page.expect_event(
-            "requestfinished",
-            predicate=lambda request: request.url.endswith("/api/v1/releases/current"),
-        ):
-            held[0].fulfill(status=200, content_type="application/json",
-                            body=json.dumps({**r2_release, "release_id": "r3"}))
-        # Let the resolved fetch continuation and React commit reach a paint.
-        page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+        state.set_current("r2")
+        _dispatch_visibility(page, True)
+        _dispatch_visibility(page, False)
+        page.wait_for_timeout(300)
+        assert seen[0] == 2  # hidden/visible while held starts no overlap
 
-        expect(page.get_by_test_id("release-changed-notice")).to_contain_text("r2")
+        held[0].fulfill(status=200, content_type="application/json",
+                        body=json.dumps({**r2_release, "release_id": "r3"}))
+
         identities = page.get_by_test_id("operations-identities")
         expect(identities).to_contain_text("latest published r2")
-        expect(identities).not_to_contain_text("latest published r3")
+        notice = page.get_by_test_id("release-changed-notice")
+        expect(notice).to_contain_text("r2")
+        expect(notice).not_to_contain_text("r3")
         expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        assert seen[0] == 3  # exactly one follow-up request
     finally:
         context.close()
 

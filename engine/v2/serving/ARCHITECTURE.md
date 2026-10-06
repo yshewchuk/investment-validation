@@ -98,8 +98,11 @@ request is the latest one; a failed latest read clears the displayed identity
 and drift hint, so historical evidence is never presented as current. Status
 uses only the latest successful publication identity, and a successful
 rollback to the pinned release clears the drift hint. These read failures do
-not change the pin; clients only re-read on their next scheduled poll, and
-serving never retries. Reads have no write or partial artifact.
+not change the pin; clients show publication evidence as unknown and re-read
+on their unchanged schedule (30 seconds by default, paused while hidden, with
+one check on visibility). Failures do not trigger immediate retries; hidden
+tabs make no calls. Serving never retries. Reads have no write or partial
+artifact.
 
 `GET /api/v1/native_parity` exposes report identity and the existing aggregate.
 `/native_parity/mismatches` pages row-key/dimension entries with known fields
