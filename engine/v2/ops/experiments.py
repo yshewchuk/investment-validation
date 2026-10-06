@@ -294,6 +294,12 @@ def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
                    details={"type": type(spec.economic_params).__name__})
     # Order matters: the field check types the economic keys before the sort.
     _validate_plan_fields(spec)
+    # A fixed-arm experiment declares exactly one arm and names it as primary;
+    # any other shape is refused here, before staging or any durable effect.
+    if len(spec.arms) != 1 or spec.arms[0] != spec.primary_arm_id:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment must declare exactly one arm and name it as its primary arm",
+                   details={"arms": list(spec.arms), "primary_arm_id": spec.primary_arm_id})
     unused = sorted(set(spec.economic_params) - SUPPORTED_ECONOMIC_KEYS)
     if unused:
         raise fail("INVALID_EXPERIMENT_SPEC",
@@ -401,6 +407,24 @@ def registered_spec_hash(checkout_root: Path | str, spec: ExperimentSpec) -> str
                    "registered runner's pre-registered specification is missing or indirect")
     from experiments.lib import load_spec
     return legacy_spec_hash(load_spec(spec_path))
+
+
+def expected_variant_identity(checkout_root: Path | str, spec: ExperimentSpec, mode: str) -> str:
+    """The immutable per-variant identity a run under ``mode`` must carry.
+
+    Smoke runs use the resolved :attr:`ExperimentSpec.spec_hash`; a primary
+    run through a registered legacy runner uses the same legacy ``spec.yaml``
+    identity its PLANNED ledger row carries (``registered_spec_hash``), while
+    a synthetic primary run -- which has no registered spec source -- falls
+    back to the resolved spec hash. Never reads or stages a runner's declared
+    dependency files; the one file ``registered_spec_hash`` opens is the
+    pre-registered ``spec.yaml`` itself.
+    """
+    if mode == "primary":
+        registered = registered_spec_hash(checkout_root, spec)
+        if registered is not None:
+            return registered
+    return spec.spec_hash
 
 
 def require_preregistration(root: Path | str, spec: ExperimentSpec) -> None:
@@ -690,15 +714,49 @@ def _report_evidence(run_dir: Path) -> dict:
             "report_bytes": report.stat().st_size}
 
 
+#: Marker delimiters around the immutable per-variant identity section this
+#: module appends to a completed ``REPORT.md``. A rerun replaces the section
+#: in place rather than duplicating it.
+VARIANT_MARKER_BEGIN = "<!-- experiment-variant:begin -->"
+VARIANT_MARKER_END = "<!-- experiment-variant:end -->"
+
+
+def _variant_section(variant_id: str) -> str:
+    return (f"{VARIANT_MARKER_BEGIN}\n"
+            f"Variant ID: {variant_id}\n"
+            f"Variants tried: 1\n"
+            f"{VARIANT_MARKER_END}")
+
+
+def _annotate_report_variant(report: Path, variant_id: str) -> None:
+    """Idempotently stamp the completed report with its variant identity.
+
+    The identity section is appended when absent and replaced in place when a
+    previous run already wrote it, so a rerun never duplicates the section and
+    the final bytes are stable.
+    """
+    text = report.read_text()
+    section = _variant_section(variant_id)
+    if VARIANT_MARKER_BEGIN in text and VARIANT_MARKER_END in text:
+        start = text.index(VARIANT_MARKER_BEGIN)
+        end = text.index(VARIANT_MARKER_END, start) + len(VARIANT_MARKER_END)
+        text = text[:start] + section + text[end:]
+    else:
+        text = text.rstrip("\n") + "\n\n" + section + "\n"
+    report.write_text(text)
+
+
 def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                    *, runner: Callable, mode="smoke", backup: Callable | None = None,
                    synthetic=False,
-                   resolved_plan: ResolvedExperimentPlan | None = None) -> dict:
+                   resolved_plan: ResolvedExperimentPlan | None = None,
+                   variant_id: str | None = None) -> dict:
     """Run one isolated hypothesis; retries reuse its exact spec/input identity."""
     if mode not in ("smoke", "primary"):
         raise fail("INVALID_REQUEST", "unknown experiment mode")
     if mode == "smoke" and backup is not None:
         raise fail("INVALID_REQUEST", "smoke runs cannot request backup")
+    variant_id = variant_id or spec.spec_hash
     # Resolved once, here: an unused economic declaration is a typed refusal
     # before any directory is created, any evidence persisted, or the runner
     # is invoked, and the very plan is the one handed to the callable below.
@@ -731,7 +789,11 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
         result = _call_runner(runner, destination, no_ledger=(mode == "smoke" or synthetic),
                               execution_plan=plan)
         report = _report_evidence(destination)
+        _annotate_report_variant(destination / "REPORT.md", variant_id)
+        report = _report_evidence(destination)
         receipt.evidence.update(report)
+        receipt.evidence["variant_id"] = variant_id
+        receipt.evidence["variants_tried"] = 1
         receipt.evidence["runner_result"] = result if isinstance(result, dict) else str(result)
         receipt.evidence["synthetic"] = bool(synthetic)
         receipt.status = "succeeded"

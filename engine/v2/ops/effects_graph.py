@@ -21,7 +21,7 @@ from __future__ import annotations
 import io
 import json
 import tarfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from engine.v2.contracts import EngineeringNight, JobSpec, OperationsStatus
@@ -895,6 +895,7 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
     registered runner's ``spec.yaml``.
     """
     from engine.v2.ops.experiments import (
+        expected_variant_identity,
         experiment_spec_from_document,
         register_hypothesis_in_transaction,
         require_preregistration,
@@ -920,12 +921,50 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
                            "primary experiment checkout differs from its "
                            "preregistration root")
             require_preregistration(checkout_root, spec)
+        variant_id = expected_variant_identity(checkout_root, spec, mode)
+        _require_receipt_variant(receipt, variant_id)
         run_id, _created = register_hypothesis_in_transaction(
             txn, spec, receipt["input_hash"], mode=mode, run_id=claim.attempt_id)
+        _record_variant_evidence(txn, run_id, variant_id)
         if mode == "primary":
             _append_ledger_row(txn, checkout_root, spec, receipt, run_id=run_id)
 
     return _commit, ()
+
+
+def _require_receipt_variant(receipt, variant_id):
+    """Refuse a receipt whose variant evidence is absent, malformed or not the
+    run's expected identity/count.
+
+    Called inside the fenced commit transaction, before the run is registered
+    or any ledger row appended, so a mismatch rolls back with no
+    ``experiment_runs``/hypothesis row and no ledger change. A non-retryable
+    ``INVALID_EXPERIMENT_SPEC``, never a silent default.
+    """
+    evidence = receipt.get("evidence") if isinstance(receipt, Mapping) else None
+    observed_id = evidence.get("variant_id") if isinstance(evidence, Mapping) else None
+    observed_count = evidence.get("variants_tried") if isinstance(evidence, Mapping) else None
+    if (observed_id != variant_id
+            or isinstance(observed_count, bool) or not isinstance(observed_count, int)
+            or observed_count != 1):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment receipt variant evidence does not match the run identity",
+                   details={"expected_variant_id": variant_id, "variant_id": observed_id,
+                            "variants_tried": observed_count})
+
+
+def _record_variant_evidence(conn, run_id, variant_id):
+    """Persist the run's immutable variant identity/count in durable evidence,
+    preserving every other evidence field already recorded."""
+    row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?",
+                       (run_id,)).fetchone()
+    if row is None:
+        return
+    evidence = json.loads(row[0]) if row[0] else {}
+    evidence["variant_id"] = variant_id
+    evidence["variants_tried"] = 1
+    conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                 (json.dumps(evidence, sort_keys=True), run_id))
 
 
 def _ran_row_exists(ledger, experiment_id):
@@ -977,10 +1016,11 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
     ``engine.*`` (``checks/import_layers.py`` records no edge and
     ``checks/legacy_adapters.json`` stays at 75/75); its ``ledger_append``
     carries the append-only prefix check this writer would otherwise have to
-    duplicate. ``spec_hash`` is the LEGACY identity of the registered
-    runner's ``spec.yaml`` computed by the same
-    :func:`experiments.legacy_spec_hash` the PLANNED row used, so planned
-    and ran rows join. The runner's own results JSON supplies the headline
+    duplicate. ``spec_hash`` is the run's validated variant identity -- the
+    registered runner's legacy ``spec.yaml`` hash for a registered primary run,
+    or the resolved spec hash for a synthetic primary fallback -- so the ran
+    row joins the same registered identity the receipt and durable evidence
+    carry. The runner's own results JSON supplies the headline
     metrics; when it did not write them the columns stay empty and the fact
     is recorded on the durable run's evidence as
     ``metrics_source: unavailable`` (the legacy ledger format stays at its
@@ -988,7 +1028,7 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
     """
     from datetime import datetime, timezone
 
-    from engine.v2.ops.experiments import experiments_ledger_path, registered_spec_hash
+    from engine.v2.ops.experiments import expected_variant_identity, experiments_ledger_path
     from experiments.lib import LEDGER_COLUMNS, ledger_append
 
     ledger = experiments_ledger_path(checkout_root)
@@ -999,7 +1039,7 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
             _mark_metrics_source(conn, run_id, "unavailable")
         return
     row = {"id": spec.experiment_id,
-           "spec_hash": registered_spec_hash(checkout_root, spec) or "",
+           "spec_hash": expected_variant_identity(checkout_root, spec, "primary"),
            "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
            "stage": "ran", "oos_mean_mid": mean, "sharpe_trade": sharpe,
            "promoted": "False"}

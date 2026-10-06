@@ -394,6 +394,7 @@ def _dispatch_experiment(parameters, root):
     economics.
     """
     from engine.v2.ops.experiments import (
+        expected_variant_identity,
         experiment_spec_from_document,
         resolve_experiment_plan,
         run_experiment,
@@ -409,6 +410,14 @@ def _dispatch_experiment(parameters, root):
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "the experiment worker's runner declares no execution_plan input",
                    details={"economic_keys": sorted(plan.economic_params)})
+    # The variant identity is bound to the run here: the registered legacy
+    # runner's own spec.yaml identity for a primary run (obtained from the
+    # preregistration root the plan recorded), the resolved spec hash for a
+    # smoke run or a synthetic primary fallback. No runner dependency file is
+    # read or staged.
+    checkout_root = parameters.get("preregistration_root")
+    variant_id = expected_variant_identity(Path(checkout_root) if checkout_root else root,
+                                           spec, mode)
     runner_id = parameters["runner"]
     if runner_id == "synthetic":
         runner, synthetic = synthetic_fixture_runner, True
@@ -423,7 +432,7 @@ def _dispatch_experiment(parameters, root):
         synthetic = False
     (root / "resolved_experiment_plan.json").write_bytes(plan.json_bytes())
     receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
-                             resolved_plan=plan)
+                             resolved_plan=plan, variant_id=variant_id)
     (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
         raise _experiment_failure(receipt)
@@ -432,7 +441,9 @@ def _dispatch_experiment(parameters, root):
                          "schema": "experiment_receipt.v1.0"},
                         {"name": "resolved_experiment_plan",
                          "path": "resolved_experiment_plan.json",
-                         "schema": "experiment_execution_plan.v1.0"}],
+                         "schema": "experiment_execution_plan.v1.0"},
+                        {"name": "experiment_variant_report", "path": "REPORT.md",
+                         "schema": "experiment_variant_report.v1.0"}],
             "completed_ids": list(expected), "no_work": False}
 
 

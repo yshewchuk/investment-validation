@@ -1,5 +1,6 @@
 """P6 slice 10: smoke-mode experiments run as supervised v2 jobs."""
 import csv
+import hashlib
 import json
 import subprocess
 from dataclasses import replace
@@ -203,13 +204,18 @@ def test_cli_experiment_plan_without_either_flag_still_refuses(tmp_path, capsys)
 
 def test_worker_dispatch_primary_mode_never_grants_runner_ledger_writes(tmp_path,
                                                                         monkeypatch):
+    from experiments import lib
+
     runner_id = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
     runner_path = tmp_path / runner_id
     runner_path.parent.mkdir(parents=True)
     runner_path.write_text("if __name__ == '__main__':\n    pass\n")
-    (runner_path.parent / "spec.yaml").write_text("id: EXP-182\n")
-    (tmp_path / "spec.json").write_text(
-        json.dumps(_spec_document(runner=runner_id, economic_params={})))
+    legacy_spec = runner_path.parent / "spec.yaml"
+    legacy_spec.write_text("id: EXP-182\n")
+    document = _spec_document(runner=runner_id, economic_params={})
+    (tmp_path / "spec.json").write_text(json.dumps(document))
+    registered_identity = experiments.legacy_spec_hash(lib.load_spec(legacy_spec))
+    resolved_spec_hash = experiments.experiment_spec_from_document(document).spec_hash
 
     commands = []
 
@@ -226,6 +232,15 @@ def test_worker_dispatch_primary_mode_never_grants_runner_ledger_writes(tmp_path
     assert result["completed_ids"] == ["experiment:x"]
     assert len(commands) == 1
     assert "--no-ledger" in commands[0]
+
+    report = (tmp_path / "REPORT.md").read_text()
+    assert f"Variant ID: {registered_identity}\n" in report
+    assert "Variants tried: 1\n" in report
+    assert resolved_spec_hash not in report
+    variant_report = [output for output in result["outputs"]
+                      if output["name"] == "experiment_variant_report"]
+    assert variant_report == [{"name": "experiment_variant_report", "path": "REPORT.md",
+                              "schema": "experiment_variant_report.v1.0"}]
 
 
 def test_worker_refuses_a_legacy_runner_that_exits_nonzero_after_the_report(tmp_path):
@@ -291,6 +306,18 @@ def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path
         assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 1
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
                                         {"id": "x", "stage": "ran"}]
+        identity = experiments.expected_variant_identity(
+            checkout,
+            experiments.experiment_spec_from_document(_spec_document(economic_params={})),
+            "primary")
+        evidence = json.loads(conn.execute(
+            "SELECT evidence_json FROM experiment_runs").fetchone()[0])
+        assert evidence["variant_id"] == identity
+        assert evidence["variants_tried"] == 1
+        with open(ledger, newline="") as fh:
+            ran_rows = [row for row in csv.DictReader(fh) if row["stage"] == "ran"]
+        assert len(ran_rows) == 1
+        assert ran_rows[0]["spec_hash"] == identity
         assert not (ops_root / "experiments").exists(), \
             "the ledger is never written beside the operations catalog"
 
@@ -308,22 +335,41 @@ def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path
         conn.close()
 
 
-def _claimed_primary_effect(tmp_path, key="primary-fence"):
+_DEFAULT_EVIDENCE = object()
+
+
+def _claimed_primary_effect(tmp_path, key="primary-fence", *, document=None, checkout=None,
+                            receipt_evidence=_DEFAULT_EVIDENCE):
     """A real claimed attempt + the coordinator's commit closure, plus the
-    checkout ledger it appends to. Returns ``(conn, clock, claim, effect, checkout)``."""
-    ops_root, checkout = tmp_path / "ops", tmp_path / "checkout"
-    _planned_ledger(checkout / "experiments" / "LEDGER.csv")
+    checkout ledger it appends to. Returns ``(conn, clock, claim, effect, checkout)``.
+    The synthetic receipt's ``evidence`` defaults to the valid primary variant
+    identity the run's bound spec resolves to; an explicit value is placed
+    verbatim, so a refusal-shaped receipt can be staged. With no ``document``
+    or ``checkout`` the synthetic spec and its PLANNED-only checkout are kept;
+    pass a ``_registered_checkout`` pair and its document to exercise the
+    registered identity branch. The default evidence is always calculated
+    from the exact document and checkout the helper submits."""
+    ops_root = tmp_path / "ops"
+    if checkout is None:
+        checkout = tmp_path / "checkout"
+        _planned_ledger(checkout / "experiments" / "LEDGER.csv")
+    if document is None:
+        document = _spec_document()
     ops_root.mkdir()
     conn, clock, supervisor_ = catalog(ops_root)
-    _submit_experiment(conn, ops_root, clock, key, no_ledger=False,
+    _submit_experiment(conn, ops_root, clock, key, document=document, no_ledger=False,
                        preregistration_root=checkout)
     claim = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
                        supervisor=supervisor_, clock=clock, registry=stages.registry())
     assert claim is not None
     store = ArtifactStore(ops_root)
     resolve_and_record(conn, store, claim)
+    if receipt_evidence is _DEFAULT_EVIDENCE:
+        spec = experiments.experiment_spec_from_document(document)
+        receipt_evidence = {"variant_id": experiments.expected_variant_identity(
+            checkout, spec, "primary"), "variants_tried": 1}
     receipt_ref = store.publish_bytes(
-        json.dumps({"input_hash": "input-" + key, "evidence": {}}).encode(),
+        json.dumps({"input_hash": "input-" + key, "evidence": receipt_evidence}).encode(),
         schema_ref="experiment_receipt.v1.0")
     with transaction(conn):
         register_artifact(conn, receipt_ref, None, clock)
@@ -387,6 +433,77 @@ def test_experiment_effect_retry_after_crash_appends_exactly_one_row(tmp_path, m
             effect(conn)
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
                                         {"id": "x", "stage": "ran"}]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("build_evidence", (
+    pytest.param(lambda vid: None, id="none-evidence"),
+    pytest.param(lambda vid: [], id="list-evidence"),
+    pytest.param(lambda vid: {"variants_tried": 1}, id="missing-variant-id"),
+    pytest.param(lambda vid: {"variant_id": "not-the-run-variant", "variants_tried": 1},
+                 id="wrong-variant-id"),
+    pytest.param(lambda vid: {"variant_id": vid}, id="missing-variants-tried"),
+    pytest.param(lambda vid: {"variant_id": vid, "variants_tried": 0},
+                 id="zero-variants-tried"),
+    pytest.param(lambda vid: {"variant_id": vid, "variants_tried": True},
+                 id="boolean-variants-tried"),
+))
+def test_effect_refuses_receipt_evidence_that_declares_no_valid_variant(tmp_path,
+                                                                        build_evidence):
+    """The new effect contract: a primary commit whose receipt carries no, a
+    foreign, or a miscounted variant identity is refused inside the fenced
+    transaction as the non-retryable ``INVALID_EXPERIMENT_SPEC`` -- before the
+    run is registered or any ledger row appended -- so only the pre-seeded
+    planned row survives and no durable run or hypothesis row exists."""
+    expected = experiments.expected_variant_identity(
+        tmp_path / "checkout",
+        experiments.experiment_spec_from_document(_spec_document()), "primary")
+    conn, clock, claim, effect, checkout = _claimed_primary_effect(
+        tmp_path, key="primary-evidence", receipt_evidence=build_evidence(expected))
+    try:
+        with pytest.raises(OpsError) as excinfo:
+            commit_attempt(conn, claim.attempt_id, claim.fence,
+                           Outcome(True, "verified_dead", 0), clock=clock,
+                           effects=lambda txn: effect(txn))
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert excinfo.value.problem.retryable is False
+        assert _ledger_rows(checkout / "experiments" / "LEDGER.csv") == [
+            {"id": "x", "stage": "planned"}]
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_registered_primary_effect_persists_registered_variant_identity(tmp_path):
+    """The registered branch end to end: a primary commit through a
+    registered runner binds the legacy spec.yaml identity its PLANNED row
+    preregistered -- in the durable evidence and in the checkout's ran row."""
+    from experiments import lib
+
+    checkout, legacy_spec = _registered_checkout(tmp_path)
+    document = _spec_document(experiment_id="EXP-182", runner=REGISTERED_RUNNER,
+                              economic_params={})
+    spec = experiments.experiment_spec_from_document(document)
+    registered = experiments.legacy_spec_hash(lib.load_spec(legacy_spec))
+    assert registered == experiments.expected_variant_identity(checkout, spec, "primary")
+
+    conn, clock, claim, effect, checkout = _claimed_primary_effect(
+        tmp_path, document=document, checkout=checkout)
+    try:
+        commit_attempt(conn, claim.attempt_id, claim.fence,
+                       Outcome(True, "verified_dead", 0), clock=clock,
+                       effects=lambda txn: effect(txn))
+        evidence = json.loads(conn.execute(
+            "SELECT evidence_json FROM experiment_runs").fetchone()[0])
+        assert evidence["variant_id"] == registered
+        assert evidence["variants_tried"] == 1
+        with open(checkout / "experiments" / "LEDGER.csv", newline="") as fh:
+            ran_rows = [row for row in csv.DictReader(fh) if row["stage"] == "ran"]
+        assert len(ran_rows) == 1
+        assert ran_rows[0]["spec_hash"] == registered
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 1
     finally:
         conn.close()
 
@@ -617,6 +734,32 @@ def test_unused_economic_key_refuses_before_the_runner_is_invoked(tmp_path):
     assert not invoked and not (tmp_path / "run").exists()
 
 
+@pytest.mark.parametrize("changes", (
+    pytest.param({"arms": []}, id="zero-arms"),
+    pytest.param({"arms": ["fixture", "control"]}, id="two-arms"),
+    pytest.param({"arms": ["control"]}, id="one-arm-not-primary"),
+))
+def test_run_experiment_refuses_arm_shapes_that_declare_no_single_primary(tmp_path,
+                                                                         changes):
+    """A fixed-arm run names exactly one arm and names it as primary; zero
+    arms, two, or a lone arm that is not the primary are refused as the
+    resolver's ``INVALID_EXPERIMENT_SPEC`` before the run directory or any
+    evidence exists, and the runner is never invoked."""
+    spec = experiments.experiment_spec_from_document(_spec_document(**changes))
+    invoked = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        invoked.append(run_dir)
+
+    run_dir = tmp_path / "run"
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                   mode="smoke", synthetic=True)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", changes
+    assert not invoked
+    assert not run_dir.exists()
+
+
 def test_resolved_plan_is_immutable_and_its_json_bytes_are_canonical():
     document = _spec_document(economic_params={"fill": "mid"})
     plan = experiments.resolve_experiment_plan(
@@ -702,11 +845,28 @@ def test_changed_fill_changes_the_plan_the_runner_receives(tmp_path):
         spec = experiments.experiment_spec_from_document(
             _spec_document(economic_params={"fill": fill}))
         receipt = experiments.run_experiment(spec, tmp_path, tmp_path / fill, runner=runner,
-                                             mode="smoke", synthetic=True)
+                                             mode="smoke", synthetic=True,
+                                             variant_id="registered-variant")
         assert receipt["status"] == "succeeded"
+        assert receipt["evidence"]["variant_id"] == "registered-variant"
+        assert receipt["evidence"]["variants_tried"] == 1
+        report = (tmp_path / fill / "REPORT.md").read_text()
+        assert "Variant ID: registered-variant\n" in report
+        assert "Variants tried: 1\n" in report
+        report_bytes = (tmp_path / fill / "REPORT.md").read_bytes()
+        assert receipt["evidence"]["report_bytes"] == len(report_bytes)
+        assert receipt["evidence"]["report_hash"] == "sha256:" + hashlib.sha256(report_bytes).hexdigest()
     assert [type(plan) for plan in received] == [experiments.ResolvedExperimentPlan] * 2
     assert [plan.economic_params["fill"] for plan in received] == ["mid", "off"]
     assert received[0].json_bytes() != received[1].json_bytes()
+
+    rerun = experiments.run_experiment(spec, tmp_path, tmp_path / "off", runner=runner,
+                                       mode="smoke", synthetic=True,
+                                       variant_id="registered-variant")
+    assert rerun["status"] == "succeeded"
+    report = (tmp_path / "off" / "REPORT.md").read_text()
+    assert report.count(experiments.VARIANT_MARKER_BEGIN) == 1
+    assert report.count(experiments.VARIANT_MARKER_END) == 1
 
 
 def test_legacy_callable_without_execution_plan_still_runs_empty_economics(tmp_path):
