@@ -36,7 +36,8 @@ check defines missing-input and failure outcomes:
 | Required input missing | Check-specific refusal, skip, or documented default |
 | `.env` missing/empty (`repo_hygiene.py`) | Warn; secret scan inactive; other checks continue |
 | `repo_hygiene.py` scan | Clean: exit 0; violations: exit 1 |
-| Hygiene blob read | Default returns empty bytes; `strict=True` raises |
+| Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
+| Worktree hygiene read failure | Default returns empty bytes; `strict=True` raises `OSError`; missing non-symlink paths return empty bytes in either mode |
 | Cache | No shared cache contract; reuse is check-specific |
 | Retry | No automatic package retry; check-specific if any |
 | Transaction | No package-wide transaction contract |
