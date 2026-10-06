@@ -7,6 +7,7 @@ count. Run directly as a CLI. See ``guides/test_selection_by_layer.md``.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -18,6 +19,13 @@ from checks import test_selection as ts  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 BUDGET_PATH = "checks/test_layout_budget.txt"
 V2 = ts.TESTS
+
+
+def _git_env():
+    env = os.environ.copy()
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        env.pop(name, None)
+    return env
 
 
 @dataclass
@@ -60,7 +68,7 @@ def check_layout(base_paths, head_paths, base_budget, head_budget, root=ROOT):
     if base_budget - head_budget != base_total - total:  # R3/R5: move accounting
         found.append("budget change does not match the root test count change")
     for path in sorted(base | head):
-        if (path.startswith(V2) and not path.startswith(ts.INTEGRATION)
+        if (path in head and path.startswith(V2) and not path.startswith(ts.INTEGRATION)
                 and path.endswith(".py") and _owned(path) is None):  # R4: unknown package
             found.append(f"{path}: names no package in checks/layer_map.py")
         if path not in head or not is_test(path):  # R4: declaration strictness
@@ -77,7 +85,8 @@ def check_layout(base_paths, head_paths, base_budget, head_budget, root=ROOT):
 
 
 def _paths(root, *args):
-    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                          env=_git_env())
     if proc.returncode:
         raise RuntimeError(proc.stderr.strip() or "git failed")
     return [path for path in proc.stdout.split("\0") if path]
@@ -93,7 +102,8 @@ def main(argv=None):
     try:
         base = _paths(root, "ls-tree", "-r", "--name-only", "-z", args.base_ref)
         proc = subprocess.run(["git", "-C", str(root), "show",
-                               f"{args.base_ref}:{BUDGET_PATH}"], capture_output=True)
+                               f"{args.base_ref}:{BUDGET_PATH}"], capture_output=True,
+                              env=_git_env())
         base_budget = (int(proc.stdout.decode().strip()) if proc.returncode == 0
                        else sum(1 for path in base if path.count("/") == 1 and is_test(path)))
         budget = int((root / BUDGET_PATH).read_text().strip())

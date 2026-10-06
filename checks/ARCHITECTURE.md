@@ -13,8 +13,8 @@ The test selector maps changed paths through `checks/layer_map.py`, then
 selects tests for those packages and their allowed importers. Unsafe or
 unmapped input selects the full suite.
 The test-layout ratchet blocks new tests outside `tests/v2/<package>/` and
-`tests/v2/integration/`, and permits the root-level unmoved test count to
-decrease only.
+`tests/v2/integration/`; the root-level unmoved test count stays the same or
+decreases.
 
 ## Inputs
 

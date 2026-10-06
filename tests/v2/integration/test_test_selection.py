@@ -170,6 +170,11 @@ def test_r4_unknown_package_helper_module_fails(tmp_path):
     assert any("names no package" in finding for finding in report.findings)
 
 
+def test_r4_deleted_unknown_package_path_does_not_fail(tmp_path):
+    report = tb.check_layout({"tests/v2/retired/test_x.py"}, set(), 0, 0, tmp_path)
+    assert report.ok
+
+
 def test_r5_rename_as_delete_plus_add_lowers_the_budget(tmp_path):
     base = {"tests/test_a.py", "tests/test_b.py"}
     head = {"tests/v2/ops/test_a.py", "tests/test_b.py"}
@@ -193,10 +198,14 @@ def test_ratchet_validates_integration_declarations(tmp_path):
 
 
 def _git(root, *args):
-    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True,
+                   env=tb._git_env())
 
 
-def test_cli_reads_real_git_and_accepts_a_staged_move(tmp_path):
+def test_cli_reads_real_git_and_accepts_a_staged_move(tmp_path, monkeypatch):
+    redirected = str(tmp_path / "redirected.git")
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.setenv(name, redirected)
     root = tmp_path / "repo"
     (root / "tests").mkdir(parents=True)
     (root / "checks").mkdir()
@@ -212,3 +221,7 @@ def test_cli_reads_real_git_and_accepts_a_staged_move(tmp_path):
     (root / "checks/test_layout_budget.txt").write_text("1\n")
     _git(root, "add", "-A")
     assert tb.main(["--repo-root", str(root), "--base-ref", "main", "--quiet"]) == 0
+
+
+def test_cli_checks_the_submitted_checkout():
+    assert tb.main(["--quiet"]) == 0
