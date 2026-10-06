@@ -13,6 +13,7 @@ from engine.v2.foundation import (
     ArtifactStore,
     DocumentError,
     SystemClock,
+    canonical_json,
     content_hash,
     ensure_directory,
     from_document,
@@ -116,6 +117,20 @@ def _add_price_history_commands(commands):
     capture_p.add_argument("--dry-run", action="store_true",
                            help="report counts; every check still runs, but nothing is written "
                                 "and no snapshot is committed")
+
+
+def _add_computed_moves_commands(commands):
+    """The Tier-1-backed `ops computed-moves capture` command."""
+    computed_moves = commands.add_parser("computed-moves")
+    computed_moves.add_argument("--root", default=argparse.SUPPRESS)
+    sub = computed_moves.add_subparsers(dest="computed_moves_command", required=True)
+    capture = sub.add_parser("capture")
+    capture.add_argument("--source-root", required=True, type=Path,
+                         help="legacy checkout containing the Tier-1 yfinance fetch cache")
+    capture.add_argument("--scope", required=True)
+    capture.add_argument("--as-of", required=True)
+    capture.add_argument("--dry-run", action="store_true",
+                         help="report target/cache coverage without writing")
 
 
 def _add_snapshot_commands(commands):
@@ -319,6 +334,7 @@ def parser():
     _add_decisions_command(commands)
     _add_price_refresh_command(commands)
     _add_price_history_commands(commands)
+    _add_computed_moves_commands(commands)
     for name in ("get", "logs", "cancel", "resume", "explain"):
         sub = commands.add_parser(name)
         sub.add_argument("job_id")
@@ -604,6 +620,8 @@ def dispatch(args, root, conn, clock):
         return decisions_command(args, root, conn, clock)
     if args.command == "price-history":
         return price_history_command(args, root, conn, clock)
+    if args.command == "computed-moves":
+        return computed_moves_command(args, root, conn, clock)
     if args.command == "provider-account":
         return provider_account_command(args, conn)
     return job_command(args, conn, clock, root)
@@ -1084,6 +1102,88 @@ def price_history_command(args, root, conn, clock):
                   details={"source_root": str(args.source_root)})
     return capture(conn, ArtifactStore(root), args.source_root, scope=args.scope, root=root,
                    dry_run=args.dry_run, clock=clock)
+
+
+def computed_moves_command(args, root, conn, clock):
+    """Build one computed_moves.v3 generation from the local Tier-1 cache."""
+    from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
+    from engine.v2.data.repository import Repository
+    from engine.v2.ops import computed_moves_store
+    from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
+    from engine.v2.ops.incremental_data import plan_refresh
+    from engine.v2.ops.unit_receipts import (
+        NATIVE_COMPUTED_MOVES_ACCOUNT,
+        cached_unit_outcomes,
+    )
+
+    if not args.source_root.is_dir():
+        raise fail("INVALID_REQUEST", "--source-root must be an existing directory",
+                   details={"source_root": str(args.source_root)})
+    as_of = computed_moves_store._as_of_day(args.as_of)
+    lock = SupervisorLock(root / "supervisor.lock")
+    if not lock.acquire():
+        raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
+    try:
+        cache, fetcher = computed_moves_store.tier1_yfinance_history_fetcher(args.source_root)
+        head = conn.execute(
+            "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
+            (args.scope,)).fetchone()
+        if head is None:
+            raise fail("SNAPSHOT_NOT_READY", "scope has no existing snapshot head",
+                       details={"scope": args.scope})
+        store = ArtifactStore(root)
+        repository = Repository(conn, store)
+        parent = repository.resolve(head["snapshot_id"])
+        targets, _ = computed_moves_store.target_tickers_from_snapshot(
+            repository, head["snapshot_id"], all_scoreable=True, as_of=as_of)
+        units = computed_moves_store.computed_moves_units(targets, as_of=as_of)
+        plan = plan_refresh(
+            parent, units,
+            cached_outcomes=cached_unit_outcomes(
+                conn, units, source=COMPUTED_MOVES_TABLE_NAME,
+                endpoint=COMPUTED_MOVES_TABLE_NAME),
+            provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
+            expected_head_generation=int(head["generation"]))
+        with_cache = sum(ticker in cache for ticker in targets)
+        report = {
+            "schema_version": "computed_moves_capture_report.v1.0",
+            "dry_run": bool(args.dry_run),
+            "target_count": len(targets),
+            "with_tier1_entry": with_cache,
+            "without_tier1_entry": len(targets) - with_cache,
+        }
+        if args.dry_run:
+            return report
+
+        catalog_path = str(root / "catalog.sqlite")
+        objects_root = str(root)
+        document = {
+            "catalog_path": catalog_path,
+            "objects_root": objects_root,
+            "scope": args.scope,
+            "expected_head_generation": plan.expected_head_generation,
+            "expected_head_snapshot_id": plan.parent_snapshot_id,
+            "as_of": as_of,
+        }
+        (root / computed_moves_store.INPUT_PATH).write_text(canonical_json(document))
+        parameters = CalendarMovesParameters(
+            expected_ids=tuple(sorted(targets)),
+            parent_snapshot_id=plan.parent_snapshot_id,
+            refresh_plan_hash=plan.plan_hash,
+            provider_calls=plan.provider_calls,
+            catalog_path=catalog_path,
+            objects_root=objects_root,
+            scope=args.scope,
+            expected_head_generation=plan.expected_head_generation,
+            expected_head_snapshot_id=plan.parent_snapshot_id,
+            as_of=as_of,
+        )
+        result = computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=as_of, fetcher=fetcher)
+        report["result"] = to_document(result)
+        return report
+    finally:
+        lock.release()
 
 
 def _provider_account_row(conn, account):

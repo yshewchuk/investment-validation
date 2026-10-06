@@ -157,7 +157,20 @@ def _build_parent(conn, clock, store, *, events_rows=()):
         tables["earnings_events"] = []
     contracts = {"earnings_events": _EVENTS, "daily_market": _DAILY}
     commit_tables(conn, clock, tables, contracts, store=store)
-    return _head_row(conn)
+    head = _head_row(conn)
+    from engine.v2.data import reference_catalog
+    from engine.v2.data.reference_catalog import ReferenceInput
+
+    receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=head["snapshot_id"])
+    assert receipt_id is not None
+    pin = ReferenceInput(
+        kind="calendar", legacy_path="calendar/trading_days.csv",
+        object_id="object-reference-calendar", content_hash="sha256:" + "a" * 64,
+        byte_size=1)
+    with transaction(conn):
+        reference_catalog.insert_reference_inputs(conn, receipt_id, [pin])
+    return head
 
 
 class _CountingFetcher:
@@ -174,6 +187,38 @@ class _CountingFetcher:
 
 def _refused_fetcher(_ticker):
     return b"not-a-real-response", "refused", {}, None
+
+
+def test_tier1_yfinance_history_fetcher_uses_newest_success_and_empty_for_missing(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    def entry(endpoint, period, ticker, status, fetched_at, path, body):
+        return SimpleNamespace(
+            endpoint=endpoint, params={"period": period, "ticker": ticker},
+            meta={"status": status, "fetched_at": fetched_at}, path=path,
+            body=lambda: body)
+
+    rows = [
+        entry("history", "max", "AAAA", 200, "2026-01-01", "cache/old", b"old"),
+        entry("history", "max", "AAAA", 200, "2026-01-02", "cache/new", b"new"),
+        entry("quote", "max", "AAAA", 200, "2026-01-09", "cache/wrong-endpoint", b"bad"),
+        entry("history", "1y", "AAAA", 200, "2026-01-10", "cache/wrong-period", b"bad"),
+        entry("history", "max", "AAAA", 500, "2026-01-11", "cache/failed", b"bad"),
+    ]
+    seen = {}
+
+    def iter_cache(source_root, source):
+        seen.update(source_root=source_root, source=source)
+        return rows
+
+    monkeypatch.setattr(computed_moves_store, "iter_raw_fetch_cache", iter_cache)
+    cache, fetcher = computed_moves_store.tier1_yfinance_history_fetcher(tmp_path)
+
+    assert seen == {"source_root": tmp_path, "source": "yfinance"}
+    assert cache["AAAA"] is rows[1]
+    assert fetcher("AAAA") == (b"new", "complete", {}, [])
+    assert fetcher("MISSING") == (b"", "legitimate_empty", {}, [])
 
 
 def _parameters(head, *, expected_ids, catalog_path, objects_root,
@@ -198,6 +243,144 @@ def _write_input(root, *, catalog_path, objects_root, head, as_of=_AS_OF, overri
     if overrides:
         document.update(overrides)
     (root / computed_moves_store.INPUT_PATH).write_text(canonical_json(document))
+
+
+def test_computed_moves_command_rejects_invalid_as_of_before_planning(tmp_path):
+    from types import SimpleNamespace
+    from engine.v2.ops.cli import computed_moves_command
+
+    conn, clock, _ = catalog(tmp_path)
+    source_root = tmp_path / "legacy"
+    source_root.mkdir()
+    args = SimpleNamespace(source_root=source_root, as_of="not-a-date",
+                           scope="shadow", dry_run=False)
+    with pytest.raises(OpsError) as err:
+        computed_moves_command(args, tmp_path, conn, clock)
+    assert err.value.code == "INVALID_REQUEST"
+
+
+def test_computed_moves_command_refuses_missing_scoped_head(tmp_path):
+    from types import SimpleNamespace
+    from engine.v2.ops.cli import computed_moves_command
+
+    conn, clock, _ = catalog(tmp_path)
+    source_root = tmp_path / "legacy"
+    source_root.mkdir()
+    args = SimpleNamespace(source_root=source_root, as_of=_AS_OF,
+                           scope="shadow", dry_run=False)
+    with pytest.raises(OpsError) as err:
+        computed_moves_command(args, tmp_path, conn, clock)
+    assert err.value.code == "SNAPSHOT_NOT_READY"
+
+
+def test_missing_tier1_history_is_logged_no_history_without_failing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA", "BBBB"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events_rows = ([_event_row("AAAA", d) for d in _EVENT_DAYS]
+                   + [_event_row("BBBB", d) for d in _EVENT_DAYS])
+    head = _build_parent(conn, clock, store, events_rows=events_rows)
+    entry = SimpleNamespace(
+        endpoint="history", params={"period": "max", "ticker": "AAAA"},
+        meta={"status": 200, "fetched_at": "2026-01-01"}, path="cache/AAAA",
+        body=_closes_csv)
+    monkeypatch.setattr(computed_moves_store, "iter_raw_fetch_cache",
+                        lambda root, source: [entry])
+    _, fetcher = computed_moves_store.tier1_yfinance_history_fetcher(tmp_path)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA", "BBBB"),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=fetcher)
+
+    assert result.status == "complete"
+    row = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?", ("BBBB",)
+    ).fetchone()
+    assert row["outcome"] == "no_history"
+
+
+def test_computed_moves_command_refuses_missing_source_root(tmp_path):
+    from types import SimpleNamespace
+    from engine.v2.ops.cli import computed_moves_command
+
+    conn, clock, _ = catalog(tmp_path)
+    args = SimpleNamespace(source_root=tmp_path / "missing", as_of=_AS_OF,
+                           scope="shadow", dry_run=False)
+    with pytest.raises(OpsError) as err:
+        computed_moves_command(args, tmp_path, conn, clock)
+    assert err.value.code == "INVALID_REQUEST"
+
+
+def test_computed_moves_command_refuses_held_supervisor_lock(tmp_path):
+    from types import SimpleNamespace
+    from engine.v2.ops.cli import computed_moves_command
+    from engine.v2.ops.recovery import SupervisorLock
+
+    conn, clock, _ = catalog(tmp_path)
+    source_root = tmp_path / "legacy"
+    source_root.mkdir()
+    held = SupervisorLock(tmp_path / "supervisor.lock")
+    assert held.acquire()
+    args = SimpleNamespace(source_root=source_root, as_of=_AS_OF,
+                           scope="shadow", dry_run=False)
+    try:
+        with pytest.raises(OpsError) as err:
+            computed_moves_command(args, tmp_path, conn, clock)
+        assert err.value.code == "RESOURCE_UNAVAILABLE"
+    finally:
+        held.release()
+
+
+def test_computed_moves_command_dry_run_reports_coverage_without_data_writes(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from engine.v2.ops.cli import computed_moves_command
+
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events_rows = [_event_row("AAAA", d) for d in _EVENT_DAYS]
+    head = _build_parent(conn, clock, store, events_rows=events_rows)
+    source_root = tmp_path / "legacy"
+    source_root.mkdir()
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    cached = SimpleNamespace(
+        endpoint="history", params={"period": "max", "ticker": "AAAA"},
+        meta={"status": 200, "fetched_at": "2026-01-01"}, path="cache/AAAA",
+        body=lambda: pytest.fail("dry-run must not read a history body"))
+    cache_entries = [cached]
+    monkeypatch.setattr(computed_moves_store, "iter_raw_fetch_cache",
+                        lambda root, source: cache_entries)
+    monkeypatch.setattr(
+        computed_moves_store, "run_computed_moves_refresh",
+        lambda *a, **k: pytest.fail("dry-run must not invoke the capture runner"))
+    before_head = _head_row(conn)["snapshot_id"]
+    before_receipts = conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0]
+    before_captures = conn.execute(
+        "SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0]
+    args = SimpleNamespace(source_root=source_root, as_of=_AS_OF,
+                           scope="shadow", dry_run=True)
+
+    report = computed_moves_command(args, tmp_path, conn, clock)
+    assert report["target_count"] == 1
+    assert report["with_tier1_entry"] == 1
+    assert report["without_tier1_entry"] == 0
+    assert report["dry_run"] is True
+    cache_entries.clear()
+    missing_report = computed_moves_command(args, tmp_path, conn, clock)
+    assert missing_report["with_tier1_entry"] == 0
+    assert missing_report["without_tier1_entry"] == 1
+    assert _head_row(conn)["snapshot_id"] == before_head
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == before_receipts
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0] == before_captures
+    assert not (tmp_path / computed_moves_store.INPUT_PATH).exists()
 
 
 def test_run_computed_moves_refresh_captures_one_complete_unit(tmp_path, monkeypatch):
@@ -226,6 +409,47 @@ def test_run_computed_moves_refresh_captures_one_complete_unit(tmp_path, monkeyp
         "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
         ("AAAA",)).fetchone()
     assert row["outcome"] == "added"
+
+
+def test_run_computed_moves_refresh_carries_reference_pins_and_lineage(tmp_path, monkeypatch):
+    """Exercise the real runner, row producer and snapshot commit on tiny inputs.
+
+    Only target selection is stubbed to keep the fixture focused on one ticker.
+    The parent catalog receipt is seeded with one reference pin; runner,
+    ``build_rows``, ``commit_snapshot`` and its reference callback are real.
+    """
+    from engine.v2.data import reference_catalog
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events_rows = [_event_row("AAAA", d) for d in _EVENT_DAYS]
+    head = _build_parent(conn, clock, store, events_rows=events_rows)
+    base_receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=head["snapshot_id"])
+    assert base_receipt_id is not None
+    reference = reference_catalog.reference_inputs_for_receipt(
+        conn, receipt_id=base_receipt_id)[0]
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(_closes_csv()))
+
+    assert result.status == "complete"
+    child_receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=result.candidate_snapshot_id)
+    assert child_receipt_id is not None
+    assert reference_catalog.reference_inputs_for_receipt(
+        conn, receipt_id=child_receipt_id) == (reference,)
+    lineage = conn.execute(
+        "SELECT kind, base_receipt_id FROM data_receipt_lineage WHERE receipt_id = ?",
+        (child_receipt_id,)).fetchone()
+    assert lineage["kind"] == "price_history_capture"
+    assert lineage["base_receipt_id"] == base_receipt_id
 
 
 def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_after_as_of(

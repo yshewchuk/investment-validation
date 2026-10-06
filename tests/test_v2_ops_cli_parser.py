@@ -33,8 +33,8 @@ def test_command_tree_is_exactly_the_expected_set():
     assert _subparser_choices(p) == sorted({
         "init", "doctor", "health", "serve", "plan", "submit", "rescore",
         "capture-inputs", "reconcile", "provider-account", "snapshot", "ledger",
-        "decisions", "price-refresh", "price-history", "get", "logs", "cancel", "resume",
-        "explain"})
+        "decisions", "price-refresh", "price-history", "computed-moves", "get", "logs",
+        "cancel", "resume", "explain"})
     for action in p._actions:
         if isinstance(action, argparse._SubParsersAction):
             assert _subparser_choices(action.choices["snapshot"]) == sorted(
@@ -43,6 +43,7 @@ def test_command_tree_is_exactly_the_expected_set():
                 {"import-history", "status", "calibrate", "book"})
             assert _subparser_choices(action.choices["decisions"]) == ["supersede"]
             assert _subparser_choices(action.choices["price-history"]) == ["capture"]
+            assert _subparser_choices(action.choices["computed-moves"]) == ["capture"]
 
 
 # --------------------------------------------------------------------------
@@ -204,6 +205,17 @@ _CASES = [
       "--scope", "shadow4", "--dry-run"],
      {"command": "price-history", "dry_run": True, "price_history_command": "capture",
       "root": "R1", "scope": "shadow4", "source_root": Path("sr4")}),
+    ("computed_moves_capture_defaults",
+     ["computed-moves", "capture", "--source-root", "sr", "--scope", "shadow",
+      "--as-of", "2026-09-14"],
+     {"as_of": "2026-09-14", "command": "computed-moves", "computed_moves_command": "capture",
+      "dry_run": False, "root": "data/operations", "scope": "shadow",
+      "source_root": Path("sr")}),
+    ("computed_moves_capture_explicit",
+     ["computed-moves", "--root", "R1", "capture", "--source-root", "sr2",
+      "--scope", "smoke", "--as-of", "2026-09-15", "--dry-run"],
+     {"as_of": "2026-09-15", "command": "computed-moves", "computed_moves_command": "capture",
+      "dry_run": True, "root": "R1", "scope": "smoke", "source_root": Path("sr2")}),
     ("get_defaults", ["get", "job3"],
      {"command": "get", "job_id": "job3", "json": False, "root": "data/operations"}),
     ("get_explicit", ["get", "job3", "--json"],
@@ -270,6 +282,10 @@ _ERROR_CASES = [
      ["decisions", "supersede", "--row-id", "r1", "--reason", "x"]),
     ("snapshot_missing_subcommand", ["snapshot"]),
     ("price_history_missing_subcommand", ["price-history"]),
+    ("computed_moves_missing_subcommand", ["computed-moves"]),
+    ("computed_moves_capture_missing_required", ["computed-moves", "capture"]),
+    ("computed_moves_capture_missing_as_of",
+     ["computed-moves", "capture", "--source-root", "sr", "--scope", "shadow"]),
     ("reconcile_missing_expected_attempt", ["reconcile", "job1"]),
     ("snapshot_promote_missing_expected_generation",
      ["snapshot", "promote", "--candidate-scope", "c", "--target-scope", "t",

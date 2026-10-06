@@ -38,18 +38,20 @@ import pyarrow.parquet as pq
 
 from engine.v2.contracts import ObjectRef, TableContractRef
 from engine.v2.data import catalog as data_catalog
-from engine.v2.data import manifests, objects
+from engine.v2.data import manifests, objects, reference_catalog
 from engine.v2.data.computed_moves import MIN_SCOREABLE, build_rows
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
 from engine.v2.ops.errors import fail
+from engine.v2.ops.generation_binding import record_price_history_lineage
 from engine.v2.ops.incremental_data import (
     RefreshCallbackResult,
     RefreshUnit,
     plan_refresh,
     refresh_job_kind,
 )
+from engine.v2.ops.legacy_adapter import iter_raw_fetch_cache
 from engine.v2.ops.lifecycle import validated_attempt_fence_pair, verify_fence
 from engine.v2.ops.pinned_partition_reader import (
     RetainedBatch,
@@ -103,6 +105,36 @@ _ALLOWED_DOCUMENT_KEYS = frozenset({
 #: ``incremental_refresh`` job kind's, the same ``{"shadow", "smoke"}`` every
 #: other v2 ops entry point is scoped to.
 _ALLOWED_SCOPES = refresh_job_kind().namespaces
+
+
+def tier1_yfinance_history_fetcher(source_root):
+    """Return the successful max-history cache index and a no-network fetcher."""
+    newest = {}
+    for entry in iter_raw_fetch_cache(source_root, "yfinance"):
+        if entry.endpoint != "history" or entry.params.get("period") != "max":
+            continue
+        try:
+            if int(entry.meta.get("status", 0)) != 200:
+                continue
+        except (TypeError, ValueError):
+            continue
+        ticker = entry.params.get("ticker")
+        if not ticker:
+            continue
+        ticker = str(ticker)
+        fetched_at = str(entry.meta.get("fetched_at") or "")
+        ordering = (fetched_at, str(entry.path))
+        if ticker not in newest or ordering > newest[ticker][0]:
+            newest[ticker] = (ordering, entry)
+    cache = {ticker: value[1] for ticker, value in newest.items()}
+
+    def fetch(ticker):
+        entry = cache.get(ticker)
+        if entry is None:
+            return b"", "legitimate_empty", {}, []
+        return entry.body(), "complete", {}, []
+
+    return cache, fetch
 
 
 def _as_of_day(as_of) -> str:
@@ -454,6 +486,20 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
                          for record in all_records}.values())
     receipt_id = "receipt_cm_" + request_hash.removeprefix("sha256:")[:32]
     attempt_id = "attempt_cm_" + request_hash.removeprefix("sha256:")[:32]
+    old_receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope=scope, snapshot_id=parent.snapshot.snapshot_id)
+    if old_receipt_id is None:
+        raise fail("SNAPSHOT_NOT_READY", "scope's parent snapshot has no committed import receipt",
+                   details={"scope": scope, "snapshot_id": parent.snapshot.snapshot_id})
+
+    def _record_references(connection, rid):
+        inputs = reference_catalog.reference_inputs_for_receipt(
+            connection, receipt_id=old_receipt_id)
+        reference_catalog.insert_reference_inputs(connection, rid, inputs)
+        _insert_captures(connection, attempts)
+        record_price_history_lineage(
+            connection, receipt_id=rid, base_receipt_id=old_receipt_id)
+
     return data_catalog.commit_snapshot(
         conn, scope=scope, request_hash=request_hash, contracts=tuple(contracts.values()),
         objects=all_objects, records=all_records, manifests=tuple(table_manifests.values()),
@@ -461,8 +507,7 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
         expected_head_generation=generation, receipt_id=receipt_id, attempt_id=attempt_id,
         fence=1,
         fence_check=_fence_check_for(staged_attempt_id, staged_fence, clock),
-        clock=clock, store=store,
-        record_references=lambda connection, rid: _insert_captures(connection, attempts),
+        clock=clock, store=store, record_references=_record_references,
         audit_partitions=False)
 
 
