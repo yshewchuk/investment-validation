@@ -341,6 +341,31 @@ def test_all_missing_tier1_persists_no_history_without_generation(tmp_path, monk
         ("AAAA", "no_history"), ("BBBB", "no_history")]
 
 
+def test_no_fragment_attempts_require_a_live_staged_fence(tmp_path, monkeypatch):
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, supervisor)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store, events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                 overrides={"attempt_id": claim.attempt_id, "fence": claim.fence})
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+    monkeypatch.setattr(computed_moves_store, "SystemClock", lambda: clock)
+    clock.advance(10 ** 6)  # expire the real claimed lease before the no-fragment write
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF,
+            fetcher=lambda ticker: (b"", "legitimate_empty", {}, []))
+
+    assert err.value.code == "LEASE_LOST"
+    assert conn.execute("SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0] == 0
+
+
 def test_refresh_uses_the_parent_receipt_pinned_before_a_reference_reimport(
         tmp_path, monkeypatch):
     from engine.v2.data import reference_catalog
@@ -457,9 +482,11 @@ def test_refresh_refuses_a_pinned_receipt_not_committed_for_parent(tmp_path, mon
 
     with pytest.raises(OpsError) as err:
         computed_moves_store.run_computed_moves_refresh(
-            parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(_closes_csv()))
+            parameters, root, as_of=_AS_OF,
+            fetcher=lambda ticker: (b"", "legitimate_empty", {}, []))
 
     assert err.value.code == "SNAPSHOT_NOT_READY"
+    assert conn.execute("SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0] == 0
     current = _head_row(conn)
     assert (current["snapshot_id"], current["generation"]) == (
         head["snapshot_id"], head["generation"])

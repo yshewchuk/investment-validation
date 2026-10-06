@@ -733,7 +733,6 @@ def _build_native_computed_moves_plan(as_of, *, catalog_path, objects_root,
     ``clock`` are accepted for signature symmetry with the other native
     builders in this module; none is read by this body.
     """
-    from engine.v2.data import reference_catalog
     from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
     from engine.v2.data.repository import Repository
     from engine.v2.ops import computed_moves_store, incremental_data
@@ -754,10 +753,8 @@ def _build_native_computed_moves_plan(as_of, *, catalog_path, objects_root,
         repository, head["snapshot_id"], all_scoreable=True, as_of=as_of)
     if not targets:
         return None
-    parent_receipt_id = reference_catalog.committed_receipt_for_snapshot(
-        conn, scope="shadow", snapshot_id=snapshot.snapshot_id)
-    if parent_receipt_id is None:
-        return None
+    parent_receipt_id = computed_moves_store.parent_receipt_id_for_snapshot(
+        conn, "shadow", snapshot.snapshot_id)
     units = computed_moves_store.computed_moves_units(targets, as_of=as_of)
     refresh_plan = incremental_data.plan_refresh(
         snapshot, units,

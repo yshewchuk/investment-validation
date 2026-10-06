@@ -43,6 +43,7 @@ from engine.v2.data.computed_moves import MIN_SCOREABLE, build_rows
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import fail
 from engine.v2.ops.generation_binding import record_price_history_lineage
 from engine.v2.ops.incremental_data import (
@@ -535,9 +536,13 @@ def _noop_result(parameters, completed_ids) -> RefreshCallbackResult:
         refresh_plan_hash=parameters.refresh_plan_hash)
 
 
-def _no_fragment_result(conn, parameters, attempts, targets):
-    """Persist audit attempts without publishing a generation when no fragment exists."""
-    with conn:
+def _no_fragment_result(conn, parameters, attempts, targets, document, parent, clock):
+    """Persist fenced audit attempts without publishing a generation."""
+    with transaction(conn):
+        _fence_check_for(document.get("attempt_id"), document.get("fence"), clock)(conn)
+        _parent_receipt_id_for_commit(
+            conn, document["scope"], parent.snapshot.snapshot_id,
+            parameters.parent_receipt_id)
         _insert_captures(conn, attempts)
     return _noop_result(parameters, tuple(sorted(targets)))
 
@@ -793,7 +798,8 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
             events_by_ticker=_group_by_ticker(events),
             daily_by_ticker=_group_by_ticker(daily), as_of_day=as_of_day)
         if not fragment_records:
-            return _no_fragment_result(conn, parameters, attempts, targets)
+            return _no_fragment_result(
+                conn, parameters, attempts, targets, document, parent, clock)
 
         request_hash = content_hash({
             "kind": "computed_moves_generation", "scope": document["scope"],

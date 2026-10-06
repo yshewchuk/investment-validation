@@ -1007,9 +1007,8 @@ waits without submitting until its paired succeeded inputs are ready.
   pin the parent receipt before execution; commits use it for reference inputs
   and lineage. Legacy unpinned jobs resolve a receipt at commit for compatibility.
   Lineage uses `price_history_capture`; captures are append-only and deduped by
-  `capture_id`; no-fragment runs persist attempts without a generation.
-  `computed_at` derives from `as_of`; identical same-`as_of` inputs
-  resolve to the parent without a generation.
+  `capture_id`; no-fragment runs persist attempts only after fence and parent receipt validation, without a generation.
+  `computed_at` derives from `as_of`; identical same-`as_of` inputs resolve to the parent without a generation.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
   here since the list can drift) — catalog/outbox/filesystem writes
@@ -1348,7 +1347,7 @@ job.
 | truncation empties the series, or an event's exit price falls past the truncated series | the existing "too few" outcome or out-of-range guard returns an ordinary skipped row; neither raises |
 | a same-`as_of` rerun with an unchanged provider fetch | truncates identically both times — same hash, same no-op/re-resolve behavior |
 | any commit candidate would inherit a fragment whose `primary_key_max` event date is on or after its basis `as_of` | `_commit_generation` refuses the whole generation with non-retryable `VALIDATION_FAILED`, before catalog commit. Rewritten tickers use the capture-time truncation above. Refusal leaves the parent, head and capture-log rows unchanged; already-published fragment objects and completed raw-unit receipts may remain. Retrying with the same parent and `as_of` cannot succeed while that fragment remains inherited; use a parent whose inherited rows precede `as_of` or request a later `as_of`. |
-| `computed-moves capture` has no source root, a held lock, no scoped head/parent pins, invalid `as_of`, a lost head CAS, or a missing source table | Refuses with `INVALID_REQUEST`, `RESOURCE_UNAVAILABLE`, `SNAPSHOT_NOT_READY`, `INVALID_REQUEST`, `SNAPSHOT_CONFLICT`, or the reader's typed contract refusal, respectively. |
+| `computed-moves capture` has no source root, a held lock, no scoped head/parent pins or a missing/mismatched pinned receipt, invalid `as_of`, a lost head CAS, or a missing source table | Refuses with `INVALID_REQUEST`, `RESOURCE_UNAVAILABLE`, `SNAPSHOT_NOT_READY`, `INVALID_REQUEST`, `SNAPSHOT_CONFLICT`, or the reader's typed contract refusal, respectively. |
 | Tier-1 history is missing, `--dry-run` is set, or identical same-`as-of` inputs are rerun | Missing history is `legitimate_empty`/`no_history` and counted without a live fetch; dry-run reports cache coverage without writes or receipts; an identical rerun resolves to the parent without a generation. |
 
 ## Invariants
