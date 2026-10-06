@@ -169,7 +169,10 @@ pinned-snapshot dependencies, every one always made: `scan_daily_state_inputs`
 `available_as_of_date <= decision_session`, feeding `panel_math`;
 availability is the day after the actual outcome-source close, so a delayed
 close cannot enter history at an earlier decision. A null availability date
-is unavailable to every decision. Rows with `skipped=true`
+is unavailable to every decision. A later availability date also excludes
+that row from this history input; unavailable moves are omitted, never
+treated as zero. If no eligible moves remain, history math uses its empty-
+input result. Rows with `skipped=true`
 carry no `realized_move_pct` and are excluded from that feed, never treated
 as a zero move; the bounds are on data dates only, never on
 `computed_at`, the row's own calculation timestamp: a backfilled or
