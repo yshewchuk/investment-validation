@@ -72,12 +72,17 @@ def catalog(tmp_path):
 # * ``PROFILE_EXCEEDS_CAPACITY`` (capacity the host can never offer) fails on
 #   the first sample.
 # * The other host-dependent reasons (``HOST_RESOURCE_REASONS``) fail once the
-#   job has sat continuously queued on them for ``ADMISSION_WAIT_SECONDS``, or
-#   at the caller's own deadline if that comes first. A shortage that clears
-#   inside the window still just waits, as the production scheduler does.
+#   job has sat continuously queued on them for ``ADMISSION_WAIT_SECONDS``. A
+#   shortage that clears inside the window still just waits, as the production
+#   scheduler does. That window is clamped to the caller's polling deadline
+#   (``AdmissionWatch(deadline=...)``): no later than it, so a window outlasting
+#   a short budget cannot fail with RESOURCE WAIT at that deadline and hide the
+#   ``RunUntilTimeout`` diagnostics, which report the same queue reason.
 # * Reasons from the test's OWN catalog (a dependency, a held heavy slot, a
 #   store lease) are never environmental: they fall through to the caller's
-#   ``run_until`` deadline and assertions unchanged.
+#   ``run_until`` deadline, which raises ``RunUntilTimeout`` (an
+#   ``AssertionError``, so a deadline assertion still fires) with the job
+#   diagnostics.
 
 TERMINAL_STATES = ("succeeded", "failed", "blocked", "cancelled")
 
@@ -158,11 +163,18 @@ def admission_message(conn, job_id, reason: dict, waited: float, *, policy=TEST_
 class AdmissionWatch:
     """Fail the test once one job's host-resource wait is known to be
     hopeless (see the block comment above). Call :meth:`check` once per poll,
-    and with ``final=True`` at the caller's own deadline."""
+    and with ``final=True`` at the caller's own deadline. A watch given the
+    caller's polling ``deadline`` goes silent at that deadline: it is never
+    later than it, so a wait the caller budgets past cannot steal the
+    ``RunUntilTimeout`` diagnostics the caller raises there."""
 
-    def __init__(self, conn, job_id, *, policy=TEST_POLICY, wait_seconds=None):
+    def __init__(self, conn, job_id, *, policy=TEST_POLICY, wait_seconds=None,
+                 deadline=None):
         self.conn, self.job_id, self.policy = conn, job_id, policy
         self.wait_seconds = ADMISSION_WAIT_SECONDS if wait_seconds is None else wait_seconds
+        #: the caller's absolute ``time.monotonic()`` polling deadline, or
+        #: ``None`` for a watch whose caller has no deadline of its own
+        self.deadline = deadline
         self.since = None
 
     def check(self, *, final=False) -> None:
@@ -175,6 +187,8 @@ class AdmissionWatch:
             self.since = None
             return
         now = time.monotonic()
+        if self.deadline is not None and now >= self.deadline:
+            return  # at/after the polling deadline the caller's timeout speaks
         self.since = now if self.since is None else self.since
         waited = now - self.since
         if reason["code"] == "PROFILE_EXCEEDS_CAPACITY" or final or waited >= self.wait_seconds:
@@ -336,14 +350,31 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
                 f"liveness: {na}; log tail: {na}.")
 
 
+class RunUntilTimeout(AssertionError):
+    """``run_until``'s per-call budget, or the cap on it, expired while the job
+    was still nonterminal. The message is :func:`_run_until_deadline_message`:
+    the last observed state plus the job's queue/admission reason, attempt count
+    and last lease heartbeat, read through the existing ops query helpers
+    (``get_job``, ``attempt_receipts``, ``process_family_liveness``). It
+    subclasses ``AssertionError``, so a caller asserting on the deadline failure
+    still fires. Observational only: it retries nothing, extends nothing and
+    sleeps nowhere."""
+
+
 def run_until(service, conn, job_id, *, timeout, states=TERMINAL_STATES, poll=0.05) -> str:
     """Tick ``service`` until ``job_id`` reaches one of ``states``, capping the wait
     at ``RUN_UNTIL_TIMEOUT_CAP_SECONDS``; an unadmittable job fails ``RESOURCE
-    WAIT``, a deadline raises ``AssertionError`` with
-    :func:`_run_until_deadline_message`, never a returned nonterminal state."""
-    watch = AdmissionWatch(conn, job_id, policy=getattr(service, "policy", TEST_POLICY))
+    WAIT``, and whichever of the caller's budget and that cap expires first
+    raises ``RunUntilTimeout`` with :func:`_run_until_deadline_message`, never a
+    returned nonterminal state."""
     effective = min(float(timeout), RUN_UNTIL_TIMEOUT_CAP_SECONDS)
     deadline = time.monotonic() + effective
+    # The watch shares this polling deadline: its admission window is never
+    # later than it, so it cannot fail the test past the deadline and hide the
+    # timeout diagnostics below (its own window, when it fits inside the
+    # budget, still fails fast with RESOURCE WAIT as before).
+    watch = AdmissionWatch(conn, job_id, policy=getattr(service, "policy", TEST_POLICY),
+                           deadline=deadline)
     state = job_state(conn, job_id)
     while time.monotonic() < deadline:
         service.tick()
@@ -353,9 +384,8 @@ def run_until(service, conn, job_id, *, timeout, states=TERMINAL_STATES, poll=0.
         watch.check()
         time.sleep(poll)
     # A job completing during the final sleep (after the deadline elapsed) is a
-    # success, not a timeout: refresh once more before the final watch check.
+    # success, not a timeout: refresh once more before failing.
     state = job_state(conn, job_id)
     if state in states:
         return state
-    watch.check(final=True)
-    raise AssertionError(_run_until_deadline_message(conn, job_id, state, states, effective))
+    raise RunUntilTimeout(_run_until_deadline_message(conn, job_id, state, states, effective))

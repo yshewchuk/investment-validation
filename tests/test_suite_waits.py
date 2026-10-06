@@ -36,6 +36,7 @@ from tests.ops_support import (
     catalog,
     request,
     run_until,
+    RunUntilTimeout,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -61,6 +62,31 @@ def test_profile_exceeds_capacity_fails_on_the_first_check(tmp_path):
     assert message.startswith("RESOURCE WAIT")
     assert "profile legacy_score" in message and "needs 5 worker CPUs" in message
     assert "at least 6 CPUs" in message
+
+
+def test_run_until_fails_at_its_explicit_budget_on_an_own_catalog_heavy_slot_wait(tmp_path):
+    """Regression (corpus timeout): a ``HEAVY_SLOT`` wait comes from the
+    test's own catalog, so it is never environmental -- ``run_until`` must
+    fall through to the caller's explicit deadline and raise
+    ``RunUntilTimeout`` inside that budget, carrying the queue reason and
+    the attempt/lease diagnostics, not fail ``RESOURCE WAIT`` or overrun."""
+    conn, job_id = _queued_job(tmp_path, {"code": "HEAVY_SLOT"})
+
+    class _NeverAdmits:
+        def tick(self):
+            pass
+
+    timeout = 0.2
+    started = time.monotonic()
+    with pytest.raises(RunUntilTimeout) as excinfo:
+        run_until(_NeverAdmits(), conn, job_id, timeout=timeout, poll=0.01)
+    # budget + 0.1 s for the deadline-edge diagnostics only: no retry, no extension
+    assert time.monotonic() - started <= timeout + 0.1
+    message = str(excinfo.value)
+    assert "state 'queued'" in message
+    assert "HEAVY_SLOT" in message
+    assert "attempt count:" in message
+    assert "attempt lease heartbeat:" in message
 
 
 def test_memory_headroom_waits_out_the_window_then_fails_with_the_numbers(tmp_path):
