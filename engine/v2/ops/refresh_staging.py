@@ -87,6 +87,7 @@ def _computed_moves_document(claim) -> dict:
         "scope": params.scope,
         "expected_head_generation": params.expected_head_generation,
         "expected_head_snapshot_id": params.expected_head_snapshot_id,
+        "parent_receipt_id": params.parent_receipt_id,
         "as_of": params.as_of,
         "all_scoreable": params.all_scoreable,
         "since": params.since,

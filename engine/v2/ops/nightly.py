@@ -723,7 +723,7 @@ def _build_native_computed_moves_plan(as_of, *, catalog_path, objects_root,
     ``computed_moves_store.run_computed_moves_refresh`` recomputes at run
     time from the same pinned parent, so a submitted job's coverage
     denominator never disagrees with what the worker independently derives.
-    Returns ``(RefreshPlan, expected_ids)``, or ``None`` when there is no open
+    Returns ``(RefreshPlan, expected_ids, parent_receipt_id)``, or ``None`` when there is no open
     catalog, no shadow head, a head missing ``earnings_events``/
     ``daily_market``, or a resolved target list that comes back empty -- this
     stage is OPTIONAL, so each of those is a graceful "nothing to submit this
@@ -753,6 +753,8 @@ def _build_native_computed_moves_plan(as_of, *, catalog_path, objects_root,
         repository, head["snapshot_id"], all_scoreable=True, as_of=as_of)
     if not targets:
         return None
+    parent_receipt_id = computed_moves_store.parent_receipt_id_for_snapshot(
+        conn, "shadow", snapshot.snapshot_id)
     units = computed_moves_store.computed_moves_units(targets, as_of=as_of)
     refresh_plan = incremental_data.plan_refresh(
         snapshot, units,
@@ -761,7 +763,7 @@ def _build_native_computed_moves_plan(as_of, *, catalog_path, objects_root,
             endpoint=COMPUTED_MOVES_TABLE_NAME),
         provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
         expected_head_generation=head["generation"])
-    return refresh_plan, tuple(targets)
+    return refresh_plan, tuple(targets), parent_receipt_id
 
 
 def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, environment_ref,
@@ -927,8 +929,9 @@ def _build_computed_moves_refresh_request(as_of, key, *, catalog_path, objects_r
         conn=conn, store=store, clock=clock)
     if built is None:
         return None
-    refresh_plan_obj, expected_ids = built
-    parameters = CalendarMovesParameters(expected_ids=expected_ids, as_of=as_of)
+    refresh_plan_obj, expected_ids, parent_receipt_id = built
+    parameters = CalendarMovesParameters(
+        expected_ids=expected_ids, parent_receipt_id=parent_receipt_id, as_of=as_of)
     implementation_ref = content_hash(worker_source_manifest(code_source))
     environment_ref = content_hash(
         environment_identity(_thread_count(COMPUTED_MOVES_REFRESH_ACTION)))

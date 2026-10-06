@@ -50,6 +50,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `decisions supersede --row-id --reason --from-json`
 - `price-refresh --session [--dry-run]`
 - `price-history capture --source-root --scope [--dry-run]` (rebuild: [guide](../../../guides/native_board_rebuild_runbook.md))
+- `computed-moves capture --source-root --scope --as-of [--dry-run]`
 - `get`/`logs`/`cancel`/`resume`/`explain <job_id>`
 
 Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`, `NO_JOB_STAGES`, `build_nightly_plan`,
@@ -657,13 +658,15 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
 - The artifact store (`ArtifactStore`, filesystem-backed) for refresh plans
   and other bound inputs.
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
-  declared adapter, for `price-history capture` and `price-refresh`.
-- `computed_moves_store.run_computed_moves_refresh(parameters, root, *,
-  as_of, fetcher=None)` reads `earnings_events` and `daily_market` once from
-  the pinned parent snapshot, then fetches yfinance history per selected
-  ticker. `calendar_moves_jobs.run_computed_moves_worker` binds the varying
-  `as_of` and injected fetcher; selection follows the legacy
-  ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
+  declared adapter, for `price-history capture`, `price-refresh`, and
+  `computed-moves capture`.
+- `computed_moves_store.run_computed_moves_refresh(...)` reads `earnings_events` and
+  `daily_market` from the pinned parent. `computed-moves capture` uses the newest
+  successful Tier-1 yfinance `history(period=max)` entry; missing history is
+  `legitimate_empty`, it never fetches live, and dry-run reports cache coverage
+  without writing. The selected source root is authoritative: catalog unit
+  receipts do not substitute for missing or changed Tier-1 entries. The worker
+  binds `as_of` and the fetcher; target selection follows the legacy ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
 - `forward_calendar_store` derives per-ticker trading calendars from pinned
   `daily_market` (weekday fallback if absent), then uses the `catalog_path`,
   `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences
@@ -1000,18 +1003,12 @@ waits without submitting until its paired succeeded inputs are ready.
   (the full event-date instant is in the key, so distinct instants remain distinct),
   the worker raises before either output file is written, rather than silently
   dropping one row.
-- `computed_moves_store.py` commits a new snapshot generation only when the
-  `computed_moves` table's content actually changes, carrying every other
-  table forward unchanged alongside the fresh `computed_moves` table version
-  (one fragment per ticker, via the same immutable-object/manifest/atomic-head
-  commit primitives `price_history_store` uses). Alongside the snapshot commit
-  it inserts one append-only row per attempted ticker into
-  `data_computed_moves_captures` — a capture already logged (same
-  content-derived `capture_id`) is never re-logged. Every committed row's
-  `computed_at` derives from `as_of`, never the run's own wall clock, so a
-  same-`as_of` rerun over identical inputs produces byte-identical fragment
-  content and resolves back to the parent snapshot rather than committing a
-  new generation.
+- `computed_moves_store.py` commits only changed content, one fragment per ticker, carrying other tables and parent pins forward. New job parameters
+  pin the parent receipt before execution; commits use it for reference inputs
+  and lineage. Legacy unpinned jobs resolve a receipt at commit for compatibility.
+  Lineage uses `price_history_capture`; captures are append-only and deduped by
+  `capture_id`; no-fragment runs persist attempts only after fence and parent receipt validation, without a generation.
+  `computed_at` derives from `as_of`; identical same-`as_of` inputs resolve to the parent without a generation.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
   here since the list can drift) — catalog/outbox/filesystem writes
@@ -1257,6 +1254,7 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | Condition | Outcome |
 |---|---|
 | no succeeded native `"refresh"` job yet, no shadow head, or a resolved target list that comes back empty | returns without submitting anything — not a failure, since `computed_moves_refresh` has no receipt to degrade until an attempt exists |
+| shadow head has scoreable targets but no committed import receipt | planner raises `SNAPSHOT_NOT_READY` before job submission; the sidecar records a failed build attempt and backs off this identity |
 | a job already exists under today's session key, in any state | never rebuilt or resubmitted |
 | idempotency key | session-only, never `scope_hash`-qualified — this job's target set is the whole scoreable universe, independent of which watchlist's `"score"` job happened to trigger the tick |
 
@@ -1350,6 +1348,8 @@ job.
 | truncation empties the series, or an event's exit price falls past the truncated series | the existing "too few" outcome or out-of-range guard returns an ordinary skipped row; neither raises |
 | a same-`as_of` rerun with an unchanged provider fetch | truncates identically both times — same hash, same no-op/re-resolve behavior |
 | any commit candidate would inherit a fragment whose `primary_key_max` event date is on or after its basis `as_of` | `_commit_generation` refuses the whole generation with non-retryable `VALIDATION_FAILED`, before catalog commit. Rewritten tickers use the capture-time truncation above. Refusal leaves the parent, head and capture-log rows unchanged; already-published fragment objects and completed raw-unit receipts may remain. Retrying with the same parent and `as_of` cannot succeed while that fragment remains inherited; use a parent whose inherited rows precede `as_of` or request a later `as_of`. |
+| `computed-moves capture` has no source root, a held lock, no scoped head/parent pins or a missing/mismatched pinned receipt, invalid `as_of`, a lost head CAS, or a missing source table | Refuses with `INVALID_REQUEST`, `RESOURCE_UNAVAILABLE`, `SNAPSHOT_NOT_READY`, `INVALID_REQUEST`, `SNAPSHOT_CONFLICT`, or the reader's typed contract refusal, respectively. |
+| Tier-1 history is missing, `--dry-run` is set, or identical same-`as-of` inputs are rerun | Missing history is `legitimate_empty`/`no_history` and counted without a live fetch; dry-run reports cache coverage without writes or receipts; an identical rerun resolves to the parent without a generation. |
 
 ## Invariants
 
