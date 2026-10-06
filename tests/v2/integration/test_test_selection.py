@@ -138,6 +138,20 @@ def test_r1_a_new_test_outside_the_layout_fails(tmp_path):
     assert any("tests/test_b.py" in finding for finding in report.findings)
 
 
+def test_r1_pytest_suffix_pattern_is_rejected_without_changing_root_budget(tmp_path):
+    assert tb.is_test("tests/foo_test.py")
+    assert tb._rooted("tests/test_a.py")
+    assert not tb._rooted("tests/foo_test.py")
+    report = tb.check_layout(
+        {"tests/test_a.py"},
+        {"tests/test_a.py", "tests/foo_test.py"},
+        1,
+        1,
+        tmp_path,
+    )
+    assert any("tests/foo_test.py" in finding for finding in report.findings)
+
+
 @pytest.mark.parametrize("path", ["checks/test_selection.py", "checks/test_layout_budget.py"])
 def test_r1_ignores_new_check_implementation_modules(tmp_path, path):
     report = tb.check_layout({"tests/test_a.py"}, {"tests/test_a.py", path}, 1, 1, tmp_path)

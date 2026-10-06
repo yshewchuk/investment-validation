@@ -38,12 +38,15 @@ class Report:
 
 
 def is_test(path):
+    name = path.rsplit("/", 1)[-1]
     return (path.startswith("tests/") and path.endswith(".py")
-            and path.rsplit("/", 1)[-1].startswith("test_"))
+            and (name.startswith("test_") or name.endswith("_test.py")))
 
 
 def _rooted(path):
-    return path.count("/") == 1 and is_test(path)
+    return (path.count("/") == 1 and path.startswith("tests/")
+            and path.endswith(".py")
+            and path.rsplit("/", 1)[-1].startswith("test_"))
 
 
 def _owned(path):
