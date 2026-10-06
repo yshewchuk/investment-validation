@@ -16,7 +16,7 @@ import {
 } from "./hooks";
 import { boardHash } from "./routes";
 
-const DEFAULT_POLL_MS = 4000;
+const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_LIMIT = 50;
 
 function toQuery(releaseId: string, filters: FilterValues, cursor: string | null): EventQuery {
