@@ -679,7 +679,8 @@ def build_equity(
 #: Columns that identify a trade well enough to look it up in a chain file.
 _LOG_IDENTITY = ("trade_id", "event_id", "ticker", "event_date", "session", "strategy",
                  "variant", "entry_date", "exit_date", "strike", "expiry", "dte_entry",
-                 "fill_alpha", "entry_cost", "exit_value", "ret", "provenance")
+                 "fill_alpha", "entry_cost", "exit_value", "ret", "provenance",
+                 "fit_identity")
 
 
 def _flatten_legs(blob: Any, max_legs: int = 2) -> dict[str, Any]:
@@ -766,10 +767,16 @@ def transaction_log(trades: pd.DataFrame, equity: Mapping[str, Any],
     log = pd.concat([log, accounting], axis=1)
 
     if scores is not None and len(scores) and "event_id" in log.columns:
-        cols = [c for c in ("event_id", "proba") if c in scores.columns]
-        if len(cols) == 2:
+        # The walk-forward score rows carry the fold's fit identity; it is
+        # joined as gate_fit_identity beside the probability, so a log row
+        # shows both what selected it and what the fold's model scored it.
+        # Older/direct score frames with only event_id and proba keep the
+        # plain probability join.
+        cols = [c for c in ("event_id", "proba", "fit_identity") if c in scores.columns]
+        if "event_id" in cols and "proba" in cols:
             log = log.merge(scores[cols].drop_duplicates("event_id").rename(
-                columns={"proba": "gate_proba"}), on="event_id", how="left")
+                columns={"proba": "gate_proba", "fit_identity": "gate_fit_identity"}),
+                on="event_id", how="left")
 
     log.insert(0, "row", np.arange(1, len(log) + 1))
     return log
@@ -917,10 +924,14 @@ class Gate:
     name: str = "gate"
     seen: list = field(default_factory=list)
     #: Optional P(win) ∈ [0, 1] per row. When present, the walk-forward
-    #: collects out-of-sample probabilities for every traded year and
-    #: evaluate() turns them into the calibration block — which is what makes
-    #: the promotion Brier-skill rule live instead of a permanent WARN. Gates
-    #: without one are still evaluated; their calibration reports unavailable.
+    #: collects out-of-sample probabilities for every eligible (fitted) test
+    #: year — always AFTER that fold's ``fit``, so a probability comes from
+    #: the same model the fold trades with — and evaluate() turns them into
+    #: the calibration block, which is what makes the promotion Brier-skill
+    #: rule live instead of a permanent WARN. Years skipped for insufficient
+    #: fit history are never predicted: their score rows carry null proba and
+    #: explicit unfitted markers that calibration excludes. Gates without one
+    #: are still evaluated; their calibration reports unavailable.
     predict_proba: Callable[[pd.DataFrame], np.ndarray] | None = None
 
 
@@ -937,9 +948,28 @@ def walk_forward(
     fixes the year-by-year accounting the headline numbers come from. Years
     with fewer than ``min_train_years`` preceding years are traded ungated (a
     gate with no training history has no business selecting) and are flagged as
-    ``ungated`` in the diagnostics so the report says so.
+    ``ungated`` and explicitly unfitted in the diagnostics so the report says
+    so.
 
-    Returns ``{selected, diagnostics, audit}`` where ``selected`` carries the
+    With a gate the order inside a fold is fixed: ``fit(train)`` runs FIRST,
+    then ``predict_proba(test)`` and ``select(test)`` — both against the
+    just-fitted fold model, never a stale one. Every eligible fold carries a
+    deterministic ``fit_identity`` (``walk-forward:<test_year>:train-through:
+    <max train year>``) stamped on its diagnostics row and on each of its
+    score rows. A fold whose local train frame is empty (allowed when
+    ``min_train_years=0`` with an upstream/precomputed fit) still runs
+    ``fit`` first, but is marked unfitted — Gate has no provenance field
+    for what happened before the harness, so the evaluator cannot validate
+    what was fitted — and is neither predicted nor selected: its identity
+    is null and it contributes no selected OOS trades (``n_selected`` is
+    zero; empty-local-history folds without validated provenance are
+    excluded from selected OOS results). A year skipped for
+    insufficient history is never predicted: its score rows exist with null
+    ``proba`` and ``fitted=False`` so the OOS accounting stays complete, and
+    calibration filters them out. The returned ``selected`` frame carries the
+    same ``fit_identity`` on every kept row, mapped from its event-date year.
+
+    Returns ``{selected, diagnostics, audit, scores}`` where ``selected`` carries the
     kept rows at every alpha (selection is decided at mid and applied to the
     whole alpha grid — the contracts a structure selects must not depend on the
     fill assumption) and ``audit`` is the leak receipt the report checklist
@@ -963,18 +993,30 @@ def walk_forward(
         train_years = int(train["year"].nunique())
         row: dict[str, Any] = {"year": int(year), "n_train": int(len(train)),
                                "n_test": int(len(test)), "train_years": train_years}
-        if gate is not None and gate.predict_proba is not None and len(test):
-            # OOS probabilities for the calibration block — collected for EVERY
-            # traded year (ungated ones included): calibration is measured on
-            # the whole out-of-sample universe, never on the selected subset.
-            score_rows.append(pd.DataFrame({
-                "event_id": test["event_id"].to_numpy(),
-                "proba": np.asarray(gate.predict_proba(test), dtype=float),
-                "year": int(year),
-            }))
         if gate is None or train_years < min_train_years or test.empty:
             row["n_selected"] = int(len(test))
             row["ungated"] = gate is not None and train_years < min_train_years
+            # The fold is marked unfitted explicitly, not by the absence of a
+            # marker: a diagnostics row that merely lacks the field cannot be
+            # told apart from one that fitted and forgot to say so.
+            row["fitted"] = False
+            row["fit_identity"] = None
+            row["unfitted_reason"] = (
+                "insufficient train history" if row["ungated"]
+                else "no gate in this run" if gate is None else "empty test year"
+            )
+            if gate is not None and gate.predict_proba is not None and len(test):
+                # Skipped year: the gate is never called — predict_proba on an
+                # unfitted model would fabricate probabilities. The rows are
+                # still recorded, with null proba, so the OOS accounting is
+                # complete; calibration excludes them via `fitted`.
+                score_rows.append(pd.DataFrame({
+                    "event_id": test["event_id"].to_numpy(),
+                    "proba": np.full(int(len(test)), np.nan),
+                    "year": int(year),
+                    "fitted": False,
+                    "fit_identity": None,
+                }))
             kept_ids.extend(test["event_id"].tolist())
             diagnostics.append(row)
             continue
@@ -987,7 +1029,56 @@ def walk_forward(
             assert int(train["year"].max()) < year, "walk-forward handed the test year to fit()"
             fit_years_seen.append(int(train["year"].max()))
             gate.seen.append(int(train["year"].max()))
+        # Fit FIRST. The fold identity is minted from the model that is about
+        # to trade, and both the probabilities and the selection must come
+        # from this same just-fitted fold — scoring before fitting would
+        # silently hand back the previous fold's model (or none at all).
         gate.fit(train)
+        row["ungated"] = False
+        if not len(train):
+            # A fold that passes min_train_years with an empty local train
+            # frame would trade on a fit made upstream/precomputed: Gate
+            # carries no provenance field for that, so the evaluator cannot
+            # see what was fitted or when. Without validated provenance the
+            # fold selects nothing — neither predict_proba nor select runs,
+            # no test ID enters kept_ids, and n_selected is zero — while it
+            # is marked unfitted: no identity, and null score rows if
+            # probabilities are configured.
+            row["fitted"] = False
+            row["fit_identity"] = None
+            row["unfitted_reason"] = (
+                "empty local train history: gate fitted upstream with no "
+                "evaluator-visible provenance"
+            )
+            if gate.predict_proba is not None:
+                score_rows.append(pd.DataFrame({
+                    "event_id": test["event_id"].to_numpy(),
+                    "proba": np.full(int(len(test)), np.nan),
+                    "year": int(year),
+                    "fitted": False,
+                    "fit_identity": None,
+                }))
+            row["n_selected"] = 0
+            diagnostics.append(row)
+            continue
+        fold_identity = (
+            f"walk-forward:{year}:train-through:"
+            f"{int(train['year'].max())}"
+        )
+        row["fitted"] = True
+        row["fit_identity"] = fold_identity
+        if gate.predict_proba is not None:
+            # OOS probabilities for the calibration block — collected for every
+            # eligible traded year, after that year's fit: calibration is
+            # measured on the whole out-of-sample universe, never on the
+            # selected subset, and never on an unfitted model.
+            score_rows.append(pd.DataFrame({
+                "event_id": test["event_id"].to_numpy(),
+                "proba": np.asarray(gate.predict_proba(test), dtype=float),
+                "year": int(year),
+                "fitted": True,
+                "fit_identity": fold_identity,
+            }))
         mask = gate.select(test)
         mask = pd.Series(np.asarray(mask, dtype=bool), index=test.index)
         row["n_selected"] = int(mask.sum())
@@ -997,6 +1088,13 @@ def walk_forward(
 
     kept_set = set(kept_ids)
     selected = trades[trades["event_id"].isin(kept_set)].copy()
+    # Each kept row inherits the fold identity of its event-date year, so a
+    # trade in the log can be traced to the exact fit that selected it. Rows
+    # from unfitted folds carry a null identity.
+    selected["fit_identity"] = (
+        pd.to_datetime(selected["event_date"]).dt.year.map(
+            {int(d["year"]): d.get("fit_identity") for d in diagnostics})
+    )
     # Leak discipline is enforced structurally — fit never receives the test
     # year (the assert above) — and the receipt records the max year every fit
     # saw so the poison test and the report auditor can verify it.
@@ -1587,11 +1685,19 @@ def evaluate(
     }
 
     # Calibration of the gate's OOS probabilities. Computed on the WHOLE
-    # out-of-sample universe, not the selected subset — measuring calibration
-    # on what the gate kept would condition on the very thing being measured.
+    # fitted out-of-sample universe, not the selected subset — measuring
+    # calibration on what the gate kept would condition on the very thing
+    # being measured. Rows a fold never fitted (insufficient train history)
+    # carry null proba and are excluded here: an unfitted row has no model's
+    # probability behind it, and averaging one into the Brier would score
+    # nothing.
     scores = wf.get("scores")
-    if scores is not None and len(scores):
-        merged = scores.merge(
+    eligible = (
+        scores[scores["fitted"].astype(bool) & scores["proba"].notna()]
+        if scores is not None and len(scores) else pd.DataFrame()
+    )
+    if len(eligible):
+        merged = eligible.merge(
             base_mid[["event_id", "ret"]], on="event_id", how="inner")
         results["calibration"] = calibration_block(
             merged["proba"].to_numpy(),
@@ -1600,7 +1706,9 @@ def evaluate(
     else:
         results["calibration"] = {
             "available": False,
-            "reason": "gate provides no predict_proba; calibration not measured",
+            "reason": ("no fitted OOS probabilities to calibrate: the gate has "
+                       "no predict_proba, or every test year was skipped for "
+                       "insufficient fit history"),
         }
 
     # -- stage 3: Monte Carlo on the WF OOS sequence ------------------------
