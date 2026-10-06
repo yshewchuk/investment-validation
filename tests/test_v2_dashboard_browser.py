@@ -618,20 +618,38 @@ def test_visibility_gates_release_poll_and_checks_once_on_return(browser, server
     context, page = _authed_page(browser, server, base)
     hits = _count_current_requests(page)
     page.add_init_script(_HIDDEN_OVERRIDE)
+    page.clock.install()
+    page.clock.pause_at("2030-01-01T00:00:00Z")
     try:
         page.goto(base + "/?pollMs=200")
         expect(page.get_by_test_id("release-id")).to_contain_text("r1")
         assert hits[0] == 1
 
         _dispatch_visibility(page, True)
-        page.wait_for_timeout(300)
+        page.clock.fast_forward(300)
         assert hits[0] == 1  # hidden: no poll even after the interval is due
 
+        page.evaluate("""() => {
+          const original = window.setTimeout.bind(window);
+          let resolveScheduled;
+          window.__releasePollScheduled = new Promise((resolve) => {
+            resolveScheduled = resolve;
+          });
+          window.setTimeout = (callback, delay, ...args) => {
+            const timerId = original(callback, delay, ...args);
+            if (delay === 200) resolveScheduled();
+            return timerId;
+          };
+        }""")
         with page.expect_request("**/api/v1/releases/current"):
             _dispatch_visibility(page, False)
         assert hits[0] == 2  # exactly one check on return
-        page.wait_for_timeout(50)
-        assert hits[0] == 2  # next read is 200ms away
+        page.evaluate("() => window.__releasePollScheduled")
+        page.clock.fast_forward(199)
+        assert hits[0] == 2  # scheduled interval is not due yet
+        with page.expect_request("**/api/v1/releases/current"):
+            page.clock.fast_forward(1)
+        assert hits[0] == 3  # exactly one check when the interval is due
     finally:
         context.close()
 
