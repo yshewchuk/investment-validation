@@ -422,3 +422,51 @@ def test_lease_release_clears_the_exact_list_handed_back_by_the_context():
     assert all(rows == [] for rows in held)
     assert account.live_rows == 0
     assert account.peak_rows == 3
+
+
+def test_iterator_advance_releases_an_open_lease():
+    snapshot = _snapshot()
+    repository = _PinnedFakeRepository(
+        snapshot, partition_keys=("2022", "2023", "2024", "2025"),
+        batches=[_GOLDEN_ROWS[:3], _GOLDEN_ROWS[3:5], _GOLDEN_ROWS[5:]])
+    account = RetainedRowCount()
+
+    iterator = iter_pinned_scan_batches(repository, snapshot, _TABLE, _COLUMNS,
+                                        max_retained_rows=50_000, retained_rows=account)
+    try:
+        first = next(iterator)
+        rows = first.__enter__()  # held open: the context is never exited before the advance
+        assert rows == _GOLDEN_ROWS[:3]
+        assert not first.released
+        assert account.live_rows == len(rows)
+
+        second = next(iterator)  # R5: advancing releases the lease the caller moved past
+        assert rows == []
+        assert first.released
+        assert account.live_rows == len(_GOLDEN_ROWS[3:5])
+        assert not second.released
+    finally:
+        iterator.close()  # releases the second lease, so a failure cannot leak one
+
+    assert account.live_rows == 0
+
+
+def test_iterator_close_releases_an_open_lease():
+    snapshot = _snapshot()
+    repository = _PinnedFakeRepository(
+        snapshot, partition_keys=("2022", "2023", "2024", "2025"),
+        batches=[_GOLDEN_ROWS[:3], _GOLDEN_ROWS[3:5], _GOLDEN_ROWS[5:]])
+    account = RetainedRowCount()
+
+    iterator = iter_pinned_scan_batches(repository, snapshot, _TABLE, _COLUMNS,
+                                        max_retained_rows=50_000, retained_rows=account)
+    lease = next(iterator)
+    rows = lease.__enter__()  # held open: there is no context block to exit
+    try:
+        assert rows == _GOLDEN_ROWS[:3]
+        assert account.live_rows == len(rows)
+    finally:
+        iterator.close()  # R5: iterator close releases the open lease
+    assert rows == []
+    assert lease.released
+    assert account.live_rows == 0

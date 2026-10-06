@@ -669,17 +669,17 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences
   in "Primary contracts", plus injected Nasdaq date and yfinance
   pending-ticker fetchers.
-- The shared `ops.pinned_partition_reader` is additive; both `_scan_rows`
-  callers stay unchanged until slices 2/3. It streams ordered batches from
-  one pinned snapshot and scope, accounting live/peak input rows under the
-  unchanged `MAX_SCAN_ROWS`. Only one `RetainedBatch` lease is live at a time:
-  consumers must finish processing it before advancing, because advancing
-  releases and clears that batch; buffering the iterator with `list(...)`
-  therefore produces released, empty leases. R1 preserves typed refusal for
-  missing, corrupt or incompatible input; R2 keeps output provisional through
-  full validation; R3 does not retry integrity refusals; R4 pins every
-  partition; R5 discards failed attempts without publication; R6 gives
-  byte-identical output for identical complete inputs.
+- Shared `ops.pinned_partition_reader` streams pinned PK batches; both
+  `_scan_rows` callers stay unchanged through slices 2/3. It tracks live/peak
+  rows under `MAX_SCAN_ROWS`. One lease is live: consume before advancing
+  (advance clears it; `list(iterator)` retains empty leases). R1 missing,
+  corrupt or incompatible pin → typed refusal, never empty/newer; R2 provisional
+  until full validation; R3 integrity refusal terminal/no retry; R4 each
+  partition uses the same pin/scope; R5 failure discards attempt state/output;
+  R6 identical inputs yield byte-identical output. Cache: no row/result cache;
+  each fragment re-hashes on open (stat-tuple cache deferred); hash failures are
+  terminal typed refusals. Transactions: read-only catalog reads roll back on success/error;
+  reader writes/commits none. Caller publishes after validation; failures or early close publish nothing.
 - `board_requests`: an already-loaded events table (`ticker`, `event_date`,
   `session` columns), an `as_of` date, a horizon in days, and an optional
   ticker filter. It performs no I/O itself — the caller loads the table; see
