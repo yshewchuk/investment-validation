@@ -191,8 +191,10 @@ evidence. See the models and data component contracts.
 
 Target PR selection maps changed packages through `checks/layer_map.py` and
 selects their tests plus reverse dependents; see [package test selection by
-layer](guides/test_selection_by_layer.md). The current selector stays until
-implementation slices land; pushes to `main` keep the full-suite backstop.
+layer](guides/test_selection_by_layer.md). A checked-in test-layout ratchet
+keeps root-level tests shrinking as packages migrate. The current selector
+stays until implementation slices land; pushes to `main` keep the full-suite
+backstop.
 
 ## 2. Layers and allowed dependency direction
 
