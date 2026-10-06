@@ -496,16 +496,21 @@ def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records
                          for record in all_records}.values())
     receipt_id = "receipt_cm_" + request_hash.removeprefix("sha256:")[:32]
     attempt_id = "attempt_cm_" + request_hash.removeprefix("sha256:")[:32]
+    # Resolve and validate the parent receipt BEFORE the commit opens: the
+    # legacy lookup reads the newest committed receipt for the parent
+    # snapshot, and an unchanged candidate names that same snapshot, so a
+    # lookup after the candidate's own insert would find the candidate (no
+    # reference inputs yet) and raise SNAPSHOT_NOT_READY.
+    resolved_parent_receipt_id = _parent_receipt_id_for_commit(
+        conn, scope, parent.snapshot.snapshot_id, parent_receipt_id)
 
     def _record_references(connection, rid):
-        resolved_receipt_id = _parent_receipt_id_for_commit(
-            connection, scope, parent.snapshot.snapshot_id, parent_receipt_id)
         inputs = reference_catalog.reference_inputs_for_receipt(
-            connection, receipt_id=resolved_receipt_id)
+            connection, receipt_id=resolved_parent_receipt_id)
         reference_catalog.insert_reference_inputs(connection, rid, inputs)
         _insert_captures(connection, attempts)
         record_price_history_lineage(
-            connection, receipt_id=rid, base_receipt_id=resolved_receipt_id)
+            connection, receipt_id=rid, base_receipt_id=resolved_parent_receipt_id)
 
     return data_catalog.commit_snapshot(
         conn, scope=scope, request_hash=request_hash, contracts=tuple(contracts.values()),

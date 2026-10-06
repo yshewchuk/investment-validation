@@ -1431,6 +1431,65 @@ def test_run_computed_moves_refresh_rerun_at_a_different_clock_time_is_a_true_no
     assert fragment1.object_ref.content_hash == fragment2.object_ref.content_hash
 
 
+def test_run_computed_moves_refresh_unpinned_unchanged_rerun_is_a_true_noop(
+        tmp_path, monkeypatch):
+    """An unchanged same-`as_of` rerun whose job is legacy-unpinned
+    (`parent_receipt_id` null) must still resolve to a true noop: the commit
+    resolves and validates the parent receipt BEFORE the catalog transaction
+    inserts the candidate receipt, so the unchanged candidate -- which names
+    the parent snapshot itself -- cannot be the receipt the lookup resolves
+    to and cannot trip over its own not-yet-written reference inputs."""
+    from engine.v2.data import reference_catalog
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, real_clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, real_clock, store, events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    first = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(_closes_csv()))
+    assert first.status == "complete"
+
+    new_head = _head_row(conn)
+    parent_receipt_id = new_head["parent_receipt_id"]
+    assert parent_receipt_id is not None
+    parent_inputs = reference_catalog.reference_inputs_for_receipt(
+        conn, receipt_id=parent_receipt_id)
+
+    root2 = tmp_path / "attempt2"
+    _write_input(root2, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=new_head,
+                 overrides={"parent_receipt_id": None})
+    fetcher2 = _CountingFetcher(_closes_csv())
+    parameters2 = _parameters(new_head, expected_ids=("AAAA",),
+                              catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path,
+                              overrides={"parent_receipt_id": None})
+
+    second = computed_moves_store.run_computed_moves_refresh(
+        parameters2, root2, as_of=_AS_OF, fetcher=fetcher2)
+
+    assert second.status == "noop"
+    assert second.coverage_advanced is False
+    assert fetcher2.calls == []  # the cached receipt was reused, not refetched
+    current_head = _head_row(conn)
+    assert (current_head["snapshot_id"], current_head["generation"]) == (
+        new_head["snapshot_id"], new_head["generation"])
+    rerun_receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope="shadow", snapshot_id=new_head["snapshot_id"])
+    assert rerun_receipt_id != parent_receipt_id  # a fresh receipt, not a replay
+    assert reference_catalog.reference_inputs_for_receipt(
+        conn, receipt_id=rerun_receipt_id) == parent_inputs
+    lineage = conn.execute(
+        "SELECT base_receipt_id FROM data_receipt_lineage WHERE receipt_id = ?",
+        (rerun_receipt_id,)).fetchone()
+    assert lineage["base_receipt_id"] == parent_receipt_id
+
+
 # --------------------------------------------------------------------------
 # round 5 (Opus re-gate BLOCK on 05fd8f7): catalog_path/objects_root
 # existence, parameters' own parent_snapshot_id/refresh_plan_hash, and
