@@ -127,8 +127,7 @@ interface section; this names only the load-bearing entry points.
 - **Errors** — `errors.DataError`, built only from a registered
   `DATA_FAILURE_CODES` entry.
 - **Contract changes** — Recalculate data tables through the standard import
-  and rebuild commands; stored identities are not migrated. The removed
-  re-registration tool remains in git history.
+  and rebuild commands; stored identities are not migrated.
 
 ## Inputs
 
