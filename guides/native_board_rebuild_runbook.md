@@ -7,9 +7,7 @@ Use a runbook plus the existing commands, and add exactly one missing standard c
 producer (`computed_moves_store.py`) but also requires a commit-path change to propagate the reference
 pins, a requirement that is not implemented. Do not add a `--from-tier` sequencer, migration code, or a
 readiness CLI: the runbook below already makes the order, head precondition, and serial heavy admission
-explicit. No step has been shown unsafe or error-prone enough to justify sequencing code; the runbook is sufficient for supervised use. The remaining cross-step decisions fit a manual checklist.
-`python3 -m engine.data.pulls.computed_moves` is NOT that capture: it is a Tier-1 raw history pull
-(yfinance realized moves feeding the panel's event history, `engine/data/pulls/computed_moves.py:2-14`), never a native `computed_moves.v3` commit.
+explicit. No step has been shown unsafe or error-prone enough to justify sequencing code; the runbook is sufficient for supervised use; the remaining cross-step decisions fit a manual checklist. `python3 -m engine.data.pulls.computed_moves` is NOT that capture: it is a Tier-1 raw history pull (yfinance realized moves feeding the panel's event history, `engine/data/pulls/computed_moves.py:2-14`), never a native `computed_moves.v3` commit.
 
 ## Verified evidence and corrections (investigation report)
 
@@ -41,11 +39,11 @@ explicit. No step has been shown unsafe or error-prone enough to justify sequenc
 
 ## Preconditions and operator rules
 
-- The Tier-1 raw cache is complete and usable; this procedure never calls providers or repairs
-  raw inputs. One frozen legacy checkout is `SOURCE_ROOT` for the whole run.
+- The Tier-1 raw cache is complete and usable; the implemented steps of this procedure never call providers or repair raw inputs. The future computed-moves capture (step 2, not implemented yet) must be held to the same cache-only rule — read only the frozen `SOURCE_ROOT` and refuse a cache miss before any provider/network I/O — while the current production binding instead uses yfinance for uncached units. One frozen legacy checkout is `SOURCE_ROOT` for the whole run.
 - Only the supervisor runs heavy steps; agents never run them. The bounded example here is the legacy rebuild: `python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.data.rebuild` — heavy steps serially, one-heavy-job admission built into `--heavy`; never lower a limit to start sooner. The measured snapshot import job (~5.9 GiB free headroom) runs through the bounded `serve --once` invocation in step 1.
 - Before `snapshot plan-import`, read the shadow head's (`snapshot_id`, `generation`) from
-  `data_snapshot_heads` and pass both; a stale head must stop the run, and never plan while the trades replay runs.
+  `data_snapshot_heads` and pass both, or for an absent head follow step 1's no-head alternative; a stale head must stop the
+  run, and never plan while the trades replay runs.
 
 ## Ordered procedure
 
@@ -59,24 +57,28 @@ Set `SOURCE_ROOT`, `OPS_ROOT`, `AS_OF` (the legacy tree's selected session), and
 | 3 | `python3 -m engine.data.rebuild --table tier4` |
 | 4 | none — go straight to the import |
 
-1. Open the operations root and import the rebuilt tree — set `HEAD_SNAPSHOT_ID` and `HEAD_GENERATION` from the
-   current shadow head before planning; wait for the trades replay to exit first; save the returned `plan_ref` as
-   `PLAN_REF` before submitting; `$IMPORT_KEY` is a source-bound stable key (`rebuild-<source-hash>-import`):
+1. Open the operations root and import the rebuilt tree — before planning, read the catalog head state and set
+   `HEAD_SNAPSHOT_ID` and `HEAD_GENERATION` from the shadow head row; with no head row, leave `HEAD_SNAPSHOT_ID` unset — the
+   conditional below passes the stored ID and generation for an existing head, or omits the snapshot-ID option entirely
+   (never an empty string) with generation 0 for an absent head. Wait for the trades replay to exit first; save the returned
+   `plan_ref` as `PLAN_REF` before submitting; `$IMPORT_KEY` is a source-bound stable key (`rebuild-<source-hash>-import`):
 
    ```bash
    python3 -m engine.v2.ops --root "$OPS_ROOT" init
-   python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot plan-import \
-     --source-root "$SOURCE_ROOT" --scope shadow \
-     --expected-head-snapshot-id "$HEAD_SNAPSHOT_ID" \
-     --expected-head-generation "$HEAD_GENERATION"
+   if [ -n "$HEAD_SNAPSHOT_ID" ]; then
+     python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot plan-import --source-root "$SOURCE_ROOT" --scope shadow --expected-head-snapshot-id "$HEAD_SNAPSHOT_ID" --expected-head-generation "$HEAD_GENERATION"
+   else
+     python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot plan-import --source-root "$SOURCE_ROOT" --scope shadow --expected-head-generation 0
+   fi
    python3 -m engine.v2.ops --root "$OPS_ROOT" snapshot submit \
      "$PLAN_REF" --idempotency-key "$IMPORT_KEY"
    python3 tools/bounded_run.py --heavy --cores 8 -- python3 -m engine.v2.ops --root "$OPS_ROOT" serve --once --store-root "$SOURCE_ROOT"
    ```
 
-2. Run the new `ops computed-moves capture` (not implemented yet — slice 2): per the design
-   requirement above, it must drive the native producer, commit a new shadow generation, and copy the base receipt's reference pins into its new receipt.
-   Proposed future CLI syntax, not an existing command: `python3 -m engine.v2.ops --root "$OPS_ROOT" computed-moves capture --as-of "$AS_OF" --scope shadow`.
+2. Run the new `ops computed-moves capture` (not implemented yet — slice 2). Design requirement, not implemented in the current
+   producer/CLI: under the preconditions' cache-only rule, drive the native producer, commit a new shadow generation, and copy
+   the base receipt's reference pins into its new receipt (per the design requirement above).
+   Proposed future CLI syntax, not an existing command: `python3 -m engine.v2.ops --root "$OPS_ROOT" computed-moves capture --source-root "$SOURCE_ROOT" --as-of "$AS_OF" --scope shadow`.
 
 3. Capture price history LAST — the final generation then carries both native tables and pins:
    `python3 -m engine.v2.ops --root "$OPS_ROOT" price-history capture --source-root "$SOURCE_ROOT" --scope shadow`.
@@ -95,8 +97,7 @@ Set `SOURCE_ROOT`, `OPS_ROOT`, `AS_OF` (the legacy tree's selected session), and
 A runbook, not one transaction: only snapshot-producing steps commit an atomic snapshot generation; ledger and model steps have
 their own operation boundaries. There is NO whole-run rollback — earlier commits remain; never serve or score from an incomplete
 head. Verified for existing commands only: snapshot import is fenced by the expected head, a fresh-root import was observed to
-produce only the eight legacy tables, and price-history capture is the existing reference-pin copy-forward path — those
-observations do not prove the proposed R1–R6 contract, and computed-moves pin copy-forward remains proposed.
+produce only the eight legacy tables, and price-history capture is the existing reference-pin copy-forward path — those observations do not prove the proposed R1–R6 contract, and computed-moves pin copy-forward remains proposed.
 
 - R1: validate the source sits at `AS_OF` and required legacy inputs exist before submitting.
 - R2: run steps serially; for a snapshot-producing step, failure before its commit leaves the prior head current.
@@ -121,11 +122,10 @@ observations do not prove the proposed R1–R6 contract, and computed-moves pin 
 ## Retained derived inputs (supervisor recommendation; report step 5 / gap 2)
 
 Retain, back up to the private mirror, restore before import, and verify by hash and Tier-4 fold
-on the newest receipt the derived reference inputs that have no standard producer; the rebuild
-does not recreate them: `data/features/pnl_sim_history.parquet` and
-`data/features/recalibration_pairs.parquet`; the chooser candidate pool built from the EXP-137
-`results/candidates.parquet`; champion artifacts from `train_all` plus `structures.json`; Tier-4
-serving caches for the imported panel hash — stored with a manifest of paths, hashes, and fold.
+on the newest receipt the derived reference inputs that have no standard producer; the rebuild does not recreate them:
+`data/features/pnl_sim_history.parquet` and `data/features/recalibration_pairs.parquet`; the chooser candidate pool built
+from the EXP-137 `results/candidates.parquet`; champion artifacts from `train_all` plus `structures.json`; Tier-4 serving
+caches for the imported panel hash — stored with a manifest of paths, hashes, and fold.
 The named producer alternatives: pnl_sim history builder; recalibration-pairs CLI; chooser pool
 builder from retained EXP-137 results; verified champion reproduction; Tier-4 cache builder for
 the new panel hash — costing more to build and validate; listed for review, not chosen here.
