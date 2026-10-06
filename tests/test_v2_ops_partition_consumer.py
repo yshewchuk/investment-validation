@@ -193,7 +193,10 @@ def test_golden_batches_match_scan_rows_and_keep_every_population_member():
     account = RetainedRowCount()
 
     flattened = _flatten(repository, snapshot, max_retained_rows=50_000, account=account)
-    reference = list(computed_moves_store._scan_rows(repository, snapshot, _TABLE, _COLUMNS))
+    reference: list[dict] = []
+    for lease in computed_moves_store._scan_rows(repository, snapshot, _TABLE, _COLUMNS):
+        with lease as batch:
+            reference.extend(batch)
 
     # Byte-for-byte the same rows, in the same order, nothing filtered out.
     assert flattened == reference

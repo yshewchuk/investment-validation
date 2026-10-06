@@ -51,7 +51,11 @@ from engine.v2.ops.incremental_data import (
     refresh_job_kind,
 )
 from engine.v2.ops.lifecycle import validated_attempt_fence_pair, verify_fence
-from engine.v2.ops.pinned_partition_reader import RetainedRowCount, iter_pinned_scan_batches
+from engine.v2.ops.pinned_partition_reader import (
+    RetainedBatch,
+    RetainedRowCount,
+    iter_pinned_scan_batches,
+)
 from engine.v2.ops.unit_receipts import (
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     cached_unit_outcomes,
@@ -132,44 +136,69 @@ def _as_of_day(as_of) -> str:
 
 
 def _scan_rows(repository: Repository, snapshot, table_name: str,
-               columns) -> Iterator[dict]:
+               columns) -> Iterator[RetainedBatch]:
     """One pinned snapshot's ``table_name``, in the table contract's primary-key
     order, through the shared bounded pinned-partition reader.
 
     The reader keeps this store's exact query scope -- the snapshot's own
     contract ref, every represented year partition, these ``columns`` -- and
-    streams the selection as leased :class:`RetainedBatch` batches accounted by
-    a fresh local live-row account. Rows are yielded straight out of the lease
-    being iterated, so only the lease-held row dictionaries are retained: the
-    live count stays bounded by ``max_retained_rows`` (``MAX_SCAN_ROWS``,
-    unchanged), and every batch is discharged as the reader advances, on scan
-    error and on iterator close. Every repository exception (a missing or
-    corrupt pinned input, a scan exceeding that bound) propagates as the
-    repository's own typed refusal -- never an empty result.
+    yields the selection as the ordered :class:`RetainedBatch` leases accounted
+    by a fresh local live-row account: each lease is the caller's to enter,
+    process and exit before the reader advances, so the live count stays
+    bounded by ``max_retained_rows`` (``MAX_SCAN_ROWS``, unchanged) and every
+    batch is discharged as the reader advances, on scan error and on iterator
+    close. Exhaustion simply ends the lease sequence once the selection's last
+    batch has been released. Every repository exception (a missing or corrupt
+    pinned input, a scan exceeding that bound) propagates as the repository's
+    own typed refusal -- never an empty result.
     """
     account = RetainedRowCount()
-    for lease in iter_pinned_scan_batches(
-            repository, snapshot, table_name, columns,
-            max_retained_rows=MAX_SCAN_ROWS, retained_rows=account):
+    yield from iter_pinned_scan_batches(
+        repository, snapshot, table_name, columns,
+        max_retained_rows=MAX_SCAN_ROWS, retained_rows=account)
+
+
+def _scan_frame(repository: Repository, snapshot, table_name: str,
+                columns) -> pd.DataFrame:
+    """One pinned snapshot's ``table_name`` as one frame, built per leased batch.
+
+    Consumes the ordered :class:`RetainedBatch` leases from :func:`_scan_rows`.
+    Handing released row dictionaries to ``pd.DataFrame`` after the fact would
+    fail -- a lease clears its rows on release -- so exactly one frame chunk is
+    constructed per batch while that batch's lease is live, the lease exits
+    before the reader advances, and the completed chunks concatenate --
+    ``ignore_index=True`` -- only after full exhaustion. A scan whose lease
+    sequence yields no batches returns an empty frame, the previous generator's
+    shape. Every repository or integrity error propagates unchanged as this
+    helper unwinds, discarding the local provisional chunks; no row dictionary
+    is ever retained or accumulated across batches.
+    """
+    chunks: list[pd.DataFrame] = []
+    for lease in _scan_rows(repository, snapshot, table_name, columns):
         with lease as batch:
-            yield from batch
+            chunks.append(pd.DataFrame(batch))
+    if not chunks:
+        return pd.DataFrame()
+    return pd.concat(chunks, ignore_index=True)
 
 
 def _scan_once(repository: Repository, snapshot) -> tuple[pd.DataFrame, pd.DataFrame]:
     """One scan of each source table, shared by target selection and capture.
 
     Returns the ORATS-confirmed ``earnings_events`` frame (``event_date``
-    parsed) and the ``daily_market`` frame, both sorted by key. Every consumer
-    in this run indexes these frames; nothing scans per ticker again.
+    parsed) and the ``daily_market`` frame, both sorted by key. Each frame
+    arrives through the batch-aware :func:`_scan_frame` consumer, so no scan
+    retains the whole selection's row dictionaries at once. Every consumer in
+    this run indexes these frames; nothing scans per ticker again.
     """
-    events = pd.DataFrame(_scan_rows(repository, snapshot, "earnings_events",
-                                     ("ticker", "event_date", "session", "src_orats")))
+    events = _scan_frame(repository, snapshot, "earnings_events",
+                         ("ticker", "event_date", "session", "src_orats"))
     if not events.empty:
         events = events[events["src_orats"] & events["session"].notna()].copy()
         events["event_date"] = pd.to_datetime(events["event_date"])
         events = events.sort_values("event_date").reset_index(drop=True)
-    daily = pd.DataFrame(_scan_rows(repository, snapshot, "daily_market",
-                                    ("ticker", "date", "implied_move")))
+    daily = _scan_frame(repository, snapshot, "daily_market",
+                        ("ticker", "date", "implied_move"))
     if not daily.empty:
         daily = daily.sort_values("date").reset_index(drop=True)
     return events, daily
