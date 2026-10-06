@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from engine.v2.contracts import KeyPredicate
+from engine.v2.data.errors import DataError, fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json
 from engine.v2.ops import computed_moves_store
@@ -17,6 +18,7 @@ from engine.v2.ops.catalog import transaction
 from engine.v2.ops.computed_moves_store import _capture_id_for, _fence_check_for
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.incremental_data import RefreshParameters, RefreshUnit
+from engine.v2.ops.pinned_partition_reader import RetainedRowCount
 from tests.data_scan_support import (
     commit_tables, contract_for, contract_ref_for, hand_built_record, publish_and_inspect,
     table_from_rows)
@@ -1029,6 +1031,19 @@ def _scan_fixture(tmp_path):
     return repository, repository.resolve(head["snapshot_id"])
 
 
+def _read_scan_rows(repository, snapshot, table_name: str, columns) -> list[dict]:
+    """Materialize the leased stream ``_scan_rows`` yields: enter each
+    ``RetainedBatch`` with ``with lease as batch``, copy its rows out while the
+    lease is live (a released lease clears its list), then advance so the lease
+    releases. A typed repository refusal lands mid-iteration and propagates
+    unchanged out of this helper -- never caught, never retried."""
+    rows: list[dict] = []
+    for lease in computed_moves_store._scan_rows(repository, snapshot, table_name, columns):
+        with lease as batch:
+            rows.extend(batch)
+    return rows
+
+
 def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp_path,
                                                                              monkeypatch):
     repository, snapshot = _scan_fixture(tmp_path)
@@ -1036,21 +1051,20 @@ def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp
     bound = _actual_population_bound(repository, snapshot, "earnings_events")
     assert bound > 0
     monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", bound)
-    baseline = computed_moves_store._scan_rows(repository, snapshot,
-                                               "earnings_events", columns)
+    baseline = _read_scan_rows(repository, snapshot, "earnings_events", columns)
     expected = computed_moves_store.MAX_SCAN_ROWS
     assert expected == bound
     captured = _capture_population_scan(monkeypatch, repository, expected)
 
-    result = computed_moves_store._scan_rows(repository, snapshot,
-                                             "earnings_events", columns)
+    result = _read_scan_rows(repository, snapshot, "earnings_events", columns)
 
     assert result == baseline
     assert len(result) == len(_EVENT_DAYS)
     assert all(r["ticker"] == "AAAA" for r in result)
     assert {r["event_id"] for r in result} == {f"AAAA_{day.date()}" for day in _EVENT_DAYS}
     assert captured[0].max_result_rows == expected
-    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000, expected)
+    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000,
+                                             computed_moves_store.MAX_SCAN_ROWS)
     assert captured[0].max_batch_rows <= captured[0].max_result_rows
 
 
@@ -1062,15 +1076,13 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     returned rows are unchanged."""
     repository, snapshot = _scan_fixture(tmp_path)
     columns = ("event_id", "ticker", "event_date", "year", "src_orats")
-    baseline = computed_moves_store._scan_rows(repository, snapshot,
-                                               "earnings_events", columns)
+    baseline = _read_scan_rows(repository, snapshot, "earnings_events", columns)
     bound = _actual_population_bound(repository, snapshot, "earnings_events")
     existing_limit = computed_moves_store.MAX_SCAN_ROWS
     assert 0 < bound < existing_limit
     captured = _capture_scans(monkeypatch, repository)
 
-    result = computed_moves_store._scan_rows(repository, snapshot,
-                                             "earnings_events", columns)
+    result = _read_scan_rows(repository, snapshot, "earnings_events", columns)
 
     assert result == baseline
     assert len(result) == len(_EVENT_DAYS)
@@ -1115,13 +1127,399 @@ def test__scan_rows_committed_zero_row_year_fragment_is_a_valid_empty_result(tmp
     captured = _capture_scans(monkeypatch, repository)
     columns = ("event_id", "ticker", "event_date", "year", "src_orats")
 
-    result = computed_moves_store._scan_rows(repository, snapshot,
-                                             "earnings_events", columns)
+    result = _read_scan_rows(repository, snapshot, "earnings_events", columns)
 
     assert result == []
     assert len(captured) == 1
     assert captured[0].max_result_rows == 0
     assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000) > 0
+
+
+# --------------------------------------------------------------------------
+# slice 2 (the wired scanner): ``_scan_rows`` now streams one pinned selection
+# as ``ops.pinned_partition_reader`` ``RetainedBatch`` leases, so a selected
+# population LARGER than ``MAX_SCAN_ROWS`` still arrives whole and in
+# primary-key order while only one batch is ever retained. The shared lease
+# cleanup contract that keeps this streaming safe -- a caller that edits a
+# leased list still gets its creation-time charge discharged and the very
+# list it mutated cleared -- is exercised by the already-merged
+# tests/test_v2_ops_partition_consumer.py::test_release_discharges_the_creation_charge_after_the_list_is_edited,
+# and, through the wired ``_scan_rows`` consumer itself, by
+# test__scan_rows_discharges_the_creation_charge_of_an_edited_leased_batch below.
+# --------------------------------------------------------------------------
+
+_SCAN_COLUMNS = ("event_id", "ticker", "event_date", "year", "src_orats")
+
+
+def _legacy_scan_rows(repository, snapshot, table_name: str, columns) -> list[dict]:
+    """Test-local oracle of the DELETED pre-slice-2 ``_scan_rows``: the exact
+    old full-materialization path -- pinned contract ref and table contract,
+    sorted represented year partitions (empty means ``[]`` without scanning),
+    the ``year in`` key filter, the manifest population bound,
+    ``max_result_rows = min(MAX_SCAN_ROWS, population_bound)``, a batch ceiling
+    of ``min(contract.maximum_batch_rows, 50_000)`` further clamped by the
+    positive bound and the result limit, the primary-key ``DataQuery``, and
+    flattened scan batches. It reads ``computed_moves_store.MAX_SCAN_ROWS``
+    live, so a test can materialize the old path's expected rows BEFORE
+    lowering the cap."""
+    from engine.v2.contracts import DataQuery
+
+    contract_ref = snapshot.table_versions[table_name].table_contract_ref
+    contract = repository.table_contract(snapshot, table_name)
+    years = tuple(sorted({int(record.partition_key)
+                          for record in repository.fragment_records(snapshot, table_name)}))
+    if not years:
+        return []
+    key_filter = (KeyPredicate(column="year", operator="in", values=years),)
+    population_bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
+        key_filter=key_filter, time_interval=None)
+    max_result_rows = min(computed_moves_store.MAX_SCAN_ROWS, population_bound)
+    max_batch_rows = min(contract.maximum_batch_rows, 50_000)
+    if population_bound > 0:
+        max_batch_rows = min(max_batch_rows, population_bound, max_result_rows)
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id, table_contract_ref=contract_ref,
+        columns=tuple(columns),
+        key_filter=key_filter,
+        order_by=tuple(contract.primary_key),
+        max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows)
+    rows: list[dict] = []
+    for batch in repository.scan(query, table_name=table_name):
+        rows.extend(batch.to_pylist())
+    return rows
+
+
+def test__scan_rows_streams_a_population_larger_than_max_scan_rows(tmp_path, monkeypatch):
+    """One injected ``RetainedRowCount`` over the fixture's ``MAX_SCAN_ROWS + 1``
+    unique ``earnings_events`` rows: every row comes back, in ``event_id``
+    (contract primary-key) order, the result limit is the manifest
+    selected-population bound -- never the retained cap -- the batch limit
+    stays at or under the cap, and the account ends empty with its peak at one
+    in-flight batch. A second complete read of the same pin returns an
+    identical list. The streamed rows are also checked against the deleted
+    pre-slice-2 scanner's own output (the ``_legacy_scan_rows`` oracle, run
+    while the cap still exceeds the population) -- the new path is verified
+    against the OLD behavior, never against itself."""
+    repository, snapshot = _scan_fixture(tmp_path)  # len(_EVENT_DAYS) unique event_ids
+    cap = len(_EVENT_DAYS) - 1  # the fixture holds exactly cap + 1 rows
+    bound = _actual_population_bound(repository, snapshot, "earnings_events")
+    assert bound == len(_EVENT_DAYS) > cap  # the population exceeds the retained cap
+    assert computed_moves_store.MAX_SCAN_ROWS > bound  # the old cap still covers every row
+    legacy_expected = _legacy_scan_rows(repository, snapshot, "earnings_events",
+                                        _SCAN_COLUMNS)
+    assert len(legacy_expected) == cap + 1  # the oracle really materialized the whole pin
+    monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", cap)
+    captured = _capture_scans(monkeypatch, repository)
+    account = RetainedRowCount()
+    monkeypatch.setattr(computed_moves_store, "RetainedRowCount", lambda: account)
+
+    rows = _read_scan_rows(repository, snapshot, "earnings_events", _SCAN_COLUMNS)
+    second = _read_scan_rows(repository, snapshot, "earnings_events", _SCAN_COLUMNS)
+    assert second == rows  # the same pin re-read complete and identical
+
+    expected = sorted((_event_row("AAAA", day) for day in _EVENT_DAYS),
+                      key=lambda row: row["event_id"])
+    ids = [row["event_id"] for row in rows]
+    assert len(set(ids)) == len(ids) == cap + 1  # unique keys, nothing dropped or added
+    assert ids == sorted(ids) == [row["event_id"] for row in expected]  # primary-key order
+    assert rows == [{column: row[column] for column in _SCAN_COLUMNS} for row in expected]
+    assert rows == legacy_expected  # byte-for-byte what the deleted old path materialized
+    assert account.live_rows == 0  # every lease discharged as the reader advanced
+    assert account.peak_rows <= computed_moves_store.MAX_SCAN_ROWS  # one batch, never more
+    assert account.peak_rows < bound  # retention stayed under the whole population
+    assert account.peak_rows == captured[0].max_batch_rows  # exactly one lease live at a time
+    assert len(captured) == 2  # both complete reads, each one scan
+    assert captured[0].max_result_rows == bound  # the manifest bound, not the cap
+    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000, cap)
+
+
+def test__scan_rows_propagates_one_typed_limit_guard_and_retains_nothing(tmp_path,
+                                                                         monkeypatch):
+    """A pinned population bound below what the fragment actually holds: the
+    repository's own ``RESULT_LIMIT_EXCEEDED`` is terminal -- one scan call, no
+    retry, no fallback, no partial success -- and because it lands mid-stream
+    (one lease was already handed out) the reader's cleanup must leave the
+    injected account back at zero. ``MAX_SCAN_ROWS`` is lowered to two so the
+    stream must hand out more than one leased batch before the guard fires: an
+    exact peak of two -- never four -- proves the earlier batch was consumed
+    and released on the way to the refusal, and ``rows`` staying ``None``
+    proves nothing was ever materialized out of the failed scan."""
+    repository, snapshot = _scan_fixture(tmp_path)
+    real_bound = _actual_population_bound(repository, snapshot, "earnings_events")
+    pinned_bound = real_bound - 1  # the manifest now under-reports the rows behind it
+    assert pinned_bound > 0
+    monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", 2)
+    assert real_bound > computed_moves_store.MAX_SCAN_ROWS  # the population exceeds the cap
+    account = RetainedRowCount()
+    monkeypatch.setattr(computed_moves_store, "RetainedRowCount", lambda: account)
+    captured = _capture_population_scan(monkeypatch, repository, pinned_bound)
+
+    rows = None
+    with pytest.raises(DataError) as err:
+        rows = _read_scan_rows(repository, snapshot, "earnings_events", _SCAN_COLUMNS)
+
+    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert err.value.problem.retryable is False
+    assert rows is None  # the refusal propagated out of the helper: nothing materialized
+    assert len(captured) == 1  # exactly one scan, never a retry
+    assert captured[0].max_result_rows == pinned_bound < real_bound
+    assert captured[0].max_batch_rows == computed_moves_store.MAX_SCAN_ROWS == 2
+    assert account.peak_rows == 2  # one in-flight batch: earlier ones were released first
+    assert account.live_rows == 0  # ... and the live lease was discharged on the way out
+
+
+def test__scan_rows_propagates_a_missing_pinned_contract_without_reaching_scan(tmp_path,
+                                                                               monkeypatch):
+    """The wired store's own R1 case: the reader's first move is the pinned
+    contract lookup, so a typed ``CONTRACT_MISMATCH`` injected at
+    ``repository.table_contract`` propagates out of the ``_read_scan_rows``
+    helper unchanged and exactly once -- no scan is ever reached, no row result is
+    ever assigned, and the fresh lease account stays empty."""
+    repository, snapshot = _scan_fixture(tmp_path)
+    problem = data_fail("CONTRACT_MISMATCH", "synthetic missing pinned contract",
+                        details={"table_name": "earnings_events"})
+
+    def _refuse(*_args, **_kwargs):
+        raise problem
+
+    monkeypatch.setattr(repository, "table_contract", _refuse)
+    account = RetainedRowCount()
+    monkeypatch.setattr(computed_moves_store, "RetainedRowCount", lambda: account)
+    captured = _capture_scans(monkeypatch, repository)
+
+    rows = None
+    with pytest.raises(DataError) as err:
+        rows = _read_scan_rows(repository, snapshot, "earnings_events", _SCAN_COLUMNS)
+
+    assert err.value is problem  # the very same typed refusal, propagated once, unwrapped
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert rows is None  # no row result was ever assigned
+    assert captured == []  # the refusal lands before any scan call -- never retried
+    assert account.live_rows == 0
+
+
+def test__scan_rows_discards_a_partial_read_on_a_mid_scan_integrity_failure(tmp_path,
+                                                                            monkeypatch):
+    """The wired store's own R2/R3/R5 case: the first REAL leased batch lands,
+    then a pre-created ``MANIFEST_CORRUPT`` refusal interrupts the scan. The
+    same exception object propagates -- exactly one scan call, never a retry --
+    and because a partial read is provisional the result never becomes a row
+    list, while the account is back at zero with its peak at the one in-flight
+    two-row batch. Synthetic fixture only: nothing is published or mutated."""
+    repository, snapshot = _scan_fixture(tmp_path)
+    problem = data_fail("MANIFEST_CORRUPT", "synthetic mid-scan integrity failure")
+    monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", 2)
+    assert problem.code == "MANIFEST_CORRUPT"
+    assert problem.problem.retryable is False
+    account = RetainedRowCount()
+    monkeypatch.setattr(computed_moves_store, "RetainedRowCount", lambda: account)
+    real_scan = repository.scan
+    captured = []
+
+    def _scan_once_then_fail(query, **kwargs):
+        captured.append(query)
+        batches = real_scan(query, **kwargs)
+        yield next(batches)  # the first real batch, then the terminal refusal
+        raise problem
+
+    monkeypatch.setattr(repository, "scan", _scan_once_then_fail)
+
+    result = None
+    with pytest.raises(DataError) as err:
+        result = _read_scan_rows(repository, snapshot, "earnings_events", _SCAN_COLUMNS)
+
+    assert err.value is problem  # the repository's refusal, unchanged
+    assert len(captured) == 1  # exactly one scan call, no retry
+    assert captured[0].max_batch_rows == computed_moves_store.MAX_SCAN_ROWS == 2
+    assert result is None  # the partial read never materialized into a list
+    assert account.peak_rows == 2  # the one in-flight leased batch
+    assert account.live_rows == 0  # discharged on the way out
+
+
+def test__scan_rows_discharges_the_creation_charge_of_an_edited_leased_batch(tmp_path,
+                                                                             monkeypatch):
+    """Integration regression for caller mutation of a yielded lease list
+    through the WIRED ``_scan_rows`` path -- not merely a direct
+    ``RetainedBatch`` unit test (that one lives in
+    ``tests/test_v2_ops_partition_consumer.py``). A generator wrapper
+    monkeypatched over ``iter_pinned_scan_batches`` enters each real lease,
+    copies the rows still to come, pops one row WHILE the lease is live --
+    a deliberate violation of the no-resize rule -- and yields the same
+    lease object to the production ``_scan_rows``. The fixed creation charge
+    never moves with the edit; as the scanner advances, every saved lease
+    list comes back cleared, its charge discharged, and the stream that
+    lands is exactly the expected rows minus one popped row per batch (the
+    cap lowered to two makes three batches)."""
+    repository, snapshot = _scan_fixture(tmp_path)
+    monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", 2)
+    account = RetainedRowCount()
+    monkeypatch.setattr(computed_moves_store, "RetainedRowCount", lambda: account)
+    expected = [{column: row[column] for column in _SCAN_COLUMNS}
+                for row in sorted((_event_row("AAAA", day) for day in _EVENT_DAYS),
+                                  key=lambda row: row["event_id"])]
+
+    real_iter = computed_moves_store.iter_pinned_scan_batches
+    saved_lists: list[list] = []
+    charges: list[int] = []
+    post_pop: list[dict] = []
+    consumed = 0
+
+    def _mutating_wrapper(*args, **kwargs):
+        nonlocal consumed
+        for lease in real_iter(*args, **kwargs):
+            rows = lease.__enter__()  # the lease's actual mutable list
+            remaining = expected[consumed:]  # a copy: the rows not yet handed out
+            charge = len(rows)  # the original creation charge, fixed until release
+            rows.pop()  # resize WHILE the lease is live -- the documented violation
+            assert account.live_rows == charge  # the edit moved neither the charge...
+            saved_lists.append(rows)  # the very list object _scan_rows is handed
+            charges.append(charge)
+            post_pop.extend(remaining[:charge - 1])  # ... nor what the scanner yields
+            consumed += charge
+            yield lease
+
+    monkeypatch.setattr(computed_moves_store, "iter_pinned_scan_batches", _mutating_wrapper)
+
+    rows = _read_scan_rows(repository, snapshot, "earnings_events", _SCAN_COLUMNS)
+
+    assert charges == [2, 2, 1]  # three leased batches, one row popped in each
+    assert rows == post_pop == [expected[0], expected[2]]  # exactly the post-pop stream
+    assert saved_lists and all(saved == [] for saved in saved_lists)  # every list cleared
+    assert account.live_rows == 0  # every fixed creation charge discharged
+    assert account.peak_rows == 2  # the exact expected peak (max(charges) == 2)
+    assert account.peak_rows <= computed_moves_store.MAX_SCAN_ROWS
+
+
+def test__scan_once_keeps_only_orats_confirmed_events_that_carry_a_session(tmp_path,
+                                                                            monkeypatch):
+    """Slice 2 changed HOW rows arrive, not which rows are usable: the wired
+    ``_scan_once`` must still apply the existing availability filter
+    (``src_orats`` confirmed AND ``session`` present). One pin, three
+    synthetic events: (a) a confirmed ORATS row with a session, (b) a row with
+    ``src_orats=False``, and (c) a confirmed row with ``session=None`` -- only
+    (a) may appear in the returned events frame. The committed-empty
+    ``daily_market`` table is the established fixture shape.
+
+    Cap wiring on the SAME production path: ``MAX_SCAN_ROWS`` is lowered to
+    two, BELOW the three-row population, and every ``RetainedRowCount`` the
+    two ``_scan_frame`` calls create plus every ``repository.scan`` query is
+    captured. The events scan's batch limit is exactly two, its account peaks
+    at exactly two (the population leased as two batches, one in flight at a
+    time) and returns to zero, and the empty daily scan's account never
+    leaves zero.
+
+    Conversion-while-leased is proven DIRECTLY, never left to ``pd.DataFrame``
+    consuming a generator: ``computed_moves_store.pd`` is replaced by a proxy
+    (``DataFrame`` / ``concat`` / ``to_datetime``) whose ``DataFrame`` must be
+    handed the CURRENT batch ``list`` -- its ticker rows exactly the next
+    slice of the primary-key stream -- while the events account still carries
+    the live charge ``live_rows == len(batch) <= MAX_SCAN_ROWS``, then
+    delegates to the real constructor. The recorded batch lengths are the two
+    events leases, ``[2, 1]``; the empty daily scan contributes none. A
+    regression handing ``_scan_rows``' generator (or any list once its lease
+    has discharged) to ``pd.DataFrame`` trips the proxy instead of passing
+    silently."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    confirmed = _event_row("AAAA", _EVENT_DAYS[0])
+    unconfirmed = dict(_event_row("BBBB", _EVENT_DAYS[2]), src_orats=False)
+    sessionless = dict(_event_row("CCCC", _EVENT_DAYS[4]), session=None)
+    head = _build_parent(conn, clock, store,
+                         events_rows=[confirmed, unconfirmed, sessionless])
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(head["snapshot_id"])
+
+    monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", 2)
+    accounts: list[RetainedRowCount] = []
+
+    def _capturing_account() -> RetainedRowCount:
+        account = RetainedRowCount()
+        accounts.append(account)
+        return account
+
+    monkeypatch.setattr(computed_moves_store, "RetainedRowCount", _capturing_account)
+    captured = _capture_scans(monkeypatch, repository)
+
+    from types import SimpleNamespace
+
+    real_pd = computed_moves_store.pd
+    converted_batches: list[int] = []
+    batched_tickers = ["AAAA", "BBBB", "CCCC"]  # the pin in event_id (primary-key) order
+
+    def _lease_live_frame(data=None, *args, **kwargs):
+        if data is None:  # _scan_frame's no-chunks empty-frame call carries no batch
+            return real_pd.DataFrame(*args, **kwargs)
+        assert isinstance(data, list)  # a batch list, never a generator handed to pandas
+        assert len(accounts) == 1  # only the events scan reaches a batch here
+        assert (accounts[0].live_rows == len(data)
+                <= computed_moves_store.MAX_SCAN_ROWS)  # conversion under the LIVE lease
+        start = sum(converted_batches)
+        assert [row["ticker"] for row in data] == batched_tickers[start:start + len(data)]
+        converted_batches.append(len(data))
+        return real_pd.DataFrame(data, *args, **kwargs)
+
+    monkeypatch.setattr(computed_moves_store, "pd", SimpleNamespace(
+        DataFrame=_lease_live_frame,
+        concat=real_pd.concat,
+        to_datetime=real_pd.to_datetime))
+
+    events, daily = computed_moves_store._scan_once(repository, snapshot)
+
+    assert list(events["ticker"]) == ["AAAA"]  # (b) and (c) never survive the filter
+    assert list(events["session"]) == ["AMC"]
+    assert list(events["src_orats"]) == [True]
+    assert list(events["event_date"]) == [pd.Timestamp(_EVENT_DAYS[0])]
+    assert daily.empty  # the empty daily table scans through unchanged
+
+    assert converted_batches == [2, 1]  # the two events leases; the daily scan adds no chunk
+    assert len(accounts) == 2  # one fresh account per _scan_frame: events, then daily
+    assert len(captured) == 1  # the empty daily selection never reaches repository.scan
+    assert captured[0].max_batch_rows == 2  # the events scan is held to the lowered cap
+    assert accounts[0].peak_rows == 2  # three rows leased as two batches (2 + 1), never 3
+    assert accounts[0].live_rows == 0  # every events lease discharged as its chunk built
+    assert accounts[1].peak_rows == 0  # the empty daily scan's account ...
+    assert accounts[1].live_rows == 0  # ... never left zero
+
+
+def test__scan_frame_discards_its_chunks_on_a_mid_partition_failure(tmp_path, monkeypatch):
+    """The batch-aware ``_scan_frame`` consumer, not just ``_scan_rows``: the
+    first REAL leased batch lands (its frame chunk built while the lease is
+    live), then the same pre-created ``MANIFEST_CORRUPT`` refusal interrupts
+    the scan before a second batch. The exact typed error propagates --
+    exactly one scan, no retry, and no frame result ever assigned -- while the
+    local provisional chunk list is discarded on the unwind and the injected
+    account ends discharged with its peak at the one in-flight two-row batch
+    (``MAX_SCAN_ROWS`` lowered to two under the fixture's five-row pin).
+    Synthetic ``tmp_path`` catalog data only; nothing is published."""
+    repository, snapshot = _scan_fixture(tmp_path)
+    problem = data_fail("MANIFEST_CORRUPT", "synthetic mid-partition failure")
+    monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", 2)
+    assert problem.code == "MANIFEST_CORRUPT"
+    account = RetainedRowCount()
+    monkeypatch.setattr(computed_moves_store, "RetainedRowCount", lambda: account)
+    real_scan = repository.scan
+    captured = []
+
+    def _scan_once_then_fail(query, **kwargs):
+        captured.append(query)
+        batches = real_scan(query, **kwargs)
+        yield next(batches)  # exactly the first real batch, then the terminal refusal
+        raise problem
+
+    monkeypatch.setattr(repository, "scan", _scan_once_then_fail)
+
+    frame = None
+    with pytest.raises(DataError) as err:
+        frame = computed_moves_store._scan_frame(repository, snapshot, "earnings_events",
+                                                 _SCAN_COLUMNS)
+
+    assert err.value is problem  # the very same pre-created refusal, propagated unwrapped
+    assert len(captured) == 1  # exactly one scan, never a retry
+    assert frame is None  # the partial read never became a frame result
+    assert account.peak_rows == 2  # the one in-flight leased batch, cap-sized
+    assert account.live_rows == 0  # discharged as the reader unwound
 
 
 # --------------------------------------------------------------------------
