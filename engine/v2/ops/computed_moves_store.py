@@ -896,9 +896,9 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
     bound to ``RefreshCallback`` via a bare ``functools.partial``: ``main``'s
     ``RefreshParameters`` has no ``as_of`` field, so ``as_of`` is an explicit,
     validated, required keyword. Validates the staged input document up front,
-    selects targets from the pinned parent snapshot with ONE scan per source
-    table, and commits one new snapshot. A same-``as_of`` rerun genuinely
-    no-ops: every committed row's ``computed_at`` derives from ``as_of``, so
+    selects targets from one counter-only scan per source table, captures
+    through bounded ticker chunks (one rescan of both tables per chunk), and
+    commits one new snapshot. A same-``as_of`` rerun genuinely no-ops: every committed row's ``computed_at`` derives from ``as_of``, so
     identical inputs commit identical bytes. ``use_cached_receipts`` picks the
     plan's cache policy (``_plan_cached_outcomes``); the supervised default
     is unchanged."""
