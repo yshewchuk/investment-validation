@@ -55,7 +55,7 @@ payoff/recalibration/board-analog-matcher artifacts into one immutable
 `ScoringReleaseBinding`, raising `NoCurrentRelease`/`ModelNotReady` (never a
 legacy or cached fallback) when the pointer, catalog or a named member is
 not ready. `engine.v2.ops.native_score_batch.py`'s `native_score_batch` job
-worker calls `resolve_release_binding` and, when no `gate_policy` is supplied,
+worker calls `resolve_release_binding` and, when `gate_policy` is absent or empty,
 `resolve_gate_policy` (the gate thresholds staged in the release), but that job is never submitted in
 production yet; `engine.v2.ops.supervisor.py`'s tick loop separately calls
 `resolve_production_release_binding()` live whenever its cheap
