@@ -325,6 +325,77 @@ def test_replay_explicit_snapshot_id_ignores_a_moved_head(tmp_path, monkeypatch)
     conn.close()
 
 
+def _run_replay_cli_with_moving_head(monkeypatch, explicit_snapshot_id=None):
+    from types import SimpleNamespace
+
+    from tools import v2_replay
+
+    resolved_ids = []
+    event_snapshot_ids = []
+    price_snapshot_ids = []
+    report_snapshot_ids = []
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    class FakeRepository:
+        def __init__(self):
+            self.head_snapshot_id = "snap-a"
+
+    connection = FakeConnection()
+    monkeypatch.setattr(v2_replay, "open_catalog", lambda *args, **kwargs: connection)
+    monkeypatch.setattr(v2_replay, "Repository", lambda conn, store: FakeRepository())
+
+    def resolve_snapshot(repository, *, scope, snapshot_id):
+        resolved_ids.append(snapshot_id)
+        if snapshot_id is not None:
+            return SimpleNamespace(snapshot_id=snapshot_id)
+        resolved = SimpleNamespace(snapshot_id=repository.head_snapshot_id)
+        repository.head_snapshot_id = "snap-b"
+        return resolved
+
+    def events_frame(repository, snapshot, *, years=None):
+        event_snapshot_ids.append(snapshot.snapshot_id)
+        return object()
+
+    def run(repository, *, strategies, events, reports_dir, scope, snapshot_id):
+        snapshot = resolve_snapshot(repository, scope=scope, snapshot_id=snapshot_id)
+        price_snapshot_ids.append(snapshot.snapshot_id)
+        report_snapshot_ids.append(snapshot.snapshot_id)
+        return {"snapshot_id": snapshot.snapshot_id, "results": [], "path": "report.json"}
+
+    monkeypatch.setattr(v2_replay._snapshot, "resolve_snapshot", resolve_snapshot)
+    monkeypatch.setattr(v2_replay._replay_run, "events_frame", events_frame)
+    monkeypatch.setattr(v2_replay._replay_run, "run", run)
+
+    argv = ["--catalog", "catalog.sqlite", "--store-root", "store", "--strategy", "STR-THRU"]
+    if explicit_snapshot_id is not None:
+        argv.extend(["--snapshot-id", explicit_snapshot_id])
+    assert v2_replay.main(argv) == 0
+    return resolved_ids, event_snapshot_ids, price_snapshot_ids, report_snapshot_ids
+
+
+def test_replay_cli_uses_one_resolved_head_for_events_prices_and_report(monkeypatch):
+    resolved, events, prices, report = _run_replay_cli_with_moving_head(monkeypatch)
+
+    assert resolved == [None, "snap-a"]
+    assert events == ["snap-a"]
+    assert prices == ["snap-a"]
+    assert report == ["snap-a"]
+
+
+def test_replay_cli_preserves_explicit_snapshot_id(monkeypatch):
+    resolved, events, prices, report = _run_replay_cli_with_moving_head(
+        monkeypatch, explicit_snapshot_id="snap-a"
+    )
+
+    assert resolved == ["snap-a", "snap-a"]
+    assert events == ["snap-a"]
+    assert prices == ["snap-a"]
+    assert report == ["snap-a"]
+
+
 def test_replay_refuses_a_corrupt_manifest(tmp_path, monkeypatch):
     conn, clock, store = catalog_and_store(tmp_path)
     snap = _commit(conn, clock, store, chain_rows=_chain_rows(),
