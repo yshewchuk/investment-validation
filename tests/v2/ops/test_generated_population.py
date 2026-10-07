@@ -32,8 +32,8 @@ _EVENTS = contract_for("earnings_events")
 _EVENTS_REF = contract_ref_for(_EVENTS)
 _DAILY = contract_for("daily_market")
 _AS_OF = "2026-12-20"  # window 2026-12-20 .. 2027-01-24 crosses a partition year
-_STRATEGIES = ("BFLY-P", "BFLY-P5", "CND-PS", "CTR5", "DYN-SV", "RAMP7", "STR-RUNUP",
-               "STR-THRU", "TWIN-P", "TWIN-P5")  # native-covered + the DYN-SV meta-row
+_STRATEGIES = ("BFLY-P", "BFLY-P5", "CAL-P", "CND-P", "CND-PS", "CTR5", "RAMP7", "STR-RUNUP",
+               "STR-THRU", "TWIN-P", "TWIN-P5")  # what the legacy score stage emits per event
 
 
 def _event_row(ticker, event_date, session="BMO", suffix=""):
@@ -274,3 +274,103 @@ def test_the_same_snapshot_and_as_of_give_the_same_population_and_scope_hash(env
     assert first["plan_hash"] == second["plan_hash"]
     assert scope(first) == scope(second)
     assert pin_one.calls[0]["expected_snapshot_id"] == pin_two.calls[0]["expected_snapshot_id"]
+
+
+# --- the legacy score stage's own population check ---------------------------------------------
+
+
+def _score_events():
+    """``earnings_events`` as the legacy ``score_calendar`` reads it, for the same synthetic rows."""
+    return pd.DataFrame([{"event_id": r["event_id"], "ticker": r["ticker"],
+                          "event_date": pd.Timestamp(r["event_date"]), "session": r["session"]}
+                         for r in _ROWS])
+
+
+class _FakeCalendar:
+    def resolve_offsets(self, *args, **kwargs):
+        raise KeyError("synthetic: no calendar range")  # plan_events skips: no chain index needed
+
+
+class _FakeScorer:
+    analog_entry_coverage = 1.0
+
+    def __init__(self, *args, **kwargs):
+        self.calendar = _FakeCalendar()
+        self._live_features_cache = {}
+
+    def score(self, request, chain_index=None):
+        from engine.score import ScoreResult
+        return ScoreResult(ticker=request.ticker, strategy=request.strategy,
+                           as_of=pd.Timestamp(_AS_OF), event_date=request.event_date,
+                           session=request.session, spot=100.0, exp_pnl_sim=0.01)
+
+
+def _score_stage(monkeypatch, tmp_path, population, *, events=None):
+    """Run the real ``_action_score`` (so the real ``score_calendar`` and population check) on
+    synthetic events; only the scorer, the feature load and the strike ladder are stubbed."""
+    import engine.dashboard.nightly as nightly_module
+    import engine.features as features_module
+    import engine.score as score_module
+    from engine.v2.ops import legacy_adapter
+
+    frame = _score_events() if events is None else events
+    monkeypatch.setattr(score_module, "Scorer", _FakeScorer)
+    monkeypatch.setattr(score_module.store, "read_table", lambda *a, **k: frame.copy())
+    monkeypatch.setattr(features_module.FeatureContext, "load", staticmethod(lambda t, years: object()))
+    monkeypatch.setattr(nightly_module, "strike_ladder", lambda *a, **k: [])
+    monkeypatch.setattr(legacy_adapter, "_check_features_current", lambda root: None)
+    (tmp_path / "finality.json").write_text(json.dumps({
+        "date": _AS_OF, "is_final": True, "market_wide": True, "daily_share": 1.0,
+        "chain_share": 1.0, "covered": 1, "detail": "final"}))
+    legacy_adapter._action_score({
+        "tickers": ["AAA", "BBB", "CCC", "DDD"], "year_start": 2026, "year_end": 2027,
+        "session": _AS_OF, "horizon_days": 35, "alt_strikes": 1,
+        "expected_population": tuple(population)}, tmp_path)
+    return json.loads((tmp_path / "score.json").read_text())
+
+
+def test_the_generated_population_is_what_the_score_stage_emits(env, monkeypatch, tmp_path):
+    population, _ = _generate(env)
+
+    document = _score_stage(monkeypatch, tmp_path, population)  # raises if the check fails
+
+    observed = set(document["observed_population"])
+    chooser = {key for key in observed if key.split("|")[1] == "DYN-SV"}
+    assert chooser  # the real score_calendar did append chooser rows, which no plan can list
+    assert observed - chooser == set(population)
+
+
+def test_a_native_board_population_would_have_failed_the_score_stage(env, monkeypatch, tmp_path):
+    from engine.v2.ops.errors import OpsError
+    from engine.v2.ops.native_board_universe import _COVERED_STRATEGIES
+
+    population, _ = _generate(env)
+    native = [key for key in population if key.split("|")[1] in _COVERED_STRATEGIES]
+    assert len(native) < len(population)  # the legacy set has CAL-P and CND-P on top
+
+    with pytest.raises(OpsError, match="differs from planned"):
+        _score_stage(monkeypatch, tmp_path, native)
+
+
+def test_the_score_stage_still_refuses_chooser_rows_it_cannot_tie_to_a_planned_event(
+        env, monkeypatch, tmp_path):
+    from engine.v2.ops.errors import OpsError
+
+    population, _ = _generate(env)
+    without_one_event = [key for key in population if not key.startswith("BBB|")]
+
+    with pytest.raises(OpsError, match="differs from planned") as raised:
+        _score_stage(monkeypatch, tmp_path, without_one_event)
+
+    assert "BBB|DYN-SV|2027-01-24" in raised.value.problem.details["unplanned"]
+
+
+def test_a_planned_chooser_key_must_still_be_observed(env, monkeypatch, tmp_path):
+    from engine.v2.ops.errors import OpsError
+
+    population, _ = _generate(env)
+
+    with pytest.raises(OpsError, match="differs from planned") as raised:
+        _score_stage(monkeypatch, tmp_path, [*population, "ZZZ|DYN-SV|2026-12-22"])
+
+    assert raised.value.problem.details["missing"] == ["ZZZ|DYN-SV|2026-12-22"]
