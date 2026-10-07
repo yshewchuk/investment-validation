@@ -527,6 +527,25 @@ def test_worker_dispatch_sends_the_audited_clock_selector_to_a_real_subprocess(t
     assert not (tmp_path / "experiments" / "LEDGER.csv").exists()
 
 
+def test_run_legacy_script_clears_inherited_pinned_source_without_sources(
+        tmp_path, monkeypatch):
+    """A caller's pinned-source value must not force unrelated wrappers into staging mode."""
+    import subprocess
+
+    monkeypatch.setenv("INVESTING_PLAN_PINNED_SOURCE", "/inherited/source.py")
+    captured = {}
+
+    def fake_run(command, *, cwd, env, check, capture_output, text, timeout):
+        captured.update(env)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    legacy_adapter.run_legacy_script(
+        tmp_path, REGISTERED_RUNNER, args=(), declared_runtime_sources=())
+
+    assert "INVESTING_PLAN_PINNED_SOURCE" not in captured
+
+
 @pytest.mark.parametrize("runner_id", [
     "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
     "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
