@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome = _replay_run.run(
             repository, strategies=strategies, events=events,
             reports_dir=args.reports_dir, scope=scope,
-            snapshot_id=args.snapshot_id,
+            snapshot_id=snapshot.snapshot_id,
         )
     except DataError as exc:
         print(
