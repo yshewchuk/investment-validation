@@ -62,10 +62,13 @@ This ratchet does not change the merged path policy: root-level tests and
 helpers, `tools/` and `checks/` continue to select the full suite. The current
 33-of-40 fallback rate is accepted while the layout improves incrementally.
 
-Add the ratchet check to the always-run meta set. It fails when a new
-`test_*.py` file is added outside `tests/v2/<package>/` or
-`tests/v2/integration/`, when the unmoved set grows, when a package directory
-is not a package in `checks/layer_map.py`, or when the budget is stale. A test
+Configure `tests/v2/integration/test_test_selection.py` as an always-run PR
+test. The CI selector includes it for every non-empty PR diff, including an
+unrelated test-only diff where a changed test file would otherwise be a leaf.
+The ratchet fails when a new `test_*.py` file is added outside
+`tests/v2/<package>/` or `tests/v2/integration/`, when the unmoved set grows,
+when a package directory is not a package in `checks/layer_map.py`, or when
+the budget is stale. A test
 removed from the unmoved set must lower the budget in the same PR; a move that
 does not update the budget therefore fails. A `git mv` with no content edits
 costs zero added lines. Git reporting a move as delete plus add does not
@@ -102,16 +105,17 @@ is still reviewable.
 
 ## Selector and workflow boundary
 
-Add a small selector module under `checks/`, with focused tests of path
+The package-layout selector under `checks/` has focused tests of path
 mapping, reverse closure, integration declarations, unmapped paths and
 failure behavior, plus a cache regression proving stale selected paths cannot
-override the current base/head diff. `.github/workflows/tests.yml` supplies the changed paths
-and consumes the selected test directories or an explicit full-suite result.
-It does not call or modify `tools/mutation_pilot.py select-tests`; that
-selector remains untouched for its existing mutation-testing role. If the
-selector process crashes or emits invalid output, the workflow prints the
-error and runs `tests/` in full. Pushes to `main`, scheduled runs and manual
-dispatch continue to run `tests/` in full as the post-merge backstop.
+override the current base/head diff. `.github/workflows/tests.yml` supplies PR
+changed paths to `tools/mutation_pilot.py select-tests` and consumes the
+selected test files or an explicit full-suite result. Its configured
+`always_run` tests are added for every non-empty PR diff, including unrelated
+test-only diffs. If the selector process crashes or emits invalid output, the
+workflow prints the error and runs `tests/` in full. Pushes to `main`,
+scheduled runs and manual dispatch continue to run `tests/` in full as the
+post-merge backstop.
 
 ## Evidence and acceptance before code
 
