@@ -217,11 +217,16 @@ def _matched_decision_clock(
 def _feature_names_or_refusal(
     feature_names: Sequence[str], *identities: Any,
 ) -> tuple[Sequence[str], tuple[str, str] | None]:
-    """Explicit ``feature_names`` win. Else the sorted, de-duplicated union of
-    the identities' ``feature_order`` minus the stage-derived gate columns
-    (projecting those would suppress their native derivation), or a
-    ``(code, fixed_detail)`` refusal when an identity has no ``feature_order``."""
-    if feature_names:
+    """Explicit ``feature_names`` win. Only ``None`` or an empty list/tuple
+    derive: the sorted, de-duplicated union of the identities' ``feature_order``
+    minus the stage-derived gate columns (projecting those would suppress their
+    native derivation), or a ``(code, fixed_detail)`` refusal when an identity
+    has no ``feature_order``. Any other shape (``0``, ``False``, ``{}``, ``""``,
+    a non-str element) is passed through unchanged, so the bundle assembler
+    refuses it ``INVALID_FEATURE_NAMES`` exactly as before."""
+    if feature_names is None:
+        feature_names = ()
+    if feature_names or not isinstance(feature_names, (list, tuple)):
         return feature_names, None
     if not all(identity.feature_order for identity in identities):
         return (), ("RELEASE_MISSING_FEATURE_ORDER",

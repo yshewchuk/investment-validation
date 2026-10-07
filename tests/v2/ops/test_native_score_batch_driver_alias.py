@@ -347,3 +347,26 @@ def test_worker_rejects_non_sequence_feature_names(tmp_path, bad):
     params["feature_names"] = bad
     with pytest.raises(ValueError, match="feature_names must be a list or tuple"):
         run_native_score_batch_worker(params, root)
+
+
+@pytest.mark.parametrize("bad", [0, False, {}, "", [1], ("signal", 2)])
+def test_direct_caller_malformed_feature_names_refuse_invalid_feature_names(tmp_path, bad):
+    """The shape check sits at the shared assembly boundary: a direct
+    ``assemble_score_batch_inputs`` caller passing a falsey or malformed
+    ``feature_names`` gets the per-row INVALID_FEATURE_NAMES refusal, never a
+    silent derive-everything default."""
+    binding = _stage(tmp_path, [SIZE, GATE])
+    event = _event_inputs()
+    assembled, refusals = _assemble(binding, [event], feature_names=bad)
+    assert assembled == {}
+    assert [r.code for r in refusals] == ["INVALID_FEATURE_NAMES"]
+
+
+@pytest.mark.parametrize("empty", [None, [], ()])
+def test_direct_caller_none_or_empty_feature_names_derive(tmp_path, empty):
+    binding = _stage(tmp_path, [SIZE, GATE])
+    event = _event_inputs()
+    assembled, refusals = _assemble(binding, [event], feature_names=empty)
+    assert refusals == ()
+    _, native_inputs = assembled[event.key]
+    assert sorted(native_inputs.features["missing_mask"]) == ["iv", "sig", "x", "zz"]
