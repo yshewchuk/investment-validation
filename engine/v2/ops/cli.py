@@ -755,12 +755,23 @@ def _primary_runner_bindings(plan, store):
     bindings = []
     for relative in relative_paths:
         path = base / relative
-        if not path.is_file():
+        if not path.is_file() or path.is_symlink():
             raise fail("VALIDATION_FAILED",
                        "registered runner source is missing",
                        details={"path": relative})
         bindings.append((relative, store.publish_bytes(
             path.read_bytes(), schema_ref="experiment_runner_source.v1.0")))
+    for relative in manifest.get("declared_runtime_inputs", ()):
+        path = base / relative
+        if not path.is_file() or path.is_symlink():
+            raise fail("VALIDATION_FAILED",
+                       "registered runner input is missing",
+                       details={"path": relative})
+        bindings.append((relative, store.publish_bytes(
+            path.read_bytes(), schema_ref="experiment_runner_input.v1.0")))
+    spec_path = base / manifest["spec_source"]
+    bindings.append(("spec.yaml", store.publish_bytes(
+        spec_path.read_bytes(), schema_ref="experiment_runner_source.v1.0")))
     return bindings
 
 
@@ -768,7 +779,7 @@ def _submit_command(args, root, conn, clock):
     store = ArtifactStore(root)
     ref = artifact(conn, store, args.plan)
     plan = json.loads(store.read_verified(ref))
-    policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
+    policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke", "primary"})})
     if plan.get("kind") == "nightly":
         return _submit_nightly(plan, conn, store, policy, clock)
     if plan.get("kind") == "experiment":

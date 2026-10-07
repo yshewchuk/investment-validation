@@ -585,6 +585,9 @@ RUNNER_INVENTORY = {
         "declared_runtime_sources": (
             "experiments/EXP-181_d_1_gated_execution_parity/run.py",
         ),
+        "declared_runtime_inputs": (
+            "experiments/EXP-179_execution_clock_d1_parity/results/trades/STR-THRU/d1_matched.parquet",
+        ),
         "fixed_arm_args": {"d1": ("--clock", "d1")},
         "ledger_write_behavior": ("appends experiments/LEDGER.csv rows via main(record=...) "
                                   "unless --no-ledger is passed; the adapter always passes it"),
@@ -614,6 +617,9 @@ RUNNER_INVENTORY = {
         "declared_runtime_sources": (
             "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/run.py",
             "experiments/EXP-142_str_runup_t14_factor_simulation_pnl_gate/simulation.py",
+        ),
+        "declared_runtime_inputs": (
+            "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/results/oos_scores.parquet",
         ),
         "ledger_write_behavior": (
             "appends experiments/LEDGER.csv rows via main()'s --no-ledger gate unless "
@@ -652,6 +658,7 @@ def runner_manifest(root: Path | str, script: str) -> dict:
     return {"schema_version": "runner_capability_manifest.v1.0",
             "runner": relative,
             "spec_source": entry["spec_source"],
+            "declared_runtime_inputs": entry.get("declared_runtime_inputs", ()),
             "spec_hash": file_hash(spec_path),
             "source_closure": closure,
             "no_ledger_support": True,
