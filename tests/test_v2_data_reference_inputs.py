@@ -736,6 +736,8 @@ def _plan_argv(tmp_path, store_root):
     ) + (
         LegacyFileRef(path="data/raw/fetch/orats/ab/placeholder.meta.json",
                       content_hash=file_hash(fixture), byte_size=fixture.stat().st_size),
+        LegacyFileRef(path="earnings_predictions/data/raw/oquants/moves/moves_AAA.json",
+                      content_hash=file_hash(fixture), byte_size=fixture.stat().st_size),
         LegacyFileRef(path=INPUTS["structure_champions"]["path"], content_hash=file_hash(fixture),
                       byte_size=fixture.stat().st_size),
     )

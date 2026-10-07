@@ -90,13 +90,17 @@ __all__ = [
 #: caught before submission: ``snapshot_import_plan.v1`` is not this.
 NIGHTLY_CAPTURE_IMPLEMENTATION_REF = "legacy_nightly_capture.v1"
 
-#: The six ``legacy_*`` nightly kinds this module declares a barrier read
+#: The seven ``legacy_*`` nightly kinds this module declares a barrier read
 #: plan for. Two of them (``legacy_render``, ``legacy_selfcheck``) ALSO run
 #: snapshot-backed once a plan pins a snapshot (``stages.SNAPSHOT_BACKED_
 #: KINDS``) -- see the module docstring for the structural derivation.
+#: ``legacy_features`` is the seventh: its moves/price read set is data-
+#: dependent, so ``capture_inputs`` enumerates it at capture time
+#: (``features_moves``/``features_price_series``).
 BARRIER_KINDS: tuple[str, ...] = (
     "legacy_finality", "legacy_decisions", "legacy_settlement",
     "legacy_model_evidence", "legacy_render", "legacy_selfcheck",
+    "legacy_features",
 )
 
 #: Named, bounded read families. ``kind`` selects how ``capture_inputs``
@@ -224,6 +228,24 @@ FAMILIES: dict[str, dict] = {
                   "capture_inputs module docstring); engine/dashboard/render.py:quota_state calls "
                   "it for legacy_render's build_meta",
     },
+    "features_moves": {
+        "kind": "moves_glob",
+        "directories": ("earnings_predictions/data/raw/oquants/moves", "data/raw/computed_moves"),
+        "reason": "engine/data/features/panel.py build_events globs moves_*.json under "
+                  "paths.RAW_OQUANTS_MOVES and paths.COMPUTED_MOVES and raises FileNotFoundError "
+                  "when neither holds one; engine/v2/ops/legacy_adapter.py:_action_features -> "
+                  "rebuild.build_panel_table runs it inside the worker's staged tree, which is "
+                  "built only from manifest file_refs",
+    },
+    "features_price_series": {
+        "kind": "price_series_bundle",
+        "universe": "moves_tickers",
+        "required": False,
+        "reason": "engine/data/features/panel.py add_runup_features reads px_<T>.csv (then the "
+                  "Tier-1 yfinance history entry) for every ticker the moves files cover; a "
+                  "ticker with neither leaves its run-up columns NaN, so this family is not "
+                  "required",
+    },
 }
 
 #: Per-kind family membership plus a short pointer to the adapter action that
@@ -265,6 +287,12 @@ LEGACY_NIGHTLY_READ_PLAN_V1: dict[str, object] = {
             "families": ("score_context", "score_context_price_series"),
             "reason": "engine/v2/ops/legacy_adapter.py:_action_selfcheck -> "
                       "Scorer(context=FeatureContext.load(tickers, years=years))",
+        },
+        "legacy_features": {
+            "families": ("features_moves", "features_price_series"),
+            "reason": "engine/v2/ops/legacy_adapter.py:_action_features -> "
+                      "engine.data.rebuild.build_panel_table -> panel.build_events/"
+                      "add_runup_features",
         },
     },
     #: Tables/reference inputs the score_context bundle carries, restated
@@ -331,6 +359,11 @@ def _present_price_series_bundle(spec, paths, manifest) -> bool:
     return any(path.startswith(px_prefix) or path.startswith(tier1_prefix) for path in paths)
 
 
+def _present_moves_glob(spec, paths, manifest) -> bool:
+    prefixes = tuple(f"{directory}/" for directory in spec["directories"])
+    return any(path.startswith(prefixes) for path in paths)
+
+
 #: One presence checker per family ``kind`` (task brief §1's declared shapes).
 #: A dispatch table rather than an if/elif chain: it keeps this module's own
 #: complexity budget (checks/code_budgets.py) low as families are added.
@@ -343,6 +376,7 @@ _PRESENCE_CHECKS = {
     "ledger_glob": _present_ledger_glob,
     "single_file": _present_single_file,
     "price_series_bundle": _present_price_series_bundle,
+    "moves_glob": _present_moves_glob,
 }
 
 

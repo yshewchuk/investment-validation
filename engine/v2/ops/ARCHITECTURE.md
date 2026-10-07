@@ -8,15 +8,9 @@ layer rules; this doc covers package detail.
 
 Durable job submission, leases, retry history and dependencies; resource
 admission (each constrained cgroup uses `max(0, memory.current - (file - shmem))`, reading `file` and `shmem` from that same directory’s `memory.stat`; active and inactive file cache is reclaimable, while shmem/tmpfs stays counted; missing, malformed or unreadable statistics fall back to `max(0, memory.current - inactive_file)`, then raw usage; headroom remains `min(host_available, container_remaining) - free_margin`) and per-job CPU placement; the nightly job graph and its release
-boundary. It does not decide research conclusions (`engine/v2/evaluation`)
-and does not compute a score (`engine/v2/scoring`) — it only sequences and
-persists the jobs that call into those packages.
+boundary. It does not decide research conclusions (`engine/v2/evaluation`) and does not compute a score (`engine/v2/scoring`) — it only sequences and persists the jobs that call into those packages.
 
-This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy
-`engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a
-legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_score_batch_shadow` →
-`build_native_score_batch_events` → `scan_forward_board_requests` → `board_requests` (see "Dependencies"); schema migrations follow the
-[checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
+This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy `engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_score_batch_shadow` → `build_native_score_batch_events` → `scan_forward_board_requests` → `board_requests` (see "Dependencies"); schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
 
 ## Primary contracts and public interfaces
 
@@ -1337,6 +1331,19 @@ job.
 | the scoring context years | derived from `as_of` on every call, mirroring legacy's own formula — never a fixed window that ages past its end |
 | crash after `plan_fn` returns but before the `"submitting"` receipt is durable (issue #186) | accepted risk: a retry may produce the same or a different plan; only the plan named by the durable receipt is submitted or scored. If the rebuilt plan differs, the first artifact is orphaned. Fresh retries recheck the window and probe; resume retries skip the window check and may submit after it closes. |
 
+### `capture_inputs.py`: `legacy_features` read set
+
+`capture` also enumerates the data-dependent read set of `legacy_features` (now a barrier kind; `UNCAPTURED_KINDS` is gone) because its worker's staging tree is built only from manifest `file_refs`. Family `features_moves` is every `moves_*.json` directly under the oquants moves directory and `data/raw/computed_moves` (panel's own glob; any other name, such as a state file, is excluded). Family `features_price_series` is `px_<T>.csv` plus the Tier-1 yfinance history entries for each ticker those files cover (JSON `ticker` field, else the file-name stem, as panel does). Capture is read-only with no provider or network calls and keeps only file names and that ticker field. The manifest schema is unchanged.
+
+| Condition | Outcome |
+|---|---|
+| neither directory holds a matching file (absent or empty) | `INPUT_CHANGED` at capture, mirroring panel's `FileNotFoundError`; `manifest_problems` flags `features_moves` for a manifest with none, so an older capture must be redone |
+| exactly one directory is absent or empty | the other's files are captured; panel also tolerates an absent computed directory |
+| a covered ticker has no price file and no yfinance entry | nothing captured, no refusal: panel leaves that ticker's run-up columns NaN |
+| a moves file or directory is a symlink | `INPUT_CHANGED`; never followed or skipped |
+| a moves file cannot be parsed | still captured, ticker from its file name; the job fails with panel's own parse error |
+| same tree captured twice | identical sorted paths and hashes |
+
 ### `computed_moves_store.py`: capture and inherited fragments respect `as_of`
 
 | Condition | Outcome |
@@ -1535,16 +1542,7 @@ flowchart LR
     OUT --> RRP["nightly_raw_row_producer.build_native_score_batch_events\n(called only by Service._reconcile_native_score_batch_shadow, slice 5)"]
 ```
 
-`board_requests` itself only consumes an `events_table` a caller passes
-in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a
-real shadow-scope snapshot via `import_snapshot.plan_import`/
-`submit_import` only — never a `Repository.scan("earnings_events")` call,
-which belongs to `computed_moves_store._scan_once` instead, a different
-boundary. It is reachable today for `nightly_trigger._default_plan`'s
-scheduled `"score"` job specifically (see "Primary contracts"); a plan
-built directly with the lower-level plan builder can still default to
-`legacy` input mode instead. The raw-row producer consumes these requests
-and is called only by `native_score_batch`'s shadow sidecar (slice 5).
+`board_requests` itself only consumes an `events_table` a caller passes in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a real shadow-scope snapshot via `import_snapshot.plan_import`/`submit_import` only — never a `Repository.scan("earnings_events")` call, which belongs to `computed_moves_store._scan_once` instead, a different boundary. It is reachable today for `nightly_trigger._default_plan`'s scheduled `"score"` job specifically (see "Primary contracts"); a plan built directly with the lower-level plan builder can still default to `legacy` input mode instead. The raw-row producer consumes these requests and is called only by `native_score_batch`'s shadow sidecar (slice 5).
 
 ### Native nightly pool/residual refresh (Cutover PR-13a)
 

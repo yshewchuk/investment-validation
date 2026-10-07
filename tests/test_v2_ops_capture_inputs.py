@@ -52,7 +52,7 @@ from engine.v2.data.legacy_nightly_read_plan import (  # noqa: E402
     required_families,
 )
 from engine.v2.foundation import to_document  # noqa: E402
-from engine.v2.ops.capture_inputs import UNCAPTURED_KINDS, capture  # noqa: E402
+from engine.v2.ops.capture_inputs import capture  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.legacy_adapter import copy_read_set  # noqa: E402
 from tests.test_v2_data_import import build_legacy_store  # noqa: E402
@@ -104,6 +104,9 @@ def _build_fixture(root: Path, *, year: int = 2024, with_orats: bool = True) -> 
     _write_calendar(root, _calendar_dates_ending_at(SESSION, 20))
     (root / "ledger" / "predictions").mkdir(parents=True)
     (root / "ledger" / "outcomes").mkdir(parents=True)
+    moves_dir = root / "earnings_predictions" / "data" / "raw" / "oquants" / "moves"
+    moves_dir.mkdir(parents=True, exist_ok=True)
+    (moves_dir / "moves_AAA.json").write_text(json.dumps({"ticker": "AAA", "data": {}}))
     if with_orats:
         _write_orats_cache(root, SESSION)
 
@@ -113,7 +116,7 @@ def _build_fixture(root: Path, *, year: int = 2024, with_orats: bool = True) -> 
 # --------------------------------------------------------------------------
 
 
-def test_barrier_kinds_are_the_structural_six():
+def test_barrier_kinds_are_the_structural_seven():
     """BARRIER_KINDS must equal the real ``legacy_*`` ACTION_NAMES minus the
     three kinds that are ALWAYS snapshot-backed once a plan pins a snapshot
     and never fall back to the barrier (``legacy_score``, ``legacy_score_
@@ -128,23 +131,20 @@ def test_barrier_kinds_are_the_structural_six():
     invariant instead: every barrier kind not exclusively snapshot-backed is
     declared here, and nothing declared here is snapshot-only.
 
-    ``legacy_features`` is neither: its read set is data-dependent (panel.py
-    globs the moves files, then reads a per-ticker price CSV per discovery),
-    so it can have no static capture plan and sits in
-    ``capture_inputs.UNCAPTURED_KINDS`` -- the explicit, documented exception
-    subtracted from the completeness equation below, not a barrier kind.
+    ``legacy_features`` is a barrier kind too: its read set is data-dependent
+    (panel.py globs the moves files, then reads a per-ticker price CSV per
+    discovery), so ``capture`` enumerates it at capture time through the
+    ``features_moves``/``features_price_series`` families.
     """
     from engine.v2.ops.legacy_actions import ACTION_NAMES
     from engine.v2.ops.stages import SNAPSHOT_BACKED_KINDS
 
     snapshot_only = SNAPSHOT_BACKED_KINDS - set(BARRIER_KINDS)
     assert snapshot_only == {"legacy_score", "legacy_score_requests", "legacy_decision_replay"}
-    assert set(BARRIER_KINDS) == set(ACTION_NAMES) - snapshot_only - set(UNCAPTURED_KINDS)
+    assert set(BARRIER_KINDS) == set(ACTION_NAMES) - snapshot_only
     assert set(BARRIER_KINDS) & snapshot_only == set()
-    assert set(UNCAPTURED_KINDS) == {"legacy_features"}
-    assert set(UNCAPTURED_KINDS) & set(BARRIER_KINDS) == set()
-    assert set(UNCAPTURED_KINDS) & SNAPSHOT_BACKED_KINDS == set()
-    assert set(UNCAPTURED_KINDS) <= set(ACTION_NAMES)
+    assert "legacy_features" in BARRIER_KINDS
+    assert required_families("legacy_features") == ("features_moves", "features_price_series")
 
 
 def test_manifest_problems_rejects_wrong_capture_ref():
