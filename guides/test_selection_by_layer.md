@@ -1,17 +1,19 @@
 # Package test selection by layer
 
-## Decision
+## Package-layout selector design (separate from active PR CI)
 
-PR test selection follows the enforced package layout. For each changed path,
-resolve its package by directory using `checks/layer_map.py`; select tests in
-that package and the reverse closure of packages that import it along allowed
+The `checks/test_selection.py` module implements this package-layout
+selection design; current PR CI uses the separate import-graph selector
+described in “Selector and workflow boundary.” For each changed path, resolve
+its package by directory using `checks/layer_map.py`; select tests in that
+package and the reverse closure of packages that import it along allowed
 layer-map edges. Run tests from `tests/v2/<package>/` for every selected
-package. There is no component map and no import-graph or dynamic-load
+package. This selector has no component map or import-graph or dynamic-load
 failsafe. The allowed-import direction is importer → dependency; selection
 walks it in reverse so a changed dependency selects its package and every
 allowed importer above it.
 
-## Path policy
+## Package-layout selector path policy
 
 | Changed path | Selection |
 |---|---|
@@ -58,13 +60,17 @@ initially **403**. The unmoved set is the current root-level
 and requires the recorded count to equal the current set size. Its budget may
 only decrease from the PR base to its head.
 
-This ratchet does not change the merged path policy: root-level tests and
-helpers, `tools/` and `checks/` continue to select the full suite. The current
-33-of-40 fallback rate is accepted while the layout improves incrementally.
+This ratchet does not change the package-layout selector's path policy above:
+within that design, root-level tests and helpers, `tools/` and `checks/`
+continue to select the full suite. Current PR CI separately narrows through
+the import-graph selector and always includes this configured meta test in
+narrowed selections. The 33-of-40 fallback rate belongs to the package-layout
+design and is accepted while the layout improves incrementally.
 
 Configure `tests/v2/integration/test_test_selection.py` as an always-run PR
-test. The CI selector includes it for every non-empty PR diff, including an
-unrelated test-only diff where a changed test file would otherwise be a leaf.
+test. Every narrowed non-empty PR selection includes it, including an
+unrelated test-only diff where a changed test file would otherwise be a leaf;
+a full-suite selection includes it with the rest of the tests.
 The ratchet fails when a new `test_*.py` file is added outside
 `tests/v2/<package>/` or `tests/v2/integration/`, when the unmoved set grows,
 when a package directory is not a package in `checks/layer_map.py`, or when
@@ -111,11 +117,11 @@ failure behavior, plus a cache regression proving stale selected paths cannot
 override the current base/head diff. `.github/workflows/tests.yml` supplies PR
 changed paths to `tools/mutation_pilot.py select-tests` and consumes the
 selected test files or an explicit full-suite result. Its configured
-`always_run` tests are added for every non-empty PR diff, including unrelated
-test-only diffs. If the selector process crashes or emits invalid output, the
-workflow prints the error and runs `tests/` in full. Pushes to `main`,
-scheduled runs and manual dispatch continue to run `tests/` in full as the
-post-merge backstop.
+`always_run` tests are added to every narrowed non-empty PR selection,
+including unrelated test-only diffs; full-suite selections include all tests.
+An explicit full-suite result runs `tests/` in full; a selector command error
+fails the CI job before pytest. Pushes to `main`, scheduled runs and manual
+dispatch continue to run `tests/` in full as the post-merge backstop.
 
 ## Evidence and acceptance before code
 
@@ -155,11 +161,12 @@ it remains a proposal; the former all-40 bar was not met.
 
 ## Scope
 
-This design changes no runtime behavior, test placement or workflow in this
-PR. It does not change the mutation-testing selector, infer non-import
-couplings, or promise that a package graph detects every fixture, data-file,
-subprocess or dynamic-load dependency. The full main-branch suite remains the
-backstop for those gaps. Findings outside this test-selection contract are
+This package-layout design is separate from current PR CI. The ratchet change
+does not alter production behavior, move tests, or edit workflow YAML; it adds
+the ratchet to the active selector's configured meta-test set. Neither the
+package graph nor the active import graph promises to detect every fixture,
+data-file, subprocess or dynamic-load dependency. The full main-branch suite
+remains the backstop for those gaps. Findings outside this contract are
 separate work.
 
 ## Follow-up slices (estimated added code / test / documentation lines)
