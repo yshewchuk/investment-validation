@@ -541,7 +541,7 @@ def test_registered_wrappers_separate_data_root_from_adapter_staging(tmp_path, r
 
     from engine.v2.ops.experiments import RUNNER_INVENTORY
 
-    wrapper = Path(__file__).resolve().parents[1] / runner_id
+    wrapper = Path(__file__).resolve().parents[3] / runner_id
     source_relative = RUNNER_INVENTORY[runner_id]["declared_runtime_sources"][0]
     captured_here = tmp_path / "wrapper_here.txt"
     synthetic_source = (
