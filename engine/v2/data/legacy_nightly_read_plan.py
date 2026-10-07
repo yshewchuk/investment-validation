@@ -76,6 +76,7 @@ re-derives it) so the two cannot silently drift apart.
 from __future__ import annotations
 
 from datetime import date
+from fnmatch import fnmatchcase
 
 from .legacy_materialization import LEGACY_SCORE_READ_PLAN_V1
 
@@ -360,8 +361,15 @@ def _present_price_series_bundle(spec, paths, manifest) -> bool:
 
 
 def _present_moves_glob(spec, paths, manifest) -> bool:
-    prefixes = tuple(f"{directory}/" for directory in spec["directories"])
-    return any(path.startswith(prefixes) for path in paths)
+    """Some path is ``<directory>/moves_*.json`` directly under a declared
+    directory -- panel.py's own glob, so a state file does not count."""
+    for directory in spec["directories"]:
+        prefix = f"{directory}/"
+        for path in paths:
+            name = path[len(prefix):]
+            if path.startswith(prefix) and "/" not in name and fnmatchcase(name, "moves_*.json"):
+                return True
+    return False
 
 
 #: One presence checker per family ``kind`` (task brief §1's declared shapes).

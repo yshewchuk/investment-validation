@@ -160,3 +160,13 @@ def test_unparseable_moves_file_is_captured_with_its_stem_ticker(tmp_path):
     paths = {ref.path for ref in _capture(tmp_path).file_refs}
     assert f"{OQUANTS}/moves_BAD.json" in paths
     assert f"{PX}/px_BAD.csv" in paths
+
+
+def test_manifest_problems_refuses_a_moves_directory_holding_only_a_state_file(tmp_path):
+    _features_tree(tmp_path)
+    document = to_document(_capture(tmp_path))
+    state_ref = {"path": f"{COMPUTED}/state.json", "content_hash": "sha256:" + "0" * 64, "byte_size": 1}
+    document["file_refs"] = [ref for ref in document["file_refs"]
+                             if not ref["path"].startswith((OQUANTS + "/", COMPUTED + "/"))] + [state_ref]
+    problems = manifest_problems(document)
+    assert [(p["kind"], p["family"]) for p in problems] == [("legacy_features", "features_moves")]
