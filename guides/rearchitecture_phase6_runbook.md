@@ -105,6 +105,15 @@ The manual command sequence, failure semantics and measured resource figures
 for a supervised shadow nightly are in
 [Phase 1 runbook §10](rearchitecture_phase1_runbook.md#10-supervised-native-shadow-nightly).
 
+| Supervised new-date condition | Outcome / evidence (2026-10-07, one WSL2 box) |
+|---|---|
+| Legacy tree is behind `as_of` | INFERRED: refresh it before a new-date native run; the full dependency chain is not yet verified |
+| Operator's manual legacy refresh | `python3 tools/bounded_run.py --heavy --cores 8 --max-rss-gb 7.5 -- python3 -m engine.dashboard.nightly`; calls ORATS and publishes the live legacy board |
+| Legacy refresh at a 6.5 GB cap | Measured kill during Tier-3 panel build; fetched work is reusable, but interrupted computation repeats (`tools/bounded_run.py`) |
+| Legacy refresh changes the same tree while native staging runs | Do not overlap: staging re-hashes pinned files and refuses `INPUT_CHANGED` (`engine/v2/ops/store_barrier.py::pin_read_set`) |
+| Legacy refresh completed | INFERRED/unverified: fresh `python3 -m engine.v2.ops snapshot plan-import` / `snapshot submit`, `price-history capture` and `computed-moves capture` may be needed; command contracts and required arguments are in [Phase 1 §2](rearchitecture_phase1_runbook.md#2-operator-commands) |
+| Already-decided-date replay where every candidate diverges | VERIFIED: whole-row decision divergence prevents DAG completion; it is not a parity signal. Use a genuinely new date; do not re-import history to bypass it ([Phase 1 §10.2](rearchitecture_phase1_runbook.md#102-failure-semantics)) |
+
 ## 5. Backup and restore
 
 Take a backup with the existing API — no new capability:
