@@ -30,6 +30,7 @@ from engine.v2.ops.lifecycle import record_progress
 from engine.v2.ops.recovery import read_boot_id
 from engine.v2.ops.submission import submit
 from engine.v2.ops.supervisor import Service
+from tests import ops_support
 from tests.ops_support import (
     POLICY,
     REGISTRY,
@@ -669,6 +670,76 @@ def test_run_until_deadline_signals_a_stuck_tracked_child_and_dumps_its_faulthan
                     pass
             if proc.stdout is not None:
                 proc.stdout.close()
+
+
+def test_signal_tracked_process_sends_sigabrt_through_the_pidfd_when_identity_matches(
+        monkeypatch):
+    """Direct unit proof of ``ops_support._signal_tracked_process`` on the
+    happy path: the pidfd is opened for the recorded pid, the start ticks
+    re-checked via the injected ``read_stat`` match the stored value, so
+    ``SIGABRT`` goes through ``pidfd_send_signal`` with no siginfo and no
+    flags, and the descriptor is closed. Spies replace
+    ``pidfd_open``/``pidfd_send_signal``/``os.close`` so no real process or
+    signal is involved and the exact call arguments are pinned."""
+    opened, sent, closed = [], [], []
+    sentinel_fd = 7777
+
+    def _open_pidfd(pid):
+        opened.append(pid)
+        return sentinel_fd
+
+    def _send_pidfd_signal(fd, sig, info, flags):
+        sent.append((fd, sig, info, flags))
+
+    def _close(fd):
+        closed.append(fd)
+
+    def _read_stat(pid):
+        assert pid == 4242
+        return {"start_ticks": 4242}
+
+    monkeypatch.setattr(ops_support.os, "pidfd_open", _open_pidfd)
+    monkeypatch.setattr(ops_support.signal, "pidfd_send_signal",
+                        _send_pidfd_signal)
+    monkeypatch.setattr(ops_support.os, "close", _close)
+    assert ops_support._signal_tracked_process(4242, 4242, _read_stat) == (True, None)
+    assert opened == [4242]
+    assert sent == [(sentinel_fd, signal.SIGABRT, None, 0)]
+    assert closed == [sentinel_fd]
+
+
+def test_signal_tracked_process_signals_nothing_when_the_start_ticks_differ(
+        monkeypatch):
+    """PID-reuse control for the same helper: the pidfd opens, but the
+    re-checked ``read_stat`` start ticks no longer match the stored identity,
+    so the helper reports ``identity changed before signal``, never calls
+    ``pidfd_send_signal`` (the replacement process is not signaled), and
+    still closes the descriptor it opened."""
+    opened, sent, closed = [], [], []
+    sentinel_fd = 7778
+
+    def _open_pidfd(pid):
+        opened.append(pid)
+        return sentinel_fd
+
+    def _send_pidfd_signal(fd, sig, info, flags):
+        sent.append((fd, sig, info, flags))
+
+    def _close(fd):
+        closed.append(fd)
+
+    def _read_stat(pid):
+        return {"start_ticks": 4243}
+
+    monkeypatch.setattr(ops_support.os, "pidfd_open", _open_pidfd)
+    monkeypatch.setattr(ops_support.signal, "pidfd_send_signal",
+                        _send_pidfd_signal)
+    monkeypatch.setattr(ops_support.os, "close", _close)
+    assert ops_support._signal_tracked_process(4242, 4242, _read_stat) == (
+        False, "identity changed before signal")
+    assert opened == [4242]
+    assert sent == []
+    assert closed == [sentinel_fd]
 
 
 def test_await_worker_stderr_growth_never_sleeps_when_the_dump_landed_before_polling(

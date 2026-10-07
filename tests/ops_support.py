@@ -402,6 +402,41 @@ def _await_worker_stderr_growth(path, baseline, *, timeout=2.0, poll=0.05) -> No
         return
 
 
+def _signal_tracked_process(pid, stored_start_ticks, read_stat):
+    open_pidfd = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if not callable(open_pidfd) or not callable(pidfd_send_signal):
+        return (False, "pidfd signaling unavailable")
+    try:
+        pidfd = open_pidfd(pid)
+    except ProcessLookupError:
+        return (False, "process exited before signal")
+    except PermissionError:
+        return (False, "signal permission denied")
+    except Exception as exc:
+        return (False, type(exc).__name__)
+    try:
+        live = read_stat(pid)
+        if live is None:
+            return (False, "process exited before signal")
+        if live.get("start_ticks") != stored_start_ticks:
+            return (False, "identity changed before signal")
+        try:
+            pidfd_send_signal(pidfd, signal.SIGABRT, None, 0)
+        except ProcessLookupError:
+            return (False, "process exited before signal")
+        except PermissionError:
+            return (False, "signal permission denied")
+        except Exception as exc:
+            return (False, type(exc).__name__)
+        return (True, None)
+    finally:
+        try:
+            os.close(pidfd)
+        except Exception:
+            pass
+
+
 def _tracked_process_diagnostics(conn, job_id) -> str:
     """Per tracked process identity of this job -- the distinct
     ``(pid, start_ticks, attempts.host_boot_id)`` tuples -- the delta of
@@ -413,10 +448,11 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
     this job's worker; a record whose stat sample is unreadable or that fails
     either identity check renders ``unavailable`` with its pid, no samples.
     A tracked pid whose final state is ``S`` or ``D`` and whose CPU delta is
-    at most one tick is a stuck worker: its start ticks are re-checked
-    immediately before ``SIGABRT`` (never signaling a reused pid) and its
-    details report whether the traceback signal was sent and, when it was
-    not, why. If any signal was
+    at most one tick is a stuck worker: a pidfd is opened for it and its
+    start ticks are re-checked while the pidfd is held, then ``SIGABRT`` is
+    delivered through that pidfd so the signal can never be redirected to a
+    reused pid, and its details report whether the traceback signal was sent
+    and, when it was not, why. If any signal was
     delivered, the attempt's ``diagnostics/worker.stderr`` is polled for the
     faulthandler dump for at most two seconds. No tracked processes reports
     that without sleeping. Never raises and never prints command lines,
@@ -502,27 +538,11 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
         not_signalled = {}
         for identity in selected:
             pid, stored_start_ticks = identity[0], identity[1]
-            # Re-check identity immediately before signaling: a pid reused in
-            # the gap must never receive this worker's traceback signal.
-            live = read_stat(pid)
-            if live is None:
-                not_signalled[identity] = "process exited before signal"
-                continue
-            if live.get("start_ticks") != stored_start_ticks:
-                not_signalled[identity] = "identity changed before signal"
-                continue
-            try:
-                os.kill(pid, signal.SIGABRT)
-            except ProcessLookupError:
-                not_signalled[identity] = "process exited before signal"
-                continue
-            except PermissionError:
-                not_signalled[identity] = "signal permission denied"
-                continue
-            except Exception as exc:
-                not_signalled[identity] = type(exc).__name__
-                continue
-            signalled.add(identity)
+            sent, reason = _signal_tracked_process(pid, stored_start_ticks, read_stat)
+            if sent:
+                signalled.add(identity)
+            else:
+                not_signalled[identity] = reason
         if signalled:
             _await_worker_stderr_growth(stderr_path, stderr_baseline)
         parts = []
