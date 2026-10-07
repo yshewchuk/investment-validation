@@ -270,6 +270,22 @@ def test_a_symlinked_or_malformed_override_keeps_its_refusals(env, monkeypatch):
     assert malformed.value.code == "INVALID_REQUEST"
 
 
+def test_a_supplied_empty_list_is_refused_by_the_pin_and_blocks_a_legacy_plan(env, monkeypatch):
+    conn, clock, store, root = env
+    empty = root / "empty.json"
+    empty.write_text("[]")
+
+    with pytest.raises(OpsError) as raised:  # the REAL pin: nothing generated to fall back on
+        planning.pin_snapshot_inputs(
+            conn, store, "shadow", tickers=("AAA",), year_start=2026, year_end=2027,
+            expected_population=(), clock=clock, session=_AS_OF)
+    plan, _ = _plan(env, monkeypatch, "--expected-population", str(empty), mode="legacy")
+
+    assert raised.value.code == "INVALID_REQUEST"
+    assert plan["expected_population"] == []
+    assert "planned_population" in plan["blocked_prerequisites"]
+
+
 def test_legacy_input_mode_generates_nothing(env, monkeypatch):
     plan, _ = _plan(env, monkeypatch, mode="legacy")
 
