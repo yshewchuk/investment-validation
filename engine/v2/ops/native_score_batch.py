@@ -745,7 +745,7 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
     ``native_score_batch.py`` section for the full contract.
     """
     from engine.v2.models.no_fit import no_fit_guard
-    from engine.v2.scoring.release_bindings import resolve_release_binding
+    from engine.v2.scoring.release_bindings import resolve_gate_policy, resolve_release_binding
 
     events_doc = json.loads((root / "events.json").read_text())
     if not isinstance(events_doc, list):
@@ -759,7 +759,8 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
         as_of=as_of, snapshot_id=snapshot_id,
         calendar_revision=calendar_revision, binding=binding,
         events=events, feature_names=tuple(parameters["feature_names"]),
-        gate_policy=parameters.get("gate_policy") or {},
+        gate_policy=(parameters.get("gate_policy")
+                     or resolve_gate_policy(binding, parameters["release_root"])),
     )
     producer_refusals_path = root / "producer_refusals.json"
     if producer_refusals_path.exists():

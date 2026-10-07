@@ -111,6 +111,9 @@ load-bearing entrypoints:
   Picking the object matching a request's own `(strategy, alpha, cutoff)`
   and mapping a binding to specific forecast-output names is the per-night
   assembler's job, not this module's.
+  `resolve_gate_policy(binding, release_root) -> dict[str, dict[str, float]]`
+  returns `{strategy: {"threshold": float}}` from each gate binding's staged
+  `threshold` member (see "`resolve_gate_policy`" below).
 - `identity.py`, `financial.py`, `chooser_inputs.py`, `native_*.py` —
   content-addressed request/record identity, financial diagnostics, and the
   native arithmetic for the analog stage, the DYN-SV chooser, the entry-rule
@@ -435,6 +438,29 @@ rather than its own. `native_score_batch` goes through `score_one`, never
   confirming two resolutions saw the same release compares `.model_release`
   directly. Resolving again after a promotion/rollback reflects the new
   pointer in every field, since nothing is cached between calls.
+
+#### `resolve_gate_policy` (conditions and outcomes)
+
+Reads only the `threshold` member of each `role="gate"` binding in
+`binding.model_release`: a content-addressed copy of the legacy model
+registry, never the live legacy registry. The threshold is the one carried by
+the registry entry whose `id` equals that binding's `model_id`. Conditions are
+checked per gate binding; the first failure raises for the whole call.
+Failure messages are fixed and path-free, naming `model:gate:<strategy>`.
+
+| Condition | Outcome |
+|---|---|
+| gate binding has no `threshold` member | strategy omitted from the result; the row-level `GATE_POLICY_NOT_STAGED` refusal is unchanged (proposed by the supervisor) |
+| member object missing, unreadable, or hash disagrees with the pointer | `ModelNotReady`, no fallback |
+| object is not a JSON object with a `models` list, or has no entry (or more than one) with `id == binding.model_id` | `ModelNotReady` |
+| the entry's `threshold` is absent, boolean, non-numeric, or non-finite | `ModelNotReady` |
+| otherwise | `{strategy: {"threshold": float(value)}}` |
+
+R2: no cache; every call re-reads and re-verifies. R3: none. R4/R5: read-only.
+R6: the same release and bytes yield an equal result; a caller resolving once
+per worker therefore sees one policy for the whole batch. The worker uses this
+result only when its `gate_policy` parameter is empty; a supplied policy wins
+and the release is not consulted for it.
 
 ### `nightly_source_bundle.py`
 
