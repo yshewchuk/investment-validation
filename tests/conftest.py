@@ -27,6 +27,24 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# Python subprocesses that inherit the pytest environment (e.g. the nested
+# pytest runs in tests/test_suite_waits.py) enable faulthandler, so a crash
+# dumps its stack instead of dying silently. The executor's built-from-scratch
+# worker env is covered separately by _executor_worker_faulthandler below.
+os.environ["PYTHONFAULTHANDLER"] = "1"
+
+# Bound at pytest startup, not inside the autouse fixture below: this
+# import chain is heavy (it reaches sklearn), and a first import inside a
+# test's setup can overrun that test's --test-timeout alarm budget --
+# observed in the child pytest of
+# test_per_test_timeout_fails_the_test_by_name_and_the_run_continues,
+# where the alarm fired mid-import and turned the intended per-test
+# timeout failure into a setup error. The fixture only needs the module
+# object to hang its monkeypatch on. This import fails closed: if the
+# executor hook is not importable, conftest load fails loudly rather than
+# silently leaving real workers without PYTHONFAULTHANDLER=1.
+from engine.v2.ops import executor as _v2_executor
+
 
 #: Tests that need a resource GitHub Actions does not have. CI
 #: (.github/workflows/tests.yml) deselects every one of these; the local
@@ -392,6 +410,44 @@ def _isolate_experiments_ledger(tmp_path, monkeypatch):
     except Exception:
         return
     monkeypatch.setattr(lib, "LEDGER_PATH", tmp_path / "experiments" / "LEDGER.csv")
+
+
+@pytest.fixture(autouse=True)
+def _executor_worker_faulthandler(monkeypatch):
+    """Wrap the worker ``subprocess.Popen`` launch in ``engine.v2.ops.executor``
+    for the duration of each test. The real executor builds its worker
+    environment from scratch (engine/v2/ops/executor.py ``launch``), so the
+    module-level ``PYTHONFAULTHANDLER`` above never reaches the worker: when
+    the command is ``-m engine.v2.ops.worker``, its explicit ``env`` mapping
+    is copied with ``PYTHONFAULTHANDLER=1`` added and passed to the original
+    ``Popen``; every non-worker command is delegated unchanged, so global
+    ``subprocess.Popen`` semantics are untouched. ``monkeypatch`` restores the
+    patch after each test. This fixture never launches a worker or runs a job
+    itself. (The executor module is imported once at conftest load, above --
+    see the comment there for why it must not happen in setup.)"""
+    original_popen = subprocess.Popen
+
+    def _is_worker_launch(args) -> bool:
+        # Only a shell command string or a list/tuple argument vector is
+        # recognized; anything else (e.g. a scalar Path-like) is not a
+        # worker launch and is passed through unchanged.
+        if isinstance(args, str):
+            parts = args.split()
+        elif isinstance(args, (list, tuple)):
+            parts = [str(part) for part in args]
+        else:
+            return False
+        return any(part == "-m" and parts[i + 1] == "engine.v2.ops.worker"
+                   for i, part in enumerate(parts[:-1]))
+
+    def _popen(args, *popen_args, **kwargs):
+        if _is_worker_launch(args) and isinstance(kwargs.get("env"), dict):
+            env = dict(kwargs["env"])
+            env["PYTHONFAULTHANDLER"] = "1"
+            kwargs["env"] = env
+        return original_popen(args, *popen_args, **kwargs)
+
+    monkeypatch.setattr(_v2_executor.subprocess, "Popen", _popen)
 
 
 @pytest.fixture

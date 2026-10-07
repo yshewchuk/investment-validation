@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -390,8 +391,12 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
     process state, the wait channel and the child pid. The stderr tail
     surfaces the traceback frame and exception line while the frame's
     absolute path, the source line and the secret text stay redacted, and a
-    recorded start ticks that no longer matches the live process reports the
-    pid identity unavailable with no cpu delta for that pid. Only the fake
+     recorded start ticks that no longer matches the live process reports the
+     pid identity unavailable with no cpu delta for that pid. The same live
+     pid is also recorded under an older superseded attempt whose start ticks
+     differ by one, so the message must render two distinct tracked-identity
+     entries for that pid -- the stale one unavailable and never signaled,
+     the live one with the traceback signal sent. Only the fake
     service's tick is stubbed; the stderr tail, the tracked-process
     diagnostics, /proc and ``run_until`` itself stay real. The parent and
     its child are terminated and reaped in ``finally`` even when an
@@ -417,6 +422,9 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
         identity = ProcessIdentity(boot_id=boot_id, pid=parent.pid,
                                    start_ticks=int(live_stat[19]),
                                    process_group=int(live_stat[2]))
+        stale_identity = ProcessIdentity(boot_id=boot_id, pid=identity.pid,
+                                         start_ticks=identity.start_ticks + 1,
+                                         process_group=identity.process_group)
         resources = ResolvedResources(
             effective_host_budget_bytes=1 << 30, reserved_memory_bytes=1 << 29,
             assigned_cpu_ids=(0,), thread_count=1, scratch_limit_bytes=1 << 28,
@@ -427,13 +435,25 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
             "supervisor_epoch, host_boot_id, state, process_state, process_json, "
             "resources_json, created_at, heartbeat_at, lease_expires_at) "
             "VALUES (?, ?, 1, 1, ?, ?, 'failed', 'exited', ?, ?, ?, ?, ?)",
+            ("att_stale", job_id, epoch, boot_id, dumps(stale_identity),
+             dumps(resources), "2026-09-12T00:00:00+00:00",
+             "2026-09-12T00:00:05+00:00", "2026-09-12T00:00:35+00:00"))
+        conn.execute("INSERT INTO process_members (attempt_id, pid, start_ticks, "
+                     "identity_json) VALUES (?, ?, ?, ?)",
+                     ("att_stale", stale_identity.pid, stale_identity.start_ticks,
+                      dumps(stale_identity)))
+        conn.execute(
+            "INSERT INTO attempts (attempt_id, job_id, attempt_number, fence, "
+            "supervisor_epoch, host_boot_id, state, process_state, process_json, "
+            "resources_json, created_at, heartbeat_at, lease_expires_at) "
+            "VALUES (?, ?, 2, 2, ?, ?, 'failed', 'exited', ?, ?, ?, ?, ?)",
             ("att_live", job_id, epoch, boot_id, dumps(identity), dumps(resources),
              "2026-09-12T00:00:00+00:00", "2026-09-12T00:00:05+00:00",
              "2026-09-12T00:00:35+00:00"))
         conn.execute("INSERT INTO process_members (attempt_id, pid, start_ticks, "
                      "identity_json) VALUES (?, ?, ?, ?)",
                      ("att_live", identity.pid, identity.start_ticks, dumps(identity)))
-        conn.execute("UPDATE jobs SET attempt_count = 1 WHERE job_id = ?", (job_id,))
+        conn.execute("UPDATE jobs SET attempt_count = 2 WHERE job_id = ?", (job_id,))
         stderr_path = (tmp_path / "attempts" / "att_live" / "staging" /
                        "diagnostics" / "worker.stderr")
         stderr_path.parent.mkdir(parents=True)
@@ -467,11 +487,29 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
         assert str(parent.pid) in message
         assert str(child_pid) in message
         assert "cpu " in message and " ticks" in message
-        state = Path(f"/proc/{parent.pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
-        assert f"state {state}" in message
+        state = re.search(r"\bstate ([A-Z]+)\b", message)
+        assert state is not None and state.group(1) in ("S", "D"), message
         assert "wchan " in message
         assert "children " in message
         assert "'queued'" in message and "never admitted" in message
+
+        # reused-pid identities: the same live pid recorded under the older
+        # superseded attempt and the matching live attempt renders two distinct
+        # tracked entries -- the stale start-ticks identity stays unavailable
+        # and is never signaled, the matching live identity carries the
+        # traceback signal, so the worker was signaled only through the
+        # identity that matches the live process
+        tracked = [part for part in message.split("; ")
+                   if part.startswith("tracked process ")]
+        assert len(tracked) == 2, message
+        stale_entries = [part for part in tracked
+                         if "unavailable (stat unreadable or start time mismatch)" in part]
+        live_entries = [part for part in tracked if "traceback signal sent" in part]
+        assert len(stale_entries) == 1 and len(live_entries) == 1, message
+        assert f"(pid {identity.pid})" in stale_entries[0]
+        assert f"(pid {identity.pid})" in live_entries[0]
+        parent.wait(timeout=10)
+        assert parent.returncode == -signal.SIGABRT, str(parent.returncode)
 
         # pid identity: a recorded start_ticks that no longer matches the live
         # process reports the pid identity unavailable, with no cpu delta for
@@ -490,8 +528,8 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
 
         # pid identity: a recorded host boot id that differs from the live
         # boot reports the pid identity unavailable with no cpu delta
-        conn.execute("UPDATE attempts SET host_boot_id=? WHERE attempt_id=?",
-                     ("stale-test-boot-id", "att_live"))
+        conn.execute("UPDATE attempts SET host_boot_id=? WHERE attempt_id IN (?, ?)",
+                     ("stale-test-boot-id", "att_live", "att_stale"))
         with pytest.raises(AssertionError) as excinfo:
             run_until(_NeverTicks(), conn, job_id, timeout=0.2)
         message3 = str(excinfo.value)
@@ -519,6 +557,117 @@ def test_run_until_deadline_reports_the_live_tracked_family_and_stderr_tail(tmp_
                 os.kill(child_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_run_until_deadline_signals_a_stuck_tracked_child_and_dumps_its_faulthandler_tail(tmp_path):
+    """Regression: the deadline diagnostics must not only track a live
+    family but actually request and surface a real all-thread traceback from
+    a stalled tracked Python child. The child enables ``faulthandler``, then
+    blocks forever on a ``threading.Lock`` held by another thread (a futex
+    wait, state ``S``) with its stderr redirected to the attempt's real
+    staging ``diagnostics/worker.stderr``, created before launch. Its live
+    pid is registered with the real boot id, start ticks and process group,
+    the matching attempts and process_members rows are inserted, and a
+    never-ticking fake service keeps the job nonterminal until ``run_until``
+    times out. The message must then report ``traceback signal sent`` and a
+    worker stderr tail carrying the sanitized faulthandler dump -- a
+    ``Current thread`` heading and a ``File "<path>", line N`` frame with the
+    temporary source path absent -- and the child must actually be
+    terminated by that diagnostic SIGABRT, reaped in ``finally`` even when an
+    assertion fails. Only the fake service's tick is inert; /proc, the
+    stderr read, the signal path and ``run_until`` itself stay real."""
+    conn, job_id = _queued_job(tmp_path, {"code": "DEPENDENCY_PENDING"})
+    boot_id = read_boot_id()
+    epoch = conn.execute("SELECT epoch_id FROM supervisor_epochs").fetchone()[0]
+    attempt_id = "att_fh"
+    child_path = tmp_path / "fh_child_worker.py"
+    child_path.write_text(
+        "import faulthandler, threading\n"
+        "faulthandler.enable()\n"
+        "lock = threading.Lock()\n"
+        "holder_ready = threading.Event()\n"
+        "\n"
+        "def _hold():\n"
+        "    lock.acquire()\n"
+        "    holder_ready.set()\n"
+        "    threading.Event().wait()\n"
+        "\n"
+        "threading.Thread(target=_hold, daemon=True).start()\n"
+        "holder_ready.wait()\n"
+        "print('ready', flush=True)\n"
+        "lock.acquire()\n")
+    stderr_path = (tmp_path / "attempts" / attempt_id / "staging" /
+                   "diagnostics" / "worker.stderr")
+    stderr_path.parent.mkdir(parents=True)
+    proc = None
+    try:
+        with open(stderr_path, "ab") as stderr_fh:
+            proc = subprocess.Popen([sys.executable, str(child_path)],
+                                    stdout=subprocess.PIPE, stderr=stderr_fh,
+                                    text=True, start_new_session=True)
+        ready_line = proc.stdout.readline()
+        assert ready_line.strip() == "ready", (
+            f"child never blocked on its held lock: stdout {ready_line!r}")
+        live_stat = Path(f"/proc/{proc.pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        identity = ProcessIdentity(boot_id=boot_id, pid=proc.pid,
+                                   start_ticks=int(live_stat[19]),
+                                   process_group=int(live_stat[2]))
+        resources = ResolvedResources(
+            effective_host_budget_bytes=1 << 30, reserved_memory_bytes=1 << 29,
+            assigned_cpu_ids=(0,), thread_count=1, scratch_limit_bytes=1 << 28,
+            executor_mode="fake", containment="none", provider_leases=(),
+            resource_profile_version="test")
+        conn.execute(
+            "INSERT INTO attempts (attempt_id, job_id, attempt_number, fence, "
+            "supervisor_epoch, host_boot_id, state, process_state, process_json, "
+            "resources_json, created_at, heartbeat_at, lease_expires_at) "
+            "VALUES (?, ?, 1, 1, ?, ?, 'failed', 'exited', ?, ?, ?, ?, ?)",
+            (attempt_id, job_id, epoch, boot_id, dumps(identity), dumps(resources),
+             "2026-09-12T00:00:00+00:00", "2026-09-12T00:00:05+00:00",
+             "2026-09-12T00:00:35+00:00"))
+        conn.execute("INSERT INTO process_members (attempt_id, pid, start_ticks, "
+                     "identity_json) VALUES (?, ?, ?, ?)",
+                     (attempt_id, identity.pid, identity.start_ticks, dumps(identity)))
+        conn.execute("UPDATE jobs SET attempt_count = 1 WHERE job_id = ?", (job_id,))
+
+        class _NeverTicks:
+            def tick(self):
+                pass
+
+        deadline_started = time.monotonic()
+        with pytest.raises(AssertionError) as excinfo:
+            run_until(_NeverTicks(), conn, job_id, timeout=0.2)
+        deadline_elapsed = time.monotonic() - deadline_started
+        message = str(excinfo.value)
+        assert deadline_elapsed < 4.0
+        tracked = [part for part in message.split("; ")
+                   if part.startswith("tracked process diagnostics:")]
+        assert len(tracked) == 1
+        assert "traceback signal sent" in tracked[0]
+        tails = [part for part in message.split("; ")
+                 if part.startswith("worker stderr tail:")]
+        assert len(tails) == 1
+        assert "Current thread <thread id redacted> (most recent call first):" in tails[0]
+        assert "Thread <thread id redacted> (most recent call first):" in tails[0]
+        assert re.search(r'File "<path>", line \d+', tails[0])
+        assert str(child_path) not in message
+        proc.wait(timeout=10)
+        assert proc.returncode == -signal.SIGABRT, (
+            f"child not terminated by the diagnostic SIGABRT: {proc.returncode}")
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+            if proc.stdout is not None:
+                proc.stdout.close()
 
 
 def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path, monkeypatch):

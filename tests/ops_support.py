@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import signal
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -257,19 +258,28 @@ def _read_progress_rows(conn, job_id):
 _TRACEBACK_MARKER = re.compile(r"^Traceback \(most recent call last\):$")
 _TRACEBACK_FRAME = re.compile(
     r"^(?P<indent>\s*)File \"(?P<path>.*)\", line (?P<line>\d+)"
-    r"(?:, in (?P<func>\S+))?$")
+    r"(?:,? in (?P<func>\S+))?$")
 _EXCEPTION_CLASS = re.compile(
     r"^(?P<cls>[A-Za-z_][A-Za-z0-9_.]*"
     r"(?:Error|Exception|Warning|Exit|Interrupt|Failure|Iteration))"
     r"(?:: (?P<msg>.*))?$")
+#: faulthandler's fatal-signal dump opens with a signal heading and one
+#: ``Current thread`` / ``Thread`` heading per stack, each ending in
+#: ``(most recent call first):``.
+_FATAL_HEADER = re.compile(r"^Fatal Python error:.*$")
+_THREAD_HEADER = re.compile(
+    r"^(?P<which>Current thread|Thread) .*\(most recent call first\):$")
 
 
 def _sanitize_worker_stderr_tail(text: str) -> str:
     """Keep only safe Python traceback structure from a worker stderr tail:
     the ``Traceback (most recent call last):`` marker, frame lines with every
-    frame path replaced by ``<path>`` (line number and function name kept),
-    and the exception class with its message replaced by
-    ``<message redacted>``. Every source-code line and every other
+    frame path replaced by ``<path>`` (line number and function name kept,
+    accepting both traceback's ``line N, in f`` and faulthandler's
+    ``line N in f``), faulthandler's ``Fatal Python error:`` heading and
+    ``Current thread`` / ``Thread ... (most recent call first):`` heading
+    (their variable text redacted), and the exception class with its message
+    replaced by ``<message redacted>``. Every source-code line and every other
     unstructured stderr line becomes ``<diagnostic text redacted>``, so no
     raw paths, exception messages, source lines or free text survive. A
     non-empty tail from which no safe traceback structure remains returns
@@ -297,6 +307,16 @@ def _sanitize_worker_stderr_tail(text: str) -> str:
         if _TRACEBACK_MARKER.match(line):
             kept = True
             out.append(line)
+            continue
+        if _FATAL_HEADER.match(line):
+            kept = True
+            out.append("Fatal Python error: <message redacted>")
+            continue
+        thread = _THREAD_HEADER.match(line)
+        if thread is not None:
+            kept = True
+            out.append(f"{thread.group('which')} <thread id redacted> "
+                       "(most recent call first):")
             continue
         out.append("<diagnostic text redacted>")
     return "\n".join(out) if kept else "<diagnostic text redacted>"
@@ -333,6 +353,56 @@ def _worker_stderr_tail(conn, attempts) -> str:
         return f"unavailable (worker stderr read failed: {type(exc).__name__})"
 
 
+def _worker_stderr_path(conn, job_id):
+    """Path of the latest attempt's ``diagnostics/worker.stderr`` for this
+    job, or ``None`` when it cannot be resolved. Best effort; the path is
+    never rendered."""
+    try:
+        attempts = attempt_receipts(conn, job_id)
+        if attempts is None or not len(attempts) or attempts[-1] is None:
+            return None
+        attempt_id = getattr(attempts[-1], "attempt_id", None)
+        if attempt_id is None:
+            return None
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row["file"]:
+                return (Path(row["file"]).parent / "attempts" / str(attempt_id) /
+                        "staging" / "diagnostics" / "worker.stderr")
+    except Exception:
+        return None
+    return None
+
+
+def _file_size(path):
+    try:
+        return path.stat().st_size
+    except Exception:
+        return None
+
+
+def _await_worker_stderr_growth(conn, job_id, *, timeout=2.0, poll=0.05) -> None:
+    """After signaling a stuck tracked process, poll briefly (at most
+    ``timeout`` seconds) for its faulthandler dump to append to
+    ``diagnostics/worker.stderr``, so the deadline message's tail read sees
+    the fresh output. Never sleeps when the path is unavailable and never
+    raises."""
+    try:
+        path = _worker_stderr_path(conn, job_id)
+        if path is None:
+            return
+        initial = _file_size(path)
+        if initial is None:
+            initial = 0
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            size = _file_size(path)
+            if size is not None and size > initial:
+                return
+            time.sleep(poll)
+    except Exception:
+        return
+
+
 def _tracked_process_diagnostics(conn, job_id) -> str:
     """Per tracked process identity of this job -- the distinct
     ``(pid, start_ticks, attempts.host_boot_id)`` tuples -- the delta of
@@ -343,9 +413,15 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
     equals the stored ``start_ticks``, so a reused pid is never reported as
     this job's worker; a record whose stat sample is unreadable or that fails
     either identity check renders ``unavailable`` with its pid, no samples.
-    No tracked processes reports that without sleeping. Never raises and
-    never prints command lines, absolute paths, environment values, boot ids
-    or raw exception text."""
+    A tracked pid whose final state is ``S`` or ``D`` and whose CPU delta is
+    at most one tick is a stuck worker: its start ticks are re-checked
+    immediately before ``SIGABRT`` (never signaling a reused pid) and its
+    details report whether the traceback signal was sent and, when it was
+    not, why. If any signal was
+    delivered, the attempt's ``diagnostics/worker.stderr`` is polled for the
+    faulthandler dump for at most two seconds. No tracked processes reports
+    that without sleeping. Never raises and never prints command lines,
+    absolute paths, environment values, boot ids or raw exception text."""
     try:
         rows = conn.execute(
             "SELECT DISTINCT pm.pid, pm.start_ticks, a.host_boot_id "
@@ -392,27 +468,84 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
         first = sample_all()
         time.sleep(1.0)
         second = sample_all()
-        parts = []
+        #: identity -> (label, earlier, final, unavailable-reason, wchan,
+        #: children), keyed by the full ``(pid, start_ticks, boot id)``
+        #: identity, never by pid alone, so recorded identities that share a
+        #: numeric pid across attempts stay distinct. wchan/children are read
+        #: with the samples, before any signal, so a signaled worker's wait
+        #: channel and child pids still print. An identity with an
+        #: unavailable reason is never signaled; a resolved identity may be.
+        resolved = {}
+        selected = []
         for index, identity in enumerate(identities, start=1):
             pid, stored_start_ticks, stored_boot_id = identity
             label = f"tracked process {index} of {len(identities)} (pid {pid})"
             if stored_boot_id != boot_id:
-                parts.append(f"{label}: unavailable (boot id mismatch)")
+                resolved[identity] = (label, None, None, "boot id mismatch", None, None)
                 continue
             earlier = first.get(pid)
             final = second.get(pid)
             if (earlier is None or final is None
                     or earlier.get("start_ticks") != stored_start_ticks
                     or final.get("start_ticks") != stored_start_ticks):
-                parts.append(f"{label}: unavailable (stat unreadable or start time mismatch)")
+                resolved[identity] = (label, None, None,
+                                      "stat unreadable or start time mismatch", None, None)
                 continue
             wchan = read_small(f"/proc/{pid}/wchan")
             children = read_small(f"/proc/{pid}/task/{pid}/children")
+            resolved[identity] = (label, earlier, final, None, wchan, children)
+            delta = final["ticks"] - earlier["ticks"]
+            if final["state"] in ("S", "D") and delta <= 1:
+                selected.append(identity)
+        signalled = set()
+        not_signalled = {}
+        for identity in selected:
+            pid, stored_start_ticks = identity[0], identity[1]
+            # Re-check identity immediately before signaling: a pid reused in
+            # the gap must never receive this worker's traceback signal.
+            live = read_stat(pid)
+            if live is None:
+                not_signalled[identity] = "process exited before signal"
+                continue
+            if live.get("start_ticks") != stored_start_ticks:
+                not_signalled[identity] = "identity changed before signal"
+                continue
+            try:
+                os.kill(pid, signal.SIGABRT)
+            except ProcessLookupError:
+                not_signalled[identity] = "process exited before signal"
+                continue
+            except PermissionError:
+                not_signalled[identity] = "signal permission denied"
+                continue
+            except Exception as exc:
+                not_signalled[identity] = type(exc).__name__
+                continue
+            signalled.add(identity)
+        if signalled:
+            _await_worker_stderr_growth(conn, job_id)
+        parts = []
+        for identity in identities:
+            pid = identity[0]
+            label, earlier, final, unavailable, wchan, children = resolved[identity]
+            if unavailable is not None:
+                parts.append(f"{label}: unavailable ({unavailable})")
+                continue
+            delta = final["ticks"] - earlier["ticks"]
+            if identity in signalled:
+                status = "traceback signal sent"
+            elif identity in not_signalled:
+                status = f"traceback signal not sent ({not_signalled[identity]})"
+            elif final["state"] not in ("S", "D"):
+                status = f"traceback signal not sent (state {final['state']})"
+            else:
+                status = f"traceback signal not sent (cpu delta {delta} ticks)"
             parts.append(
-                f"{label}: cpu {final['ticks'] - earlier['ticks']} ticks, "
+                f"{label}: cpu {delta} ticks, "
                 f"state {final['state']}, "
                 f"wchan {wchan if wchan is not None else 'unavailable'}, "
-                f"children {children if children is not None else 'unavailable'}")
+                f"children {children if children is not None else 'unavailable'}, "
+                f"{status}")
         return "; ".join(parts)
     except Exception as exc:
         return f"unavailable (tracked process diagnostics failed: {type(exc).__name__})"
@@ -542,12 +675,16 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
                           label="attempt lease heartbeat")
         family = field(render_family, missing="unavailable (no liveness summary)",
                        label="process family liveness")
-        stderr_tail = field(lambda: _worker_stderr_tail(conn, attempts),
-                            missing="unavailable (worker stderr unavailable)",
-                            label="worker stderr tail")
+        # Read the tracked-process diagnostics first: it is what signals a
+        # stuck worker (SIGABRT) and waits briefly for faulthandler to append
+        # to worker.stderr, so the stderr tail below captures that fresh
+        # output.
         process_details = field(lambda: _tracked_process_diagnostics(conn, job_id),
                                 missing="unavailable (tracked process diagnostics unavailable)",
                                 label="tracked process diagnostics")
+        stderr_tail = field(lambda: _worker_stderr_tail(conn, attempts),
+                            missing="unavailable (worker stderr unavailable)",
+                            label="worker stderr tail")
         return head + "; ".join([
             f"attempt count: {count}",
             f"queue/admission reason: {reason_text}",
