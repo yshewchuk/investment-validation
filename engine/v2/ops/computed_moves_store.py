@@ -14,10 +14,12 @@ contracted table does. One fragment per ticker; the append-only capture log is
 ``data_computed_moves_captures`` (schema v12).
 
 Spec s4c rewrites two things here: the yfinance edge is the injected
-``yfinance_history_fetcher`` (never ``legacy_adapter.new_fetcher``), and both
-source tables are scanned exactly ONCE per run -- selection and capture share
-the same two frames (``_scan_once``), because the old per-ticker
-``_events_for``/``_daily_for`` made 2xN full-table scans for N targets.
+``yfinance_history_fetcher`` (never ``legacy_adapter.new_fetcher``), and the
+source tables are never scanned per ticker (the old ``_events_for``/
+``_daily_for`` made 2xN full-table scans for N targets). Issue #362: one
+scan keeps only per-ticker counters for selection, and capture rescans one
+bounded ticker chunk at a time (``_TickerChunks``), so retained source rows
+never grow with total history.
 
 The pure close-to-close math lives in :mod:`engine.v2.data.computed_moves`;
 this module is the impure orchestrator.
@@ -28,6 +30,7 @@ import hashlib
 import io
 import json
 import sqlite3
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -44,7 +47,7 @@ from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTE
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
 from engine.v2.ops.catalog import transaction
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.generation_binding import record_price_history_lineage
 from engine.v2.ops.incremental_data import (
     RefreshCallbackResult,
@@ -76,6 +79,10 @@ __all__ = [
 
 INPUT_PATH = "computed_moves_refresh_input.json"
 MAX_SCAN_ROWS = 2_000_000
+#: The reader's own batch ceiling; a chunk scan leases at most this, or half the guard if smaller.
+_LEASE_ALLOWANCE = 50_000
+_EVENT_COLUMNS = ("ticker", "event_date", "session", "src_orats")
+_DAILY_COLUMNS = ("ticker", "date", "implied_move")
 FRAGMENT_COLUMNS = ("ticker", "event_date", "realized_move_pct", "available_as_of_date",
                     "implied_move_pct", "quarter_ordinal", "skipped", "computed_at",
                     "source_hash", "capture_id")
@@ -200,8 +207,13 @@ def _scan_rows(repository: Repository, snapshot, table_name: str,
         max_retained_rows=MAX_SCAN_ROWS, retained_rows=account)
 
 
-def _scan_frame(repository: Repository, snapshot, table_name: str,
-                columns) -> pd.DataFrame:
+def _lease_cap() -> int:
+    """The most rows one chunk-scan lease may hold: its share of ``MAX_SCAN_ROWS``."""
+    return max(1, min(_LEASE_ALLOWANCE, MAX_SCAN_ROWS // 2))
+
+
+def _scan_frame(repository: Repository, snapshot, table_name: str, columns,
+                tickers=None, held: RetainedRowCount | None = None) -> pd.DataFrame:
     """One pinned snapshot's ``table_name`` as one frame, built per leased batch.
 
     Consumes the ordered :class:`RetainedBatch` leases from :func:`_scan_rows`.
@@ -214,36 +226,139 @@ def _scan_frame(repository: Repository, snapshot, table_name: str,
     shape. Every repository or integrity error propagates unchanged as this
     helper unwinds, discarding the local provisional chunks; no row dictionary
     is ever retained or accumulated across batches.
+
+    ``tickers`` (a set) keeps only those tickers' rows, so the frame is the
+    selection's bounded slice rather than the whole table. That scan leases at
+    most :func:`_lease_cap` rows and charges those leases and every kept row to
+    ``held``; the caller discharges the kept rows when it drops the frame.
     """
     chunks: list[pd.DataFrame] = []
-    for lease in _scan_rows(repository, snapshot, table_name, columns):
+    leases = (_scan_rows(repository, snapshot, table_name, columns) if tickers is None
+              else iter_pinned_scan_batches(
+                  repository, snapshot, table_name, columns,
+                  max_retained_rows=_lease_cap(), retained_rows=held))
+    for lease in leases:
         with lease as batch:
-            chunks.append(pd.DataFrame(batch))
+            rows = batch if tickers is None else [row for row in batch if row["ticker"] in tickers]
+            if tickers is not None and not rows:
+                continue
+            chunks.append(pd.DataFrame(rows))
+            if held is not None:
+                held.retain(len(rows))
     if not chunks:
         return pd.DataFrame()
     return pd.concat(chunks, ignore_index=True)
 
 
-def _scan_once(repository: Repository, snapshot) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """One scan of each source table, shared by target selection and capture.
+def _scan_once(repository: Repository, snapshot, tickers=None,
+               held: RetainedRowCount | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """One scan of each source table, optionally narrowed to ``tickers``.
 
     Returns the ORATS-confirmed ``earnings_events`` frame (``event_date``
     parsed) and the ``daily_market`` frame, both sorted by key. Each frame
     arrives through the batch-aware :func:`_scan_frame` consumer, so no scan
-    retains the whole selection's row dictionaries at once. Every consumer in
-    this run indexes these frames; nothing scans per ticker again.
+    retains the whole selection's row dictionaries at once. With ``tickers``
+    omitted the frames are the whole tables; the refresh passes one bounded
+    ticker chunk at a time (:class:`_TickerChunks`).
     """
-    events = _scan_frame(repository, snapshot, "earnings_events",
-                         ("ticker", "event_date", "session", "src_orats"))
+    events = _scan_frame(repository, snapshot, "earnings_events", _EVENT_COLUMNS, tickers, held)
     if not events.empty:
         events = events[events["src_orats"] & events["session"].notna()].copy()
         events["event_date"] = pd.to_datetime(events["event_date"])
         events = events.sort_values("event_date").reset_index(drop=True)
-    daily = _scan_frame(repository, snapshot, "daily_market",
-                        ("ticker", "date", "implied_move"))
+    daily = _scan_frame(repository, snapshot, "daily_market", _DAILY_COLUMNS, tickers, held)
     if not daily.empty:
         daily = daily.sort_values("date").reset_index(drop=True)
     return events, daily
+
+
+class _SourceStats:
+    """Per-ticker aggregates of the two source tables: O(tickers) state, never rows."""
+
+    def __init__(self) -> None:
+        self.event_rows, self.daily_rows, self.past = Counter(), Counter(), Counter()
+        self.latest: dict[str, pd.Timestamp] = {}
+
+    def add_confirmed(self, events: pd.DataFrame, day) -> None:
+        """Fold in ORATS-confirmed sessioned events: those before ``day``, and each ticker's newest."""
+        if events.empty:
+            return
+        dates, tickers = pd.to_datetime(events["event_date"]), events["ticker"].astype(str)
+        if day is not None:
+            self.past.update(tickers[dates < day].value_counts().to_dict())
+        for ticker, newest in dates.groupby(tickers).max().items():
+            if pd.notna(newest) and (ticker not in self.latest or newest > self.latest[ticker]):
+                self.latest[ticker] = newest
+
+
+def _scan_stats(repository: Repository, snapshot, stats: _SourceStats, day, *,
+                events: bool = True, daily: bool = True) -> None:
+    """Stream the source tables into ``stats``, one lease at a time."""
+    if events:
+        for lease in _scan_rows(repository, snapshot, "earnings_events", _EVENT_COLUMNS):
+            with lease as batch:
+                frame = pd.DataFrame(batch)
+                if not frame.empty:
+                    stats.event_rows.update(frame["ticker"].astype(str))
+                    stats.add_confirmed(
+                        frame[frame["src_orats"] & frame["session"].notna()], day)
+    if daily:
+        for lease in _scan_rows(repository, snapshot, "daily_market", _DAILY_COLUMNS):
+            with lease as batch:
+                stats.daily_rows.update(str(row["ticker"]) for row in batch)
+
+
+class _TickerChunks:
+    """Each target ticker's source frames, loaded one bounded ticker chunk at a time.
+
+    Targets, in plan order, are packed into chunks whose event plus daily rows
+    total at most ``MAX_SCAN_ROWS`` less :func:`_lease_cap`, and chunk scans
+    lease at most that cap, so the rows held here and the in-flight lease
+    together stay within ``MAX_SCAN_ROWS`` however long the source history is
+    (``held.peak_rows`` is that total). A chunk is loaded on its first ticker's
+    request and released (the charge returned) before the next one loads. One
+    ticker alone above the bound is refused: nothing partial is built.
+    """
+
+    def __init__(self, repository: Repository, snapshot, order, stats: _SourceStats) -> None:
+        self._repository, self._snapshot = repository, snapshot
+        self.held = RetainedRowCount()
+        budget = MAX_SCAN_ROWS - _lease_cap()
+        self._chunks: list[list[str]] = []
+        self._index: dict[str, int] = {}
+        size = 0
+        for ticker in order:
+            rows = stats.event_rows[ticker] + stats.daily_rows[ticker]
+            if rows > budget:
+                raise fail("RESOURCE_LIMIT_EXCEEDED",
+                           "computed moves source rows for one ticker exceed the retained-row guard",
+                           details={"limit": budget})
+            if not self._chunks or size + rows > budget:
+                self._chunks.append([])
+                size = 0
+            self._chunks[-1].append(ticker)
+            size += rows
+            self._index[ticker] = len(self._chunks) - 1
+        self._loaded: int | None = None
+        self._groups: tuple[dict, dict] = ({}, {})
+
+    def _for(self, ticker: str) -> tuple[dict, dict]:
+        index = self._index.get(ticker)
+        if index is None:
+            return {}, {}
+        if index != self._loaded:
+            self._groups, self._loaded = ({}, {}), None
+            self.held.discharge(self.held.live_rows)
+            events, daily = _scan_once(self._repository, self._snapshot,
+                                       set(self._chunks[index]), self.held)
+            self._groups, self._loaded = (_group_by_ticker(events), _group_by_ticker(daily)), index
+        return self._groups
+
+    def events(self, ticker: str) -> pd.DataFrame | None:
+        return self._for(ticker)[0].get(ticker)
+
+    def daily(self, ticker: str) -> pd.DataFrame:
+        return self._for(ticker)[1].get(ticker, _EMPTY_DAILY)
 
 
 def _group_by_ticker(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
@@ -252,10 +367,35 @@ def _group_by_ticker(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return {str(ticker): group for ticker, group in frame.groupby("ticker")}
 
 
+def _selection_stats(repository: Repository, parent_snapshot_id: str,
+                     events: pd.DataFrame | None, daily: pd.DataFrame | None, as_of) -> _SourceStats:
+    """Selection aggregates from the caller's frames, streaming whichever table is absent.
+
+    Counters only, never a whole-table frame. A bad ``as_of`` refuses after the
+    scan, so a source refusal still outranks it exactly as before.
+    """
+    try:
+        day, bad_as_of = _as_of_day(as_of), None
+    except OpsError as error:
+        day, bad_as_of = None, error
+    stats = _SourceStats()
+    if events is not None:
+        stats.add_confirmed(events, day)
+    if daily is not None and not daily.empty:
+        stats.daily_rows.update(daily["ticker"].astype(str))
+    if events is None or daily is None:
+        _scan_stats(repository, repository.resolve(parent_snapshot_id), stats, day,
+                    events=events is None, daily=daily is None)
+    if bad_as_of is not None:
+        raise bad_as_of
+    return stats
+
+
 def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str, *,
                                  all_scoreable: bool = True, since=None,
                                  oquants_tickers=(), events: pd.DataFrame | None = None,
                                  daily: pd.DataFrame | None = None,
+                                 stats: _SourceStats | None = None,
                                  as_of) -> tuple[list[str], dict]:
     """The legacy ``target_tickers`` rule, read through the v2 snapshot.
 
@@ -265,23 +405,17 @@ def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str
     caller's optional replacement for the legacy extension-only oquants glob
     (the v2 catalog carries no oquants moves table); it only matters for
     ``all_scoreable=False``. ``events``/``daily`` are the caller's already
-    scanned frames (spec s4c Rewrite 3); omitted, this scans once itself.
+    scanned frames (spec s4c Rewrite 3) and ``stats`` its already streamed
+    per-ticker aggregates; omitted, this streams them itself, keeping counters
+    only -- never a whole-table frame.
     ``as_of`` is the job's own session date (spec R5): selection NEVER reads
     the wall clock, so the store's plan hash equals the nightly's.
     """
-    if events is None or daily is None:
-        snapshot = repository.resolve(parent_snapshot_id)
-        scanned_events, scanned_daily = _scan_once(repository, snapshot)
-        events = scanned_events if events is None else events
-        daily = scanned_daily if daily is None else daily
-    day = _as_of_day(as_of)
-    if events.empty:
-        scoreable: set[str] = set()
-    else:
-        hist = events[pd.to_datetime(events["event_date"]) < day]
-        counts = hist.groupby("ticker")["event_date"].size()
-        scoreable = set(counts[counts >= MIN_SCOREABLE].index)
-    dm_tickers = set(daily["ticker"].astype(str)) if not daily.empty else set()
+    if stats is None:
+        stats = _selection_stats(repository, parent_snapshot_id, events, daily, as_of)
+    _as_of_day(as_of)  # a stats-bearing caller is validated too
+    scoreable = {ticker for ticker, count in stats.past.items() if count >= MIN_SCOREABLE}
+    dm_tickers = set(stats.daily_rows)
 
     oq_tickers = {str(ticker) for ticker in oquants_tickers}
     pool = scoreable if all_scoreable else (scoreable - oq_tickers)
@@ -294,11 +428,7 @@ def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str
     }
     if since is not None:
         since = pd.Timestamp(_as_of_day(since))  # same validation as_of gets (Opus review)
-        if events.empty:
-            printed: set[str] = set()
-        else:
-            recent = events[pd.to_datetime(events["event_date"]) >= since]
-            printed = set(recent["ticker"].astype(str))
+        printed = {ticker for ticker, newest in stats.latest.items() if newest >= since}
         targets = [ticker for ticker in targets if ticker in printed]
         report["since"] = str(since.date())
         report["printed_since"] = len(printed)
@@ -766,9 +896,9 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
     bound to ``RefreshCallback`` via a bare ``functools.partial``: ``main``'s
     ``RefreshParameters`` has no ``as_of`` field, so ``as_of`` is an explicit,
     validated, required keyword. Validates the staged input document up front,
-    selects targets from the pinned parent snapshot with ONE scan per source
-    table, and commits one new snapshot. A same-``as_of`` rerun genuinely
-    no-ops: every committed row's ``computed_at`` derives from ``as_of``, so
+    selects targets from one counter-only scan per source table, captures
+    through bounded ticker chunks (one rescan of both tables per chunk), and
+    commits one new snapshot. A same-``as_of`` rerun genuinely no-ops: every committed row's ``computed_at`` derives from ``as_of``, so
     identical inputs commit identical bytes. ``use_cached_receipts`` picks the
     plan's cache policy (``_plan_cached_outcomes``); the supervised default
     is unchanged."""
@@ -792,11 +922,12 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
         store = ArtifactStore(document["objects_root"])
         repository = Repository(conn, store)
         parent = repository.resolve_full(parameters.parent_snapshot_id)
-        events, daily = _scan_once(repository, parent.snapshot)
+        stats = _SourceStats()
+        _scan_stats(repository, parent.snapshot, stats, as_of_day)
         targets, _selection = target_tickers_from_snapshot(
             repository, parameters.parent_snapshot_id,
             all_scoreable=document.get("all_scoreable", True),
-            since=document.get("since"), events=events, daily=daily, as_of=as_of)
+            since=document.get("since"), stats=stats, as_of=as_of)
         units = computed_moves_units(targets, as_of=as_of)
         plan = plan_refresh(
             parent.snapshot, units,
@@ -805,8 +936,9 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
             expected_head_generation=int(document["expected_head_generation"]))
         fragment_records, attempts = _capture_targets(
             conn, store, plan, fetcher, clock,
-            events_by_ticker=_group_by_ticker(events),
-            daily_by_ticker=_group_by_ticker(daily), as_of_day=as_of_day)
+            inputs=_TickerChunks(repository, parent.snapshot,
+                                 [unit.expected_keys[0] for unit in plan.units], stats),
+            as_of_day=as_of_day)
         if not fragment_records:
             return _no_fragment_result(
                 conn, parameters, attempts, targets, document, parent, clock)
@@ -913,8 +1045,8 @@ def _capture_id_for(unit, *, source_hash: str | None = None,
     return "capture_" + content_hash(payload).removeprefix("sha256:")[:32]
 
 
-def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
-                     daily_by_ticker, as_of_day: str):
+def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks,
+                     as_of_day: str):
     """Acquire and stage one fragment per unit, fresh or cached, exactly once.
 
     The caller reaches this only when the plan has at least one fresh fetch, and
@@ -947,7 +1079,8 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
                              "outcome": ("no_history" if kind == "legitimate_empty"
                                          else kind)})
             continue
-        events = events_by_ticker.get(ticker)
+        events = None  # drop the last ticker's frame before the next chunk can load
+        events = inputs.events(ticker)
         if events is None:
             capture_id = _capture_id_for(unit)
             attempts.append({"capture_id": capture_id, "ticker": ticker,
@@ -973,7 +1106,7 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
         events = events[(events["event_date"] >= pd.Timestamp(sd[0]))
                         & (events["event_date"] < as_of_ts)]
         rows = build_rows(
-            ticker, events, sd, sc, daily_by_ticker.get(ticker, _EMPTY_DAILY),
+            ticker, events, sd, sc, inputs.daily(ticker),
             computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id)
         if not rows:
             attempts.append({"capture_id": capture_id, "ticker": ticker,
