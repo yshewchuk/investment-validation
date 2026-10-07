@@ -1343,7 +1343,7 @@ job.
 
 ### `decision_validation.py`: finality coverage of candidates
 
-The finality receipt's `covered_tickers` (from `finality_coverage.json`) lists only tickers individually final on the session. The check compares it against the candidate decisions' tickers (the population actually being decided), not every score row. Scoring a ticker that lacks a final session is legitimate; it is never a candidate. (Supervisor judgement call, 2026-10-07; a native shadow nightly failed on 8 uncovered non-candidate scored tickers while all 12 candidate tickers were covered.) The finding keeps its name `missing_candidate`, which now describes the comparison: a candidate ticker missing from the covered list. Consumers should match on `{field: "evidence.finality.covered_tickers", reason: "missing_candidate"}`.
+The finality receipt's `covered_tickers` (from `finality_coverage.json`) lists only tickers individually final on the session. The check compares it against the candidate decisions' tickers (the population actually being decided), not every score row. Scoring a ticker that lacks a final session is legitimate; it is never a candidate. The finding keeps its name `missing_candidate`, which now describes the comparison: a candidate ticker missing from the covered list. Consumers should match on `{field: "evidence.finality.covered_tickers", reason: "missing_candidate"}`.
 
 | Condition | Outcome |
 |---|---|
