@@ -469,10 +469,10 @@ def _ticker_list(value):
     return tuple(filter(None, (part.strip() for part in raw.replace(",", "\n").splitlines())))
 
 
-def _planned_population(args, root, conn, clock, tickers, context_tickers):
+def _planned_population(args, root, conn, clock, tickers):
     """``(population, snapshot_id)``: a supplied ``--expected-population`` file always wins,
     unchanged. Otherwise ``--input-mode snapshot`` generates it
-    (:func:`~engine.v2.ops.snapshot_planning.generated_population`) for the watchlist and
+    (:func:`~engine.v2.ops.snapshot_planning.generated_population`) for the ``--tickers`` watchlist and
     returns the snapshot id it read; any other mode has no snapshot and yields ``()``."""
     if args.expected_population or args.input_mode != "snapshot":
         return _read_expected_population(args), None
@@ -480,7 +480,7 @@ def _planned_population(args, root, conn, clock, tickers, context_tickers):
         raise fail("INVALID_REQUEST", "snapshot input mode needs --snapshot-scope")
     from engine.v2.ops.snapshot_planning import generated_population
     return generated_population(conn, ArtifactStore(root), args.snapshot_scope, as_of=args.as_of,
-                                tickers=tickers or context_tickers, clock=clock,
+                                tickers=tickers, clock=clock,
                                 expected_snapshot_id=getattr(args, "expected_snapshot_id", None))
 
 
@@ -530,8 +530,7 @@ def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
         context_tickers = _ticker_list(args.context_tickers) or tickers
-        population, snapshot_id = _planned_population(args, root, conn, clock, tickers,
-                                                      context_tickers)
+        population, snapshot_id = _planned_population(args, root, conn, clock, tickers)
         from engine.v2.ops.snapshot_stages import _catalog_path
         plan = nightly_plan(Path(__file__).resolve().parents[3], args.as_of,
                             mode=args.mode, manifest_ref=_read_input_manifest_ref(args, root, conn, clock),

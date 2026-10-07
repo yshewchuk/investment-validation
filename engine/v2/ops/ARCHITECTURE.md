@@ -622,7 +622,7 @@ caller behavior.
 | no event in the window | `INVALID_REQUEST`, never an empty plan |
 | no head, or `earnings_events` missing or failing its contract | the scan's typed `DataError`, surfaced as `INPUT_CHANGED` with `details.data_code` (as for other pin failures); a null or unparseable `event_date` is `board_requests`'s `INVALID_REQUEST` |
 | head differs from a caller-supplied `expected_snapshot_id`, or moved after the scan (`pin_snapshot_inputs`'s own re-resolution differs from the scanned id) | `INPUT_CHANGED`; no plan is saved |
-| scope | `--tickers`, else `--context-tickers`; neither is `INVALID_REQUEST`. `legacy` input mode has no snapshot: nothing generated, `planned_population` stays blocked |
+| scope | the `--tickers` watchlist the score stage scores; none is `INVALID_REQUEST`, never a fallback to the wider `--context-tickers`. `legacy` input mode has no snapshot: nothing generated, `planned_population` stays blocked |
 | same snapshot and `as_of` | identical population and scope hash; no provider or network call |
 
 A generated population comes from the same snapshot that is scored, so it checks coverage (every upcoming event in the data got scored or refused) but cannot detect a hole in the events themselves; qualification runs keep the file override for an independent expectation.

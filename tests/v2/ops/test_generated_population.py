@@ -206,11 +206,13 @@ class _Pin:
                 "materialization_request_ref": "request-1"}
 
 
-def _plan(env, monkeypatch, *extra, mode="snapshot"):
+def _plan(env, monkeypatch, *extra, mode="snapshot", tickers="AAA,BBB"):
     conn, clock, _, root = env
     pin = _Pin()
     monkeypatch.setattr(planning, "pin_snapshot_inputs", pin)
-    argv = ["plan", "nightly", "--as-of", _AS_OF, "--tickers", "AAA,BBB", "--input-mode", mode]
+    argv = ["plan", "nightly", "--as-of", _AS_OF, "--input-mode", mode]
+    if tickers:
+        argv += ["--tickers", tickers]
     if mode == "snapshot":
         argv += ["--snapshot-scope", "shadow"]
     plan = cli._plan_command(cli.parser().parse_args([*argv, *extra]), root, conn, clock)["plan"]
@@ -225,6 +227,20 @@ def test_a_plan_without_a_file_records_the_generated_population(env, monkeypatch
     assert plan["expected_population"] == expected
     assert pin.calls[0]["expected_population"] == tuple(expected)
     assert pin.calls[0]["expected_snapshot_id"] == _head_id(env[0])  # the snapshot that was scanned
+
+
+def test_generation_follows_the_watchlist_not_the_wider_context(env, monkeypatch):
+    plan, _ = _plan(env, monkeypatch, "--context-tickers", "AAA,BBB,CCC,DDD", tickers="AAA")
+
+    assert plan["expected_population"] == sorted(_keys("AAA", "2026-12-20") + _keys("AAA", "2026-12-30"))
+
+
+def test_a_plan_without_a_watchlist_is_refused_not_widened_to_the_context(env, monkeypatch):
+    with pytest.raises(OpsError) as raised:  # the score stage scores --tickers only
+        _plan(env, monkeypatch, "--context-tickers", "AAA,BBB", tickers="")
+
+    assert raised.value.code == "INVALID_REQUEST"
+    assert "--tickers" in raised.value.problem.message
 
 
 def test_a_supplied_file_overrides_generation(env, monkeypatch):

@@ -92,7 +92,9 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     missing head or a missing/malformed events table is the scan's ``DataError`` as
     ``INPUT_CHANGED`` (``details.data_code``), as ``pin_snapshot_inputs`` reports it."""
     if not tickers:
-        raise fail("INVALID_REQUEST", "generated population needs planned tickers")
+        # The score stage scores the watchlist only: a population over any wider scope (the
+        # context universe) could only fail at execution, so refuse at plan time instead.
+        raise fail("INVALID_REQUEST", "generated population needs the --tickers watchlist")
     try:
         head = resolve_snapshot_head(conn, store, scope, clock=clock)
         snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
