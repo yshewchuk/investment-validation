@@ -289,6 +289,35 @@ directly, without conversion to `DataError`.
 | `STALE_EXPECTATION` | validation | no | `explain_dependencies`'s chain-query path sees a stale caller expectation |
 | `CALENDAR_UNAVAILABLE` | validation | no | registered here but raised only by `engine.v2.research`, never from inside this package |
 
+**Legacy materialization row validation.** Rewritten curated parts and
+single-file outputs are checked against a fresh scan in query order, comparing
+the query's selected columns with exact value equality after the existing
+null-like and timestamp normalization. A row-count mismatch keeps the
+`CONTRACT_MISMATCH` refusal message `materialized row count {actual} != scanned
+row count {expected}`; a value mismatch keeps
+`materialized value for column {column!r} disagrees with the scanned row`.
+Read path: row values are compared by reading the written Parquet part
+directly with pyarrow (never through the legacy reader); a rewritten curated
+part also reaches the legacy `coerce()` per batch; only byte-copied files, and
+a rewritten part with zero rows, are opened with the legacy reader. Validation
+compares bounded batches (8,192 rows per side, so peak memory does
+not grow with rows per table-year), but no batch is accepted on its own: a
+difference in any batch, including the last, refuses the whole
+materialization, and a row-count mismatch takes precedence over a value
+mismatch. Validation is read-only and idempotent (same parts and snapshot, same
+verdict): it changes no materialized byte and no `SNAPSHOT`/receipt content,
+keeps no cache of its own and no retry (every call re-scans the snapshot for
+rewritten files and re-reads each part), and runs only after every part is
+written, with no transaction around it. Byte-copied files are not re-scanned:
+a copied curated table is reopened with the legacy reader and passed through
+`coerce()` (failure: `CONTRACT_MISMATCH` "legacy coerce() refused ..."), and a
+copied single file is only reopened with the legacy reader (failure: the
+reader's own error). A `DataError` refusal makes `legacy_adapter.materialize` remove everything
+that call wrote (except destination-root safety refusals, which leave the
+pre-existing root alone). A missing or unreadable part raises the reader's own
+error, never a match; that error is not a `DataError`, so it skips that cleanup
+and leaves an unlocked, unreturned partial tree (pre-existing behaviour).
+
 **`daily_market` missing-ticker outcome (R1–R6).** A non-empty 2xx ORATS
 response that remains incomplete after the provider's single paired retry is
 committable as partial coverage. It does not turn an absent ticker into a
