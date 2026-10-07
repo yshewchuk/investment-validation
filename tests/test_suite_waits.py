@@ -35,6 +35,7 @@ from tests.ops_support import (
     REGISTRY,
     TEST_POLICY,
     AdmissionWatch,
+    _await_worker_stderr_growth,
     catalog,
     request,
     run_until,
@@ -668,6 +669,31 @@ def test_run_until_deadline_signals_a_stuck_tracked_child_and_dumps_its_faulthan
                     pass
             if proc.stdout is not None:
                 proc.stdout.close()
+
+
+def test_await_worker_stderr_growth_never_sleeps_when_the_dump_landed_before_polling(
+        tmp_path, monkeypatch):
+    """Regression: the stderr-growth wait must recognize growth that already
+    happened before its first poll. The race: the baseline is recorded before
+    the SIGABRT is delivered, and a worker whose faulthandler dump lands in
+    the gap between delivery and the start of polling has already grown the
+    file past the pre-signal baseline -- the very first size check must
+    return, never sleeping (see ``ops_support._await_worker_stderr_growth``).
+    A real temporary stderr file holds the baseline content, the simulated
+    dump is appended before the helper runs, and ``ops_support.time.sleep``
+    is replaced by a recording spy."""
+    stderr_path = tmp_path / "diagnostics" / "worker.stderr"
+    stderr_path.parent.mkdir(parents=True)
+    stderr_path.write_text("worker startup banner\n")
+    baseline = stderr_path.stat().st_size
+    with open(stderr_path, "ab") as fh:
+        fh.write(b"Current thread 0x0 (most recent call first):\n"
+                 b'  File "<path>", line 1\n')
+    sleeps = []
+    monkeypatch.setattr("tests.ops_support.time.sleep",
+                        lambda seconds: sleeps.append(seconds))
+    _await_worker_stderr_growth(stderr_path, baseline)
+    assert sleeps == []
 
 
 def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path, monkeypatch):

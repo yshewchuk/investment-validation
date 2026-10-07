@@ -380,19 +380,18 @@ def _file_size(path):
         return None
 
 
-def _await_worker_stderr_growth(conn, job_id, *, timeout=2.0, poll=0.05) -> None:
+def _await_worker_stderr_growth(path, baseline, *, timeout=2.0, poll=0.05) -> None:
     """After signaling a stuck tracked process, poll briefly (at most
     ``timeout`` seconds) for its faulthandler dump to append to
     ``diagnostics/worker.stderr``, so the deadline message's tail read sees
-    the fresh output. Never sleeps when the path is unavailable and never
-    raises."""
+    the fresh output. The path and its pre-signal baseline are resolved by the
+    caller before signaling, so growth that happened between signaling and
+    this call is not missed. Never sleeps when the path is unavailable and
+    never raises."""
     try:
-        path = _worker_stderr_path(conn, job_id)
         if path is None:
             return
-        initial = _file_size(path)
-        if initial is None:
-            initial = 0
+        initial = baseline if baseline is not None else 0
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             size = _file_size(path)
@@ -497,6 +496,8 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
             delta = final["ticks"] - earlier["ticks"]
             if final["state"] in ("S", "D") and delta <= 1:
                 selected.append(identity)
+        stderr_path = _worker_stderr_path(conn, job_id)
+        stderr_baseline = _file_size(stderr_path) if stderr_path is not None else None
         signalled = set()
         not_signalled = {}
         for identity in selected:
@@ -523,7 +524,7 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
                 continue
             signalled.add(identity)
         if signalled:
-            _await_worker_stderr_growth(conn, job_id)
+            _await_worker_stderr_growth(stderr_path, stderr_baseline)
         parts = []
         for identity in identities:
             pid = identity[0]
