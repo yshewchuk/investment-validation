@@ -1079,6 +1079,7 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
                              "outcome": ("no_history" if kind == "legitimate_empty"
                                          else kind)})
             continue
+        events = None  # drop the last ticker's frame before the next chunk can load
         events = inputs.events(ticker)
         if events is None:
             capture_id = _capture_id_for(unit)

@@ -266,6 +266,27 @@ def _spy_live_frame_rows(monkeypatch) -> list[int]:
     return peaks
 
 
+def test_no_frame_is_alive_while_the_next_chunk_loads(tmp_path, monkeypatch):
+    """The previous chunk's frames, including the capture loop's own reference to a
+    ticker's events, are released before the next chunk's scan starts, so nothing escapes
+    the retained-row account (CodeRabbit round 2)."""
+    monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", 600)  # one ticker per chunk
+    alive_at_load: list[int] = []
+    real = computed_moves_store._scan_once
+
+    def spy(*args, **kwargs):
+        gc.collect()
+        alive_at_load.append(sum(len(obj) for obj in gc.get_objects()
+                                 if isinstance(obj, pd.DataFrame)))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(computed_moves_store, "_scan_once", spy)
+    _run(tmp_path)
+
+    assert len(alive_at_load) > 1  # several chunks really loaded
+    assert alive_at_load == [0] * len(alive_at_load)
+
+
 @pytest.mark.parametrize("bulk", [0, 10, 30])
 def test_retained_input_rows_do_not_grow_with_total_history(tmp_path, monkeypatch, bulk):
     """(c) Total history grows ~7x across the cases; the rows retained at once never
