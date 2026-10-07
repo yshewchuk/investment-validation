@@ -95,28 +95,19 @@ the production-default `legacy`/unpinned path stays a no-op.
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
 a manual/operator-invoked script, as `native_parity`'s production caller.
-The previous owner proved that script can never be more than manual: it
-calls `run_shadow_nightly`, which "has no production caller [and] needs
-14 caller-supplied stage handlers nothing builds" — a manual script
-outside any schedule is not what "the REAL nightly" means. Phase 1 (cutover PR-4 redo slice 1, `#132`) landed
-the pure functions this section documents — `legacy_parity_rows`,
-`native_parity_report._empty_native_report`, and
-`native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` bumped
-`v1.0` → `v1.1`) — with no job/worker/supervisor wiring yet. Phase 2
-slice 2A (`#185`) lands the other half of the keyed-join design this
-section already specified before either half was code: `native_score_batch.py`'s
-`v2.0` keyed `records.json`/`refusals.json` schema (`_board_request_key`,
-the new `INVALID_KEY_FIELD` refusal, schema tags
-`native_score_batch_records.v2.0` / `native_score_batch_refusals.v2.0`)
-plus `native_parity_report._population_key_from_board_request_key` and
-`native_parity_report._native_rows_and_refusals` — the pure projection
-functions this doc's "Primary contracts" section below documents. The
-new `native_parity_report` projection functions are pure, with no
-`native_parity` job/worker/supervisor wiring of their own — that wiring
-is slice 2B, below. `native_score_batch.py`'s own worker and
-shadow-submission sidecar are unaffected by this schema bump: they
-already exist and are already wired (cutover PR-3 `#66`'s worker
-dispatch, PR-7a `#126`'s tick-loop submission).
+That script can never be more than manual: it calls `run_shadow_nightly`,
+which "has no production caller [and] needs 14 caller-supplied stage
+handlers nothing builds". Phase 1 (`#132`) landed the pure functions
+`legacy_parity_rows`, `native_parity_report._empty_native_report` and
+`native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` `v1.0` →
+`v1.1`). Slice 2A (`#185`) landed the other half of the keyed join:
+`native_score_batch.py`'s `v2.0` keyed `records.json`/`refusals.json`
+schema (`_board_request_key`, the `INVALID_KEY_FIELD` refusal, tags
+`native_score_batch_records.v2.0` / `native_score_batch_refusals.v2.0`) plus
+`native_parity_report._population_key_from_board_request_key` and
+`_native_rows_and_refusals` (pure projections; "Primary contracts" below).
+`native_score_batch.py`'s worker and shadow sidecar are unaffected by the
+bump (cutover PR-3 `#66` worker dispatch, PR-7a `#126` tick-loop submission).
 The `native_parity` job kind -- `stages.py::_native_parity_kind`,
 `worker.py`'s dispatch branch, `run_native_parity_worker`,
 `NativeParityParameters` -- is real. Its nightly-side builder,
@@ -1257,7 +1248,8 @@ Per row (collected as a refusal, never sinks the batch):
 | `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its dates don't parse |
 | `CALENDAR_ROW_KEY_MISMATCH` | the staged row's ticker/event_date disagrees with the row's own key |
 | `UNSUPPORTED_STRATEGY` | the row's strategy is outside this assembler's supported set |
-| `RELEASE_MISSING_ROLE` | the release has no driver/gate identity for the strategy |
+| `RELEASE_MISSING_ROLE` | no `driver:{strategy}` identity and no `_DRIVER_ROLE_ALIAS` identity (below), or no gate identity, for the strategy |
+| `RELEASE_MISSING_FEATURE_ORDER` | `feature_names` is empty and the driver or gate identity has an empty `feature_order` |
 | `AMBIGUOUS_DECISION_CLOCK` | the resolved driver/gate identities disagree on decision clock |
 | `GATE_POLICY_NOT_STAGED` | no gate threshold staged for the row's strategy (known gap; no production source exists yet) |
 | `POST_AS_OF_ROW` | the row's panel anchor is dated after `as_of` |
@@ -1268,6 +1260,12 @@ string, never staged input or an exception message (`refusals.json` is a
 published output). The release is resolved once per attempt and reused for
 every row. Assembly is a pure function of its inputs (no clock, no RNG) —
 a newly promoted release genuinely changing the output is by design.
+
+**Driver alias (TEMPORARY; supervisor's proposal, user-approved 2026-10-07).** No real release carries `driver:STR-THRU` (the inventory emits `size`, not `driver`). `_DRIVER_ROLE_ALIAS` (one constant, strategy -> identity key; `STR-THRU` -> `size:*`, legacy `PAYOFF_DRIVER`, `engine/payoff.py:81`) is consulted only when the exact `driver:{strategy}` identity is absent; a present exact binding always wins. When the alias is used the bundle's `model_identity` is keyed by the alias key (`size:*`), so the record shows it. Removal: a release carrying the dedicated binding (inventory change); `test_dedicated_driver_binding_wins_over_alias` fails if one is ignored. Restaging the release is a possible later pivot.
+
+**Feature names.** A non-empty `parameters.feature_names` is used as given. Empty: per row, the sorted de-duplicated union of the driver and gate `feature_order`s, minus the stage-derived gate columns (`GATE_FORECAST_COLUMNS`, `GATE_ANALOG_COLUMNS`: projecting them would suppress native derivation). A pure function of the recorded identities, so it changes with the model's inputs; the leakage denylist still applies (`LEAKED_FEATURE_NAME`).
+
+**Known gap ([#479](https://github.com/yshewchuk/investment-validation/issues/479)).** The bundle declares no driver residual pool, payoff artifact or residual recipe, so rows that pass the checks above are flagged `NO_PAYOFF_MAP` / `MISSING_MODEL_RESIDUALS` until that slice lands.
 
 ### Native parity (`run_native_parity_worker`, `native_parity_report.py`)
 
