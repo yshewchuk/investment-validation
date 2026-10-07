@@ -290,6 +290,7 @@ __all__ = [
     "format_pinned_ref",
     "lock_down",
     "materialize_price_series",
+    "materialized_batches",
     "materialize_tree",
     "narrow_query_to_year",
     "panel_object_ref",
@@ -299,6 +300,7 @@ __all__ = [
     "px_relative_path",
     "px_series_tickers",
     "read_plan_complete",
+    "scanned_batches",
     "scanned_rows",
     "tier4_cache_refs_match_panel",
     "trades_span",
@@ -1161,28 +1163,41 @@ def narrow_query_to_year(query: DataQuery, contract: TableContract, year: int) -
         end_exclusive=f"{year + 1}-01-01"))
 
 
-def scanned_rows(repository, query: DataQuery, table_name: str) -> list[dict]:
-    """Scan ``query`` and collect its rows.
+VALIDATION_BATCH_ROWS = 8192
+
+
+def scanned_batches(repository, query: DataQuery, table_name: str, *,
+                    batch_rows: int | None = None):
+    """Scan a selection in bounded batches while preserving its query order.
 
     Callers may hand in a query whose ``time_interval`` has been narrowed (see
     :func:`narrow_query_to_year`) while its ``max_result_rows`` still carries
     the wider query's population, which ``Repository._check_population_bound``
     refuses as an unbound. The result limit is therefore prepared against
-    exactly the bound that rule enforces for THIS selection — the same
-    ``scan_population_bound``/``_prepared_query`` recipe as everywhere else
-    (kept when the membership admits it, lowered to the bound otherwise, with
-    the batch limit following it down and staying positive for a zero bound).
-    Every other field, the output ordering and the scan's own refusals are the
-    caller's."""
+    exactly the bound that rule enforces for THIS selection: kept when the
+    membership admits it, lowered to the bound otherwise, with the batch limit
+    following it down and staying positive for a zero bound. ``batch_rows``
+    (default :data:`VALIDATION_BATCH_ROWS`, read at call time) caps the batch.
+    """
+    if batch_rows is None:
+        batch_rows = VALIDATION_BATCH_ROWS
     bound = repository.scan_population_bound(
         query.snapshot_id, table_name=table_name, table_contract_ref=query.table_contract_ref,
         key_filter=query.key_filter, time_interval=query.time_interval)
     max_result_rows = min(query.max_result_rows, bound)
-    max_batch_rows = (min(query.max_batch_rows, max_result_rows) if max_result_rows > 0
-                      else query.max_batch_rows)
+    max_batch_rows = min(query.max_batch_rows, batch_rows)
+    if max_result_rows > 0:
+        max_batch_rows = min(max_batch_rows, max_result_rows)
     prepared = dataclasses.replace(query, max_result_rows=max_result_rows,
                                   max_batch_rows=max_batch_rows)
-    return [row for batch in repository.scan(prepared, table_name=table_name) for row in batch.to_pylist()]
+    return repository.scan(prepared, table_name=table_name)
+
+
+def scanned_rows(repository, query: DataQuery, table_name: str) -> list[dict]:
+    """Scan ``query`` and collect all of its rows (small selections only; the
+    post-write validation streams :func:`scanned_batches` instead)."""
+    return [row for batch in scanned_batches(repository, query, table_name)
+            for row in batch.to_pylist()]
 
 
 def _normalize_value(value):
@@ -1197,19 +1212,64 @@ def _normalize_value(value):
     return to_pydatetime() if to_pydatetime is not None else value
 
 
-def assert_rows_match(scanned: list[dict], legacy_frame, columns: tuple[str, ...]) -> None:
-    """Row-for-row equality between a fresh Repository scan and a legacy
-    ``_read_part`` frame of the same materialized file (D14: full-precision
-    values, not an approximation)."""
-    legacy_rows = legacy_frame.to_dict("records") if len(legacy_frame) else []
-    if len(scanned) != len(legacy_rows):
-        raise errors.fail("CONTRACT_MISMATCH",
-                  f"materialized row count {len(legacy_rows)} != scanned row count {len(scanned)}")
-    for scanned_row, legacy_row in zip(scanned, legacy_rows):
+def _rows_from_batches(batches):
+    """Yield rows from one bounded Arrow/Python batch at a time."""
+    for batch in batches:
+        rows = batch.to_pylist() if hasattr(batch, "to_pylist") else batch
+        yield from rows
+
+
+def materialized_batches(path, columns=None, *, batch_rows: int | None = None):
+    """Yield a written Parquet part as bounded Arrow batches (all columns when
+    ``columns`` is None). An unreadable or missing part raises the reader's own
+    error, which refuses the materialization."""
+    parquet = pq.ParquetFile(path)
+    selected = None
+    if columns is not None:
+        # Same tolerance as the legacy reader: a column absent from the part
+        # reads as missing (None), which then disagrees with the scanned value.
+        available = set(parquet.schema_arrow.names)
+        selected = [name for name in columns if name in available]
+    yield from parquet.iter_batches(
+        batch_size=VALIDATION_BATCH_ROWS if batch_rows is None else batch_rows,
+        columns=selected)
+
+
+def assert_rows_match(scanned_batches, materialized_batches,
+                      columns: tuple[str, ...]) -> None:
+    """Compare all selected rows exactly, retaining at most the current batches.
+
+    Count and value refusals keep the prior codes and messages. A first value
+    mismatch is remembered while both iterators are exhausted so a total row
+    count mismatch retains its historical precedence.
+    """
+    missing = object()
+    scanned_count = 0
+    materialized_count = 0
+    first_mismatch = None
+    scanned_iter = _rows_from_batches(scanned_batches)
+    materialized_iter = _rows_from_batches(materialized_batches)
+    while True:
+        scanned_row = next(scanned_iter, missing)
+        materialized_row = next(materialized_iter, missing)
+        if scanned_row is missing and materialized_row is missing:
+            break
+        if scanned_row is not missing:
+            scanned_count += 1
+        if materialized_row is not missing:
+            materialized_count += 1
+        if scanned_row is missing or materialized_row is missing or first_mismatch is not None:
+            continue
         for name in columns:
-            if _normalize_value(scanned_row.get(name)) != _normalize_value(legacy_row.get(name)):
-                raise errors.fail("CONTRACT_MISMATCH",
-                          f"materialized value for column {name!r} disagrees with the scanned row")
+            if _normalize_value(scanned_row.get(name)) != _normalize_value(materialized_row.get(name)):
+                first_mismatch = (
+                    f"materialized value for column {name!r} disagrees with the scanned row")
+                break
+    if scanned_count != materialized_count:
+        raise errors.fail("CONTRACT_MISMATCH",
+                  f"materialized row count {materialized_count} != scanned row count {scanned_count}")
+    if first_mismatch is not None:
+        raise errors.fail("CONTRACT_MISMATCH", first_mismatch)
 
 
 def _file_content_hash(path: Path) -> str:

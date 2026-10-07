@@ -358,16 +358,23 @@ def _validate_curated_table(repository, query, table_name: str, contract, year_p
     for year, paths_for_year in year_paths.items():
         (path,) = paths_for_year  # the rewrite path always writes exactly one part-0000.parquet
         year_query = legacy_materialization.narrow_query_to_year(query, contract, year)
-        scanned = legacy_materialization.scanned_rows(repository, year_query, table_name)
-        legacy_frame = read_legacy_part(path, columns=None)
-        legacy_materialization.assert_rows_match(scanned, legacy_frame, query.columns)
-        _assert_legacy_coerce_accepts(legacy_frame, table_name)
+        scanned = legacy_materialization.scanned_batches(repository, year_query, table_name)
+        materialized = legacy_materialization.materialized_batches(path, query.columns)
+        legacy_materialization.assert_rows_match(scanned, materialized, query.columns)
+        # Legacy coerce() is rowwise schema casting. Feed it bounded Parquet
+        # batches instead of retaining the complete table-year DataFrame.
+        batches = 0
+        for batch in legacy_materialization.materialized_batches(path):
+            batches += 1
+            _assert_legacy_coerce_accepts(batch.to_pandas(), table_name)
+        if batches == 0:  # an empty part still gets one coerce() on the legacy frame
+            _assert_legacy_coerce_accepts(read_legacy_part(path, columns=None), table_name)
 
 
 def _validate_single_file(repository, query, table_name: str, path) -> None:
-    scanned = legacy_materialization.scanned_rows(repository, query, table_name)
-    legacy_frame = read_legacy_part(path, columns=None)
-    legacy_materialization.assert_rows_match(scanned, legacy_frame, query.columns)
+    scanned = legacy_materialization.scanned_batches(repository, query, table_name)
+    materialized = legacy_materialization.materialized_batches(path, query.columns)
+    legacy_materialization.assert_rows_match(scanned, materialized, query.columns)
 
 
 def _assert_legacy_coerce_accepts(legacy_frame, table_name: str) -> None:

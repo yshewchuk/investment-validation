@@ -289,6 +289,21 @@ directly, without conversion to `DataError`.
 | `STALE_EXPECTATION` | validation | no | `explain_dependencies`'s chain-query path sees a stale caller expectation |
 | `CALENDAR_UNAVAILABLE` | validation | no | registered here but raised only by `engine.v2.research`, never from inside this package |
 
+**Legacy materialization row validation.** Rewritten curated parts and
+single-file outputs are checked against a fresh scan in query order, comparing
+the query's selected columns with exact value equality after the existing
+null-like and timestamp normalization. A row-count mismatch keeps the
+`CONTRACT_MISMATCH` refusal message `materialized row count {actual} != scanned
+row count {expected}`; a value mismatch keeps
+`materialized value for column {column!r} disagrees with the scanned row`.
+Validation compares bounded batches (8,192 rows per side, so peak memory does
+not grow with rows per table-year), but no batch is accepted on its own: a
+difference in any batch, including the last, refuses the whole
+materialization, and a row-count mismatch takes precedence over a value
+mismatch. A missing or unreadable part raises the reader's own error and is
+never treated as a match. Validation does not change materialized bytes or the
+`SNAPSHOT`/receipt content.
+
 **`daily_market` missing-ticker outcome (R1–R6).** A non-empty 2xx ORATS
 response that remains incomplete after the provider's single paired retry is
 committable as partial coverage. It does not turn an absent ticker into a
