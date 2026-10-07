@@ -45,8 +45,8 @@ def _put(root, directory: str, name: str, doc: dict):
 
 def _features_tree(root) -> None:
     """oquants: AAA (from ``_build_fixture``), BBB, CCC whose document ticker is
-    CCX; computed: DDD. Decoys: state files, a non-matching suffix, a directory
-    named like a moves file, and a price file for a ticker no moves file covers.
+    CCX; computed: DDD. Decoys: state files, a non-matching suffix, and a price
+    file for a ticker no moves file covers.
     Prices exist only for BBB and CCX; AAA and DDD have none."""
     root.mkdir(parents=True, exist_ok=True)
     _build_fixture(root)
@@ -56,7 +56,6 @@ def _features_tree(root) -> None:
     _put(root, COMPUTED, "moves_DDD.json", _moves_doc("DDD"))
     _put(root, COMPUTED, "state.json", {"ticker": "STATE"})
     _put(root, COMPUTED, "moves_DDD.json.tmp", {"ticker": "TMP"})
-    (root / COMPUTED / "moves_dir.json").mkdir()
     for ticker in ("BBB", "CCX", "ZZZ"):
         _write_px_csv(root, ticker, DAYS)
 
@@ -170,3 +169,12 @@ def test_manifest_problems_refuses_a_moves_directory_holding_only_a_state_file(t
                              if not ref["path"].startswith((OQUANTS + "/", COMPUTED + "/"))] + [state_ref]
     problems = manifest_problems(document)
     assert [(p["kind"], p["family"]) for p in problems] == [("legacy_features", "features_moves")]
+
+
+def test_capture_refuses_a_directory_named_like_a_moves_file(tmp_path):
+    _features_tree(tmp_path)
+    (tmp_path / COMPUTED / "moves_dir.json").mkdir()
+    with pytest.raises(OpsError) as excinfo:
+        _capture(tmp_path)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["path"] == f"{COMPUTED}/moves_dir.json"

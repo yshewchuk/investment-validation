@@ -1333,7 +1333,7 @@ job.
 
 ### `capture_inputs.py`: `legacy_features` read set
 
-`capture` also enumerates the data-dependent read set of `legacy_features` (now a barrier kind; `UNCAPTURED_KINDS` is gone) because its worker's staging tree is built only from manifest `file_refs`. Family `features_moves` is every `moves_*.json` directly under the oquants moves directory and `data/raw/computed_moves` (panel's own glob; any other name, such as a state file, is excluded, and a directory named like a moves file is skipped although panel's glob would match it). Family `features_price_series` is `px_<T>.csv` plus the Tier-1 yfinance history entries for each ticker those files cover (JSON `ticker` field, else the file-name stem, as panel does). Capture is read-only with no provider or network calls and keeps only file names and that ticker field. The manifest schema is unchanged.
+`capture` also enumerates the data-dependent read set of `legacy_features` (now a barrier kind; `UNCAPTURED_KINDS` is gone) because its worker's staging tree is built only from manifest `file_refs`. Family `features_moves` is every `moves_*.json` directly under the oquants moves directory and `data/raw/computed_moves` (panel's own glob; any other name, such as a state file, is excluded, and a real directory named like a moves file is refused `INPUT_CHANGED` because panel's glob would match and fail reading it). Family `features_price_series` is `px_<T>.csv` plus the Tier-1 yfinance history entries for each ticker those files cover (JSON `ticker` field, else the file-name stem, as panel does). Capture is read-only with no provider or network calls and keeps only file names and that ticker field. The manifest schema is unchanged.
 
 | Condition | Outcome |
 |---|---|

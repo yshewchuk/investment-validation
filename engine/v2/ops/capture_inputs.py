@@ -314,17 +314,23 @@ def _enumerate_moves(root: Path, directories) -> list[str]:
     """``moves_*.json`` directly under each directory -- the glob
     ``engine.data.features.panel.build_events`` runs (panel.py:252/256), so a
     state file or any other name is excluded. A symlinked file is listed (and
-    refused by ``manifest_files``), a symlinked directory is refused here:
-    never followed, never skipped.
+    refused by ``manifest_files``); a symlinked moves directory, or a real
+    directory matching the glob (panel would fail reading it), is refused
+    here: never followed, never skipped.
     """
     out: list[str] = []
     for directory in directories:
         base = root / directory
         if base.is_symlink():
             raise fail("INPUT_CHANGED", "moves directory is indirect", details={"path": directory})
-        if base.is_dir():
-            out.extend(f"{directory}/{p.name}" for p in base.glob("moves_*.json")
-                       if p.is_file() or p.is_symlink())
+        if not base.is_dir():
+            continue
+        for p in base.glob("moves_*.json"):
+            if p.is_dir() and not p.is_symlink():
+                raise fail("INPUT_CHANGED", "a moves_*.json match is a directory",
+                           details={"path": f"{directory}/{p.name}"})
+            if p.is_file() or p.is_symlink():
+                out.append(f"{directory}/{p.name}")
     return sorted(out)
 
 
