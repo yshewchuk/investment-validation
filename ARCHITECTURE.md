@@ -164,8 +164,10 @@ evidence. See the models and data component contracts.
     this gap costs informational PR coverage, never an unmutated merge.
   - **`test` CI PR selection** (`select_pr_tests`, used by
     `.github/workflows/tests.yml`'s `test` job): on `pull_request`, narrows which
-    `tests/test_*.py` files pytest collects to the subset the diff can affect, falling
-    back to every test file when it can't prove a narrower subset is safe; push/
+    tracked test files pytest collects to the subset the diff can affect, and includes
+    configured `[pr_selection].always_run` paths present in the tracked test set (which
+    may be nested), falling back to every test file when it can't prove a narrower subset
+    is safe; push/
     `workflow_dispatch`/schedule runs always run the unfiltered full suite. Selection is
     best-effort: a test reachable only through runtime loading this static analysis
     doesn't track may be omitted from a PR's narrowed run, backstopped by the full
@@ -189,12 +191,18 @@ evidence. See the models and data component contracts.
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
 
-Target PR selection maps changed packages through `checks/layer_map.py` and
-selects their tests plus reverse dependents; see [package test selection by
-layer](guides/test_selection_by_layer.md). A planned checked-in test-layout
-ratchet will keep root-level tests shrinking as packages migrate; Slice 1 will
-implement its check. The current selector stays until implementation slices
-land; pushes to `main` keep the full-suite backstop.
+The active PR workflow uses `tools/mutation_pilot.py select-tests` and the
+import-graph policy described above. For each non-empty diff that yields a
+narrowed test selection, its result includes the configured
+`[pr_selection].always_run` paths present in the tracked test set, even when
+the diff changes only an unrelated test file; full-suite results include all
+tests. The layout ratchet's regression test,
+`tests/test_mutation_ci.py::test_select_pr_tests_always_runs_ratchet_for_unrelated_test_only_diff`,
+covers that selection. The package-layout selector in `checks/test_selection.py`
+is separate from the active workflow; see [package test selection by
+layer](guides/test_selection_by_layer.md). The checked-in test-layout ratchet
+(`checks/test_layout_budget.py`) keeps root-level tests from growing while
+packages migrate; pushes to `main` keep the full-suite backstop.
 
 ## 2. Layers and allowed dependency direction
 

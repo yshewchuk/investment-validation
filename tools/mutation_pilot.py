@@ -1738,7 +1738,9 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     collected test file is a leaf (selects itself and its static
     importers), and a doc path (`is_doc_changed_path`) selects only the
     tests whose closure names that doc (`_doc_reader_tests`). A diff of
-    only those selects a narrow set.
+    only those selects a narrow set. Configured `pr_selection.always_run`
+    test paths are selected for every non-empty diff, including a test-only
+    diff.
 
     #155 (unresolved dynamic loading) handling: a test file that ITSELF
     carries a catch-all edge, as identified by `dynamic_files(graph)`, is
@@ -1787,7 +1789,7 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
         if t in dyn or tainted:
             failsafe.add(t)
     tests_set = set(tests)
-    selected: set[str] = set()
+    selected: set[str] = set(cfg.get("pr_selection", {}).get("always_run", [])) & tests_set
     docs: list[str] = []
     needs_failsafe = False
     for path in sorted(changed_set):

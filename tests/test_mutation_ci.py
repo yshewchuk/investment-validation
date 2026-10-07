@@ -2680,6 +2680,24 @@ def test_select_pr_tests_any_md_outside_inert_skip_is_a_doc(tmp_path, monkeypatc
     assert pilot.select_pr_tests(cfg, ["static/x.md"], graph=graph) is None
 
 
+def test_select_pr_tests_always_runs_ratchet_for_unrelated_test_only_diff(tmp_path, monkeypatch):
+    cfg = pilot.load_config()
+    assert cfg["pr_selection"]["always_run"] == [
+        "tests/test_import_layers.py", "tests/test_layer_map.py",
+        "tests/test_repo_hygiene.py", "tests/test_architecture_docs.py",
+        "tests/test_architecture_doc_budgets.py", "tests/test_code_budgets.py",
+        "tests/v2/integration/test_test_selection.py"]
+    tracked = _write_repo(tmp_path, {
+        "tests/v2/integration/test_test_selection.py": "def test_ratchet(): pass\n",
+        "tests/test_unrelated.py": "def test_unrelated(): pass\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert pilot.select_pr_tests(
+        cfg, ["tests/test_unrelated.py"], graph=graph) == [
+        "tests/test_unrelated.py", "tests/v2/integration/test_test_selection.py"]
+
+
 def test_select_pr_tests_new_test_file_selects_itself_not_the_full_suite(tmp_path, monkeypatch):
     tracked = _write_repo(tmp_path, {
         "tests/test_dyn.py": "import importlib\nimportlib.import_module(__name__ + 'x')\n",
