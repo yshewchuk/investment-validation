@@ -38,18 +38,21 @@ import pyarrow.parquet as pq
 
 from engine.v2.contracts import ObjectRef, TableContractRef
 from engine.v2.data import catalog as data_catalog
-from engine.v2.data import manifests, objects
+from engine.v2.data import manifests, objects, reference_catalog
 from engine.v2.data.computed_moves import MIN_SCOREABLE, build_rows
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import fail
+from engine.v2.ops.generation_binding import record_price_history_lineage
 from engine.v2.ops.incremental_data import (
     RefreshCallbackResult,
     RefreshUnit,
     plan_refresh,
     refresh_job_kind,
 )
+from engine.v2.ops.legacy_adapter import iter_raw_fetch_cache
 from engine.v2.ops.lifecycle import validated_attempt_fence_pair, verify_fence
 from engine.v2.ops.pinned_partition_reader import (
     RetainedBatch,
@@ -93,8 +96,8 @@ _CONTRACT_REF = TableContractRef(contract_id=COMPUTED_MOVES_CONTRACT.contract_id
 #: refused rather than silently ignored (Opus review, PR #39).
 _ALLOWED_DOCUMENT_KEYS = frozenset({
     "catalog_path", "objects_root", "scope", "expected_head_generation",
-    "expected_head_snapshot_id", "attempt_id", "fence", "all_scoreable",
-    "since", "as_of",
+    "expected_head_snapshot_id", "parent_receipt_id", "attempt_id", "fence",
+    "all_scoreable", "since", "as_of",
 })
 
 #: The namespaces this store's document may commit into. This store has no
@@ -103,6 +106,45 @@ _ALLOWED_DOCUMENT_KEYS = frozenset({
 #: ``incremental_refresh`` job kind's, the same ``{"shadow", "smoke"}`` every
 #: other v2 ops entry point is scoped to.
 _ALLOWED_SCOPES = refresh_job_kind().namespaces
+
+
+def tier1_yfinance_history_fetcher(source_root):
+    """Return the successful max-history cache index and a no-network fetcher."""
+    newest = {}
+    for entry in iter_raw_fetch_cache(source_root, "yfinance"):
+        if entry.endpoint != "history" or entry.params.get("period") != "max":
+            continue
+        try:
+            if int(entry.meta.get("status", 0)) != 200:
+                continue
+        except (TypeError, ValueError):
+            continue
+        ticker = entry.params.get("ticker")
+        if not ticker:
+            continue
+        ticker = str(ticker)
+        fetched_at = str(entry.meta.get("fetched_at") or "")
+        ordering = (fetched_at, str(entry.path))
+        if ticker not in newest or ordering > newest[ticker][0]:
+            newest[ticker] = (ordering, entry)
+    cache = {ticker: value[1] for ticker, value in newest.items()}
+
+    def fetch(ticker):
+        entry = cache.get(ticker)
+        if entry is None:
+            return b"", "legitimate_empty", {}, []
+        return entry.body(), "complete", {}, []
+
+    return cache, fetch
+
+
+def parent_receipt_id_for_snapshot(conn, scope, snapshot_id) -> str:
+    receipt_id = reference_catalog.committed_receipt_for_snapshot(
+        conn, scope=scope, snapshot_id=snapshot_id)
+    if receipt_id is None:
+        raise fail("SNAPSHOT_NOT_READY", "scope's parent snapshot has no committed import receipt",
+                   details={"scope": scope, "snapshot_id": snapshot_id})
+    return _validated_parent_receipt_id(receipt_id)
 
 
 def _as_of_day(as_of) -> str:
@@ -399,8 +441,8 @@ def _fence_check_for(staged_attempt_id, staged_fence, clock):
                                            clock.now())
 
 
-def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempts, clock,
-                       expected_head, generation, request_hash, as_of,
+def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records_by_ticker,
+                       attempts, clock, expected_head, generation, request_hash, as_of,
                        staged_attempt_id=None, staged_fence=None):
     prior_manifest = parent.table_manifests.get(COMPUTED_MOVES_TABLE_NAME)
     prior_records = tuple(record for record in parent.records
@@ -454,6 +496,22 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
                          for record in all_records}.values())
     receipt_id = "receipt_cm_" + request_hash.removeprefix("sha256:")[:32]
     attempt_id = "attempt_cm_" + request_hash.removeprefix("sha256:")[:32]
+    # Resolve and validate the parent receipt BEFORE the commit opens: the
+    # legacy lookup reads the newest committed receipt for the parent
+    # snapshot, and an unchanged candidate names that same snapshot, so a
+    # lookup after the candidate's own insert would find the candidate (no
+    # reference inputs yet) and raise SNAPSHOT_NOT_READY.
+    resolved_parent_receipt_id = _parent_receipt_id_for_commit(
+        conn, scope, parent.snapshot.snapshot_id, parent_receipt_id)
+
+    def _record_references(connection, rid):
+        inputs = reference_catalog.reference_inputs_for_receipt(
+            connection, receipt_id=resolved_parent_receipt_id)
+        reference_catalog.insert_reference_inputs(connection, rid, inputs)
+        _insert_captures(connection, attempts)
+        record_price_history_lineage(
+            connection, receipt_id=rid, base_receipt_id=resolved_parent_receipt_id)
+
     return data_catalog.commit_snapshot(
         conn, scope=scope, request_hash=request_hash, contracts=tuple(contracts.values()),
         objects=all_objects, records=all_records, manifests=tuple(table_manifests.values()),
@@ -461,8 +519,7 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
         expected_head_generation=generation, receipt_id=receipt_id, attempt_id=attempt_id,
         fence=1,
         fence_check=_fence_check_for(staged_attempt_id, staged_fence, clock),
-        clock=clock, store=store,
-        record_references=lambda connection, rid: _insert_captures(connection, attempts),
+        clock=clock, store=store, record_references=_record_references,
         audit_partitions=False)
 
 
@@ -482,6 +539,17 @@ def _noop_result(parameters, completed_ids) -> RefreshCallbackResult:
         status="noop", completed_ids=completed_ids, coverage_advanced=False,
         parent_snapshot_id=parameters.parent_snapshot_id,
         refresh_plan_hash=parameters.refresh_plan_hash)
+
+
+def _no_fragment_result(conn, parameters, attempts, targets, document, parent, clock):
+    """Persist fenced audit attempts without publishing a generation."""
+    with transaction(conn):
+        _fence_check_for(document.get("attempt_id"), document.get("fence"), clock)(conn)
+        _parent_receipt_id_for_commit(
+            conn, document["scope"], parent.snapshot.snapshot_id,
+            parameters.parent_receipt_id)
+        _insert_captures(conn, attempts)
+    return _noop_result(parameters, tuple(sorted(targets)))
 
 
 def _input_document(root: Path) -> dict | None:
@@ -510,6 +578,14 @@ def _validate_document_identity(document: dict) -> None:
         if not isinstance(value, str) or not value:
             raise fail("INVALID_REQUEST",
                        f"computed moves refresh input document needs a non-empty string {name}")
+    if document.get("parent_receipt_id") is not None:
+        # An explicit null is the same legacy/unpinned state as an omitted
+        # field: production documents staged before ``parent_receipt_id``
+        # existed serialize it as null, and ``_parent_receipt_id_for_commit``
+        # resolves the receipt for that state. Every non-null value is still
+        # validated here, and a non-null pin that disagrees with the job or is
+        # not committed for the parent is still refused.
+        _validated_parent_receipt_id(document["parent_receipt_id"])
     if not Path(document["catalog_path"]).is_file():
         # ``sqlite3.connect`` is never allowed to silently create a fresh,
         # empty database at a path that does not already hold the real
@@ -598,6 +674,9 @@ def _validate_document_matches_job(document: dict, parameters, *, as_of: str) ->
     if document["scope"] != parameters.scope:
         raise fail("INVALID_REQUEST", "computed moves refresh input document's scope disagrees "
                                        "with the job's RefreshParameters")
+    if document.get("parent_receipt_id") != parameters.parent_receipt_id:
+        raise fail("INVALID_REQUEST", "computed moves input parent_receipt_id disagrees "
+                                      "with the job parameters")
     if document.get("expected_head_generation") != parameters.expected_head_generation:
         raise fail("INVALID_REQUEST", "computed moves refresh input document's "
                                        "expected_head_generation disagrees with the job's "
@@ -631,6 +710,32 @@ def _validated_parent_snapshot_id(parent_snapshot_id) -> str:
     return parent_snapshot_id
 
 
+def _validated_parent_receipt_id(parent_receipt_id) -> str:
+    if (not isinstance(parent_receipt_id, str) or not parent_receipt_id
+            or len(parent_receipt_id) > 128):
+        raise fail("INVALID_REQUEST",
+                   f"parent_receipt_id must be a bounded nonempty str, "
+                   f"got {parent_receipt_id!r}")
+    return parent_receipt_id
+
+
+def _parent_receipt_id_for_commit(conn, scope, snapshot_id, pinned_receipt_id):
+    if pinned_receipt_id is None:
+        # Compatibility for jobs serialized before parent_receipt_id was added.
+        return parent_receipt_id_for_snapshot(conn, scope, snapshot_id)
+    receipt_id = _validated_parent_receipt_id(pinned_receipt_id)
+    row = conn.execute(
+        "SELECT 1 FROM data_import_receipts WHERE receipt_id = ? AND scope = ? "
+        "AND status = 'committed' AND result_snapshot_id = ?",
+        (receipt_id, scope, snapshot_id)).fetchone()
+    if row is None:
+        raise fail("SNAPSHOT_NOT_READY",
+                   "pinned parent receipt is not committed for the parent snapshot",
+                   details={"scope": scope, "snapshot_id": snapshot_id,
+                            "receipt_id": receipt_id})
+    return receipt_id
+
+
 def _validated_refresh_plan_hash(refresh_plan_hash) -> str:
     """Matches ``incremental_data._is_hash``'s own sha256-hex check for this
     same field (mirrored rather than imported: that name is private, and #40's
@@ -650,20 +755,23 @@ def _validate_job_identity(parameters) -> None:
     runner is called directly, not through the job-submission pipeline that
     would otherwise have validated them via ``refresh_parameter_problems``."""
     _validated_parent_snapshot_id(parameters.parent_snapshot_id)
+    if parameters.parent_receipt_id is not None:
+        _validated_parent_receipt_id(parameters.parent_receipt_id)
     _validated_refresh_plan_hash(parameters.refresh_plan_hash)
 
 
-def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> RefreshCallbackResult:
+def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
+                               use_cached_receipts: bool = True) -> RefreshCallbackResult:
     """This job's own callback (spec s4b Change 3), called directly -- NOT
     bound to ``RefreshCallback`` via a bare ``functools.partial``: ``main``'s
     ``RefreshParameters`` has no ``as_of`` field, so ``as_of`` is an explicit,
     validated, required keyword. Validates the staged input document up front,
     selects targets from the pinned parent snapshot with ONE scan per source
-    table, and commits one new snapshot. A cached unit is never re-fetched,
-    and a same-``as_of`` rerun genuinely no-ops: every committed row's
-    ``computed_at`` derives from ``as_of``, so identical inputs commit
-    identical bytes.
-    """
+    table, and commits one new snapshot. A same-``as_of`` rerun genuinely
+    no-ops: every committed row's ``computed_at`` derives from ``as_of``, so
+    identical inputs commit identical bytes. ``use_cached_receipts`` picks the
+    plan's cache policy (``_plan_cached_outcomes``); the supervised default
+    is unchanged."""
     as_of_day = _as_of_day(as_of)  # validated before any I/O; a bad value raises
     _validate_job_identity(parameters)
     root = Path(root)
@@ -692,9 +800,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
         units = computed_moves_units(targets, as_of=as_of)
         plan = plan_refresh(
             parent.snapshot, units,
-            cached_outcomes=cached_unit_outcomes(
-                conn, units, source=COMPUTED_MOVES_TABLE_NAME,
-                endpoint=COMPUTED_MOVES_TABLE_NAME),
+            cached_outcomes=_plan_cached_outcomes(conn, units, use_cached_receipts),
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(document["expected_head_generation"]))
         fragment_records, attempts = _capture_targets(
@@ -702,10 +808,8 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
             events_by_ticker=_group_by_ticker(events),
             daily_by_ticker=_group_by_ticker(daily), as_of_day=as_of_day)
         if not fragment_records:
-            # ``targets`` -- the whole derived universe -- is what "completed"
-            # means here, whether or not this particular run wrote a fragment
-            # for every one of them.
-            return _noop_result(parameters, tuple(sorted(targets)))
+            return _no_fragment_result(
+                conn, parameters, attempts, targets, document, parent, clock)
 
         request_hash = content_hash({
             "kind": "computed_moves_generation", "scope": document["scope"],
@@ -714,6 +818,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
                           for ticker, record in sorted(fragment_records.items())}})
         receipt = _commit_generation(
             conn, store, str(document["scope"]), parent=parent,
+            parent_receipt_id=parameters.parent_receipt_id,
             records_by_ticker=fragment_records, attempts=attempts, clock=clock, as_of=as_of_day,
             expected_head=document.get("expected_head_snapshot_id",
                                        parameters.parent_snapshot_id),
@@ -733,6 +838,25 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
             candidate_snapshot_id=receipt.resulting_head_snapshot_id)
     finally:
         conn.close()
+
+
+def _plan_cached_outcomes(conn, units, use_cached_receipts):
+    """The plan's cache set under this run's explicit policy.
+
+    ``use_cached_receipts`` is the narrowest explicit control over the catalog
+    raw-receipt cache. ``True`` -- the supervised worker's existing behavior --
+    reuses a durable same-unit receipt instead of re-fetching (spec R2). The
+    local ``computed-moves capture`` CLI sets it ``False`` because its selected
+    Tier-1 source root is authoritative: an old same-unit catalog receipt must
+    never override changed bytes, or a missing entry, in that selected source.
+    Both the CLI and the runner build their plan with this same policy, so
+    their plan identity agrees.
+    """
+    if not use_cached_receipts:
+        return {}
+    return cached_unit_outcomes(
+        conn, units, source=COMPUTED_MOVES_TABLE_NAME,
+        endpoint=COMPUTED_MOVES_TABLE_NAME)
 
 
 def _unit_history(conn, store, unit, fetcher, cached, *, created_at):
