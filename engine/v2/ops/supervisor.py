@@ -180,6 +180,7 @@ class Service:
         #: monotonic time of the last best-effort pass renewing every OTHER
         #: running attempt's lease (issue #106); None until the first pass.
         self._other_leases_renewed_at = None
+        self._claim_keepalive_cache = None  # (attempt_id, callable): one throttle per attempt
         self.launches = {}
         #: attempt_id -> (monotonic time, observed state) of its last heartbeat row.
         self.observed = {}
@@ -1292,8 +1293,13 @@ class Service:
         ``record_launch``) and ``_finish``'s coordinator work. The own renewal
         is throttled to once per ``LEASE_SECONDS / 4`` by ``Keepalive`` and
         raises ``LEASE_LOST`` when ``heartbeat`` is refused (a void fence is
-        never extended); sibling renewal failures are swallowed.
+        never extended); sibling renewal failures are swallowed. One callable
+        per attempt (single-slot memo): the pin and copy phases of one launch
+        share a single throttle, so no extra heartbeat fires at their boundary.
         """
+        cached = self._claim_keepalive_cache
+        if cached is not None and cached[0] == claim.attempt_id:
+            return cached[1]
         own_keepalive = Keepalive(self.conn, claim.attempt_id, claim.fence, clock=self.clock,
                                   lease_seconds=LEASE_SECONDS)
 
@@ -1301,6 +1307,7 @@ class Service:
             own_keepalive()
             self._renew_other_leases(exclude_attempt_id=claim.attempt_id)
 
+        self._claim_keepalive_cache = (claim.attempt_id, keepalive)
         return keepalive
 
     def _finish(self, running, status):

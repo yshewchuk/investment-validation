@@ -32,7 +32,7 @@ from tests.test_v2_ops_store_barrier import BOUND_REGISTRY
 
 pytestmark = pytest.mark.xdist_group("serial")
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 FILES = 6
 TICK_SECONDS = 45  # per keepalive call: under one lease, but the calls add up to several
 
@@ -43,11 +43,11 @@ def _fixed_capacity(monkeypatch):
                         lambda root, *, clock: sample(clock))
 
 
-def _slow(real, clock, hook=None):
-    """Wrap a staging function so every keepalive call first spends TICK_SECONDS."""
+def _slow(real, clock, hook=None, seconds=TICK_SECONDS):
+    """Wrap a staging function so every keepalive call first spends ``seconds``."""
     def wrapper(*args, keepalive=None, **kwargs):
         def ticking():
-            clock.advance(TICK_SECONDS)
+            clock.advance(seconds)
             if hook is not None:
                 hook()
             keepalive()
@@ -55,7 +55,7 @@ def _slow(real, clock, hook=None):
     return wrapper
 
 
-def _setup(tmp_path, monkeypatch, hook=None):
+def _setup(tmp_path, monkeypatch, hook=None, seconds=TICK_SECONDS):
     prod = tmp_path / "prod"
     (prod / "data").mkdir(parents=True)
     refs = []
@@ -84,9 +84,9 @@ def _setup(tmp_path, monkeypatch, hook=None):
         implementation_ref=content_hash(worker_source_manifest(REPO)),
         environment_ref=content_hash(environment_identity(1))), clock=clock)
     monkeypatch.setattr(supervisor_module, "pin_read_set",
-                        _slow(supervisor_module.pin_read_set, clock, hook))
+                        _slow(supervisor_module.pin_read_set, clock, hook, seconds))
     monkeypatch.setattr(supervisor_module, "copy_read_set",
-                        _slow(supervisor_module.copy_read_set, clock, hook))
+                        _slow(supervisor_module.copy_read_set, clock, hook, seconds))
     service = Service(conn, tmp_path, BOUND_REGISTRY, TEST_POLICY, clock=clock,
                       code_source=REPO, store_root=prod)
     service.start()
@@ -139,6 +139,41 @@ def test_lost_fence_during_staging_still_refuses_with_lease_lost(tmp_path, monke
         # a heartbeat never extends a lease whose fence is gone
         assert attempt["lease_expires_at"] == leases["after_loss"]
         assert calls["n"] == 3  # staging stopped at the first refused renewal
+    finally:
+        service.close()
+        conn.close()
+
+
+def test_pin_and_copy_share_one_throttle_across_their_boundary(tmp_path, monkeypatch):
+    import engine.v2.ops.lifecycle as lifecycle_module
+
+    # Staging spans far less than LEASE_SECONDS / 4, so the claimed attempt's
+    # own lease is renewed exactly once: a second keepalive built for the copy
+    # phase would heartbeat again the moment the pin phase ends.
+    conn, clock, job, service = _setup(tmp_path, monkeypatch, seconds=0.1)
+    beats = []
+    real_heartbeat = lifecycle_module.heartbeat
+
+    def counting(conn_, attempt_id, *args, **kwargs):
+        beats.append(attempt_id)
+        return real_heartbeat(conn_, attempt_id, *args, **kwargs)
+
+    monkeypatch.setattr(lifecycle_module, "heartbeat", counting)
+    real_stage = service._stage_legacy_inputs
+    staged = {}
+
+    def stage(claim, launch):
+        before = len(beats)
+        try:
+            return real_stage(claim, launch)
+        finally:
+            staged["beats"] = len(beats) - before
+
+    monkeypatch.setattr(service, "_stage_legacy_inputs", stage)
+    try:
+        assert service.tick() is True
+        assert staged["beats"] == 1
+        run_until(service, conn, job.job_id, timeout=90)
     finally:
         service.close()
         conn.close()
