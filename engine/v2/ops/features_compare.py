@@ -88,8 +88,9 @@ def compare_tables(name, rebuilt_path, pinned_path) -> dict:
                                    "n_rows": n_bad, "max_abs_diff": col_abs,
                                    "max_rel_diff": col_rel})
         else:
-            n_diff = int((~((rebuilt[c] == pinned[c])
-                            | (rebuilt[c].isna() & pinned[c].isna()))).sum())
+            na_r, na_p = rebuilt[c].isna().to_numpy(dtype=bool), pinned[c].isna().to_numpy(dtype=bool)
+            both = ~na_r & ~na_p
+            n_diff = int(np.count_nonzero(na_r != na_p)) + int((rebuilt[c][both] != pinned[c][both]).sum())
             if n_diff:
                 mismatches.append({"reason": "non_float", "column": c, "n_rows": n_diff})
     return {"verdict": "mismatch" if mismatches else "match",

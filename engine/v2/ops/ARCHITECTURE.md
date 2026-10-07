@@ -1333,7 +1333,7 @@ job.
 |---|---|
 | R1: no `features.json` | `FEATURES_MISSING` (both modes) |
 | R1: snapshot score, receipt lacks `comparison`, `verdict` or `pinned_*` hashes | `FEATURES_STALE`, reason `not_compared` (a missing verdict never reads as a pass) |
-| Exact: row count, schema (names, dtypes), keys (panel `ticker, date`; Tier-4 `ticker, event_date`), non-float columns, NaN/inf positions. Float columns: `abs(a-b) <= FEATURES_ATOL + FEATURES_RTOL*abs(b)`, `1e-12`/`1e-9`, named in `features_compare.py` (**supervisor's judgement call, not derived**; measured noise 3.6e-15) | features records `verdict: "mismatch"` (also for a table missing on either side) and does not raise; score raises non-retryable `FEATURES_STALE`, reason `mismatch` |
+| Exact: row count, schema (names, dtypes), keys (panel `ticker, date`; Tier-4 `ticker, event_date`), non-float columns, NaN/inf positions. Float columns: `abs(a-b) <= FEATURES_ATOL + FEATURES_RTOL*abs(b)`, with the two constants named once in `features_compare.py` (a judgement call, not derived from the data) | features records `verdict: "mismatch"` (also for a table missing on either side) and does not raise; score raises non-retryable `FEATURES_STALE`, reason `mismatch` |
 | Materialization hashes at score differ from `pinned_panel_sha256`/`pinned_tier4_sha256` | `FEATURES_STALE`, reason `pinned_changed` |
 | R2-R6 | no cache or retry (rerun the stage); `features.json` is an atomic stage output, tables read-only; same tables give the same verdict |
 | Recorded in `features.json` | `comparison` (`numeric.v1`, `rtol`, `atol`), `verdict`, `pinned_*_sha256`, per table max absolute/relative diff and differing-column count, and on mismatch up to 5 columns (`reason`, `n_rows`, diffs); never cell values |

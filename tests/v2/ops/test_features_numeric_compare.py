@@ -148,6 +148,24 @@ def test_structural_or_exact_changes_refuse(tmp_path, case, reason, column):
         assert result["mismatches"][0]["column"] == column
 
 
+def test_one_sided_null_in_a_non_float_column_refuses(tmp_path):
+    df = _frame()
+    df["n_obs"] = df["n_obs"].astype("Int64")
+    rebuilt = df.copy()
+    rebuilt.loc[2, "n_obs"] = pd.NA
+    rebuilt_path, pinned_path = tmp_path / "rebuilt.parquet", tmp_path / "pinned.parquet"
+    _write(rebuilt_path, rebuilt)
+    _write(pinned_path, df)
+
+    result = compare_tables("tier4", rebuilt_path, pinned_path)
+    assert result["verdict"] == "mismatch"
+    assert result["mismatches"][0] == {"reason": "non_float", "column": "n_obs", "n_rows": 1}
+
+    reverse = compare_tables("tier4", pinned_path, rebuilt_path)
+    assert reverse["verdict"] == "mismatch"
+    assert reverse["mismatches"][0] == {"reason": "non_float", "column": "n_obs", "n_rows": 1}
+
+
 def test_legacy_mode_stays_byte_exact(monkeypatch, tmp_path):
     from engine import paths as paths_module
     from engine.data import store
