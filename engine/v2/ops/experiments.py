@@ -602,6 +602,7 @@ RUNNER_INVENTORY = {
         "declared_runtime_sources": (
             "experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py",
         ),
+        "fixed_arm_args": {"gate_midfill_str_thru_forecast_analog": ()},
         "ledger_write_behavior": ("appends experiments/LEDGER.csv rows via main()'s "
                                   "--no-ledger gate unless disabled; the adapter always "
                                   "passes --no-ledger"),
@@ -618,6 +619,7 @@ RUNNER_INVENTORY = {
             "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/run.py",
             "experiments/EXP-142_str_runup_t14_factor_simulation_pnl_gate/simulation.py",
         ),
+        "fixed_arm_args": {"native_nan": ()},
         "declared_runtime_inputs": (
             "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/results/oos_scores.parquet",
         ),

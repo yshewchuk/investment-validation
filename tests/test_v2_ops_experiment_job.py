@@ -527,6 +527,36 @@ def test_worker_dispatch_sends_the_audited_clock_selector_to_a_real_subprocess(t
     assert not (tmp_path / "experiments" / "LEDGER.csv").exists()
 
 
+@pytest.mark.parametrize(("runner_id", "primary_arm_id"), [
+    ("experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
+     "gate_midfill_str_thru_forecast_analog"),
+    ("experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py",
+     "native_nan"),
+])
+def test_worker_dispatch_runs_registered_no_argument_primary_arms(
+        tmp_path, monkeypatch, runner_id, primary_arm_id):
+    """Each registered primary selector reaches the runner adapter as an
+    empty tuple and writes its report in the supplied staging root."""
+    from types import SimpleNamespace
+
+    run_dir = tmp_path / primary_arm_id
+    run_dir.mkdir()
+    calls = []
+
+    def adapter(staging_root, called_runner_id, *, args, declared_runtime_sources):
+        calls.append((called_runner_id, args))
+        Path(staging_root, "REPORT.md").write_text("# Registered primary report\n")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(legacy_adapter, "run_legacy_script", adapter)
+    runner = worker._registered_experiment_runner(tmp_path, runner_id, primary_arm_id)
+    result = runner(run_dir=run_dir, no_ledger=True)
+
+    assert calls == [(runner_id, ())]
+    assert result["returncode"] == 0
+    assert (run_dir / "REPORT.md").read_text() == "# Registered primary report\n"
+
+
 def test_worker_dispatch_refuses_a_registered_arm_without_an_audited_selector(
         tmp_path, monkeypatch):
     """Fail closed: a registered runner with no audited selector for the
