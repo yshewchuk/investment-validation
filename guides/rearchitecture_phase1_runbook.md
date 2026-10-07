@@ -470,7 +470,7 @@ python3 tools/bounded_run.py --heavy --cores 8 --max-rss-gb 6.5 -- \
 | `legacy_settlement`: 18 min / 18 min, fixed by the ledger, not ticker count (#476); peak RSS 1.8 GB | measured 2026-10-07 |
 | `legacy_features`: 23 min at 100 tickers; peak RSS 5.05 GB against a 5.5 GiB profile (no 1,326 figure) | measured 2026-10-07 |
 | `engineering_gate`: seconds | measured 2026-10-07 |
-| `serve --once` exits while a job is in `retry_wait`; it loops until no job is queued, `retry_wait`, running or starting | measured 2026-10-07 |
+| `serve --once` returns as soon as a pass has nothing running and claims nothing, so it also exits while a job is in `retry_wait` or queued behind dependencies or capacity; repeat passes until no job is queued, `retry_wait`, running or starting | measured 2026-10-07 |
 
 ### 10.2 Failure semantics
 
@@ -479,7 +479,7 @@ python3 tools/bounded_run.py --heavy --cores 8 --max-rss-gb 6.5 -- \
 | `capture-inputs` | `SOURCE_EMPTY` / `INPUT_CHANGED` when a required family has no files (§2) | Read-only apart from `--output`; fix the source, re-run |
 | `plan nightly` | No manifest: plan is blocked. Wrong manifest kind or missing ticker file: `INPUT_CHANGED`. `--full-run` with `--tickers` != `--context-tickers` | Writes only an immutable plan; re-plan |
 | `submit` | Blocked plan: `INVALID_REQUEST`, exit 2 | Re-submitting the same plan resolves to the same jobs |
-| `serve --once` | Exit status is not a verdict: it exits when idle, so judge success on job states (`get`, `explain`), never the exit code | Retryable failures wait in `retry_wait`; re-run `serve --once` until none is active |
+| `serve --once` | Exit status is not a verdict: it exits when idle, so judge success on job states (`get`, `explain`), never the exit code | Retryable failures wait in `retry_wait`; re-run `serve --once` until no job is queued, `retry_wait`, running or starting |
 | A failed non-retryable job | Cannot be re-driven; `resume` is `--dry-run` only | Fix, then create a FRESH plan (new decision clock, new job ids) and serve it from code that carries the fix |
 
 Failure signatures seen on 2026-10-07 and what they meant:
