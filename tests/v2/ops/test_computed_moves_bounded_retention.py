@@ -57,7 +57,8 @@ def _events_for(ticker: str, qualifying: int) -> list[dict]:
         rows += [_event_row(ticker, _GRID[_AS_OF_IDX]),           # on as_of: never "past"
                  _event_row(ticker, _GRID[_AS_OF_IDX + 3])]       # after as_of
     if ticker == "AB":
-        rows += [{**_event_row(ticker, _GRID[10 + 12 * 11]), "src_orats": False},
+        rows += [_event_row(ticker, _GRID[_AS_OF_IDX]),  # confirmed ON as_of: a 12th would make it a target
+                 {**_event_row(ticker, _GRID[10 + 12 * 11]), "src_orats": False},
                  {**_event_row(ticker, _GRID[10 + 12 * 11 + 2]), "session": None}]
     if ticker == "E":
         for row in rows[::3]:
