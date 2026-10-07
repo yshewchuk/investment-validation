@@ -164,8 +164,10 @@ evidence. See the models and data component contracts.
     this gap costs informational PR coverage, never an unmutated merge.
   - **`test` CI PR selection** (`select_pr_tests`, used by
     `.github/workflows/tests.yml`'s `test` job): on `pull_request`, narrows which
-    `tests/test_*.py` files pytest collects to the subset the diff can affect, falling
-    back to every test file when it can't prove a narrower subset is safe; push/
+    tracked test files pytest collects to the subset the diff can affect, and includes
+    configured `[pr_selection].always_run` paths present in the tracked test set (which
+    may be nested), falling back to every test file when it can't prove a narrower subset
+    is safe; push/
     `workflow_dispatch`/schedule runs always run the unfiltered full suite. Selection is
     best-effort: a test reachable only through runtime loading this static analysis
     doesn't track may be omitted from a PR's narrowed run, backstopped by the full
