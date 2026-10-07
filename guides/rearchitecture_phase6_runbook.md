@@ -101,6 +101,10 @@ plus `started_at`/`ended_at`/`wall_seconds` fields double as this record
 (§7–§8). The default `--refresh-mode legacy` submits no refresh job at all and
 leaves the DAG unchanged.
 
+The manual command sequence, failure semantics and measured resource figures
+for a supervised shadow nightly are in
+[Phase 1 runbook §10](rearchitecture_phase1_runbook.md#10-supervised-native-shadow-nightly).
+
 ## 5. Backup and restore
 
 Take a backup with the existing API — no new capability:
