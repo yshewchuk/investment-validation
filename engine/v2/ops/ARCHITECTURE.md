@@ -599,14 +599,13 @@ non-terminal row is reattached and driven to terminal directly — never resubmi
 exactly once, ever. A terminal-but-failed row raises `INPUT_CHANGED` immediately without resubmitting under the same
 key; the NEXT `_submit_plan` entry mints a genuinely new key via the bumped `snapshot_attempt`.
 
-`TriggerReceipt.snapshot_attempt: int = 0` is a single, monotonic per-`as_of` counter, carried on every receipt
-regardless of status (independent of `error_count`, which resets on several unrelated statuses), and bumped in exactly
-one place: a terminal `INPUT_CHANGED` refusal, never a transient failure. Give-up is an OR of two independent bounds:
-`error_count >= MAX_CONSECUTIVE_ERRORS` (unchanged) OR `snapshot_attempt >= MAX_CONSECUTIVE_ERRORS` (new) — an
-alternating `"error"`/`"timed_out"` sequence can no longer defeat the give-up bound by resetting only the old counter.
-Any status in `RESUME_STATUSES` (which includes `"snapshot_not_yet"`, a resumed `"not_yet"` outcome) resumes on the
-next tick regardless of whether `plan_ref` is set — a pre-plan timeout/error genuinely has no `plan_ref` yet, and this
-is what makes it resumable rather than permanently `"missed"`.
+`TriggerReceipt.snapshot_attempt: int = 0` is a single, monotonic per-`as_of` counter, carried on every receipt regardless of status (independent of
+`error_count`, which resets on several unrelated statuses), and bumped in exactly one place: a terminal `INPUT_CHANGED` refusal, never a transient
+failure. Give-up is an OR of two independent bounds: `error_count >= MAX_CONSECUTIVE_ERRORS` (unchanged) OR `snapshot_attempt >=
+MAX_CONSECUTIVE_ERRORS` (new) — an alternating `"error"`/`"timed_out"` sequence can no longer defeat the give-up bound by resetting only the old
+counter. Any status in `RESUME_STATUSES` (which includes `"snapshot_not_yet"`, a resumed `"not_yet"` outcome) resumes on the next tick regardless of
+whether `plan_ref` is set — a pre-plan timeout/error genuinely has no `plan_ref` yet, and this is what makes it resumable rather than permanently
+`"missed"`.
 
 Commits land directly in scope `"shadow"` (no candidate-scope-then-promote step): `"shadow"` has no downstream
 consumer needing pre-advance validation. The EXACT `snapshot_id` this call verified is threaded through
@@ -616,16 +615,17 @@ consumer needing pre-advance validation. The EXACT `snapshot_id` this call verif
 request construction or registration; equality keeps that ref. Omitting the expected id preserves direct and legacy
 caller behavior.
 
-**Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list, empty list). It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`) and records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date) in the plan and `_scope_hash` exactly as a supplied file. `board_requests` crosses each event with the native-covered strategies plus one `DYN-SV` meta-row, with no per-event applicability filter; unsupported rows become per-row refusals downstream. The head is resolved once and its `snapshot_id` is passed to `pin_snapshot_inputs(expected_snapshot_id=...)`, so the scanned and pinned snapshots are the same.
+**Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list, empty list). It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`) and records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date) in the plan and `_scope_hash` exactly as a supplied file. `board_requests` crosses each event with the native-covered strategies plus one `DYN-SV` meta-row, with no per-event applicability filter; unsupported rows become per-row refusals downstream. The head is resolved twice on this path: by `generated_population`, which scans it, and again by `pin_snapshot_inputs`, which receives the scanned `snapshot_id` as `expected_snapshot_id`. The guarantee is refusal, not a shared resolution: a head that moved after the scan is refused with `INPUT_CHANGED`, so a plan never pairs a population with a different snapshot.
 
 | Condition | Outcome |
 |---|---|
 | no event in the window | `INVALID_REQUEST`, never an empty plan |
 | no head, or `earnings_events` missing or malformed | the scan's typed `DataError`, surfaced as `INPUT_CHANGED` with `details.data_code` (as for other pin failures) |
+| head differs from a caller-supplied `expected_snapshot_id`, or moved after the scan (`pin_snapshot_inputs`'s own re-resolution differs from the scanned id) | `INPUT_CHANGED`; no plan is saved |
 | scope | `--tickers`, else `--context-tickers`; neither is `INVALID_REQUEST`. `legacy` input mode has no snapshot: nothing generated, `planned_population` stays blocked |
 | same snapshot and `as_of` | identical population and scope hash; no provider or network call |
 
-A generated population comes from the same snapshot that is scored, so it checks coverage (every upcoming event in the data got scored or refused) but cannot detect a hole in the events themselves; qualification runs keep the file override for an independent expectation. The scheduled trigger still reads its population file for its universe: generating it there is follow-up work.
+A generated population comes from the same snapshot that is scored, so it checks coverage (every upcoming event in the data got scored or refused) but cannot detect a hole in the events themselves; qualification runs keep the file override for an independent expectation.
 `nightly_raw_rows.scan_forward_board_requests` enumerates pinned forward events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_version`.
 `nightly_raw_rows.scan_calendar_row(repository, snapshot, key, **staged)` returns `CalendarRowInputs(calendar_revision, calendar_row)` with the matched event row ID and the pinned earnings-events dataset version, not the snapshot calendar placeholder.
 These two earnings-event reads take their result bound from the pinned manifest's selected-population bound for the exact selection — the one shared bound the scan enforces before any row streams — so the broad forward enumeration carries no result ceiling of its own, and an empty selection is simply a zero-row query with a positive batch limit; this module's exact-key calendar read now takes that same shared population bound instead of its own result-row cap, and explicit local ceilings stay only where they encode the caller's own operational requirement: `nightly_calendar_inputs`, `nightly_quote_rows`, `computed_moves_store` and `forward_calendar_store`, each keeping its own batch limit and every other retained guard, deadline and invariant unchanged. Both native readers publish catalog refresh output only at the final catalog commit. A source-scan refusal in either reader or a forward-calendar provider refusal before that commit prevents partial catalog publication; successful forward-calendar provider receipts may remain cached.

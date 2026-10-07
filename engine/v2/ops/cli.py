@@ -485,7 +485,10 @@ def _planned_population(args, root, conn, clock, tickers, context_tickers):
 
 
 def _snapshot_inputs(args, root, conn, clock, context_tickers, population, snapshot_id=None):
-    """``--input-mode snapshot``: resolve the scope's head exactly once, here.
+    """``--input-mode snapshot``: pin the scope's head here, via ``pin_snapshot_inputs``.
+
+    A generated population has already resolved and scanned the head once; pinning resolves it
+    again and refuses ``INPUT_CHANGED`` if it moved (``snapshot_id`` is the scanned id).
 
     ``context_tickers`` (P2-C04) is the historical evidence universe — the
     scope :func:`engine.v2.ops.snapshot_planning.pin_snapshot_inputs` builds

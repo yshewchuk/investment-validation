@@ -11,14 +11,19 @@ import json
 import pandas as pd
 import pytest
 
+from engine.v2.data import catalog as data_catalog
+from engine.v2.data import manifests
+from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops import cli, nightly
 from engine.v2.ops import snapshot_planning as planning
 from engine.v2.ops.errors import OpsError
 from tests.data_scan_support import (
+    RECEIPT,
     commit_tables,
     contract_for,
     contract_ref_for,
+    fake_hash,
     publish_and_inspect,
 )
 from tests.ops_support import catalog
@@ -52,6 +57,37 @@ def _build(conn, clock, store, rows, *, with_events=True):
                                      for year, part in sorted(by_year.items())]
         contracts["earnings_events"] = _EVENTS
     commit_tables(conn, clock, tables, contracts, store=store)
+
+
+def _head_id(conn):
+    return conn.execute(
+        "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = 'shadow'").fetchone()[0]
+
+
+def _advance_head(conn, clock, store):
+    """Commit a child snapshot (one more events partition) and move the ``shadow`` head to it."""
+    head = conn.execute("SELECT snapshot_id, generation FROM data_snapshot_heads "
+                        "WHERE scope = 'shadow'").fetchone()
+    parent = Repository(conn, store).resolve(head["snapshot_id"])
+    records = {name: list(Repository(conn, store).fragment_records(parent, name))
+               for name in ("daily_market", "earnings_events")}
+    records["earnings_events"].append(publish_and_inspect(
+        store, _EVENTS, _EVENTS_REF, [_event_row("EEE", "2028-01-05")], "2028"))
+    contracts = {"daily_market": _DAILY, "earnings_events": _EVENTS}
+    table_manifests = {name: manifests.dataset_manifest(
+        contract_ref_for(contracts[name]), recs, knowledge_mode="reconstructed",
+        coverage_receipt_refs=(RECEIPT,), availability_evidence_refs=())
+        for name, recs in records.items()}
+    child = manifests.snapshot_ref(
+        table_manifests, calendar_version="cal.v1", source_priority_version="prio.v1",
+        finality_receipt_refs=(RECEIPT,), parent_snapshot_id=parent.snapshot_id)
+    data_catalog.commit_snapshot(
+        conn, scope="shadow", request_hash=fake_hash("advance"), contracts=list(contracts.values()),
+        objects=[r.object_ref for recs in records.values() for r in recs],
+        records=[r for recs in records.values() for r in recs], manifests=list(table_manifests.values()),
+        snapshot=child, expected_head_snapshot_id=head["snapshot_id"],
+        expected_head_generation=head["generation"], receipt_id="r-advance", attempt_id="att-advance",
+        fence=1, fence_check=lambda _c: None, clock=clock, store=store)
 
 
 def _keys(ticker, day):
@@ -89,8 +125,7 @@ def test_generated_population_is_the_sorted_deduplicated_window_keys(env):
     population, snapshot_id = _generate(env)
 
     assert list(population) == _EXPECTED  # (a) edges in, outside out, sorted, no duplicates
-    assert snapshot_id == env[0].execute(
-        "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = 'shadow'").fetchone()[0]
+    assert snapshot_id == _head_id(env[0])
 
 
 def test_generation_is_restricted_to_the_planned_tickers(env):
@@ -124,6 +159,32 @@ def test_a_snapshot_without_an_events_table_refuses_with_the_contract_error(tmp_
 
     assert raised.value.code == "INPUT_CHANGED"
     assert raised.value.problem.details["data_code"] == "CONTRACT_MISMATCH"
+
+
+def test_a_scope_without_a_head_refuses_with_the_not_ready_error(tmp_path):
+    conn, clock, _ = catalog(tmp_path)  # nothing committed: the scope has no head
+
+    with pytest.raises(OpsError) as raised:
+        _generate((conn, clock, ArtifactStore(tmp_path), tmp_path))
+
+    assert raised.value.code == "INPUT_CHANGED"
+    assert raised.value.problem.details["data_code"] == "SNAPSHOT_NOT_READY"
+
+
+def test_a_head_that_moves_after_the_scan_is_refused_by_the_pin(env):
+    conn, clock, store, _ = env
+    population, scanned = _generate(env)
+    _advance_head(conn, clock, store)
+    assert _head_id(conn) != scanned
+
+    with pytest.raises(OpsError) as raised:  # the real pin re-resolves and compares
+        planning.pin_snapshot_inputs(
+            conn, store, "shadow", tickers=("AAA", "BBB"), year_start=2026, year_end=2027,
+            expected_population=population, clock=clock, session=_AS_OF,
+            expected_snapshot_id=scanned)
+
+    assert raised.value.code == "INPUT_CHANGED"
+    assert "moved" in raised.value.problem.message
 
 
 def test_a_moved_head_is_refused_against_the_expected_snapshot_id(env):
@@ -163,7 +224,7 @@ def test_a_plan_without_a_file_records_the_generated_population(env, monkeypatch
                       + _keys("BBB", "2027-01-24"))
     assert plan["expected_population"] == expected
     assert pin.calls[0]["expected_population"] == tuple(expected)
-    assert pin.calls[0]["expected_snapshot_id"]  # pinned to the snapshot that was scanned
+    assert pin.calls[0]["expected_snapshot_id"] == _head_id(env[0])  # the snapshot that was scanned
 
 
 def test_a_supplied_file_overrides_generation(env, monkeypatch):

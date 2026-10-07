@@ -81,8 +81,9 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     """``(population, snapshot_id)``: the sorted, de-duplicated ``ticker|strategy|event_date``
     keys of ``scan_forward_board_requests`` on ``scope``'s head for ``as_of`` ..
     ``as_of + GENERATED_HORIZON_DAYS``, restricted to ``tickers``. Pure snapshot read: no
-    provider or network call. Pass the returned ``snapshot_id`` to ``pin_snapshot_inputs`` so
-    the scanned and pinned snapshots cannot differ. No ``tickers`` or an empty window is
+    provider or network call. Pass the returned ``snapshot_id`` to ``pin_snapshot_inputs`` as
+    ``expected_snapshot_id``: it re-resolves the head and refuses ``INPUT_CHANGED`` if the head
+    moved after this scan, so the plan never pairs this population with another snapshot. No ``tickers`` or an empty window is
     ``INVALID_REQUEST``; a mismatch with ``expected_snapshot_id`` is ``INPUT_CHANGED``; a
     missing head or a missing/malformed events table is the scan's ``DataError`` as
     ``INPUT_CHANGED`` (``details.data_code``), as ``pin_snapshot_inputs`` reports it."""
