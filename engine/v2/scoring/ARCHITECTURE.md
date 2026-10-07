@@ -257,17 +257,15 @@ machine-checked consumers allowlist by design. `engine.v2.ops.native_score_batch
 (Cutover PR-3) is a real production module that imports
 `assemble_nightly_source_bundle`/`NightlySourceBundleRefusal`/`validated_as_of`
 and calls `resolve_release_binding` from its `native_score_batch` job
-worker — but nothing submits that job yet (`engine/v2/ops/ARCHITECTURE.md`'s
-"Cutover PR-7a": the raw-row producer that would build one from real staged
-data is cutover PR-6, still missing), so this call path has never executed
-outside tests. Separately, `engine.v2.ops.supervisor.py`'s tick loop
-(Cutover PR-7a) runs a cheap release-identity check every tick and DOES call
+worker, and `engine.v2.ops.supervisor.py`'s tick loop (Cutover PR-7a) submits
+that job for eligible pinned-snapshot identities (`engine/v2/ops/
+ARCHITECTURE.md`'s "Cutover PR-7a"). Separately, the same tick loop runs a
+cheap release-identity check every tick and calls
 `release_bindings.resolve_production_release_binding()` live whenever that
 identity changes (memo-gated: skipped on repeat ticks once the current
-release root/id has already been resolved, success or refusal) — purely a
-release-readiness check ahead of that same never-submitted job, but a real
-one that runs in production today, independent of whether the job itself
-ever does.
+release root/id has already been resolved, success or refusal) — a
+release-readiness check that runs independently of whether the job is
+submitted.
 
 ## External systems and libraries
 

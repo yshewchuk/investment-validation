@@ -81,8 +81,8 @@ real caller of these four (`tools/capture_tier0_corpus.py`,
 `assemble_nightly_source_bundle`/`validated_as_of`/`NightlySourceBundleRefusal`)
 reaches them through the submodule-qualified `from
 engine.v2.scoring.nightly_source_bundle import ...` instead, which the
-checker doesn't enforce. `native_score_batch`'s own job is never submitted
-in production, so no caller resolves a full bundle in production yet. See
+checker doesn't enforce. `native_score_batch`'s own job is submitted in
+production for eligible pinned-snapshot identities. See
 `ARCHITECTURE.md` for what
 runs in production today versus only in tests.
 
