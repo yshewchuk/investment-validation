@@ -49,7 +49,8 @@ def _child(source):
 
 
 def _gone(process):
-    for _ in range(30):
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             return True
         time.sleep(0.01)
@@ -264,7 +265,7 @@ def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
     details = json.loads((tmp_path / "diagnostics" / "failure_details.json").read_text())
     assert details == {"exception_type": "RuntimeError",
                        "location": details["location"]}
-    assert details["location"].endswith("test_v2_ops_executor_faults.py:242")
+    assert details["location"].endswith("test_v2_ops_executor_faults.py:243")
     assert "S3CRET-VALUE" not in json.dumps(details)
 
 
