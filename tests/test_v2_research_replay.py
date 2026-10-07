@@ -351,12 +351,11 @@ def _run_replay_cli_with_moving_head(monkeypatch, explicit_snapshot_id=None):
         resolved_ids.append(snapshot_id)
         if snapshot_id is not None:
             return SimpleNamespace(snapshot_id=snapshot_id)
-        resolved = SimpleNamespace(snapshot_id=repository.head_snapshot_id)
-        repository.head_snapshot_id = "snap-b"
-        return resolved
+        return SimpleNamespace(snapshot_id=repository.head_snapshot_id)
 
     def events_frame(repository, snapshot, *, years=None):
         event_snapshot_ids.append(snapshot.snapshot_id)
+        repository.head_snapshot_id = "snap-b"
         return object()
 
     def run(repository, *, strategies, events, reports_dir, scope, snapshot_id):
