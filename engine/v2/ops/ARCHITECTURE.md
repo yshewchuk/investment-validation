@@ -187,24 +187,7 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   never a second, independently written lookup. Returns `(as_of,
   scope_hash, score_job_id, native_score_batch_job_id)`, or `None` when
   no succeeded `native_score_batch` job exists yet.
-- `stages.py::_native_parity_kind()` — **implemented, slice 2B(a) (this
-  PR)** — a new `JobKind`, mirroring
-  `_native_score_batch_kind()` (`stages.py:271`) in shape:
-  `name="native_parity"`, `worker="native_parity"`,
-  `parameters=NativeParityParameters` (new, `RescoreParameters`-shaped —
-  only `expected_ids` and `input_bindings`; this job carries no scalar
-  data of its own, since every input it reads is job-bound),
-  `resource_classes=frozenset({"validation"})` (a pure comparison, no
-  provider fetch — the same classification `decision_evidence` already
-  has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`,
-  `checkpoint_contract="native_parity_report.v1.2"` (matching
-  `native_parity_report.SCHEMA_VERSION`, bumped from `v1.1` in cutover
-  PR-4 slice 1 of #327's redo — see "Outputs" below for what this
-  contract now covers), `namespaces=frozenset({"shadow", "smoke"})`.
-  `worker.py::dispatch` gains a `"native_parity"` branch routing to
-  `native_parity_report.run_native_parity_worker` (below), the same
-  lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
-  already uses (`worker.py:167-168`, `:198-200`).
+- `stages.py::_native_parity_kind()` — **implemented, slice 2B(a) (this PR)** — a new `JobKind`, mirroring `_native_score_batch_kind()` (`stages.py:271`) in shape: `name="native_parity"`, `worker="native_parity"`, `parameters=NativeParityParameters` (new, `RescoreParameters`-shaped — only `expected_ids` and `input_bindings`; this job carries no scalar data of its own, since every input it reads is job-bound), `resource_classes=frozenset({"validation"})` (a pure comparison, no provider fetch — the same classification `decision_evidence` already has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`, `checkpoint_contract="native_parity_report.v1.2"` (matching `native_parity_report.SCHEMA_VERSION`, bumped from `v1.1` in cutover PR-4 slice 1 of #327's redo — see "Outputs" below for what this contract now covers), `namespaces=frozenset({"shadow", "smoke"})`. `worker.py::dispatch` gains a `"native_parity"` branch routing to `native_parity_report.run_native_parity_worker` (below), the same lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch` already uses (`worker.py:167-168`, `:198-200`).
 
 `nightly.GRAPH` has a `"native_score_batch": ("score",)` node (`#88`),
 while `"native_parity"` remains `("score",)` (`nightly.py:124`). Widening
@@ -1372,6 +1355,18 @@ job.
 | `computed-moves capture` has no source root, a held lock, no scoped head/parent pins or a missing/mismatched pinned receipt, invalid `as_of`, a lost head CAS, or a missing source table | Refuses with `INVALID_REQUEST`, `RESOURCE_UNAVAILABLE`, `SNAPSHOT_NOT_READY`, `INVALID_REQUEST`, `SNAPSHOT_CONFLICT`, or the reader's typed contract refusal, respectively. |
 | a source table or column missing, a corrupt, out-of-order or under-bounded pinned fragment, or one ticker's rows above `MAX_SCAN_ROWS` | Selection and chunk packing refuse before any fetch, receipt or fragment write: the reader's own typed code, or `RESOURCE_LIMIT_EXCEEDED` for the ticker case. No partial result; fragment bytes, receipts, snapshots and every other refusal are unchanged. |
 | Tier-1 history is missing, `--dry-run` is set, or identical same-`as-of` inputs are rerun | Missing history is `legitimate_empty`/`no_history` and counted without a live fetch; dry-run reports cache coverage without writes or receipts; an identical rerun resolves to the parent without a generation. |
+
+### `decision_validation.py`: finality coverage of candidates
+
+The finality receipt's `covered_tickers` (from `finality_coverage.json`) lists only tickers individually final on the session. The check compares it against the candidate decisions' tickers (the population actually being decided), not every score row. Scoring a ticker that lacks a final session is legitimate. Candidate status comes from the entry-dated decision population, not from `covered_tickers`: such a ticker is tolerated while it has no candidate row and refuses once it does. The finding keeps its name `missing_candidate`, which now describes the comparison: a candidate ticker missing from the covered list. Consumers should match on `{field: "evidence.finality.covered_tickers", reason: "missing_candidate"}`.
+
+| Condition | Outcome |
+|---|---|
+| a candidate's ticker is absent from `covered_tickers` | `VALIDATION_FAILED`, finding `evidence.finality.covered_tickers` / `missing_candidate`; non-retryable |
+| a scored ticker absent from `covered_tickers` has no candidate | tolerated: no finding |
+| `covered_tickers` missing, not a list or holds a non-string | `VALIDATION_FAILED`, finding `evidence.finality` / `unbound`, with or without candidates; never passes vacuously |
+| no candidates and a well-formed `covered_tickers` (even empty) | no coverage finding: nothing to cover; the empty population is still verified independently against the score document |
+| `is_final`, `daily_share`, `chain_share` and `covered` floors | unchanged (`finality.*` findings) |
 
 ## Invariants
 

@@ -166,7 +166,8 @@ def _validate_evidence(receipts, source, actual, expected, finality, findings):
     _validate_causality(receipts.get("causality", {}), source, findings)
     if not _same(receipts.get("coverage", {}).get("observed_population"), expected):
         _add(findings, "evidence.coverage.observed_population", "mismatch")
-    _validate_finality_receipt(receipts.get("finality", {}), source, finality, findings)
+    candidate_tickers = {key.split("|", 1)[0] for key in actual}
+    _validate_finality_receipt(receipts.get("finality", {}), candidate_tickers, finality, findings)
     # Canonical order for every population-derived list in this contract is
     # sorted-by-population-key (decision_replay.decision_population sorts
     # its rows that way, and decision_evidence.derive's ``expected`` — what
@@ -203,12 +204,15 @@ def _validate_causality(causal, source, findings):
             _add(findings, "evidence.causality." + key, "unbound_or_late_cutoff")
 
 
-def _validate_finality_receipt(receipt, source, finality, findings):
+def _validate_finality_receipt(receipt, candidate_tickers, finality, findings):
+    """Finality coverage is required of the CANDIDATE tickers only; scored
+    tickers that are not candidates may lack a final session.
+    """
     covered = receipt.get("covered_tickers")
     if (receipt.get("observed_finality_hash") != content_hash(finality)
             or not isinstance(covered, list) or not all(isinstance(item, str) for item in covered)):
         _add(findings, "evidence.finality", "unbound")
-    if not set(row.get("ticker") for row in source.values()).issubset(set(covered or ())):
+    if not set(candidate_tickers).issubset(set(covered or ())):
         _add(findings, "evidence.finality.covered_tickers", "missing_candidate")
 
 
