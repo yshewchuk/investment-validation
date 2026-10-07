@@ -273,7 +273,8 @@ def _add_plan_command(commands):
     _add_plan_ledger_arguments(plan)
     plan.add_argument("--input-manifest", type=Path)
     plan.add_argument("--expected-population", type=Path,
-                      help="JSON file: a list of 'ticker|strategy|event_date' keys")
+                      help="JSON file: a list of 'ticker|strategy|event_date' keys; "
+                           "overrides the population --input-mode snapshot otherwise generates")
     plan.add_argument("--tickers", default="")
     plan.add_argument("--context-tickers", default="",
                       help="historical evidence ticker universe: comma list or @file "
@@ -468,8 +469,26 @@ def _ticker_list(value):
     return tuple(filter(None, (part.strip() for part in raw.replace(",", "\n").splitlines())))
 
 
-def _snapshot_inputs(args, root, conn, clock, context_tickers, population):
-    """``--input-mode snapshot``: resolve the scope's head exactly once, here.
+def _planned_population(args, root, conn, clock, tickers):
+    """``(population, snapshot_id)``: a supplied ``--expected-population`` file always wins,
+    unchanged. Otherwise ``--input-mode snapshot`` generates it
+    (:func:`~engine.v2.ops.snapshot_planning.generated_population`) for the ``--tickers`` watchlist and
+    returns the snapshot id it read; any other mode has no snapshot and yields ``()``."""
+    if args.expected_population or args.input_mode != "snapshot":
+        return _read_expected_population(args), None
+    if not args.snapshot_scope:
+        raise fail("INVALID_REQUEST", "snapshot input mode needs --snapshot-scope")
+    from engine.v2.ops.snapshot_planning import generated_population
+    return generated_population(conn, ArtifactStore(root), args.snapshot_scope, as_of=args.as_of,
+                                tickers=tickers, clock=clock,
+                                expected_snapshot_id=getattr(args, "expected_snapshot_id", None))
+
+
+def _snapshot_inputs(args, root, conn, clock, context_tickers, population, snapshot_id=None):
+    """``--input-mode snapshot``: pin the scope's head here, via ``pin_snapshot_inputs``.
+
+    A generated population has already resolved and scanned the head once; pinning resolves it
+    again and refuses ``INPUT_CHANGED`` if it moved (``snapshot_id`` is the scanned id).
 
     ``context_tickers`` (P2-C04) is the historical evidence universe — the
     scope :func:`engine.v2.ops.snapshot_planning.pin_snapshot_inputs` builds
@@ -484,7 +503,8 @@ def _snapshot_inputs(args, root, conn, clock, context_tickers, population):
                                tickers=context_tickers, year_start=args.year_start,
                                year_end=args.year_end, expected_population=population, clock=clock,
                                session=args.as_of,
-                               expected_snapshot_id=getattr(args, "expected_snapshot_id", None))
+                               expected_snapshot_id=snapshot_id
+                               or getattr(args, "expected_snapshot_id", None))
 
 
 def _read_refresh_plan(args):
@@ -510,7 +530,7 @@ def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
         context_tickers = _ticker_list(args.context_tickers) or tickers
-        population = _read_expected_population(args)
+        population, snapshot_id = _planned_population(args, root, conn, clock, tickers)
         from engine.v2.ops.snapshot_stages import _catalog_path
         plan = nightly_plan(Path(__file__).resolve().parents[3], args.as_of,
                             mode=args.mode, manifest_ref=_read_input_manifest_ref(args, root, conn, clock),
@@ -519,7 +539,7 @@ def _plan_command(args, root, conn, clock):
                             expected_population=population, clock=clock,
                             input_mode=args.input_mode, full_run=args.full_run,
                             snapshot_inputs=_snapshot_inputs(args, root, conn, clock, context_tickers,
-                                                             population),
+                                                             population, snapshot_id),
                             refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args),
                             catalog_path=_catalog_path(conn), objects_root=str(root))
     elif args.kind == "training":

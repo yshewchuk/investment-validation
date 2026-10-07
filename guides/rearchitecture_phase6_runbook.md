@@ -101,6 +101,10 @@ plus `started_at`/`ended_at`/`wall_seconds` fields double as this record
 (§7–§8). The default `--refresh-mode legacy` submits no refresh job at all and
 leaves the DAG unchanged.
 
+The manual command sequence, failure semantics and measured resource figures
+for a supervised shadow nightly are in
+[Phase 1 runbook §10](rearchitecture_phase1_runbook.md#10-supervised-native-shadow-nightly).
+
 ## 5. Backup and restore
 
 Take a backup with the existing API — no new capability:
@@ -250,11 +254,12 @@ not a synthetic fixture — as part of rehearsal:
 Both read bounded `Repository.scan` slices of one snapshot (explicit
 `--snapshot-id`, or the scope's pinned head) and write the snapshot id into
 their outputs. Note plainly: `nightly-features`/`legacy_features` (the
-Tier-3/Tier-4 rebuild stage) cannot succeed in barrier mode — it globs a
-data-dependent file set no static captured manifest can enumerate
-(`engine/v2/ops/capture_inputs.py::UNCAPTURED_KINDS`). The smoke runs must use
-real captured inputs the same way a real nightly does, never a bare
-barrier-mode stub.
+Tier-3/Tier-4 rebuild stage) is a captured barrier kind: its data-dependent
+read set (the `moves_*.json` files and per-ticker price files `panel.py` globs)
+is enumerated by `capture-inputs` (`features_moves` and `features_price_series`
+in `engine/v2/data/legacy_nightly_read_plan.py`), and a manifest without a
+moves file is refused. The smoke runs must use real captured inputs the same
+way a real nightly does, never a bare barrier-mode stub.
 
 ## 10. CLI capability smoke steps
 

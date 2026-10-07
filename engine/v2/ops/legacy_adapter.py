@@ -697,7 +697,7 @@ def _action_score(parameters, root):
         raise fail("VALIDATION_FAILED", "planned population has duplicate keys")
     observed_keys = {_population_key(row) for row in rows}
     missing = sorted(set(expected) - observed_keys)
-    unplanned = sorted(observed_keys - set(expected))
+    unplanned = _unplanned_keys(observed_keys, expected)
     if missing or unplanned:
         raise fail("VALIDATION_FAILED", "score population differs from planned inputs",
                    details={"missing": missing, "unplanned": unplanned})
@@ -758,6 +758,22 @@ def _action_score_requests(parameters, root):
                                                           "expected_population": len(requests)})
     worker_progress.step_end("write_outputs")
     return output
+
+
+def _unplanned_keys(observed_keys, expected) -> list[str]:
+    """``observed - expected``, except a ``DYN-SV`` chooser row for a planned event.
+
+    ``score_calendar`` appends that row only for events whose menu members it could rank, so a
+    plan cannot list it in advance (a listed one still has to be observed)."""
+    planned = set(expected)
+    events = {(parts[0], parts[2]) for parts in (key.split("|") for key in planned)
+              if len(parts) == 3 and parts[1] != "DYN-SV"}
+
+    def derived(key):
+        parts = key.split("|")
+        return len(parts) == 3 and parts[1] == "DYN-SV" and (parts[0], parts[2]) in events
+
+    return sorted(key for key in observed_keys - planned if not derived(key))
 
 
 def _population_key(row):

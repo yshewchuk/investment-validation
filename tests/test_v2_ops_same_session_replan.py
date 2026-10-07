@@ -102,6 +102,8 @@ def _nightly_manifest_dict(note: str = "") -> dict:
                  "content_hash": "sha256:" + "0" * 64, "byte_size": 1} for table in tables]
     file_refs.append({"path": "data/raw/fetch/orats/ab/placeholder.meta.json",
                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1})
+    file_refs.append({"path": "earnings_predictions/data/raw/oquants/moves/moves_AAA.json",
+                      "content_hash": "sha256:" + "0" * 64, "byte_size": 1})
     return {"manifest_id": "m1", "note": note, "file_refs": file_refs, "table_contract_refs": [],
             "registry_and_model_refs": ["placeholder::sha256:" + "0" * 64],
             "calendar_ref": "placeholder::sha256:" + "0" * 64, "selected_session": SESSION,

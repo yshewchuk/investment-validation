@@ -8,15 +8,9 @@ layer rules; this doc covers package detail.
 
 Durable job submission, leases, retry history and dependencies; resource
 admission (each constrained cgroup uses `max(0, memory.current - (file - shmem))`, reading `file` and `shmem` from that same directory’s `memory.stat`; active and inactive file cache is reclaimable, while shmem/tmpfs stays counted; missing, malformed or unreadable statistics fall back to `max(0, memory.current - inactive_file)`, then raw usage; headroom remains `min(host_available, container_remaining) - free_margin`) and per-job CPU placement; the nightly job graph and its release
-boundary. It does not decide research conclusions (`engine/v2/evaluation`)
-and does not compute a score (`engine/v2/scoring`) — it only sequences and
-persists the jobs that call into those packages.
+boundary. It does not decide research conclusions (`engine/v2/evaluation`) and does not compute a score (`engine/v2/scoring`) — it only sequences and persists the jobs that call into those packages.
 
-This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy
-`engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a
-legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_score_batch_shadow` →
-`build_native_score_batch_events` → `scan_forward_board_requests` → `board_requests` (see "Dependencies"); schema migrations follow the
-[checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
+This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy `engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_score_batch_shadow` → `build_native_score_batch_events` → `scan_forward_board_requests` → `board_requests` (see "Dependencies"); schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
 
 ## Primary contracts and public interfaces
 
@@ -592,40 +586,40 @@ before `plan_fn`, on every pre-plan attempt:
 | `("timed_out", None)` | drive-to-terminal hit `_serve_deadline`; the import job is left running, not cancelled | free (a separate consecutive-timeout counter, mirroring `serve_fn`'s own) |
 | raises (terminal `snapshot_import` failure, or `INPUT_CHANGED`: the shadow head moved since verification) | routed through `_submit_plan`'s existing `_failure` path | bumps BOTH `error_count` and `snapshot_attempt` |
 
-Idempotency key: `f"shadow_snapshot_import:{as_of}:{attempt}"` —
-`attempt`-suffixed, not bare `as_of`, because an existing row under an
-unchanged key is matched and returned regardless of its own state; a bare
-`as_of` key would make one terminally-failed import permanent for the rest
-of that `as_of`'s retry window. A key that already has a non-terminal row
-is reattached and driven to terminal directly — never resubmitted — so
-one key's request is submitted exactly once, ever. A terminal-but-failed
-row raises `INPUT_CHANGED` immediately without resubmitting under the same
-key; the NEXT `_submit_plan` entry mints a genuinely new key via the
-bumped `snapshot_attempt`.
+Idempotency key: `f"shadow_snapshot_import:{as_of}:{attempt}"` — `attempt`-suffixed, not bare `as_of`, because an
+existing row under an unchanged key is matched and returned regardless of its own state; a bare `as_of` key would make
+one terminally-failed import permanent for the rest of that `as_of`'s retry window. A key that already has a
+non-terminal row is reattached and driven to terminal directly — never resubmitted — so one key's request is submitted
+exactly once, ever. A terminal-but-failed row raises `INPUT_CHANGED` immediately without resubmitting under the same
+key; the NEXT `_submit_plan` entry mints a genuinely new key via the bumped `snapshot_attempt`.
 
-`TriggerReceipt.snapshot_attempt: int = 0` is a single, monotonic
-per-`as_of` counter, carried on every receipt regardless of status
-(independent of `error_count`, which resets on several unrelated
-statuses), and bumped in exactly one place: a terminal `INPUT_CHANGED`
-refusal, never a transient failure. Give-up is an OR of two independent
-bounds: `error_count >= MAX_CONSECUTIVE_ERRORS` (unchanged) OR
-`snapshot_attempt >= MAX_CONSECUTIVE_ERRORS` (new) — an alternating
-`"error"`/`"timed_out"` sequence can no longer defeat the give-up bound by
-resetting only the old counter. Any status in `RESUME_STATUSES` (which
-includes `"snapshot_not_yet"`, a resumed `"not_yet"` outcome) resumes on
-the next tick regardless of whether `plan_ref` is set — a pre-plan
-timeout/error genuinely has no `plan_ref` yet, and this is what makes it
-resumable rather than permanently `"missed"`.
+`TriggerReceipt.snapshot_attempt: int = 0` is a single, monotonic per-`as_of` counter, carried on every receipt regardless of status (independent of
+`error_count`, which resets on several unrelated statuses), and bumped in exactly one place: a terminal `INPUT_CHANGED` refusal, never a transient
+failure. Give-up is an OR of two independent bounds: `error_count >= MAX_CONSECUTIVE_ERRORS` (unchanged) OR `snapshot_attempt >=
+MAX_CONSECUTIVE_ERRORS` (new) — an alternating `"error"`/`"timed_out"` sequence can no longer defeat the give-up bound by resetting only the old
+counter. Any status in `RESUME_STATUSES` (which includes `"snapshot_not_yet"`, a resumed `"not_yet"` outcome) resumes on the next tick regardless of
+whether `plan_ref` is set — a pre-plan timeout/error genuinely has no `plan_ref` yet, and this is what makes it resumable rather than permanently
+`"missed"`.
 
-Commits land directly in scope `"shadow"` (no candidate-scope-then-promote
-step): `"shadow"` has no downstream consumer needing pre-advance
-validation. The EXACT `snapshot_id` this call verified is threaded through
-(`expected_shadow_snapshot_id` → `_default_plan`'s `args.expected_snapshot_id`
-→ `cli._snapshot_inputs` → `pin_snapshot_inputs(expected_snapshot_id=None)`).
-The optional guard compares the already-loaded `SnapshotRef.snapshot_id`,
-without a second head resolution. A mismatch raises `INPUT_CHANGED` before
-materialization request construction or registration; equality keeps that ref.
-Omitting the expected id preserves direct and legacy caller behavior.
+Commits land directly in scope `"shadow"` (no candidate-scope-then-promote step): `"shadow"` has no downstream
+consumer needing pre-advance validation. The EXACT `snapshot_id` this call verified is threaded through
+(`expected_shadow_snapshot_id` → `_default_plan`'s `args.expected_snapshot_id` → `cli._snapshot_inputs` →
+`pin_snapshot_inputs(expected_snapshot_id=None)`). The optional guard compares the already-loaded
+`SnapshotRef.snapshot_id`, without a second head resolution. A mismatch raises `INPUT_CHANGED` before materialization
+request construction or registration; equality keeps that ref. Omitting the expected id preserves direct and legacy
+caller behavior.
+
+**Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`) and records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date) in the plan and `_scope_hash` exactly as a supplied file. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires its observed keys to equal the plan's population. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
+
+| Condition | Outcome |
+|---|---|
+| no event in the window | `INVALID_REQUEST`, never an empty plan |
+| no head, or `earnings_events` missing or failing its contract | the scan's typed `DataError`, surfaced as `INPUT_CHANGED` with `details.data_code` (as for other pin failures); a null or unparseable `event_date` is `board_requests`'s `INVALID_REQUEST` |
+| head differs from a caller-supplied `expected_snapshot_id`, or moved after the scan (the head is resolved twice: `generated_population` scans it, `pin_snapshot_inputs` re-resolves it against the scanned id) | `INPUT_CHANGED`; no plan is saved, so a population never pairs with another snapshot |
+| scope | the `--tickers` watchlist the score stage scores; none is `INVALID_REQUEST`, never a fallback to the wider `--context-tickers`. `legacy` input mode has no snapshot: nothing generated, `planned_population` stays blocked |
+| same snapshot and `as_of` | identical population and scope hash; no provider or network call |
+
+A generated population comes from the same snapshot that is scored, so it checks coverage (every upcoming event in the data got scored or refused) but cannot detect a hole in the events themselves; qualification runs keep the file override for an independent expectation.
 `nightly_raw_rows.scan_forward_board_requests` enumerates pinned forward events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_version`.
 `nightly_raw_rows.scan_calendar_row(repository, snapshot, key, **staged)` returns `CalendarRowInputs(calendar_revision, calendar_row)` with the matched event row ID and the pinned earnings-events dataset version, not the snapshot calendar placeholder.
 These two earnings-event reads take their result bound from the pinned manifest's selected-population bound for the exact selection — the one shared bound the scan enforces before any row streams — so the broad forward enumeration carries no result ceiling of its own, and an empty selection is simply a zero-row query with a positive batch limit; this module's exact-key calendar read now takes that same shared population bound instead of its own result-row cap, and explicit local ceilings stay only where they encode the caller's own operational requirement: `nightly_calendar_inputs`, `nightly_quote_rows`, `computed_moves_store` and `forward_calendar_store`, each keeping its own batch limit and every other retained guard, deadline and invariant unchanged. Both native readers publish catalog refresh output only at the final catalog commit. A source-scan refusal in either reader or a forward-calendar provider refusal before that commit prevents partial catalog publication; successful forward-calendar provider receipts may remain cached.
@@ -1352,6 +1346,21 @@ job.
 | the scoring context years | derived from `as_of` on every call, mirroring legacy's own formula — never a fixed window that ages past its end |
 | crash after `plan_fn` returns but before the `"submitting"` receipt is durable (issue #186) | accepted risk: a retry may produce the same or a different plan; only the plan named by the durable receipt is submitted or scored. If the rebuilt plan differs, the first artifact is orphaned. Fresh retries recheck the window and probe; resume retries skip the window check and may submit after it closes. |
 
+### `capture_inputs.py`: `legacy_features` read set
+
+`capture` enumerates `legacy_features`' data-dependent read set (a barrier kind) because its worker stages only manifest `file_refs`. It is read-only, makes no provider or network calls and leaves the manifest schema unchanged.
+
+| Condition | Outcome |
+|---|---|
+| `moves_*.json` directly under the oquants moves directory or `data/raw/computed_moves` (family `features_moves`; panel's glob, other names excluded) | listed in the manifest |
+| `px_<T>.csv` and Tier-1 yfinance history entry for each ticker those files cover (family `features_price_series`; JSON `ticker` field, else file-name stem) | listed when present |
+| neither directory holds a matching file | `INPUT_CHANGED` at capture (panel raises `FileNotFoundError`); `manifest_problems` flags `features_moves` for a manifest with none, so an older capture must be redone |
+| one directory absent or empty | the other's files are captured |
+| a covered ticker has no price file or yfinance entry | tolerated: nothing captured, panel leaves its run-up columns NaN |
+| a moves file or directory is a symlink, or a real directory matches the glob | `INPUT_CHANGED`; never followed or skipped |
+| a moves file cannot be parsed | captured with the stem ticker; the job fails with panel's parse error |
+| same tree captured twice | identical sorted paths and hashes |
+
 ### `computed_moves_store.py`: capture and inherited fragments respect `as_of`
 
 | Condition | Outcome |
@@ -1534,16 +1543,7 @@ flowchart LR
     OUT --> RRP["nightly_raw_row_producer.build_native_score_batch_events\n(called only by Service._reconcile_native_score_batch_shadow, slice 5)"]
 ```
 
-`board_requests` itself only consumes an `events_table` a caller passes
-in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a
-real shadow-scope snapshot via `import_snapshot.plan_import`/
-`submit_import` only — never a `Repository.scan("earnings_events")` call,
-which belongs to `computed_moves_store._scan_once` instead, a different
-boundary. It is reachable today for `nightly_trigger._default_plan`'s
-scheduled `"score"` job specifically (see "Primary contracts"); a plan
-built directly with the lower-level plan builder can still default to
-`legacy` input mode instead. The raw-row producer consumes these requests
-and is called only by `native_score_batch`'s shadow sidecar (slice 5).
+`board_requests` itself only consumes an `events_table` a caller passes in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a real shadow-scope snapshot via `import_snapshot.plan_import`/`submit_import` only — never a `Repository.scan("earnings_events")` call, which belongs to `computed_moves_store._scan_once` instead, a different boundary. It is reachable today for `nightly_trigger._default_plan`'s scheduled `"score"` job specifically (see "Primary contracts"); a plan built directly with the lower-level plan builder can still default to `legacy` input mode instead. The raw-row producer consumes these requests and is called only by `native_score_batch`'s shadow sidecar (slice 5).
 
 ### Native nightly pool/residual refresh (Cutover PR-13a)
 

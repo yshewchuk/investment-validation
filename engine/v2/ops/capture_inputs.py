@@ -3,9 +3,9 @@
 ``python3 -m engine.v2.ops capture-inputs`` (wired in ``cli.py``). Builds one
 :class:`~engine.v2.contracts.LegacyInputManifest` covering every family
 :data:`engine.v2.data.legacy_nightly_read_plan.LEGACY_NIGHTLY_READ_PLAN_V1`
-declares for the six barrier-only nightly kinds (``legacy_finality``,
+declares for the seven nightly kinds (``legacy_finality``,
 ``legacy_decisions``, ``legacy_settlement``, ``legacy_model_evidence``,
-``legacy_render``, ``legacy_selfcheck``) -- the union, since one manifest is
+``legacy_render``, ``legacy_selfcheck``, ``legacy_features``) -- the union, since one manifest is
 what a real ``ops plan nightly --input-manifest`` submits for the WHOLE
 barrier-mode nightly, not one kind at a time. Because ``score_context``
 (reused from ``LEGACY_SCORE_READ_PLAN_V1``) is also exactly what
@@ -72,16 +72,12 @@ from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import verify_pinned_model_modules
 from engine.v2.ops.legacy_adapter import iter_raw_fetch_cache, manifest_files
 
-# ``legacy_features`` can never have a static read plan, so it is an explicit,
-# documented exception to the barrier set rather than a barrier kind:
-# ``_action_features`` -> ``engine/data/rebuild.py`` ->
-# ``engine/data/features/panel.py`` globs ``paths.RAW_OQUANTS_MOVES`` and
-# ``paths.COMPUTED_MOVES`` for ``moves_*.json`` (panel.py:252/256), then reads
-# a per-ticker price CSV under ``paths.RAW_YF`` for every ticker that glob
-# discovers (panel.py:461-544) -- a data-dependent file set that ``capture()``
-# cannot enumerate up front. A run that includes this kind cannot claim its
-# legacy inputs were captured by this module.
-UNCAPTURED_KINDS = frozenset({"legacy_features"})
+# ``legacy_features``'s read set is data-dependent: ``engine/data/features/panel.py``
+# globs ``moves_*.json`` under ``paths.RAW_OQUANTS_MOVES`` and
+# ``paths.COMPUTED_MOVES`` (panel.py:252/256), then reads a per-ticker price
+# file for every ticker those files cover (panel.py:461-544). ``capture()``
+# enumerates it against the same source tree: the ``moves_glob`` family and
+# the ``price_series_bundle`` family with ``universe: moves_tickers``.
 
 __all__ = ["capture", "write_manifest"]
 
@@ -283,10 +279,10 @@ def _to_refs(hashed: dict) -> tuple[LegacyFileRef, ...]:
                 for path, info in sorted(hashed.items()))
 
 
-def _capture_price_series(root: Path, scope: _Scope) -> list[str]:
+def _capture_price_series(root: Path, tickers: tuple[str, ...]) -> list[str]:
     """``px_<T>.csv`` (legacy's default-path price file) plus the Tier-1
     yfinance fetch-cache entry (``_yf_history_from_tier1``'s fallback) for
-    every ticker in ``scope.context_tickers`` -- the same evidence universe
+    every ticker in ``tickers`` -- the evidence universe
     ``engine.data.features.panel.add_runup_features`` iterates
     (panel.py:527,533). Neither source is required per-ticker: a ticker with
     neither legitimately leaves its runup columns NaN, matching native
@@ -294,13 +290,13 @@ def _capture_price_series(root: Path, scope: _Scope) -> list[str]:
     (stale px files included), never refreshes or fixes it.
     """
     found: list[str] = []
-    for ticker in scope.context_tickers:
+    for ticker in tickers:
         relative = px_relative_path(ticker)
         path = root / relative
         if path.is_file() and not path.is_symlink():
             found.append(relative)
 
-    wanted = set(scope.context_tickers)
+    wanted = set(tickers)
     for entry in iter_raw_fetch_cache(root, "yfinance"):
         if entry.endpoint != "history":
             continue
@@ -312,6 +308,60 @@ def _capture_price_series(root: Path, scope: _Scope) -> list[str]:
             if candidate.is_file() and not candidate.is_symlink():
                 found.append(candidate.resolve().relative_to(root.resolve()).as_posix())
     return sorted(set(found))
+
+
+def _enumerate_moves(root: Path, directories) -> list[str]:
+    """``moves_*.json`` directly under each directory -- the glob
+    ``engine.data.features.panel.build_events`` runs (panel.py:252/256), so a
+    state file or any other name is excluded. A symlinked file is listed (and
+    refused by ``manifest_files``); a symlinked moves directory, or a real
+    directory matching the glob (panel would fail reading it), is refused
+    here: never followed, never skipped.
+    """
+    out: list[str] = []
+    for directory in directories:
+        base = root / directory
+        if base.is_symlink():
+            raise fail("INPUT_CHANGED", "moves directory is indirect", details={"path": directory})
+        if not base.is_dir():
+            continue
+        for p in base.glob("moves_*.json"):
+            if p.is_dir() and not p.is_symlink():
+                raise fail("INPUT_CHANGED", "a moves_*.json match is a directory",
+                           details={"path": f"{directory}/{p.name}"})
+            if p.is_file() or p.is_symlink():
+                out.append(f"{directory}/{p.name}")
+    return sorted(out)
+
+
+def _moves_tickers(root: Path, directories) -> tuple[str, ...]:
+    """Tickers the moves files cover, derived as panel.py does: the document's
+    ``ticker`` field, else the file-name stem. An unreadable file keeps its
+    stem (the job later fails with panel's own parse error); a symlink is
+    never opened. Only that one field is read."""
+    tickers: set[str] = set()
+    for relative in _enumerate_moves(root, directories):
+        path = root / relative
+        if path.is_symlink():
+            continue
+        ticker = path.name[len("moves_"):-len(".json")]
+        try:
+            doc = json.loads(path.read_text())
+            if isinstance(doc, dict) and doc.get("ticker"):
+                ticker = str(doc["ticker"])
+        except (OSError, ValueError):
+            pass
+        if ticker and ticker == Path(ticker).name:
+            tickers.add(ticker)
+    return tuple(sorted(tickers))
+
+
+def _capture_moves(root: Path, family: str, spec: dict) -> list[str]:
+    found = _enumerate_moves(root, spec["directories"])
+    if not found:
+        raise fail("INPUT_CHANGED", "no moves files in any directory panel.py globs",
+                  details={"family": family, "directories": list(spec["directories"])})
+    return found
 
 
 def _capture_raw_fetch_window(root: Path, family: str, spec: dict, scope: _Scope) -> list[str]:
@@ -363,7 +413,11 @@ def _capture_family(root: Path, family: str, scope: _Scope, finality_years: set[
         paths, panel_hash = _score_context_paths(root, scope)
         return paths, panel_hash
     if kind == "price_series_bundle":
-        return _capture_price_series(root, scope), panel_hash
+        tickers = (_moves_tickers(root, FAMILIES["features_moves"]["directories"])
+                   if spec.get("universe") == "moves_tickers" else scope.context_tickers)
+        return _capture_price_series(root, tickers), panel_hash
+    if kind == "moves_glob":
+        return _capture_moves(root, family, spec), panel_hash
     if kind == "reference_calendar":
         return [], panel_hash  # folded into the reference-input bundle, below
     if kind == "raw_fetch_window":

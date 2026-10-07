@@ -65,7 +65,7 @@ manifest.
 | `health` | Print the `operations_health.v1.1` document (§3). | `python3 -m engine.v2.ops health --json` |
 | `serve` | Run the supervisor claim/execute loop; `--once` drains and exits when nothing is active. `--store-root PATH` points a snapshot-backed launch at the legacy checkout, when it is not the code checkout `serve` runs from (see above). | `python3 -m engine.v2.ops serve --once --store-root /path/to/legacy/checkout` |
 | `snapshot plan-import` / `snapshot submit` | Import the rebuilt legacy tree into a shadow snapshot. Pass the current head snapshot ID and generation to `plan-import`; wait for the trades replay to finish first. Full rebuild order and heavy-run rules: [`native board rebuild runbook`](native_board_rebuild_runbook.md). | `python3 -m engine.v2.ops snapshot plan-import --source-root /path/to/legacy --scope shadow --expected-head-snapshot-id <id> --expected-head-generation <generation>` |
-| `capture-inputs` | The supported capture for `plan nightly --input-manifest` (2026-09-14). Enumerates and hashes, read-only, every file the six barrier-only nightly kinds (`legacy_finality`, `legacy_decisions`, `legacy_settlement`, `legacy_model_evidence`, `legacy_render`, `legacy_selfcheck`) actually read — see `engine/v2/data/legacy_nightly_read_plan.py` for the declared, cited families — and writes a `LegacyInputManifest` with `capture_implementation_ref="legacy_nightly_capture.v1"`. `--as-of`, `--tickers`, `--context-tickers` (defaults to `--tickers`), `--year-start/--year-end`, `--source-root` (the legacy checkout to scan), `--output` (where to write the manifest JSON) are all required except `--tickers`/`--context-tickers`. Refuses with a typed problem (`SOURCE_EMPTY`/`INPUT_CHANGED`) when a required family has no files, e.g. no cached ORATS market-wide files for any of the 15 finality lookback sessions. | `python3 -m engine.v2.ops capture-inputs --as-of 2026-09-12 --tickers AAA,BBB --year-start 2024 --year-end 2026 --source-root /path/to/legacy/checkout --output manifest.json` |
+| `capture-inputs` | The supported capture for `plan nightly --input-manifest` (2026-09-14). Enumerates and hashes, read-only, every file the seven nightly barrier kinds (`legacy_finality`, `legacy_decisions`, `legacy_settlement`, `legacy_model_evidence`, `legacy_render`, `legacy_selfcheck`, `legacy_features`) actually read — see `engine/v2/data/legacy_nightly_read_plan.py` for the declared, cited families — and writes a `LegacyInputManifest` with `capture_implementation_ref="legacy_nightly_capture.v1"`. `--as-of`, `--tickers`, `--context-tickers` (defaults to `--tickers`), `--year-start/--year-end`, `--source-root` (the legacy checkout to scan), `--output` (where to write the manifest JSON) are all required except `--tickers`/`--context-tickers`. Refuses with a typed problem (`SOURCE_EMPTY`/`INPUT_CHANGED`) when a required family has no files, e.g. no cached ORATS market-wide files for any of the 15 finality lookback sessions. | `python3 -m engine.v2.ops capture-inputs --as-of 2026-09-12 --tickers AAA,BBB --year-start 2024 --year-end 2026 --source-root /path/to/legacy/checkout --output manifest.json` |
 | `price-refresh` | Scheduled full-history yfinance price re-downloader feeding Tier-2 `price_history` (`engine.data.pulls.price_refresh`). `--session YYYY-MM-DD` (required): daily group is every ticker with a confirmed event in `[session, session+35 calendar days]` or within 5 trading sessions after one already printed; monthly group is every other price-universe ticker with no successful dated fetch this calendar month; delisted/failing tickers are never pruned, only reported. `--dry-run` reads Tier-2 `earnings_events` and the Tier-1 fetch store (disk only) and prints plan counts, making **zero** provider calls. A real run makes one yfinance call per planned ticker (~200-3,000 depending on the day) and writes `<root>/price_refresh/<session>.json`. **Not wired into the nightly DAG yet** (a later task) — run it by hand or by an external scheduler, and never from inside a heavy stage (capture-inputs, a nightly job, a parity replay): it makes real provider calls and must not share a run window with them. **Pre-nightly order**, until the DAG wiring lands: 1) `price-refresh --session <as-of>` (this command, real run, no `--dry-run`), 2) `price-history capture`, 3) `computed-moves capture`, 4) the nightly (`plan nightly` / `submit`). | `python3 -m engine.v2.ops price-refresh --session 2026-09-14` |
 | `ledger import-history` | One-time bootstrap for a FRESH catalog (2026-09-14): a brand-new `decisions` table starts empty, so `legacy_settlement` fails `VALIDATION_FAILED` ("settlement names no committed prediction") on its first night against any trade entered before the catalog existed. Reads `ledger/predictions/*.jsonl` and `ledger/outcomes/*.jsonl` under `--source-root` read-only, in deterministic file/line order, and imports them via `engine.v2.ledger.decisions.import_lines` (idempotent per `(source_hash, line_number)`; a changed byte or conflicting duplicate refuses typed, `IDEMPOTENCY_CONFLICT`, with that file's transaction rolled back). One `BEGIN IMMEDIATE` transaction per file, under the same `supervisor.lock` `serve` holds — refuses `RESOURCE_UNAVAILABLE` if a supervisor is running. `--through YYYY-MM-DD` excludes predictions (`as_of`) / outcomes (`resolved_at`) dated after it, so the bootstrap never imports rows the nightly under test is about to commit itself. `--dry-run` reports the same JSON summary (`files`/`lines`/`imported`/`already_present`/`conflicts`/`date_range` per family) without writing anything. | `python3 -m engine.v2.ops ledger import-history --source-root /path/to/legacy/checkout --through 2026-09-09` |
 | `price-history capture` | Append-only point-in-time capture of yfinance price data into the normalized bitemporal `price_history` dataset (design confirmed 2026-09-14; see `engine/v2/ops/price_history_store.py`). Reads both legacy sources read-only under `--source-root` (a `px_<T>.csv`, when present, always wins over the Tier-1 fetch cache, per `panel.py`'s own read order) and, per ticker, appends one version row per new/changed date or tombstones a date missing from a full-history retrieval; refuses `INPUT_CHANGED` typed on anti-backdating (a capture's `retrieved_at` must be later than every one already recorded for that ticker — never floor-adjusted) and `VALIDATION_FAILED` on a partial-window retrieval (starts later than the ticker's live stored history). A byte-identical re-capture is a no-op (`duplicate_source_hash`, zero new rows/bytes). `--dry-run` runs every check and reports true counts (`by_outcome`, `rows_added`, `rows_tombstoned`, `estimated_compressed_bytes`, overlapping-ticker disagreement counts) without writing a fragment, a raw object, or committing the capture-log transaction. Materialization (`engine.v2.ops.price_history_store.materialize`, not yet a CLI command) writes `px_<T>.csv` at the legacy relpath from a caller's own pin — plan/replay code, not an operator command. | `python3 -m engine.v2.ops --root data/operations price-history capture --source-root /path/to/legacy/checkout --dry-run` |
@@ -432,3 +432,67 @@ Every heavy command in §5 is bound by the AGENTS.md rules for this box
 - **Credentials never in argv.** Source `.env` into the environment;
   bounded_run prints the full command line, so anything passed as an argument
   leaks into logs. The serving token likewise comes from the environment.
+
+## 10. Supervised native shadow nightly
+
+A manual, operator-watched shadow nightly against a rebuilt root. Shadow only
+(§1); legacy keeps publishing ([Phase 6 runbook §2](rearchitecture_phase6_runbook.md#2-legacy-keeps-publishing-user-constraint)).
+Flags below were checked against `python3 -m engine.v2.ops <command> --help`
+(`engine/v2/ops/cli.py`). Run the §2 pre-nightly order and, on a fresh catalog,
+`ledger import-history` (§6) first. `D` is the session date, `R` the ops root,
+`T` a ticker file (comma- or newline-separated), `M.json` the manifest.
+
+```text
+python3 -m engine.v2.ops capture-inputs --as-of D --tickers @T --source-root <legacy tree> \
+    --year-start 2025 --year-end 2026 --output M.json
+python3 -m engine.v2.ops --root R plan nightly --as-of D --input-manifest M.json \
+    --tickers @T --context-tickers @T --full-run --year-start 2025 --year-end 2026 \
+    --input-mode snapshot --snapshot-scope shadow
+python3 -m engine.v2.ops --root R submit --plan <plan ref> --idempotency-key <any>
+python3 tools/bounded_run.py --heavy --cores 8 --max-rss-gb 6.5 -- \
+    python3 -m engine.v2.ops --root R serve --once --store-root <legacy tree>
+```
+
+- `plan nightly` generates the expected population from the pinned snapshot
+  (#472); a supplied `--expected-population` file still wins.
+- The `submit` key is ignored for nightly plans: job keys derive from the plan (§2.1).
+- Run one heavy job at a time (§9). A manual `serve` needs `MODEL_RELEASE_ROOT`
+  exported: `set -a; . ~/.config/investing-plan/nightly.env; set +a`.
+
+### 10.1 Measured facts (2026-10-07, one WSL2 box)
+
+| Fact | Status |
+|---|---|
+| `MODEL_RELEASE_ROOT` comes only from the environment; persistent home `~/.config/investing-plan/nightly.env` (mode 600), loaded by the unit's `EnvironmentFile` (#461) | measured 2026-10-07 |
+| Input manifest at 100 tickers: 21k files, 3.6 GB | measured 2026-10-07 |
+| `materialize`: 6 min (100 tickers) / 42 min (1,326); peak RSS 1.5 GB | measured 2026-10-07 |
+| `legacy_finality`: 10 min / 113 min; peak RSS 0.9-1.1 GB | measured 2026-10-07 |
+| `legacy_settlement`: 18 min / 18 min, fixed by the ledger, not ticker count (#476); peak RSS 1.8 GB | measured 2026-10-07 |
+| `legacy_features`: 23 min at 100 tickers; peak RSS 5.05 GB against a 5.5 GiB profile (no 1,326 figure) | measured 2026-10-07 |
+| `engineering_gate`: seconds | measured 2026-10-07 |
+| `serve --once` returns as soon as a pass has nothing running and claims nothing, so it also exits while a job is in `retry_wait` or queued behind dependencies or capacity; repeat passes until no job is queued, `retry_wait`, running or starting | measured 2026-10-07 |
+
+### 10.2 Failure semantics
+
+| Step | Refuses | Recoverable |
+|---|---|---|
+| `capture-inputs` | `SOURCE_EMPTY` / `INPUT_CHANGED` when a required family has no files (§2) | Read-only apart from `--output`; fix the source, re-run |
+| `plan nightly` | No manifest: plan is blocked. Wrong manifest kind or missing ticker file: `INPUT_CHANGED`. `--full-run` with `--tickers` != `--context-tickers` | Writes only an immutable plan; re-plan |
+| `submit` | Blocked plan: `INVALID_REQUEST`, exit 2 | Re-submitting the same plan resolves to the same jobs |
+| `serve --once` | Exit status is not a verdict: it exits when idle, so judge success on job states (`get`, `explain`), never the exit code | Retryable failures wait in `retry_wait`; re-run `serve --once` until no job is queued, `retry_wait`, running or starting |
+| A failed non-retryable job | Cannot be re-driven; `resume` is `--dry-run` only | Fix, then create a FRESH plan (new decision clock, new job ids) and serve it from code that carries the fix |
+
+Failure signatures seen on 2026-10-07 and what they meant:
+
+| Signature | Meaning | Fixed by |
+|---|---|---|
+| `RESOURCE_LIMIT_EXCEEDED` | Profile too small for the stage (`materialize`) | #468 |
+| `LEASE_LOST` | No lease renewal during long pre-launch staging | #462 |
+| `FileNotFoundError` for oquants moves in `legacy_features` | Read set not captured | #473 |
+| `FEATURES_STALE` | Byte-exact Tier-4 compare in snapshot mode | #475 makes it numeric (open at time of writing) |
+
+### 10.3 Not yet verified
+
+- Stages not yet exercised end to end on the rebuilt root: `legacy_score` onward, `native_score_batch`, `native_parity`.
+- INFERRED: native scoring refuses per row (`RELEASE_MISSING_ROLE`, `UNSUPPORTED_STRATEGY`, `GATE_POLICY_NOT_STAGED`), so the sidecars report no compared rows.
+- INFERRED: replaying an already-imported date collides with imported legacy decisions `prediction:<row_id>` in `decision_commit` (`_commit_row_or_diverge`, `engine/v2/ops/decision_commit.py`; OPS-5 guard). Rows are recorded as divergences and `ledger_export` never runs; unverified until the operator's n6 run reports. A new date, or importing history `--through` the prior day, avoids it. Do not re-import for a replay (operator decision, 2026-10-07).

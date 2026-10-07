@@ -52,11 +52,17 @@ from engine.v2.foundation import from_document, to_document
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import register_artifact
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.nightly_raw_rows import scan_forward_board_requests
 from engine.v2.ops.snapshots import resolve_snapshot_head
+from engine.v2.registry.strategies import STRATEGY_IDS
 
-__all__ = ["REQUEST_SCHEMA_REF", "direct_scope_for", "pin_snapshot_inputs", "scratch_estimate"]
+__all__ = ["GENERATED_HORIZON_DAYS", "REQUEST_SCHEMA_REF", "direct_scope_for",
+           "generated_population", "pin_snapshot_inputs", "scratch_estimate"]
 
 REQUEST_SCHEMA_REF = "legacy_materialization_request.v1.0"
+#: Mirrors ``engine.dashboard.nightly.HORIZON_DAYS`` (as ``nightly_trigger._LEGACY_HORIZON_DAYS`` does);
+#: v2 may not import the legacy dashboard.
+GENERATED_HORIZON_DAYS = 35
 
 
 def direct_scope_for(expected_population) -> dict:
@@ -69,6 +75,45 @@ def direct_scope_for(expected_population) -> dict:
         tickers.add(parts[0])
         years.add(int(parts[2][:4]))
     return {"tickers": sorted(tickers), "years": sorted(years)}
+
+
+def generated_population(conn, store, scope, *, as_of, tickers, clock,
+                         expected_snapshot_id: str | None = None) -> tuple[tuple[str, ...], str]:
+    """``(population, snapshot_id)``: the sorted, de-duplicated ``ticker|strategy|event_date``
+    keys for the events ``scan_forward_board_requests`` finds on ``scope``'s head for ``as_of`` ..
+    ``as_of + GENERATED_HORIZON_DAYS``, restricted to ``tickers``, each crossed with every
+    ``STRATEGY_IDS`` member: the rows the legacy ``score`` stage's ``score_calendar`` emits per
+    event (disabled CAL-P/CND-P included). Never ``DYN-SV``: ``score_calendar`` appends that row
+    only for events its chooser ranked, so no plan can list it. Pure snapshot read: no
+    provider or network call. Pass the returned ``snapshot_id`` to ``pin_snapshot_inputs`` as
+    ``expected_snapshot_id``: it re-resolves the head and refuses ``INPUT_CHANGED`` if the head
+    moved after this scan, so the plan never pairs this population with another snapshot. No ``tickers`` or an empty window is
+    ``INVALID_REQUEST``; a mismatch with ``expected_snapshot_id`` is ``INPUT_CHANGED``; a
+    missing head or a missing/malformed events table is the scan's ``DataError`` as
+    ``INPUT_CHANGED`` (``details.data_code``), as ``pin_snapshot_inputs`` reports it."""
+    if not tickers:
+        # The score stage scores the watchlist only: a population over any wider scope (the
+        # context universe) could only fail at execution, so refuse at plan time instead.
+        raise fail("INVALID_REQUEST", "generated population needs the --tickers watchlist")
+    try:
+        head = resolve_snapshot_head(conn, store, scope, clock=clock)
+        snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
+        if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
+            raise fail("INPUT_CHANGED",
+                       "the shadow snapshot head moved since it was verified for this session")
+        requests = scan_forward_board_requests(
+            Repository(conn, store), snapshot, as_of=as_of,
+            horizon_days=GENERATED_HORIZON_DAYS, tickers=tickers)
+    except DataError as exc:
+        raise fail("INPUT_CHANGED", "snapshot events cannot be read for the generated population",
+                   details={"data_code": exc.code}) from None
+    events = {(r.ticker, r.event_date.date().isoformat()) for r in requests}
+    population = tuple(sorted(f"{ticker}|{strategy}|{day}"
+                              for ticker, day in events for strategy in STRATEGY_IDS))
+    if not population:
+        raise fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's planning window",
+                   details={"as_of": str(as_of), "horizon_days": GENERATED_HORIZON_DAYS})
+    return population, snapshot.snapshot_id
 
 
 def scratch_estimate(repository, store, request) -> int:
