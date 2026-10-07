@@ -91,8 +91,10 @@ to the same tree later imported from `SOURCE_ROOT` (operator requirement, not lo
 
 5. Complete the Phase 5 staged model release under `MODEL_RELEASE_ROOT` (inventory, calibration, training, preparation, acceptance, staging) — a separate heavy workflow (report step 12).
 
-6. Verify every readiness item below before starting the nightly trigger; the population document
-   is placed by hand at `reports/phase6/nightly_trigger/expected_population.json` (`nightly_trigger.py:652`) (report step 13).
+6. Verify every readiness item below before starting the nightly trigger. `ops plan nightly --input-mode snapshot` now generates
+   the population from the pinned snapshot (as_of to +35 days) when no `--expected-population` file is given; the scheduled trigger
+   still reads its universe from the hand-placed `reports/phase6/nightly_trigger/expected_population.json` (`nightly_trigger.py:652`),
+   until it generates one too (report step 13). Use a file for qualification: a generated population shares the scored snapshot's events, so it cannot detect a hole in them.
 
 ## Proposed requirements R1–R6 (not current end-to-end guarantees)
 
@@ -119,7 +121,7 @@ produce only the eight legacy tables, and price-history capture is the existing 
 - [ ] Catalog `decisions` holds the imported prediction/outcome history the rebuilt tree needs.
 - [ ] Legacy selected session is exactly `AS_OF` — wait for currency, never import later/partial.
 - [ ] A staged model release exists under `MODEL_RELEASE_ROOT` and passed Phase 5 acceptance.
-- [ ] The expected population document exists and matches the intended nightly population.
+- [ ] The expected population document exists and matches the intended nightly population (the trigger still needs the file; a qualification run needs an independent one, see step 6).
 - [ ] Operations root, legacy store root, and timer target the same intended catalogs/tree.
 
 ## Retained derived inputs (supervisor recommendation; report step 5 / gap 2)
@@ -138,7 +140,7 @@ the new panel hash — costing more to build and validate; listed for review, no
 Regenerate snapshot IDs and preregistration hashes in affected experiment `spec.yaml` files by
 hand; recapture the v17 corpus with `tools/capture_tier0_corpus.py` and rerun corpus parity; rerun
 the D14, D15, and D19 evidence with their standard checks; old catalog attempts and receipts are
-not current evidence. Follow-up issues: spec-hash rebinding, population-document automation, the
+not current evidence. Follow-up issues: spec-hash rebinding, scheduled-trigger population generation ([#471](https://github.com/yshewchuk/investment-validation/issues/471)), the
 retention-vs-producers decision, a measured rebuild duration.
 
 ## Proposed slices
