@@ -9,3 +9,4 @@
 - Owner tooling (watcher, gate, owner scripts and metrics) lives in `/root/agent-ops/`. See `/root/agent-ops/README.md` and `/root/agent-ops/pr_watch/README.md` for its workflow.
 - Before the first push of a PR that edits an `ARCHITECTURE.md`, run `python3 tools/oc_check.py tests/test_architecture_doc_budgets.py`.
 - To update a PR description, write a Markdown file and run `gh pr edit <n> --body-file <file>`. Do not use an inline script that writes files.
+- New tests go in `tests/v2/<package>/` (package names from `checks/layer_map.py`) or `tests/v2/integration/`, never the root `tests/` folder. A PR that edits a root-level test should move it and lower `checks/test_layout_budget.txt` by exactly the number of files moved. Before pushing, run `python3 checks/test_layout_budget.py --base-ref origin/main`; PR CI enforces it.

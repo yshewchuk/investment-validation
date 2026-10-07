@@ -104,6 +104,19 @@ def test_select_step_only_runs_on_pull_request_and_diffs_against_base():
     assert "tools/mutation_pilot.py select-tests --changed-files" in step["run"]
 
 
+def test_layout_ratchet_step_runs_only_on_pull_request_with_base_sha_env():
+    with open(WORKFLOW_PATH) as f:
+        workflow = yaml.safe_load(f)
+
+    steps = workflow["jobs"]["test"]["steps"]
+    names = [s.get("name") for s in steps]
+    step = steps[names.index("Check test layout ratchet")]
+    assert names.index("Check test layout ratchet") < names.index("Run pytest")
+    assert step["if"] == "github.event_name == 'pull_request'"
+    assert step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    assert step["run"] == 'python3 checks/test_layout_budget.py --base-ref "$BASE_SHA"'
+
+
 def test_pytest_step_falls_back_to_tests_dir_and_has_selection_fallback():
     with open(WORKFLOW_PATH) as f:
         workflow = yaml.safe_load(f)
