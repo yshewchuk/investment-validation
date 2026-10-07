@@ -49,7 +49,7 @@ explicit. No step has been shown unsafe or error-prone enough to justify sequenc
 
 Set `SOURCE_ROOT` to one absolute path — the frozen legacy checkout — plus `OPS_ROOT`, `AS_OF` (the legacy tree's selected session), and
 `MODEL_RELEASE_ROOT`; for the scheduled native nightly, persist it in `~/.config/investing-plan/nightly.env`, the unit's optional EnvironmentFile.
-For supervised runs, load it with `set -a; . ~/.config/investing-plan/nightly.env; set +a`. Make `OPS_ROOT` and `MODEL_RELEASE_ROOT` absolute too, so
+For supervised runs, load it with `set -a; . ~/.config/investing-plan/nightly.env; set +a`. Quote the full assignment value if it contains spaces, e.g. `MODEL_RELEASE_ROOT="value with spaces"`; do not rely on unquoted whitespace parsing identically in systemd and a shell. Make `OPS_ROOT` and `MODEL_RELEASE_ROOT` absolute too, so
 they remain valid after the `cd "$SOURCE_ROOT"` before the tier table changes the directory. Run the Tier 2–4 rebuild commands with the current directory set to that checkout, binding their rebuild output
 to the same tree later imported from `SOURCE_ROOT` (operator requirement, not locally verified). Complete the start-tier legacy work first:
 
