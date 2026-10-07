@@ -191,7 +191,7 @@ evidence. See the models and data component contracts.
 
 The active PR workflow uses `tools/mutation_pilot.py select-tests` and the
 import-graph policy described above. For each non-empty diff that yields a
-narrowed test selection, its result starts with the configured
+narrowed test selection, its result includes the configured
 `[pr_selection].always_run` paths present in the tracked test set, even when
 the diff changes only an unrelated test file; full-suite results include all
 tests. The layout ratchet's regression test,
