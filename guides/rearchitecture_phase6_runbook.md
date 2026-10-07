@@ -108,7 +108,7 @@ for a supervised shadow nightly are in
 | Supervised new-date condition | Outcome / evidence (2026-10-07, one WSL2 box) |
 |---|---|
 | Legacy tree is behind `as_of` | INFERRED: refresh it before a new-date native run; the full dependency chain is not yet verified |
-| Operator's manual legacy refresh | `python3 tools/bounded_run.py --heavy --cores 8 --max-rss-gb 7.5 -- python3 -m engine.dashboard.nightly`; calls ORATS and publishes the live legacy board |
+| Observed manual legacy refresh (prerequisite, not rehearsal/qualification evidence) | `python3 tools/bounded_run.py --heavy --cores 8 --max-rss-gb 7.5 -- python3 -m engine.dashboard.nightly`; calls ORATS and publishes the live legacy board. Rehearsal/qualification runs still require the §7 `tools/v2_resource_measurement.py` recorder; this observed command is not a substitute |
 | Legacy refresh at a 6.5 GB cap | Measured kill during Tier-3 panel build; fetched work is reusable, but interrupted computation repeats (`tools/bounded_run.py`) |
 | Legacy refresh changes the same tree while native staging runs | Do not overlap: staging re-hashes pinned files and refuses `INPUT_CHANGED` (`engine/v2/ops/store_barrier.py::pin_read_set`) |
 | Legacy refresh completed | INFERRED/unverified: fresh `python3 -m engine.v2.ops snapshot plan-import` / `snapshot submit`, `price-history capture` and `computed-moves capture` may be needed; command contracts and required arguments are in [Phase 1 §2](rearchitecture_phase1_runbook.md#2-operator-commands) |

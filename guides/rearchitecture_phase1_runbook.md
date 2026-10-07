@@ -517,5 +517,5 @@ score-schema keys differed. These divergences are not a native/legacy parity sig
 ### 10.3 Not yet verified
 
 - Successful end-to-end completion of `ledger_export` onward remains unverified: export failed and its downstream stages were blocked. `native_score_batch` and `native_parity` remain unexercised.
-- INFERRED: native scoring refuses per row (`RELEASE_MISSING_ROLE`, `UNSUPPORTED_STRATEGY`, `GATE_POLICY_NOT_STAGED`), so the sidecars report no compared rows.
+- INFERRED: native scoring may refuse per row (`RELEASE_MISSING_ROLE`, `UNSUPPORTED_STRATEGY`, `GATE_POLICY_NOT_STAGED`), leaving no compared rows. No compared-row result was produced by the unexercised sidecars in this run; this is an expectation, not a measured result.
 - INFERRED: a new-date run needs a legacy tree current to `as_of`, then a fresh snapshot import and price-history/computed-moves captures; this dependency chain remains unverified ([Phase 6 §4](rearchitecture_phase6_runbook.md#4-native-daily_market-refresh-timing-rehearsal-constraint)).
