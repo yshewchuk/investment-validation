@@ -460,7 +460,9 @@ SNAPSHOT_STAGES = frozenset({"score", "decision_replay", "projection", "selfchec
 #: content within its own declared projection (``legacy_adapter.
 #: _action_finality``), rather than reading the materialization as its own
 #: root (its raw ORATS fetch-cache/calendar reads are not declarable there).
-CROSS_CHECK_STAGES = frozenset({"finality"})
+#: ``features`` also binds them, to compare its rebuilt tables numerically
+#: against the pinned ones (``legacy_adapter._compare_to_pinned``).
+CROSS_CHECK_STAGES = frozenset({"finality", "features"})
 _SNAPSHOT_REQUIRED = ("snapshot_ref_artifact_id", "materialization_request_ref",
                       "scratch_estimate_bytes")
 

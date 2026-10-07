@@ -1319,6 +1319,21 @@ job.
 | the CURRENT or claimed attempt's own renewal fails (fence void, job cancelling, lease already expired), or the supervisor crashes mid-staging | a failed renewal raises `LEASE_LOST`: staging stops, nothing is launched, and the refusal is recorded through the fence-aware `_commit_failure` path (a lost lease is handed to recovery); a heartbeat never extends a lease whose fence is gone (it verifies the fence first and writes nothing on refusal). A crash stops renewal, the lease expires, and the existing recovery path (`expire_leases`, reconcile) settles the attempt as before |
 | a long subprocess (e.g. the engineering gate) exceeds its own deadline, or the keepalive call itself fails mid-run | killed and reaped before the failure propagates; refused as before |
 
+### `legacy_features` / `legacy_score`: the features receipt (`legacy_adapter.py`, `features_compare.py`)
+
+`legacy_score` refuses unless `features.json` (the receipt `legacy_features` writes) still describes the panel and Tier-4 tables it reads. **Legacy mode**: byte-exact `panel_sha256`/`tier4_sha256`, unchanged. **Snapshot mode**: score reads the materialization's tables, not the stage's rebuild, and a refit is not bit-reproducible (1-ulp noise), so `features` is a cross-check stage (`nightly.CROSS_CHECK_STAGES`, like `finality`): it binds the snapshot artifacts, launches as `finality_check`, receives the materialization root (`envelope["finality_cross_check"]`) and compares with `features_compare.compare_tables`. Score re-hashes the materialization against the receipt's pinned hashes, so a later swap is still refused.
+
+| Condition | Outcome |
+|---|---|
+| R1: no `features.json` | `FEATURES_MISSING` (both modes) |
+| R1: snapshot score, receipt lacks `comparison`, `verdict` or `pinned_*` hashes | `FEATURES_STALE`, reason `not_compared` (a missing verdict never reads as a pass) |
+| Exact: row count, schema (names, dtypes), keys (panel `ticker, date`; Tier-4 `ticker, event_date`), non-float columns, NaN/inf positions. Float columns: `abs(a-b) <= FEATURES_ATOL + FEATURES_RTOL*abs(b)`, with the two constants named once in `features_compare.py` (a judgement call, not derived from the data) | features records `verdict: "mismatch"` (also for a table missing on either side) and does not raise; score raises non-retryable `FEATURES_STALE`, reason `mismatch` |
+| Materialization hashes at score differ from `pinned_panel_sha256`/`pinned_tier4_sha256` | `FEATURES_STALE`, reason `pinned_changed` |
+| R2-R6 | no cache or retry (rerun the stage); `features.json` is an atomic stage output, tables read-only; same tables give the same verdict |
+| Recorded in `features.json` | `comparison` (`numeric.v1`, `rtol`, `atol`), `verdict`, `pinned_*_sha256`, per table max absolute/relative diff and differing-column count, and on mismatch up to 5 columns (`reason`, `n_rows`, diffs); never cell values |
+
+`details` is private by design (§5.2): never in `failure_json`, always in `diagnostics/failure_details.json` via `diagnostic_ref`; the earlier "empty details" was this routing, not a lost value.
+
 ### `nightly_trigger.py`
 
 | Condition | Outcome |
@@ -1431,23 +1446,7 @@ flowchart TD
     class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh,native_score_batch optional
 ```
 
-Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never
-blocks the graph. This diagram is the *shadow* graph — `run_shadow_nightly`
-is the only function that walks it whole, inline, for every stage
-including `native_parity`; it has no production caller, only
-`tests/test_v2_ops_legacy_workflows.py` and
-`tests/test_v2_ops_native_shadow_render.py` call it.
-`computed_moves_refresh` and `native_score_batch` are both real submittable
-job kinds and `GRAPH` nodes; `run_shadow_nightly` reaches both through its
-whole-graph walk. Automatic *production* submission reaches them only
-through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` /
-`Service._reconcile_native_score_batch_shadow`); `_stage_sequence` filters
-both out of every job-submission stage list by name (see "Outputs").
-`native_score_batch`'s sidecar returns a normal no-op if the selected
-`"score"` job pinned no snapshot or no eligible identity exists (never a
-JobSpec, never a raise — R3 above); for a new eligible snapshot-pinned job
-it is the raw-row producer's only production caller — see "Outputs"/"Failure
-semantics" for both cases.
+Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never blocks the graph. This diagram is the *shadow* graph — `run_shadow_nightly` is the only function that walks it whole, inline, for every stage including `native_parity`; it has no production caller, only `tests/test_v2_ops_legacy_workflows.py` and `tests/test_v2_ops_native_shadow_render.py` call it. `computed_moves_refresh` and `native_score_batch` are both real submittable job kinds and `GRAPH` nodes; `run_shadow_nightly` reaches both through its whole-graph walk. Automatic *production* submission reaches them only through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` / `Service._reconcile_native_score_batch_shadow`); `_stage_sequence` filters both out of every job-submission stage list by name (see "Outputs"). `native_score_batch`'s sidecar returns a normal no-op if the selected `"score"` job pinned no snapshot or no eligible identity exists (never a JobSpec, never a raise — R3 above); for a new eligible snapshot-pinned job it is the raw-row producer's only production caller — see "Outputs"/"Failure semantics" for both cases.
 
 **`native_parity`.** The job kind and its worker
 (`run_native_parity_worker`, dispatched from `worker.py`) receive jobs through

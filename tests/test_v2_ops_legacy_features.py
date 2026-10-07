@@ -149,7 +149,7 @@ class _Sentinel(Exception):
 
 
 def test_action_score_calls_the_features_guard_before_anything_else(monkeypatch, tmp_path):
-    def _raise_sentinel(root):
+    def _raise_sentinel(root, parameters=None):
         raise _Sentinel("features guard reached")
 
     monkeypatch.setattr(legacy_adapter, "_check_features_current", _raise_sentinel)

@@ -350,7 +350,9 @@ def _score_stage(monkeypatch, tmp_path, population, *, events=None):
     monkeypatch.setattr(score_module.store, "read_table", lambda *a, **k: frame.copy())
     monkeypatch.setattr(features_module.FeatureContext, "load", staticmethod(lambda t, years: object()))
     monkeypatch.setattr(nightly_module, "strike_ladder", lambda *a, **k: [])
-    monkeypatch.setattr(legacy_adapter, "_check_features_current", lambda root: None)
+    monkeypatch.setattr(
+        legacy_adapter, "_check_features_current", lambda root, parameters=None: None
+    )
     (tmp_path / "finality.json").write_text(json.dumps({
         "date": _AS_OF, "is_final": True, "market_wide": True, "daily_share": 1.0,
         "chain_share": 1.0, "covered": 1, "detail": "final"}))
