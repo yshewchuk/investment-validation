@@ -660,28 +660,25 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture`, `price-refresh`, and
   `computed-moves capture`.
-- `computed_moves_store.run_computed_moves_refresh(...)` reads `earnings_events` and
-  `daily_market` from the pinned parent. `computed-moves capture` uses the newest
-  successful Tier-1 yfinance `history(period=max)` entry; missing history is
-  `legitimate_empty`, it never fetches live, and dry-run reports cache coverage
-  without writing. The selected source root is authoritative: catalog unit
-  receipts do not substitute for missing or changed Tier-1 entries. The worker
-  binds `as_of` and the fetcher; target selection follows the legacy ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
-- `forward_calendar_store` derives per-ticker trading calendars from pinned
-  `daily_market` (weekday fallback if absent), then uses the `catalog_path`,
-  `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences
-  in "Primary contracts", plus injected Nasdaq date and yfinance
-  pending-ticker fetchers.
-- `ops.pinned_partition_reader` yields bounded leases to both stores; forward-calendar builds daily-market DataFrames from each lease and indexes existing earnings rows there. `MAX_SCAN_ROWS` bounds live input; consume before advancing (advance clears it; `list(iterator)` retains empty leases). R1 missing,
-  corrupt or incompatible pin → typed refusal, never empty/newer; R2 provisional
-  until full validation; R3 integrity refusal terminal/no retry; R4 each
-  partition uses the same pin/scope; R5 failure discards attempt state/output;
+- `computed_moves_store.run_computed_moves_refresh(...)` reads `earnings_events` and `daily_market` from the pinned
+  parent. `computed-moves capture` uses the newest successful Tier-1 yfinance `history(period=max)` entry; missing
+  history is `legitimate_empty`, it never fetches live, and dry-run reports cache coverage without writing. The selected source root is authoritative: catalog unit receipts do not substitute for missing or changed Tier-1 entries. The worker binds `as_of` and the fetcher; target selection follows the legacy ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
+- `forward_calendar_store` derives trading calendars from pinned `daily_market` (weekday fallback if absent), then uses the `catalog_path`, `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences in "Primary contracts", plus injected Nasdaq date and yfinance pending-ticker fetchers.
+- Bounded retention (`computed_moves_store`): a lease is transient, so the store never accumulates leases into a
+  history-sized list or frame. It scans each source table once keeping only per-ticker counters (row counts,
+  ORATS-confirmed sessioned events before `as_of`, newest such event date), packs the targets in plan order into chunks
+  whose rows across both tables total at most `MAX_SCAN_ROWS` minus a lease cap (the lesser of 50,000 and half the
+  guard), then rescans per chunk through leases of at most that cap, keeping only that chunk's rows, released before the
+  next. Chunk plus lease never exceed `MAX_SCAN_ROWS`, whatever the source history; pin, columns, key order, filters and
+  null/correction/date handling are unchanged. Forward-calendar is not
+  yet bounded: it builds whole-history daily-market frames and an existing-earnings index, capped by `MAX_SCAN_ROWS`.
+- `ops.pinned_partition_reader` yields bounded leases to both stores; `MAX_SCAN_ROWS` bounds live input; consume before advancing (advance clears it; `list(iterator)` retains empty leases). R1 missing,
+  corrupt or incompatible pin → typed refusal, never empty/newer; R2 provisional until full validation; R3 integrity
+  refusal terminal/no retry; R4 each partition uses the same pin/scope; R5 failure discards attempt state/output;
   R6 identical inputs yield byte-identical output. Cache: no row/result cache;
   exact per-process stat-tuple match with real directories skips hashing; first open/stat drift re-hashes; digest mismatch/instability gives terminal `OBJECT_CORRUPT`. Transactions: read-only catalog reads roll back on success/error; reader writes/commits nothing. Caller publishes after validation; failures/early close publish nothing.
 - `board_requests`: an already-loaded events table (`ticker`, `event_date`,
-  `session` columns), an `as_of` date, a horizon in days, and an optional
-  ticker filter. It performs no I/O itself — the caller loads the table; see
-  "Failure semantics" for its input-validation rules.
+  `session` columns), an `as_of` date, a horizon in days, and an optional ticker filter. It performs no I/O itself — the caller loads the table; see "Failure semantics" for its input-validation rules.
 - `assemble_score_batch_inputs`'s own arguments: `as_of` (the night's
   cutoff), `snapshot_id` and `calendar_revision` (caller-supplied identity
   strings this module never resolves itself — a later caller derives them
@@ -1349,6 +1346,7 @@ job.
 | a same-`as_of` rerun with an unchanged provider fetch | truncates identically both times — same hash, same no-op/re-resolve behavior |
 | any commit candidate would inherit a fragment whose `primary_key_max` event date is on or after its basis `as_of` | `_commit_generation` refuses the whole generation with non-retryable `VALIDATION_FAILED`, before catalog commit. Rewritten tickers use the capture-time truncation above. Refusal leaves the parent, head and capture-log rows unchanged; already-published fragment objects and completed raw-unit receipts may remain. Retrying with the same parent and `as_of` cannot succeed while that fragment remains inherited; use a parent whose inherited rows precede `as_of` or request a later `as_of`. |
 | `computed-moves capture` has no source root, a held lock, no scoped head/parent pins or a missing/mismatched pinned receipt, invalid `as_of`, a lost head CAS, or a missing source table | Refuses with `INVALID_REQUEST`, `RESOURCE_UNAVAILABLE`, `SNAPSHOT_NOT_READY`, `INVALID_REQUEST`, `SNAPSHOT_CONFLICT`, or the reader's typed contract refusal, respectively. |
+| a source table or column missing, a corrupt, out-of-order or under-bounded pinned fragment, or one ticker's rows above `MAX_SCAN_ROWS` | Selection and chunk packing refuse before any fetch, receipt or fragment write: the reader's own typed code, or `RESOURCE_LIMIT_EXCEEDED` for the ticker case. No partial result; fragment bytes, receipts, snapshots and every other refusal are unchanged. |
 | Tier-1 history is missing, `--dry-run` is set, or identical same-`as-of` inputs are rerun | Missing history is `legitimate_empty`/`no_history` and counted without a live fetch; dry-run reports cache coverage without writes or receipts; an identical rerun resolves to the parent without a generation. |
 
 ## Invariants
