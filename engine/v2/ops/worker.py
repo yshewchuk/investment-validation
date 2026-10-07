@@ -459,8 +459,8 @@ def _dispatch_experiment(parameters, root):
     # The variant identity is bound to the run here: the registered legacy
     # runner's own spec.yaml identity for a primary run (obtained from the
     # preregistration root the plan recorded), the resolved spec hash for a
-    # smoke run or a synthetic primary fallback. No runner dependency file is
-    # read or staged.
+    # smoke run or a synthetic primary fallback.
+    # Primary runs receive declared dependencies as staged bindings before dispatch.
     checkout_root = parameters.get("preregistration_root")
     variant_id = expected_variant_identity(Path(checkout_root) if checkout_root else root,
                                            spec, mode)

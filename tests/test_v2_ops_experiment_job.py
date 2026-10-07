@@ -527,6 +527,52 @@ def test_worker_dispatch_sends_the_audited_clock_selector_to_a_real_subprocess(t
     assert not (tmp_path / "experiments" / "LEDGER.csv").exists()
 
 
+@pytest.mark.parametrize("runner_id", [
+    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+    "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
+    "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py",
+])
+def test_registered_wrappers_separate_data_root_from_adapter_staging(tmp_path, runner_id):
+    """A general data-root override keeps wrapper outputs experiment-relative;
+    only the adapter's pinned-source signal selects the staging root."""
+    import os
+    import subprocess
+    import sys
+
+    from engine.v2.ops.experiments import RUNNER_INVENTORY
+
+    wrapper = Path(__file__).resolve().parents[1] / runner_id
+    source_relative = RUNNER_INVENTORY[runner_id]["declared_runtime_sources"][0]
+    captured_here = tmp_path / "wrapper_here.txt"
+    synthetic_source = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "HERE = None\n"
+        "def main():\n"
+        "    Path(os.environ['WRAPPER_HERE_CAPTURE']).write_text(str(HERE))\n"
+    )
+
+    for staged in (False, True):
+        root = tmp_path / ("staged" if staged else "data-root")
+        root.mkdir()
+        source = root / source_relative
+        source.parent.mkdir(parents=True)
+        source.write_text(synthetic_source)
+        env = dict(os.environ, INVESTING_PLAN_ROOT=str(root),
+                   WRAPPER_HERE_CAPTURE=str(captured_here))
+        if staged:
+            env["INVESTING_PLAN_PINNED_SOURCE"] = str(source)
+        else:
+            env.pop("INVESTING_PLAN_PINNED_SOURCE", None)
+
+        completed = subprocess.run([sys.executable, str(wrapper)], cwd=root, env=env,
+                                   capture_output=True, text=True, check=False)
+
+        assert completed.returncode == 0, completed.stderr
+        expected_here = root if staged else wrapper.parent
+        assert captured_here.read_text() == str(expected_here.resolve())
+
+
 @pytest.mark.parametrize(("runner_id", "primary_arm_id"), [
     ("experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
      "gate_midfill_str_thru_forecast_analog"),
