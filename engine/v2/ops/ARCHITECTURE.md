@@ -1333,15 +1333,17 @@ job.
 
 ### `capture_inputs.py`: `legacy_features` read set
 
-`capture` also enumerates the data-dependent read set of `legacy_features` (now a barrier kind; `UNCAPTURED_KINDS` is gone) because its worker's staging tree is built only from manifest `file_refs`. Family `features_moves` is every `moves_*.json` directly under the oquants moves directory and `data/raw/computed_moves` (panel's own glob; any other name, such as a state file, is excluded, and a real directory named like a moves file is refused `INPUT_CHANGED` because panel's glob would match and fail reading it). Family `features_price_series` is `px_<T>.csv` plus the Tier-1 yfinance history entries for each ticker those files cover (JSON `ticker` field, else the file-name stem, as panel does). Capture is read-only with no provider or network calls and keeps only file names and that ticker field. The manifest schema is unchanged.
+`capture` enumerates `legacy_features`' data-dependent read set (a barrier kind) because its worker stages only manifest `file_refs`. It is read-only, makes no provider or network calls and leaves the manifest schema unchanged.
 
 | Condition | Outcome |
 |---|---|
-| neither directory holds a matching file (absent or empty) | `INPUT_CHANGED` at capture, mirroring panel's `FileNotFoundError`; `manifest_problems` flags `features_moves` for a manifest with none, so an older capture must be redone |
-| exactly one directory is absent or empty | the other's files are captured; panel also tolerates an absent computed directory |
-| a covered ticker has no price file and no yfinance entry | nothing captured, no refusal: panel leaves that ticker's run-up columns NaN |
-| a moves file or directory is a symlink | `INPUT_CHANGED`; never followed or skipped |
-| a moves file cannot be parsed | still captured, ticker from its file name; the job fails with panel's own parse error |
+| `moves_*.json` directly under the oquants moves directory or `data/raw/computed_moves` (family `features_moves`; panel's glob, other names excluded) | listed in the manifest |
+| `px_<T>.csv` and Tier-1 yfinance history entry for each ticker those files cover (family `features_price_series`; JSON `ticker` field, else file-name stem) | listed when present |
+| neither directory holds a matching file | `INPUT_CHANGED` at capture (panel raises `FileNotFoundError`); `manifest_problems` flags `features_moves` for a manifest with none, so an older capture must be redone |
+| one directory absent or empty | the other's files are captured |
+| a covered ticker has no price file or yfinance entry | tolerated: nothing captured, panel leaves its run-up columns NaN |
+| a moves file or directory is a symlink, or a real directory matches the glob | `INPUT_CHANGED`; never followed or skipped |
+| a moves file cannot be parsed | captured with the stem ticker; the job fails with panel's parse error |
 | same tree captured twice | identical sorted paths and hashes |
 
 ### `computed_moves_store.py`: capture and inherited fragments respect `as_of`
