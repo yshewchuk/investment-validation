@@ -10,8 +10,7 @@ from pathlib import Path
 
 PINNED_SOURCE = os.environ.get("INVESTING_PLAN_PINNED_SOURCE")
 IS_STAGED_RUNNER = bool(PINNED_SOURCE)
-ROOT = (Path.cwd() if IS_STAGED_RUNNER else
-        Path(os.environ.get("INVESTING_PLAN_ROOT") or Path(__file__).resolve().parents[2]))
+ROOT = Path.cwd() if IS_STAGED_RUNNER else Path(__file__).resolve().parents[2]
 HERE = ROOT if IS_STAGED_RUNNER else Path(__file__).resolve().parent
 SOURCE = (Path(PINNED_SOURCE) if IS_STAGED_RUNNER else
           ROOT / "experiments" / "EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline" / "run.py")

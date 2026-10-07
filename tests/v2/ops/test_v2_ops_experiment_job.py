@@ -26,7 +26,7 @@ from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY, catalog, run_until, sample
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 
 
@@ -552,17 +552,18 @@ def test_run_legacy_script_clears_inherited_pinned_source_without_sources(
     "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py",
 ])
 def test_registered_wrappers_separate_data_root_from_adapter_staging(tmp_path, runner_id):
-    """A general data-root override keeps wrapper outputs experiment-relative;
-    only the adapter's pinned-source signal selects the staging root."""
+    """A general data-root override must not select staging: the wrapper stays
+    experiment-relative and checkout-rooted. Only the adapter's pinned-source
+    signal selects the staging root."""
+    import json
     import os
     import subprocess
     import sys
 
     from engine.v2.ops.experiments import RUNNER_INVENTORY
 
-    wrapper = Path(__file__).resolve().parents[3] / runner_id
+    wrapper = REPO / runner_id
     source_relative = RUNNER_INVENTORY[runner_id]["declared_runtime_sources"][0]
-    captured_here = tmp_path / "wrapper_here.txt"
     synthetic_source = (
         "import os\n"
         "from pathlib import Path\n"
@@ -571,25 +572,40 @@ def test_registered_wrappers_separate_data_root_from_adapter_staging(tmp_path, r
         "    Path(os.environ['WRAPPER_HERE_CAPTURE']).write_text(str(HERE))\n"
     )
 
-    for staged in (False, True):
-        root = tmp_path / ("staged" if staged else "data-root")
-        root.mkdir()
-        source = root / source_relative
-        source.parent.mkdir(parents=True)
-        source.write_text(synthetic_source)
-        env = dict(os.environ, INVESTING_PLAN_ROOT=str(root),
-                   WRAPPER_HERE_CAPTURE=str(captured_here))
-        if staged:
-            env["INVESTING_PLAN_PINNED_SOURCE"] = str(source)
-        else:
-            env.pop("INVESTING_PLAN_PINNED_SOURCE", None)
+    # (i) Direct run, only INVESTING_PLAN_ROOT set: not staging mode. The
+    # runner source load is stubbed so only the wrapper's own selection runs.
+    data_root = tmp_path / "data-root"
+    data_root.mkdir()
+    probe = (
+        "import __future__, importlib.machinery as m, importlib.util, json, os, pathlib, sys\n"
+        "p = sys.argv[1]\n"
+        "g = {'__file__': p, '__name__': 'wrapper_probe'}\n"
+        "m.SourceFileLoader.exec_module = lambda self, module: None\n"
+        "exec(compile(open(p).read(), p, 'exec'), g)\n"
+        "print(json.dumps({k: str(g[k]) for k in ('HERE', 'ROOT', 'SOURCE')}))\n")
+    env = dict(os.environ, INVESTING_PLAN_ROOT=str(data_root))
+    env.pop("INVESTING_PLAN_PINNED_SOURCE", None)
+    completed = subprocess.run([sys.executable, "-c", probe, str(wrapper)], cwd=data_root,
+                               env=env, capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+    seen = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert Path(seen["HERE"]) == wrapper.parent.resolve()
+    assert Path(seen["ROOT"]) == REPO.resolve()
+    assert str(data_root) not in seen["SOURCE"]
 
-        completed = subprocess.run([sys.executable, str(wrapper)], cwd=root, env=env,
-                                   capture_output=True, text=True, check=False)
-
-        assert completed.returncode == 0, completed.stderr
-        expected_here = root if staged else wrapper.parent
-        assert captured_here.read_text() == str(expected_here.resolve())
+    # (ii) Staged run: the pinned source selects staging; the staging root is cwd.
+    staged_root = tmp_path / "staged"
+    source = staged_root / source_relative
+    source.parent.mkdir(parents=True)
+    source.write_text(synthetic_source)
+    captured_here = tmp_path / "wrapper_here.txt"
+    env = dict(os.environ, INVESTING_PLAN_ROOT=str(data_root),
+               INVESTING_PLAN_PINNED_SOURCE=str(source),
+               WRAPPER_HERE_CAPTURE=str(captured_here))
+    completed = subprocess.run([sys.executable, str(wrapper)], cwd=staged_root, env=env,
+                               capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+    assert captured_here.read_text() == str(staged_root.resolve())
 
 
 @pytest.mark.parametrize(("runner_id", "primary_arm_id"), [
