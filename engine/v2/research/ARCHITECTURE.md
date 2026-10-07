@@ -115,9 +115,9 @@ This bounds retained unmatched rows, not total process RSS.
   and `--snapshot-id` (default `None`): together they resolve the *one*
   `SnapshotRef` the run reads. An explicit id reproduces a run after the
   scope's head has moved; omitting it resolves the scope's current pinned
-  head. Exactly one `resolve`/`resolve_pinned` call is made per run — the
-  resolved id is fixed for the rest of that process regardless of what
-  commits to the scope afterward.
+  head. A CLI that resolves before its first table read passes that id to
+  downstream runners; any later lookup uses the explicit id rather than
+  resolving the possibly advanced scope head again.
 - Tier-2 tables, read through `Repository.scan` against that one snapshot:
   `option_chains` (ORATS EOD quotes — fill quality, replay's chain reads),
   `option_daily` (Polygon traded bars — fill quality), `daily_market`
@@ -381,8 +381,10 @@ uncaught traceback instead.
 
 ## Invariants
 
-- One `resolve`/`resolve_pinned` call per run; the resulting `snapshot_id`
-  is threaded through every subsequent read and written into every output
+- Every run reads one selected snapshot. A CLI that resolves before its
+  first table read passes that `snapshot_id` to downstream runners, whose
+  later lookups use the explicit id; the id is threaded through every read
+  and written into every output
   (root doc §5's "no silent default" invariant, applied to research reads) —
   except `experiment_trades.load_trades`'s returned frame, which carries no
   `snapshot_id` column so it can match the legacy loader's frame exactly
