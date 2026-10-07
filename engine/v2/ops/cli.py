@@ -752,24 +752,30 @@ def _primary_runner_bindings(plan, store):
     relative_paths = list(dict.fromkeys(
         [manifest["runner"], manifest["spec_source"], *declared,
          *manifest["source_closure"]]))
+    def checkout_path(relative, message):
+        candidate = base / relative
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(base)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise fail("VALIDATION_FAILED", message,
+                       details={"path": relative}) from exc
+        if not candidate.is_file() or candidate.is_symlink():
+            raise fail("VALIDATION_FAILED", message,
+                       details={"path": relative})
+        return resolved
+
     bindings = []
     for relative in relative_paths:
-        path = base / relative
-        if not path.is_file() or path.is_symlink():
-            raise fail("VALIDATION_FAILED",
-                       "registered runner source is missing",
-                       details={"path": relative})
+        path = checkout_path(relative, "registered runner source is missing")
         bindings.append((relative, store.publish_bytes(
             path.read_bytes(), schema_ref="experiment_runner_source.v1.0")))
     for relative in manifest.get("declared_runtime_inputs", ()):
-        path = base / relative
-        if not path.is_file() or path.is_symlink():
-            raise fail("VALIDATION_FAILED",
-                       "registered runner input is missing",
-                       details={"path": relative})
+        path = checkout_path(relative, "registered runner input is missing")
         bindings.append((relative, store.publish_bytes(
             path.read_bytes(), schema_ref="experiment_runner_input.v1.0")))
-    spec_path = base / manifest["spec_source"]
+    spec_path = checkout_path(
+        manifest["spec_source"], "registered runner source is missing")
     bindings.append(("spec.yaml", store.publish_bytes(
         spec_path.read_bytes(), schema_ref="experiment_runner_source.v1.0")))
     return bindings

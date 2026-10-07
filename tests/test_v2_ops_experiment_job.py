@@ -195,6 +195,35 @@ def test_primary_cli_stages_registered_runner_and_publishes_root_report(
         conn.close()
 
 
+def test_primary_runner_bindings_reject_parent_symlink_escape(tmp_path, monkeypatch):
+    base = tmp_path / "checkout"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "run.py").write_text("external source")
+    (outside / "spec.yaml").write_text("external spec")
+    (base / "linked").symlink_to(outside, target_is_directory=True)
+    manifest = {"runner": "linked/run.py", "spec_source": "linked/spec.yaml",
+                "source_closure": []}
+    monkeypatch.setattr(
+        cli, "_registered_runner_manifest",
+        lambda plan: ((), base, manifest))
+
+    class CapturingStore:
+        def __init__(self):
+            self.published = []
+
+        def publish_bytes(self, data, *, schema_ref):
+            self.published.append((schema_ref, data))
+            return data
+
+    store = CapturingStore()
+    with pytest.raises(OpsError) as excinfo:
+        cli._primary_runner_bindings({}, store)
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert store.published == []
+
+
 def test_primary_runner_bindings_publish_exp185_simulation_dependency(tmp_path):
     """The EXP-142 module and frozen EXP-144 population are declared and
     published with the primary runner's registered input bindings."""
