@@ -2,16 +2,21 @@
 """EXP-185 registered wrapper for the STR-RUNUP T14 corrected-calendar gate rebaseline runner."""
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-HERE = Path(__file__).resolve().parent
-SOURCE = ROOT / "experiments" / "EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline" / "run.py"
+STAGING_ROOT = os.environ.get("INVESTING_PLAN_ROOT")
+ROOT = Path(STAGING_ROOT) if STAGING_ROOT else Path(__file__).resolve().parents[2]
+HERE = ROOT if STAGING_ROOT else Path(__file__).resolve().parent
+SOURCE = Path(os.environ.get("INVESTING_PLAN_PINNED_SOURCE") or
+              ROOT / "experiments" / "EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline" / "run.py")
 sys.path.insert(0, str(ROOT))
 
-spec = importlib.util.spec_from_file_location("exp185_runner", SOURCE)
+loader = importlib.machinery.SourceFileLoader("exp185_runner", str(SOURCE))
+spec = importlib.util.spec_from_loader("exp185_runner", loader)
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)

@@ -1122,8 +1122,10 @@ _FIXED_ARM_ARGS = frozenset({("--clock", "d1")})
 LEGACY_RUNNER_TIMEOUT_S = 3600
 
 
-def run_legacy_script(root, script, args=()):
+def run_legacy_script(root, script, args=(), *, declared_runtime_sources=()):
     """Run a registered legacy runner in a private root with smoke protection."""
+    import os
+
     _rooted_import(root)
     base = Path(root).resolve()
     relative = str(Path(script))
@@ -1135,7 +1137,10 @@ def run_legacy_script(root, script, args=()):
         raise fail("INVALID_REQUEST", "legacy runner may not enable ledger writes")
     import subprocess
     command = [sys.executable, "-u", str(script_path), *arguments, "--no-ledger"]
-    return subprocess.run(command, cwd=base, check=False,
+    env = dict(os.environ, INVESTING_PLAN_ROOT=str(base))
+    if declared_runtime_sources:
+        env["INVESTING_PLAN_PINNED_SOURCE"] = str(base / declared_runtime_sources[0])
+    return subprocess.run(command, cwd=base, env=env, check=False,
                           capture_output=True, text=True, timeout=LEGACY_RUNNER_TIMEOUT_S)
 
 

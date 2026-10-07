@@ -613,6 +613,7 @@ RUNNER_INVENTORY = {
         "spec_source": "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/spec.yaml",
         "declared_runtime_sources": (
             "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/run.py",
+            "experiments/EXP-142_str_runup_t14_factor_simulation_pnl_gate/simulation.py",
         ),
         "ledger_write_behavior": (
             "appends experiments/LEDGER.csv rows via main()'s --no-ledger gate unless "

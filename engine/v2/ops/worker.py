@@ -366,6 +366,20 @@ def _experiment_failure(receipt):
                 "experiment run did not succeed", details=details)
 
 
+def _declared_experiment_sources(runner_id: str) -> tuple[str, ...]:
+    """Return the declared runtime source paths for one registered runner."""
+    from engine.v2.ops.experiments import RUNNER_INVENTORY
+
+    entry = RUNNER_INVENTORY.get(runner_id)
+    sources = entry.get("declared_runtime_sources") if isinstance(entry, dict) else None
+    if (not isinstance(sources, (list, tuple)) or not sources
+            or not all(isinstance(relative, str) and relative for relative in sources)):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "registered runner has no valid inventory source record",
+                   details={"runner": runner_id})
+    return tuple(sources)
+
+
 def _registered_experiment_runner(root, runner_id, primary_arm_id):
     """The runner closure for a registered legacy runner (P6 slice 10).
 
@@ -386,13 +400,16 @@ def _registered_experiment_runner(root, runner_id, primary_arm_id):
                    "registered runner has no audited selector for the primary arm",
                    details={"runner": runner_id, "primary_arm_id": primary_arm_id})
 
+    sources = _declared_experiment_sources(runner_id)
+
     def runner(*, run_dir, no_ledger):
-        completed = run_legacy_script(root, runner_id, args=selected_args)
+        completed = run_legacy_script(run_dir, runner_id, args=selected_args,
+                                      declared_runtime_sources=sources)
         if completed.returncode != 0:
             raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
                        details={"returncode": completed.returncode,
                                 "stderr_tail": (completed.stderr or "")[-2000:]})
-        return {"returncode": completed.returncode, "headline": _runner_headline(root)}
+        return {"returncode": completed.returncode, "headline": _runner_headline(run_dir)}
     return runner
 
 
