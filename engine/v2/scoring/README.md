@@ -56,8 +56,8 @@ payoff/recalibration/board-analog-matcher artifacts into one immutable
 legacy or cached fallback) when the pointer, catalog or a named member is
 not ready. `engine.v2.ops.native_score_batch.py`'s `native_score_batch` job
 worker calls `resolve_release_binding` and, when `gate_policy` is absent or empty,
-`resolve_gate_policy` (the gate thresholds staged in the release), but that job is never submitted in
-production yet; `engine.v2.ops.supervisor.py`'s tick loop separately calls
+`resolve_gate_policy` (the gate thresholds staged in the release), and the supervisor's tick loop submits that job for eligible
+pinned-snapshot identities; it also separately calls
 `resolve_production_release_binding()` live whenever its cheap
 release-identity check (run every tick) sees a changed root/id — a
 memo-gated release-readiness gate, not a per-tick call — see

@@ -22,11 +22,10 @@ content hash before use. Does not mutate a strategy or model registry
 Two modules, `nightly_source_bundle.py` (the per-night `SourceBundle`
 assembler) and `release_bindings.py` (the live-deployment release reader),
 are consumed today by `engine.v2.ops.native_score_batch.py`'s
-`native_score_batch` job worker, but that worker never actually runs in
-production yet — `engine.v2.ops.supervisor.py`'s tick loop never submits a
-`native_score_batch` job because the raw-row producer that would build one
-from real staged data is still missing (cutover PR-6, `engine/v2/ops/
-ARCHITECTURE.md`). The one piece of this that IS live: the same tick loop's
+`native_score_batch` job worker, and `engine.v2.ops.supervisor.py`'s tick loop
+submits a `native_score_batch` job when an eligible pinned-snapshot identity
+has staged producer inputs (cutover PR-6, `engine/v2/ops/ARCHITECTURE.md`).
+Separately, the same tick loop's
 cheap release-identity gate runs every tick, and calls
 `release_bindings.resolve_production_release_binding()` — which
 hash-verifies every model file — whenever the release root/id it sees has
