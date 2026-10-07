@@ -1259,7 +1259,7 @@ Per row (collected as a refusal, never sinks the batch):
 | `UNSUPPORTED_STRATEGY` | the row's strategy is outside this assembler's supported set |
 | `RELEASE_MISSING_ROLE` | the release has no driver/gate identity for the strategy |
 | `AMBIGUOUS_DECISION_CLOCK` | the resolved driver/gate identities disagree on decision clock |
-| `GATE_POLICY_NOT_STAGED` | no gate threshold for the row's strategy: none supplied, and the release has no gate `threshold` member |
+| `GATE_POLICY_NOT_STAGED` | the selected policy has no threshold for the row's strategy: a non-empty supplied policy is used as is (the release is not consulted); otherwise the release's gate `threshold` members, which may omit it |
 | `POST_AS_OF_ROW` | the row's panel anchor is dated after `as_of` |
 | re-wrapped | any other source-bundle refusal, or an input-assembly `ValueError` |
 

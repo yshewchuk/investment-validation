@@ -141,6 +141,7 @@ def test_hash_mismatch_raises_model_not_ready(tmp_path):
 
 _BAD_REGISTRIES = [
     pytest.param(b"not json", id="not-json"),
+    pytest.param(b"[" * 200000, id="too-deeply-nested"),
     pytest.param(b"[]", id="array-document"),
     pytest.param(json.dumps({"models": "x"}).encode(), id="models-not-a-list"),
     pytest.param(_registry({"id": "m-other", "threshold": 9.5}), id="no-gate-entry"),

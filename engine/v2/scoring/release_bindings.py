@@ -243,7 +243,7 @@ def resolve_gate_policy(
 def _registry_threshold(member_id: str, payload: bytes, model_id: str) -> float:
     try:
         doc = json.loads(payload)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise ModelNotReady(member_id, "threshold: object is not valid JSON") from exc
     models = doc.get("models") if isinstance(doc, dict) else None
     entries = ([e for e in models if isinstance(e, dict) and e.get("id") == model_id]
