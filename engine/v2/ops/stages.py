@@ -343,7 +343,7 @@ def _core_kinds():
             resource_classes=frozenset({"experiment_heavy"}), effects=("staged",),
             retry=RetryPolicy("bounded", 2, (30, 120)),
             checkpoint_contract="experiment_receipt.v1.0",
-            namespaces=frozenset({"shadow", "smoke"})),
+            namespaces=frozenset({"shadow", "smoke", "primary"})),
         # P2-5/B1c: a pure, non-legacy worker (see worker.py) that derives
         # decision_plan.v1.0/decision_evidence.v1.0 from bound, already-
         # committed score/finality/replay artifacts. Never reads the legacy
