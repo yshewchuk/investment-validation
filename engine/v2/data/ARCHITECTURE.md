@@ -306,9 +306,13 @@ difference in any batch, including the last, refuses the whole
 materialization, and a row-count mismatch takes precedence over a value
 mismatch. Validation is read-only and idempotent (same parts and snapshot, same
 verdict): it changes no materialized byte and no `SNAPSHOT`/receipt content,
-keeps no cache of its own and no retry (every call re-scans the snapshot and re-reads the
-part), and runs only after every part is written, with no transaction around
-it. A `DataError` refusal makes `legacy_adapter.materialize` remove everything
+keeps no cache of its own and no retry (every call re-scans the snapshot for
+rewritten files and re-reads each part), and runs only after every part is
+written, with no transaction around it. Byte-copied files are not re-scanned:
+a copied curated table is reopened with the legacy reader and passed through
+`coerce()` (failure: `CONTRACT_MISMATCH` "legacy coerce() refused ..."), and a
+copied single file is only reopened with the legacy reader (failure: the
+reader's own error). A `DataError` refusal makes `legacy_adapter.materialize` remove everything
 that call wrote (except destination-root safety refusals, which leave the
 pre-existing root alone). A missing or unreadable part raises the reader's own
 error, never a match; that error is not a `DataError`, so it skips that cleanup
