@@ -95,15 +95,12 @@ the production-default `legacy`/unpinned path stays a no-op.
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
 a manual/operator-invoked script, as `native_parity`'s production caller.
-That script can never be more than manual: it calls `run_shadow_nightly`,
-which "has no production caller [and] needs 14 caller-supplied stage
-handlers nothing builds". Phase 1 (`#132`) landed the pure functions
-`legacy_parity_rows`, `native_parity_report._empty_native_report` and
-`native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` `v1.0` →
-`v1.1`). Slice 2A (`#185`) landed the other half of the keyed join:
-`native_score_batch.py`'s `v2.0` keyed `records.json`/`refusals.json`
+The parity inputs are pure functions: `legacy_parity_rows`,
+`native_parity_report._empty_native_report` and
+`native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` `v1.1`), joined
+on `native_score_batch.py`'s `v2.0` keyed `records.json`/`refusals.json`
 schema (`_board_request_key`, the `INVALID_KEY_FIELD` refusal, tags
-`native_score_batch_records.v2.0` / `native_score_batch_refusals.v2.0`) plus
+`native_score_batch_records.v2.0` / `native_score_batch_refusals.v2.0`) through
 `native_parity_report._population_key_from_board_request_key` and
 `_native_rows_and_refusals` (pure projections; "Primary contracts" below).
 `native_score_batch.py`'s worker and shadow sidecar are unaffected by the
@@ -1234,7 +1231,7 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 
 ### `native_score_batch.py`
 
-Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities, unresolvable release, request-hash collision, invalid worker identity fields, or malformed `events.json`/`producer_refusals.json`. Invalid timestamp wire values raise `ValueError` during decoding.
+Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities, unresolvable release, request-hash collision, invalid worker identity fields, a supplied `feature_names` that is not a list/tuple (`null`/omitted means empty), or malformed `events.json`/`producer_refusals.json`. Invalid timestamp wire values raise `ValueError` during decoding.
 Quote bounds are validated during decoding and in `_checked_batch_arguments`, including direct assembly callers: only `null` or non-negative integers are accepted. Booleans, floats, strings, and negatives raise `ValueError`, mapped to nonretryable `VALIDATION_FAILED` before scoring or output writes; invalid bounds are malformed batch inputs, not row refusals.
 This classification does not apply to every shape error: a missing `events.json` item `key` raises `KeyError` and
 maps to retryable `WORKER_FAILED`. R2: no cache. R3: no internal retry. R4: no catalog transaction. R5: writes follow assembly, scoring and collision checks. R6: strict timestamp identity for duplicate/overlap checks.
@@ -1261,11 +1258,11 @@ published output). The release is resolved once per attempt and reused for
 every row. Assembly is a pure function of its inputs (no clock, no RNG) —
 a newly promoted release genuinely changing the output is by design.
 
-**Driver alias (TEMPORARY; supervisor's proposal, user-approved 2026-10-07).** No real release carries `driver:STR-THRU` (the inventory emits `size`, not `driver`). `_DRIVER_ROLE_ALIAS` (one constant, strategy -> identity key; `STR-THRU` -> `size:*`, legacy `PAYOFF_DRIVER`, `engine/payoff.py:81`) is consulted only when the exact `driver:{strategy}` identity is absent; a present exact binding always wins. When the alias is used the bundle's `model_identity` is keyed by the alias key (`size:*`), so the record shows it. Removal: a release carrying the dedicated binding (inventory change); `test_dedicated_driver_binding_wins_over_alias` fails if one is ignored. Restaging the release is a possible later pivot.
+**Driver alias (TEMPORARY).** No real release carries `driver:STR-THRU` (the inventory emits `size`, not `driver`). `_DRIVER_ROLE_ALIAS` (one constant, strategy -> identity key; `STR-THRU` -> `size:*`, legacy `PAYOFF_DRIVER`, `engine/payoff.py:81`) is consulted only when the exact `driver:{strategy}` identity is absent; a present exact binding always wins. When the alias is used the bundle's `model_identity` is keyed by the alias key (`size:*`), so the record shows it. Removal: a release carrying the dedicated binding (inventory change); `test_dedicated_driver_binding_wins_over_alias` fails if one is ignored.
 
 **Feature names.** A non-empty `parameters.feature_names` is used as given. Empty: per row, the sorted de-duplicated union of the driver and gate `feature_order`s, minus the stage-derived gate columns (`GATE_FORECAST_COLUMNS`, `GATE_ANALOG_COLUMNS`: projecting them would suppress native derivation). A pure function of the recorded identities, so it changes with the model's inputs; the leakage denylist still applies (`LEAKED_FEATURE_NAME`).
 
-**Known gap ([#479](https://github.com/yshewchuk/investment-validation/issues/479)).** The bundle declares no driver residual pool, payoff artifact or residual recipe, so rows that pass the checks above are flagged `NO_PAYOFF_MAP` / `MISSING_MODEL_RESIDUALS` until that slice lands.
+**Known gap ([#479](https://github.com/yshewchuk/investment-validation/issues/479)).** The bundle declares no driver residual pool, payoff artifact or residual recipe, so rows that pass the checks above are flagged `NO_PAYOFF_MAP` / `MISSING_MODEL_RESIDUALS`.
 
 ### Native parity (`run_native_parity_worker`, `native_parity_report.py`)
 

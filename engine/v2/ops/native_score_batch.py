@@ -796,10 +796,15 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
     as_of = parameters["as_of"]
     snapshot_id = parameters["snapshot_id"]
     calendar_revision = parameters["calendar_revision"]
+    raw_feature_names = parameters.get("feature_names")
+    if raw_feature_names is None:
+        raw_feature_names = ()
+    if not isinstance(raw_feature_names, (list, tuple)):
+        raise ValueError("feature_names must be a list or tuple of strings")
     assembled, refusals = assemble_score_batch_inputs(
         as_of=as_of, snapshot_id=snapshot_id,
         calendar_revision=calendar_revision, binding=binding,
-        events=events, feature_names=tuple(parameters.get("feature_names") or ()),
+        events=events, feature_names=tuple(raw_feature_names),
         gate_policy=parameters.get("gate_policy") or {},
     )
     producer_refusals_path = root / "producer_refusals.json"

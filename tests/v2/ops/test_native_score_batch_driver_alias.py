@@ -4,6 +4,7 @@ import hashlib
 import json
 
 import pandas as pd
+import pytest
 
 from engine.v2.foundation import content_hash
 from engine.v2.models import (
@@ -332,3 +333,17 @@ def test_worker_without_feature_names_gets_past_release_missing_role(tmp_path):
     assert "RELEASE_MISSING_ROLE" not in json.dumps(document)
     assert document["refusals"] == {}
     assert document["unkeyable_refusals"] == []
+
+
+@pytest.mark.parametrize("bad", [0, {}, "signal", 1.5, False])
+def test_worker_rejects_non_sequence_feature_names(tmp_path, bad):
+    """A supplied, malformed ``feature_names`` raises -- truthiness must not
+    silently turn ``0``/``{}`` into the empty (derive-everything) default."""
+    _stage(tmp_path, [SIZE, GATE])
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / "events.json").write_text(json.dumps([_event_doc()]))
+    params = _worker_parameters(tmp_path, expected_ids=["evt-1"])
+    params["feature_names"] = bad
+    with pytest.raises(ValueError, match="feature_names must be a list or tuple"):
+        run_native_score_batch_worker(params, root)
