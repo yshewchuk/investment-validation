@@ -27,9 +27,12 @@ create an import cycle (``legacy_mapping.py`` already imports this module for
 its accessors).
 
 :func:`materialize` stays here: it is the one place D13/D14 actually invokes
-a legacy reader (:func:`read_legacy_part`) and the legacy schema coercion
-(:func:`coerce_legacy`) to prove a materialized file is readable by
-unchanged legacy code, so it cannot move to a legacy-free module. Every
+the legacy reader (:func:`read_legacy_part`) and the legacy schema coercion
+(:func:`coerce_legacy`), so it cannot move to a legacy-free module. The
+reader opens every byte-copied file and any empty rewritten part;
+``coerce_legacy`` checks every curated table (a rewritten part per Parquet
+batch). Row values of rewritten parts and single files are compared through
+bounded pyarrow batches, never through the legacy reader. Every
 other piece of its machinery (dest_root safety, Parquet writing, hashing,
 row comparison, lock-down) already lives in ``legacy_materialization.py``.
 
@@ -290,9 +293,12 @@ def materialize(repository, store, request, dest_root) -> dict[str, str]:
 
     ``dest_root`` must be a fresh, empty, non-symlink directory outside
     ``store``'s own tree — refused with a stable ``DEST_ROOT_*`` code
-    otherwise. Every written file is re-read with the unchanged legacy
-    readers before the tree is made read-only (chmod 0444 files / 0555
-    dirs). Returns ``{relative_path: content_hash}``.
+    otherwise. Every written file is validated before the tree is made
+    read-only (chmod 0444 files / 0555 dirs): rewritten curated parts and
+    rewritten single files are compared row-for-row with a fresh scan through
+    bounded pyarrow batches; curated tables also pass the legacy ``coerce()``
+    (a rewritten part per batch); byte-copied files are re-opened with the
+    unchanged legacy reader. Returns ``{relative_path: content_hash}``.
 
     A table in ``tree.copied_tables`` (review round 4, decision 1) was
     written by a verified byte-for-byte object copy, not a rewrite: its

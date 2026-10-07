@@ -767,7 +767,8 @@ class MaterializedTree:
     """What :func:`materialize_tree` wrote, before validation or lock-down.
 
     ``curated_files``/``single_files`` name exactly the paths
-    ``legacy_adapter.materialize`` must re-read with the legacy loaders;
+    ``legacy_adapter.materialize`` must validate (bounded pyarrow row
+    comparison, legacy ``coerce()``, or a legacy-reader re-open for copies);
     ``manifest`` is the full ``{relative_path: content_hash}`` this task's
     contract returns. ``copied_tables`` (review round 4, decision 1) names
     every table written by a verified byte-for-byte object copy rather than

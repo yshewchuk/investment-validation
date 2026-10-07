@@ -296,7 +296,11 @@ null-like and timestamp normalization. A row-count mismatch keeps the
 `CONTRACT_MISMATCH` refusal message `materialized row count {actual} != scanned
 row count {expected}`; a value mismatch keeps
 `materialized value for column {column!r} disagrees with the scanned row`.
-Validation compares bounded batches (8,192 rows per side, so peak memory does
+Read path: row values are compared by reading the written Parquet part
+directly with pyarrow (never through the legacy reader); a rewritten curated
+part also reaches the legacy `coerce()` per batch; only byte-copied files, and
+a rewritten part with zero rows, are opened with the legacy reader. Validation
+compares bounded batches (8,192 rows per side, so peak memory does
 not grow with rows per table-year), but no batch is accepted on its own: a
 difference in any batch, including the last, refuses the whole
 materialization, and a row-count mismatch takes precedence over a value
