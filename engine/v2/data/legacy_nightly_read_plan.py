@@ -47,10 +47,12 @@ instead (``nightly.CROSS_CHECK_STAGES``, ``snapshot_stages``'s
 ``legacy_decisions``/``legacy_settlement`` are barrier-only for the identical
 structural reason — absent from ``SNAPSHOT_BACKED_KINDS`` — the dict simply
 never grew a comment for them. :data:`BARRIER_KINDS` below is the full set
-of six kinds this module declares a read plan for; it is no longer the exact
+of seven kinds (the six above plus ``legacy_features``, whose moves/price read
+set ``capture_inputs`` enumerates at capture time) this module declares a read
+plan for; it is no longer the exact
 complement of ``SNAPSHOT_BACKED_KINDS`` within ``ACTION_NAMES`` now that
 three kinds are dual-mode (see ``test_v2_ops_capture_inputs.py``'s
-``test_barrier_kinds_are_the_structural_six``).
+``test_barrier_kinds_are_the_structural_seven``).
 
 **Families.** Rather than list raw path globs per kind, each kind declares
 which named :data:`FAMILIES` it reads; a family is one bounded, reviewable
