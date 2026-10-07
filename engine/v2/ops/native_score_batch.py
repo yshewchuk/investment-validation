@@ -16,6 +16,7 @@ import json
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -25,6 +26,7 @@ from engine.v2.foundation import content_hash, to_document
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.scoring.application import score_batch
 from engine.v2.scoring.identity import request_hash
+from engine.v2.scoring.native_gate_features import GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
     assemble_nightly_source_bundle,
@@ -48,6 +50,13 @@ _SHADOW_FILL_ALPHA = 0.5  # engine.fills.MID.alpha; do not import engine.fills
                           # (legacy) from this v2 module -- this is a shadow
                           # default, documented in ARCHITECTURE.md, not a
                           # legacy-derived fact.
+
+#: TEMPORARY (removal: a release carrying a dedicated `driver:{strategy}`
+#: binding, see ARCHITECTURE.md "Driver alias"). strategy -> the release
+#: identity key supplying the driver when `driver:{strategy}` is absent.
+#: STR-THRU's driver is the `size` champion (legacy PAYOFF_DRIVER,
+#: engine/payoff.py:81); feature roles are keyed with strategy id "*".
+_DRIVER_ROLE_ALIAS: Mapping[str, str] = MappingProxyType({"STR-THRU": "size:*"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,11 +190,18 @@ def _matched_decision_clock(
 
     Returns a tagged 3-tuple: ``(code, detail, None)`` on failure (missing
     ``driver``/``gate`` role, or the two roles disagreeing on
-    ``decision_clock_id``), ``(None, None, (driver_identity, gate_identity))``
-    on success. The row's ``key`` is passed in for the caller's error
-    context; the refusal codes/details are row-scoped by that caller.
+    ``decision_clock_id``), ``(None, None, (driver_key, driver_identity,
+    gate_identity))`` on success. ``driver_key`` is the release identity key
+    the driver came from: ``driver:{strategy}``, or -- only when that exact
+    binding is absent -- the ``_DRIVER_ROLE_ALIAS`` key. The row's ``key``
+    is passed in for the caller's error context; the refusal codes/details
+    are row-scoped by that caller.
     """
-    driver_identity = model_identity.get(f"driver:{strategy}")
+    driver_key = f"driver:{strategy}"
+    driver_identity = model_identity.get(driver_key)
+    if driver_identity is None:
+        driver_key = _DRIVER_ROLE_ALIAS.get(strategy, driver_key)
+        driver_identity = model_identity.get(driver_key)
     gate_identity = model_identity.get(f"gate:{strategy}")
     if driver_identity is None:
         return ("RELEASE_MISSING_ROLE", f"driver:{strategy}", None)
@@ -195,7 +211,29 @@ def _matched_decision_clock(
         return ("AMBIGUOUS_DECISION_CLOCK",
                 f"driver:{strategy}={driver_identity.decision_clock_id!r} "
                 f"gate:{strategy}={gate_identity.decision_clock_id!r}", None)
-    return (None, None, (driver_identity, gate_identity))
+    return (None, None, (driver_key, driver_identity, gate_identity))
+
+
+def _feature_names_or_refusal(
+    feature_names: Sequence[str], *identities: Any,
+) -> tuple[Sequence[str], tuple[str, str] | None]:
+    """Explicit ``feature_names`` win. Only ``None`` or an empty list/tuple
+    derive: the sorted, de-duplicated union of the identities' ``feature_order``
+    minus the stage-derived gate columns (projecting those would suppress their
+    native derivation), or a ``(code, fixed_detail)`` refusal when an identity
+    has no ``feature_order``. Any other shape (``0``, ``False``, ``{}``, ``""``,
+    a non-str element) is passed through unchanged, so the bundle assembler
+    refuses it ``INVALID_FEATURE_NAMES`` exactly as before."""
+    if feature_names is None:
+        feature_names = ()
+    if feature_names or not isinstance(feature_names, (list, tuple)):
+        return feature_names, None
+    if not all(identity.feature_order for identity in identities):
+        return (), ("RELEASE_MISSING_FEATURE_ORDER",
+                    "driver or gate identity has no feature_order")
+    stage_owned = {*GATE_FORECAST_COLUMNS, *GATE_ANALOG_COLUMNS}
+    return tuple(sorted(
+        {name for identity in identities for name in identity.feature_order} - stage_owned)), None
 
 
 def _identity_context(as_of: Any, snapshot_id: str,
@@ -266,6 +304,7 @@ def _bundle_or_refusal(
     *,
     strategy: str,
     driver_identity: Any,
+    driver_key: str,
     gate_identity: Any,
     gate_policy: Mapping[str, Mapping[str, Any]],
     as_of: Any,
@@ -291,7 +330,7 @@ def _bundle_or_refusal(
             quote_status=event.quote_status, feature_names=feature_names,
             quote_max_age_sessions=event.quote_max_age_sessions,
             driver_name=driver_name,
-            model_identity={f"driver:{strategy}": to_document(driver_identity),
+            model_identity={driver_key: to_document(driver_identity),
                             f"gate:{strategy}": to_document(gate_identity)},
             model_artifact_refs={"driver_prediction": driver_identity.artifact_hash},
             forecast_recipes={"driver_prediction": {"binding_id": driver_identity.binding_id}},
@@ -335,13 +374,18 @@ def _assemble_one_event(
     code, detail, pair = _matched_decision_clock(key, binding.model_identity, strategy)
     if code is not None:
         return NativeScoreBatchRowRefusal(key, code, detail)
-    driver_identity, gate_identity = pair
+    driver_key, driver_identity, gate_identity = pair
     if strategy not in gate_policy:
         return NativeScoreBatchRowRefusal(
             key, "GATE_POLICY_NOT_STAGED", f"no gate policy staged for {strategy!r}")
+    feature_names, problem = _feature_names_or_refusal(
+        feature_names, driver_identity, gate_identity)
+    if problem is not None:
+        return NativeScoreBatchRowRefusal(key, *problem)
     bundle = _bundle_or_refusal(
-        key, event, strategy=strategy, driver_identity=driver_identity,
-        gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
+        key, event, strategy=strategy, driver_key=driver_key,
+        driver_identity=driver_identity, gate_identity=gate_identity,
+        gate_policy=gate_policy, as_of=as_of,
         feature_names=feature_names, driver_name=driver_name)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
@@ -450,7 +494,9 @@ def assemble_score_batch_inputs(
     per-row gap is a collected :class:`NativeScoreBatchRowRefusal` instead, so
     one bad row never sinks the batch: ``UNSUPPORTED_STRATEGY`` (not
     ``STR-THRU``), ``RELEASE_MISSING_ROLE``/``AMBIGUOUS_DECISION_CLOCK`` (the
-    release's driver/gate identities for the strategy), ``GATE_POLICY_NOT_
+    release's driver/gate identities for the strategy),
+    ``RELEASE_MISSING_FEATURE_ORDER`` (empty ``feature_names`` and an
+    identity without ``feature_order``), ``GATE_POLICY_NOT_
     STAGED`` (no caller-supplied threshold for the strategy -- gate thresholds
     are not part of the release binding), any re-wrapped
     ``NightlySourceBundleRefusal`` from the per-event bundle assembly,
@@ -755,10 +801,15 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
     as_of = parameters["as_of"]
     snapshot_id = parameters["snapshot_id"]
     calendar_revision = parameters["calendar_revision"]
+    raw_feature_names = parameters.get("feature_names")
+    if raw_feature_names is None:
+        raw_feature_names = ()
+    if not isinstance(raw_feature_names, (list, tuple)):
+        raise ValueError("feature_names must be a list or tuple of strings")
     assembled, refusals = assemble_score_batch_inputs(
         as_of=as_of, snapshot_id=snapshot_id,
         calendar_revision=calendar_revision, binding=binding,
-        events=events, feature_names=tuple(parameters["feature_names"]),
+        events=events, feature_names=tuple(raw_feature_names),
         gate_policy=(parameters.get("gate_policy")
                      or resolve_gate_policy(binding, parameters["release_root"])),
     )

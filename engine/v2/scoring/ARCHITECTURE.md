@@ -31,7 +31,7 @@ cheap release-identity gate runs every tick, and calls
 hash-verifies every model file — whenever the release root/id it sees has
 changed since the last tick (memo-gated: skipped on repeat ticks once that
 identity's already been resolved, success or refusal), independent of the
-never-submitted job (see Dependencies).
+`native_score_batch` job (see Dependencies).
 
 ## Primary contracts and public interfaces
 
