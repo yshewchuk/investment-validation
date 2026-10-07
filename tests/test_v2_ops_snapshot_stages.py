@@ -510,6 +510,8 @@ def _plan_files(case):
         for table in tables
     ) + (LegacyFileRef(path="data/raw/fetch/orats/ab/placeholder.meta.json",
                        content_hash=file_hash(fixture), byte_size=fixture.stat().st_size),
+        LegacyFileRef(path="earnings_predictions/data/raw/oquants/moves/moves_AAA.json",
+                      content_hash=file_hash(fixture), byte_size=fixture.stat().st_size),
         LegacyFileRef(path="unused.txt", content_hash=file_hash(fixture),
                       byte_size=fixture.stat().st_size))
     manifest.write_text(json.dumps(to_document(LegacyInputManifest(
