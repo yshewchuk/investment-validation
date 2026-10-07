@@ -252,14 +252,29 @@ def _population(repository, head) -> int:
                for record in repository.fragment_records(snapshot, name))
 
 
+def _frames_now() -> list:
+    """Strong references (so ids stay unique) to every DataFrame alive right now."""
+    gc.collect()
+    return [obj for obj in gc.get_objects() if isinstance(obj, pd.DataFrame)]
+
+
+def _frame_rows_since(baseline) -> int:
+    """Rows alive in DataFrames that did not exist when ``baseline`` was taken, so frames
+    other tests leave alive in a shared process never count."""
+    known = {id(frame) for frame in baseline}
+    return sum(len(obj) for obj in gc.get_objects()
+               if isinstance(obj, pd.DataFrame) and id(obj) not in known)
+
+
 def _spy_live_frame_rows(monkeypatch) -> list[int]:
-    """Rows alive in ANY DataFrame each time a ticker's rows are built -- measured with
-    ``gc``, independent of the store's own live-row accounting."""
+    """Rows alive in ANY run-created DataFrame each time a ticker's rows are built --
+    measured with ``gc``, independent of the store's own live-row accounting."""
     peaks: list[int] = []
+    baseline = _frames_now()
     real = computed_moves_store.build_rows
 
     def spy(*args, **kwargs):
-        peaks.append(sum(len(obj) for obj in gc.get_objects() if isinstance(obj, pd.DataFrame)))
+        peaks.append(_frame_rows_since(baseline))
         return real(*args, **kwargs)
 
     monkeypatch.setattr(computed_moves_store, "build_rows", spy)
@@ -272,12 +287,12 @@ def test_no_frame_is_alive_while_the_next_chunk_loads(tmp_path, monkeypatch):
     the retained-row account (CodeRabbit round 2)."""
     monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", 600)  # one ticker per chunk
     alive_at_load: list[int] = []
+    baseline = _frames_now()
     real = computed_moves_store._scan_once
 
     def spy(*args, **kwargs):
         gc.collect()
-        alive_at_load.append(sum(len(obj) for obj in gc.get_objects()
-                                 if isinstance(obj, pd.DataFrame)))
+        alive_at_load.append(_frame_rows_since(baseline))
         return real(*args, **kwargs)
 
     monkeypatch.setattr(computed_moves_store, "_scan_once", spy)
