@@ -287,16 +287,27 @@ def test_integer_string_digit_limit_member_refuses(tmp_path):
     _assert_no_leak(tmp_path, error.value)
 
 
-def test_deeply_nested_member_refuses(tmp_path):
-    """A hash-valid member whose JSON nesting is too deep refuses as not valid
-    JSON, caused by a RecursionError out of the real json.loads -- never
-    escapes; 200,000 nesting levels raises RecursionError from json.loads."""
+def test_member_json_recursion_error_refuses(tmp_path):
+    """A hash-valid member whose JSON document makes ``json.loads`` hit the
+    interpreter recursion limit refuses as not valid JSON, caused by a
+    RecursionError out of the member decode -- never escapes as an uncaught
+    refusal. The patch replaces the shared ``json.loads`` attribute for the
+    duration of this test, but raises only for the exact member payload and
+    delegates catalog and manifest inputs to the saved real loader."""
     _stage_and_promote(tmp_path)
-    depth = 200000
-    nested = b"[" * depth + b"1" + b"]" * depth
-    _write_catalog(tmp_path, rows=[_row(_MEMBER, [_staged_object(tmp_path, nested, _sha(nested))])])
-    with pytest.raises(ModelNotReady) as error:
-        resolve_release_binding(tmp_path)
+    artifact, payload = _driver()
+    _write_catalog(tmp_path, rows=[_row(_MEMBER, [_staged_object(tmp_path, payload, artifact.content_hash)])])
+    real_loads = json.loads
+
+    def poisoned_loads(arg, *args, **kwargs):
+        if arg == payload:
+            raise RecursionError("json document nesting exceeds the interpreter limit")
+        return real_loads(arg, *args, **kwargs)
+
+    with unittest.mock.patch(
+            "engine.v2.scoring.release_bindings.json.loads", poisoned_loads):
+        with pytest.raises(ModelNotReady) as error:
+            resolve_release_binding(tmp_path)
     assert error.value.member_id == _MEMBER
     assert error.value.detail == "driver residual pool is not valid JSON"
     assert isinstance(error.value.__cause__, RecursionError)
