@@ -51,10 +51,12 @@ implementation.
 `release_bindings` is the Phase 6 (cutover PR-1) production release reader:
 given a staged release root, `resolve_release_binding` resolves the live
 deployment pointer's model identity/artifact refs and the release's frozen
-payoff/recalibration/board-analog-matcher artifacts into one immutable
-`ScoringReleaseBinding`, raising `NoCurrentRelease`/`ModelNotReady` (never a
-legacy or cached fallback) when the pointer, catalog or a named member is
-not ready. `engine.v2.ops.native_score_batch.py`'s `native_score_batch` job
+payoff/recalibration/board-analog-matcher artifacts, plus the
+role-keyed `driver_residual_artifacts` mapping (empty when no driver pool
+member is staged), into one immutable `ScoringReleaseBinding`, raising
+`NoCurrentRelease`/`ModelNotReady` (never a legacy or cached fallback) when
+the pointer, catalog or a named member is not ready.
+`engine.v2.ops.native_score_batch.py`'s `native_score_batch` job
 worker calls `resolve_release_binding` and, when `gate_policy` is absent or empty,
 `resolve_gate_policy` (the gate thresholds staged in the release), and the supervisor's tick loop submits that job for eligible
 pinned-snapshot identities; it also separately calls

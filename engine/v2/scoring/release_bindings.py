@@ -40,6 +40,11 @@ from engine.v2.models.recalibration_artifact import (
     RecalibrationArtifactRef,
     RecalibrationMapArtifact,
 )
+from engine.v2.models.residual_artifact import (
+    DriverResidualPoolArtifact,
+    ResidualArtifactError,
+    residual_artifact_from_document,
+)
 
 __all__ = [
     "ModelIdentity",
@@ -58,6 +63,7 @@ _PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
 _PAYOFF_PREFIXES = ("payoff_line:", "payoff_surface:")
 _RECALIBRATION_PREFIX = "recalibration_map:"
 _ANALOG_MEMBER_ID = "board_analog_matcher"
+_DRIVER_RESIDUAL_PREFIX = "driver_residual_pool:"
 
 
 class ReleaseBindingError(ValueError):
@@ -134,6 +140,9 @@ class ScoringReleaseBinding:
     recalibration_artifacts: Mapping[str, tuple[RecalibrationMapArtifact, ...]]
     #: Keyed by strategy, same rule as ``payoff_artifacts``.
     analog_artifacts: Mapping[str, tuple[BoardAnalogPoolArtifact, ...]]
+    #: Driver residual pools, keyed by the loaded artifact's own ``.role``
+    #: field. Empty for a release that stages none.
+    driver_residual_artifacts: Mapping[str, DriverResidualPoolArtifact] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_identity", MappingProxyType(dict(self.model_identity)))
@@ -145,6 +154,8 @@ class ScoringReleaseBinding:
                            MappingProxyType({k: tuple(v) for k, v in self.recalibration_artifacts.items()}))
         object.__setattr__(self, "analog_artifacts",
                            MappingProxyType({k: tuple(v) for k, v in self.analog_artifacts.items()}))
+        object.__setattr__(self, "driver_residual_artifacts",
+                           MappingProxyType(dict(self.driver_residual_artifacts)))
 
 
 def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
@@ -185,12 +196,14 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
         _load_recalibration)
     analog = _resolve_state_group(
         dep_root, catalog, lambda member_id: member_id == _ANALOG_MEMBER_ID, _load_analog)
+    driver_residual = _resolve_driver_residual_pools(dep_root, catalog)
 
     return ScoringReleaseBinding(
         release_id=release.release_id, model_identity=model_identity,
         model_artifact_refs=model_artifact_refs, model_release=release,
         frozen_inference=FrozenInference(dep_root),
         payoff_artifacts=payoff, recalibration_artifacts=recalibration, analog_artifacts=analog,
+        driver_residual_artifacts=driver_residual,
     )
 
 
@@ -306,7 +319,13 @@ def _read_verified_object(dep_root: Path, member_id: str, name: str, path: str,
     internally -- this helper is only for model-binding members, which have
     no dedicated loader.)"""
     base = dep_root.resolve()
-    target = (base / path).resolve()
+    try:
+        target = (base / path).resolve()
+    except ValueError as exc:
+        # A path with an embedded NUL (or another path resolve() rejects)
+        # raises a bare ValueError, never an OSError; translate it to the
+        # same fixed, path-free refusal instead of echoing the supplied path.
+        raise ModelNotReady(member_id, f"{name}: object path is invalid") from exc
     try:
         target.relative_to(base)
     except ValueError:
@@ -392,9 +411,19 @@ def _read_state_catalog(release_root: Path, expected_release_id: str) -> Mapping
     return body
 
 
+def _artifact_strategy(artifact) -> str:
+    return artifact.strategy
+
+
 def _resolve_state_group(
     dep_root: Path, catalog: Mapping, matches: Callable[[str], bool], loader,
+    key: Callable[[object], str] = _artifact_strategy,
 ) -> dict[str, tuple]:
+    """Rows whose ``member_id`` satisfies ``matches`` are loaded through
+    ``loader`` and grouped by ``key`` (default ``_artifact_strategy``: the
+    loaded artifact's own ``.strategy``) into ``{group: (artifact, ...)}``
+    -- one shared catalog contract for the payoff/recalibration/analog
+    groups and the driver residual pools."""
     members = catalog.get("members")
     if members is None or not isinstance(members, list):
         raise ModelNotReady("phase5_release.json", "members must be a JSON array")
@@ -418,8 +447,8 @@ def _resolve_state_group(
                     or not isinstance(obj.get("content_hash"), str)):
                 raise ModelNotReady(member_id, "malformed object reference in phase5_release.json")
             artifact = loader(dep_root, member_id, obj)
-            grouped.setdefault(artifact.strategy, []).append(artifact)
-    return {strategy: tuple(items) for strategy, items in grouped.items()}
+            grouped.setdefault(key(artifact), []).append(artifact)
+    return {group: tuple(items) for group, items in grouped.items()}
 
 
 def _load_payoff(dep_root: Path, member_id: str, obj: Mapping):
@@ -451,3 +480,53 @@ def _load_analog(dep_root: Path, member_id: str, obj: Mapping):
     if not isinstance(state, BoardAnalogPoolArtifact):
         raise ModelNotReady(member_id, f"expected a board analog pool, got {type(state).__name__}")
     return state
+
+
+def _resolve_driver_residual_pools(
+    dep_root: Path, catalog: Mapping,
+) -> dict[str, DriverResidualPoolArtifact]:
+    """Every staged ``driver_residual_pool:<role>`` object, keyed by the
+    artifact's own ``.role`` (one object per role; a duplicate role is an
+    ambiguous member and refuses). No declared member yields ``{}``."""
+    grouped = _resolve_state_group(
+        dep_root, catalog, lambda member_id: member_id.startswith(_DRIVER_RESIDUAL_PREFIX),
+        _load_driver_residual, key=lambda artifact: artifact.role)
+    pools: dict[str, DriverResidualPoolArtifact] = {}
+    for role, artifacts in grouped.items():
+        if len(artifacts) != 1:
+            raise ModelNotReady(
+                _DRIVER_RESIDUAL_PREFIX + role, "ambiguous driver residual pool member")
+        pools[role] = artifacts[0]
+    return pools
+
+
+def _load_driver_residual(dep_root: Path, member_id: str, obj: Mapping) -> DriverResidualPoolArtifact:
+    """Verify one driver residual pool's bytes, then decode and validate it
+    through the residual artifact's own typed contract. Every failure is a
+    fixed, path-free ``ModelNotReady`` naming ``member_id``; no fallback."""
+    verified_hash, payload = _read_verified_object(
+        dep_root, member_id, "driver residual pool", obj["path"], obj["content_hash"])
+    try:
+        document = json.loads(payload)
+    except (ValueError, RecursionError) as exc:
+        # ValueError covers UnicodeDecodeError, json.JSONDecodeError, and the
+        # integer string digit-limit error (a ValueError from json's number
+        # parser); RecursionError covers excessive JSON nesting. All are
+        # translated to the same fixed, path-free refusal.
+        raise ModelNotReady(member_id, "driver residual pool is not valid JSON") from exc
+    try:
+        artifact = residual_artifact_from_document(document)
+    except (ResidualArtifactError, KeyError, TypeError, ValueError,
+            AttributeError, OverflowError, RecursionError) as exc:
+        # RecursionError covers the document-to-artifact decoder hitting the
+        # interpreter recursion limit on an accepted JSON document; it is
+        # translated to the same fixed, path-free refusal. The JSON parsing
+        # boundary above keeps its own distinct refusal unchanged.
+        raise ModelNotReady(member_id, "driver residual pool could not be verified or loaded") from exc
+    if not isinstance(artifact, DriverResidualPoolArtifact):
+        raise ModelNotReady(member_id, "driver residual pool is not a driver-slot artifact")
+    if artifact.content_hash != verified_hash:
+        raise ModelNotReady(member_id, "driver residual pool disagrees with its own hash")
+    if artifact.role != member_id[len(_DRIVER_RESIDUAL_PREFIX):]:
+        raise ModelNotReady(member_id, "driver residual pool role disagrees with its member")
+    return artifact
