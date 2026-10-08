@@ -1021,15 +1021,10 @@ waits without submitting until its paired succeeded inputs are ready.
   then `DYN-SV` last inner. No side effect, no write.
 
 **`computed_moves_refresh` and `forward_calendar_refresh` nightly wiring.**
-Both are registered `_core_kinds()` job kinds (`calendar_moves_jobs.
-computed_moves_job_kind()`/`forward_calendar_job_kind()`), dispatched by
-`worker.py::dispatch` to `run_computed_moves_worker`/`run_forward_calendar_worker`.
-Only `computed_moves_refresh` has a nightly `GRAPH`/`OPTIONAL` node and a
-submitter; `forward_calendar_refresh` has neither yet — building its
-nightly node and submitter is a separate, unbuilt piece
-([#206](https://github.com/yshewchuk/investment-validation/issues/206)),
-and until then it is reachable only through direct `ops submit`, same as
-`training`/`models_promote` above.
+Both job kinds dispatch through `worker.py` to `calendar_moves_jobs`.
+Only `computed_moves_refresh` has a nightly `GRAPH`/`OPTIONAL` node and submitter.
+`forward_calendar_refresh` is direct-submit only; [#206](https://github.com/yshewchuk/investment-validation/issues/206)
+tracks its missing nightly integration.
 
 `computed_moves_refresh` is submitted only by `supervisor.Service`'s own
 tick loop (`_reconcile_computed_moves_refresh`, wrapped in the same
@@ -1043,18 +1038,23 @@ tick. It is submitted alone (`submission.submit`, never `submit_graph`),
 never sharing `build_legacy_job_requests`'s graph — bundling a REQUIRED and
 an OPTIONAL job into one all-or-nothing graph submission is exactly what
 R4 below forbids. If a job already exists under that key, in any state,
-nothing is rebuilt or resubmitted. Rebuild attempts against an identity
-that keeps coming back empty are memoized with a bounded retry budget
-(`Service._computed_moves_memo`), so a full target-ticker scan is not
-repeated every tick; a changed identity (new session, or the same session
-on a new head) always gets a fresh budget. `completed_ids` on a
-`"complete"`/`"noop"` result is the full whole-market target set the
-worker itself derives at run time, not only tickers that got a written
-fragment, so a caller's coverage denominator never disagrees with the
-worker. `forward_calendar_refresh` does not share this denominator design
-— its own `expected_ids` is always `set(tickers)`, so a whole-market
-(`tickers=()`) submission is not supported as a job today, only the
-standalone runner accepts it.
+nothing is rebuilt or resubmitted. `Service._computed_moves_memo` bounds
+unsuccessful rebuild attempts; a new session or head resets that budget.
+Its `complete`/`noop` coverage is the full derived whole-market target set,
+including targets without a written fragment.
+
+**Forward-calendar admission boundary.** Direct `submission.submit` requires
+nonempty, unique `tickers` and `expected_ids` with equal sets; order can differ.
+An empty selection or mismatched coverage is `INVALID_REQUEST` before inserting
+a job row or opening the submission transaction. Only the standalone runner accepts
+whole-market `tickers=()`. Submission queues without fetching or executing.
+`plan_forward_calendar` returns separate Nasdaq and yfinance plans. The
+worker runs date discovery first and derives confirmation tickers from its
+claims. `JobSpec.provider_budget_ref` and scheduler admission/reservation
+name one account, so a single job does not reserve both source budgets.
+Native refresh `expected_ids` are unit IDs; unit `expected_keys` carry context
+tickers, not the paired score request's watchlist and horizon. These are
+current integration constraints; automatic submission remains unimplemented.
 
 Both stores validate their own staged input document and `parameters`
 up front, before the sqlite connection opens (unknown keys, wrong types,
