@@ -78,7 +78,7 @@ properties — among them that every leaf which changes a record's digest is a
 compared path (`28cf8b1` as a property, not a list), that a missing field, a
 null and an integer-become-float each disagree in the stage table as well as
 in the findings, and that a downstream field is localized to the root upstream
-of it. `tests/test_phase0_negative_controls.py` seeds each seedable 2026-09-11
+of it. `tests/v2/diagnosis/test_phase0_negative_controls.py` seeds each seedable 2026-09-11
 cause alone and all at once on distinct records against the control spec in
 `checks/replay_identity.py`. The same controls run over the real corpus in
 `checks/tier0_corpus.py` and through real engine stages in

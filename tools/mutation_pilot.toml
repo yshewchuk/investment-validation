@@ -278,6 +278,8 @@ mutate = [
     "engine/v2/parity/tolerance.py",
 ]
 tests = [
+    "tests/v2/diagnosis/test_phase0_negative_controls.py",
+    "tests/v2/integration/test_tier0_support.py",
     "tests/test_baseline_export.py",
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_ops_foundation.py",

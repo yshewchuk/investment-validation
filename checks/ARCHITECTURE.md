@@ -9,6 +9,15 @@
 No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.
 Some checks also expose callable report functions.
 
+`tier0_support.py` owns `DEFAULT_CORPUS`, `round_params` and `finding_dicts`.
+The default retains the corpus runner's checkout-relative `fixtures/tier0`
+location. Rounding deep-copies the record and rounds only float values directly
+inside a dictionary-valued `structure_params`; finding projection preserves
+receipt order and returns fresh dictionaries with the same three fields.
+`tier0_corpus.py` re-exports these names for existing callers. Its loading,
+progress and subprocess orchestration remain there; Phase-2 evidence and the
+synthetic Phase-0 controls import the support module directly.
+
 The test selector maps changed paths through `checks/layer_map.py`, then
 selects tests for those packages and their allowed importers. Unsafe or
 unmapped input selects the full suite.
@@ -27,6 +36,8 @@ Commands write findings/progress to standard streams and may write reports or ev
 ## Dependencies
 
 Checks use Python and repository metadata; evidence checks may import application packages or read built stores. `repo_hygiene.py` avoids `engine` imports.
+Tier-0 support imports only the standard library and the diagnosis receipt
+interface; it never imports the corpus runner or starts a process.
 
 ## External systems and libraries
 
@@ -52,6 +63,7 @@ check defines missing-input and failure outcomes:
 | Repeat invocation | No package-wide idempotency guarantee; effects vary |
 | Selector input or declaration is unsafe | Report the reason and select the full suite |
 | Root test count or layout budget grows/stales | Ratchet check fails |
+| Tier-0 support gets an invalid record/receipt | Existing copy, rounding or attribute errors propagate; no retry, cache, transaction or partial writes |
 
 ## Invariants
 
