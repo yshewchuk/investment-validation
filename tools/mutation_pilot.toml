@@ -224,6 +224,7 @@ skip = [
     "*/canonical.py",
 ]
 tests = [
+    "tests/v2/serving/test_score_population.py",
     "tests/test_phase4_analog_recipe_cache.py",
     "tests/test_phase4_capture_strict.py",
     "tests/test_phase4_checkpoints.py",
@@ -583,6 +584,7 @@ mutate = [
     "engine/v2/dashboard/*.py",
 ]
 tests = [
+    "tests/v2/serving/test_score_population.py",
     "tests/test_v2_dashboard_preview.py",
     "tests/test_v2_dashboard_preview_analogs.py",
     "tests/test_v2_ops_serving.py",
@@ -832,6 +834,7 @@ mutate = [
     "engine/v2/ops/decision_replay.py",
 ]
 tests = [
+    "tests/v2/serving/test_score_population.py",
     "tests/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_capture_inputs.py",

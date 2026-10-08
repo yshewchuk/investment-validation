@@ -35,6 +35,8 @@ from engine.v2.contracts import (
     RowIdentity,
 )
 from engine.v2.foundation import content_hash
+from engine.v2.foundation.score_population import population_difference
+from engine.v2.foundation.score_population import population_key as _population_key
 
 __all__ = ["LEGACY_DISPLAY_MAPPING_V1", "DisplayFieldSpec", "build_bridges"]
 
@@ -336,12 +338,6 @@ def _legacy_row_id(row: Mapping[str, Any]) -> str:
                      ("ticker", "strategy", "event_date", "strike", "expiry"))
 
 
-def _population_key(row: Mapping[str, Any]) -> str:
-    """Mirrors ``engine.v2.ops.legacy_adapter._population_key``: the planned
-    population is keyed before strike/expiry exist."""
-    return "|".join(str(row.get(k, "")) for k in ("ticker", "strategy", "event_date"))
-
-
 # --------------------------------------------------------------------------
 # build
 # --------------------------------------------------------------------------
@@ -408,8 +404,7 @@ def _bridge_one(row: Mapping[str, Any], rendered_index: dict, used_keys: set,
 def _planned_population_findings(planned: tuple[str, ...],
                                   source_main: list[dict]) -> list[Finding]:
     observed = {_population_key(row) for row in source_main}
-    missing = sorted(set(planned) - observed)
-    unplanned = sorted(observed - set(planned))
+    missing, unplanned = population_difference(planned, observed)
     findings = [Finding(code="PLANNED_ROW_MISSING", category="missing",
                         message=f"planned population key {key!r} has no scored row",
                         details={"population_key": key}) for key in missing]
