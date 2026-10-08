@@ -84,15 +84,18 @@ def require_v2_snapshot_id(spec):
     return v2_snapshot_id
 
 
-def load_trades(v2_snapshot_id):
+def load_trades(v2_snapshot_id, *, as_of_month=None):
     columns = [
         "trade_id", "kind", "strategy", "variant", "ticker", "event_id",
         "event_date", "legs", "entry_date", "exit_date", "strike", "expiry",
         "fill_alpha", "entry_cost", "exit_value", "ret", "provenance",
+        "snapshot_id", "holdout_as_of_month", "random_membership_version",
+        "rolling_membership_version", "population_use",
     ]
     frame = common_v2.load_v2_trades(
         STRATEGY, catalog=V2_CATALOG, store_root=V2_STORE_ROOT,
         snapshot_id=v2_snapshot_id,
+        as_of_month=as_of_month,
     )
     frame = frame[frame["variant"] == VARIANT].copy()
     if frame.empty:
@@ -863,6 +866,7 @@ def main():
     parser.add_argument("--draws", type=int, default=4000)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-ledger", action="store_true")
+    parser.add_argument("--holdout-as-of-month", required=True)
     args = parser.parse_args()
     RESULTS.mkdir(parents=True, exist_ok=True)
     spec = lib.load_spec(HERE / "spec.yaml")
@@ -880,11 +884,12 @@ def main():
     if tuple(incumbent.features) != BASE_FEATURES:
         raise RuntimeError("registered STR-RUNUP feature contract changed")
 
-    trades = load_trades(v2_snapshot_id)
-    dataset = build_dataset(trades, force=args.force)
+    trades = load_trades(v2_snapshot_id, as_of_month=args.holdout_as_of_month)
+    # Existing caches are not bound to holdout membership or its as-of month.
+    dataset = build_dataset(trades, force=True)
     sim_data = simulation_ready(dataset)
     scores, diagnostics = generate_scores(
-        dataset, sim_data, args.draws, force=args.force
+        dataset, sim_data, args.draws, force=True
     )
     scores, cutoffs = add_decisions(scores)
     scores = add_champion_decisions(

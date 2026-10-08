@@ -10,13 +10,14 @@ uses -- and call the standalone helpers directly. ``main()`` is never run.
 from __future__ import annotations
 
 import importlib.util
+import ast
 import sys
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.research import experiment_trades  # noqa: E402
@@ -36,6 +37,8 @@ PROJECTED_COLUMNS = [
     "trade_id", "kind", "strategy", "variant", "ticker", "event_id",
     "event_date", "legs", "entry_date", "exit_date", "strike", "expiry",
     "fill_alpha", "entry_cost", "exit_value", "ret", "provenance",
+    "snapshot_id", "holdout_as_of_month", "random_membership_version",
+    "rolling_membership_version", "population_use",
 ]
 DATE_COLUMNS = ("event_date", "entry_date", "exit_date", "expiry")
 
@@ -101,13 +104,15 @@ def test_load_trades_reads_the_pinned_v2_snapshot(tmp_path):
         _runup_row("T-LEGACY-PROVENANCE", wanted, LEGACY_PROVENANCE),
     ])
 
-    frame = module.load_trades(snapshot.snapshot_id)
+    frame = module.load_trades(snapshot.snapshot_id, as_of_month="2025-01")
     conn.close()
 
     assert sorted(frame["trade_id"].astype(str)) == ["T-RUNUP-MID", "T-RUNUP-WORST"]
     assert set(frame["event_id"].astype(str)) == {"TEST_2024-05-02"}
     assert set(frame["variant"].astype(str)) == {wanted}
     assert list(frame.columns) == PROJECTED_COLUMNS
+    assert set(frame["snapshot_id"]) == {snapshot.snapshot_id}
+    assert set(frame["holdout_as_of_month"]) == {"2025-01"}
     for column in DATE_COLUMNS:
         assert pd.api.types.is_datetime64_any_dtype(frame[column]), column
 
@@ -142,3 +147,63 @@ def test_add_champion_decisions_treats_a_nan_score_as_not_selected():
 
     assert list(out["selected_champion"]) == [False]
     assert pd.isna(out["champion_pwin"]).all()
+
+
+def test_main_forces_both_membership_unbound_caches_to_recompute():
+    module = _exp144()
+    tree = ast.parse(Path(module.__file__).read_text())
+    main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+    for name in ("build_dataset", "generate_scores"):
+        calls = [node for node in ast.walk(main) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == name]
+        assert len(calls) == 1
+        force = next(kw.value for kw in calls[0].keywords if kw.arg == "force")
+        assert isinstance(force, ast.Constant) and force.value is True
+
+
+def test_dataset_recompute_does_not_return_a_stale_holdout_cache(tmp_path, monkeypatch):
+    module = _exp144()
+    module.RESULTS = tmp_path
+    stale = pd.DataFrame([_runup_row("OLD", module.VARIANT, PROVENANCE)])
+    stale["event_id"] = "EVENT-5"
+    cache = tmp_path / "factor_dataset.parquet"
+    stale.to_parquet(cache, index=False)
+    eligible = stale.copy()
+    eligible["event_id"] = "EVENT-0"
+    assert module.build_dataset(eligible, force=False)["event_id"].tolist() == ["EVENT-5"]
+
+    class RecomputeReached(Exception):
+        pass
+
+    def source(**kwargs):
+        raise RecomputeReached
+
+    # Only the expensive feature source is replaced; the actual cache guard
+    # reads a real stale Parquet artifact for the negative control above.
+    monkeypatch.setattr(module.FeatureContext, "load", source)
+    before = cache.read_bytes()
+    with pytest.raises(RecomputeReached):
+        module.build_dataset(eligible, force=True)
+    assert cache.read_bytes() == before
+
+
+def test_score_recompute_replaces_stale_holdout_rows(tmp_path, monkeypatch):
+    module = _exp144()
+    module.RESULTS = tmp_path
+    score_dir = tmp_path / "score_folds"
+    score_dir.mkdir()
+    score_path = score_dir / "scores_2019.parquet"
+    pd.DataFrame({"event_id": ["EVENT-5"], "event_date": [pd.Timestamp("2019-01-15")],
+                  "year": [2019]}).to_parquet(score_path, index=False)
+    (score_dir / "diagnostics_2019.json").write_text("{}")
+    base = {"ticker": "TEST", "event_date": pd.Timestamp("2018-01-15"), "year": 2018,
+            "ret": 0.0, "quote_present": True, "mcap_log": 0.0, "relative_spread": 0.0}
+    dataset = pd.DataFrame([{**base, "event_id": f"TRAIN-{i}"} for i in range(500)] + [
+        {**base, "event_id": "EVENT-0", "year": 2019, "event_date": pd.Timestamp("2019-01-15")}])
+    sim_data = pd.DataFrame({"year": []})
+    assert module.generate_scores(dataset, sim_data, 1, force=False)[0]["event_id"].tolist() == ["EVENT-5"]
+    monkeypatch.setattr(module, "fit_direct", lambda train, test, features, complete_case:
+                        (module.np.zeros(len(test)), module.np.zeros(len(test)), len(train)))
+    scores, _ = module.generate_scores(dataset, sim_data, 1, force=True)
+    assert scores["event_id"].tolist() == ["EVENT-0"]
+    assert pd.read_parquet(score_path)["event_id"].tolist() == ["EVENT-0"]

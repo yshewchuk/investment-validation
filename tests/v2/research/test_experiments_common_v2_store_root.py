@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.data.errors import DataError  # noqa: E402
@@ -73,7 +73,7 @@ def test_load_v2_trades_store_root_is_the_ops_root_not_root_objects(tmp_path):
 
     trades = common_v2.load_v2_trades(
         "STR-THRU", catalog=tmp_path / "catalog.sqlite", store_root=ops_root,
-        snapshot_id=snapshot.snapshot_id)
+        snapshot_id=snapshot.snapshot_id, as_of_month="2025-01")
     assert list(trades["trade_id"]) == ["T-THRU-A"]
     assert list(trades["session"]) == ["AMC"]
 
@@ -86,7 +86,7 @@ def test_load_v2_trades_store_root_is_the_ops_root_not_root_objects(tmp_path):
     with pytest.raises(DataError) as excinfo:
         common_v2.load_v2_trades(
             "STR-THRU", catalog=tmp_path / "catalog.sqlite",
-            store_root=ops_root / "objects", snapshot_id=snapshot.snapshot_id)
+            store_root=ops_root / "objects", snapshot_id=snapshot.snapshot_id, as_of_month="2025-01")
     assert excinfo.value.code == "OBJECT_CORRUPT"
 
 

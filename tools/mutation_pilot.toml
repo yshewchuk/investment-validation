@@ -225,6 +225,7 @@ skip = [
 ]
 tests = [
     "tests/v2/serving/test_score_population.py",
+    "tests/v2/foundation/test_experiment_holdouts.py",
     "tests/test_phase4_analog_recipe_cache.py",
     "tests/test_phase4_capture_strict.py",
     "tests/test_phase4_checkpoints.py",
@@ -981,6 +982,9 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/test_v2_research_experiment_trades.py",
+    "tests/v2/research/test_exp144_v2_trades.py",
+    "tests/v2/research/test_experiments_common_v2_store_root.py",
     "tests/test_v2_research_build_trades.py",
     "tests/test_v2_research_reconcile_trades.py",
     "tests/test_v2_research_replay.py",
