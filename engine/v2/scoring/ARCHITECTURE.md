@@ -469,13 +469,12 @@ state and carries the typed driver residual artifact on
 catalog `content_hash` before parsing; the decoded artifact must pass the
 residual artifact schema and content-hash checks before it can be returned.
 The member is optional for releases that predate this state: an absent member
-produces an empty artifact mapping. When native batch consumes a staged
-release, that empty mapping means no pool is available; its follow-up wiring
-must not substitute request-supplied rows.
+produces an empty artifact mapping. Native batch is not wired to consume this
+mapping in this release-loader slice.
 
 | R1–R6 condition | Outcome |
 |---|---|
-| member row absent | empty artifact mapping; the release remains resolvable, and a staged-release consumer treats the pool as unavailable |
+| member row absent | empty artifact mapping; the release remains resolvable |
 | member is declared but status is not `STAGED` or no object is declared | `ModelNotReady` naming `driver_residual_pool:size`; no binding is returned |
 | object path escapes the deployment root, object is absent or unreadable, or bytes disagree with the catalog `content_hash` | `ModelNotReady` naming `driver_residual_pool:size`; no alternate object |
 | verified bytes are not a valid driver residual artifact for the `driver` slot | `ModelNotReady` naming `driver_residual_pool:size`; no partially loaded binding |
@@ -484,9 +483,10 @@ must not substitute request-supplied rows.
 | no release is staged | existing `NoCurrentRelease` behavior remains; native batch keeps its existing per-row refusal results for the unstaged path |
 
 The loader is read-only: a failure returns no partial binding and writes no
-state. The follow-up native batch wiring consumes a verified pool and binds
-the release member to the scorer's `driver` slot and residual recipe before
-scoring; an empty mapping never permits request-row fallback.
+state. Follow-up requirement (not implemented in this slice): native batch
+must bind a verified pool to the scorer's `driver` slot and residual recipe.
+If a staged release has no pool, that wiring must not fall back to
+request-supplied rows; the existing unstaged-path refusal behavior remains.
 
 ### `nightly_source_bundle.py`
 
