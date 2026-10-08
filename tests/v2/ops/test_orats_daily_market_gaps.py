@@ -170,6 +170,17 @@ def test_rerun_from_committed_partial_state_still_succeeds_for_returned_tickers(
     # run_incremental_refresh still reports that commit as "complete".
     assert result["status"] in ("complete", "noop")
     assert len(calls) == 4
+    head_after = conn.execute(
+        "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = ?",
+        ("shadow",)).fetchone()[0]
+    coverage_json = conn.execute(
+        "SELECT coverage_json FROM data_snapshot_coverage WHERE snapshot_id = ? "
+        "AND table_name = ?", (head_after, "daily_market")).fetchone()[0]
+    coverage = from_document(CompletedCoverage, json.loads(coverage_json))
+    present = {outcome.key.ticker for outcome in coverage.outcomes
+               if outcome.status == "present"}
+    assert {"AAA", "BBB"} <= present
+    assert coverage.state == "partial"
     assert conn.execute(
         "SELECT COUNT(*) FROM data_daily_market_revisions WHERE ticker = 'CCC'"
     ).fetchone()[0] == 0
