@@ -21,7 +21,12 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly_calendar_inputs import scan_decision_calendar
 from engine.v2.ops.price_history_store import capture
 from engine.v2.ops.supervisor import Service
-from tests.test_v2_ops_price_history import _base_snapshot, _scan_price_history, _write_px
+from tests.test_v2_ops_price_history import (
+    _base_snapshot,
+    _px_dir,
+    _scan_price_history,
+    _write_px,
+)
 
 _SPY_DATES = ("2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05",
               "2024-01-08", "2024-01-09")
@@ -50,6 +55,21 @@ def test_capture_without_required_ticker_refuses_before_any_write(tmp_path):
         capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
                 dry_run=True, required_tickers=("SPY",))
     assert dry.value.problem.code == "SOURCE_NOT_FOUND"
+    head = conn.execute("SELECT snapshot_id FROM data_snapshot_heads WHERE scope='shadow'"
+                        ).fetchone()
+    assert head["snapshot_id"] == base.snapshot_id  # nothing was committed
+
+
+def test_capture_with_unparseable_required_ticker_source_refuses_and_commits_nothing(tmp_path):
+    conn, clock, store, base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=False)
+    (_px_dir(source_root) / "px_SPY.csv").write_bytes(b"not,a,price\nfile\n")
+    with pytest.raises(OpsError) as exc:
+        capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
+                required_tickers=("SPY",))
+    assert exc.value.problem.code == "SOURCE_NOT_FOUND"
+    assert exc.value.problem.details == {"tickers": ["SPY"]}
     head = conn.execute("SELECT snapshot_id FROM data_snapshot_heads WHERE scope='shadow'"
                         ).fetchone()
     assert head["snapshot_id"] == base.snapshot_id  # nothing was committed
@@ -143,3 +163,27 @@ def test_supervisor_reports_typed_error_type_code_and_details(capsys):
     plain = json.loads(capsys.readouterr().out)
     assert plain["error_type"] == "RuntimeError"
     assert plain["problem"]["code"] == "VALIDATION_FAILED"
+
+
+def test_supervisor_report_drops_unbounded_and_nonscalar_details(capsys):
+    holder = SimpleNamespace(_last_native_score_batch_problem=None)
+    boom = data_fail("CONTRACT_MISMATCH", "m",
+                     details={"ticker": "SPY", "blob": {"a": 1}, "long": "x" * 500,
+                              "tickers": ["SPY"]})
+    Service._report_native_score_batch_problem(holder, boom)
+    event = json.loads(capsys.readouterr().out)
+    assert event["problem"]["details"] == {"ticker": "SPY", "tickers": ["SPY"]}
+
+
+class _NonProblemError(Exception):
+    def __init__(self):
+        super().__init__("x")
+        self.problem = SimpleNamespace(code="X", message="y")
+
+
+def test_supervisor_report_ignores_a_non_problem_problem_attribute(capsys):
+    holder = SimpleNamespace(_last_native_score_batch_problem=None)
+    Service._report_native_score_batch_problem(holder, _NonProblemError())
+    event = json.loads(capsys.readouterr().out)
+    assert event["problem"]["code"] == "VALIDATION_FAILED"
+    assert event["problem"]["message"] == "native_score_batch shadow reconciliation failed"

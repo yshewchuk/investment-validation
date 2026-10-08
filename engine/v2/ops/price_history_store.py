@@ -652,8 +652,9 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     unless ``dry_run``, commit one new snapshot generation under ``scope``
     carrying every other table's dataset version forward unchanged alongside
     price_history's fresh one. Never touches ``source_root``'s bytes.
-    ``required_tickers`` refuse ``SOURCE_NOT_FOUND``, before any write, when
-    neither the source nor the prior dataset version holds them.
+    ``required_tickers`` refuse ``SOURCE_NOT_FOUND``, before committing a
+    snapshot, when neither the source (with at least one parseable row) nor
+    the prior dataset version holds them.
 
     ``root`` (SEND-BACK 2026-09-14 item 4) is the operations root holding
     ``supervisor.lock`` -- held for the whole run, exactly as
@@ -686,10 +687,7 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
     prior_manifest, prior_records = repository.latest_dataset_version(PRICE_HISTORY_CONTRACT.contract_id)
     prior_by_ticker = {r.partition_key: r for r in prior_records}
     updated_records = dict(prior_by_ticker)
-    missing = sorted(set(required_tickers) - set(tickers) - set(prior_by_ticker))
-    if missing:
-        raise fail("SOURCE_NOT_FOUND", "price_history source lacks a required ticker",
-                   details={"tickers": missing})
+    usable = set(prior_by_ticker)
 
     results: list[dict] = []
     all_attempts: list[dict] = []
@@ -702,6 +700,8 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
         entries.extend(("tier1_fetch", e) for e in tier1.get(ticker, []))
         stored = _read_fragment_rows(store, prior_by_ticker.get(ticker))
         outcome = _capture_ticker(conn, ticker, entries, stored=stored, created_at=created_at)
+        if len(outcome.stored):
+            usable.add(ticker)
         results.extend(outcome.results)
         all_attempts.extend(outcome.attempts)
         if outcome.changed and not dry_run:
@@ -714,6 +714,11 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
                 disagreements[ticker] = _overlap_disagreement(px[ticker], tier1[ticker][-1])
             except Exception:  # noqa: BLE001 -- best-effort reporting only.
                 pass
+
+    missing = sorted(set(required_tickers) - usable)
+    if missing:
+        raise fail("SOURCE_NOT_FOUND", "price_history source lacks a usable required ticker",
+                   details={"tickers": missing})
 
     report = _summarize(results, disagreements, dry_run=dry_run)
     if dry_run:
