@@ -65,7 +65,7 @@ _CHECKS = (
 #: The phase-0 test suite: every instrument's own negative controls.
 PHASE0_TESTS = (
     "tests/test_diagnosis_comparator.py",
-    "tests/test_phase0_negative_controls.py",
+    "tests/v2/diagnosis/test_phase0_negative_controls.py",
     "tests/test_tier0_corpus.py",
     "tests/test_import_layers.py",
     "tests/test_code_budgets.py",

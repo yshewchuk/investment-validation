@@ -14,7 +14,6 @@ import pytest
 
 from tools import mutation_pilot as pilot
 
-
 CONFIG = "tools/mutation_pilot.toml"
 READERS = {
     "tests/test_mutation_ci.py", "tests/test_gremlin_ci.py", "tests/test_gremlins_ci.py",

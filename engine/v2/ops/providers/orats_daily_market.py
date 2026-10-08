@@ -36,7 +36,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from engine.v2.foundation import canonical_json
 from engine.v2.ops.errors import fail
-from engine.v2.ops.incremental_data import classify_response
+from engine.v2.ops.provider_response import classify_response
 
 __all__ = ["SUMMARY_FIELDS", "orats_daily_market_fetcher"]
 

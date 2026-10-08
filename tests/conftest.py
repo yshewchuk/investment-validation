@@ -27,6 +27,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# Python subprocesses that inherit the pytest environment (e.g. the nested
+# pytest runs in tests/test_suite_waits.py) enable faulthandler, so a crash
+# dumps its stack instead of dying silently.
+os.environ["PYTHONFAULTHANDLER"] = "1"
 
 #: Tests that need a resource GitHub Actions does not have. CI
 #: (.github/workflows/tests.yml) deselects every one of these; the local

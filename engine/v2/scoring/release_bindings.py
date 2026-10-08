@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -46,6 +47,7 @@ __all__ = [
     "NoCurrentRelease",
     "ScoringReleaseBinding",
     "ReleaseBindingError",
+    "resolve_gate_policy",
     "resolve_production_release_binding",
     "resolve_release_binding",
 ]
@@ -209,6 +211,66 @@ def resolve_production_release_binding() -> ScoringReleaseBinding:
     return resolve_release_binding(root)
 
 
+def resolve_gate_policy(
+    binding: ScoringReleaseBinding, release_root: Path | str,
+) -> dict[str, dict[str, float]]:
+    """``{strategy: {"threshold": float}}`` from each gate binding's staged
+    ``threshold`` member (a content-addressed copy of the model registry; the
+    threshold is the registry entry whose ``id`` is the binding's
+    ``model_id``). A gate binding with no ``threshold`` member is omitted. No
+    unique matching release binding for the gate identity, a binding with more
+    than one threshold member, a
+    missing/unreadable/hash-mismatched object, an unparseable registry, no
+    unique entry for the model, or a non-finite/non-numeric threshold raises
+    ``ModelNotReady`` with no fallback. Read-only, no cache: see
+    ``engine/v2/scoring/ARCHITECTURE.md``'s ``resolve_gate_policy`` section."""
+    dep_root = Path(release_root) / _DEPLOYMENT_DIR
+    policy: dict[str, dict[str, float]] = {}
+    for key, identity in binding.model_identity.items():
+        if identity.role != "gate":
+            continue
+        matches = [b for b in binding.model_release.bindings
+                   if b.binding_id == identity.binding_id and b.role == identity.role
+                   and b.strategy_id == identity.strategy_id]
+        if len(matches) != 1:
+            raise ModelNotReady(
+                f"model:{key}", "threshold: gate identity does not match exactly one release binding")
+        threshold_members = [m for m in matches[0].members
+                             if m.name == "threshold"]
+        if len(threshold_members) > 1:
+            raise ModelNotReady(
+                f"model:{key}", "threshold: binding has more than one threshold member")
+        if not threshold_members:
+            continue
+        member = threshold_members[0]
+        member_id = f"model:{key}"
+        _, payload = _read_verified_object(
+            dep_root, member_id, member.name, member.path, member.content_hash)
+        policy[identity.strategy_id] = {
+            "threshold": _registry_threshold(member_id, payload, identity.model_id)}
+    return policy
+
+
+def _registry_threshold(member_id: str, payload: bytes, model_id: str) -> float:
+    try:
+        doc = json.loads(payload)
+    except (ValueError, RecursionError) as exc:
+        raise ModelNotReady(member_id, "threshold: object is not valid JSON") from exc
+    models = doc.get("models") if isinstance(doc, dict) else None
+    entries = ([e for e in models if isinstance(e, dict) and e.get("id") == model_id]
+               if isinstance(models, list) else [])
+    if len(entries) != 1:
+        raise ModelNotReady(member_id, "threshold: registry has no unique entry for the gate model")
+    value = entries[0].get("threshold")
+    try:
+        number = None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
+    except OverflowError:
+        number = None
+    if number is None or not math.isfinite(number):
+        raise ModelNotReady(member_id, "threshold: entry threshold is not a finite number")
+    return number
+
+
 def _read_and_verify_manifest(dep_root: Path, release_id: str) -> "deployment.StagedManifest":
     """R1(c)-(f): the one staged-manifest read, via ``deployment._read_manifest``
     -- never through the public ``resolve_release()`` wrapper, and never
@@ -235,8 +297,8 @@ def _read_and_verify_manifest(dep_root: Path, release_id: str) -> "deployment.St
     return manifest
 
 
-def _verify_object_bytes(dep_root: Path, member_id: str, name: str, path: str,
-                         expected_hash: str) -> str:
+def _read_verified_object(dep_root: Path, member_id: str, name: str, path: str,
+                          expected_hash: str) -> tuple[str, bytes]:
     """Read and hash-verify one model-binding member object. Never falls
     back: a missing file or a hash mismatch is always ``ModelNotReady``
     naming ``member_id``, and nothing else is ever substituted for it.
@@ -258,7 +320,14 @@ def _verify_object_bytes(dep_root: Path, member_id: str, name: str, path: str,
     actual = "sha256:" + hashlib.sha256(payload).hexdigest()
     if actual != expected_hash:
         raise ModelNotReady(member_id, f"{name}: object hash disagrees with the pointer")
-    return actual
+    return actual, payload
+
+
+def _verify_object_bytes(dep_root: Path, member_id: str, name: str, path: str,
+                         expected_hash: str) -> str:
+    """The verified content hash of one model-binding member object (see
+    :func:`_read_verified_object`)."""
+    return _read_verified_object(dep_root, member_id, name, path, expected_hash)[0]
 
 
 def _resolve_model_bindings(
