@@ -155,6 +155,30 @@ def test_duplicate_threshold_member_raises_model_not_ready(tmp_path):
     assert exc.value.member_id == "model:gate:STR-THRU"
 
 
+def test_duplicate_gate_binding_raises_model_not_ready(tmp_path):
+    binding = _stage_gate_release(tmp_path, registry_payload=_STANDARD_REGISTRY)
+    gate_binding = next(b for b in binding.model_release.bindings if b.role == "gate")
+    release = dataclasses.replace(
+        binding.model_release,
+        bindings=binding.model_release.bindings + (gate_binding,))
+    patched = dataclasses.replace(binding, model_release=release)
+    with pytest.raises(ModelNotReady) as exc:
+        resolve_gate_policy(patched, tmp_path)
+    assert exc.value.member_id == "model:gate:STR-THRU"
+
+
+def test_driver_binding_sharing_the_gate_binding_id_is_not_a_match(tmp_path):
+    binding = _stage_gate_release(tmp_path, registry_payload=_STANDARD_REGISTRY)
+    driver = next(b for b in binding.model_release.bindings if b.role == "driver")
+    gate = next(b for b in binding.model_release.bindings if b.role == "gate")
+    shadowed_driver = dataclasses.replace(driver, binding_id=gate.binding_id)
+    others = tuple(b for b in binding.model_release.bindings if b.role != "driver")
+    release = dataclasses.replace(
+        binding.model_release, bindings=(shadowed_driver, *others))
+    patched = dataclasses.replace(binding, model_release=release)
+    assert resolve_gate_policy(patched, tmp_path) == {"STR-THRU": {"threshold": 0.375}}
+
+
 _BAD_REGISTRIES = [
     pytest.param(b"not json", id="not-json"),
     pytest.param(b"[" * 200000, id="too-deeply-nested"),

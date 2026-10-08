@@ -217,19 +217,25 @@ def resolve_gate_policy(
     """``{strategy: {"threshold": float}}`` from each gate binding's staged
     ``threshold`` member (a content-addressed copy of the model registry; the
     threshold is the registry entry whose ``id`` is the binding's
-    ``model_id``). A gate binding with no ``threshold`` member is omitted. A
-    binding with more than one threshold member, a
+    ``model_id``). A gate binding with no ``threshold`` member is omitted. No
+    unique matching release binding for the gate identity, a binding with more
+    than one threshold member, a
     missing/unreadable/hash-mismatched object, an unparseable registry, no
     unique entry for the model, or a non-finite/non-numeric threshold raises
     ``ModelNotReady`` with no fallback. Read-only, no cache: see
     ``engine/v2/scoring/ARCHITECTURE.md``'s ``resolve_gate_policy`` section."""
     dep_root = Path(release_root) / _DEPLOYMENT_DIR
-    bindings = {item.binding_id: item for item in binding.model_release.bindings}
     policy: dict[str, dict[str, float]] = {}
     for key, identity in binding.model_identity.items():
         if identity.role != "gate":
             continue
-        threshold_members = [m for m in bindings[identity.binding_id].members
+        matches = [b for b in binding.model_release.bindings
+                   if b.binding_id == identity.binding_id and b.role == identity.role
+                   and b.strategy_id == identity.strategy_id]
+        if len(matches) != 1:
+            raise ModelNotReady(
+                f"model:{key}", "threshold: gate identity does not match exactly one release binding")
+        threshold_members = [m for m in matches[0].members
                              if m.name == "threshold"]
         if len(threshold_members) > 1:
             raise ModelNotReady(

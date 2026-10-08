@@ -447,6 +447,7 @@ Failure messages are fixed and path-free, naming `model:gate:<strategy>`.
 
 | Condition | Outcome |
 |---|---|
+| the gate identity's `binding_id`, role and strategy match zero or several bindings of the release | `ModelNotReady` (the binding is selected by all three, never by a `binding_id` map that could overwrite a duplicate) |
 | gate binding has more than one member named `threshold` | `ModelNotReady` (checked before any member is selected or read) |
 | gate binding has no `threshold` member | strategy omitted from the result; the row-level `GATE_POLICY_NOT_STAGED` refusal is unchanged (proposed by the supervisor) |
 | member object missing, unreadable, or hash disagrees with the pointer | `ModelNotReady`, no fallback |
