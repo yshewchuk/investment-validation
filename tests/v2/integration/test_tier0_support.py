@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 from checks import rearchitecture_phase2_evidence as evidence
@@ -27,22 +28,64 @@ def test_default_corpus_retains_repository_root_independently_of_cwd(tmp_path, m
     assert support.DEFAULT_CORPUS == corpus.ROOT / "fixtures" / "tier0"
 
 
-def test_pure_consumers_do_not_inherit_corpus_process_taint():
+def test_consumers_use_the_lightweight_tier0_boundary(monkeypatch):
+    # Check this extraction's direct import contracts, not every transitive
+    # repository dependency. The full selector graph is measured separately.
+    def refuse_whole_graph(*args, **kwargs):
+        raise AssertionError("this bounded check must not rebuild the repository graph")
+
+    monkeypatch.setattr(selector, "build_import_graph", refuse_whole_graph)
+    parsed = {}
+    consumers = {
+        "checks/rearchitecture_phase2_evidence.py": {"DEFAULT_CORPUS"},
+        "tests/v2/diagnosis/test_phase0_negative_controls.py": {
+            "finding_dicts", "round_params"},
+    }
+    for path, names in consumers.items():
+        tree = ast.parse((ROOT / path).read_text())
+        parsed[path] = tree
+        support_imports = {alias.name for node in ast.walk(tree)
+                           if isinstance(node, ast.ImportFrom)
+                           and node.module == "checks.tier0_support"
+                           for alias in node.names}
+        assert names <= support_imports, path
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                modules = [node.module or ""] + [
+                    f"{node.module}.{alias.name}" for alias in node.names]
+            else:
+                continue
+            assert not any(module == "checks.tier0_corpus"
+                           or module.startswith("checks.tier0_corpus.")
+                           for module in modules), path
+
+    leaf = ast.parse((ROOT / "checks/tier0_support.py").read_text())
+    parsed["checks/tier0_support.py"] = leaf
+    imports = set()
+    for node in ast.walk(leaf):
+        if isinstance(node, ast.Import):
+            imports.update((alias.name, None) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0
+            imports.update((node.module, alias.name) for alias in node.names)
+    assert imports == {("__future__", "annotations"), ("copy", None),
+                       ("pathlib", "Path"), ("engine.v2.diagnosis", "ComparisonReceipt")}
+
+    # Preserve the genuine runner's unresolved-process classification using
+    # the selector's real scanner, but parse only that runner rather than
+    # constructing and scanning a whole-repository graph for every CI run.
     # Mutation work copies contain these sources but have no Git metadata.
-    tracked = sorted(str(path.relative_to(ROOT))
-                     for source in ("checks", "engine", "tests", "tools")
-                     for path in (ROOT / source).rglob("*.py"))
-    graph = selector.build_import_graph(tracked)
-    unresolved = selector.unresolved_import_files(tracked)
-    runner = "checks/tier0_corpus.py"
-    assert runner in unresolved  # The genuine process runner still fails safe.
-    for path in (
-        "checks/tier0_support.py",
-        "checks/rearchitecture_phase2_evidence.py",
-        "tests/v2/diagnosis/test_phase0_negative_controls.py",
-    ):
-        roots = {path} | selector._conftest_ancestors(path, set(tracked))
-        closure, tainted = selector._closure_from_roots(
-            roots, graph, unresolved, taint_exempt=set())
-        assert runner not in closure, path
-        assert not tainted, path
+    tracked = {str(path.relative_to(ROOT))
+               for source in ("checks", "engine", "tests", "tools")
+               for path in (ROOT / source).rglob("*.py")}
+    roots = selector._tracked_roots(tracked)
+    for path, tree in parsed.items():
+        assert not selector._has_unresolved_import_attempt(tree, False), path
+        assert not selector._has_unresolved_sys_path_mutation(tree, path), path
+        assert not selector._has_unresolved_process_launch(tree), path
+        assert not selector._subprocess_targets(tree, tracked, roots)[1], path
+    runner = ast.parse((ROOT / "checks/tier0_corpus.py").read_text())
+    _, unresolved = selector._subprocess_targets(runner, tracked, roots)
+    assert unresolved
