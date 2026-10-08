@@ -50,6 +50,7 @@ def test_provider_and_credential_import_closures_exclude_refresh_runtime():
     assert not tainted
     assert "engine/v2/ops/incremental_data.py" not in closure
     assert "engine/v2/ops/legacy_adapter.py" not in closure
+    # Foundation retains its declared, lightweight environment/path bridge.
     assert not {path for path in closure
                 if path.startswith("engine/") and not path.startswith("engine/v2/")
-                and path != "engine/__init__.py"}
+                and path not in {"engine/__init__.py", "engine/env.py", "engine/paths.py"}}

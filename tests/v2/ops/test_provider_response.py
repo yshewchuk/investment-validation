@@ -12,15 +12,17 @@ from engine.v2.ops.errors import OpsError
     (200, {"returned_keys": ("AAA",), "truncated": True}, "partial"),
     (200, {"final": False, "truncated": True}, "not_final"),
     (200, {"credential_page": True, "final": False}, "credential_invalid"),
+    (429, {"credential_page": True}, "credential_invalid"),
     (403, {}, "credential_invalid"),
     (429, {"final": False}, "rate_limited"),
+    (503, {"credential_page": True}, "credential_invalid"),
     (503, {"final": False}, "transient"),
     (404, {"final": False}, "unsupported"),
     (302, {}, "transient"),
     (199, {}, "transient"),
     (299, {"returned_keys": ("AAA",)}, "complete"),
 ])
-def test_classification_precedence(status, options, kind):
+def test_classification_branches_and_precedence(status, options, kind):
     outcome = provider_response.classify_response(status, ("AAA",), **options)
     assert outcome.kind == kind
 
