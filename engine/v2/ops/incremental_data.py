@@ -33,8 +33,6 @@ from engine.v2.ops.provider_response import (
     AcquisitionOutcome,
     OutcomeKind as OutcomeKind,
     _keys,
-    _response_kind as _response_kind,
-    _subset as _subset,
     classify_response as classify_response,
 )
 from engine.v2.ops.snapshot_promotion import promote, rollback

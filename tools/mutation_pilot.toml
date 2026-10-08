@@ -913,6 +913,7 @@ mutate = [
 ]
 tests = [
     "tests/v2/ops/test_provider_response.py",
+    "tests/v2/ops/test_provider_response_boundary.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",
