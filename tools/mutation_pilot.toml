@@ -463,6 +463,7 @@ tests = [
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
     "tests/test_v2_scoring_release_bindings.py",
     "tests/v2/scoring/test_release_gate_policy.py",
+    "tests/v2/scoring/test_release_driver_pools.py",
 ]
 
 [modules.board_analog]
