@@ -78,9 +78,12 @@ def _score_stage(monkeypatch, root, planned, rows):
     ([True], [BASE, CHOOSER], [True], [CHOOSER, BASE]),
     ([3.5], [BASE, CHOOSER], [3.5], [CHOOSER, BASE]),
     ([BASE, 42], [BASE, CHOOSER], [42], []),
+    ([BASE, 42], [CHOOSER], [42, BASE], []),
+    ([BASE, None, 42], [CHOOSER], [None, 42, BASE], []),
 ], ids=["exact", "derived-chooser", "unplanned-ticker", "unplanned-date",
         "unplanned-strategy", "missing-explicit-chooser", "missing-base", "chooser-only-plan",
-        "integer-plan", "null-plan", "boolean-plan", "float-plan", "mixed-valid-integer-plan"])
+        "integer-plan", "null-plan", "boolean-plan", "float-plan", "mixed-valid-integer-plan",
+        "missing-string-and-integer", "missing-string-null-and-integer"])
 def test_score_stage_and_real_bridge_agree(monkeypatch, tmp_path, planned, observed,
                                            missing, unplanned):
     rows = [_row(key) for key in observed]
@@ -135,12 +138,25 @@ def test_shared_rule_is_deterministic_read_only_and_conservative():
     assert population_key({"ticker": None}) == "None||"  # Preserve existing encoding.
 
 
+def test_missing_scalar_order_preserves_values():
+    planned = ["42", 42, None]
+    before = deepcopy(planned)
+    expected = ([None, 42, "42"], [])
+    assert population_difference(planned, []) == expected
+    assert population_difference(reversed(planned), []) == expected
+    assert planned == before
+    assert population_difference([10, 2], []) == ([2, 10], [])
+
+
 @pytest.mark.parametrize("planned, extra, expected_codes", [
     ([BASE], CHOOSER, []),
     ([BASE], "BBB|DYN-SV|2026-01-15", ["SCORED_ROW_UNPLANNED"]),
     ([42], CHOOSER, ["PLANNED_ROW_MISSING", "SCORED_ROW_UNPLANNED", "SCORED_ROW_UNPLANNED"]),
     ([BASE, 42], CHOOSER, ["PLANNED_ROW_MISSING"]),
-], ids=["derived-chooser", "unplanned-event", "integer-plan", "mixed-valid-integer-plan"])
+    (["CCC|STR-THRU|2026-01-15", 42], CHOOSER,
+     ["PLANNED_ROW_MISSING", "PLANNED_ROW_MISSING", "SCORED_ROW_UNPLANNED", "SCORED_ROW_UNPLANNED"]),
+], ids=["derived-chooser", "unplanned-event", "integer-plan", "mixed-valid-integer-plan",
+        "missing-string-and-integer"])
 def test_real_candidate_keeps_unplanned_refusal(tmp_path, planned, extra, expected_codes):
     from datetime import datetime
 
@@ -195,6 +211,8 @@ def test_real_candidate_keeps_unplanned_refusal(tmp_path, planned, extra, expect
             assert [finding["code"] for finding in findings] == expected_codes
             if 42 in planned:
                 assert findings[0]["details"]["population_key"] == 42
+            if expected_codes.count("PLANNED_ROW_MISSING") == 2:
+                assert findings[1]["details"]["population_key"] == planned[0]
             assert phases == ["findings_written"]
             assert projections.get_release(conn, result.details["release_id"]) is None
     finally:

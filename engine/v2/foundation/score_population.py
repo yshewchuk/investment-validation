@@ -12,8 +12,8 @@ def population_key(row: Mapping[str, Any]) -> str:
     return "|".join(str(row.get(key, "")) for key in ("ticker", "strategy", "event_date"))
 
 
-def population_difference(planned: Iterable[str], observed: Iterable[str]
-                          ) -> tuple[list[str], list[str]]:
+def population_difference(planned: Iterable[Any], observed: Iterable[str]
+                          ) -> tuple[list[Any], list[str]]:
     """Return missing and unplanned keys, allowing derived chooser rows.
 
     ``score_calendar`` appends DYN-SV only when it ranks a planned event's
@@ -28,4 +28,9 @@ def population_difference(planned: Iterable[str], observed: Iterable[str]
         parts = key.split("|")
         return len(parts) == 3 and parts[1] == "DYN-SV" and (parts[0], parts[2]) in events
 
-    return sorted(expected - actual), sorted(key for key in actual - expected if not derived(key))
+    missing_keys = expected - actual
+    try:
+        missing = sorted(missing_keys)
+    except TypeError:
+        missing = sorted(missing_keys, key=lambda key: (type(key).__name__, str(key)))
+    return missing, sorted(key for key in actual - expected if not derived(key))
