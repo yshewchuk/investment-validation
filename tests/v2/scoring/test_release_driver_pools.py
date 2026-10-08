@@ -217,3 +217,35 @@ def test_duplicate_member_refuses(tmp_path):
         resolve_release_binding(tmp_path)
     assert error.value.member_id == _MEMBER
     _assert_no_leak(tmp_path, error.value)
+
+
+def test_non_mapping_lineage_document_refuses(tmp_path):
+    _stage_and_promote(tmp_path)
+    _artifact, payload = _driver()
+    document = json.loads(payload)
+    document["lineage"] = ["not-a-mapping"]
+    mutated = json.dumps(document).encode()
+    _write_catalog(tmp_path, rows=[_row(
+        _MEMBER, [_staged_object(tmp_path, mutated, _sha(mutated))])])
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == _MEMBER
+    assert error.value.detail == "driver residual pool could not be verified or loaded"
+    assert isinstance(error.value.__cause__, AttributeError)
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_overflowing_flat_residual_refuses(tmp_path):
+    _stage_and_promote(tmp_path)
+    _artifact, payload = _driver()
+    document = json.loads(payload)
+    document["flat_residuals"] = [10**400, 0.1, 0.3]
+    mutated = json.dumps(document).encode()
+    _write_catalog(tmp_path, rows=[_row(
+        _MEMBER, [_staged_object(tmp_path, mutated, _sha(mutated))])])
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == _MEMBER
+    assert error.value.detail == "driver residual pool could not be verified or loaded"
+    assert isinstance(error.value.__cause__, OverflowError)
+    _assert_no_leak(tmp_path, error.value)

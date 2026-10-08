@@ -506,7 +506,8 @@ def _load_driver_residual(dep_root: Path, member_id: str, obj: Mapping) -> Drive
         raise ModelNotReady(member_id, "driver residual pool is not valid JSON") from exc
     try:
         artifact = residual_artifact_from_document(document)
-    except (ResidualArtifactError, KeyError, TypeError, ValueError) as exc:
+    except (ResidualArtifactError, KeyError, TypeError, ValueError,
+            AttributeError, OverflowError) as exc:
         raise ModelNotReady(member_id, "driver residual pool could not be verified or loaded") from exc
     if not isinstance(artifact, DriverResidualPoolArtifact):
         raise ModelNotReady(member_id, "driver residual pool is not a driver-slot artifact")
