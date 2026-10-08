@@ -100,6 +100,7 @@ def test_guarded_promote_refuses_when_incumbent_changed_and_writes_nothing(tmp_p
 
     assert error.value.code == "CONCURRENT_PROMOTE"
     assert isinstance(error.value, DeploymentError)
+    assert error.value.retryable is False
     assert "r1" in str(error.value)
     assert deployment.current_pointer(tmp_path) == before_pointer
     assert deployment.current_pointer(tmp_path).release_id == "r2"

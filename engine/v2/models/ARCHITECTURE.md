@@ -53,7 +53,7 @@ The full list is `README.md`'s `<!-- public-interface: ... -->` directive
 
 - `deployment.stage_release(root, release, inventory, payloads, *, clock) -> StagedManifest`
   — validate, then durably stage. Never touches `DEPLOYED`.
-- `deployment.promote(root, release_id, *, clock) -> PointerState` /
+- `deployment.promote(root, release_id, *, clock, expected_previous_release_id=None) -> PointerState` /
   `deployment.rollback(root, *, clock) -> PointerState` — the one atomic
   pointer swap, in either direction.
 - `deployment.resolve_release(root, release_id) -> ModelRelease` /
@@ -305,7 +305,7 @@ independently of whatever staged it.
 | Target's staged `release_hash_version` is not the current semantic version | Refuses `StaleReleaseHash`, checked before anything else — including re-promoting the currently live release, if it is itself stale. `restage_semantic_hash` (§7.5) is the only way to clear this; never automatic |
 | Target manifest's recomputed content hash disagrees with its declared `release_hash` | Refuses `CorruptManifest`, before the pointer moves |
 | Target manifest declares two bindings for the same `(role, strategy_id)` | Refuses `StagingRefused` (`DUPLICATE_BINDING`) — re-verified independent of `stage_release`'s own check, in case a release predates it or was staged by another path |
-| `promote` receives `expected_previous_release_id` and the current deployed release is absent or has a different id | Refuses typed `ConcurrentPromote` (`CONCURRENT_PROMOTE`) before pointer/history writes; the expected id is compared with the current pointer read for this swap, with no retry or alternate target |
+| `promote` receives `expected_previous_release_id`, its target is not already live, and the current deployed release is absent or has a different id | Refuses typed `ConcurrentPromote` (`CONCURRENT_PROMOTE`) before pointer/history writes; the expected id is compared with the current pointer read for this swap, with no retry or alternate target. If the target is already live, promotion is an idempotent no-op even when the supplied incumbent differs |
 | Caching | None: `current_pointer`/the manifest are re-read from disk on every call |
 | `promote` on the already-live `release_id` | No-op: returns the existing `PointerState`, never a new one |
 | `rollback` with fewer than two ids left after replaying pointer history as a promote/rollback undo stack | Refuses `NoPriorRelease` |
@@ -318,7 +318,8 @@ independently of whatever staged it.
 `promote`'s optional `expected_previous_release_id` guard checks the current
 pointer for callers promoting from a known incumbent. Omitting it preserves
 the existing operator path; supplying it requires that the observed current
-pointer still names that incumbent. This optimistic guard does not add a
+pointer still names that incumbent unless the target is already live, in which
+case promotion is an idempotent no-op. This optimistic guard does not add a
 cross-process lock for direct callers (#137). A refusal never changes the
 pointer or history.
 

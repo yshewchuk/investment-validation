@@ -202,8 +202,11 @@ def _add_operator_plan_arguments(plan):
     plan.add_argument("--release-id", default="")
     plan.add_argument("--expected-previous-release-id", default=argparse.SUPPRESS,
                       help="optional expected-incumbent guard for promote: the plan's "
-                           "worker refuses CONCURRENT_PROMOTE unless the live DEPLOYED "
-                           "pointer names this release; omit for the unguarded behavior")
+                           "worker refuses CONCURRENT_PROMOTE when the live DEPLOYED "
+                           "pointer is absent or names a different incumbent, except "
+                           "that promoting the already-live target remains an "
+                           "idempotent no-op even if the expected incumbent differs; "
+                           "omit for the unguarded behavior")
 
 
 def _add_reconcile_command(commands):
@@ -555,9 +558,13 @@ def _plan_command(args, root, conn, clock):
                              manifest_ref=_read_input_manifest_ref(args, root, conn, clock, nightly=False))
     elif args.kind == "promote":
         from engine.v2.ops.training import promote_plan
+        expected_previous = getattr(args, "expected_previous_release_id", None)
+        if expected_previous is not None and not expected_previous.strip():
+            raise fail("INVALID_REQUEST",
+                       "--expected-previous-release-id must not be blank; omit it for the "
+                       "unguarded behavior")
         plan = promote_plan(release_root=args.release_root, release_id=args.release_id,
-                            expected_previous_release_id=getattr(
-                                args, "expected_previous_release_id", "") or None)
+                            expected_previous_release_id=expected_previous)
     else:
         from engine.v2.ops.experiments import experiment_plan
         if args.no_ledger and args.activate_ledger:

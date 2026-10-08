@@ -194,6 +194,7 @@ class ConcurrentPromote(DeploymentError):
     """
 
     code = "CONCURRENT_PROMOTE"
+    retryable = False
 
     def __init__(self, release_id: str, expected_previous_release_id: str) -> None:
         """Build the CONCURRENT_PROMOTE refusal, naming both ids."""

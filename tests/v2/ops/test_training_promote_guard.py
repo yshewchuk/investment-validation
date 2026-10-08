@@ -1,4 +1,5 @@
 """Issue 192 slice 1: models_promote worker and CLI propagation of expected_previous_release_id."""
+import argparse
 import hashlib
 import json
 
@@ -15,7 +16,9 @@ from engine.v2.models import (
     ReleaseRequirement,
     deployment,
 )
+from engine.v2.foundation import SystemClock
 from engine.v2.ops import cli, training
+from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 
 
@@ -140,3 +143,35 @@ def test_cli_plan_promote_carries_expected_previous_release_id(tmp_path, capsys)
                      "--release-root", str(tmp_path), "--release-id", "r2"]) == 0
     parameters = json.loads(capsys.readouterr().out)["plan"]["parameters"]
     assert parameters["expected_previous_release_id"] is None
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_cli_plan_promote_refuses_blank_expected_previous_release_id(tmp_path, capsys, blank):
+    root = tmp_path / "ops"
+    assert cli.main(["--root", str(root), "init"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["--root", str(root), "plan", "promote",
+                     "--release-root", str(tmp_path), "--release-id", "r2",
+                     "--expected-previous-release-id", blank]) == 2
+    problem = json.loads(capsys.readouterr().out)
+    assert problem["code"] == "INVALID_REQUEST"
+
+    conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_plan_promote_help_documents_already_live_noop_exception():
+    root = cli.parser()
+    (subparsers,) = [action for action in root._actions
+                     if isinstance(action, argparse._SubParsersAction)]
+    plan = subparsers.choices["plan"]
+    (action,) = [item for item in plan._actions
+                 if item.dest == "expected_previous_release_id"]
+    assert "CONCURRENT_PROMOTE" in action.help
+    assert "idempotent no-op" in action.help
+    assert "already-live" in action.help
+    assert "unguarded" in action.help
