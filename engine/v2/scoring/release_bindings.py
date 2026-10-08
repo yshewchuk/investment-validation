@@ -502,7 +502,11 @@ def _load_driver_residual(dep_root: Path, member_id: str, obj: Mapping) -> Drive
         dep_root, member_id, "driver residual pool", obj["path"], obj["content_hash"])
     try:
         document = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:
+        # ValueError covers UnicodeDecodeError, json.JSONDecodeError, and the
+        # integer string digit-limit error (a ValueError from json's number
+        # parser); RecursionError covers excessive JSON nesting. All are
+        # translated to the same fixed, path-free refusal.
         raise ModelNotReady(member_id, "driver residual pool is not valid JSON") from exc
     try:
         artifact = residual_artifact_from_document(document)

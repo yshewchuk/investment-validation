@@ -249,3 +249,35 @@ def test_overflowing_flat_residual_refuses(tmp_path):
     assert error.value.detail == "driver residual pool could not be verified or loaded"
     assert isinstance(error.value.__cause__, OverflowError)
     _assert_no_leak(tmp_path, error.value)
+
+
+def test_integer_string_digit_limit_member_refuses(tmp_path):
+    """A hash-valid member whose JSON number exceeds the interpreter's integer
+    string digit limit refuses as not valid JSON, caused by a bare ValueError
+    from json's number parser -- never escapes as an uncaught refusal."""
+    _stage_and_promote(tmp_path)
+    big = b"[" + b"1" * 10000 + b"]"
+    _write_catalog(tmp_path, rows=[_row(_MEMBER, [_staged_object(tmp_path, big, _sha(big))])])
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == _MEMBER
+    assert error.value.detail == "driver residual pool is not valid JSON"
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "digit" in str(error.value.__cause__).casefold()
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_deeply_nested_member_refuses(tmp_path):
+    """A hash-valid member whose JSON nesting is too deep refuses as not valid
+    JSON, caused by a RecursionError out of the real json.loads -- never
+    escapes; 200,000 nesting levels raises RecursionError from json.loads."""
+    _stage_and_promote(tmp_path)
+    depth = 200000
+    nested = b"[" * depth + b"1" + b"]" * depth
+    _write_catalog(tmp_path, rows=[_row(_MEMBER, [_staged_object(tmp_path, nested, _sha(nested))])])
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == _MEMBER
+    assert error.value.detail == "driver residual pool is not valid JSON"
+    assert isinstance(error.value.__cause__, RecursionError)
+    _assert_no_leak(tmp_path, error.value)
