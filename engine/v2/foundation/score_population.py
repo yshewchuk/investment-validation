@@ -20,7 +20,8 @@ def population_difference(planned: Iterable[str], observed: Iterable[str]
     menu. An explicitly planned chooser key still has to be observed.
     """
     expected, actual = set(planned), set(observed)
-    events = {(parts[0], parts[2]) for parts in (key.split("|") for key in expected)
+    events = {(parts[0], parts[2]) for parts in (key.split("|") for key in expected
+                                              if isinstance(key, str))
               if len(parts) == 3 and parts[1] != "DYN-SV"}
 
     def derived(key: str) -> bool:

@@ -73,8 +73,14 @@ def _score_stage(monkeypatch, root, planned, rows):
     ([BASE, CHOOSER], [BASE], [CHOOSER], []),
     ([BASE], [CHOOSER], [BASE], []),
     ([CHOOSER], [CHOOSER, BASE], [], [BASE]),
+    ([42], [BASE, CHOOSER], [42], [CHOOSER, BASE]),
+    ([None], [BASE, CHOOSER], [None], [CHOOSER, BASE]),
+    ([True], [BASE, CHOOSER], [True], [CHOOSER, BASE]),
+    ([3.5], [BASE, CHOOSER], [3.5], [CHOOSER, BASE]),
+    ([BASE, 42], [BASE, CHOOSER], [42], []),
 ], ids=["exact", "derived-chooser", "unplanned-ticker", "unplanned-date",
-        "unplanned-strategy", "missing-explicit-chooser", "missing-base", "chooser-only-plan"])
+        "unplanned-strategy", "missing-explicit-chooser", "missing-base", "chooser-only-plan",
+        "integer-plan", "null-plan", "boolean-plan", "float-plan", "mixed-valid-integer-plan"])
 def test_score_stage_and_real_bridge_agree(monkeypatch, tmp_path, planned, observed,
                                            missing, unplanned):
     rows = [_row(key) for key in observed]
@@ -129,8 +135,13 @@ def test_shared_rule_is_deterministic_read_only_and_conservative():
     assert population_key({"ticker": None}) == "None||"  # Preserve existing encoding.
 
 
-@pytest.mark.parametrize("extra, accepted", [(CHOOSER, True), ("BBB|DYN-SV|2026-01-15", False)])
-def test_real_candidate_keeps_unplanned_refusal(tmp_path, extra, accepted):
+@pytest.mark.parametrize("planned, extra, expected_codes", [
+    ([BASE], CHOOSER, []),
+    ([BASE], "BBB|DYN-SV|2026-01-15", ["SCORED_ROW_UNPLANNED"]),
+    ([42], CHOOSER, ["PLANNED_ROW_MISSING", "SCORED_ROW_UNPLANNED", "SCORED_ROW_UNPLANNED"]),
+    ([BASE, 42], CHOOSER, ["PLANNED_ROW_MISSING"]),
+], ids=["derived-chooser", "unplanned-event", "integer-plan", "mixed-valid-integer-plan"])
+def test_real_candidate_keeps_unplanned_refusal(tmp_path, planned, extra, expected_codes):
     from datetime import datetime
 
     from engine.v2.contracts import ObjectRef, PreviewInput, PreviewRelease, Problem
@@ -156,7 +167,7 @@ def test_real_candidate_keeps_unplanned_refusal(tmp_path, extra, accepted):
     snapshot = commit_tables(catalog, clock, {"earnings_events": [fragment]}, {"earnings_events": contract})
     rows = [_row(BASE), _row(extra)]
     path = tmp_path / "score.json"
-    path.write_text(json.dumps({"rows": rows, "ladder": [], "expected_population": [BASE]}))
+    path.write_text(json.dumps({"rows": rows, "ladder": [], "expected_population": planned}))
     preview = PreviewInput(
         source_release_id="source", source_release_manifest_ref="manifest",
         snapshot_ref=snapshot.snapshot_id,
@@ -167,19 +178,24 @@ def test_real_candidate_keeps_unplanned_refusal(tmp_path, extra, accepted):
         score_comparison_receipt_ref="score-comparison", render_comparison_receipt_ref="render-comparison",
         source_code_hash="sha256:" + "2" * 64, source_environment_hash="sha256:" + "3" * 64)
     conn = projections.connect(str(tmp_path / "serving.sqlite"))
+    phases = []
     try:
         result = projections.build_candidate(
             preview, load_score_document(path), _bundle(rows), repository=Repository(catalog, source_store),
             snapshot_ref=snapshot, store=ArtifactStore(tmp_path / "serving-objects"), conn=conn,
-            requested_as_of="2026-01-14", resolved_as_of="2026-01-14", clock=clock)
-        if accepted:
+            requested_as_of="2026-01-14", resolved_as_of="2026-01-14", clock=clock,
+            fault=phases.append)
+        if not expected_codes:
             assert isinstance(result, PreviewRelease)
             assert projections.get_release(conn, result.release_id) == result
         else:
             assert isinstance(result, Problem)
             assert result.code == "PROJECTION_REFUSED"
-            assert [finding["code"] for finding in result.details["findings"]["findings"]] == [
-                "SCORED_ROW_UNPLANNED"]
+            findings = result.details["findings"]["findings"]
+            assert [finding["code"] for finding in findings] == expected_codes
+            if 42 in planned:
+                assert findings[0]["details"]["population_key"] == 42
+            assert phases == ["findings_written"]
             assert projections.get_release(conn, result.details["release_id"]) is None
     finally:
         conn.close()
