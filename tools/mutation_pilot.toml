@@ -159,7 +159,8 @@ tests = ["tests/test_v2_models_no_fit.py", "tests/test_v2_models_no_fit_native.p
 [modules.canonical]
 why = "Every receipt, artifact and corpus identity is a content_hash over canonical_json; a number-layout or key-order slip re-keys everything or collides two different values."
 mutate = ["engine/v2/foundation/canonical.py"]
-tests = ["tests/test_v2_ops_foundation.py", "tests/test_v2_data_contracts.py"]
+tests = ["tests/test_v2_ops_foundation.py", "tests/test_v2_data_contracts.py",
+         "tests/v2/integration/test_mutation_registration_selection.py"]
 
 [modules.frozen_artifacts]
 why = "Frozen payoff/residual/recalibration artifacts are accepted by key + content-hash comparison; a weakened comparison accepts a wrong-fold (future-leaking) artifact and prints a plausible number."
