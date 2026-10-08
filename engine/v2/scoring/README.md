@@ -55,8 +55,9 @@ payoff/recalibration/board-analog-matcher artifacts into one immutable
 `ScoringReleaseBinding`, raising `NoCurrentRelease`/`ModelNotReady` (never a
 legacy or cached fallback) when the pointer, catalog or a named member is
 not ready. `engine.v2.ops.native_score_batch.py`'s `native_score_batch` job
-worker calls `resolve_release_binding`, but that job is never submitted in
-production yet; `engine.v2.ops.supervisor.py`'s tick loop separately calls
+worker calls `resolve_release_binding` and, when `gate_policy` is absent or empty,
+`resolve_gate_policy` (the gate thresholds staged in the release), and the supervisor's tick loop submits that job for eligible
+pinned-snapshot identities; it also separately calls
 `resolve_production_release_binding()` live whenever its cheap
 release-identity check (run every tick) sees a changed root/id — a
 memo-gated release-readiness gate, not a per-tick call — see
@@ -80,12 +81,12 @@ real caller of these four (`tools/capture_tier0_corpus.py`,
 `assemble_nightly_source_bundle`/`validated_as_of`/`NightlySourceBundleRefusal`)
 reaches them through the submodule-qualified `from
 engine.v2.scoring.nightly_source_bundle import ...` instead, which the
-checker doesn't enforce. `native_score_batch`'s own job is never submitted
-in production, so no caller resolves a full bundle in production yet. See
+checker doesn't enforce. `native_score_batch`'s own job is submitted in
+production for eligible pinned-snapshot identities. See
 `ARCHITECTURE.md` for what
 runs in production today versus only in tests.
 
-<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, release_bindings, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
+<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, release_bindings, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
 
 ## Consumers
 

@@ -22,17 +22,16 @@ content hash before use. Does not mutate a strategy or model registry
 Two modules, `nightly_source_bundle.py` (the per-night `SourceBundle`
 assembler) and `release_bindings.py` (the live-deployment release reader),
 are consumed today by `engine.v2.ops.native_score_batch.py`'s
-`native_score_batch` job worker, but that worker never actually runs in
-production yet — `engine.v2.ops.supervisor.py`'s tick loop never submits a
-`native_score_batch` job because the raw-row producer that would build one
-from real staged data is still missing (cutover PR-6, `engine/v2/ops/
-ARCHITECTURE.md`). The one piece of this that IS live: the same tick loop's
+`native_score_batch` job worker, and `engine.v2.ops.supervisor.py`'s tick loop
+submits a `native_score_batch` job when an eligible pinned-snapshot identity
+has staged producer inputs (cutover PR-6, `engine/v2/ops/ARCHITECTURE.md`).
+Separately, the same tick loop's
 cheap release-identity gate runs every tick, and calls
 `release_bindings.resolve_production_release_binding()` — which
 hash-verifies every model file — whenever the release root/id it sees has
 changed since the last tick (memo-gated: skipped on repeat ticks once that
 identity's already been resolved, success or refusal), independent of the
-never-submitted job (see Dependencies).
+`native_score_batch` job (see Dependencies).
 
 ## Primary contracts and public interfaces
 
@@ -111,6 +110,9 @@ load-bearing entrypoints:
   Picking the object matching a request's own `(strategy, alpha, cutoff)`
   and mapping a binding to specific forecast-output names is the per-night
   assembler's job, not this module's.
+  `resolve_gate_policy(binding, release_root) -> dict[str, dict[str, float]]`
+  returns `{strategy: {"threshold": float}}` from each gate binding's staged
+  `threshold` member (see "`resolve_gate_policy`" below).
 - `identity.py`, `financial.py`, `chooser_inputs.py`, `native_*.py` —
   content-addressed request/record identity, financial diagnostics, and the
   native arithmetic for the analog stage, the DYN-SV chooser, the entry-rule
@@ -255,17 +257,15 @@ machine-checked consumers allowlist by design. `engine.v2.ops.native_score_batch
 (Cutover PR-3) is a real production module that imports
 `assemble_nightly_source_bundle`/`NightlySourceBundleRefusal`/`validated_as_of`
 and calls `resolve_release_binding` from its `native_score_batch` job
-worker — but nothing submits that job yet (`engine/v2/ops/ARCHITECTURE.md`'s
-"Cutover PR-7a": the raw-row producer that would build one from real staged
-data is cutover PR-6, still missing), so this call path has never executed
-outside tests. Separately, `engine.v2.ops.supervisor.py`'s tick loop
-(Cutover PR-7a) runs a cheap release-identity check every tick and DOES call
+worker, and `engine.v2.ops.supervisor.py`'s tick loop (Cutover PR-7a) submits
+that job for eligible pinned-snapshot identities (`engine/v2/ops/
+ARCHITECTURE.md`'s "Cutover PR-7a"). Separately, the same tick loop runs a
+cheap release-identity check every tick and calls
 `release_bindings.resolve_production_release_binding()` live whenever that
 identity changes (memo-gated: skipped on repeat ticks once the current
-release root/id has already been resolved, success or refusal) — purely a
-release-readiness check ahead of that same never-submitted job, but a real
-one that runs in production today, independent of whether the job itself
-ever does.
+release root/id has already been resolved, success or refusal) — a
+release-readiness check that runs independently of whether the job is
+submitted.
 
 ## External systems and libraries
 
@@ -435,6 +435,31 @@ rather than its own. `native_score_batch` goes through `score_one`, never
   confirming two resolutions saw the same release compares `.model_release`
   directly. Resolving again after a promotion/rollback reflects the new
   pointer in every field, since nothing is cached between calls.
+
+#### `resolve_gate_policy` (conditions and outcomes)
+
+Reads only the `threshold` member of each `role="gate"` binding in
+`binding.model_release`: a content-addressed copy of the legacy model
+registry, never the live legacy registry. The threshold is the one carried by
+the registry entry whose `id` equals that binding's `model_id`. Conditions are
+checked per gate binding; the first failure raises for the whole call.
+Failure messages are fixed and path-free, naming `model:gate:<strategy>`.
+
+| Condition | Outcome |
+|---|---|
+| the gate identity's `binding_id`, role and strategy match zero or several bindings of the release | `ModelNotReady` (the binding is selected by all three, never by a `binding_id` map that could overwrite a duplicate) |
+| gate binding has more than one member named `threshold` | `ModelNotReady` (checked before any member is selected or read) |
+| gate binding has no `threshold` member | strategy omitted from the result; the row-level `GATE_POLICY_NOT_STAGED` refusal is unchanged (proposed by the supervisor) |
+| member object missing, unreadable, or hash disagrees with the pointer | `ModelNotReady`, no fallback |
+| object is not a JSON object with a `models` list, or has no entry (or more than one) with `id == binding.model_id` | `ModelNotReady` |
+| the entry's `threshold` is absent, boolean, non-numeric, or non-finite | `ModelNotReady` |
+| otherwise | `{strategy: {"threshold": float(value)}}` |
+
+R2: no cache; every call re-reads and re-verifies. R3: none. R4/R5: read-only.
+R6: the same release and bytes yield an equal result; a caller resolving once
+per worker therefore sees one policy for the whole batch. The worker uses this
+result only when its `gate_policy` parameter is empty; a supplied policy wins
+and the release is not consulted for it.
 
 ### `nightly_source_bundle.py`
 

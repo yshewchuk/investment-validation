@@ -654,7 +654,7 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   `quote_status` — the calendar row must carry a non-empty string
   `event_id`, see "Failure semantics"), the batch's `feature_names`, and an
   optional `gate_policy: Mapping[str, Mapping[str, Any]]` keyed by strategy
-  (see "Failure semantics" for why this is caller-supplied and optional). The
+  (when the worker's parameter is empty it uses the release's own, see below). The
   worker's own `NativeScoreBatchParameters` additionally carries
   `release_root` as a plain string field and
   `input_bindings={"events.json": <artifact ref>}` for the one staged
@@ -1231,7 +1231,7 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 
 ### `native_score_batch.py`
 
-Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities, unresolvable release, request-hash collision, invalid worker identity fields, a supplied `feature_names` that is not a list/tuple (`null`/omitted means empty), or malformed `events.json`/`producer_refusals.json`. Invalid timestamp wire values raise `ValueError` during decoding.
+Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities, unresolvable release or, when `gate_policy` is absent or empty, a gate `threshold` member that fails `scoring/ARCHITECTURE.md`'s `resolve_gate_policy` (`ModelNotReady`, once per worker, no fallback), request-hash collision, invalid worker identity fields, a supplied `feature_names` that is not a list/tuple (`null`/omitted means empty), or malformed `events.json`/`producer_refusals.json`. Invalid timestamp wire values raise `ValueError` during decoding.
 Quote bounds are validated during decoding and in `_checked_batch_arguments`, including direct assembly callers: only `null` or non-negative integers are accepted. Booleans, floats, strings, and negatives raise `ValueError`, mapped to nonretryable `VALIDATION_FAILED` before scoring or output writes; invalid bounds are malformed batch inputs, not row refusals.
 This classification does not apply to every shape error: a missing `events.json` item `key` raises `KeyError` and
 maps to retryable `WORKER_FAILED`. R2: no cache. R3: no internal retry. R4: no catalog transaction. R5: writes follow assembly, scoring and collision checks. R6: strict timestamp identity for duplicate/overlap checks.
@@ -1248,7 +1248,7 @@ Per row (collected as a refusal, never sinks the batch):
 | `RELEASE_MISSING_ROLE` | no `driver:{strategy}` identity and no `_DRIVER_ROLE_ALIAS` identity (below), or no gate identity, for the strategy |
 | `RELEASE_MISSING_FEATURE_ORDER` | `feature_names` is empty and the driver or gate identity has an empty `feature_order` |
 | `AMBIGUOUS_DECISION_CLOCK` | the resolved driver/gate identities disagree on decision clock |
-| `GATE_POLICY_NOT_STAGED` | no gate threshold staged for the row's strategy (known gap; no production source exists yet) |
+| `GATE_POLICY_NOT_STAGED` | the selected policy has no threshold for the row's strategy: a non-empty supplied policy is used as is (the release is not consulted); otherwise the release's gate `threshold` members, which may omit it |
 | `POST_AS_OF_ROW` | the row's panel anchor is dated after `as_of` |
 | re-wrapped | any other source-bundle refusal, or an input-assembly `ValueError` |
 
