@@ -26,7 +26,7 @@ from engine.v2.ops.profiles import DEFAULT_POLICY, GIB, POLICY_VERSION, profile_
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 
 
 # --------------------------------------------------------------------------
@@ -215,7 +215,7 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
         assert profile.memory_bytes >= measured_peak_bytes
         assert profile.measured is False
     assert POLICY_VERSION == DEFAULT_POLICY.version
-    assert "2026-09-15" in POLICY_VERSION
+    assert "2026-10-08" in POLICY_VERSION
 
 
 # --------------------------------------------------------------------------
@@ -229,8 +229,8 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
 MEASURED_READ_SET_BYTES = 1796916876
 
 
-def test_policy_version_is_v8():
-    assert POLICY_VERSION == "ops_resources.2026-09-15.v8"
+def test_policy_version_is_v9():
+    assert POLICY_VERSION == "ops_resources.2026-10-08.v9"
     assert POLICY_VERSION == DEFAULT_POLICY.version
 
 
@@ -254,10 +254,12 @@ def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
     per-champion subprocess isolation plus removing a redundant
     ``daily_market`` re-read brought the measured worst case down to
     4866.2 MiB, and lowered the reservation to 5 GiB (5*GIB) -- admittable
-    with real margin under a live 5.41 GiB headroom sample. Every other
-    profile's memory is unchanged since v4."""
+    with real margin under a live 5.41 GiB headroom sample. v9 raised
+    ``projection`` from 2 GiB to 3 GiB (INTERIM, 100-ticker render only;
+    issue #505's bounded/chunked reads are the real full-universe fix).
+    Every other profile's memory is unchanged since v4."""
     for name, old_memory_bytes in (("validation", 5 * GIB), ("legacy_score", 5 * GIB + GIB // 4),
-                                   ("model_evidence", 5 * GIB), ("projection", 2 * GIB)):
+                                   ("model_evidence", 5 * GIB), ("projection", 3 * GIB)):
         profile = profile_named(DEFAULT_POLICY, name)
         assert profile.scratch_bytes >= MEASURED_READ_SET_BYTES
         assert profile.scratch_bytes == 4 * GIB
@@ -283,6 +285,24 @@ def test_model_evidence_reservation_covers_the_measured_peak():
     assert profile.memory_bytes >= MEASURED_MODEL_EVIDENCE_PEAK_BYTES
     assert profile.memory_bytes == 5 * GIB
     assert profile.measured is False
+
+
+# --------------------------------------------------------------------------
+# 2026-10-08 (v9, interim): ``projection`` is legacy_render's exclusive
+# profile; its limit is raised to 3 GiB from the observed 100-ticker render
+# only, not full-universe evidence. Issue #505's bounded/chunked reads are
+# the real fix. This asserts both the number and that render still routes
+# there (so another job kind's reservation is never silently widened).
+# --------------------------------------------------------------------------
+
+
+def test_legacy_render_projection_is_three_gib_and_still_assigned():
+    from engine.v2.ops.nightly import _legacy_resource
+
+    profile = profile_named(DEFAULT_POLICY, "projection")
+    assert profile.memory_bytes == 3 * GIB
+    assert profile.memory_bytes == 3 * (1 << 30)
+    assert _legacy_resource("legacy_render") == "projection"
 
 
 # --------------------------------------------------------------------------

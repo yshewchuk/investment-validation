@@ -8,7 +8,7 @@ layer rules; this doc covers package detail.
 
 Durable job submission, leases, retry history and dependencies; resource
 admission (each constrained cgroup uses `max(0, memory.current - (file - shmem))`, reading `file` and `shmem` from that same directory’s `memory.stat`; active and inactive file cache is reclaimable, while shmem/tmpfs stays counted; missing, malformed or unreadable statistics fall back to `max(0, memory.current - inactive_file)`, then raw usage; headroom remains `min(host_available, container_remaining) - free_margin`) and per-job CPU placement; the nightly job graph and its release
-boundary. It does not decide research conclusions (`engine/v2/evaluation`) and does not compute a score (`engine/v2/scoring`) — it only sequences and persists the jobs that call into those packages.
+boundary. It does not decide research conclusions (`engine/v2/evaluation`) and does not compute a score (`engine/v2/scoring`) — it only sequences and persists the jobs that call into those packages. `legacy_render` renders the staged score document's board rows, which scale with output rows, and builds a `Scorer` without calling its scoring path. Its `feature_panel`, `trades`, and `earnings_events` inputs are whole-table reads; `FeatureContext.load` filters its `daily_market` input by plan `context_tickers` and year range, while `Scorer` construction separately reads each historical `daily_market` year slice, then filters it to trade-derived ticker chunks, spanning the trade entry years plus one prior year. The lazy Tier-4 forecast path is not reached. The render profile (`projection`) must account for the complete evidence working set, which can include more tickers than the staged board rows; its 3 GiB reservation and cgroup `memory.max` cap are INTERIM, sized from the observed 100-ticker render only and NOT shown to fit the full universe, so the bounded/chunked read design tracked by issue #505 is the actual fix; available subset evidence does not establish full-universe fit.
 
 This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy `engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_score_batch_shadow` → `build_native_score_batch_events` → `scan_forward_board_requests` → `board_requests` (see "Dependencies"); schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
 
@@ -1023,8 +1023,7 @@ waits without submitting until its paired succeeded inputs are ready.
 **`computed_moves_refresh` and `forward_calendar_refresh` nightly wiring.**
 Both job kinds dispatch through `worker.py` to `calendar_moves_jobs`.
 Only `computed_moves_refresh` has a nightly `GRAPH`/`OPTIONAL` node and submitter.
-`forward_calendar_refresh` is direct-submit only; [#206](https://github.com/yshewchuk/investment-validation/issues/206)
-tracks its missing nightly integration.
+`forward_calendar_refresh` is direct-submit only.
 
 `computed_moves_refresh` is submitted only by `supervisor.Service`'s own
 tick loop (`_reconcile_computed_moves_refresh`, wrapped in the same
@@ -1049,8 +1048,8 @@ An empty selection or mismatched coverage is `INVALID_REQUEST` before inserting
 a job row or opening the submission transaction. Only the standalone runner accepts
 whole-market `tickers=()`. Submission queues without fetching or executing.
 `plan_forward_calendar` returns separate Nasdaq and yfinance plans. The
-worker runs date discovery first and derives confirmation tickers from its
-claims. `JobSpec.provider_budget_ref` and scheduler admission/reservation
+yfinance confirmation plan uses tickers derived from discovery claims.
+`JobSpec.provider_budget_ref` and scheduler admission/reservation
 name one account, so a single job does not reserve both source budgets.
 Native refresh `expected_ids` are unit IDs; unit `expected_keys` carry context
 tickers, not the paired score request's watchlist and horizon. These are

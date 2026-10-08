@@ -14,6 +14,7 @@ from engine.v2.ops.submission import KindRegistry, NamespacePolicy, submit
 
 
 def _request(tickers, expected_ids):
+    """Build a registered-kind request with only the coverage selection varied."""
     kind = forward_calendar_job_kind()
     parameters = CalendarMovesParameters(
         tickers=tickers, expected_ids=expected_ids, as_of="2026-01-05",
@@ -30,6 +31,7 @@ def _request(tickers, expected_ids):
 
 @pytest.fixture
 def admission(tmp_path):
+    """Use an isolated real catalog and the production kind validator."""
     clock = SystemClock()
     conn = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
     registry = KindRegistry([forward_calendar_job_kind()])
@@ -48,6 +50,7 @@ def admission(tmp_path):
 ])
 def test_unsupported_selection_refuses_before_submission_transaction(
         admission, tickers, expected_ids):
+    """Unsupported selections fail before even a catalog statement executes."""
     conn, registry, policy, clock = admission
     statements = []
     conn.set_trace_callback(statements.append)
@@ -62,6 +65,7 @@ def test_unsupported_selection_refuses_before_submission_transaction(
 
 
 def test_reordered_equal_ticker_coverage_queues_without_execution(admission):
+    """Set-equal coverage queues without starting an attempt or fetching data."""
     conn, registry, policy, clock = admission
     request = _request(("BETA", "ALPHA"), ("ALPHA", "BETA"))
     receipt = submit(conn, registry, policy, request, clock=clock)
