@@ -41,6 +41,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -1723,7 +1724,117 @@ def _closure_from_roots(roots: set[str], graph: dict[str, set[str]],
     return seen, tainted
 
 
-def select_pr_tests(cfg: dict, changed: list[str], *,
+_REGISTRATION_CONFIG = "tools/mutation_pilot.toml"
+# Bare tools imports are not reliable graph edges: retain these readers explicitly.
+_REGISTRATION_READERS = {
+    "tests/test_mutation_ci.py", "tests/test_gremlin_ci.py", "tests/test_gremlins_ci.py",
+    "tests/test_mutation_results.py", "tests/test_checks_mutation_ratchet.py",
+}
+_REGISTRATION_FIELDS = {
+    "defaults": {"timeout_constant", "timeout_multiplier", "max_children",
+                 "pytest_args", "deselect", "copy"},
+    "pr_selection": {"inert", "inert_skip", "full_suite", "always_run"},
+}
+
+
+def _config_identity(cfg: dict) -> str:
+    return json.dumps(cfg, sort_keys=True, allow_nan=False)
+
+
+def registration_tests(cfg: dict, base: dict | None, changed: set[str],
+                       tracked: set[str]) -> set[str] | None:
+    """Prove add-only registrations against a verified parsed base, else None.
+
+    Existing globs stay unchanged; a new literal cannot overlap any old entry.
+    Every affected module's old/new test expansion and tooling reader is required.
+    """
+    try:
+        for config in (base, cfg):
+            if not isinstance(config, dict) or set(config) != {*_REGISTRATION_FIELDS, "modules"}:
+                return None
+            for section, fields in _REGISTRATION_FIELDS.items():
+                if not isinstance(config[section], dict) or set(config[section]) != fields:
+                    return None
+                for field, value in config[section].items():
+                    if section == "defaults" and field in {"timeout_constant", "timeout_multiplier", "max_children"}:
+                        if type(value) not in ({int} if field == "max_children" else {int, float}):
+                            return None
+                    elif not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+                        return None
+            if not isinstance(config["modules"], dict):
+                return None
+            for mod in config["modules"].values():
+                if (not isinstance(mod, dict) or "mutate" not in mod
+                        or set(mod) - {"mutate", "tests", "skip", "excluded", "why"}):
+                    return None
+                for field, value in mod.items():
+                    if field in {"mutate", "tests", "skip"}:
+                        if (not isinstance(value, list) or not all(isinstance(p, str) for p in value)
+                                or len(value) != len(set(value))):
+                            return None
+                    elif not isinstance(value, str):
+                        return None
+        if list(base["modules"]) != list(cfg["modules"]):
+            return None
+        restored = {**cfg, "modules": {n: dict(m) for n, m in cfg["modules"].items()}}
+        affected = set()
+        for name, old in base["modules"].items():
+            new = cfg["modules"][name]
+            for field in ("mutate", "tests"):
+                before, after = old.get(field, []), new.get(field, [])
+                if before == after:
+                    continue
+                if (old.get("excluded") or new.get("excluded")
+                        or field not in old or [p for p in after if p in before] != before):
+                    return None
+                added = set(after) - set(before)
+                for path in added:
+                    prefix = "engine/" if field == "mutate" else "tests/"
+                    if (not re.fullmatch(r"[A-Za-z0-9_/.-]+\.py", path)
+                            or not path.startswith(prefix) or any(p in {"", ".", ".."} for p in path.split("/"))
+                            or path not in tracked or path not in changed
+                            or any(fnmatch.fnmatchcase(path, p) for p in before + old.get("skip", []))):
+                        return None
+                affected.add(name)
+                restored["modules"][name][field] = before
+        if not affected or _config_identity(restored) != _config_identity(base):
+            return None
+        selected = set(_REGISTRATION_READERS)
+        for name in affected:
+            for config in (base, cfg):
+                selected.update(test_files(config, name, sorted(tracked)))
+        return selected if selected <= set(pytest_test_files(tracked)) else None
+    except (KeyError, TypeError, ValueError, SystemExit):
+        return None
+
+
+def registration_base_config(base_sha: str, cfg: dict, changed: list[str]) -> dict | None:
+    """Read bounded, immutable base/head blobs for the exact triple-dot diff."""
+    if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+        return None
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(REPO), *args], check=True,
+                              capture_output=True, timeout=10).stdout
+
+    def config_at(sha):
+        spec = f"{sha}:{_REGISTRATION_CONFIG}"
+        if not 0 < int(git("cat-file", "-s", spec)) <= 1024 * 1024:
+            raise ValueError("config size")
+        return tomllib.loads(git("show", spec).decode("utf-8"))
+
+    try:
+        head = git("rev-parse", "HEAD").decode().strip()
+        base = git("merge-base", base_sha, head).decode().strip()
+        paths = git("diff", "-z", "--no-renames", "--name-only", base, head).decode().split("\0")
+        if set(filter(None, paths)) != set(changed) or _config_identity(config_at(head)) != _config_identity(cfg):
+            return None
+        return config_at(base)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return None
+
+
+def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = None,
                     graph: dict[str, set[str]] | None = None) -> list[str] | None:
     """The pytest test files (tests/test_*.py) a pull_request `test` CI run
     should collect. Returns None for "run the full suite" (a path on the
@@ -1767,9 +1878,15 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
                   f"({type(exc).__name__}: {exc}); selecting the full test suite",
                   file=sys.stderr, flush=True)
             return None
+    tracked_set = set(graph)
+    registrations: set[str] = set()
+    if _REGISTRATION_CONFIG in changed_set:
+        registrations = registration_tests(cfg, base_cfg, changed_set, tracked_set)
+        if registrations is None:
+            return None
+        changed_set.remove(_REGISTRATION_CONFIG)
     if any(forces_full_suite(cfg, p) for p in changed_set):
         return None
-    tracked_set = set(graph)
     tests = pytest_test_files(tracked_set)
     dyn = dynamic_files(graph)
     try:
@@ -1790,6 +1907,7 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
             failsafe.add(t)
     tests_set = set(tests)
     selected: set[str] = set(cfg.get("pr_selection", {}).get("always_run", [])) & tests_set
+    selected |= registrations
     docs: list[str] = []
     needs_failsafe = False
     for path in sorted(changed_set):
@@ -1982,7 +2100,9 @@ def cmd_select_tests(cfg: dict, args) -> int:
     file paths, one per line (possibly zero lines, never a trailing blank
     line), for the `test` CI job's pull_request runs."""
     changed = read_changed_files(args.changed_files)
-    selected = select_pr_tests(cfg, changed)
+    base = (registration_base_config(getattr(args, "base_sha", ""), cfg, changed)
+            if _REGISTRATION_CONFIG in changed else None)
+    selected = select_pr_tests(cfg, changed, base_cfg=base)
     if selected is None:
         print("__ALL__")
     else:
@@ -2263,6 +2383,7 @@ def main(argv: list[str] | None = None) -> int:
                         "behavior.")
     p = sub.add_parser("select-tests",
                        help="test files (or __ALL__) a pull_request `test` CI run should run")
+    p.add_argument("--base-sha", default="", help="PR base commit for verified add-only registrations")
     p.add_argument("--changed-files", required=True, metavar="PATH",
                    help="path to a NUL-delimited changed-file list (git diff -z --no-renames "
                         "--name-only); see select_pr_tests's docstring for the selection rule")

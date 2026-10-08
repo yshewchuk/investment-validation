@@ -52,6 +52,7 @@ jobs:
           CHANGED_FILE="$RUNNER_TEMP/pr-changed-files.txt"
           git diff -z --no-renames --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
           python3 tools/mutation_pilot.py select-tests --changed-files "$CHANGED_FILE" \
+            --base-sha "$BASE_SHA" \
             > "$RUNNER_TEMP/pr-test-selection.txt"
 
       - name: Check test layout ratchet
