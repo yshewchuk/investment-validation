@@ -34,7 +34,9 @@ The shared typed-document decoder reports `UNSUPPORTED_VERSION` before `UNKNOWN_
 `population_difference` returns sorted missing and unplanned keys for ops scoring
 and the serving bridge. An extra `DYN-SV` key is allowed only when its exact
 ticker/date has a planned non-chooser key. Every explicit planned key, including
-`DYN-SV`, remains required. These pure helpers perform no I/O, caching, retries,
+`DYN-SV`, remains required. Missing scalar keys retain their original values and
+normal sort order; incomparable mixed types use type-name/string-value order.
+Only string planned keys can authorize a derived chooser. These helpers perform no I/O, caching, retries,
 transactions or writes; equal inputs yield equal differences without mutation.
 
 ## Invariants
