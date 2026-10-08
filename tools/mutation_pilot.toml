@@ -255,6 +255,7 @@ mutate = [
     "engine/v2/registry/*.py",
 ]
 tests = [
+    "tests/v2/domain/generation/test_straddle_captured_expiry.py",
     "tests/test_v2_features_context.py",
     "tests/test_v2_features_recipes.py",
     "tests/test_v2_native_structures.py",

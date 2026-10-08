@@ -56,15 +56,19 @@ computed by this package:
 - `spot`, `forecast_abs_move` (or `forecast`), `width` — sizing.
 - `strike`, `expiry` — a caller-already-resolved value, used exactly as
   given wherever it is checked (bypasses native selection for that field).
-- `post_event_expiry` — an alternate already-resolved expiry, honored as the
-  same unconditional bypass as `expiry` by `_expiry()` (every put-ladder
-  strategy's fallback, and STR-THRU/STR-RUNUP whenever `_select_listed_straddle`
-  itself declines to run) and by `has_resolvable_expiry`. **Known gap
-  (issue #115, not fixed here):** whenever `_select_listed_straddle` DOES
-  run for STR-THRU/STR-RUNUP (`strike` or `expiry` missing), its own
-  `_resolve_straddle_expiry` checks only `expiry`, not `post_event_expiry` —
-  a row with `post_event_expiry` captured but not `expiry` can fall into
-  native DTE-based selection instead of using it.
+- `post_event_expiry` — an alternate already-resolved expiry. One bypass rule
+  covers every path (`_expiry()`, `has_resolvable_expiry`, and
+  `_resolve_straddle_expiry` for STR-THRU/STR-RUNUP): the captured expiry is
+  `expiry` if non-empty, else `post_event_expiry`, so `expiry` wins when both
+  are present. `EXPIRY_NOT_LISTED` is raised only when a captured expiry is
+  checked against a candidate list: STR-THRU/STR-RUNUP with `strike` or
+  `expiry` missing AND at least one strike listed as both call and put
+  (candidates = expiries of those common strikes), or a `resolve_expiry` call
+  (candidates = the caller's list). Every other path uses the captured value
+  as given, unvalidated against `quotes`: STR-THRU/STR-RUNUP with both
+  `strike` and `expiry` supplied; STR-THRU/STR-RUNUP whose chain is empty or
+  has no call/put common strike (selection returns nothing, so the captured
+  value is the fallback); and every put-ladder strategy.
 - `quotes` — a mapping keyed by `(right, strike, expiry)` (or an equivalent
   `"right:strike:expiry"` string), each value `{"bid", "ask"}`. The contract
   domain native selects from whenever `strike`/`expiry` is missing.
@@ -147,7 +151,7 @@ Raised exceptions:
   (a required numeric field, such as `spot`/`width`, is missing or not a
   finite number), `UNKNOWN_STRATEGY`,
   `ZERO_WIDTH`, `MISSING_EXPIRY` (no captured expiry and nothing listed to
-  select from), `EXPIRY_NOT_LISTED:<date>` (a caller-supplied `expiry` not
+  select from), `EXPIRY_NOT_LISTED:<date>` (a captured `expiry`/`post_event_expiry` not
   present in `quotes`), `NO_EXPIRY_ON_OR_AFTER:<date>` (STR-THRU/put-ladder
   `first_post_event`: no listed expiry survives the event-date/session
   filter), `NO_CHAIN`/`COARSE_LADDER` (a put-ladder leg has no listed
@@ -171,7 +175,7 @@ Raised exceptions:
   the caller (`engine/v2/scoring/stages.py`) catches them and republishes
   the code as the resulting `Geometry`/`Pricing`'s `.refusal`.
 - **STR-RUNUP's expiry rule (issue #95).** `_resolve_straddle_expiry`
-  dispatches on `strategy`: a caller-supplied `expiry` bypasses every DTE
+  dispatches on `strategy`: a captured expiry (`expiry`, else `post_event_expiry`) bypasses every DTE
   rule unconditionally for every strategy (matching legacy's `fixed` kind).
   Otherwise, `strategy == "STR-RUNUP"` uses legacy's own `straddle_runup`
   rule (`engine/structures.py`, `ExpirySelector(kind="first_dte_at_least",
@@ -186,9 +190,7 @@ Raised exceptions:
   the AMC/BMO distinction applied when `session` is known — or, when
   `event_date` itself is not captured, the earliest listed expiry
   unconditionally (a deterministic default, not a refusal).
-- **Known gaps, not fixed here** (see "Inputs" for detail): `_resolve_straddle_expiry`
-  does not honor a captured `post_event_expiry` the way `_expiry()` does
-  (issue #115); `generate()` resolves expiry/strike before it checks
+- **Known gaps, not fixed here** (see "Inputs" for detail): `generate()` resolves expiry/strike before it checks
   `resolved_legs` (issue #114).
 
 ## Invariants
