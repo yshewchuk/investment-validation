@@ -31,8 +31,12 @@ from engine.v2.foundation import (
 from engine.v2.ops.errors import fail
 from engine.v2.ops.provider_response import (
     AcquisitionOutcome,
-    OutcomeKind as OutcomeKind,
     _keys,
+)
+from engine.v2.ops.provider_response import (
+    OutcomeKind as OutcomeKind,
+)
+from engine.v2.ops.provider_response import (
     classify_response as classify_response,
 )
 from engine.v2.ops.snapshot_promotion import promote, rollback

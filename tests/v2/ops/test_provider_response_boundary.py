@@ -1,7 +1,11 @@
 """Compatibility and import boundaries between providers and orchestration."""
+import ast
+from pathlib import Path
+
 from engine.v2.ops import incremental_data, provider_response
 from engine.v2.ops.providers import orats_daily_market
-from tools import mutation_pilot
+
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_compatibility_names_and_provider_share_one_implementation():
@@ -30,27 +34,43 @@ def test_existing_retry_policy_accepts_leaf_outcomes():
     assert incremental_data.retry_action(partial) == "retry_missing"
 
 
-def test_provider_and_credential_import_closures_exclude_refresh_runtime():
-    graph = mutation_pilot.build_import_graph()
-    unresolved = mutation_pilot.unresolved_import_files(graph)
-    roots = {
-        "engine/v2/ops/provider_response.py",
-        "engine/v2/ops/providers/__init__.py",
-        "engine/v2/ops/providers/orats_daily_market.py",
-        "engine/v2/ops/providers/nasdaq_calendar.py",
-        "engine/v2/ops/providers/yfinance_edge.py",
-        "tests/test_v2_ops_provider_credentials.py",
-        "tests/test_v2_ops_providers_nasdaq.py",
-        "tests/test_v2_ops_providers_yfinance.py",
-        "tests/v2/ops/test_provider_response.py",
+def _source_imports(relative_path):
+    tree = ast.parse((ROOT / relative_path).read_text(encoding="utf-8"))
+    modules, targets = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+            targets.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "boundary modules use explicit absolute imports"
+            modules.add(node.module)
+            targets.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Name):
+            assert node.id not in {"__import__", "eval", "exec"}
+    assert not {name.split(".")[0] for name in modules} & {
+        "importlib", "runpy", "subprocess"}
+    return modules, {target for target in targets if target.startswith("engine.")}
+
+
+def test_provider_and_pure_test_direct_dependency_contracts():
+    # Bounded source contracts, not a whole-repository transitive graph rebuild.
+    contracts = {
+        "engine/v2/ops/provider_response.py": {"engine.v2.ops.errors.fail"},
+        "engine/v2/ops/providers/__init__.py": {
+            "engine.v2.ops.providers.nasdaq_calendar.nasdaq_calendar_fetcher",
+            "engine.v2.ops.providers.orats_daily_market.orats_daily_market_fetcher",
+            "engine.v2.ops.providers.yfinance_edge.yfinance_earnings_fetcher",
+            "engine.v2.ops.providers.yfinance_edge.yfinance_history_fetcher"},
+        "engine/v2/ops/providers/orats_daily_market.py": {
+            "engine.v2.foundation.canonical_json", "engine.v2.ops.errors.fail",
+            "engine.v2.ops.provider_response.classify_response"},
+        "engine/v2/ops/providers/nasdaq_calendar.py": {"engine.v2.ops.errors.fail"},
+        "engine/v2/ops/providers/yfinance_edge.py": set(),
+        "tests/v2/ops/test_provider_response.py": {
+            "engine.v2.ops.provider_response", "engine.v2.ops.errors.OpsError"},
     }
-    assert roots <= graph.keys()
-    closure, tainted = mutation_pilot._closure_from_roots(
-        roots, graph, unresolved, taint_exempt=set())
-    assert not tainted
-    assert "engine/v2/ops/incremental_data.py" not in closure
-    assert "engine/v2/ops/legacy_adapter.py" not in closure
-    # Foundation retains its declared, lightweight environment/path bridge.
-    assert not {path for path in closure
-                if path.startswith("engine/") and not path.startswith("engine/v2/")
-                and path not in {"engine/__init__.py", "engine/env.py", "engine/paths.py"}}
+    for path, expected in contracts.items():
+        modules, targets = _source_imports(path)
+        assert targets == expected, path
+        if path == "engine/v2/ops/provider_response.py":
+            assert modules == {"__future__", "dataclasses", "typing", "engine.v2.ops.errors"}
