@@ -1747,7 +1747,7 @@ def registration_tests(cfg: dict, base: dict | None, changed: set[str],
     """Prove add-only registrations against a verified parsed base, else None.
 
     Existing globs stay unchanged; a new literal cannot overlap any old entry.
-    Every affected module's old/new test expansion and tooling reader is required.
+    Every affected module needs nonempty old/new test expansions and tooling readers.
     """
     try:
         for config in (base, cfg):
@@ -1803,7 +1803,10 @@ def registration_tests(cfg: dict, base: dict | None, changed: set[str],
         selected = set(_REGISTRATION_READERS)
         for name in affected:
             for config in (base, cfg):
-                selected.update(test_files(config, name, sorted(tracked)))
+                expanded = test_files(config, name, sorted(tracked))
+                if not expanded:
+                    return None
+                selected.update(expanded)
         return selected if selected <= set(pytest_test_files(tracked)) else None
     except (KeyError, TypeError, ValueError, SystemExit):
         return None

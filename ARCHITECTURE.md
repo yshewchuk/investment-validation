@@ -195,7 +195,8 @@ evidence. See the models and data component contracts.
     existing entry in order and all other fields exactly. New modules, removals,
     duplicates, overlapping patterns, added globs, unknown fields and changes to
     defaults, selection policy, exclusions or skips cannot use the exception.
-    Every addition must also be a changed path. Selection unions the ordinary diff
+    Every addition must also be a changed path. An affected module without nonempty
+    base and head test expansions selects the full suite. Selection unions the ordinary diff
     selection with every expanded old/new test of each affected module and the five
     existing tooling-reader tests plus the selector's integration regression listed
     in `_REGISTRATION_READERS`; bare tool imports

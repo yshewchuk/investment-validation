@@ -170,6 +170,21 @@ def test_unsupported_registration_changes_fail_closed(case, problem):
     assert selected(case) is None
 
 
+@pytest.mark.parametrize("coverage", ["absent", "empty", "new_only"])
+def test_affected_module_needs_existing_nonempty_test_coverage(case, coverage):
+    base, cfg, changed, graph = case
+    for config in (base, cfg):
+        if coverage == "absent":
+            config["modules"]["alpha"].pop("tests")
+        else:
+            config["modules"]["alpha"]["tests"] = []
+    if coverage == "new_only":
+        cfg["modules"]["alpha"]["tests"].append("tests/test_new.py")
+    else:
+        changed.remove("tests/test_new.py")
+    assert selected(case) is None
+
+
 @pytest.mark.parametrize("base", [None, {}, [], {"modules": []}])
 def test_missing_or_malformed_parsed_base_is_full_suite(case, base):
     _, cfg, changed, graph = case
@@ -290,7 +305,8 @@ def test_workflow_passes_its_base_sha_and_new_test_is_registered():
     assert any(path in mod.get("tests", []) for mod in cfg["modules"].values())
 
 
-def test_architecture_documents_both_resource_limit_fallbacks():
+def test_architecture_documents_resource_and_coverage_fallbacks():
     root = Path(__file__).resolve().parents[3]
     contract = " ".join((root / "ARCHITECTURE.md").read_text().split())
     assert "size/time limits; exceeding either limit selects the full suite" in contract
+    assert "without nonempty base and head test expansions selects the full suite" in contract
