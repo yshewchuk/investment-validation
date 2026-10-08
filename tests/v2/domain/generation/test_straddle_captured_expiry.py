@@ -72,3 +72,19 @@ def test_strike_and_expiry_both_supplied_bypass_listing_check(strategy):
 def test_put_ladder_captured_expiry_is_not_validated_against_quotes():
     got = _expiries("TWIN-P", post_event_expiry="2026-10-23")
     assert got == {"2026-10-23"}
+
+
+@pytest.mark.parametrize("strategy", STRADDLES)
+@pytest.mark.parametrize("quotes", [
+    {},
+    {("C", 100.0, "2026-11-20"): _QUOTE},  # one-sided: calls only, no common strike
+])
+def test_empty_or_one_sided_chain_falls_back_to_captured_expiry_unvalidated(strategy, quotes):
+    inputs = {**_BASE, "quotes": quotes, "post_event_expiry": "2026-10-23"}
+    assert {leg.expiry for leg in generate(strategy, inputs).legs} == {"2026-10-23"}
+
+
+@pytest.mark.parametrize("strategy", STRADDLES)
+def test_empty_chain_without_captured_expiry_refuses_missing_expiry(strategy):
+    with pytest.raises(GeometryRefusal, match="MISSING_EXPIRY"):
+        generate(strategy, {**_BASE, "quotes": {}})
