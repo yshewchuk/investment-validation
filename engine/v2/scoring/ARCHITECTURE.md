@@ -461,6 +461,33 @@ per worker therefore sees one policy for the whole batch. The worker uses this
 result only when its `gate_policy` parameter is empty; a supplied policy wins
 and the release is not consulted for it.
 
+#### Driver residual pool member (issue #479, release-loader slice)
+
+`resolve_release_binding` also loads the staged `driver_residual_pool:size`
+state and carries the typed driver residual artifact on
+`ScoringReleaseBinding`. Its catalog object bytes are verified against the
+catalog `content_hash` before parsing; the decoded artifact must pass the
+residual artifact schema and content-hash checks before it can be returned.
+The member is optional for releases that predate this state: an absent member
+produces an empty artifact mapping. When native batch consumes a staged
+release, that empty mapping means no pool is available; its follow-up wiring
+must not substitute request-supplied rows.
+
+| R1–R6 condition | Outcome |
+|---|---|
+| member row absent | empty artifact mapping; the release remains resolvable, and a staged-release consumer treats the pool as unavailable |
+| member is declared but status is not `STAGED` or no object is declared | `ModelNotReady` naming `driver_residual_pool:size`; no binding is returned |
+| object path escapes the deployment root, object is absent or unreadable, or bytes disagree with the catalog `content_hash` | `ModelNotReady` naming `driver_residual_pool:size`; no alternate object |
+| verified bytes are not a valid driver residual artifact for the `driver` slot | `ModelNotReady` naming `driver_residual_pool:size`; no partially loaded binding |
+| a complete valid staged member is loaded | the returned binding contains the verified artifact; subsequent bundle assembly consumes this binding-owned value |
+| resolving an unchanged release repeatedly | every call re-reads and re-verifies the member; no loader cache is retained between calls |
+| no release is staged | existing `NoCurrentRelease` behavior remains; native batch keeps its existing per-row refusal results for the unstaged path |
+
+The loader is read-only: a failure returns no partial binding and writes no
+state. The follow-up native batch wiring consumes a verified pool and binds
+the release member to the scorer's `driver` slot and residual recipe before
+scoring; an empty mapping never permits request-row fallback.
+
 ### `nightly_source_bundle.py`
 
 `class NightlySourceBundleRefusal(ValueError)` — `__init__(code, detail)`,
