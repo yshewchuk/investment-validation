@@ -25,6 +25,15 @@ The test-layout ratchet blocks new tests outside `tests/v2/<package>/` and
 `tests/v2/integration/`; the root-level unmoved test count stays the same or
 decreases.
 
+`import_layers.py --all` also checks the planned ops ownership/direction in
+`ops_dependencies.json` against every tracked ops Python file. Static imports
+in every scope, including lazy/function imports, form the module graph.
+Forbidden directions and exact cyclic edges must match enumerated exceptions;
+exceptions may only shrink against the base branch. Resolved exceptions must
+be removed. Unmapped modules, syntax/JSON errors and read failures fail closed.
+The existing always-run layer test invokes this check in CI; external layers
+and dynamic-import restrictions are unchanged.
+
 ## Inputs
 
 Inputs vary: source files/Git state, policy or baselines, application data, or prepared artifacts. Options select paths, scope, years, or outputs.

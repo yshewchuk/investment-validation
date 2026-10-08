@@ -996,3 +996,8 @@ mutate = [
     "engine/v2/contracts/*.py",
     "engine/v2/evaluation/*.py",
 ]
+
+[modules.ops_dependency_checks]
+excluded = "Source-only architecture enforcement runs in ordinary CI; its tests do not execute ops runtime code and are not part of the runtime mutation pilot."
+mutate = []
+tests = ["tests/v2/ops/test_ops_dependencies.py"]
