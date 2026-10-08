@@ -79,8 +79,13 @@ def _finite_float(value: Any, name: str) -> float:
     return result
 
 
+def _captured_expiry(inputs: Mapping[str, Any]) -> Any:
+    """The one bypass rule: ``expiry`` if truthy, else ``post_event_expiry``."""
+    return inputs.get("expiry") or inputs.get("post_event_expiry")
+
+
 def _expiry(inputs: Mapping[str, Any]) -> str:
-    expiry = inputs.get("expiry") or inputs.get("post_event_expiry")
+    expiry = _captured_expiry(inputs)
     if expiry is None:
         raise GeometryRefusal("MISSING_EXPIRY")
     return str(expiry)
@@ -129,7 +134,8 @@ def _resolve_straddle_expiry(strategy: str, inputs: Mapping[str, Any],
     for those callers is never ``"STR-RUNUP"``, so the branch below never
     fires for them).
 
-    - A caller-supplied ``expiry`` is legacy's ``fixed`` rule: it must match
+    - A captured expiry (``expiry``, else ``post_event_expiry``; see
+      :func:`_captured_expiry`) is legacy's ``fixed`` rule: it must match
       a listed expiry exactly (by calendar date), or this refuses via
       ``GeometryRefusal`` rather than silently substituting another expiry.
       This bypasses every DTE rule below for every ``strategy`` -- legacy's
@@ -149,7 +155,7 @@ def _resolve_straddle_expiry(strategy: str, inputs: Mapping[str, Any],
     - With no date signal at all, the earliest listed expiry is used as a
       deterministic default.
     """
-    requested = inputs.get("expiry")
+    requested = _captured_expiry(inputs)
     if requested is not None:
         target = str(requested)[:10]
         matches = [candidate for candidate in expiries if candidate[:10] == target]
@@ -325,7 +331,7 @@ def has_resolvable_expiry(strategy: str, inputs: Mapping[str, Any], spot: float)
     than collapsed into it -- the gate only short-circuits the case where
     there is nothing listed for native to even attempt.
     """
-    if inputs.get("expiry") is not None or inputs.get("post_event_expiry") is not None:
+    if _captured_expiry(inputs) is not None:
         return True
     if strategy in {"STR-THRU", "STR-RUNUP"}:
         contracts = _quote_contracts(inputs)
@@ -588,8 +594,7 @@ def _resolve_generate_expiry(strategy: str, inputs: Mapping[str, Any]) -> str:
     nothing is listed at all (the pre-existing degenerate unit-test case).
     """
     if (strategy not in {"STR-THRU", "STR-RUNUP"}
-            and inputs.get("expiry") is None
-            and inputs.get("post_event_expiry") is None):
+            and _captured_expiry(inputs) is None):
         put_expiries = _listed_put_expiries(inputs)
         if put_expiries:
             return _resolve_straddle_expiry(strategy, inputs, put_expiries)
