@@ -517,7 +517,11 @@ def _load_driver_residual(dep_root: Path, member_id: str, obj: Mapping) -> Drive
     try:
         artifact = residual_artifact_from_document(document)
     except (ResidualArtifactError, KeyError, TypeError, ValueError,
-            AttributeError, OverflowError) as exc:
+            AttributeError, OverflowError, RecursionError) as exc:
+        # RecursionError covers the document-to-artifact decoder hitting the
+        # interpreter recursion limit on an accepted JSON document; it is
+        # translated to the same fixed, path-free refusal. The JSON parsing
+        # boundary above keeps its own distinct refusal unchanged.
         raise ModelNotReady(member_id, "driver residual pool could not be verified or loaded") from exc
     if not isinstance(artifact, DriverResidualPoolArtifact):
         raise ModelNotReady(member_id, "driver residual pool is not a driver-slot artifact")

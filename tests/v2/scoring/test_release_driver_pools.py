@@ -6,6 +6,7 @@ catalog before decoding, so a declared-but-broken member refuses all-or-nothing
 with the exact member id and a path-free message.
 """
 import json
+import sys
 import unittest.mock
 from pathlib import Path
 from types import MappingProxyType
@@ -18,6 +19,7 @@ from engine.v2.models.residual_artifact import (
     make_driver_residual_pool_artifact,
     make_paired_residual_pool_artifact,
 )
+from engine.v2.scoring import release_bindings
 from engine.v2.scoring.release_bindings import ModelNotReady, resolve_release_binding
 from tests.test_v2_scoring_release_bindings import (
     _assert_no_leak,
@@ -310,5 +312,49 @@ def test_member_json_recursion_error_refuses(tmp_path):
             resolve_release_binding(tmp_path)
     assert error.value.member_id == _MEMBER
     assert error.value.detail == "driver residual pool is not valid JSON"
+    assert isinstance(error.value.__cause__, RecursionError)
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_member_decoder_recursion_error_refuses(tmp_path):
+    """A hash-valid member whose JSON document parses successfully through the
+    real ``json.loads`` on the small valid driver payload, but whose parsed
+    document carries one unknown field nested deeper than the interpreter
+    recursion limit (with a safe margin), makes the real
+    ``residual_artifact_from_document`` decoder's recursive ``untag_nonfinite``
+    hit the recursion limit and refuse as "could not be verified or loaded",
+    caused by a chained RecursionError -- never escapes as an uncaught refusal.
+    The patch wraps ``release_bindings.json.loads`` only for the exact member
+    bytes: it calls the saved real loader and then attaches the deep value,
+    built iteratively (no giant serialized document, no direct
+    ``untag_nonfinite`` call, no patched typed decoder); every other JSON
+    input delegates unchanged. Distinct from the member decode's
+    parser-recursion refusal above."""
+    _stage_and_promote(tmp_path)
+    artifact, payload = _driver()
+    _write_catalog(tmp_path, rows=[_row(_MEMBER, [_staged_object(tmp_path, payload, artifact.content_hash)])])
+    real_loads = json.loads
+
+    def iteratively_nested(depth):
+        root = node = []
+        for _ in range(depth):
+            child = []
+            node.append(child)
+            node = child
+        return root
+
+    def member_only_loads(arg, *args, **kwargs):
+        document = real_loads(arg, *args, **kwargs)
+        if arg == payload:
+            document["unknown_extra_field"] = iteratively_nested(
+                sys.getrecursionlimit() + 200)
+        return document
+
+    with unittest.mock.patch(
+            "engine.v2.scoring.release_bindings.json.loads", member_only_loads):
+        with pytest.raises(ModelNotReady) as error:
+            resolve_release_binding(tmp_path)
+    assert error.value.member_id == _MEMBER
+    assert error.value.detail == "driver residual pool could not be verified or loaded"
     assert isinstance(error.value.__cause__, RecursionError)
     _assert_no_leak(tmp_path, error.value)
