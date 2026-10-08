@@ -267,6 +267,15 @@ streaming ``match_frame`` rather than materializing all ~19k matches, or
 bounding the daily-market span further), which is further profiling and
 change than this pass covers -- a real, stated follow-up, not a guess ahead
 of evidence.
+
+v9 (2026-10-08) raises ``projection`` from 2 GiB to 3 GiB. This profile is
+exclusive to ``legacy_render`` (``stages.py::registry``'s profile map and
+``nightly._legacy_resource``: no other kind selects it). The raise is
+INTERIM and is based on the observed 100-ticker render only -- it is NOT
+evidence that a full-universe render fits, and available subset evidence
+does not establish full-universe fit. The real fix is the bounded/chunked
+read design tracked by issue #505; 3 GiB only buys headroom until that
+lands. No other profile changes.
 """
 from __future__ import annotations
 
@@ -278,7 +287,7 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-POLICY_VERSION = "ops_resources.2026-09-15.v8"
+POLICY_VERSION = "ops_resources.2026-10-08.v9"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -298,7 +307,10 @@ DEFAULT_POLICY = ResourcePolicy(
         # legacy_render (store_domains read) stages the legacy read set
         # through the same barrier as validation/legacy_score below --
         # scratch bumped to the v4 basis (1.67 GiB measured + headroom).
-        ResourceProfile(name="projection", memory_bytes=2 * GIB, cpu_count=2,
+        # INTERIM (v9): 3 GiB is sized from the observed 100-ticker render
+        # only; it is NOT evidence of full-universe fit. The bounded/chunked
+        # read design tracked by issue #505 is the real fix.
+        ResourceProfile(name="projection", memory_bytes=3 * GIB, cpu_count=2,
                         scratch_bytes=4 * GIB, heavy=False),
         # The serialized selfcheck builds a bounded scorer of its own.
         # Lowered 2026-09-14 from 11/2 GiB to 5 GiB (right-sizing pass, ops
