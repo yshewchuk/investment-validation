@@ -422,6 +422,35 @@ def _load_registered_population(path, expected_count, expected_digest):
     return set(ids)
 
 
+def write_eligible_scores(scores):
+    path = RESULTS / "eligible_oos_scores.parquet"
+    scores.to_parquet(path, index=False)
+    return path
+
+
+def eligible_incumbent_comparison(scores, spec, trades):
+    """Describe the eligible cohort without rewriting historical expectations."""
+    columns = ["snapshot_id", "holdout_as_of_month", "random_membership_version",
+               "rolling_membership_version"]
+    pins = trades[columns].drop_duplicates()
+    if len(pins) != 1 or pins.isna().any().any() or not set(scores["event_id"]) <= set(trades["event_id"]):
+        raise RuntimeError("incumbent comparison must use one pinned eligible trade population")
+    values = scores.loc[scores["year"] >= 2020, "incumbent_complete_case"].dropna()
+    if values.empty:
+        raise RuntimeError("eligible incumbent population has no scored OOS rows")
+    stored = float(spec["incumbent"]["stored_threshold"])
+    return {
+        "population_use": "post-release selection", "historical_reproduction": False,
+        "comparison_label": "Post-release selection incumbent comparison (historical reproduction not claimed; no final holdout conclusion)",
+        "oos_rows": int(len(values)), "stored_threshold": stored,
+        "selected_at_stored_threshold": int((values >= stored).sum()),
+        "learned_threshold": float(gate_mod.choose_threshold(values.to_numpy(dtype=float))),
+        "historical_expectations": copy.deepcopy(spec["incumbent"]),
+        "holdout_context": pins.iloc[0].to_dict(),
+        "holdout_exclusions": copy.deepcopy(trades.attrs["holdout_exclusions"]),
+    }
+
+
 def incumbent_reproduction(scores, spec):
     inc = spec["incumbent"]
     oos_all = scores[scores["year"] >= 2020]
@@ -732,6 +761,10 @@ def report_sections(result, evaluations, ranks, matched, policy, cohorts, reprod
         ),
     }
     promotion = all(checks.values())
+    selection_only = reproduction.get("historical_reproduction") is False
+    outcome = "PROMOTION CRITERIA MET" if promotion else "NO PROMOTION"
+    if selection_only:
+        outcome = "SELECTION COMPARISON CRITERIA MET" if promotion else "SELECTION COMPARISON CRITERIA NOT MET"
     arm_rows = []
     for arm in ALL_ARMS:
         metrics = (
@@ -768,12 +801,12 @@ def report_sections(result, evaluations, ranks, matched, policy, cohorts, reprod
         {
             "title": "Rebaseline decision",
             "body": [
-                f"**{'PROMOTION CRITERIA MET' if promotion else 'NO PROMOTION'}**.",
+                f"**{outcome}**.",
                 f"Native-missing minus complete-case policy value: "
                 f"{fmt_pct(policy['observed'])}; 90% earnings-week interval "
                 f"[{fmt_pct(lo90)}, {fmt_pct(hi90)}], "
                 f"P(greater than zero) {policy['p_gt_zero']:.1%}.",
-                f"Incumbent reproduction: {reproduction['oos_rows']:,} OOS scores, "
+                f"{reproduction.get('comparison_label', 'Incumbent reproduction')}: {reproduction['oos_rows']:,} OOS scores, "
                 f"{reproduction['selected_at_stored_threshold']:,} stored-threshold passes, "
                 f"threshold {reproduction['learned_threshold']:.8f}.",
             ],
@@ -789,7 +822,7 @@ def report_sections(result, evaluations, ranks, matched, policy, cohorts, reprod
             "rows": arm_rows,
         },
         {
-            "title": "Pre-registered promotion checks",
+            "title": "Selection comparison checks" if selection_only else "Pre-registered promotion checks",
             "columns": ["check", "status"],
             "align": ["---", "---"],
             "rows": check_rows,
@@ -896,8 +929,8 @@ def main():
         scores, float(spec["incumbent"]["stored_threshold"])
     )
     oos = scores[scores["year"] >= 2020].copy()
-    reproduction = incumbent_reproduction(scores, spec)
-    oos.to_parquet(RESULTS / "oos_scores.parquet", index=False)
+    reproduction = eligible_incumbent_comparison(scores, spec, trades)
+    eligible_scores_path = write_eligible_scores(oos)
     pd.DataFrame(cutoffs).to_csv(
         RESULTS / "trailing_cutoffs.csv", index=False
     )
@@ -936,7 +969,7 @@ def main():
         arm_spec(spec, "ungated"), eval_trades,
         run_dir=HERE / "arms/ungated", spy_daily=spy,
         fractions=(0.02, 0.05), mc_paths=500, seed=144,
-        write_report=True, input_files=[RESULTS / "oos_scores.parquet"],
+        write_report=True, input_files=[eligible_scores_path],
     )
     evaluations["ungated"] = ungated
     if not args.no_ledger:
@@ -955,7 +988,7 @@ def main():
             gate=PrecomputedGate(oos, arm).gate(), run_dir=run_dir,
             spy_daily=spy, fractions=(0.02, 0.05), mc_paths=500,
             seed=144, write_report=True,
-            input_files=[RESULTS / "oos_scores.parquet"],
+            input_files=[eligible_scores_path],
         )
         evaluations[arm] = result
         if not args.no_ledger:
@@ -970,7 +1003,7 @@ def main():
         spy_daily=spy, fractions=(0.02, 0.05), mc_paths=1000,
         seed=144, write_report=True,
         input_files=[
-            RESULTS / "oos_scores.parquet",
+            eligible_scores_path,
             RESULTS / "incumbent_reproduction.json",
         ],
         extra_sections=lambda result: report_sections(
@@ -1005,7 +1038,7 @@ def main():
         champion_spec, eval_trades,
         gate=PrecomputedGate(oos, "champion").gate(), run_dir=champion_run_dir,
         spy_daily=spy, fractions=(0.02, 0.05), mc_paths=1000, seed=144,
-        write_report=True, input_files=[RESULTS / "oos_scores.parquet"],
+        write_report=True, input_files=[eligible_scores_path],
     )
     if not args.no_ledger:
         lib.record_evaluation(

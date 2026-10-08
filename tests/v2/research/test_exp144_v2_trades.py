@@ -9,10 +9,12 @@ uses -- and call the standalone helpers directly. ``main()`` is never run.
 """
 from __future__ import annotations
 
-import importlib.util
 import ast
+import copy
+import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -23,6 +25,12 @@ sys.path.insert(0, str(ROOT))
 from engine.v2.research import experiment_trades  # noqa: E402
 from tests.data_scan_support import catalog_and_store  # noqa: E402
 from tests.test_v2_research_build_trades import _commit_all  # noqa: E402
+from tests.test_v2_research_experiment_trades import (  # noqa: E402
+    _RANDOM,
+    _ROLLING,
+    _SAFE,
+    _holdout_snapshot,
+)
 
 PROVENANCE = experiment_trades.PROVENANCE
 LEGACY_PROVENANCE = "engine.replay"
@@ -159,6 +167,21 @@ def test_main_forces_both_membership_unbound_caches_to_recompute():
         assert len(calls) == 1
         force = next(kw.value for kw in calls[0].keywords if kw.arg == "force")
         assert isinstance(force, ast.Constant) and force.value is True
+    comparisons = [node for node in ast.walk(main) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Name)
+                   and node.func.id in ("eligible_incumbent_comparison", "incumbent_reproduction")]
+    assert len(comparisons) == 1
+    assert comparisons[0].func.id == "eligible_incumbent_comparison"
+    assert [arg.id for arg in comparisons[0].args] == ["scores", "spec", "trades"]
+    writes = [node for node in ast.walk(main) if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name) and node.func.id == "write_eligible_scores"]
+    assert len(writes) == 1 and writes[0].args[0].id == "oos"
+    evaluations = [node for node in ast.walk(main) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Name) and node.func.id == "evaluate"]
+    assert len(evaluations) == 4
+    for call in evaluations:
+        files = next(kw.value for kw in call.keywords if kw.arg == "input_files")
+        assert any(isinstance(item, ast.Name) and item.id == "eligible_scores_path" for item in files.elts)
 
 
 def test_dataset_recompute_does_not_return_a_stale_holdout_cache(tmp_path, monkeypatch):
@@ -207,3 +230,109 @@ def test_score_recompute_replaces_stale_holdout_rows(tmp_path, monkeypatch):
     scores, _ = module.generate_scores(dataset, sim_data, 1, force=True)
     assert scores["event_id"].tolist() == ["EVENT-0"]
     assert pd.read_parquet(score_path)["event_id"].tolist() == ["EVENT-0"]
+
+
+@pytest.mark.parametrize("registered", [False, True])
+@pytest.mark.parametrize("passes", [False, True])
+def test_eligible_comparison_preserves_history_without_claiming_reproduction(tmp_path, registered, passes):
+    module = _exp144()
+    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_SAFE, _RANDOM, _ROLLING])
+    try:
+        trades = experiment_trades.load_trades(repository, snapshot, "STR-THRU", as_of_month="2024-10")
+        scores = pd.DataFrame({"event_id": trades["event_id"], "year": [2024],
+                               "incumbent_complete_case": [0.25]})
+        spec = {"incumbent": {"stored_threshold": 0.5, "expected_oos_rows": 3,
+                              "expected_selected_at_stored_threshold": 2}}
+        if registered:
+            ids = ["EVENT-0", "EVENT-5", "EVENT-1"]
+            module.REGISTERED_POPULATION_PATH = tmp_path / "registered.parquet"
+            pd.DataFrame({"event_id": ids}).to_parquet(module.REGISTERED_POPULATION_PATH)
+            spec["incumbent"].update(population_event_id_count=len(ids),
+                                     population_event_id_sha256=module._population_digest(ids))
+        before = copy.deepcopy(spec)
+        with pytest.raises(RuntimeError):
+            module.incumbent_reproduction(scores, spec)
+        result = module.eligible_incumbent_comparison(scores, spec, trades)
+        assert result["historical_reproduction"] is False
+        assert result["population_use"] == "post-release selection"
+        assert result["oos_rows"] == 1
+        assert result["selected_at_stored_threshold"] == 0
+        assert result["historical_expectations"] == before["incumbent"]
+        assert spec == before
+        assert result["holdout_context"] == {key: trades.iloc[0][key] for key in (
+            "snapshot_id", "holdout_as_of_month", "random_membership_version", "rolling_membership_version")}
+        assert result["holdout_exclusions"] == trades.attrs["holdout_exclusions"]
+        _assert_eligible_report_label(module, result, passes)
+        module.write_json(tmp_path / "comparison.json", result)
+        assert '"historical_reproduction": false' in (tmp_path / "comparison.json").read_text()
+        result["historical_expectations"]["expected_oos_rows"] = 999
+        assert spec == before
+    finally:
+        conn.close()
+
+
+def _assert_eligible_report_label(module, comparison, passes):
+    metrics = {"n": 1, "mean": 0, "dollar_weighted": 0, "cagr": 0, "sharpe_trade": 0,
+               "years_positive": 0, "years_evaluated": 1, "breakeven_alpha": None}
+    result = SimpleNamespace(results={"headline": metrics})
+    primary_metrics = dict(metrics, mean=1, dollar_weighted=1, cagr=1, sharpe_trade=1,
+                           years_positive=1, breakeven_alpha=0.5) if passes else metrics
+    primary = SimpleNamespace(results={"headline": primary_metrics})
+    if passes:
+        metrics["breakeven_alpha"] = 1
+    ranks = {arm: {"n": 1, "spearman": 0, "top_bottom_decile": 0} for arm in module.ALL_ARMS}
+    if passes:
+        ranks[module.PRIMARY].update(spearman=1, top_bottom_decile=1)
+    counts = dict.fromkeys(["priced", "oos", "incumbent_scoreable", "native_scoreable",
+                           "simulation_scoreable", "quote_present", "quote_absent"], 1)
+    sections = module.report_sections(primary, dict.fromkeys(module.ALL_ARMS, result), ranks, [],
+        {"ci90": [0.1 if passes else -1, 1], "observed": 0, "p_gt_zero": 0.5}, [], comparison, counts)
+    text = " ".join(sections[0]["body"])
+    assert "Post-release selection incumbent comparison" in text
+    assert "historical reproduction not claimed" in text
+    assert "no final holdout conclusion" in text
+    assert "Incumbent reproduction:" not in text
+    assert "PROMOTION CRITERIA MET" not in text
+    assert ("SELECTION COMPARISON CRITERIA MET" if passes else "SELECTION COMPARISON CRITERIA NOT MET") in text
+    assert sections[2]["title"] == "Selection comparison checks"
+
+
+@pytest.mark.parametrize("corruption", ["excluded_score", "mixed_context"])
+def test_eligible_comparison_refuses_population_or_context_drift_before_output(tmp_path, corruption):
+    module = _exp144()
+    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_SAFE, _RANDOM])
+    try:
+        trades = experiment_trades.load_trades(repository, snapshot, "STR-THRU", as_of_month="2024-10")
+        scores = pd.DataFrame({"event_id": ["EVENT-0"], "year": [2024], "incumbent_complete_case": [0.25]})
+        if corruption == "excluded_score":
+            scores.loc[0, "event_id"] = "EVENT-5"
+        else:
+            other = trades.copy()
+            other["snapshot_id"] = "another-snapshot"
+            trades = pd.concat([trades, other], ignore_index=True)
+        with pytest.raises(RuntimeError, match="pinned eligible"):
+            result = module.eligible_incumbent_comparison(scores, {"incumbent": {"stored_threshold": 0.5}}, trades)
+            module.write_json(tmp_path / "comparison.json", result)
+        assert not (tmp_path / "comparison.json").exists()
+    finally:
+        conn.close()
+
+
+def test_eligible_score_writer_preserves_the_registered_historical_artifact(tmp_path):
+    module = _exp144()
+    module.RESULTS = tmp_path
+    module.REGISTERED_POPULATION_PATH = tmp_path / "oos_scores.parquet"
+    ids = ["EVENT-0", "EVENT-5", "EVENT-1"]
+    pd.DataFrame({"event_id": ids}).to_parquet(module.REGISTERED_POPULATION_PATH, index=False)
+    before = module.REGISTERED_POPULATION_PATH.read_bytes()
+    digest = module._population_digest(ids)
+    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_SAFE, _RANDOM, _ROLLING])
+    try:
+        eligible = experiment_trades.load_trades(repository, snapshot, "STR-THRU", as_of_month="2024-10")
+        path = module.write_eligible_scores(eligible[["event_id"]])
+        assert path == tmp_path / "eligible_oos_scores.parquet"
+        assert pd.read_parquet(path)["event_id"].tolist() == ["EVENT-0"]
+        assert module.REGISTERED_POPULATION_PATH.read_bytes() == before
+        assert module._load_registered_population(module.REGISTERED_POPULATION_PATH, len(ids), digest) == set(ids)
+    finally:
+        conn.close()

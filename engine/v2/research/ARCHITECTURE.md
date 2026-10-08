@@ -95,6 +95,14 @@ ledger recording are deferred to #489; final-read authority, sample-size
 assessment and side-by-side reporting are tracked in #490, #491 and #492.
 The EXP-144 runner recomputes its dataset and scores: its old caches carry no
 holdout context and cannot replace the newly filtered population.
+Its incumbent comparison describes the current eligible cohort as post-release
+selection and explicitly makes no historical-reproduction claim. It preserves
+the registered expectations as historical metadata, records loader pins and
+exclusions, and rejects scores outside the eligible trades. The separate
+historical-reproduction checks remain unchanged.
+Eligible scores use `eligible_oos_scores.parquet`, preserving the separately
+registered historical score artifact. Selection-only reports label passing
+criteria as selection comparisons and make no final holdout conclusion.
 
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
