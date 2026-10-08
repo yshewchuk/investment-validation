@@ -188,6 +188,24 @@ def test_bad_mark(source, bid, ask):
         _walk(source, rows=rows)
 
 
+@pytest.mark.parametrize("index", [0, 2, 4])
+def test_zero_market_refusal(source, index):
+    rows = _rows()
+    rows[index].update(bid=0.0, ask=0.0)
+    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED") as caught:
+        _walk(source, rows=rows)
+    assert caught.value.problem.details["session"] == DATES[index // 2]
+
+
+@pytest.mark.parametrize("index", [0, 2, 4])
+def test_zero_bid_mark(source, index):
+    rows = _rows()
+    rows[index].update(bid=0.0, ask=0.4)
+    decisions, _ = _walk(source, rows=rows)
+    assert len(decisions) == 1
+    assert decisions[0].visited_dates == DATES[:3]
+
+
 def test_empty_chains(source):
     with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
         _walk(source, rows=[])

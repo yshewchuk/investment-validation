@@ -76,8 +76,8 @@ def _cash_flow(position, rows, fill, *, closing):
         if len(hits) != 1:
             raise ValueError("missing or ambiguous held contract")
         bid, ask = float(hits.iloc[0]["bid"]), float(hits.iloc[0]["ask"])
-        if not isfinite(bid) or not isfinite(ask):
-            raise ValueError("nonfinite required mark")
+        if not isfinite(bid) or not isfinite(ask) or ask <= 0:
+            raise ValueError("unusable required mark")
         side = {"buy": "sell", "sell": "buy"}[leg.side] if closing else leg.side
         total += float(fill.cash_flow(side, bid, ask, leg.qty))
     if not isfinite(total):
