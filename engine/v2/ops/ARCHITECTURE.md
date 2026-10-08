@@ -39,7 +39,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
   document; `training`/`promote` take operator-only arguments
   (`--training-mode`, `--recipe`, `--state`, `--alpha`, `--cutoff`,
   `--strategy`, `--pairs`, `--ticker-chunk`, `--release-root`,
-  `--release-id`) and are never part of the nightly DAG
+  `--release-id`, `--expected-previous-release-id`) and are never part of the nightly DAG
 - `submit --plan --idempotency-key`
 - `rescore --request --native-inputs` — read-only, no provider pulls, no fitting
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
@@ -1223,8 +1223,8 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 
 | Condition | Outcome |
 |---|---|
-| a training-tool refusal, or a `deployment.DeploymentError` (including a superseded release hash) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED` |
-| no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset | `INVALID_REQUEST` at plan time, never an empty `release_root` reaching the worker |
+| a training-tool refusal, or a `deployment.DeploymentError` (including a superseded release hash or `ConcurrentPromote` (`CONCURRENT_PROMOTE`) when a supplied incumbent is absent or no longer current and the target is not already live) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a refusal writes no successful pointer-state output |
+| no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset, or `ops plan promote` supplies a blank `--expected-previous-release-id` | `INVALID_REQUEST` at plan time; no empty `release_root` reaches the worker, and only an absent incumbent option means no guard |
 | a recipe job's `pairs_path` does not resolve beneath the attempt's own pinned legacy root | `INPUT_CHANGED` at execution, even after passing plan-time validation |
 | any `models_promote` claim | serialized globally by one write lease on the deployment pointer |
 
