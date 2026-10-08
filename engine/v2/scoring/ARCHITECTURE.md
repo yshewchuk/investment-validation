@@ -494,9 +494,10 @@ payoff artifact with its causal recipe. Release-backed STR-THRU keeps the
 simulation `residual_recipe` empty: this release binding supplies no paired
 residual inputs for planned-exit simulation, so the batch does not invent a
 recipe or source rows. A missing driver-pool member is never filled from
-request-supplied rows. If no release resolves, `NoCurrentRelease` remains; a
-resolved binding missing required model roles keeps the native batch's
-existing per-row refusals.
+request-supplied rows. If a present driver pool's `model_id` differs from the
+resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
+release resolves, `NoCurrentRelease` remains; a resolved binding missing
+required model roles keeps the native batch's existing per-row refusals.
 
 ### `nightly_source_bundle.py`
 

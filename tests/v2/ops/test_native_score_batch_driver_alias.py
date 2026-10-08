@@ -512,6 +512,21 @@ def test_malformed_payoff_artifact_refuses_model_not_ready(tmp_path):
     assert error.value.member_id == "payoff_line:STR-THRU"
 
 
+def test_driver_pool_model_id_mismatch_refuses_model_not_ready(tmp_path):
+    """A driver residual pool is keyed only by role in the release binding, so
+    a pool whose own ``model_id`` disagrees with the resolved driver identity's
+    ``model_id`` must refuse the row with ``MODEL_NOT_READY`` -- never declare a
+    mismatched driver artifact -- and assemble no row."""
+    _, driver_row = _staged_driver_pool(tmp_path, model_id="m-other")
+    binding = _stage(tmp_path, [SIZE, GATE], rows=[driver_row])
+    assert binding.driver_residual_artifacts["size"].model_id == "m-other"
+    event = _event_inputs()
+    assembled, refusals = _assemble(binding, [event])
+    assert assembled == {}
+    assert [refusal.code for refusal in refusals] == ["MODEL_NOT_READY"]
+    assert [refusal.key for refusal in refusals] == [event.key]
+
+
 def test_malformed_entry_date_refuses_calendar_row_invalid(tmp_path):
     """``entry_date`` is calendar date validation too: on a real release that
     carries a driver pool and a payoff line (so the payoff causal cutoff

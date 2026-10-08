@@ -348,6 +348,10 @@ def _release_artifact_declarations(
         return {}
     declarations: dict[str, Any] = {}
     if pool is not None:
+        if pool.model_id != driver_identity.model_id:
+            raise NightlySourceBundleRefusal(
+                "MODEL_NOT_READY",
+                "driver residual pool model_id disagrees with the resolved driver identity")
         declarations["model_residual_artifacts"] = {"driver": pool}
         declarations["model_residual_artifact_recipe"] = {"driver": {
             "role": pool.role, "model_id": pool.model_id, "fold": pool.fold,
