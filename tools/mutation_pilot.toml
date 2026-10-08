@@ -459,6 +459,7 @@ tests = [
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
     "tests/test_v2_scoring_release_bindings.py",
+    "tests/v2/scoring/test_release_gate_policy.py",
 ]
 
 [modules.board_analog]
