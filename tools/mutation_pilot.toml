@@ -654,6 +654,7 @@ mutate = [
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
+    "tests/v2/ops/test_ops_dependencies.py",
     "tests/test_v2_ops_catalog.py",
     "tests/test_v2_ops_checkpoint_output_names.py",
     "tests/test_v2_ops_coordinator_lease.py",
