@@ -1224,10 +1224,10 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 
 | Condition | Outcome |
 |---|---|
-| a training-tool refusal, or a `deployment.DeploymentError` (including a superseded release hash) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED` |
+| a training-tool refusal, or a `deployment.DeploymentError` (including a superseded release hash or `ConcurrentPromote` when a supplied incumbent is absent or no longer current) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a refusal writes no successful pointer-state output |
 | no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset | `INVALID_REQUEST` at plan time, never an empty `release_root` reaching the worker |
 | a recipe job's `pairs_path` does not resolve beneath the attempt's own pinned legacy root | `INPUT_CHANGED` at execution, even after passing plan-time validation |
-| any `models_promote` claim | serialized globally by one write lease on the deployment pointer |
+| any `models_promote` claim | serialized globally by one write lease on the deployment pointer; callers promoting from a known incumbent pass its id as `expected_previous_release_id`, and omission retains existing operator behavior |
 
 ### `native_score_batch.py`
 
