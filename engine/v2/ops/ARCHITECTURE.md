@@ -12,6 +12,12 @@ boundary. It does not decide research conclusions (`engine/v2/evaluation`) and d
 
 This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy `engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_score_batch_shadow` → `build_native_score_batch_events` → `scan_forward_board_requests` → `board_requests` (see "Dependencies"); schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
 
+**Planned package split.**
+The `design/ops-package-split` PR records the proposed module homes and move slices.
+The planned dependency direction is entrypoints → runtime → workflows → stores →
+{legacy, native, providers} → core, with no upward or peer-package imports.
+Before implementation, remove prerequisite cycles and migrate all callers per move; no compatibility modules or re-export shims.
+
 ## Primary contracts and public interfaces
 
 **Operations health output.** `health` emits `operations_health.v1.1`; it selects the current delivered release from each published scope's `CURRENT` pointer, then orders those releases by occurrence, delivery time and release ID. `requested_session` and `resolved_session` come from the unique delivered `ledger_export_receipt.v1.0` associated through a consistent `release_intent` receipt with that release, including same-session reruns; the export receipt's scope must match the selected pointer scope or validation is `VALIDATION_FAILED`. Sessions never come from `generated_at`. Invalid or ambiguous evidence is `VALIDATION_FAILED`; the CLI removes its output and does not retry. Identical catalog, pointer and clock inputs produce byte-identical JSON; evolution follows `guides/component_contracts.md` §2.3 and older versions remain valid. A publication status sidecar compares withheld releases against its own scope's delivered `CURRENT` row; when none exists, it treats current as absent and does not fall back to another scope's latest delivery. Unsafe unrelated-scope pointers do not prevent that write; aggregate health reads each published scope pointer and propagates unsafe-pointer errors. **I/O outcomes:**
@@ -59,21 +65,14 @@ one per event × native-covered strategy, plus one `DYN-SV` meta-request per eve
 `forward_calendar_refresh` has a `JobKind` (worker dispatch, loader callback, parameter validation) but no `nightly.py`
 `GRAPH`/`OPTIONAL` node and no `supervisor.Service` submitter yet — not on the nightly schedule.
 
-`forward_calendar_store.py` is one of a small number of natively-fetched
-data stores living directly in this package rather than delegating to
-another v2 layer. `run_forward_calendar_refresh` is a standalone,
-fully keyword-only runner validating every non-fetcher argument before
-touching the catalog or a provider (see "Failure semantics" below);
-`tickers=()` means the whole market. Its commit path composes a
-per-attempt lease `fence_check` (byte-identical in shape to
-`computed_moves_store`'s own) with the existing `_head_fence` check —
-`_head_fence` always runs first, both inside the one transaction
-`catalog.commit_snapshot` invokes — so a cancelled or lease-expired
-attempt is refused before anything commits, never after; omitting
-`fence_check` (the default) keeps `engine/v2/data/incremental.py`'s
-generic-refresh path and `engine/v2/research/_trades_publish.py`
-unchanged. No `GRAPH` node or `supervisor.Service` submitter exists yet,
-so nothing submits a `forward_calendar_refresh` job today.
+`forward_calendar_store.py` owns native fetching here rather than in another v2 layer.
+Its standalone, keyword-only `run_forward_calendar_refresh` validates every non-fetcher
+argument before catalog/provider access; `tickers=()` means the whole market.
+At commit, `_head_fence` runs before the per-attempt `fence_check` (the same shape as
+`computed_moves_store`), both inside `catalog.commit_snapshot`'s transaction:
+cancelled or lease-expired attempts refuse before any commit. Omitting `fence_check`
+preserves `engine/v2/data/incremental.py`'s generic refresh and
+`engine/v2/research/_trades_publish.py`. No `GRAPH` node or `Service` submitter exists yet.
 
 `native_score_batch.py`: the batch-shaped seam between the board universe
 (`native_board_universe.BoardRequest`) and
