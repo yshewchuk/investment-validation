@@ -54,6 +54,12 @@ jobs:
           python3 tools/mutation_pilot.py select-tests --changed-files "$CHANGED_FILE" \
             > "$RUNNER_TEMP/pr-test-selection.txt"
 
+      - name: Check test layout ratchet
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 checks/test_layout_budget.py --base-ref "$BASE_SHA"
+
       - name: Run pytest
         env:
           # Empty ('') for push/schedule/workflow_dispatch: the "Select PR

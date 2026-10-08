@@ -202,7 +202,8 @@ covers that selection. The package-layout selector in `checks/test_selection.py`
 is separate from the active workflow; see [package test selection by
 layer](guides/test_selection_by_layer.md). The checked-in test-layout ratchet
 (`checks/test_layout_budget.py`) keeps root-level tests from growing while
-packages migrate; pushes to `main` keep the full-suite backstop.
+packages migrate. On `pull_request`, `tests.yml` runs it against the PR base SHA before
+pytest and a nonzero result fails the `test` job; pushes to `main` keep the full-suite backstop.
 
 ## 2. Layers and allowed dependency direction
 

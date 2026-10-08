@@ -111,7 +111,7 @@ def launch_mode(spec) -> str:
         return "materialize"
     if (spec.parameters or {}).get("input_mode") == "snapshot":
         return "snapshot"
-    if spec.kind == "legacy_finality" and _has_finality_cross_check_bindings(spec):
+    if spec.kind in ("legacy_finality", "legacy_features") and _has_finality_cross_check_bindings(spec):
         return "finality_check"
     return "legacy"
 
@@ -122,7 +122,8 @@ def _has_finality_cross_check_bindings(spec) -> bool:
     declared read plan for the kind), but a snapshot-mode plan graph still
     binds it the same three ``SNAPSHOT_BINDINGS`` read-only, so its worker can
     cross-check its own barrier read against this run's committed
-    materialization (``legacy_adapter._action_finality``). A legacy-mode plan
+    materialization (``legacy_adapter._action_finality``). ``legacy_features``
+    follows the same path. A legacy-mode plan
     leaves these unbound, so this is false and the kind launches as plain
     ``"legacy"``, exactly as before this fix."""
     bindings = (spec.parameters or {}).get("input_bindings") or {}

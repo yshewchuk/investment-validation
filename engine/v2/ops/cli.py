@@ -273,7 +273,8 @@ def _add_plan_command(commands):
     _add_plan_ledger_arguments(plan)
     plan.add_argument("--input-manifest", type=Path)
     plan.add_argument("--expected-population", type=Path,
-                      help="JSON file: a list of 'ticker|strategy|event_date' keys")
+                      help="JSON file: a list of 'ticker|strategy|event_date' keys; "
+                           "overrides the population --input-mode snapshot otherwise generates")
     plan.add_argument("--tickers", default="")
     plan.add_argument("--context-tickers", default="",
                       help="historical evidence ticker universe: comma list or @file "
@@ -468,8 +469,26 @@ def _ticker_list(value):
     return tuple(filter(None, (part.strip() for part in raw.replace(",", "\n").splitlines())))
 
 
-def _snapshot_inputs(args, root, conn, clock, context_tickers, population):
-    """``--input-mode snapshot``: resolve the scope's head exactly once, here.
+def _planned_population(args, root, conn, clock, tickers):
+    """``(population, snapshot_id)``: a supplied ``--expected-population`` file always wins,
+    unchanged. Otherwise ``--input-mode snapshot`` generates it
+    (:func:`~engine.v2.ops.snapshot_planning.generated_population`) for the ``--tickers`` watchlist and
+    returns the snapshot id it read; any other mode has no snapshot and yields ``()``."""
+    if args.expected_population or args.input_mode != "snapshot":
+        return _read_expected_population(args), None
+    if not args.snapshot_scope:
+        raise fail("INVALID_REQUEST", "snapshot input mode needs --snapshot-scope")
+    from engine.v2.ops.snapshot_planning import generated_population
+    return generated_population(conn, ArtifactStore(root), args.snapshot_scope, as_of=args.as_of,
+                                tickers=tickers, clock=clock,
+                                expected_snapshot_id=getattr(args, "expected_snapshot_id", None))
+
+
+def _snapshot_inputs(args, root, conn, clock, context_tickers, population, snapshot_id=None):
+    """``--input-mode snapshot``: pin the scope's head here, via ``pin_snapshot_inputs``.
+
+    A generated population has already resolved and scanned the head once; pinning resolves it
+    again and refuses ``INPUT_CHANGED`` if it moved (``snapshot_id`` is the scanned id).
 
     ``context_tickers`` (P2-C04) is the historical evidence universe — the
     scope :func:`engine.v2.ops.snapshot_planning.pin_snapshot_inputs` builds
@@ -484,7 +503,8 @@ def _snapshot_inputs(args, root, conn, clock, context_tickers, population):
                                tickers=context_tickers, year_start=args.year_start,
                                year_end=args.year_end, expected_population=population, clock=clock,
                                session=args.as_of,
-                               expected_snapshot_id=getattr(args, "expected_snapshot_id", None))
+                               expected_snapshot_id=snapshot_id
+                               or getattr(args, "expected_snapshot_id", None))
 
 
 def _read_refresh_plan(args):
@@ -510,7 +530,7 @@ def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
         context_tickers = _ticker_list(args.context_tickers) or tickers
-        population = _read_expected_population(args)
+        population, snapshot_id = _planned_population(args, root, conn, clock, tickers)
         from engine.v2.ops.snapshot_stages import _catalog_path
         plan = nightly_plan(Path(__file__).resolve().parents[3], args.as_of,
                             mode=args.mode, manifest_ref=_read_input_manifest_ref(args, root, conn, clock),
@@ -519,7 +539,7 @@ def _plan_command(args, root, conn, clock):
                             expected_population=population, clock=clock,
                             input_mode=args.input_mode, full_run=args.full_run,
                             snapshot_inputs=_snapshot_inputs(args, root, conn, clock, context_tickers,
-                                                             population),
+                                                             population, snapshot_id),
                             refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args),
                             catalog_path=_catalog_path(conn), objects_root=str(root))
     elif args.kind == "training":
@@ -716,22 +736,94 @@ def _recheck_experiment_preregistration(plan):
     require_preregistration(checkout_root, experiment_spec_from_document(plan["spec_document"]))
 
 
+def _registered_runner_manifest(plan):
+    """Resolve the primary plan's registered runner and staged source set."""
+    from engine.v2.ops.experiments import (
+        RUNNER_INVENTORY,
+        default_checkout_root,
+        runner_manifest,
+    )
+
+    runner = plan["spec_document"].get("runner")
+    entry = RUNNER_INVENTORY.get(runner) if isinstance(runner, str) else None
+    declared = entry.get("declared_runtime_sources") if isinstance(entry, dict) else None
+    if (not isinstance(declared, (list, tuple)) or not declared
+            or not all(isinstance(item, str) and item for item in declared)):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment runner registration has no declared runtime sources",
+                   details={"runner": runner})
+    recorded = plan.get("preregistration_root")
+    checkout_root = Path(recorded) if recorded else default_checkout_root()
+    try:
+        manifest = runner_manifest(checkout_root, runner)
+    except OpsError as exc:
+        if exc.code == "INPUT_CHANGED":
+            raise fail("VALIDATION_FAILED",
+                       "registered runner source is missing or indirect",
+                       details={"runner": runner}) from exc
+        raise fail("INVALID_EXPERIMENT_SPEC", "experiment runner is not registered",
+                   details={"runner": runner}) from exc
+    return declared, Path(checkout_root).resolve(), manifest
+
+
+def _primary_runner_bindings(plan, store):
+    """Publish the registered primary runner, spec, and runtime source closure."""
+    declared, base, manifest = _registered_runner_manifest(plan)
+    relative_paths = list(dict.fromkeys(
+        [manifest["runner"], manifest["spec_source"], *declared,
+         *manifest["source_closure"]]))
+    def checkout_path(relative, message):
+        candidate = base / relative
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(base)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise fail("VALIDATION_FAILED", message,
+                       details={"path": relative}) from exc
+        if not candidate.is_file() or candidate.is_symlink():
+            raise fail("VALIDATION_FAILED", message,
+                       details={"path": relative})
+        return resolved
+
+    bindings = []
+    for relative in relative_paths:
+        path = checkout_path(relative, "registered runner source is missing")
+        bindings.append((relative, store.publish_bytes(
+            path.read_bytes(), schema_ref="experiment_runner_source.v1.0")))
+    for relative in manifest.get("declared_runtime_inputs", ()):
+        path = checkout_path(relative, "registered runner input is missing")
+        bindings.append((relative, store.publish_bytes(
+            path.read_bytes(), schema_ref="experiment_runner_input.v1.0")))
+    spec_path = checkout_path(
+        manifest["spec_source"], "registered runner source is missing")
+    bindings.append(("spec.yaml", store.publish_bytes(
+        spec_path.read_bytes(), schema_ref="experiment_runner_source.v1.0")))
+    return bindings
+
+
 def _submit_command(args, root, conn, clock):
     store = ArtifactStore(root)
     ref = artifact(conn, store, args.plan)
     plan = json.loads(store.read_verified(ref))
-    policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
+    policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke", "primary"})})
     if plan.get("kind") == "nightly":
         return _submit_nightly(plan, conn, store, policy, clock)
     if plan.get("kind") == "experiment":
+        binding_refs = []
         if plan.get("parameters", {}).get("no_ledger", True) is False:
             _recheck_experiment_preregistration(plan)
+            binding_refs = _primary_runner_bindings(plan, store)
         spec_ref = store.publish_bytes(json.dumps(plan["spec_document"], sort_keys=True).encode(),
                                        schema_ref="experiment_spec.v1.0")
         with transaction(conn):
             register_artifact(conn, spec_ref, None, clock)
-        plan["input_refs"] = [spec_ref.artifact_id]
-        plan["parameters"]["input_bindings"] = {"spec.json": spec_ref.artifact_id}
+            for _, binding_ref in binding_refs:
+                register_artifact(conn, binding_ref, None, clock)
+        plan["input_refs"] = [spec_ref.artifact_id,
+                              *(binding_ref.artifact_id for _, binding_ref in binding_refs)]
+        plan["parameters"]["input_bindings"] = {
+            "spec.json": spec_ref.artifact_id,
+            **{relative: binding_ref.artifact_id for relative, binding_ref in binding_refs}}
     return submit(conn, registry(), policy, request_from_plan(plan, args.idempotency_key), clock=clock)
 
 

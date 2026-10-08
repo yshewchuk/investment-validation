@@ -333,7 +333,8 @@ def legacy_action(action, parameters, staging, legacy_root=None, cross_check=Non
     ``cross_check`` (last read-set gap fix, 2026-09-15): only ever non-empty
     for ``legacy_finality``, when its launch resolved a ``finality_check``
     materialization (``snapshot_stages.prepare_launch``) -- see
-    ``_action_finality``."""
+    ``_action_finality``. Also non-empty for ``legacy_features`` in a
+    snapshot plan (see ARCHITECTURE.md "the features receipt")."""
     root = Path(staging).resolve()
     _rooted_import(Path(legacy_root) if legacy_root else root / "legacy")
     actions = {
@@ -356,6 +357,8 @@ def legacy_action(action, parameters, staging, legacy_root=None, cross_check=Non
     with worker_progress.step(action):
         if action == "legacy_finality":
             return _action_finality(parameters, root, cross_check=cross_check)
+        if action == "legacy_features":
+            return _action_features(parameters, root, cross_check=cross_check)
         return actions[action](parameters, root)
 
 
@@ -493,9 +496,37 @@ def _current_features_hashes():
     }
 
 
-def _check_features_current(root):
+def _check_snapshot_features(receipt, current):
+    required = ("comparison", "verdict", "pinned_panel_sha256", "pinned_tier4_sha256")
+    missing = [k for k in required if k not in receipt]
+    if missing:
+        raise fail("FEATURES_STALE",
+                   "the features receipt carries no numeric comparison against the pinned "
+                   "snapshot tables",
+                   details={"reason": "not_compared", "missing": missing})
+    if receipt["verdict"] != "match":
+        raise fail("FEATURES_STALE",
+                   "the rebuilt panel/tier4 tables differ from the pinned snapshot tables "
+                   "beyond tolerance",
+                   details={"reason": "mismatch", "comparison": receipt["comparison"],
+                            "tables": receipt.get("tables")})
+    changed = {key: {"receipt": receipt[f"pinned_{key}"], "current": current[key]}
+               for key in ("panel_sha256", "tier4_sha256")
+               if receipt[f"pinned_{key}"] != current[key]}
+    if changed:
+        raise fail("FEATURES_STALE",
+                   "the panel and/or tier4 table on disk no longer matches the table the "
+                   "features stage pinned",
+                   details={"reason": "pinned_changed", "mismatches": changed})
+
+
+def _check_features_current(root, parameters=None):
     """P6-2: refuse a score launch whose features receipt does not match
     what the panel and Tier-4 forecast table actually are right now.
+
+    In snapshot mode (``parameters["input_mode"] == "snapshot"``) the
+    comparison is the receipt's numeric verdict plus the pinned hashes
+    (see ``engine/v2/ops/ARCHITECTURE.md``); legacy mode stays byte-exact.
 
     Two distinct refusals, on purpose (identity must not be able to no-op,
     the way ``_phase4_tier4_digest`` and the pre-registration guard's
@@ -521,6 +552,9 @@ def _check_features_current(root):
     """
     receipt = _load_features(root)
     current = _current_features_hashes()
+    if (parameters or {}).get("input_mode") == "snapshot":
+        _check_snapshot_features(receipt, current)
+        return
     mismatches = {key: {"receipt": receipt.get(key), "current": current[key]}
                  for key in ("panel_sha256", "tier4_sha256") if receipt.get(key) != current[key]}
     if mismatches:
@@ -530,7 +564,31 @@ def _check_features_current(root):
                    details={"mismatches": mismatches})
 
 
-def _action_features(parameters, root):
+def _compare_to_pinned(materialization_root, hashes):
+    from engine import paths
+    from engine.data import store
+    from engine.v2.ops import features_compare as fc
+
+    root = Path(materialization_root)
+    pinned = {}
+    tables = {}
+    for name, rebuilt in (("panel", paths.PANEL), ("tier4", paths.TIER4)):
+        pinned_path = root / rebuilt.relative_to(paths.ROOT)
+        pinned[name] = store.file_sha256(pinned_path) if pinned_path.is_file() else None
+        if hashes[f"{name}_sha256"] is not None and hashes[f"{name}_sha256"] == pinned[name]:
+            tables[name] = dict(fc.IDENTICAL, mismatches=[])
+        else:
+            tables[name] = fc.compare_tables(name, rebuilt, pinned_path)
+    verdict = "match" if all(t["verdict"] == "match" for t in tables.values()) else "mismatch"
+    return {"comparison": {"id": fc.COMPARISON_ID, "rtol": fc.FEATURES_RTOL,
+                           "atol": fc.FEATURES_ATOL},
+            "verdict": verdict,
+            "pinned_panel_sha256": pinned["panel"],
+            "pinned_tier4_sha256": pinned["tier4"],
+            "tables": tables}
+
+
+def _action_features(parameters, root, cross_check=None):
     """The Tier-3 panel and Tier-4 forecast rebuild (P6-2), wrapped as a
     supervised legacy action: ``engine.data.rebuild``'s own panel/tier4
     builders, run inside this worker's rooted staging tree
@@ -538,6 +596,12 @@ def _action_features(parameters, root):
     receipt binding the exact files a downstream ``legacy_score`` must see
     unchanged (``_check_features_current``) -- the identity
     ``nightly-features`` never had before this task.
+
+    In a snapshot plan a bound materialization root
+    (``cross_check["materialization_root"]``) makes this a cross-check
+    stage: the receipt also carries the numeric comparison of the rebuilt
+    tables against the pinned ones (``_compare_to_pinned``, see
+    ``ARCHITECTURE.md``'s "the features receipt").
     """
     from engine.data import rebuild
 
@@ -548,13 +612,17 @@ def _action_features(parameters, root):
     tier4_report = rebuild.build_tier4_table(parameters.get("tier4_since"))
     worker_progress.step_end("tier4_rebuild")
     hashes = _current_features_hashes()
-    return _write_action(root, "features.json", {
+    receipt = {
         "schema_version": "features.v1.0",
         "panel_sha256": hashes["panel_sha256"],
         "tier4_sha256": hashes["tier4_sha256"],
         "panel_rows": panel_report.get("rows"),
         "tier4_rows": tier4_report.get("rows"),
-    })
+    }
+    materialization_root = (cross_check or {}).get("materialization_root")
+    if materialization_root:
+        receipt.update(_compare_to_pinned(materialization_root, hashes))
+    return _write_action(root, "features.json", receipt)
 
 
 def _scoring_context(parameters, *, action):
@@ -600,7 +668,7 @@ def _action_score(parameters, root):
     from engine.score import Scorer, score_calendar
     from engine.v2.ops.session_resolution import resolve_effective_session
 
-    _check_features_current(root)
+    _check_features_current(root, parameters)
     worker_progress.step_start("inputs_load")
     session = resolve_effective_session(_load_finality(root), parameters["session"])
     tickers = sorted(set(parameters["tickers"]))
@@ -629,7 +697,7 @@ def _action_score(parameters, root):
         raise fail("VALIDATION_FAILED", "planned population has duplicate keys")
     observed_keys = {_population_key(row) for row in rows}
     missing = sorted(set(expected) - observed_keys)
-    unplanned = sorted(observed_keys - set(expected))
+    unplanned = _unplanned_keys(observed_keys, expected)
     if missing or unplanned:
         raise fail("VALIDATION_FAILED", "score population differs from planned inputs",
                    details={"missing": missing, "unplanned": unplanned})
@@ -690,6 +758,22 @@ def _action_score_requests(parameters, root):
                                                           "expected_population": len(requests)})
     worker_progress.step_end("write_outputs")
     return output
+
+
+def _unplanned_keys(observed_keys, expected) -> list[str]:
+    """``observed - expected``, except a ``DYN-SV`` chooser row for a planned event.
+
+    ``score_calendar`` appends that row only for events whose menu members it could rank, so a
+    plan cannot list it in advance (a listed one still has to be observed)."""
+    planned = set(expected)
+    events = {(parts[0], parts[2]) for parts in (key.split("|") for key in planned)
+              if len(parts) == 3 and parts[1] != "DYN-SV"}
+
+    def derived(key):
+        parts = key.split("|")
+        return len(parts) == 3 and parts[1] == "DYN-SV" and (parts[0], parts[2]) in events
+
+    return sorted(key for key in observed_keys - planned if not derived(key))
 
 
 def _population_key(row):
@@ -1122,8 +1206,10 @@ _FIXED_ARM_ARGS = frozenset({("--clock", "d1")})
 LEGACY_RUNNER_TIMEOUT_S = 3600
 
 
-def run_legacy_script(root, script, args=()):
+def run_legacy_script(root, script, args=(), *, declared_runtime_sources=()):
     """Run a registered legacy runner in a private root with smoke protection."""
+    import os
+
     _rooted_import(root)
     base = Path(root).resolve()
     relative = str(Path(script))
@@ -1135,7 +1221,12 @@ def run_legacy_script(root, script, args=()):
         raise fail("INVALID_REQUEST", "legacy runner may not enable ledger writes")
     import subprocess
     command = [sys.executable, "-u", str(script_path), *arguments, "--no-ledger"]
-    return subprocess.run(command, cwd=base, check=False,
+    env = dict(os.environ, INVESTING_PLAN_ROOT=str(base))
+    if declared_runtime_sources:
+        env["INVESTING_PLAN_PINNED_SOURCE"] = str(base / declared_runtime_sources[0])
+    else:
+        env.pop("INVESTING_PLAN_PINNED_SOURCE", None)
+    return subprocess.run(command, cwd=base, env=env, check=False,
                           capture_output=True, text=True, timeout=LEGACY_RUNNER_TIMEOUT_S)
 
 

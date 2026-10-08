@@ -38,6 +38,8 @@ def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(
                      {"path": "data/curated/trades/year=2024/part-0000.parquet",
                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1},
                      {"path": "data/raw/fetch/orats/ab/placeholder.meta.json",
+                      "content_hash": "sha256:" + "0" * 64, "byte_size": 1},
+                     {"path": "earnings_predictions/data/raw/oquants/moves/moves_AAA.json",
                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1}],
         "registry_and_model_refs": ["placeholder::sha256:" + "0" * 64],
         "calendar_ref": "placeholder::sha256:" + "0" * 64,

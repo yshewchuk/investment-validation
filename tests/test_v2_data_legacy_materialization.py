@@ -1444,3 +1444,205 @@ def test_evidence_scoped_materialization_keeps_exact_row_count_and_caller_limit(
         list(repository.scan(smaller, table_name="option_chains"))
     assert err.value.code == "RESULT_LIMIT_EXCEEDED"
     conn.close()
+
+
+# --------------------------------------------------------------------------
+# streaming validator: scanned_batches / assert_rows_match must accept a
+# matching multi-batch year, refuse a corrupted final batch, and keep only a
+# bounded number of rows resident per batch.
+# --------------------------------------------------------------------------
+
+
+def _row_scoped_daily_market_request(repository, snap, snapshot_object_ref, store):
+    """``_build_request``'s own request, with ``daily_market`` narrowed just
+    enough to leave the whole-table byte-copy path: a ticker predicate (both
+    real 2020 tickers) and the full-calendar coverage that keeps
+    ``_check_daily_market_covers_trades`` satisfied. The result is a real
+    scan-and-rewrite — one ``part-0000.parquet`` per year — which is what
+    exercises the Repository scan and the streaming validator at all (a
+    whole-table copy never calls either)."""
+    request = _build_request(repository, snap, snapshot_object_ref, store)
+    whole = request.table_queries["daily_market"]
+    scoped = dataclasses.replace(
+        whole,
+        key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAA", "BBB")),),
+        time_interval=TimeInterval(column=whole.time_interval.column,
+                                   start_inclusive="2020-01-01",
+                                   end_exclusive="2022-01-01"))
+    return dataclasses.replace(request, table_queries={**request.table_queries, "daily_market": scoped})
+
+
+def test_materialize_accepts_multi_batch_table_year(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+
+    monkeypatch.setattr(lm, "VALIDATION_BATCH_ROWS", 1)
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _row_scoped_daily_market_request(repository, snap, _snapshot_object_ref(store), store)
+    dest_root = tmp_path / "legacy_root"
+    manifest = materialize(repository, store, request, dest_root)
+
+    # The rewrite path writes exactly one part file per year; a byte copy of
+    # this deliberately two-fragment 2020 partition would have written two.
+    year_2020 = sorted(rel for rel in manifest
+                       if rel.startswith("data/curated/daily_market/year=2020/"))
+    assert year_2020 == ["data/curated/daily_market/year=2020/part-0000.parquet"]
+    materialized_rows = sum(pq.ParquetFile(dest_root / rel).metadata.num_rows for rel in year_2020)
+    # Two real rows (AAA and BBB) compared across one-row validation batches.
+    assert materialized_rows > lm.VALIDATION_BATCH_ROWS
+
+
+def test_curated_validation_refuses_mismatch_in_last_batch(tmp_path, monkeypatch):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from engine.v2.data.legacy_adapter import _validate_curated_table
+
+    monkeypatch.setattr(lm, "VALIDATION_BATCH_ROWS", 1)
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _row_scoped_daily_market_request(repository, snap, _snapshot_object_ref(store), store)
+    tree = lm.materialize_tree(repository, store, request, tmp_path / "legacy_root")
+
+    (path,) = tree.curated_files["daily_market"][2020]
+    table = pq.read_table(path)
+    spot = table.column("spot").to_pylist()
+    assert len(spot) == 2
+    spot[-1] += 1.0  # corrupt the final row -- the second one-row validation batch
+    spot_field = table.schema.get_field_index("spot")
+    table = table.set_column(spot_field, table.schema.field(spot_field),
+                             pa.array(spot, type=table.schema.field(spot_field).type))
+    pq.write_table(table, path)
+
+    with pytest.raises(DataError) as err:
+        _validate_curated_table(
+            repository, request.table_queries["daily_market"], "daily_market",
+            repository.table_contract(request.snapshot_ref, "daily_market"),
+            tree.curated_files["daily_market"])
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.message == "materialized value for column 'spot' disagrees with the scanned row"
+
+
+def _materialized_daily_market(tmp_path, monkeypatch):
+    monkeypatch.setattr(lm, "VALIDATION_BATCH_ROWS", 1)
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _row_scoped_daily_market_request(repository, snap, _snapshot_object_ref(store), store)
+    tree = lm.materialize_tree(repository, store, request, tmp_path / "legacy_root")
+    (path,) = tree.curated_files["daily_market"][2020]
+    return repository, request, tree, path
+
+
+def _validate_daily_market(repository, request, tree):
+    from engine.v2.data.legacy_adapter import _validate_curated_table
+
+    _validate_curated_table(
+        repository, request.table_queries["daily_market"], "daily_market",
+        repository.table_contract(request.snapshot_ref, "daily_market"),
+        tree.curated_files["daily_market"])
+
+
+def test_curated_validation_row_count_mismatch_takes_precedence_over_value_mismatch(
+        tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+
+    repository, request, tree, path = _materialized_daily_market(tmp_path, monkeypatch)
+    table = pq.read_table(path)
+    assert table.num_rows == 2
+    truncated = table.slice(0, 1)
+    spot_field = truncated.schema.get_field_index("spot")
+    spot = truncated.column("spot").to_pylist()
+    spot[0] += 1.0  # the first row ALSO disagrees; the count refusal must still win
+    import pyarrow as pa
+    truncated = truncated.set_column(
+        spot_field, truncated.schema.field(spot_field),
+        pa.array(spot, type=truncated.schema.field(spot_field).type))
+    pq.write_table(truncated, path)
+
+    with pytest.raises(DataError) as err:
+        _validate_daily_market(repository, request, tree)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.message == "materialized row count 1 != scanned row count 2"
+
+
+def test_curated_validation_missing_part_is_never_treated_as_a_match(tmp_path, monkeypatch):
+    repository, request, tree, path = _materialized_daily_market(tmp_path, monkeypatch)
+    path.unlink()
+
+    with pytest.raises(OSError):
+        _validate_daily_market(repository, request, tree)
+
+
+class _CountingBatch:
+    def __init__(self, rows, on_convert):
+        self._rows = rows
+        self._on_convert = on_convert
+
+    @property
+    def num_rows(self):
+        return len(self._rows)
+
+    def to_pylist(self):
+        self._on_convert(len(self._rows))
+        return list(self._rows)
+
+
+class _CountingBatchRepository:
+    """Arrow-like batch source recording the prepared query's own
+    ``max_batch_rows`` and the size of every batch it converts, yielding
+    bounded batches lazily (never materializing the whole row list)."""
+
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.prepared_max_batch_rows = None
+        self.batch_sizes = []
+        self.converted_batch_sizes = []
+        self.years_seen = set()
+        self.rows_consumed = 0
+
+    def scan_population_bound(self, snapshot_id, *, table_name, table_contract_ref, key_filter,
+                              time_interval):
+        return len(self.rows)
+
+    def scan(self, query, *, table_name):
+        self.prepared_max_batch_rows = query.max_batch_rows
+        for start in range(0, len(self.rows), query.max_batch_rows):
+            chunk = self.rows[start:start + query.max_batch_rows]
+            self.batch_sizes.append(len(chunk))
+            self.rows_consumed += len(chunk)
+            for row in chunk:
+                self.years_seen.add(row["year"])
+            yield _CountingBatch(chunk, self.converted_batch_sizes.append)
+
+
+def test_scanned_batches_bounds_multi_year_synthetic_source():
+    from engine.v2.contracts.data import DataQuery
+
+    columns = ("ticker", "year", "value")
+    rows = [
+        {"ticker": "AAA", "year": 2020, "value": 1},
+        {"ticker": "BBB", "year": 2020, "value": 2},
+        {"ticker": "AAA", "year": 2021, "value": 3},
+        {"ticker": "BBB", "year": 2021, "value": 4},
+        {"ticker": "CCC", "year": 2021, "value": 5},
+        {"ticker": "AAA", "year": 2022, "value": 6},
+        {"ticker": "BBB", "year": 2022, "value": 7},
+    ]
+    query = DataQuery(
+        snapshot_id="snap_synthetic",
+        table_contract_ref=contract_ref_for(contract_for("daily_market")),
+        columns=columns, key_filter=(), time_interval=None, order_by=("ticker", "year"),
+        max_batch_rows=1000, max_result_rows=1000)
+
+    counting = _CountingBatchRepository(rows)
+    materialized = _CountingBatchRepository(rows)
+    lm.assert_rows_match(lm.scanned_batches(counting, query, "daily_market", batch_rows=3),
+                         materialized.scan(dataclasses.replace(query, max_batch_rows=3),
+                                           table_name="daily_market"),
+                         columns)
+
+    assert counting.prepared_max_batch_rows == 3
+    assert counting.rows_consumed == len(rows)
+    assert len(counting.batch_sizes) > 1
+    assert counting.years_seen == {2020, 2021, 2022}
+    assert max(counting.converted_batch_sizes) <= 3

@@ -822,6 +822,7 @@ mutate = [
     "engine/v2/ops/render_inputs.py",
     "engine/v2/ops/input_bindings.py",
     "engine/v2/ops/parity.py",
+    "engine/v2/ops/features_compare.py",
     "engine/v2/ops/finality.py",
     "engine/v2/ops/decision_replay.py",
 ]
@@ -843,6 +844,7 @@ tests = [
     "tests/test_v2_ops_same_session_replan.py",
     "tests/test_v2_ops_security_gate.py",
     "tests/test_v2_serving_publication_binding.py",
+    "tests/v2/ops/test_features_numeric_compare.py",
 ]
 
 [modules.ops_effects]
