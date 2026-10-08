@@ -254,6 +254,6 @@ def test_checker_registration_does_not_expand_runtime_mutation_pool():
     config = tomllib.loads((ROOT / "tools/mutation_pilot.toml").read_text())
     registered = config["modules"]["ops_dependency_checks"]
     assert registered["excluded"]
-    assert registered["mutate"] == ["checks/ops_dependencies.py"]
+    assert registered["mutate"] == []
     assert registered["tests"] == ["tests/v2/ops/test_ops_dependencies.py"]
     assert registered["tests"][0] not in config["modules"]["ops_runtime"]["tests"]

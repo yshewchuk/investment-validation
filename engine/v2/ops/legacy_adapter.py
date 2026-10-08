@@ -15,6 +15,8 @@ from engine.data.finality import covered_tickers as _legacy_covered_tickers
 from engine.data.finality import resolve_final_session as _legacy_resolve_final_session
 from engine.data.finality import session_finality as _legacy_session_finality
 from engine.v2.foundation import safe_relative_path
+from engine.v2.foundation.score_population import population_difference
+from engine.v2.foundation.score_population import population_key as _population_key
 from engine.v2.ops import worker_progress
 from engine.v2.ops.decision_replay import score_row_id as _score_row_id
 from engine.v2.ops.errors import fail
@@ -696,8 +698,7 @@ def _action_score(parameters, root):
     if len(set(expected)) != len(expected):
         raise fail("VALIDATION_FAILED", "planned population has duplicate keys")
     observed_keys = {_population_key(row) for row in rows}
-    missing = sorted(set(expected) - observed_keys)
-    unplanned = _unplanned_keys(observed_keys, expected)
+    missing, unplanned = population_difference(expected, observed_keys)
     if missing or unplanned:
         raise fail("VALIDATION_FAILED", "score population differs from planned inputs",
                    details={"missing": missing, "unplanned": unplanned})
@@ -758,28 +759,6 @@ def _action_score_requests(parameters, root):
                                                           "expected_population": len(requests)})
     worker_progress.step_end("write_outputs")
     return output
-
-
-def _unplanned_keys(observed_keys, expected) -> list[str]:
-    """``observed - expected``, except a ``DYN-SV`` chooser row for a planned event.
-
-    ``score_calendar`` appends that row only for events whose menu members it could rank, so a
-    plan cannot list it in advance (a listed one still has to be observed)."""
-    planned = set(expected)
-    events = {(parts[0], parts[2]) for parts in (key.split("|") for key in planned)
-              if len(parts) == 3 and parts[1] != "DYN-SV"}
-
-    def derived(key):
-        parts = key.split("|")
-        return len(parts) == 3 and parts[1] == "DYN-SV" and (parts[0], parts[2]) in events
-
-    return sorted(key for key in observed_keys - planned if not derived(key))
-
-
-def _population_key(row):
-    """A2: the planned population is keyed before strike/expiry are known —
-    they only exist after scoring, so the plan cannot name them in advance."""
-    return "|".join(str(row.get(key, "")) for key in ("ticker", "strategy", "event_date"))
 
 
 def _load_action_frame(root):
