@@ -919,26 +919,26 @@ waits without submitting until its paired succeeded inputs are ready.
 ## Outputs
 
 - **`orats_daily_market_fetcher`'s rows** (`providers/orats_daily_market.py`).
-  `fetcher(unit)`'s `ticker_rows` are plain dicts keyed by the
-  `daily_market` contract's columns. A field is masked to `None` (never a
-  raw sentinel, never silently dropped) when its scaled value falls outside
-  `PLAUSIBLE_RANGES` (a local, test-verified mirror of
-  `engine.data.normalize.common.PLAUSIBLE_RANGES`), or when it is
-  `implied_move` and the scaled, in-range value is `<= 0` (ORATS's own
-  "no quote" sentinel). `mcap_usd` is `None` whenever the day's payload has
-  no market cap for that ticker; this module never looks back at other
-  sessions to fill it (the backward-looking as-of carry is
-  `engine.v2.data.incremental.merge_daily_market`'s job, documented in that
-  package's own `ARCHITECTURE.md`). None of this raises — masking is
-  normal-path behavior, not a failure (see "Failure semantics" for what
-  does raise). The paired summaries/cores fetch calls both endpoints per
-  attempt and retries once when non-empty 2xx results omit expected tickers:
-  four HTTP calls max per unit, all reserved. At exhaustion, available rows
-  return as partial; response metadata carries session date and attempt
-  evidence, while returned rows and typed missing-ticker coverage commit
-  against the raw receipt, never as complete. Empty or literal-404 stays
-  not_final under the normal retry policy; endpoint outcomes classify
-    independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
+  `fetcher(unit)` returns `ticker_rows` dicts keyed by `daily_market` columns.
+  Scaled fields outside `PLAUSIBLE_RANGES` (a test-verified local mirror of
+  `engine.data.normalize.common.PLAUSIBLE_RANGES`) become `None`, as does
+  in-range `implied_move <= 0` (ORATS's "no quote" sentinel); masking never raises.
+  Missing daily market cap stays `mcap_usd=None`; backward-looking as-of carry
+  belongs to `engine.v2.data.incremental.merge_daily_market`, not this fetcher.
+  Paired summaries/cores calls retry once for non-empty 2xx missing tickers:
+  four reserved calls maximum. Exhaustion returns available rows as partial,
+  with session/attempt metadata and typed missing-ticker coverage bound to the
+  raw receipt, never complete. Empty or literal-404 stays not_final under the
+  normal retry policy; independently classified endpoints retain credential,
+  rate-limit and not-final refusal precedence over partial.
+  `provider_response.py` owns pure `classify_response`, `OutcomeKind` and
+  frozen `AcquisitionOutcome`; `incremental_data` re-exports the same objects.
+  The ORATS edge imports that leaf directly: only stdlib and `ops.errors.fail`,
+  so importing providers/credentials no longer reaches refresh orchestration.
+  Classification validates unique nonempty requested keys, returned/empty/
+  unsupported subsets and nonnegative observed quota before returning an outcome;
+  invalid values retain `INVALID_REQUEST`. No I/O, cache, transaction, partial
+  write or retry occurs in the leaf; equal inputs give equal outcomes; retry/coverage policy remains in `incremental_data`.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
