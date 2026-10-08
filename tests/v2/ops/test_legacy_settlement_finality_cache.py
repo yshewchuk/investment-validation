@@ -58,7 +58,9 @@ def _rows(column):
 
 
 def _store_frames():
-    return _rows("date"), _rows("obs_date")
+    daily, chains = _rows("date"), _rows("obs_date")
+    chains = chains.loc[~((chains["obs_date"] == D3) & (chains["ticker"] == "E"))]
+    return daily, chains.reset_index(drop=True)
 
 
 def _entries():
@@ -103,11 +105,14 @@ def _calls():
 def test_cached_equals_per_call(counting_store):
     run = finality.cached_session_finality()
     seen = set()
+    mismatches = []
     for date, tickers in _calls():
         cached = run(date, tickers).as_dict()
         direct = finality.session_finality(date, tickers).as_dict()
         assert cached == direct, (date, tickers)
+        mismatches.append(cached["daily_share"] != cached["chain_share"])
         seen.add(cached["is_final"])
+    assert any(mismatches)
     assert seen == {True, False}
 
 
