@@ -2,11 +2,12 @@
 
 ``experiments/`` is where the EXP-101+ discipline lives (the 0-50 range
 belongs to ``earnings_predictions/`` and is never reused). Every evaluated
-spec — including grid cells and failures — lands in ``LEDGER.csv``: the
+real-run spec — including grid cells and failures — lands in ``LEDGER.csv``: the
 multiple-testing record a promotion decision cites, so the program always
 knows how many tries preceded a winner. That is the guard against the
 overfitting fifty experiments of iteration invites, and it only works if the
-ledger is append-only, which this module enforces.
+ledger is append-only, which this module enforces. Smoke/subset grid runs
+use ``record=False`` to leave this multiple-testing record unchanged.
 
 The ledger is deliberately a dumb CSV: greppable, diffable, syncable to the
 private mirror, no database. Its columns are fixed and its rows are only
@@ -272,7 +273,8 @@ ARMS_INDEX = "ARMS.md"
 
 
 def evaluate_with_grid(spec: Mapping[str, Any], trades: pd.DataFrame, run_dir: Path | str,
-                       *, ledger_path: Path | None = None, **evaluate_kwargs: Any):
+                       *, ledger_path: Path | None = None, record: bool = True,
+                       **evaluate_kwargs: Any):
     """Evaluate the primary spec, then every grid cell as a secondary arm.
 
     The primary keeps ``run_dir/REPORT.md`` and ``run_dir/figures/``; each
@@ -280,6 +282,8 @@ def evaluate_with_grid(spec: Mapping[str, Any], trades: pd.DataFrame, run_dir: P
     ``run_dir/arms/<spec_hash[:12]>/``, so no secondary can overwrite the
     headline evidence. ``run_dir/ARMS.md`` indexes the arms, marking the
     preregistered primary. Returns the primary's ``EvalResult``.
+    ``record=False`` skips all experiment-ledger appends for smoke/subset
+    runs; evaluation artifacts and preregistration checks are unchanged.
     """
     from engine.evaluate import evaluate
 
@@ -292,7 +296,8 @@ def evaluate_with_grid(spec: Mapping[str, Any], trades: pd.DataFrame, run_dir: P
     # an index from an earlier run describing arms this run did not finish.
     (run_dir / ARMS_INDEX).unlink(missing_ok=True)
     result = evaluate(spec, trades, run_dir=run_dir, **evaluate_kwargs)
-    record_evaluation(run_dir, spec, result.results, ledger_path=ledger_path)
+    if record:
+        record_evaluation(run_dir, spec, result.results, ledger_path=ledger_path)
     arms = [("primary", "preregistered primary", result)]
 
     for key, values in (spec.get("grid") or {}).items():
@@ -307,7 +312,8 @@ def evaluate_with_grid(spec: Mapping[str, Any], trades: pd.DataFrame, run_dir: P
             arm_dir = run_dir / ARMS_DIR / spec_hash(cell)[:12]
             cell_result = evaluate(cell, trades, run_dir=run_dir,
                                    report_dir=arm_dir, **evaluate_kwargs)
-            record_evaluation(run_dir, cell, cell_result.results, ledger_path=ledger_path)
+            if record:
+                record_evaluation(run_dir, cell, cell_result.results, ledger_path=ledger_path)
             arms.append(("secondary", f"{key}={value}", cell_result))
 
     lines = [f"# {spec.get('id')} — arms", "",
