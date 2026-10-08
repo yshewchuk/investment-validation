@@ -479,7 +479,7 @@ must not substitute request-supplied rows.
 | member is declared but status is not `STAGED` or no object is declared | `ModelNotReady` naming `driver_residual_pool:size`; no binding is returned |
 | object path escapes the deployment root, object is absent or unreadable, or bytes disagree with the catalog `content_hash` | `ModelNotReady` naming `driver_residual_pool:size`; no alternate object |
 | verified bytes are not a valid driver residual artifact for the `driver` slot | `ModelNotReady` naming `driver_residual_pool:size`; no partially loaded binding |
-| a complete valid staged member is loaded | the returned binding contains the verified artifact; subsequent bundle assembly consumes this binding-owned value |
+| a complete valid staged member is loaded | `ScoringReleaseBinding` exposes the verified artifact for follow-up bundle wiring |
 | resolving an unchanged release repeatedly | every call re-reads and re-verifies the member; no loader cache is retained between calls |
 | no release is staged | existing `NoCurrentRelease` behavior remains; native batch keeps its existing per-row refusal results for the unstaged path |
 
