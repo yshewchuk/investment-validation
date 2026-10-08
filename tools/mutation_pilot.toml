@@ -979,6 +979,7 @@ tests = [
     "tests/test_v2_research_reconcile_trades.py",
     "tests/test_v2_research_replay.py",
     "tests/test_v2_research_tools.py",
+    "tests/v2/research/test_experiment_no_ledger.py",
 ]
 
 [modules.contracts]
