@@ -193,9 +193,7 @@ submission path reads either edge (the rule Part 4 established for
   comparison already imports it), and it is the identical three-field
   format `engine.v2.serving.native_render.native_row_key` already derives
   for a native `ScoreRecord` (that module's own docstring: `"the native
-  twin of bridge._population_key"` — `legacy_adapter._population_key` is a
-  second, private, byte-identical copy of the same format used only for
-  `_action_score`'s own population check; this PR reuses the PUBLIC one
+  twin of bridge._population_key"` — `legacy_adapter._population_key` is a second, private, byte-identical copy of the same format used only for `_action_score`'s own population check; this PR reuses the PUBLIC one
   `decision_validation` already exports, adding no new function). Pure: no
   filesystem, no clock, and — the point of putting this here rather than
   in the composing script below — no import of `engine.v2.serving` (a
