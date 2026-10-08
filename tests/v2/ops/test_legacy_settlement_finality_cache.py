@@ -240,7 +240,8 @@ def test_score_outcomes_reads_once(ledger_root, counting_store, monkeypatch):
     assert result["deferred"] == sum(1 for final in baseline.values() if not final)
 
     outcomes = ledger.read_outcomes()
-    assert outcomes
+    assert {o["row_id"] for o in outcomes} == {
+        row_id for row_id, final in baseline.items() if final}
     assert any(o["exit_finality"]["is_final"] for o in outcomes)
     predictions = {row["row_id"]: row for row in ledger.read_predictions()}
     for outcome in outcomes:
