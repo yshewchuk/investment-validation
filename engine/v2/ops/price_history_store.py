@@ -151,6 +151,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -641,7 +642,8 @@ def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: st
 
 
 def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
-           root: Path, dry_run: bool = False, clock: Clock | None = None) -> dict:
+           root: Path, dry_run: bool = False, clock: Clock | None = None,
+           required_tickers: Iterable[str] = ()) -> dict:
     """Read both legacy sources (read-only), capture EVERY not-yet-captured
     retrieval per ticker as its own row-version event -- the px file (if any)
     AND every dated/undated Tier-1 ``history`` entry, merged into one
@@ -650,6 +652,8 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     unless ``dry_run``, commit one new snapshot generation under ``scope``
     carrying every other table's dataset version forward unchanged alongside
     price_history's fresh one. Never touches ``source_root``'s bytes.
+    ``required_tickers`` refuse ``SOURCE_NOT_FOUND``, before any write, when
+    neither the source nor the prior dataset version holds them.
 
     ``root`` (SEND-BACK 2026-09-14 item 4) is the operations root holding
     ``supervisor.lock`` -- held for the whole run, exactly as
@@ -663,13 +667,14 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     if not lock.acquire():
         raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
     try:
-        return _capture(conn, store, source_root, scope=scope, dry_run=dry_run, clock=clock)
+        return _capture(conn, store, source_root, scope=scope, dry_run=dry_run, clock=clock,
+                        required_tickers=required_tickers)
     finally:
         lock.release()
 
 
 def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
-            dry_run: bool, clock: Clock | None) -> dict:
+            dry_run: bool, clock: Clock | None, required_tickers: Iterable[str]) -> dict:
     clock = clock or SystemClock()
     source_root = Path(source_root)
     px = _px_retrievals(source_root)
@@ -681,6 +686,10 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
     prior_manifest, prior_records = repository.latest_dataset_version(PRICE_HISTORY_CONTRACT.contract_id)
     prior_by_ticker = {r.partition_key: r for r in prior_records}
     updated_records = dict(prior_by_ticker)
+    missing = sorted(set(required_tickers) - set(tickers) - set(prior_by_ticker))
+    if missing:
+        raise fail("SOURCE_NOT_FOUND", "price_history source lacks a required ticker",
+                   details={"tickers": missing})
 
     results: list[dict] = []
     all_attempts: list[dict] = []

@@ -303,7 +303,8 @@ class TestDryRun:
         document = cli.price_refresh_command(args, tmp_path / "ops")
 
         assert document["dry_run"] is True
-        assert document["counts"]["daily"] == 1
+        # AAA's event plus the always-daily native calendar ticker (SPY)
+        assert document["counts"]["daily"] == 2
         assert not (tmp_path / "ops").exists()
 
 

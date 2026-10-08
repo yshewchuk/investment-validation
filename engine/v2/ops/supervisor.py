@@ -468,17 +468,22 @@ class Service:
         self._native_score_batch_memo = memo
 
     def _report_native_score_batch_problem(self, exc):
-        """Dedup-by-(code, message) report, identical pattern to
+        """Dedup-by-(code, message, error-type) report, identical pattern to
         _report_computed_moves_problem (Cutover PR-7a)."""
-        problem = exc.problem if isinstance(exc, OpsError) else make_problem(
-            "VALIDATION_FAILED", "native_score_batch shadow reconciliation failed")
-        problem_key = (problem.code, problem.message)
+        problem = getattr(exc, "problem", None)
+        if not (hasattr(problem, "code") and hasattr(problem, "message")):
+            problem = make_problem("VALIDATION_FAILED",
+                                   "native_score_batch shadow reconciliation failed")
+        problem_key = (problem.code, problem.message, type(exc).__name__)
         if problem_key == self._last_native_score_batch_problem:
             return
         self._last_native_score_batch_problem = problem_key
+        document = to_document(problem)
         print(json.dumps({"event": "native_score_batch_reconcile_failed",
-                          "problem": {field: to_document(problem)[field]
-                                      for field in ("code", "category", "retryable", "message")}}))
+                          "error_type": type(exc).__name__,
+                          "problem": {field: document[field]
+                                      for field in ("code", "category", "retryable", "message",
+                                                    "details")}}))
 
     def _computed_moves_identity_or_none(self, now):
         """The two CHEAP checks (plain indexed ``SELECT``s, no pandas scan)

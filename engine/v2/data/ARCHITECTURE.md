@@ -484,6 +484,15 @@ Root doc §5 invariants this package is responsible for:
 - **Whole-partition rewrite, no legacy append order** — `price_history_table.py`/
   `computed_moves_table.py` each cover one ticker's whole history in one
   fragment, so a correction rewrites it rather than appending a byte.
+- **The calendar ticker is a declared `price_history` dependency.** The native
+  nightly derives its session calendar from the pinned `price_history` series of
+  `price_history_table.CALENDAR_TICKER` (`SPY`), independent of any scoring
+  scope or board universe. The source feeding capture must therefore carry it:
+  `ops price-refresh` always plans it in the daily group, and
+  `ops price-history capture` refuses `SOURCE_NOT_FOUND` (details name the
+  ticker) when neither the source nor the prior dataset version holds it, so
+  the gap surfaces at capture rather than as a failed native calendar scan
+  (`CONTRACT_MISMATCH`, no `price_history` for the ticker) in the nightly.
 - **Registered contract definitions are immutable.** `catalog.commit_snapshot`
   refuses (`IDENTITY_CONFLICT`) a changed definition under an existing
   `contract_id`; a table picks its next `contract_id`/`semantic_version` per
