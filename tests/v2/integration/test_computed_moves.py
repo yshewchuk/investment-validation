@@ -6,6 +6,7 @@ a second run must actually rebuild (the bug these tests exist for), and an
 interrupted run must resume rather than restart 2,853 network fetches.
 """
 from __future__ import annotations
+# packages: engine.v2.data
 
 import json
 
@@ -121,7 +122,9 @@ class TestOngoingMode:
 
         monkeypatch.setattr(cm.store, "read_table", read)
         monkeypatch.setattr(cm, "MIN_SCOREABLE", 1)
-        monkeypatch.setattr(cm.paths, "RAW_OQUANTS_MOVES", __import__("pathlib").Path("/nonexistent"))
+        from pathlib import Path
+
+        monkeypatch.setattr(cm.paths, "RAW_OQUANTS_MOVES", Path("/nonexistent"))
 
         everything, _ = cm.target_tickers(all_scoreable=True)
         recent, report = cm.target_tickers(all_scoreable=True, since="2026-09-01")
