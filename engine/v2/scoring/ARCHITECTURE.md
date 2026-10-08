@@ -473,8 +473,8 @@ state and carries the typed driver residual artifact on
 catalog `content_hash` before parsing; the decoded artifact must pass the
 residual artifact schema and content-hash checks before it can be returned.
 The member is optional for releases that predate this state: an absent member
-produces an empty artifact mapping. Native batch is not wired to consume this
-mapping in this release-loader slice.
+produces an empty artifact mapping. Native batch consumes verified members
+from the resolved binding when assembling release-backed bundles.
 
 | R1–R6 condition | Outcome |
 |---|---|
@@ -485,13 +485,18 @@ mapping in this release-loader slice.
 | multiple verified objects resolve to the same artifact role | `ModelNotReady` naming `driver_residual_pool:<role>`; no binding is returned |
 | a complete valid staged member is loaded | `ScoringReleaseBinding` exposes the verified artifact for follow-up bundle wiring |
 | resolving an unchanged release repeatedly | every call re-reads and re-verifies the member; no loader cache is retained between calls |
-| no release is staged | existing `NoCurrentRelease` behavior remains; native batch keeps its existing per-row refusal results for the unstaged path |
+| no release is staged | existing `NoCurrentRelease` behavior remains; no partial binding is returned |
 
 The loader is read-only: a failure returns no partial binding and writes no
-state. Follow-up requirement (not implemented in this slice): native batch
-must bind a verified pool to the scorer's `driver` slot and residual recipe.
-If a staged release has no pool, that wiring must not fall back to
-request-supplied rows; the existing unstaged-path refusal behavior remains.
+state. Native batch binds a present verified pool to the scorer's `driver`
+slot and model-residual artifact recipe, and attaches a selected verified
+payoff artifact with its causal recipe. Release-backed STR-THRU keeps the
+simulation `residual_recipe` empty: this release binding supplies no paired
+residual inputs for planned-exit simulation, so the batch does not invent a
+recipe or source rows. A missing driver-pool member is never filled from
+request-supplied rows. If no release resolves, `NoCurrentRelease` remains; a
+resolved binding missing required model roles keeps the native batch's
+existing per-row refusals.
 
 ### `nightly_source_bundle.py`
 

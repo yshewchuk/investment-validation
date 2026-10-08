@@ -23,6 +23,7 @@ import pandas as pd
 
 from engine.v2.contracts import ScoreBatch, ScoreRequest
 from engine.v2.foundation import content_hash, to_document
+from engine.v2.models.payoff_artifact import payoff_artifact_key
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.scoring.application import score_batch
 from engine.v2.scoring.identity import request_hash
@@ -258,21 +259,30 @@ def _identity_context(as_of: Any, snapshot_id: str,
 
 def _calendar_row_problem(key: BoardRequest, calendar_row: Any) -> tuple[str, str] | None:
     """``None`` if ``calendar_row`` is a well-formed mapping whose own
-    ``ticker``/``event_date``/``expiry`` are parseable and match ``key``,
-    else ``(code, fixed_detail)`` for a per-row refusal. Checked first,
-    before every other per-row check (CodeRabbit rounds 2-5, PR #66):
+    ``ticker``/``event_date``/``expiry``/``entry_date`` are parseable and
+    match ``key``, else ``(code, fixed_detail)`` for a per-row refusal.
+    Checked first, before every other per-row check (CodeRabbit rounds 2-5,
+    PR #66):
 
     - Not a mapping at all (e.g. a null ``calendar_row`` in ``events.json``)
       -- ``CALENDAR_ROW_INVALID``. Nothing upstream of this module checks
       this; calling ``.get`` on a non-mapping would otherwise raise
       ``AttributeError`` and abort the whole batch before
       ``assemble_nightly_source_bundle`` gets a chance to refuse it.
-    - An unparseable ``event_date`` or ``expiry`` -- ``CALENDAR_ROW_INVALID``.
-      ``assemble_nightly_source_bundle`` never parses either itself (it
-      copies both straight into ``context``), and this module's own
-      ``_identity_context`` parses ``expiry`` later, outside every
-      try/except in :func:`_assemble_one_event` -- an unparseable value
-      must be caught here, before that point, not there.
+    - An unparseable non-null ``event_date``/``expiry``/``entry_date`` --
+      ``CALENDAR_ROW_INVALID``. ``assemble_nightly_source_bundle`` never
+      parses ``event_date``/``expiry`` itself (it copies both straight into
+      ``context``), and this module's own ``_identity_context`` parses
+      ``expiry`` later, outside every try/except in
+      :func:`_assemble_one_event` -- an unparseable value must be caught
+      here, before that point, not there. ``entry_date`` is the causal
+      cutoff :func:`_row_cutoff` later derives from
+      :func:`validated_as_of`; validating it here with the SAME helper
+      returns the row-level ``CALENDAR_ROW_INVALID`` instead of the
+      ``INVALID_DATE`` the cutoff helper would otherwise surface. A null
+      ``entry_date`` is left to that helper's own ``MISSING_STAGED_INPUT``
+      (or to no artifact cutoff when the release carries no payoff artifact),
+      so only malformed non-null values are caught here.
     - ``ticker``/``event_date`` not matching ``key`` -- ``CALENDAR_ROW_KEY_
       MISMATCH``. Neither this module nor ``assemble_nightly_source_bundle``
       (which only checks ``panel_row`` against ``calendar_row``, never
@@ -291,11 +301,99 @@ def _calendar_row_problem(key: BoardRequest, calendar_row: Any) -> tuple[str, st
     try:
         calendar_event_date = _iso(calendar_row.get("event_date"))
         _iso(calendar_row.get("expiry"))
+        entry_date = calendar_row.get("entry_date")
+        if entry_date is not None:
+            validated_as_of(entry_date, label="calendar_row.entry_date")
     except (TypeError, ValueError):
         return "CALENDAR_ROW_INVALID", "calendar row has an unparseable date field"
     if calendar_row.get("ticker") != key.ticker or calendar_event_date != _iso(key.event_date):
         return "CALENDAR_ROW_KEY_MISMATCH", "calendar row does not match the request key"
     return None
+
+
+def _row_cutoff(as_of: Any, calendar_row: Mapping[str, Any]) -> str:
+    """One row's causal cutoff -- no later than both ``as_of`` and its entry.
+
+    Legacy's ``evidence_cutoff`` is ``min(decision date, entry date)``
+    (``tools/phase5_calibration_keys.py``); STR-THRU's decision date is
+    ``as_of``, so both are validated here exactly as the nightly bundle
+    validates ``as_of``. A malformed value raises ``NightlySourceBundleRefusal``
+    (re-wrapped per-row by the caller, like every other staged-date refusal).
+    """
+    as_of_ts = validated_as_of(as_of, label="as_of")
+    entry_ts = validated_as_of(calendar_row.get("entry_date"), label="calendar_row.entry_date")
+    return min(as_of_ts, entry_ts).date().isoformat()
+
+
+def _release_artifact_declarations(
+    binding: ScoringReleaseBinding,
+    strategy: str,
+    driver_identity: Any,
+    as_of: Any,
+    calendar_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The release-backed P5-4 SourceBundle declarations for one row.
+
+    The release is the SOLE source: the driver role's verified residual pool
+    (slot ``driver``) with its causal recipe, and the strategy's payoff
+    artifact selected by the canonical ``(strategy, fill alpha, cutoff)`` key
+    (``payoff_artifact_key``) with its ``before`` recipe. A member the release
+    does not carry leaves its declaration ABSENT -- never filled from
+    request/event/panel/Tier-4 rows. Malformed members never reach here: they
+    already refused ``resolve_release_binding`` with ``ModelNotReady``.
+    """
+    pool = binding.driver_residual_artifacts.get(driver_identity.role)
+    artifacts = binding.payoff_artifacts.get(strategy) or ()
+    if pool is None and not artifacts:
+        return {}
+    declarations: dict[str, Any] = {}
+    if pool is not None:
+        declarations["model_residual_artifacts"] = {"driver": pool}
+        declarations["model_residual_artifact_recipe"] = {"driver": {
+            "role": pool.role, "model_id": pool.model_id, "fold": pool.fold,
+            "content_hash": pool.content_hash}}
+    if artifacts:
+        cutoff = _row_cutoff(as_of, calendar_row)
+        key = payoff_artifact_key(strategy, _SHADOW_FILL_ALPHA, cutoff)
+        for artifact in artifacts:
+            if artifact.key == key:
+                declarations["payoff_artifact"] = artifact
+                declarations["payoff_artifact_recipe"] = {"before": cutoff}
+                break
+    return declarations
+
+
+def _with_release_artifacts(
+    bundle: SourceBundle,
+    *,
+    binding: ScoringReleaseBinding,
+    key: BoardRequest,
+    strategy: str,
+    driver_identity: Any,
+    as_of: Any,
+    snapshot_id: str,
+    calendar_row: Mapping[str, Any],
+    quote_max_age_sessions: Any,
+) -> SourceBundle | NativeScoreBatchRowRefusal:
+    """Declare the release-backed artifacts on a bundle, or re-wrap a refusal.
+
+    Split out of :func:`_assemble_one_event` to keep it under its line budget.
+    The cutoff's own date refusal (:func:`_row_cutoff`) is a source-bundle
+    refusal like any other and is re-wrapped with the row's key.
+    """
+    try:
+        declarations = _release_artifact_declarations(
+            binding, strategy, driver_identity, as_of, calendar_row)
+    except NightlySourceBundleRefusal as exc:
+        return NativeScoreBatchRowRefusal(
+            key, exc.code, f"nightly_source_bundle refused: {exc.code}")
+    return replace(
+        bundle, **declarations,
+        context={**bundle.context,
+                 **_identity_context(as_of, snapshot_id, calendar_row,
+                                     quote_max_age_sessions=quote_max_age_sessions)},
+        model_release=binding.model_release, frozen_inference=binding.frozen_inference,
+    )
 
 
 def _bundle_or_refusal(
@@ -393,12 +491,13 @@ def _assemble_one_event(
     if not isinstance(event_id, str) or not event_id:
         return NativeScoreBatchRowRefusal(
             key, "MISSING_STAGED_INPUT", "calendar_row missing event_id")
-    bundle = replace(
-        bundle, context={**bundle.context,
-                         **_identity_context(as_of, snapshot_id, event.calendar_row,
-                                             quote_max_age_sessions=event.quote_max_age_sessions)},
-        model_release=binding.model_release, frozen_inference=binding.frozen_inference,
-    )
+    bundle = _with_release_artifacts(
+        bundle, binding=binding, key=key, strategy=strategy,
+        driver_identity=driver_identity, as_of=as_of, snapshot_id=snapshot_id,
+        calendar_row=event.calendar_row,
+        quote_max_age_sessions=event.quote_max_age_sessions)
+    if isinstance(bundle, NativeScoreBatchRowRefusal):
+        return bundle
     try:
         native_inputs = build_native_score_inputs(bundle)
     except ValueError:
@@ -502,7 +601,7 @@ def assemble_score_batch_inputs(
     ``NightlySourceBundleRefusal`` from the per-event bundle assembly,
     ``MISSING_STAGED_INPUT`` (no ``event_id`` in the calendar row),
     ``CALENDAR_ROW_INVALID`` (``calendar_row`` is not a mapping, or its
-    ``event_date``/``expiry`` do not parse), ``CALENDAR_ROW_KEY_MISMATCH``
+    ``event_date``/``expiry``/``entry_date`` do not parse), ``CALENDAR_ROW_KEY_MISMATCH``
     (``calendar_row``'s own ``ticker``/``event_date`` does not match its
     ``NightlyEventInputs.key``) and ``NATIVE_INPUT_BUILD_FAILED`` (a
     ``ValueError`` from ``build_native_score_inputs``). Per-row assembly

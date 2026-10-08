@@ -1241,7 +1241,7 @@ Per row (collected as a refusal, never sinks the batch):
 |---|---|
 | `INVALID_KEY_FIELD` | the row's own key contains a reserved separator |
 | `MISSING_STAGED_INPUT` | the staged `calendar_row` has no non-empty string `event_id` |
-| `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its dates don't parse |
+| `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its `event_date`, `expiry`, or non-null `entry_date` does not parse |
 | `CALENDAR_ROW_KEY_MISMATCH` | the staged row's ticker/event_date disagrees with the row's own key |
 | `UNSUPPORTED_STRATEGY` | the row's strategy is outside this assembler's supported set |
 | `RELEASE_MISSING_ROLE` | no `driver:{strategy}` identity and no `_DRIVER_ROLE_ALIAS` identity (below), or no gate identity, for the strategy |
@@ -1261,7 +1261,7 @@ a newly promoted release genuinely changing the output is by design.
 
 **Feature names.** At the assembly boundary a non-empty `feature_names` is used as given and any malformed shape (`0`, `False`, `{}`, `""`, non-str element) refuses `INVALID_FEATURE_NAMES`; only `None` or an empty list/tuple derive: per row, the sorted de-duplicated union of the driver and gate `feature_order`s, minus the stage-derived gate columns (`GATE_FORECAST_COLUMNS`, `GATE_ANALOG_COLUMNS`: projecting them would suppress native derivation). A pure function of the recorded identities, so it changes with the model's inputs; the leakage denylist still applies (`LEAKED_FEATURE_NAME`).
 
-**Known gap ([#479](https://github.com/yshewchuk/investment-validation/issues/479)).** The bundle declares no driver residual pool, payoff artifact or residual recipe, so rows that pass the checks above are flagged `NO_PAYOFF_MAP` / `MISSING_MODEL_RESIDUALS`.
+For a resolved staged release containing a driver pool and a payoff artifact selected for the row, the bundle declares the verified driver residual artifact in slot `driver` and its artifact recipe, plus that payoff artifact and causal recipe from the same binding. Missing release members stay undeclared; request-supplied rows never fill them. Release-backed STR-THRU keeps an empty simulation `residual_recipe` because the binding supplies no paired residual inputs for planned-exit simulation; the batch does not invent recipe values or source rows. A malformed staged member refuses release resolution with `MODEL_NOT_READY`. A resolved binding missing required model roles retains the existing per-row refusal results above.
 
 ### Native parity (`run_native_parity_worker`, `native_parity_report.py`)
 

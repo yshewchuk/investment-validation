@@ -25,8 +25,22 @@ from engine.v2.ops.native_score_batch import (
     assemble_score_batch_inputs,
     run_native_score_batch_worker,
 )
+from engine.v2.models.frozen_state import serialize_frozen_state
+from engine.v2.models.lineage import Lineage
+from engine.v2.models.payoff_artifact import (
+    make_payoff_line_artifact,
+    serialize_payoff_artifact,
+)
+from engine.v2.models.residual_artifact import make_driver_residual_pool_artifact
 from engine.v2.scoring import native_gate_features
-from engine.v2.scoring.release_bindings import resolve_release_binding
+from engine.v2.scoring.release_bindings import ModelNotReady, resolve_release_binding
+from tests.test_v2_scoring_release_bindings import (
+    _dep_root,
+    _obj,
+    _row,
+    _write_catalog,
+    _write_object,
+)
 
 _AS_OF = "2026-01-10"
 _SNAPSHOT = "snap-1"
@@ -65,10 +79,12 @@ def _write_empty_catalog(root, release_id: str) -> None:
     (root / "phase5_release.json").write_text(json.dumps(body, sort_keys=True))
 
 
-def _stage(tmp_path, specs, release_id="r1"):
+def _stage(tmp_path, specs, release_id="r1", rows=None):
     """Stage one binding per ``(role, strategy_id, feature_order)`` spec,
     promote, and return the real, resolved ScoringReleaseBinding. Every
-    clock id is "entry-close"."""
+    clock id is "entry-close". ``rows`` (when given) becomes the release's
+    staged state catalog, so release-backed artifacts resolve like
+    production; no rows leaves it members-empty."""
     bindings = []
     artifacts = []
     release_bindings = []
@@ -112,7 +128,10 @@ def _stage(tmp_path, specs, release_id="r1"):
     deployment.stage_release(dep_root, release, inventory, payloads)
     deployment.mark_staging_succeeded(dep_root, release_id)
     deployment.promote(dep_root, release_id)
-    _write_empty_catalog(tmp_path, release_id)
+    if rows is None:
+        _write_empty_catalog(tmp_path, release_id)
+    else:
+        _write_catalog(tmp_path, release_id=release_id, rows=rows)
     return resolve_release_binding(tmp_path)
 
 
@@ -370,3 +389,140 @@ def test_direct_caller_none_or_empty_feature_names_derive(tmp_path, empty):
     assert refusals == ()
     _, native_inputs = assembled[event.key]
     assert sorted(native_inputs.features["missing_mask"]) == ["iv", "sig", "x", "zz"]
+
+
+def _staged_driver_pool(tmp_path, *, role="size", model_id="m-size-*"):
+    """A verified driver residual pool written as a real staged catalog row."""
+    artifact = make_driver_residual_pool_artifact(
+        role=role, model_id=model_id, fold=None,
+        flat_residuals=(0.1, -0.2, 0.3), buckets=None, deciles=10,
+        min_pool=2, lineage=Lineage())
+    path = _write_object(_dep_root(tmp_path), serialize_frozen_state(artifact))
+    row = _row(f"driver_residual_pool:{role}", [_obj(path, artifact.content_hash)])
+    return artifact, row
+
+
+def _staged_payoff_line(tmp_path, *, alpha=0.5, cutoff="2026-01-10"):
+    """A verified payoff line written as a real staged catalog row."""
+    artifact = make_payoff_line_artifact(
+        {"n": 2, "intercept": 0.1, "slope": 0.2, "resid_sd": 0.01, "r": 0.5,
+         "residuals": [0.01, -0.01]},
+        strategy="STR-THRU", driver="driver_prediction", alpha=alpha, cutoff=cutoff)
+    path = _write_object(_dep_root(tmp_path), serialize_payoff_artifact(artifact))
+    row = _row("payoff_line:STR-THRU", [_obj(path, artifact.content_hash)])
+    return artifact, row
+
+
+def test_release_backed_bundle_declares_driver_pool_and_payoff_artifact(tmp_path):
+    """A promoted release carrying a verified driver residual pool and payoff
+    line makes the real ``_assemble_one_event``/``build_native_score_inputs``
+    path declare all four SourceBundle fields: the pool under slot ``driver``
+    with its causal recipe, and the payoff artifact selected by the canonical
+    ``(strategy, 0.5, cutoff)`` key with its ``before`` recipe. The declared
+    identities/content are the release's own artifact objects."""
+    driver, driver_row = _staged_driver_pool(tmp_path)
+    payoff, payoff_row = _staged_payoff_line(tmp_path, cutoff="2026-01-08")
+    binding = _stage(tmp_path, [SIZE, GATE], rows=[driver_row, payoff_row])
+    event = _event_inputs(calendar_row=_calendar_row(entry_date="2026-01-08"))
+    assembled, refusals = _assemble(binding, [event])
+    assert refusals == ()
+    _, native_inputs = assembled[event.key]
+    model = native_inputs.model
+    assert model["model_residual_artifacts"] == {"driver": driver}
+    assert model["model_residual_artifact_recipe"] == {"driver": {
+        "role": "size", "model_id": "m-size-*", "fold": None,
+        "content_hash": driver.content_hash}}
+    assert model["payoff_artifact"] == payoff
+    assert model["payoff_recipe"] == {"before": "2026-01-08"}
+    assert native_inputs.simulation == {}
+
+
+def test_null_entry_date_with_pool_but_no_payoff_declares_no_cutoff(tmp_path):
+    """The payoff cutoff runs only when the resolved binding actually has
+    payoff artifacts: a release carrying a valid driver pool but no payoff
+    member assembles a row with a null ``entry_date`` (the "no entry_date"
+    case -- a key literally absent would refuse at the bundle's staged-input
+    check before the release declarations run). :func:`_row_cutoff`, which
+    would refuse a null entry date with ``MISSING_STAGED_INPUT``, and
+    ``payoff_artifact_key`` are never evaluated -- the model block declares
+    the release's pool with its recipe, nothing payoff-related, and the
+    simulation mapping stays empty."""
+    driver, driver_row = _staged_driver_pool(tmp_path)
+    binding = _stage(tmp_path, [SIZE, GATE], rows=[driver_row])
+    event = _event_inputs(calendar_row=_calendar_row(entry_date=None))
+    assembled, refusals = _assemble(binding, [event])
+    assert refusals == ()
+    _, native_inputs = assembled[event.key]
+    model = native_inputs.model
+    assert model["model_residual_artifacts"] == {"driver": driver}
+    assert model["model_residual_artifact_recipe"] == {"driver": {
+        "role": "size", "model_id": "m-size-*", "fold": None,
+        "content_hash": driver.content_hash}}
+    assert "payoff_artifact" not in model
+    assert "payoff_recipe" not in model
+    assert native_inputs.simulation == {}
+
+
+def test_release_without_artifacts_ignores_row_markers(tmp_path):
+    """The release is the sole source: a release with no driver-pool or payoff
+    member leaves every declaration absent even when the event's Tier-4 and
+    panel rows carry residual/payoff-like marker values, so request rows can
+    never populate the model block."""
+    binding = _stage(tmp_path, [SIZE, GATE])
+    event = _event_inputs(
+        tier4_row={"pred_abs_move": 0.05,
+                   "pred_abs_move_fold_start": "2026-01-01",
+                   "model_residual_artifacts": {"driver": "bogus"},
+                   "model_residual_artifact_recipe": {"driver": {"role": "size"}},
+                   "payoff_artifact": "bogus",
+                   "payoff_artifact_recipe": {"before": "2026-01-10"}},
+        panel_row={"date": "2026-01-15", "signal": 1.5,
+                   "model_residual_artifacts": {"driver": "bogus"},
+                   "payoff_artifact": "bogus"},
+    )
+    assembled, refusals = _assemble(binding, [event])
+    assert refusals == ()
+    _, native_inputs = assembled[event.key]
+    assert native_inputs.model == {}
+
+
+def test_malformed_driver_pool_refuses_model_not_ready(tmp_path):
+    """A malformed staged driver pool refuses through the real release
+    resolver with the typed ``ModelNotReady`` naming its member, before any
+    bundle is returned."""
+    junk = b"not valid json"
+    row = _row("driver_residual_pool:size",
+               [_obj(_write_object(_dep_root(tmp_path), junk), _sha(junk))])
+    with pytest.raises(ModelNotReady) as error:
+        _stage(tmp_path, [SIZE, GATE], rows=[row])
+    assert error.value.code == "MODEL_NOT_READY"
+    assert error.value.member_id == "driver_residual_pool:size"
+
+
+def test_malformed_payoff_artifact_refuses_model_not_ready(tmp_path):
+    """A malformed staged payoff member refuses through the real release
+    resolver with the typed ``ModelNotReady`` naming its member, before any
+    bundle is returned."""
+    junk = b"not valid json"
+    row = _row("payoff_line:STR-THRU",
+               [_obj(_write_object(_dep_root(tmp_path), junk), _sha(junk))])
+    with pytest.raises(ModelNotReady) as error:
+        _stage(tmp_path, [SIZE, GATE], rows=[row])
+    assert error.value.code == "MODEL_NOT_READY"
+    assert error.value.member_id == "payoff_line:STR-THRU"
+
+
+def test_malformed_entry_date_refuses_calendar_row_invalid(tmp_path):
+    """``entry_date`` is calendar date validation too: on a real release that
+    carries a driver pool and a payoff line (so the payoff causal cutoff
+    actually runs), a malformed non-null ``entry_date`` refuses the existing
+    row-level ``CALENDAR_ROW_INVALID`` from ``_calendar_row_problem`` before
+    :func:`_row_cutoff` ever sees it -- never the cutoff helper's own
+    ``INVALID_DATE`` re-wrap -- and no row is assembled."""
+    driver, driver_row = _staged_driver_pool(tmp_path)
+    payoff, payoff_row = _staged_payoff_line(tmp_path)
+    binding = _stage(tmp_path, [SIZE, GATE], rows=[driver_row, payoff_row])
+    event = _event_inputs(calendar_row=_calendar_row(entry_date="not-a-date"))
+    assembled, refusals = _assemble(binding, [event])
+    assert assembled == {}
+    assert [refusal.code for refusal in refusals] == ["CALENDAR_ROW_INVALID"]
