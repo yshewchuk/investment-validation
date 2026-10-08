@@ -186,7 +186,20 @@ evidence. See the models and data component contracts.
     path, a deleted test file, or a graph or scan failure returns the `__ALL__` sentinel and runs
     the full suite. If the selector command itself errors, the CLI exits nonzero without printing a
     selection; the workflow job fails before pytest rather than proceeding with a narrowed run.
-    The full-suite allowlist includes the operator-tool namespace. The selection rule (leaf,
+    The full-suite allowlist includes the operator-tool namespace, with one guarded
+    exception: `tools/mutation_pilot.toml` may add literal tracked Python paths to
+    existing enabled modules' `mutate`/`tests` lists. `select-tests --base-sha`
+    reads the base config blob (bounded size/time); missing, malformed or unsupported
+    config falls back to the full suite. Parsed base/head configs must preserve every
+    existing entry in order and all other fields exactly. New modules, removals,
+    duplicates, overlapping patterns, added globs, unknown fields and changes to
+    defaults, selection policy, exclusions or skips cannot use the exception.
+    Every addition must also be a changed path. Selection unions the ordinary diff
+    selection with every expanded old/new test of each affected module and the five
+    explicit tooling-reader tests listed in `_REGISTRATION_READERS`; bare tool imports
+    make relying on graph reachability alone unsafe. Other full-suite triggers and
+    the dynamic-loading fail-safe remain unchanged. Mutation-CI module selection is
+    unchanged. The selection rule (leaf,
     taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
