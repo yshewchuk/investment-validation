@@ -676,6 +676,7 @@ tests = [
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_worker_typed_failures.py",
+    "tests/v2/ops/test_orats_daily_market_gaps.py",
 ]
 
 # ops_catalog was one 12-file matrix job and exceeded the mutmut step's
