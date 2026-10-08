@@ -234,6 +234,17 @@ class _NonProblemError(Exception):
         self.problem = SimpleNamespace(code="X", message="y")
 
 
+def test_usable_tickers_skips_live_row_reconstruction_without_required_tickers(monkeypatch):
+    from engine.v2.ops import price_history_store as phs
+
+    def _boom(rows):
+        raise AssertionError("should not run")
+
+    monkeypatch.setattr(phs, "_has_live_rows", _boom)
+    assert phs._usable_tickers(frozenset(), ["AAPL"], {}, None,
+                               {"AAPL": pd.DataFrame()}) == set()
+
+
 def test_supervisor_report_ignores_a_non_problem_problem_attribute(capsys):
     holder = SimpleNamespace(_last_native_score_batch_problem=None)
     Service._report_native_score_batch_problem(holder, _NonProblemError())

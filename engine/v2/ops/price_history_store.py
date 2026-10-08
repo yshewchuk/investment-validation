@@ -686,7 +686,9 @@ def _usable_tickers(required_tickers: frozenset[str], listed: list[str],
                     stored_by_ticker: dict) -> set[str]:
     """The required tickers with at least one live row either in this run's
     captured state or in the prior dataset version."""
-    usable = {t for t in listed if _has_live_rows(stored_by_ticker[t])}
+    if not required_tickers:
+        return set()
+    usable = {t for t in required_tickers & set(listed) if _has_live_rows(stored_by_ticker[t])}
     for ticker in required_tickers - set(listed):
         record = prior_by_ticker.get(ticker)
         if record is not None and _has_live_rows(_read_fragment_rows(store, record)):
