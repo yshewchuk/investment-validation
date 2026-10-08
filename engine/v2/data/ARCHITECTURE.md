@@ -491,7 +491,8 @@ Root doc §5 invariants this package is responsible for:
   `ops price-refresh` schedules it daily (skipped only when already fetched
   that session), and `ops price-history capture` refuses `SOURCE_NOT_FOUND`
   (details name the ticker) before committing a snapshot when neither the
-  source (a parseable row) nor the prior dataset version holds it, so
+  resulting state nor the prior dataset version holds a live (non-tombstoned)
+  latest-state row for it, so
   the gap surfaces at capture rather than as a failed native calendar scan
   (`CONTRACT_MISMATCH`, no `price_history` for the ticker) in the nightly.
 - **Registered contract definitions are immutable.** `catalog.commit_snapshot`

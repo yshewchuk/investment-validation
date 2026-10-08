@@ -681,13 +681,13 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
         lock.release()
 
 
-def _usable_tickers(required_tickers: Iterable[str], listed: list[str],
+def _usable_tickers(required_tickers: frozenset[str], listed: list[str],
                     prior_by_ticker: dict, store: ArtifactStore,
                     stored_by_ticker: dict) -> set[str]:
     """The required tickers with at least one live row either in this run's
     captured state or in the prior dataset version."""
     usable = {t for t in listed if _has_live_rows(stored_by_ticker[t])}
-    for ticker in set(required_tickers) - set(listed):
+    for ticker in required_tickers - set(listed):
         record = prior_by_ticker.get(ticker)
         if record is not None and _has_live_rows(_read_fragment_rows(store, record)):
             usable.add(ticker)
@@ -696,6 +696,7 @@ def _usable_tickers(required_tickers: Iterable[str], listed: list[str],
 
 def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
             dry_run: bool, clock: Clock | None, required_tickers: Iterable[str]) -> dict:
+    required = frozenset(required_tickers)
     clock = clock or SystemClock()
     source_root = Path(source_root)
     px = _px_retrievals(source_root)
@@ -734,8 +735,8 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
             except Exception:  # noqa: BLE001 -- best-effort reporting only.
                 pass
 
-    usable = _usable_tickers(required_tickers, tickers, prior_by_ticker, store, stored_by_ticker)
-    missing = sorted(set(required_tickers) - usable)
+    usable = _usable_tickers(required, tickers, prior_by_ticker, store, stored_by_ticker)
+    missing = sorted(required - usable)
     if missing:
         raise fail("SOURCE_NOT_FOUND", "price_history source lacks a usable required ticker",
                    details={"tickers": missing})

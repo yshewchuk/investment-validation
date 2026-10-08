@@ -62,6 +62,20 @@ def test_capture_without_required_ticker_refuses_before_any_write(tmp_path):
     assert head["snapshot_id"] == base.snapshot_id  # nothing was committed
 
 
+def test_capture_required_tickers_may_be_a_one_shot_iterator(tmp_path):
+    conn, clock, store, base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=False)
+    with pytest.raises(OpsError) as exc:
+        capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
+                required_tickers=iter(("SPY",)))
+    assert exc.value.problem.code == "SOURCE_NOT_FOUND"
+    assert exc.value.problem.details == {"tickers": ["SPY"]}
+    head = conn.execute("SELECT snapshot_id FROM data_snapshot_heads WHERE scope='shadow'"
+                        ).fetchone()
+    assert head["snapshot_id"] == base.snapshot_id  # nothing was committed
+
+
 def test_capture_with_unparseable_required_ticker_source_refuses_and_commits_nothing(tmp_path):
     conn, clock, store, base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
