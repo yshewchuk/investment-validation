@@ -77,6 +77,11 @@ def counting_store(monkeypatch):
     def read(table, **kwargs):
         counter.reads.append((table, tuple(sorted(kwargs.get("years") or []))))
         frame = daily if table == "daily_market" else chains
+        years = kwargs.get("years")
+        if years is not None:
+            column = "date" if table == "daily_market" else "obs_date"
+            frame = frame[pd.to_datetime(frame[column],
+                                         errors="coerce").dt.year.isin(years)]
         columns = kwargs.get("columns")
         if columns is not None:
             frame = frame.loc[:, [c for c in columns if c in frame.columns]]
