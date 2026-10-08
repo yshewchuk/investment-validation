@@ -547,9 +547,9 @@ def score_outcomes(through=None, *, resolved_at=None, finality_fn=None) -> dict:
     # New ledger rows may settle only once the recorded exit session is final.
     # Legacy rows predate this proof and keep their historical retry behavior.
     if finality_fn is None:
-        from engine.data.finality import session_finality
+        from engine.data.finality import cached_session_finality
 
-        finality_fn = session_finality
+        finality_fn = cached_session_finality()
     finality_cache = {}
     eligible = []
     deferred = 0

@@ -30,6 +30,15 @@ Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strateg
 
 The shared typed-document decoder reports `UNSUPPORTED_VERSION` before `UNKNOWN_FIELD` when a document has both an unsupported schema version and undeclared fields. Supported versions still report `UNKNOWN_FIELD` for undeclared fields.
 
+`score_population.population_key` preserves the `ticker|strategy|event_date` identity;
+`population_difference` returns sorted missing and unplanned keys for ops scoring
+and the serving bridge. An extra `DYN-SV` key is allowed only when its exact
+ticker/date has a planned non-chooser key. Every explicit planned key, including
+`DYN-SV`, remains required. Missing scalar keys retain their original values and
+normal sort order; incomparable mixed types use type-name/string-value order.
+Only string planned keys can authorize a derived chooser. These helpers perform no I/O, caching, retries,
+transactions or writes; equal inputs yield equal differences without mutation.
+
 ## Invariants
 
 Observed-through is the source maximum and never the projected endpoint. Projection uses weekdays excluding computed annual US market holidays and documented one-off NYSE full-closure dates (2012-10-29, 2012-10-30, 2018-12-05, and 2025-01-09), and includes the first post-print session. STR-THRU/put-menu/DYN-SV exit first post-print; STR-RUNUP exits last pre-print.

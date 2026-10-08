@@ -193,8 +193,9 @@ submission path reads either edge (the rule Part 4 established for
   comparison already imports it), and it is the identical three-field
   format `engine.v2.serving.native_render.native_row_key` already derives
   for a native `ScoreRecord` (that module's own docstring: `"the native
-  twin of bridge._population_key"` — `legacy_adapter._population_key` is a second, private, byte-identical copy of the same format used only for `_action_score`'s own population check; this PR reuses the PUBLIC one
-  `decision_validation` already exports, adding no new function). Pure: no
+  twin of bridge._population_key"`; both bridge and legacy adapter now use
+  `foundation.score_population.population_key`, while parity retains
+  `decision_validation`'s existing public helper). Pure: no
   filesystem, no clock, and — the point of putting this here rather than
   in the composing script below — no import of `engine.v2.serving` (a
   layer-7.0 peer of `engine.v2.ops`, per the root doc's layer table;
@@ -241,8 +242,7 @@ submission path reads either edge (the rule Part 4 established for
   (`VALIDATION_FAILED`) rather than letting `population_key`'s own
   `.get(...)` calls raise a bare `TypeError`/`AttributeError` on a
   malformed element.
-  `population_key`, `_population_key`, and `_action_score`'s own
-  set-based check are all unchanged by this PR.
+  Parity's population validation remains independent of score-plan validation.
 - **`native_parity_report.run_native_parity_worker(parameters, root)`**
   (implemented, slice 2B(a), this PR) — the `native_parity` job kind's worker entrypoint (dispatched
   from `worker.py`, registered in `stages.py::_core_kinds`). Reads its two
@@ -577,7 +577,7 @@ consumer needing pre-advance validation. The EXACT `snapshot_id` this call verif
 request construction or registration; equality keeps that ref. Omitting the expected id preserves direct and legacy
 caller behavior.
 
-**Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`) and records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date) in the plan and `_scope_hash` exactly as a supplied file. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires its observed keys to equal the plan's population. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
+**Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`) and records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date) in the plan and `_scope_hash` exactly as a supplied file. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires every planned key to be observed under the shared score-population rule. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
 
 | Condition | Outcome |
 |---|---|
@@ -1239,7 +1239,7 @@ Per row (collected as a refusal, never sinks the batch):
 |---|---|
 | `INVALID_KEY_FIELD` | the row's own key contains a reserved separator |
 | `MISSING_STAGED_INPUT` | the staged `calendar_row` has no non-empty string `event_id` |
-| `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its dates don't parse |
+| `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its `event_date`, `expiry`, or non-null `entry_date` does not parse |
 | `CALENDAR_ROW_KEY_MISMATCH` | the staged row's ticker/event_date disagrees with the row's own key |
 | `UNSUPPORTED_STRATEGY` | the row's strategy is outside this assembler's supported set |
 | `RELEASE_MISSING_ROLE` | no `driver:{strategy}` identity and no `_DRIVER_ROLE_ALIAS` identity (below), or no gate identity, for the strategy |
@@ -1259,7 +1259,7 @@ a newly promoted release genuinely changing the output is by design.
 
 **Feature names.** At the assembly boundary a non-empty `feature_names` is used as given and any malformed shape (`0`, `False`, `{}`, `""`, non-str element) refuses `INVALID_FEATURE_NAMES`; only `None` or an empty list/tuple derive: per row, the sorted de-duplicated union of the driver and gate `feature_order`s, minus the stage-derived gate columns (`GATE_FORECAST_COLUMNS`, `GATE_ANALOG_COLUMNS`: projecting them would suppress native derivation). A pure function of the recorded identities, so it changes with the model's inputs; the leakage denylist still applies (`LEAKED_FEATURE_NAME`).
 
-**Known gap ([#479](https://github.com/yshewchuk/investment-validation/issues/479)).** The bundle declares no driver residual pool, payoff artifact or residual recipe, so rows that pass the checks above are flagged `NO_PAYOFF_MAP` / `MISSING_MODEL_RESIDUALS`.
+For a resolved staged release containing a driver pool and a payoff artifact selected for the row, the bundle declares the verified driver residual artifact in slot `driver` and its artifact recipe, plus that payoff artifact and causal recipe from the same binding. A present driver pool whose `model_id` differs from the selected driver identity is refused per row with `MODEL_NOT_READY`. Missing release members stay undeclared; request-supplied rows never fill them. Release-backed STR-THRU keeps an empty simulation `residual_recipe` because the binding supplies no paired residual inputs for planned-exit simulation; the batch does not invent recipe values or source rows. A malformed staged member refuses release resolution with `MODEL_NOT_READY`. A resolved binding missing required model roles retains the existing per-row refusal results above.
 
 ### Native parity (`run_native_parity_worker`, `native_parity_report.py`)
 
@@ -1361,7 +1361,7 @@ The finality receipt's `covered_tickers` (from `finality_coverage.json`) lists o
 | `is_final`, `daily_share`, `chain_share` and `covered` floors | unchanged (`finality.*` findings) |
 
 ## Invariants
-
+Score-plan validation shares `foundation.score_population.population_difference` with serving: only an extra `DYN-SV` key with an exact planned non-chooser ticker/date is allowed. Every planned key remains required; other differences retain `VALIDATION_FAILED` before score output.
 Enforces or is bound by, from the root doc §5: missing-input typed refusal;
 no parity-only mode (`native_parity` runs the real code, never a
 legacy-shaped branch); one shared parity comparator (`native_parity_report.py`
