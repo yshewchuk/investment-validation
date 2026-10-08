@@ -181,6 +181,9 @@ def test_rerun_from_committed_partial_state_still_succeeds_for_returned_tickers(
                if outcome.status == "present"}
     assert {"AAA", "BBB"} <= present
     assert coverage.state == "partial"
+    missing = {outcome.key.ticker for outcome in coverage.outcomes
+               if outcome.status == "missing"}
+    assert missing == {"CCC"}
     assert conn.execute(
         "SELECT COUNT(*) FROM data_daily_market_revisions WHERE ticker = 'CCC'"
     ).fetchone()[0] == 0
