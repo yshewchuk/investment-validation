@@ -76,7 +76,8 @@ load-bearing entrypoints:
   runs in production).
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
-  identity, model artifact refs, and analog/payoff/recalibration artifacts;
+  identity, model artifact refs, and analog/payoff/recalibration/driver-residual
+  artifacts;
   `resolve_production_release_binding()` is the same resolution against the
   one configured production release root
   (`engine.v2.models.deployment.production_release_root()`, config key
@@ -107,6 +108,9 @@ load-bearing entrypoints:
   `.strategy` field** (never the manifest row's declared `strategies` list),
   holding every hash-verified object of that family the release stages (a
   family can hold several per strategy, e.g. one calibration fold each).
+  `driver_residual_artifacts: Mapping[str, DriverResidualPoolArtifact]` is
+  keyed by the loaded artifact's `.role` field and empty when no driver pool
+  member is staged.
   Picking the object matching a request's own `(strategy, alpha, cutoff)`
   and mapping a binding to specific forecast-output names is the per-night
   assembler's job, not this module's.
@@ -478,6 +482,7 @@ mapping in this release-loader slice.
 | member is declared but status is not `STAGED` or no object is declared | `ModelNotReady` naming `driver_residual_pool:size`; no binding is returned |
 | object path escapes the deployment root, object is absent or unreadable, or bytes disagree with the catalog `content_hash` | `ModelNotReady` naming `driver_residual_pool:size`; no alternate object |
 | verified bytes are not a valid driver residual artifact for the `driver` slot | `ModelNotReady` naming `driver_residual_pool:size`; no partially loaded binding |
+| multiple verified objects resolve to the same artifact role | `ModelNotReady` naming `driver_residual_pool:<role>`; no binding is returned |
 | a complete valid staged member is loaded | `ScoringReleaseBinding` exposes the verified artifact for follow-up bundle wiring |
 | resolving an unchanged release repeatedly | every call re-reads and re-verifies the member; no loader cache is retained between calls |
 | no release is staged | existing `NoCurrentRelease` behavior remains; native batch keeps its existing per-row refusal results for the unstaged path |
