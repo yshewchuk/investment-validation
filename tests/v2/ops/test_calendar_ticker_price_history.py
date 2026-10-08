@@ -9,6 +9,7 @@ no network, no real market data.
 from __future__ import annotations
 
 import json
+import os
 from datetime import date
 from types import SimpleNamespace
 
@@ -23,6 +24,7 @@ from engine.v2.ops.price_history_store import capture
 from engine.v2.ops.supervisor import Service
 from tests.test_v2_ops_price_history import (
     _base_snapshot,
+    _epoch,
     _px_dir,
     _scan_price_history,
     _write_px,
@@ -173,6 +175,43 @@ def test_supervisor_report_drops_unbounded_and_nonscalar_details(capsys):
     Service._report_native_score_batch_problem(holder, boom)
     event = json.loads(capsys.readouterr().out)
     assert event["problem"]["details"] == {"ticker": "SPY", "tickers": ["SPY"]}
+
+
+def test_supervisor_report_drops_long_keys_and_non_finite_floats(capsys):
+    holder = SimpleNamespace(_last_native_score_batch_problem=None)
+    boom = data_fail("CONTRACT_MISMATCH", "m",
+                     details={"k" * 500: "v", "bad": float("nan"), "inf": float("inf"),
+                              "ok": 1.5})
+    Service._report_native_score_batch_problem(holder, boom)
+    line = capsys.readouterr().out
+    event = json.loads(line, parse_constant=lambda value: pytest.fail(
+        f"non-finite constant {value!r} in {line!r}"))
+    assert event["problem"]["details"] == {"ok": 1.5}
+    assert "NaN" not in line
+    assert "Infinity" not in line
+
+
+def test_capture_with_all_dates_tombstoned_required_ticker_refuses(tmp_path):
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=True)
+    spy_path = _px_dir(source_root) / "px_SPY.csv"
+    os.utime(spy_path, (_epoch("2024-01-01T00:00:00+00:00"),) * 2)
+    capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
+            required_tickers=("SPY",))
+
+    # A header-only px file parses as a valid, empty retrieval; a later mtime
+    # makes it a legitimate later retrieval whose diff tombstones every prior
+    # live SPY row.
+    second_root = tmp_path / "legacy_tombstoned"
+    tomb_path = _px_dir(second_root) / "px_SPY.csv"
+    tomb_path.write_bytes(b"date,close_adj,close_raw,high_raw\n")
+    os.utime(tomb_path, (_epoch("2024-06-01T00:00:00+00:00"),) * 2)
+    with pytest.raises(OpsError) as exc:
+        capture(conn, store, second_root, root=tmp_path, scope="shadow", clock=clock,
+                required_tickers=("SPY",))
+    assert exc.value.problem.code == "SOURCE_NOT_FOUND"
+    assert exc.value.problem.details == {"tickers": ["SPY"]}
 
 
 class _NonProblemError(Exception):

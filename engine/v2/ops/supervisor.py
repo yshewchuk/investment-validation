@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import re
 import sys
@@ -171,6 +172,10 @@ def _bounded_problem_details(details):
     entries, each a short scalar or a short list of short strings."""
     bounded = {}
     for key, value in list((details or {}).items())[:8]:
+        if len(str(key)) > 120:
+            continue
+        if isinstance(value, float) and not math.isfinite(value):
+            continue
         if isinstance(value, (str, int, float, bool)) and len(str(value)) <= 120:
             bounded[str(key)] = value
         elif (isinstance(value, list) and len(value) <= 8
