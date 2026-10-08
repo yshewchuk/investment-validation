@@ -1,4 +1,5 @@
 """resolve_gate_policy reads one gate's staged, hash-verified registry threshold."""
+import dataclasses
 import json
 
 import pytest
@@ -136,6 +137,21 @@ def test_hash_mismatch_raises_model_not_ready(tmp_path):
     (tmp_path / "deployment" / member.path).write_bytes(b"tampered after resolve")
     with pytest.raises(ModelNotReady) as exc:
         resolve_gate_policy(binding, tmp_path)
+    assert exc.value.member_id == "model:gate:STR-THRU"
+
+
+def test_duplicate_threshold_member_raises_model_not_ready(tmp_path):
+    binding = _stage_gate_release(tmp_path, registry_payload=_STANDARD_REGISTRY)
+    gate_binding = next(b for b in binding.model_release.bindings if b.role == "gate")
+    threshold = next(m for m in gate_binding.members if m.name == "threshold")
+    duplicated = dataclasses.replace(gate_binding, members=(*gate_binding.members, threshold))
+    release = dataclasses.replace(
+        binding.model_release,
+        bindings=tuple(duplicated if b.binding_id == gate_binding.binding_id else b
+                       for b in binding.model_release.bindings))
+    patched = dataclasses.replace(binding, model_release=release)
+    with pytest.raises(ModelNotReady) as exc:
+        resolve_gate_policy(patched, tmp_path)
     assert exc.value.member_id == "model:gate:STR-THRU"
 
 

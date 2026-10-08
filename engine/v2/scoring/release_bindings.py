@@ -218,6 +218,7 @@ def resolve_gate_policy(
     ``threshold`` member (a content-addressed copy of the model registry; the
     threshold is the registry entry whose ``id`` is the binding's
     ``model_id``). A gate binding with no ``threshold`` member is omitted. A
+    binding with more than one threshold member, a
     missing/unreadable/hash-mismatched object, an unparseable registry, no
     unique entry for the model, or a non-finite/non-numeric threshold raises
     ``ModelNotReady`` with no fallback. Read-only, no cache: see
@@ -228,10 +229,14 @@ def resolve_gate_policy(
     for key, identity in binding.model_identity.items():
         if identity.role != "gate":
             continue
-        member = next((m for m in bindings[identity.binding_id].members
-                       if m.name == "threshold"), None)
-        if member is None:
+        threshold_members = [m for m in bindings[identity.binding_id].members
+                             if m.name == "threshold"]
+        if len(threshold_members) > 1:
+            raise ModelNotReady(
+                f"model:{key}", "threshold: binding has more than one threshold member")
+        if not threshold_members:
             continue
+        member = threshold_members[0]
         member_id = f"model:{key}"
         _, payload = _read_verified_object(
             dep_root, member_id, member.name, member.path, member.content_hash)
