@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -346,3 +348,87 @@ def test_a_receipt_survives_a_json_round_trip():
     receipt = compare_records(baseline(), seed("forecast_suppressed", baseline()))
     text = json.dumps(receipt.payload(), sort_keys=True, default=str)
     assert json.loads(text)["verdict"] == DIFFER
+
+
+# Pure helper contracts shared by the synthetic controls and corpus runner.
+
+
+def test_round_params_preserves_bytes_order_and_copy_boundaries():
+    nested = {"x": [1.123456789]}
+    record = {"structure_params": {
+        "float": 1.123456789, "int": 2, "bool": True,
+        "nested": nested, "negative_zero": -0.0,
+    }, "outside": nested, "unrounded": 1.123456789}
+    original = json.dumps(record)
+    result = round_params(record)
+    assert json.dumps(result) == (
+        '{"structure_params": {"float": 1.123457, "int": 2, "bool": true, '
+        '"nested": {"x": [1.123456789]}, "negative_zero": -0.0}, '
+        '"outside": {"x": [1.123456789]}, "unrounded": 1.123456789}'
+    )
+    assert json.dumps(record) == original
+    assert result is not record
+    assert result["structure_params"] is not record["structure_params"]
+    assert result["outside"] is result["structure_params"]["nested"]
+    result["outside"]["x"].append(3)
+    assert nested == {"x": [1.123456789]}
+
+
+@pytest.mark.parametrize("params", [None, [], [1.123456789], "raw", 7])
+def test_non_dictionary_params_are_copied_without_rounding(params):
+    result = round_params({"structure_params": params})
+    assert result == {"structure_params": params}
+    if isinstance(params, list):
+        assert result["structure_params"] is not params
+
+
+def test_missing_params_and_nonfinite_floats_keep_existing_behavior():
+    assert round_params({}) == {}
+    values = {"nan": float("nan"), "pos": float("inf"), "neg": -float("inf")}
+    result = round_params({"structure_params": values})["structure_params"]
+    assert math.isnan(result["nan"])
+    assert result["pos"] == values["pos"] and result["neg"] == values["neg"]
+
+
+@pytest.mark.parametrize("record", [None, [], 1])
+def test_invalid_records_still_raise_attribute_error(record):
+    with pytest.raises(AttributeError):
+        round_params(record)
+
+
+def test_deepcopy_failure_is_not_swallowed():
+    class Uncopyable:
+        def __deepcopy__(self, memo):
+            raise RuntimeError("cannot copy")
+
+    with pytest.raises(RuntimeError, match="cannot copy"):
+        round_params({"nested": Uncopyable()})
+
+
+def test_finding_projection_preserves_order_duplicates_and_value_identity():
+    value = ["retained"]
+    first = SimpleNamespace(first_differing_stage="forecast", field_path="x", kind=value)
+    second = SimpleNamespace(first_differing_stage="analogs", field_path="y", kind="changed")
+    receipt = SimpleNamespace(findings=[second, first, first])
+    result = finding_dicts(receipt)
+    assert result == [
+        {"first_differing_stage": "analogs", "field_path": "y", "kind": "changed"},
+        {"first_differing_stage": "forecast", "field_path": "x", "kind": value},
+        {"first_differing_stage": "forecast", "field_path": "x", "kind": value},
+    ]
+    assert list(result[0]) == ["first_differing_stage", "field_path", "kind"]
+    assert result[1] is not result[2]
+    assert result[1]["kind"] is value
+    result[1]["field_path"] = "changed"
+    assert first.field_path == "x" and result[2]["field_path"] == "x"
+    assert finding_dicts(SimpleNamespace(findings=[])) == []
+
+
+@pytest.mark.parametrize("receipt,error", [
+    (None, AttributeError),
+    (SimpleNamespace(findings=None), TypeError),
+    (SimpleNamespace(findings=[SimpleNamespace(first_differing_stage="x")]), AttributeError),
+])
+def test_invalid_receipts_keep_their_errors(receipt, error):
+    with pytest.raises(error):
+        finding_dicts(receipt)
