@@ -60,8 +60,11 @@ computed by this package:
   covers every path (`_expiry()`, `has_resolvable_expiry`, and
   `_resolve_straddle_expiry` for STR-THRU/STR-RUNUP): the captured expiry is
   `expiry` if non-empty, else `post_event_expiry`, so `expiry` wins when both
-  are present. A captured expiry that is not listed refuses
-  `EXPIRY_NOT_LISTED` rather than re-selecting.
+  are present. On the listed-selection path (STR-THRU/STR-RUNUP with `strike`
+  or `expiry` missing) a captured expiry that is not listed refuses
+  `EXPIRY_NOT_LISTED` rather than re-selecting. Where selection is bypassed
+  (STR-THRU/STR-RUNUP with both `strike` and `expiry` supplied, and put-ladder
+  strategies), the captured value is used as given, unvalidated against `quotes`.
 - `quotes` — a mapping keyed by `(right, strike, expiry)` (or an equivalent
   `"right:strike:expiry"` string), each value `{"bid", "ask"}`. The contract
   domain native selects from whenever `strike`/`expiry` is missing.

@@ -60,3 +60,15 @@ def test_unlisted_post_event_expiry_refuses_instead_of_reselecting(strategy):
 @pytest.mark.parametrize("strategy", STRADDLES)
 def test_has_resolvable_expiry_true_for_post_event_expiry_only(strategy):
     assert has_resolvable_expiry(strategy, {**_BASE, "post_event_expiry": "2026-10-16"}, 100.0)
+
+
+@pytest.mark.parametrize("strategy", STRADDLES)
+def test_strike_and_expiry_both_supplied_bypass_listing_check(strategy):
+    # Documented: where selection is bypassed the captured value is used as given.
+    got = _expiries(strategy, strike=100.0, expiry="2026-10-23")
+    assert got == {"2026-10-23"}
+
+
+def test_put_ladder_captured_expiry_is_not_validated_against_quotes():
+    got = _expiries("TWIN-P", post_event_expiry="2026-10-23")
+    assert got == {"2026-10-23"}
