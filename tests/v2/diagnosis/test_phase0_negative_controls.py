@@ -26,11 +26,11 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from checks.replay_identity import FORECAST_BLOCK, SEEDED_CONTROLS, check_control  # noqa: E402
-from checks.tier0_corpus import finding_dicts, round_params  # noqa: E402
+from checks.tier0_support import finding_dicts, round_params  # noqa: E402
 from engine.v2.diagnosis import (  # noqa: E402
     AGREE,
     DIFFER,
