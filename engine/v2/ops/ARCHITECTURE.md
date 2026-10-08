@@ -110,7 +110,7 @@ The `native_parity` job kind -- `stages.py::_native_parity_kind`,
 `nightly.submit_native_parity_if_ready`/`_native_parity_identity`, and
 its tick-loop caller, `supervisor.Service._reconcile_native_parity`, are
 both real too: `Service.tick()` calls it every tick the way
-`_reconcile_native_score_batch_shadow` (`#88`) already does (its failures print `native_score_batch_reconcile_failed` with `error_type` and the typed problem's code and bounded scalar details). The
+`_reconcile_native_score_batch_shadow` (`#88`) already does (its failures print `native_score_batch_reconcile_failed` with `error_type` and the typed problem's code and bounded details: short scalars and short string lists). The
 `nightly.GRAPH` node width is doc-only (`run_shadow_nightly`'s test-only
 graph walk; no submission path reads it). Cutover
 PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`)

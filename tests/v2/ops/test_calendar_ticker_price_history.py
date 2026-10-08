@@ -251,3 +251,22 @@ def test_supervisor_report_ignores_a_non_problem_problem_attribute(capsys):
     event = json.loads(capsys.readouterr().out)
     assert event["problem"]["code"] == "VALIDATION_FAILED"
     assert event["problem"]["message"] == "native_score_batch shadow reconciliation failed"
+
+
+def test_capture_keeps_resulting_rows_only_for_required_tickers(tmp_path, monkeypatch):
+    from engine.v2.ops import price_history_store as phs
+
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=True)
+    recorded: list[set] = []
+    original = phs._usable_tickers
+
+    def _record(required_tickers, listed, prior_by_ticker, store, stored_by_ticker):
+        recorded.append(set(stored_by_ticker))
+        return original(required_tickers, listed, prior_by_ticker, store, stored_by_ticker)
+
+    monkeypatch.setattr(phs, "_usable_tickers", _record)
+    capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
+            required_tickers=("SPY",))
+    assert recorded == [{"SPY"}]

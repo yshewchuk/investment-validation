@@ -723,7 +723,8 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
         entries.extend(("tier1_fetch", e) for e in tier1.get(ticker, []))
         stored = _read_fragment_rows(store, prior_by_ticker.get(ticker))
         outcome = _capture_ticker(conn, ticker, entries, stored=stored, created_at=created_at)
-        stored_by_ticker[ticker] = outcome.stored
+        if ticker in required:
+            stored_by_ticker[ticker] = outcome.stored
         results.extend(outcome.results)
         all_attempts.extend(outcome.attempts)
         if outcome.changed and not dry_run:
