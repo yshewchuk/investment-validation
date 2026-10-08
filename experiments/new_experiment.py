@@ -67,12 +67,15 @@ RUN_TEMPLATE = '''#!/usr/bin/env python3
 """{id} — {title}.
 
 Run:  python3 experiments/{folder}/run.py
+Smoke/subset:  python3 experiments/{folder}/run.py --no-ledger
 
 Pre-registration lives in spec.yaml; engine.evaluate enforces it. The primary
-spec's OOS result is the headline; grid cells are secondary.
+spec's OOS result is the headline; grid cells are secondary. A --no-ledger
+pass still writes evaluation artifacts, but is not a real ledger-recorded run.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -96,14 +99,18 @@ def build_trades():
     raise NotImplementedError("wire the candidate trade generator here")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--no-ledger", action="store_true",
+                        help="smoke/subset run: skip experiment-ledger rows")
+    args = parser.parse_args(argv)
     spec = lib.load_spec(HERE / "spec.yaml")
     trades = build_trades()
 
     # The primary spec runs first and keeps REPORT.md; each grid cell then
     # runs as a secondary arm with its own report/figure directory under
-    # arms/ (its own ledger row too). ARMS.md indexes them all.
-    result = lib.evaluate_with_grid(spec, trades, HERE)
+    # arms/ (its own ledger row unless --no-ledger). ARMS.md indexes them all.
+    result = lib.evaluate_with_grid(spec, trades, HERE, record=not args.no_ledger)
 
     print(f"report: {{result.report_path}}")
 

@@ -113,14 +113,20 @@ evidence. See the models and data component contracts.
     experiment folder. Outputs: the primary's `REPORT.md` and `figures/` stay at
     the folder root; each secondary writes its own report and figures under
     `arms/<spec-hash prefix>/`, so no secondary can overwrite the headline
-    evidence; `ARMS.md` names the primary and links every arm. Every arm
-    appends one `ran` row to the experiment ledger and its metrics to the
-    folder's `results/`. Failure semantics: arms run sequentially and any
-    error aborts the run; `ARMS.md` is removed at the start and written only
+    evidence; `ARMS.md` names the primary and links every arm. By default
+    (`record=True`), every completed arm appends one `ran` experiment-ledger
+    row. `record=False`, exposed by the generated runner's `--no-ledger`, skips
+    all those appends without creating or changing that ledger. Reports and
+    `results/` metrics/run logs are still written; preregistration checks still
+    apply. A no-ledger smoke/subset pass is not a real ledger-recorded run.
+    Scaffolding still records its separate `planned` row. Failure semantics:
+    arms run sequentially and any error aborts the run; `ARMS.md` is removed
+    at the start and written only
     after every arm has finished, so it never indexes a partial run. Reports
     already written by completed arms stay in place until a re-run rewrites
-    them; the ledger is append-only, so a re-run keeps existing rows and adds
-    new `ran` rows. `engine.evaluate` takes an optional `report_dir` that
+    them; with recording enabled, a re-run keeps existing ledger rows and adds
+    new `ran` rows. No-ledger retries also leave the ledger unchanged.
+    `engine.evaluate` takes an optional `report_dir` that
     redirects only the report and figures, never the run log that
     preregistration reads.
   - **Mutation-testing PR module selection** (`changed_modules`, shared by
