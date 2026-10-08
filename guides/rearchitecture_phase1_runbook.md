@@ -465,12 +465,25 @@ python3 tools/bounded_run.py --heavy --cores 8 --max-rss-gb 6.5 -- \
 |---|---|
 | `MODEL_RELEASE_ROOT` comes only from the environment; persistent home `~/.config/investing-plan/nightly.env` (mode 600), loaded by the unit's `EnvironmentFile` (#461) | measured 2026-10-07 |
 | Input manifest at 100 tickers: 21k files, 3.6 GB | measured 2026-10-07 |
-| `materialize`: 6 min (100 tickers) / 42 min (1,326); peak RSS 1.5 GB | measured 2026-10-07 |
-| `legacy_finality`: 10 min / 113 min; peak RSS 0.9-1.1 GB | measured 2026-10-07 |
-| `legacy_settlement`: 18 min / 18 min, fixed by the ledger, not ticker count (#476); peak RSS 1.8 GB | measured 2026-10-07 |
-| `legacy_features`: 23 min at 100 tickers; peak RSS 5.05 GB against a 5.5 GiB profile (no 1,326 figure) | measured 2026-10-07 |
-| `engineering_gate`: seconds | measured 2026-10-07 |
+| Rebuilt-root 100-ticker run, `as_of=2026-10-01`: `legacy_materialize`, `finality`, `settlement`, `features`, `score`, `decision_replay`, `decision_evidence`, `model_evidence`, `decisions` (`decision_commit`), `engineering_gate`, `backup` succeeded | VERIFIED; individual stage success, not a completed DAG |
+| Same run: `ledger_export` failed `VALIDATION_FAILED` ("no committed decisions for this session"); render (`projection`), `selfcheck`, `publication` blocked | VERIFIED; already-decided-date boundary (§10.2) |
 | `serve --once` returns as soon as a pass has nothing running and claims nothing, so it also exits while a job is in `retry_wait` or queued behind dependencies or capacity; repeat passes until no job is queued, `retry_wait`, running or starting | measured 2026-10-07 |
+
+Latest 100-ticker stage costs are operator measurements, not capacity guarantees:
+
+| Stage | Wall time | Peak RSS |
+|---|---|---|
+| `legacy_materialize` | First build 6 min; identical-input reuse <1 min | 1.5 GB (first build) |
+| `finality` | 13 min | 0.96 GB |
+| `settlement` | 21 min; cost fixed by ledger, not ticker count (#476) | 1.8 GB |
+| `features` | 23 min | 5.1 GB; profile 5.5 GiB |
+| `score` | 7 min | 2.6 GB |
+| `decision_replay` | 2 min | 2.6 GB |
+| `decisions` (`decision_commit`) | About 1 min | Not reported |
+| `engineering_gate` | Seconds | Not reported |
+
+Earlier 1,326-ticker observations remain: materialization 42 min, finality
+113 min (0.9–1.1 GB), settlement 18 min (1.8 GB); no features measurement.
 
 ### 10.2 Failure semantics
 
@@ -481,6 +494,8 @@ python3 tools/bounded_run.py --heavy --cores 8 --max-rss-gb 6.5 -- \
 | `submit` | Blocked plan: `INVALID_REQUEST`, exit 2 | Re-submitting the same plan resolves to the same jobs |
 | `serve --once` | Exit status is not a verdict: it exits when idle, so judge success on job states (`get`, `explain`), never the exit code | Retryable failures wait in `retry_wait`; re-run `serve --once` until no job is queued, `retry_wait`, running or starting |
 | A failed non-retryable job | Cannot be re-driven; `resume` is `--dry-run` only | Fix, then create a FRESH plan (new decision clock, new job ids) and serve it from code that carries the fix |
+| Already-decided-date replay; every candidate diverges | VERIFIED: OPS-5 in `engine/v2/ops/decision_commit.py` withholds export/release intent and the decisions watermark; `ledger_export` fails, so this replay cannot finish the DAG by construction | Use a genuinely new date to avoid this collision; do not re-import history to dodge it (operator decision, 2026-10-07) |
+| Failure envelope omits raw details | By design ([operations §5.2](rearchitecture_phase1_operations.md#52-execution-and-output-protocol)): `failure_json` is not the detail store | Follow `diagnostic_ref` to the verified `diagnostics/failure_details.json` artifact (`worker.py::_write_failure_details`) |
 
 Failure signatures seen on 2026-10-07 and what they meant:
 
@@ -488,11 +503,19 @@ Failure signatures seen on 2026-10-07 and what they meant:
 |---|---|---|
 | `RESOURCE_LIMIT_EXCEEDED` | Profile too small for the stage (`materialize`) | #468 |
 | `LEASE_LOST` | No lease renewal during long pre-launch staging | #462 |
-| `FileNotFoundError` for oquants moves in `legacy_features` | Read set not captured | #473 |
-| `FEATURES_STALE` | Byte-exact Tier-4 compare in snapshot mode | #475 makes it numeric (open at time of writing) |
+| `FileNotFoundError` for moves/price inputs in `legacy_features` | Read set not captured | #473 captures moves and price inputs |
+| `FEATURES_STALE` | Byte-exact Tier-4 compare in snapshot mode | #475: numeric comparison, merged |
+| `decision_validation`: `evidence.finality.covered_tickers` / `missing_candidate` | Coverage checked against all scored tickers | #478: require candidate-ticker coverage only |
+
+VERIFIED replay evidence: `payload_hash` hashes the whole row, including
+`decision_ts`, `written_at`, `audit_receipt` and finality counts
+(`engine/v2/ledger/decisions.py::insert`). All 12 examined pairs had bit-identical
+material fields: prices, strikes, expiry, entry cost, analog statistics, leg
+quotes, model versions and settlement. Only run-environment fields and four
+score-schema keys differed. These divergences are not a native/legacy parity signal.
 
 ### 10.3 Not yet verified
 
-- Stages not yet exercised end to end on the rebuilt root: `legacy_score` onward, `native_score_batch`, `native_parity`.
-- INFERRED: native scoring refuses per row (`RELEASE_MISSING_ROLE`, `UNSUPPORTED_STRATEGY`, `GATE_POLICY_NOT_STAGED`), so the sidecars report no compared rows.
-- INFERRED: replaying an already-imported date collides with imported legacy decisions `prediction:<row_id>` in `decision_commit` (`_commit_row_or_diverge`, `engine/v2/ops/decision_commit.py`; OPS-5 guard). Rows are recorded as divergences and `ledger_export` never runs; unverified until the operator's n6 run reports. A new date, or importing history `--through` the prior day, avoids it. Do not re-import for a replay (operator decision, 2026-10-07).
+- Successful end-to-end completion of `ledger_export` onward remains unverified: export failed and its downstream stages were blocked. `native_score_batch` and `native_parity` remain unexercised.
+- INFERRED: native scoring may refuse per row (`RELEASE_MISSING_ROLE`, `UNSUPPORTED_STRATEGY`, `GATE_POLICY_NOT_STAGED`), leaving no compared rows. No compared-row result was produced by the unexercised sidecars in this run; this is an expectation, not a measured result.
+- INFERRED: a new-date run needs a legacy tree current to `as_of`, then a fresh snapshot import and price-history/computed-moves captures; this dependency chain remains unverified ([Phase 6 §4](rearchitecture_phase6_runbook.md#4-native-daily_market-refresh-timing-rehearsal-constraint)).
