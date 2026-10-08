@@ -76,6 +76,20 @@ slice 2), which labels each priced grid-position step with the same
 execution-variant string `replay()` itself uses, rather than reimplementing
 that labeling.
 
+`experiment_exits.walk_fixed_day(repository, snapshot, positions, economic_params=...)`
+accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
+economics. It reprices the held legs on every observed trading day from entry
+through entry plus the declared positive `trading_days`, using the pinned
+`daily_market` calendar and `option_chains` quotes with `_pricing.FillModel`'s
+existing alpha ladder; no projected calendar, replacement contract or mark source.
+Results are `mark_based` per-option-unit P&L with exit decision, visited dates,
+source, alpha fill convention and snapshot identity. Missing required leg marks,
+unusable quotes reaching pricing and insufficient calendar coverage raise non-retryable
+`EXPERIMENT_VARIANT_FAILED`; the whole call fails, never excludes a trade or
+returns a partial tuple (design #372 R4). Other repository refusals propagate.
+No cache, retry, transaction or write: identical inputs return identical results.
+Report/ledger publication, target/stop recipes and aggregation belong to slice 7b.
+
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
 snapshot-read helpers), `_pricing.py` (except the names carved out above),
