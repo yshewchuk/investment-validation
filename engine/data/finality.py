@@ -179,6 +179,40 @@ def session_finality(date, tickers: Iterable[str], *, frames=None) -> SessionFin
     )
 
 
+def cached_session_finality():
+    """Return a ``session_finality`` that reads each coverage window once.
+
+    For a loop over many (date, ticker) checks: same answers as calling
+    :func:`session_finality` directly, but each table's ``{year - 1, year}``
+    coverage window is read and reduced once per exit year, not once per call.
+    The reduced frame keeps only what :func:`_exact_share` uses (the distinct
+    ``(ticker, date)`` pairs), so its shares are unchanged. A failed read is
+    stored as ``None``, which makes ``session_finality`` fall back to its own
+    read exactly as before.
+    """
+    windows: dict = {}
+    sources = (("daily_market", "date"), ("option_chains", "obs_date"))
+
+    def window(table: str, column: str, stamp: pd.Timestamp):
+        key = (table, stamp.year)
+        if key not in windows:
+            frame = _coverage_frame(table, column, stamp)
+            if frame is not None and column in frame:
+                frame = frame[["ticker", column]].dropna(subset=["ticker"]).copy()
+                frame["ticker"] = frame["ticker"].astype(str)
+                frame[column] = pd.to_datetime(frame[column], errors="coerce").dt.normalize()
+                frame = frame.drop_duplicates()
+            windows[key] = frame
+        return windows[key]
+
+    def run(date, tickers: Iterable[str]) -> SessionFinality:
+        stamp = pd.Timestamp(date).normalize()
+        frames = {table: window(table, column, stamp) for table, column in sources}
+        return session_finality(date, tickers, frames=frames)
+
+    return run
+
+
 def covered_tickers(date, tickers: Iterable[str]) -> list[str]:
     """The subset of ``tickers`` individually final at ``date``.
 
