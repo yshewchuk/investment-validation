@@ -144,6 +144,13 @@ def test_omitted_guard_keeps_the_previous_blind_swap_behavior(tmp_path):
     assert len(deployment.pointer_history(tmp_path)) == 2
 
 
+def test_package_export_is_the_deployment_concurrent_promote_class():
+    from engine.v2.models import ConcurrentPromote as package_level
+
+    assert package_level is ConcurrentPromote
+    assert package_level is deployment.ConcurrentPromote
+
+
 def test_rollback_never_takes_the_expected_incumbent_guard(tmp_path):
     _staged_pair(tmp_path)
     deployment.promote(tmp_path, "r1")
