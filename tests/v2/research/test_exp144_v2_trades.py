@@ -182,6 +182,11 @@ def test_main_forces_both_membership_unbound_caches_to_recompute():
     for call in evaluations:
         files = next(kw.value for kw in call.keywords if kw.arg == "input_files")
         assert any(isinstance(item, ast.Name) and item.id == "eligible_scores_path" for item in files.elts)
+    literals = [node.value for node in ast.walk(main) if isinstance(node, ast.Constant)
+                and isinstance(node.value, str)]
+    assert literals.count("eligible_incumbent_comparison.json") == 2
+    assert "incumbent_reproduction.json" not in literals
+    assert "incumbent_reproduction" not in literals
 
 
 def test_dataset_recompute_does_not_return_a_stale_holdout_cache(tmp_path, monkeypatch):
@@ -263,8 +268,8 @@ def test_eligible_comparison_preserves_history_without_claiming_reproduction(tmp
             "snapshot_id", "holdout_as_of_month", "random_membership_version", "rolling_membership_version")}
         assert result["holdout_exclusions"] == trades.attrs["holdout_exclusions"]
         _assert_eligible_report_label(module, result, passes)
-        module.write_json(tmp_path / "comparison.json", result)
-        assert '"historical_reproduction": false' in (tmp_path / "comparison.json").read_text()
+        module.write_json(tmp_path / "eligible_incumbent_comparison.json", result)
+        assert '"historical_reproduction": false' in (tmp_path / "eligible_incumbent_comparison.json").read_text()
         result["historical_expectations"]["expected_oos_rows"] = 999
         assert spec == before
     finally:
@@ -336,3 +341,20 @@ def test_eligible_score_writer_preserves_the_registered_historical_artifact(tmp_
         assert module._load_registered_population(module.REGISTERED_POPULATION_PATH, len(ids), digest) == set(ids)
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("argument,code", [("--force", 2), ("--help", 0)])
+def test_cli_removes_ineffective_force_without_running_the_experiment(tmp_path, monkeypatch, capsys, argument, code):
+    module = _exp144()
+    module.RESULTS = tmp_path / "never-created"
+    monkeypatch.setattr(sys, "argv", ["run.py", "--holdout-as-of-month", "2024-10", argument])
+    with pytest.raises(SystemExit) as caught:
+        module.main()
+    assert caught.value.code == code
+    captured = capsys.readouterr()
+    if code:
+        assert "unrecognized arguments: --force" in captured.err
+    else:
+        assert "--force" not in captured.out
+        assert "--holdout-as-of-month" in captured.out
+    assert not module.RESULTS.exists()

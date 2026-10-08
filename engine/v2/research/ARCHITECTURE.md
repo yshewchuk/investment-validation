@@ -90,19 +90,8 @@ before returning a frame to metric/report writers. Missing/invalid context,
 an as-of month later than the current UTC month,
 unknown purposes and an entirely excluded population receive the same refusal.
 There is no date fallback, partial returned frame, report write or retry here.
-Final holdout reads are not available. Durable refusal receipts and conditional
-ledger recording are deferred to #489; final-read authority, sample-size
-assessment and side-by-side reporting are tracked in #490, #491 and #492.
-The EXP-144 runner recomputes its dataset and scores: its old caches carry no
-holdout context and cannot replace the newly filtered population.
-Its incumbent comparison describes the current eligible cohort as post-release
-selection and explicitly makes no historical-reproduction claim. It preserves
-the registered expectations as historical metadata, records loader pins and
-exclusions, and rejects scores outside the eligible trades. The separate
-historical-reproduction checks remain unchanged.
-Eligible scores use `eligible_oos_scores.parquet`, preserving the separately
-registered historical score artifact. Selection-only reports label passing
-criteria as selection comparisons and make no final holdout conclusion.
+Final holdout reads are unavailable. This read-only interface does not write
+durable refusal receipts or ledger rows.
 
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
@@ -182,7 +171,7 @@ This bounds retained unmatched rows, not total process RSS.
   outcome summary (`committed`, `outcome`, `committed_snapshot_id`,
   `emitted_revisions`) — never a rewrite of the table version the run read.
 - Every output that carries data also carries the `snapshot_id` it was
-  read from, so a report is reproducible without re-resolving anything. One
+  read from, so a report is reproducible without re-resolving anything.
   `experiment_trades.load_trades` includes its explicit snapshot and holdout
   context columns alongside the legacy-compatible trade columns.
 

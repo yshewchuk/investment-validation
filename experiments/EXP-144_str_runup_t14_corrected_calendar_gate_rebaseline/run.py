@@ -897,7 +897,6 @@ def report_sections(result, evaluations, ranks, matched, policy, cohorts, reprod
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--draws", type=int, default=4000)
-    parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-ledger", action="store_true")
     parser.add_argument("--holdout-as-of-month", required=True)
     args = parser.parse_args()
@@ -935,7 +934,7 @@ def main():
         RESULTS / "trailing_cutoffs.csv", index=False
     )
     write_json(RESULTS / "fold_diagnostics.json", diagnostics)
-    write_json(RESULTS / "incumbent_reproduction.json", reproduction)
+    write_json(RESULTS / "eligible_incumbent_comparison.json", reproduction)
 
     ranks = ranking(oos)
     matched = exact_matched(oos)
@@ -1004,7 +1003,7 @@ def main():
         seed=144, write_report=True,
         input_files=[
             eligible_scores_path,
-            RESULTS / "incumbent_reproduction.json",
+            RESULTS / "eligible_incumbent_comparison.json",
         ],
         extra_sections=lambda result: report_sections(
             result, evaluations, ranks, matched, policy,
@@ -1053,7 +1052,7 @@ def main():
     summary = {
         "spec_hash": lib.spec_hash(spec),
         "counts": counts,
-        "incumbent_reproduction": reproduction,
+        "eligible_incumbent_comparison": reproduction,
         "policy_bootstrap": policy,
         "ranking": ranks,
         "matched_selectivity": matched,
