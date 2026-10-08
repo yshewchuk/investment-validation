@@ -237,7 +237,8 @@ def test_unavailable_or_non_sha_base_fails_closed(config_repo, base):
     assert pilot.registration_base_config(base, cfg, [CONFIG]) is None
 
 
-@pytest.mark.parametrize("content", ["invalid [ toml", "#" * (1024 * 1024 + 1)])
+@pytest.mark.parametrize("content", ["invalid [ toml", "#" * (1024 * 1024 + 1)],
+                         ids=["malformed", "oversized"])
 def test_bad_or_oversized_base_blob_fails_closed(config_repo, content):
     git, path, _, cfg = config_repo
     path.write_text(content)
@@ -279,3 +280,9 @@ def test_workflow_passes_its_base_sha_and_new_test_is_registered():
     cfg = tomllib.loads((root / CONFIG).read_text())
     path = Path(__file__).relative_to(root).as_posix()
     assert any(path in mod.get("tests", []) for mod in cfg["modules"].values())
+
+
+def test_architecture_documents_both_resource_limit_fallbacks():
+    root = Path(__file__).resolve().parents[3]
+    contract = " ".join((root / "ARCHITECTURE.md").read_text().split())
+    assert "size/time limits; exceeding either limit selects the full suite" in contract

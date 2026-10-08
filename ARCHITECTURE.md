@@ -189,8 +189,9 @@ evidence. See the models and data component contracts.
     The full-suite allowlist includes the operator-tool namespace, with one guarded
     exception: `tools/mutation_pilot.toml` may add literal tracked Python paths to
     existing enabled modules' `mutate`/`tests` lists. `select-tests --base-sha`
-    reads the base config blob (bounded size/time); missing, malformed or unsupported
-    config falls back to the full suite. Parsed base/head configs must preserve every
+    reads the base config blob with size/time limits; exceeding either limit selects
+    the full suite, as does missing, malformed or unsupported config.
+    Parsed base/head configs must preserve every
     existing entry in order and all other fields exactly. New modules, removals,
     duplicates, overlapping patterns, added globs, unknown fields and changes to
     defaults, selection policy, exclusions or skips cannot use the exception.
