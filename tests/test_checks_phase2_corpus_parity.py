@@ -71,6 +71,36 @@ SNAPSHOT_HASH = "sha256:test-snapshot-0001"
 
 
 @pytest.fixture(autouse=True)
+def _executor_worker_faulthandler(monkeypatch):
+    """Enable ``PYTHONFAULTHANDLER`` in executor worker subprocesses only.
+
+    Keeping this fixture in the test module (not root conftest) avoids tainting the root-conftest
+    import graph, and executor workers build their environment from scratch,
+    so the fault handler flag must be injected at spawn time.
+    """
+    original_popen = executor.subprocess.Popen
+
+    def _is_worker_launch(args):
+        if isinstance(args, str):
+            parts = args.split()
+        elif isinstance(args, (list, tuple)):
+            parts = [str(part) for part in args]
+        else:
+            return False
+        return any(part == "-m" and parts[i + 1] == "engine.v2.ops.worker"
+                   for i, part in enumerate(parts[:-1]))
+
+    def _popen(args, *popen_args, **kwargs):
+        if _is_worker_launch(args):
+            env = kwargs.get("env")
+            if isinstance(env, dict):
+                kwargs["env"] = {**env, "PYTHONFAULTHANDLER": "1"}
+        return original_popen(args, *popen_args, **kwargs)
+
+    monkeypatch.setattr(executor.subprocess, "Popen", _popen)
+
+
+@pytest.fixture(autouse=True)
 def _bounded_admission_wait(monkeypatch):
     """The harness's own ``_run_to_terminal`` polls a real ``Service`` for up to
     1800 s per job, which is right for a real D14 run waiting its turn for

@@ -29,8 +29,7 @@ if str(REPO_ROOT) not in sys.path:
 
 # Python subprocesses that inherit the pytest environment (e.g. the nested
 # pytest runs in tests/test_suite_waits.py) enable faulthandler, so a crash
-# dumps its stack instead of dying silently. The executor's built-from-scratch
-# worker env is covered separately by _executor_worker_faulthandler below.
+# dumps its stack instead of dying silently.
 os.environ["PYTHONFAULTHANDLER"] = "1"
 
 #: Tests that need a resource GitHub Actions does not have. CI
@@ -397,42 +396,6 @@ def _isolate_experiments_ledger(tmp_path, monkeypatch):
     except Exception:
         return
     monkeypatch.setattr(lib, "LEDGER_PATH", tmp_path / "experiments" / "LEDGER.csv")
-
-
-@pytest.fixture(autouse=True)
-def _executor_worker_faulthandler(monkeypatch):
-    """Wrap the shared ``subprocess.Popen`` module binding used by the
-    executor for the duration of each test. The real executor builds its worker
-    environment from scratch (engine/v2/ops/executor.py ``launch``), so the
-    module-level ``PYTHONFAULTHANDLER`` above never reaches the worker: when
-    the command is ``-m engine.v2.ops.worker``, its explicit ``env`` mapping
-    is copied with ``PYTHONFAULTHANDLER=1`` added and passed to the original
-    ``Popen``; every non-worker command is delegated unchanged. ``monkeypatch``
-    restores the patch after each test. This fixture never launches a worker
-    or runs a job itself."""
-    original_popen = subprocess.Popen
-
-    def _is_worker_launch(args) -> bool:
-        # Only a shell command string or a list/tuple argument vector is
-        # recognized; anything else (e.g. a scalar Path-like) is not a
-        # worker launch and is passed through unchanged.
-        if isinstance(args, str):
-            parts = args.split()
-        elif isinstance(args, (list, tuple)):
-            parts = [str(part) for part in args]
-        else:
-            return False
-        return any(part == "-m" and parts[i + 1] == "engine.v2.ops.worker"
-                   for i, part in enumerate(parts[:-1]))
-
-    def _popen(args, *popen_args, **kwargs):
-        if _is_worker_launch(args) and isinstance(kwargs.get("env"), dict):
-            env = dict(kwargs["env"])
-            env["PYTHONFAULTHANDLER"] = "1"
-            kwargs["env"] = env
-        return original_popen(args, *popen_args, **kwargs)
-
-    monkeypatch.setattr(subprocess, "Popen", _popen)
 
 
 @pytest.fixture
