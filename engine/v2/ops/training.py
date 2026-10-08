@@ -50,6 +50,11 @@ class PromoteParameters:
     expected_ids: tuple[str, ...]        # always ("models_promote",)
     release_root: str
     release_id: str
+    #: Optional expected-incumbent guard forwarded to
+    #: ``deployment.promote``: when set, the worker's swap refuses
+    #: ``CONCURRENT_PROMOTE`` unless the live pointer names this release.
+    #: ``None`` keeps the unguarded behavior.
+    expected_previous_release_id: str | None = None
     input_bindings: dict[str, str] | None = None
 
 
@@ -247,13 +252,16 @@ def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategi
             "resource_class": "experiment_heavy"}
 
 
-def promote_plan(*, release_root, release_id) -> dict:
+def promote_plan(*, release_root, release_id,
+                 expected_previous_release_id=None) -> dict:
     """Build an operator-submitted ``models_promote`` plan. An empty
     ``release_root`` resolves ``engine.v2.models.deployment.
     production_deployment_root()`` (config key ``MODEL_RELEASE_ROOT``,
     one level below the value that key names -- see that function's
     docstring) here, at plan time -- a missing key is ``INVALID_REQUEST``
-    and never reaches the worker with an empty root."""
+    and never reaches the worker with an empty root. An operator may also
+    pass ``expected_previous_release_id`` (the optional expected-incumbent
+    guard); ``None`` keeps the unguarded behavior."""
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
@@ -272,7 +280,8 @@ def promote_plan(*, release_root, release_id) -> dict:
     release_root = str(Path(release_root).expanduser().resolve())
     profile = profile_named(DEFAULT_POLICY, "delivery")
     params = PromoteParameters(expected_ids=("models_promote",), release_root=release_root,
-                               release_id=release_id)
+                               release_id=release_id,
+                               expected_previous_release_id=expected_previous_release_id)
     root3 = Path(__file__).resolve().parents[3]
     return {"schema_version": "operations_plan.v1.0", "kind": "promote", "mode": "shadow",
             "effects": ["staged"], "parameters": vars(params), "input_refs": [],
@@ -431,7 +440,10 @@ def run_promote_worker(parameters, root) -> dict:
     from engine.v2.models import deployment
 
     try:
-        state = deployment.promote(Path(parameters["release_root"]), parameters["release_id"])
+        state = deployment.promote(
+            Path(parameters["release_root"]), parameters["release_id"],
+            expected_previous_release_id=parameters.get(
+                "expected_previous_release_id"))
     except deployment.DeploymentError as exc:
         raise fail("VALIDATION_FAILED", "promote refused",
                    details={"exception_class": type(exc).__name__}) from exc

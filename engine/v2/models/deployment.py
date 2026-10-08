@@ -65,6 +65,7 @@ __all__ = [
     "MODEL_RELEASE_ROOT_ENV",
     "POINTER_STATE_V1",
     "STAGED_MANIFEST_V1",
+    "ConcurrentPromote",
     "CorruptManifest",
     "DeploymentError",
     "MissingReleaseRoot",
@@ -178,6 +179,29 @@ class StagingNotSuccessful(DeploymentError):
         self.release_id = release_id
         super().__init__(f"{self.code}: {release_id} has no successful staging "
                           f"completion record")
+
+
+class ConcurrentPromote(DeploymentError):
+    """A promote's optional expected-incumbent guard refused.
+
+    Raised only when ``promote`` is given ``expected_previous_release_id``
+    and the live pointer read for that swap is absent or names a different
+    release -- another promotion already moved ``DEPLOYED`` (or nothing was
+    ever promoted). Typed and non-retryable until the operator re-reads the
+    pointer and re-issues with the observed incumbent; the refusal itself
+    never retries, never picks another target, and never writes the pointer
+    or ``history/``. The same-target no-op still wins over this guard.
+    """
+
+    code = "CONCURRENT_PROMOTE"
+
+    def __init__(self, release_id: str, expected_previous_release_id: str) -> None:
+        """Build the CONCURRENT_PROMOTE refusal, naming both ids."""
+        self.release_id = release_id
+        self.expected_previous_release_id = expected_previous_release_id
+        super().__init__(f"{self.code}: {release_id} expected incumbent "
+                          f"{expected_previous_release_id!r} deployed, but the "
+                          f"deployment pointer is absent or names another release")
 
 
 # --------------------------------------------------------------------------
@@ -816,6 +840,7 @@ def _validate_staged_target(root: Path, release_id: str) -> StagedManifest:
 def _swap_pointer(
     root: Path, release_id: str, action: str, clock: Clock,
     *, validated_manifest: StagedManifest | None = None,
+    expected_previous_release_id: str | None = None,
 ) -> PointerState:
     """Validate a staged release, then move ``DEPLOYED`` to it.
 
@@ -827,6 +852,15 @@ def _swap_pointer(
     exact ``release_id`` and ``release_hash``) before the pointer ever moves;
     a no-op if ``release_id`` is already live.
 
+    ``expected_previous_release_id`` is promote's optional expected-incumbent
+    guard (``None`` from rollback, which never takes it). When supplied, the
+    live pointer is read for this swap BEFORE ``_repair_history`` or any
+    write: an already-live target keeps the existing no-op (the guard loses
+    to idempotency even when its expected id has since gone stale), and
+    otherwise an absent pointer or one naming another release refuses
+    :class:`ConcurrentPromote` -- no retry, no alternate target, and no
+    pointer/history change, so the refusal cannot heal a crash window.
+
     ``validated_manifest`` lets a caller that already ran
     :func:`_validate_staged_target` on this exact target (rollback validates
     before repairing history) supply the verified result and skip only the
@@ -834,6 +868,12 @@ def _swap_pointer(
     """
     if validated_manifest is None:
         _validate_staged_target(root, release_id)
+    observed = current_pointer(root)
+    already_live = observed is not None and observed.release_id == release_id
+    if (expected_previous_release_id is not None and not already_live
+            and (observed is None
+                 or observed.release_id != expected_previous_release_id)):
+        raise ConcurrentPromote(release_id, expected_previous_release_id)
     _repair_history(root)
     previous = current_pointer(root)
     if previous is not None and previous.release_id == release_id:
@@ -853,7 +893,10 @@ def _swap_pointer(
     return state
 
 
-def promote(root: Path, release_id: str, *, clock: Clock = SystemClock()) -> PointerState:
+def promote(
+    root: Path, release_id: str, *, clock: Clock = SystemClock(),
+    expected_previous_release_id: str | None = None,
+) -> PointerState:
     """Atomically point ``DEPLOYED`` at ``release_id``.
 
     Refuses an unstaged release (:class:`ReleaseNotStaged`) or one staged
@@ -861,8 +904,17 @@ def promote(root: Path, release_id: str, *, clock: Clock = SystemClock()) -> Poi
     -- see :func:`restage_semantic_hash` -- and one whose staging workflow
     never published a success record for this exact release and hash
     (:class:`StagingNotSuccessful`), see :func:`mark_staging_succeeded`.
+
+    ``expected_previous_release_id`` is the optional expected-incumbent
+    guard for callers promoting from a known incumbent: when supplied, the
+    pointer read for this swap must name that release, or the swap refuses
+    :class:`ConcurrentPromote` before any pointer/history write (an omitted
+    guard keeps the existing behavior exactly; a request for the already
+    live ``release_id`` stays the existing no-op even with a stale expected
+    id). This is an optimistic check on one read, not a cross-process lock.
     """
-    return _swap_pointer(Path(root), release_id, "promote", clock)
+    return _swap_pointer(Path(root), release_id, "promote", clock,
+                         expected_previous_release_id=expected_previous_release_id)
 
 
 def _rollback_target(root: Path) -> str:

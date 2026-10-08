@@ -200,6 +200,10 @@ def _add_operator_plan_arguments(plan):
     plan.add_argument("--ticker-chunk", type=int, default=1000)
     plan.add_argument("--release-root", default="")
     plan.add_argument("--release-id", default="")
+    plan.add_argument("--expected-previous-release-id", default=argparse.SUPPRESS,
+                      help="optional expected-incumbent guard for promote: the plan's "
+                           "worker refuses CONCURRENT_PROMOTE unless the live DEPLOYED "
+                           "pointer names this release; omit for the unguarded behavior")
 
 
 def _add_reconcile_command(commands):
@@ -551,7 +555,9 @@ def _plan_command(args, root, conn, clock):
                              manifest_ref=_read_input_manifest_ref(args, root, conn, clock, nightly=False))
     elif args.kind == "promote":
         from engine.v2.ops.training import promote_plan
-        plan = promote_plan(release_root=args.release_root, release_id=args.release_id)
+        plan = promote_plan(release_root=args.release_root, release_id=args.release_id,
+                            expected_previous_release_id=getattr(
+                                args, "expected_previous_release_id", "") or None)
     else:
         from engine.v2.ops.experiments import experiment_plan
         if args.no_ledger and args.activate_ledger:
