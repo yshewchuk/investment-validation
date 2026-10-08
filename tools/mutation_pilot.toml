@@ -278,6 +278,8 @@ mutate = [
     "engine/v2/parity/tolerance.py",
 ]
 tests = [
+    "tests/v2/diagnosis/test_phase0_negative_controls.py",
+    "tests/v2/integration/test_tier0_support.py",
     "tests/test_baseline_export.py",
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_ops_foundation.py",
@@ -905,6 +907,7 @@ mutate = [
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/forward_calendar_store.py",
     "engine/v2/ops/incremental_data.py",
+    "engine/v2/ops/provider_response.py",
     "engine/v2/ops/training.py",
     "engine/v2/ops/unit_receipts.py",
     "engine/v2/ops/computed_moves_store.py",
@@ -912,6 +915,8 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_provider_response.py",
+    "tests/v2/ops/test_provider_response_boundary.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",

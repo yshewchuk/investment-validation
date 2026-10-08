@@ -67,7 +67,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from checks.tier0_corpus import DEFAULT_CORPUS
+from checks.tier0_support import DEFAULT_CORPUS
 from engine.v2.contracts.data import (
     DependencyPlan,
     ObjectRef,

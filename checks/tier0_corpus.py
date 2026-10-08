@@ -77,6 +77,7 @@ from checks.replay_identity import (  # noqa: E402
     check_control,
     pick_seed_targets,
 )
+from checks.tier0_support import DEFAULT_CORPUS, finding_dicts, round_params  # noqa: E402,F401
 from engine.v2.diagnosis import (  # noqa: E402
     AGREE,
     DIFFER,
@@ -95,8 +96,6 @@ __all__ = ["Corpus", "load", "run", "main", "derive_covers", "seeded_controls",
            "SHARED_REF_KEY", "SHARED_DOCUMENT_SCHEMA_VERSION",
            "ROWS_REF_KEY", "SHARED_TRANSLATION_TABLE_SCHEMA_VERSION",
            "Progress", "NO_PROGRESS"]
-
-DEFAULT_CORPUS = ROOT / "fixtures" / "tier0"
 
 #: §7.3: total runtime under ten seconds, network disabled.
 TIME_BUDGET_SECONDS = 10.0
@@ -1391,16 +1390,6 @@ def _nudged(value: float) -> float:
     return value + max(abs(value) * 1e-3, 1e-9)
 
 
-def round_params(record: dict) -> dict:
-    """``structure_params`` rounded to six places — the `json_safe` defect."""
-    out = copy.deepcopy(record)
-    params = out.get("structure_params")
-    if isinstance(params, dict):
-        out["structure_params"] = {k: round(v, 6) if isinstance(v, float) else v
-                                   for k, v in params.items()}
-    return out
-
-
 def _seeded_record(cause: str | None, record: dict) -> dict:
     """The frozen record as the seeded defect leaves it at its first stage."""
     out = copy.deepcopy(record)
@@ -1411,12 +1400,6 @@ def _seeded_record(cause: str | None, record: dict) -> dict:
     elif cause == "replay_input_rounded":
         out = round_params(out)
     return out
-
-
-def finding_dicts(receipt: ComparisonReceipt) -> list[dict]:
-    return [{"first_differing_stage": f.first_differing_stage,
-             "field_path": f.field_path, "kind": f.kind}
-            for f in receipt.findings]
 
 
 def _seed_pair(fid: str, payload: dict, cause: str | None) -> tuple[ComparisonReceipt, ComparisonReceipt]:
