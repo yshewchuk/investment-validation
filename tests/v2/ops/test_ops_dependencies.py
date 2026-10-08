@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -33,7 +34,9 @@ def sources(**modules):
 
 def git(root, *args):
     return subprocess.run(["git", "-C", str(root), *args], check=True,
-                          capture_output=True, text=True).stdout.strip()
+                          capture_output=True, text=True,
+                          env={key: value for key, value in os.environ.items()
+                               if not key.startswith("GIT_")}).stdout.strip()
 
 
 def repository(root, files, rules, *, bootstrap=False):
@@ -154,6 +157,21 @@ def test_git_environment_cannot_redirect_repository(tmp_path, monkeypatch, boots
     assert ops.check_repository(intended, base) == []
 
 
+def test_git_fixture_setup_ignores_inherited_environment(tmp_path, monkeypatch):
+    intended, other = tmp_path / "intended", tmp_path / "other"
+    intended.mkdir()
+    other.mkdir()
+    original = repository(other, sources(other=""), policy({"core": ["other"]}))
+    for name, value in {"GIT_DIR": other / ".git", "GIT_WORK_TREE": other,
+                        "GIT_INDEX_FILE": other / ".git/index",
+                        "GIT_OBJECT_DIRECTORY": other / ".git/objects"}.items():
+        monkeypatch.setenv(name, str(value))
+    repository(intended, sources(a=""), policy({"core": ["a"]}))
+    assert git(other, "rev-parse", "HEAD") == original
+    assert ops.SOURCE + "a.py" in git(intended, "ls-files").splitlines()
+    assert ops.SOURCE + "a.py" not in git(other, "ls-files").splitlines()
+
+
 @pytest.mark.parametrize("bootstrap", [False, True])
 def test_real_git_path_rejects_new_violation_even_if_added_to_policy(tmp_path, bootstrap):
     rules = policy({"core": ["low"], "runtime": ["high"]})
@@ -207,6 +225,23 @@ def test_real_tree_matches_enumerated_findings_and_layer_ci_entrypoint():
     result = subprocess.run([sys.executable, "checks/import_layers.py", "--all"], cwd=ROOT,
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_layer_cli_rejects_planted_ops_violation(tmp_path):
+    files = {name.replace(".", "/") + "/__init__.py": b""
+             for name in [*layers.CONTAINERS, *(p.dotted for p in layers.PACKAGES)]}
+    files.update(sources(low="", high=""))
+    rules = policy({"entry": [""], "core": ["low"], "runtime": ["high"]})
+    base = repository(tmp_path, files, rules)
+    command = [sys.executable, str(ROOT / "checks/import_layers.py"),
+               "--repo-root", str(tmp_path), "--all", "--base-ref", base]
+    valid = subprocess.run(command, capture_output=True, text=True)
+    assert valid.returncode == 0, valid.stdout + valid.stderr
+    (tmp_path / ops.SOURCE / "low.py").write_text("def lazy():\n    from . import high\n")
+    invalid = subprocess.run(command, capture_output=True, text=True)
+    assert invalid.returncode == 1, invalid.stdout + invalid.stderr
+    assert "[ops-dependency]" in invalid.stderr
+    assert "ops forbidden: new: low -> high" in invalid.stderr
 
 
 def test_external_layers_and_dynamic_import_restriction_remain():
