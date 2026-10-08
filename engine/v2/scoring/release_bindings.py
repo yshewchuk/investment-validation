@@ -319,7 +319,13 @@ def _read_verified_object(dep_root: Path, member_id: str, name: str, path: str,
     internally -- this helper is only for model-binding members, which have
     no dedicated loader.)"""
     base = dep_root.resolve()
-    target = (base / path).resolve()
+    try:
+        target = (base / path).resolve()
+    except ValueError as exc:
+        # A path with an embedded NUL (or another path resolve() rejects)
+        # raises a bare ValueError, never an OSError; translate it to the
+        # same fixed, path-free refusal instead of echoing the supplied path.
+        raise ModelNotReady(member_id, f"{name}: object path is invalid") from exc
     try:
         target.relative_to(base)
     except ValueError:

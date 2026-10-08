@@ -111,6 +111,26 @@ def test_object_path_escape_refuses(tmp_path):
     _assert_no_leak(tmp_path, error.value)
 
 
+def test_object_path_with_embedded_nul_refuses(tmp_path):
+    """A hash-valid catalog member whose object path contains an embedded NUL
+    byte makes the real ``Path.resolve`` raise a ``ValueError``; the resolver
+    translates that to the exact path-free ``ModelNotReady`` naming the
+    member, chaining the original ``ValueError`` and writing no file at the
+    invalid path. The escape refusal for a resolved path stays separate."""
+    _stage_and_promote(tmp_path)
+    artifact, _payload = _driver()
+    _write_catalog(tmp_path, rows=[_row(
+        _MEMBER, [_obj("objects/\x00artifact", artifact.content_hash)])])
+
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+
+    assert error.value.member_id == _MEMBER
+    assert error.value.detail == "driver residual pool: object path is invalid"
+    assert isinstance(error.value.__cause__, ValueError)
+    _assert_no_leak(tmp_path, error.value)
+
+
 def test_absent_object_refuses(tmp_path):
     _stage_and_promote(tmp_path)
     missing = "objects/" + "0" * 64
