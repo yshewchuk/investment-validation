@@ -153,6 +153,12 @@ ceiling, while a larger population retains the lookup limit.
 | Idempotency | `release_id` derives from content and index writes are `INSERT OR IGNORE`: a repeated candidate writes no new rows. |
 
 ## Invariants
+Score population validation uses `foundation.score_population.population_difference`,
+the same rule as ops scoring: an extra `DYN-SV` chooser row is allowed only for
+an exact ticker/date with a planned non-chooser key. Explicit planned keys remain
+required (`PLANNED_ROW_MISSING`); other extras retain `SCORED_ROW_UNPLANNED` and
+`build_candidate` refuses `PROJECTION_REFUSED`. This exception changes no other
+bridge finding, row matching or release-publication rule.
 Reject new application markup, inline DOM scripts and page builders here; hosting
 built assets is transport. Keep saved financial values, clocks and provenance;
 saved replay evidence does not imply current nightly/full-population qualification.
