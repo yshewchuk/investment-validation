@@ -1729,6 +1729,7 @@ _REGISTRATION_CONFIG = "tools/mutation_pilot.toml"
 _REGISTRATION_READERS = {
     "tests/test_mutation_ci.py", "tests/test_gremlin_ci.py", "tests/test_gremlins_ci.py",
     "tests/test_mutation_results.py", "tests/test_checks_mutation_ratchet.py",
+    "tests/v2/integration/test_mutation_registration_selection.py",
 }
 _REGISTRATION_FIELDS = {
     "defaults": {"timeout_constant", "timeout_multiplier", "max_children",

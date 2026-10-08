@@ -197,7 +197,8 @@ evidence. See the models and data component contracts.
     defaults, selection policy, exclusions or skips cannot use the exception.
     Every addition must also be a changed path. Selection unions the ordinary diff
     selection with every expanded old/new test of each affected module and the five
-    explicit tooling-reader tests listed in `_REGISTRATION_READERS`; bare tool imports
+    existing tooling-reader tests plus the selector's integration regression listed
+    in `_REGISTRATION_READERS`; bare tool imports
     make relying on graph reachability alone unsafe. Other full-suite triggers and
     the dynamic-loading fail-safe remain unchanged. Mutation-CI module selection is
     unchanged. The selection rule (leaf,

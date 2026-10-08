@@ -19,6 +19,7 @@ CONFIG = "tools/mutation_pilot.toml"
 READERS = {
     "tests/test_mutation_ci.py", "tests/test_gremlin_ci.py", "tests/test_gremlins_ci.py",
     "tests/test_mutation_results.py", "tests/test_checks_mutation_ratchet.py",
+    "tests/v2/integration/test_mutation_registration_selection.py",
 }
 BASE = '''
 [defaults]
@@ -86,6 +87,14 @@ def test_multiple_modules_and_insertions_preserve_all_old_tests(case):
     cfg["modules"]["beta"]["tests"].append("tests/test_unrelated.py")
     changed.append("tests/test_unrelated.py")
     assert {"tests/test_beta.py", "tests/test_unrelated.py"} <= set(selected(case))
+
+
+def test_noncanonical_test_only_registration_retains_selector_regressions(case):
+    base, cfg, changed, graph = case
+    cfg["modules"]["alpha"] = copy.deepcopy(base["modules"]["alpha"])
+    cfg["modules"]["beta"]["tests"].append("tests/test_new.py")
+    changed.remove("engine/new.py")
+    assert "tests/v2/integration/test_mutation_registration_selection.py" in selected(case)
 
 
 def test_source_fail_safe_and_test_only_leaf_behavior_survive(case):
