@@ -1243,7 +1243,7 @@ def module_dependency_closure(cfg: dict, name: str, graph: dict[str, set[str]],
     The walk follows REAL edges only -- `graph.precise` when `graph` is a
     real `_ImportGraph` from `build_import_graph` (every production call
     site). This recovers a DYNAMIC file's genuine, statically-resolvable
-    imports (e.g. `tests/test_v2_ops_foundation.py` is individually DYNAMIC
+    imports (e.g. `tests/test_dynamic.py` can be individually DYNAMIC
     yet has a plain `from engine.v2 import foundation` -- the closure must
     still reach `engine.v2.foundation` through it) while never treating a
     DYNAMIC file's catch-all edge (`tracked_set - {rel}`, "this file might

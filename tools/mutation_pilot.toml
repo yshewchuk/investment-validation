@@ -154,12 +154,12 @@ copy = ["."]
 [modules.no_fit]
 why = "One process-wide flag decides whether a legacy fit/train/cache-write may run during scoring; a flipped default or restore silently re-enables fitting in serving."
 mutate = ["engine/models/no_fit.py", "engine/v2/models/no_fit.py"]
-tests = ["tests/test_v2_models_no_fit.py", "tests/test_v2_models_no_fit_native.py"]
+tests = ["tests/v2/models/test_v2_models_no_fit.py", "tests/test_v2_models_no_fit_native.py"]
 
 [modules.canonical]
 why = "Every receipt, artifact and corpus identity is a content_hash over canonical_json; a number-layout or key-order slip re-keys everything or collides two different values."
 mutate = ["engine/v2/foundation/canonical.py"]
-tests = ["tests/test_v2_ops_foundation.py", "tests/test_v2_data_contracts.py",
+tests = ["tests/v2/foundation/test_v2_ops_foundation.py", "tests/test_v2_data_contracts.py",
          "tests/v2/integration/test_mutation_registration_selection.py"]
 
 [modules.frozen_artifacts]
@@ -242,7 +242,7 @@ tests = [
     "tests/test_v2_ops_contracts.py",
     "tests/test_v2_ops_decision_validation_order.py",
     "tests/test_v2_ops_effects_backup.py",
-    "tests/test_v2_ops_foundation.py",
+    "tests/v2/foundation/test_v2_ops_foundation.py",
     "tests/test_v2_scoring_stage_observer.py",
     "tests/test_v2_serving_bridge.py",
 ]
@@ -285,7 +285,7 @@ tests = [
     "tests/v2/integration/test_tier0_support.py",
     "tests/test_baseline_export.py",
     "tests/test_diagnosis_comparator.py",
-    "tests/test_v2_ops_foundation.py",
+    "tests/v2/foundation/test_v2_ops_foundation.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
 ]
@@ -424,6 +424,7 @@ tests = [
     "tests/test_v2_models_residual_artifact.py",
     "tests/test_v2_models_training_payoff.py",
     "tests/test_v2_models_training_recipes.py",
+    "tests/v2/models/training/test_v2_models_training_recipe_fields.py",
     "tests/test_v2_scoring_frozen_residuals.py",
     "tests/test_v2_scoring_native_payoff.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
@@ -451,7 +452,7 @@ tests = [
     "tests/test_v2_models_inference.py",
     "tests/test_v2_models_inventory.py",
     "tests/test_v2_models_lineage.py",
-    "tests/test_v2_models_no_fit.py",
+    "tests/v2/models/test_v2_models_no_fit.py",
     "tests/test_v2_models_no_fit_native.py",
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_phase5_datasets.py",
@@ -913,6 +914,7 @@ mutate = [
     # literal for an untracked file matches nothing and fails
     # test_mutation_ci's tracked-pattern expansion.
     "engine/v2/ops/n*.py",
+    "engine/v2/ops/native/*.py",
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",
     "engine/v2/ops/fingerprints.py",
@@ -929,6 +931,8 @@ tests = [
     "tests/v2/ops/test_forward_calendar_admission.py",
     "tests/v2/ops/test_provider_response.py",
     "tests/v2/ops/test_provider_response_boundary.py",
+    "tests/v2/ops/test_native_parity_inputs_leaf.py",
+    "tests/test_v2_ops_native_parity_pairing.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",

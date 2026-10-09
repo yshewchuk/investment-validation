@@ -17,6 +17,7 @@ from engine.v2.contracts import ScoreRecord
 from engine.v2.foundation import format_timestamp, to_document
 from engine.v2.ops import worker
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.native.parity_inputs import legacy_parity_rows
 from engine.v2.ops.native_parity_report import (
     PARITY_DIMENSIONS,
     SCHEMA_VERSION,
@@ -27,7 +28,6 @@ from engine.v2.ops.native_parity_report import (
     compare_native_vs_legacy,
     run_native_parity_worker,
 )
-from engine.v2.ops.nightly import legacy_parity_rows
 from engine.v2.parity.tolerance import SCORE_RECORD_V1
 from tests.ops_support import FakeClock
 
