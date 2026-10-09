@@ -132,10 +132,38 @@ def _ledger_rows(before):
     return fieldnames, stored
 
 
-def _sync_ledger_directory(directory):
-    """Also finish parent creation left incomplete by an earlier failed sync."""
-    for ancestor in (directory, *directory.parents):
-        fsync_directory(ancestor)
+def _ensure_ledger_directory(directory):
+    """Recover only this path's mkdir intents, including across process restarts.
+
+    A stable locked marker records each pending parent sync before mkdir. Its
+    entry is durable before the new directory can exist; clearing it follows
+    the parent sync. Completed markers stay in place to preserve lock identity.
+    """
+    for child in reversed((directory, *directory.parents[:-1])):
+        name = hashlib.sha256(os.fsencode(child.name)).hexdigest()
+        marker = child.parent / f".ledger-directory-{name}.lock"
+        if child.exists() and not marker.exists():
+            continue
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+        with os.fdopen(os.open(marker, flags, 0o666), "r+b") as pending:
+            fcntl.flock(pending, fcntl.LOCK_EX)
+            state, exists = pending.read(2), child.exists()
+            if state not in (b"0", b"1") and (state or exists):
+                raise LedgerError("invalid ledger directory-creation marker")
+            if not exists:
+                pending.seek(0)
+                pending.write(b"1")
+                pending.flush()
+                os.fsync(pending.fileno())
+                fsync_directory(child.parent)
+                ensure_directory(child)
+            elif state != b"1":
+                continue
+            fsync_directory(child.parent)
+            pending.seek(0)
+            pending.write(b"0")
+            pending.flush()
+            os.fsync(pending.fileno())
 
 
 def _commit_ledger(path, before, suffix):
@@ -152,7 +180,7 @@ def _commit_ledger(path, before, suffix):
         if current != before:
             raise LedgerError("ledger changed outside the shared append lock")
         os.replace(temp.name, path)
-        _sync_ledger_directory(path.parent)
+        fsync_directory(path.parent)
     finally:
         Path(temp.name).unlink(missing_ok=True)
 
@@ -192,7 +220,7 @@ def _append_ledger_locked(rows, path, unique_by):
         _ledger_rows(before + suffix)
         _commit_ledger(path, before, suffix)
     else:
-        _sync_ledger_directory(path.parent)
+        fsync_directory(path.parent)
     return appended
 
 
@@ -210,7 +238,7 @@ def ledger_append(rows: Sequence[Mapping[str, Any]], path: Path | None = None,
         raise LedgerError("invalid ledger replay key")
     path = Path(path or LEDGER_PATH)
     path = path.parent.resolve() / path.name
-    ensure_directory(path.parent)
+    _ensure_ledger_directory(path.parent)
     with open(path.with_name(path.name + ".append.lock"), "ab") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:

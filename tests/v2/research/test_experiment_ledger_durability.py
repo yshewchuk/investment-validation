@@ -93,7 +93,7 @@ def _race(path, tasks):
 
 
 def test_first_creation_races_ensure_and_appends_without_losing_rows(tmp_path):
-    path = tmp_path / "nested" / "ledger.csv"
+    path = tmp_path / "created" / "nested" / "ledger.csv"
     tasks = [("ensure", [], None)] * 3 + [
         ("append", [_row(n)], None) for n in range(901, 908)
     ]
@@ -103,11 +103,16 @@ def test_first_creation_races_ensure_and_appends_without_losing_rows(tmp_path):
     assert path.read_bytes().count(_csv()) == 1
     lock = Path(f"{path}.append.lock")
     inode = lock.stat().st_ino
+    markers = {marker: marker.stat().st_ino
+               for marker in tmp_path.rglob(".ledger-directory-*.lock")}
+    assert len(markers) == 2
+    assert all(marker.read_bytes() == b"0" for marker in markers)
     before = path.read_bytes()
     assert lib.ledger_ensure(path) == path
     assert lib.ledger_append([_row(908)], path) == 1
     assert path.read_bytes().startswith(before)
     assert lock.stat().st_ino == inode
+    assert all(marker.stat().st_ino == inode for marker, inode in markers.items())
 
 
 def test_outer_refusal_lock_and_ordinary_append_do_not_deadlock(tmp_path):
@@ -285,9 +290,7 @@ def test_publication_fsyncs_same_directory_temp_before_replace_then_directory(tm
     monkeypatch.setattr(os, "replace", replace)
     monkeypatch.setattr(lib, "fsync_directory", directory)
     assert lib.ledger_append([_row(902)], path) == 1
-    assert events == ["file-fsync", "replace", *[
-        ("directory-fsync", directory) for directory in path.parents
-    ]]
+    assert events == ["file-fsync", "replace", ("directory-fsync", path.parent)]
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -327,6 +330,7 @@ def test_failures_before_replacement_preserve_prior_state(tmp_path, monkeypatch,
         with pytest.raises(OSError, match="synthetic publication failure"):
             lib.ledger_append([_row(902)], path, unique_by=KEY)
     assert (path.read_bytes() if path.exists() else None) == before
+    assert not list(path.parent.glob(".ledger-*"))
     assert lib.ledger_append([_row(902)], path, unique_by=KEY) == 1
     assert _read(path) == ([_row()] if existing else []) + [_row(902)]
 
@@ -354,7 +358,7 @@ def test_failed_directory_sync_keeps_new_bytes_and_keyed_replay_finishes_sync(tm
     monkeypatch.setattr(lib, "fsync_directory", sync)
     assert lib.ledger_append([_row(902)], path, unique_by=KEY) == 0
     assert path.read_bytes() == after
-    assert synced == list(path.parents)
+    assert synced == [path.parent]
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -473,11 +477,168 @@ def test_retry_finishes_parent_directory_sync_after_mkdir_failure(tmp_path, monk
 
     monkeypatch.setattr(lib, "fsync_directory", sync)
     assert lib.ledger_append([_row()], path, unique_by=KEY) == 1
-    assert synced == list(path.parents)
+    assert synced == [tmp_path, path.parent.parent, path.parent.parent, path.parent]
     assert _read(path) == [_row()]
     synced.clear()
     assert lib.ledger_append([_row()], path, unique_by=KEY) == 0
-    assert synced == list(path.parents)
+    assert synced == [path.parent]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_unrelated_traverse_only_ancestor_is_not_opened(tmp_path, monkeypatch, nested):
+    unrelated = tmp_path / "shared"
+    parent = unrelated / "tenant"
+    parent.mkdir(parents=True)
+    unrelated.chmod(0o711)
+    path = (parent / "created" if nested else parent) / "ledger.csv"
+    # This external path is deliberately outside the configured checkout root.
+    monkeypatch.setattr(lib.paths, "ROOT", tmp_path / "checkout")
+    real_open = os.open
+    opened = []
+
+    def open_directory(name, flags, *args, **kwargs):
+        if flags & os.O_DIRECTORY:
+            opened.append(Path(name))
+            if Path(name) == unrelated or Path(name) in unrelated.parents:
+                raise PermissionError("synthetic unowned traverse-only ancestor")
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_directory)
+    assert lib.ledger_append([_row()], path, unique_by=KEY) == 1
+    assert lib.ledger_ensure(path) == path
+    assert lib.ledger_append([_row()], path, unique_by=KEY) == 0
+    assert lib.ledger_append([_row(902)], path) == 1
+    assert set(opened) == ({parent, path.parent} if nested else {parent})
+    assert _read(path) == [_row(), _row(902)]
+
+
+def test_creation_intent_is_durable_before_mkdir_and_cleared_after_parent_sync(tmp_path, monkeypatch):
+    path = tmp_path / "created" / "ledger.csv"
+    events = []
+    real_fsync, real_directory, real_ensure = os.fsync, lib.fsync_directory, lib.ensure_directory
+
+    def fsync(fd):
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            events.append("file-fsync")
+        return real_fsync(fd)
+
+    def directory(parent):
+        marker = next(tmp_path.glob(".ledger-directory-*.lock"))
+        if parent == tmp_path:
+            assert marker.read_bytes() == b"1"
+        events.append(("directory-fsync", parent))
+        return real_directory(parent)
+
+    def ensure(parent):
+        assert not parent.exists()
+        assert events == ["file-fsync", ("directory-fsync", tmp_path)]
+        events.append("mkdir")
+        return real_ensure(parent)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(lib, "fsync_directory", directory)
+    monkeypatch.setattr(lib, "ensure_directory", ensure)
+    assert lib.ledger_append([_row()], path) == 1
+    assert events == [
+        "file-fsync", ("directory-fsync", tmp_path), "mkdir",
+        ("directory-fsync", tmp_path), "file-fsync", "file-fsync",
+        ("directory-fsync", path.parent),
+    ]
+    assert next(tmp_path.glob(".ledger-directory-*.lock")).read_bytes() == b"0"
+
+
+@pytest.mark.parametrize("fault", ["file", "directory"])
+def test_creation_intent_sync_failure_prevents_mkdir(tmp_path, monkeypatch, fault):
+    path = tmp_path / "created" / "ledger.csv"
+
+    def fail(*args):
+        raise OSError("synthetic intent sync failure")
+
+    with monkeypatch.context() as patch:
+        if fault == "file":
+            patch.setattr(os, "fsync", fail)
+        else:
+            patch.setattr(lib, "fsync_directory", fail)
+        with pytest.raises(OSError, match="synthetic intent sync failure"):
+            lib.ledger_append([_row()], path, unique_by=KEY)
+    assert not path.parent.exists()
+    assert lib.ledger_append([_row()], path, unique_by=KEY) == 1
+    assert _read(path) == [_row()]
+
+
+@pytest.mark.parametrize("payload", [b"", b"2", b"10", b"01", b"\xff"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_directory_creation_marker_corruption_refuses_unchanged(tmp_path, payload, existing):
+    path = tmp_path / "created" / "ledger.csv"
+    lib._ensure_ledger_directory(path.parent)
+    marker = next(tmp_path.glob(".ledger-directory-*.lock"))
+    marker.write_bytes(payload)
+    if not existing:
+        path.parent.rmdir()
+    if payload == b"" and not existing:
+        assert lib.ledger_append([_row()], path) == 1
+        assert marker.read_bytes() == b"0"
+        assert _read(path) == [_row()]
+    else:
+        with pytest.raises(lib.LedgerError, match="invalid ledger directory-creation marker"):
+            lib.ledger_append([_row()], path)
+        assert marker.read_bytes() == payload
+        assert path.parent.exists() == existing
+        assert not path.exists()
+
+
+def _mkdir_crash_worker(path, failed_parent):
+    from engine.v2.foundation import artifacts
+
+    real_sync = artifacts.fsync_directory
+
+    def sync(parent):
+        if parent == failed_parent:
+            os._exit(73)
+        return real_sync(parent)
+
+    artifacts.fsync_directory = sync
+    lib.ledger_append([_row()], path, unique_by=KEY)
+    os._exit(74)
+
+
+def test_repeated_parent_creation_crashes_recover_in_fresh_processes(tmp_path, monkeypatch):
+    path = tmp_path / "first" / "second" / "third" / "ledger.csv"
+    for child in reversed(path.parents[:3]):
+        process = CTX.Process(target=_mkdir_crash_worker, args=(path, child.parent))
+        try:
+            process.start()
+            process.join(timeout=20)
+            assert process.exitcode == 73, "child did not stop after the intended mkdir"
+        finally:
+            _stop_process(process)
+        assert child.is_dir()
+        assert not path.exists()
+
+    def fail(parent):
+        assert parent == path.parent.parent
+        raise OSError("synthetic pending parent sync failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lib, "fsync_directory", fail)
+        for _ in range(2):
+            with pytest.raises(OSError, match="synthetic pending parent sync failure"):
+                lib.ledger_append([_row()], path, unique_by=KEY)
+            assert not path.exists()
+    synced = []
+    real_sync = lib.fsync_directory
+
+    def sync(parent):
+        synced.append(parent)
+        return real_sync(parent)
+
+    monkeypatch.setattr(lib, "fsync_directory", sync)
+    assert lib.ledger_append([_row()], path, unique_by=KEY) == 1
+    assert synced == [path.parent.parent, path.parent]
+    synced.clear()
+    assert lib.ledger_append([_row()], path, unique_by=KEY) == 0
+    assert synced == [path.parent]
+    assert _read(path) == [_row()]
 
 
 @pytest.mark.parametrize("invalid", [None, "not a mapping", 1, []])
