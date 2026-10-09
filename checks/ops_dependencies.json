@@ -4,7 +4,7 @@
     "entry": ["", "__main__", "cli"],
     "core": ["bootstrap", "catalog", "checkpoints", "decision_replay", "decision_validation", "diagnostics", "discovery", "errors",
       "executor_cgroup", "executor_watchdog", "fingerprints", "input_bindings", "lifecycle", "migrations", "outbox", "parity", "plans",
-      "profiles", "provider_budget", "provider_response", "recovery", "resources", "scheduler", "schema", "schema_runtime",
+      "profiles", "provider_budget", "provider_requirements", "provider_response", "recovery", "resources", "scheduler", "schema", "schema_runtime",
       "session_backfill", "session_resolution", "store_barrier", "submission", "worker_progress"],
     "runtime": ["executor", "supervisor", "worker", "nightly_trigger"],
     "workflows": ["backup", "decision_commit", "decision_evidence", "effects_graph", "experiment_folds", "experiments", "health",
@@ -13,13 +13,12 @@
       "legacy_adapter", "materialization_worker", "render_inputs", "snapshot_roots", "snapshot_stages"],
     "stores": ["calendar_moves_jobs", "computed_moves_store", "forward_calendar_store", "incremental_data", "pinned_partition_reader",
       "price_history_store", "refresh_staging", "snapshot_import", "snapshot_planning", "snapshot_promotion", "snapshots", "unit_receipts"],
-    "native": ["native_board_universe", "native_parity_report", "native_score_batch", "native_shadow_render", "nightly_calendar_inputs",
+    "native": ["native", "native.parity_inputs", "native_board_universe", "native_parity_report", "native_score_batch", "native_shadow_render", "nightly_calendar_inputs",
       "nightly_quote_rows", "nightly_raw_row_producer", "nightly_raw_rows", "source_availability"],
     "providers": ["providers", "providers.nasdaq_calendar", "providers.orats_daily_market", "providers.yfinance_edge"]
   },
   "exceptions": {
     "forbidden": [
-      ["native_parity_report", "nightly"],
       ["nightly_trigger", "cli"],
       ["snapshot_stages", "stages"],
       ["worker", "cli"]
@@ -40,8 +39,6 @@
       ["incremental_data", "forward_calendar_store"],
       ["incremental_data", "refresh_staging"],
       ["legacy_adapter", "finality"],
-      ["native_parity_report", "nightly"],
-      ["nightly", "native_parity_report"],
       ["refresh_staging", "calendar_moves_jobs"],
       ["refresh_staging", "incremental_data"],
       ["supervisor", "worker"],

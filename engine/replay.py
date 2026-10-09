@@ -606,6 +606,7 @@ def replay(
     alphas: Sequence[float] = ALPHA_GRID,
     calendar: TradingCalendar | None = None,
     index: ChainIndex | None = None,
+    available: set[tuple[str, pd.Timestamp]] | None = None,
     progress_every: int = 2000,
     include_legs: bool = False,
 ) -> ReplayResult:
@@ -628,8 +629,8 @@ def replay(
         f"({plan.skipped.get('no_session', 0):,} without a session)"
     )
     planned_total = int(len(plan.frame))
-    if index is None and len(plan.frame):
-        plan = filter_plan_by_availability(plan)
+    if len(plan.frame) and (index is None or available is not None):
+        plan = filter_plan_by_availability(plan, available)
         _log(f"{strategy}/{variant}: {len(plan.frame):,} events have both chains")
     if plan.frame.empty:
         return ReplayResult(strategy, variant, _empty_trades(), plan.skipped,

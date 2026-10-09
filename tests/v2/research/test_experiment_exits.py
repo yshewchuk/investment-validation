@@ -31,7 +31,8 @@ def test_recipe_contract_table_boundary():
 def test_failure_contract_table():
     document = Path(__file__).parents[3] / "engine/v2/research/ARCHITECTURE.md"
     rows = document.read_text().splitlines()
-    for condition in ("Missing required leg mark", "Unusable quote reaching pricing",
+    for condition in ("Malformed position or leg record", "Missing required leg mark",
+                      "Unusable quote reaching pricing",
                       "Insufficient calendar coverage"):
         row, = [line for line in rows if line.startswith(f"| {condition} |")]
         assert "Non-retryable `EXPERIMENT_VARIANT_FAILED`" in row
@@ -254,6 +255,15 @@ def test_expiry_bound(source):
 def test_position_validation(source, changes):
     with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
         _walk(source, positions=(replace(_position(), **changes),))
+
+
+@pytest.mark.parametrize("record", [None, {}, "record", object()])
+@pytest.mark.parametrize("kind", ["position", "leg"])
+def test_malformed_records_refuse(source, record, kind):
+    bad = record if kind == "position" else replace(_position(), legs=(record,))
+    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED") as caught:
+        _walk(source, positions=(_position(), bad))
+    assert caught.value.problem.retryable is False
 
 
 def test_direct_recipe_validation():

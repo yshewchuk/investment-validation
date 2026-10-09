@@ -56,9 +56,12 @@ from engine.v2.contracts.data import ColumnContract, TableContract
 
 from . import manifests
 
-__all__ = ["PRICE_HISTORY_CONTRACT", "PRICE_HISTORY_TABLE_NAME"]
+__all__ = ["CALENDAR_TICKER", "PRICE_HISTORY_CONTRACT", "PRICE_HISTORY_TABLE_NAME"]
 
 PRICE_HISTORY_TABLE_NAME = "price_history"
+
+# The trading-calendar series the native nightly reads; a declared dependency of every price_history source.
+CALENDAR_TICKER = "SPY"
 
 _SCHEMA_EVOLUTION_POLICY = (
     "Never edit a registered definition under the same contract_id (phase-2 guide §5.1). "

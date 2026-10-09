@@ -51,6 +51,16 @@ def _session(value):
     return pd.Timestamp(parsed)
 
 
+def _validated_leg_key(leg):
+    if not isinstance(leg, PositionLeg):
+        raise ValueError("invalid held leg record")
+    if (leg.side not in ("buy", "sell") or leg.right not in ("C", "P")
+            or not isfinite(leg.qty) or leg.qty <= 0
+            or not isfinite(leg.strike) or leg.strike <= 0):
+        raise ValueError("invalid held leg")
+    return _session(leg.expiry), leg.strike, leg.right
+
+
 def _validate_position(position):
     if (not isinstance(position.trade_id, str) or not position.trade_id.strip()
             or not isinstance(position.ticker, str) or not position.ticker.strip()
@@ -58,11 +68,9 @@ def _validate_position(position):
         raise ValueError("invalid entered position")
     contracts = set()
     for leg in position.legs:
-        key = (_session(leg.expiry), leg.strike, leg.right)
-        if (leg.side not in ("buy", "sell") or leg.right not in ("C", "P")
-                or not isfinite(leg.qty) or leg.qty <= 0
-                or not isfinite(leg.strike) or leg.strike <= 0 or key in contracts):
-            raise ValueError("invalid held leg")
+        key = _validated_leg_key(leg)
+        if key in contracts:
+            raise ValueError("duplicate held contract")
         contracts.add(key)
 
 
@@ -86,6 +94,8 @@ def _cash_flow(position, rows, fill, *, closing):
 
 
 def _walk_position(repository, snapshot, position, calendar, days, fill):
+    if not isinstance(position, EnteredPosition):
+        raise fail("EXPERIMENT_VARIANT_FAILED", "entered position record is malformed")
     session = position.entry_date
     try:
         _validate_position(position)
