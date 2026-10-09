@@ -266,18 +266,18 @@ def invoke_score_calendar(root, as_of, *, scorer, tickers=None, horizon_days=35)
                           scorer=scorer, tickers=tickers, progress_every=10)
 
 
-def invoke_price_refresh(session, *, dry_run: bool = False):
+def invoke_price_refresh(session, *, dry_run: bool = False,
+                         planned_tickers=None, source_root=None):
     """Plan (and, unless ``dry_run``, run) one ``ops price-refresh`` pass.
 
     ``engine.v2.ops.cli`` may not import ``engine.data.*`` directly -- one
     adapter module per package (``checks/import_layers.py`` §4.2) -- so this
     is the whole crossing: ``engine.data.pulls.price_refresh`` (the actual
-    planning/fetch logic, this task's own new module) plus
-    ``engine.data.fetch.Fetcher`` for a real run. Never rooted via
-    ``_rooted_import``: unlike the snapshot-materialization callers above,
-    price-refresh has no ``--store-root``/``--source-root`` of its own yet
-    (out of this task's scope) and always reads/writes the checkout it
-    actually runs in.
+    planning/fetch logic) plus ``engine.data.fetch.Fetcher`` for a real run.
+    Standalone callers retain the legacy event/inventory universe. Nightly
+    callers supply their scoring tickers and source root: only those names
+    plus the calendar dependency are daily targets, without consulting a
+    separately maintained universe or process-global data roots.
     """
     from engine.data.pulls.price_refresh import (
         load_events,
@@ -288,12 +288,23 @@ def invoke_price_refresh(session, *, dry_run: bool = False):
     )
     from engine.v2.data.price_history_table import CALENDAR_TICKER
 
-    plan = plan_refresh(session, events=load_events(), price_universe=load_price_universe(),
-                        fetch_history=load_fetch_history(), always_daily=(CALENDAR_TICKER,))
+    fetch_root = None
+    if planned_tickers is None:
+        plan = plan_refresh(session, events=load_events(), price_universe=load_price_universe(),
+                            fetch_history=load_fetch_history(), always_daily=(CALENDAR_TICKER,))
+    else:
+        import pandas as pd
+
+        if source_root is None:
+            raise fail("INVALID_REQUEST", "planned price refresh needs a source root")
+        fetch_root = Path(source_root) / "data" / "raw" / "fetch"
+        plan = plan_refresh(session, events=pd.DataFrame(columns=["ticker", "event_date"]),
+                            price_universe=(), fetch_history=load_fetch_history(fetch_root=fetch_root),
+                            always_daily=(*planned_tickers, CALENDAR_TICKER))
     if dry_run:
         return {"plan": plan, "report": None}
     from engine.data.fetch import Fetcher
-    return {"plan": plan, "report": run_refresh(plan, Fetcher())}
+    return {"plan": plan, "report": run_refresh(plan, Fetcher(root=fetch_root))}
 
 
 def _write_action(root, name, value):

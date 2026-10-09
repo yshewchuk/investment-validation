@@ -178,7 +178,7 @@ def _add_refresh_mode_arguments(plan):
     """R3B-3: ``--refresh-mode native [--refresh-plan <file>]`` submits one
     real ``incremental_refresh`` job as part of the nightly DAG (see
     ``nightly._resolve_refresh_plan``). Default ``legacy`` submits none --
-    ``ops price-refresh`` remains the only refresh path, unchanged."""
+    Price-history acquisition is separate from this daily-market job."""
     plan.add_argument("--refresh-mode", default="legacy", choices=("legacy", "native"))
     plan.add_argument("--refresh-plan", type=Path, default=None,
                       help="optional pinned RefreshPlan document (to_document()'d JSON); "

@@ -452,7 +452,7 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
         if resuming:
             # plan_fn is forwarded (not None) so a pre-plan timed_out resume (plan_ref None)
             # re-plans through the SAME injected seam; production run_trigger callers pass
-            # plan_fn=None here, where _submit_plan resolves it to _default_plan unchanged.
+            # plan_fn=None here, where _submit_plan resolves the production preparation path.
             # tickers/context_tickers are forwarded too (gate-round-6 fix): a pre-plan
             # resume's plan_fn call needs the caller's ACTUAL selection, not an empty
             # one -- harmless for a plan_ref-set resume, where plan_fn is never called.
@@ -509,8 +509,8 @@ def _timeout_receipt(clock, as_of: str, plan_ref: str | None, snapshot_attempt: 
 
 
 def _snapshot_attempt_bump(exc: BaseException) -> int:
-    """Only a terminal ``INPUT_CHANGED`` refusal from ``ensure_snapshot_fn``
-    mints a new idempotency key (CodeRabbit round 1); a transient failure
+    """An ``INPUT_CHANGED`` refusal during snapshot preparation or planning
+    mints a new import key, including a stale pin after price capture; a transient failure
     (e.g. a catalog-I/O ``OSError``) must not, since the import job already
     submitted under the OLD attempt's key may still be running or already
     have succeeded there."""
@@ -570,7 +570,8 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
         plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
                            full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
     except _HANDLED_FAILURES as exc:
-        return None, _failure(root, clock, as_of, None, exc, prior)
+        return None, _failure(root, clock, as_of, None, exc, prior,
+                              snapshot_attempt=snapshot_attempt + _snapshot_attempt_bump(exc))
     _record(root, _receipt(clock, as_of, "submitting",
                            "the plan is saved; submitting it", plan_ref=plan_ref,
                            snapshot_attempt=snapshot_attempt))
@@ -584,11 +585,11 @@ def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, pla
 
     ``snapshot_attempt`` (Cutover PR-7b) is a single, monotonic counter for the
     WHOLE ``as_of`` run, carried on every receipt below regardless of status and
-    bumped in exactly one place -- the ``ensure_snapshot_fn`` failure branch --
+    bumped for ``INPUT_CHANGED`` during snapshot preparation or planning --
     never reused from ``error_count``, which resets on any non-``"error"``
     status this function (and the rest of the module) already has several of.
     """
-    plan_fn = plan_fn or _default_plan
+    plan_fn = plan_fn or _prepare_default_plan
     submit_fn = submit_fn or _default_submit
     serve_fn = serve_fn or _default_serve
     ensure_snapshot_fn = ensure_snapshot_fn or _ensure_shadow_snapshot
@@ -700,6 +701,60 @@ def _capture_input_manifest(root: Path, as_of: str, tickers: tuple[str, ...],
     return write_manifest(manifest, output)
 
 
+def _refresh_plan_prices(root, as_of, tickers, clock, expected_snapshot_id):
+    """Refresh the selected scoring universe, capture, and report absent names."""
+    from engine.v2.data.errors import DataError
+    from engine.v2.data.price_history_query import tickers_with_price_history
+    from engine.v2.data.price_history_table import CALENDAR_TICKER
+    from engine.v2.data.repository import Repository
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.legacy_adapter import invoke_price_refresh
+    from engine.v2.ops.price_history_store import _check_expected_head, capture
+
+    ops_root = _ops_root(root)
+    conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
+    try:
+        _check_expected_head(conn, "shadow", expected_snapshot_id)
+        result = invoke_price_refresh(as_of, planned_tickers=tickers, source_root=root)
+        store = ArtifactStore(ops_root)
+        captured = capture(conn, store, root, root=ops_root, scope="shadow", clock=clock,
+                           required_tickers=(CALENDAR_TICKER,),
+                           expected_snapshot_id=expected_snapshot_id)
+        snapshot_id = captured["result_snapshot_id"]
+        repository = Repository(conn, store)
+        present = tickers_with_price_history(repository, repository.resolve(snapshot_id), tickers)
+        result.update(schema_version="nightly_price_refresh.v1.0", capture=captured,
+                      missing_price_history=[{"ticker": ticker,
+                                              "reason_code": "PRICE_HISTORY_NOT_AVAILABLE"}
+                                             for ticker in sorted(set(tickers) - present)])
+        output = Path(root).joinpath(*STATE_DIR, f"{as_of}.price_refresh.json")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_name(output.name + ".tmp")
+        temporary.write_text(json.dumps(result, sort_keys=True))
+        os.replace(temporary, output)
+        return snapshot_id
+    except DataError as exc:
+        raise fail("INPUT_CHANGED", "price history preparation could not bind its snapshot",
+                   details={"data_code": exc.code}) from None
+    finally:
+        conn.close()
+
+
+def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=None, *,
+                          full_run=True, expected_shadow_snapshot_id=None):
+    """The scheduled preparation uses the exact watchlist passed to planning."""
+    clock = clock or SystemClock()
+    universe = tuple(tickers) or _population_tickers(
+        _qualification_path(root, QUALIFICATION_POPULATION))
+    context = tuple(context_tickers) or universe
+    if universe:
+        expected_shadow_snapshot_id = _refresh_plan_prices(
+            root, as_of, universe, clock, expected_shadow_snapshot_id)
+    return _default_plan(root, as_of, universe, context, clock, full_run=full_run,
+                         expected_shadow_snapshot_id=expected_shadow_snapshot_id)
+
+
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,
                   full_run: bool = True,
                   expected_shadow_snapshot_id: str | None = None) -> str:
@@ -711,11 +766,9 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     ``"snapshot"`` and ``snapshot_scope`` is always ``"shadow"`` (Cutover
     PR-7b): the shadow nightly's plan always reads a pinned snapshot of the
     ``shadow`` scope, never the legacy live store directly.
-    ``expected_shadow_snapshot_id`` is the exact snapshot id ``_submit_plan``'s
-    ``ensure_snapshot_fn`` call just verified is fresh for ``as_of`` (``None``
-    for any caller outside that path, e.g. a direct `ops plan` invocation) --
-    threaded through ``cli._plan_command`` as ``args.expected_snapshot_id``
-    to ``pin_snapshot_inputs``, which rejects a different loaded snapshot.
+    ``expected_shadow_snapshot_id`` is the exact prepared snapshot passed
+    through ``cli._plan_command`` to ``pin_snapshot_inputs``; the scheduled
+    caller has already refreshed and captured prices before this call.
     ``expected_population`` is the operator's population document when present
     (``full_population`` derived
     the universe from the same file); absent, ``universe``/``context`` are

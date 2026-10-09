@@ -558,20 +558,20 @@ exactly once, ever. A terminal-but-failed row raises `INPUT_CHANGED` immediately
 key; the NEXT `_submit_plan` entry mints a genuinely new key via the bumped `snapshot_attempt`.
 
 `TriggerReceipt.snapshot_attempt: int = 0` is a single, monotonic per-`as_of` counter, carried on every receipt regardless of status (independent of
-`error_count`, which resets on several unrelated statuses), and bumped in exactly one place: a terminal `INPUT_CHANGED` refusal, never a transient
+`error_count`, which resets on several unrelated statuses), and bumped on `INPUT_CHANGED` from snapshot preparation or planning, never a transient
 failure. Give-up is an OR of two independent bounds: `error_count >= MAX_CONSECUTIVE_ERRORS` (unchanged) OR `snapshot_attempt >=
 MAX_CONSECUTIVE_ERRORS` (new) — an alternating `"error"`/`"timed_out"` sequence can no longer defeat the give-up bound by resetting only the old
 counter. Any status in `RESUME_STATUSES` (which includes `"snapshot_not_yet"`, a resumed `"not_yet"` outcome) resumes on the next tick regardless of
 whether `plan_ref` is set — a pre-plan timeout/error genuinely has no `plan_ref` yet, and this is what makes it resumable rather than permanently
 `"missed"`.
 
-Commits land directly in scope `"shadow"` (no candidate-scope-then-promote step): `"shadow"` has no downstream
-consumer needing pre-advance validation. The EXACT `snapshot_id` this call verified is threaded through
-(`expected_shadow_snapshot_id` → `_default_plan`'s `args.expected_snapshot_id` → `cli._snapshot_inputs` →
-`pin_snapshot_inputs(expected_snapshot_id=None)`). The optional guard compares the already-loaded
-`SnapshotRef.snapshot_id`, without a second head resolution. A mismatch raises `INPUT_CHANGED` before materialization
-request construction or registration; equality keeps that ref. Omitting the expected id preserves direct and legacy
-caller behavior.
+Commits land directly in scope `"shadow"`. Before capturing its input manifest or plan, the scheduled `_prepare_default_plan` refreshes every ticker in its own scoring watchlist, plus the calendar ticker, then captures price history into that scope.
+The nightly refresh consumes that same watchlist, including names absent from events and both price sources; it uses the selected source root and the existing daily cache/fetch policy, without an independent ticker list.
+Per-ticker fetch failures handled by `run_refresh` are retained in the refresh report and refresh proceeds to capture; missing planned-history reports are nonfatal. Capture-wide errors and the existing required-calendar-ticker refusal still propagate.
+The private per-session price report lists each planned ticker without any captured rows with `PRICE_HISTORY_NOT_AVAILABLE`; this presence check reports without refusing the plan or scoring rows and does not establish a usable session close.
+Capture optionally checks `expected_snapshot_id` under its lock and again before committing; a changed head is `INPUT_CHANGED`. The captured snapshot ID becomes the plan's expected pin, whose existing final equality guard remains in force.
+If capture committed before a later failure or crash, its rows and fetched bytes remain. A stale import pin on retry refuses, advances `snapshot_attempt`, and causes the next trigger attempt to import afresh within the existing retry budget.
+The report is replaced atomically after capture; a report-write failure leaves the committed capture available. A saved plan resumes without another refresh. Direct `ops plan` and standalone `price-refresh` retain their existing behavior.
 
 **Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`) and records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date) in the plan and `_scope_hash` exactly as a supplied file. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires every planned key to be observed under the shared score-population rule. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
 

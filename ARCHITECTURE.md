@@ -567,6 +567,8 @@ Only a tracked path absent from the worktree reads as empty.
 
 ### 4.1 Production flow
 
+The scheduled native trigger refreshes its scoring watchlist and captures price history before input-manifest and plan capture; the ops component contract defines nonfatal per-ticker reporting and snapshot fencing.
+
 ```mermaid
 flowchart LR
     subgraph Legacy["engine/* (legacy, frozen until cutover)"]
