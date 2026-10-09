@@ -254,6 +254,13 @@ def validate_recording_receipt(spec: Mapping[str, Any], metrics_file: Path | str
             f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact {metrics_file.name} "
             f"is recording_mode={artifact.get('recording_mode')!r}, not 'recorded' — "
             "its run was never finalized by the ledger recorder")
+    artifact_spec_hash = str(artifact.get("spec_hash", "") or "")
+    if artifact_spec_hash != sha:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact {metrics_file.name} "
+            f"carries spec_hash {artifact_spec_hash[:12]}… but this spec is {sha[:12]}… "
+            "— the artifact belongs to a different spec (a copied foreign artifact "
+            "cannot authorize promotion for this one)")
 
     receipt_file = metrics_file.with_name(f"receipt_{sha[:12]}.json")
     if not receipt_file.is_file():

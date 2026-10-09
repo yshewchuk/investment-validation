@@ -573,3 +573,50 @@ def test_exp156_refresh_report_preserves_recorded_metrics(tmp_root, monkeypatch)
     assert seen["recording_mode"] == "recorded"
     assert seen["checklist"] == result.results["checklist"]
     assert seen["checklist"], "the refreshed report saw no finalized checklist"
+
+
+def test_copied_foreign_metrics_artifact_is_refused(tmp_root):
+    """A metrics artifact copied from another spec's real run binds nothing.
+
+    Spec B is evaluated and recorded for real, so its bytes are a genuine
+    recorded artifact. Spec A is then evaluated for real but left unrecorded,
+    and B's bytes are copied over A's metrics path. Recording A must refuse on
+    the artifact's ``spec_hash`` before publishing a receipt (the identity check
+    precedes the run-ID mismatch), and promotion must refuse the same foreign
+    artifact for its identity.
+    """
+    spec_a = _spec(exp_id="EXP-923")
+    spec_a["primary_spec"] = {"probe": "alpha"}
+    spec_b = _spec(exp_id="EXP-924")
+    spec_b["primary_spec"] = {"probe": "beta"}
+    assert lib.spec_hash(spec_a) != lib.spec_hash(spec_b)
+    folder_a = _experiment(tmp_root, spec_a, "EXP-923")
+    folder_b = _experiment(tmp_root, spec_b, "EXP-924")
+
+    # B is a real recorded run: real metrics, receipt and ledger row.
+    _run(spec_b, folder_b)
+    b_metrics = lib.metrics_path(folder_b, spec_b)
+    assert b_metrics.is_file()
+    assert lib.receipt_path(folder_b, spec_b).is_file()
+
+    # A is evaluated for real but not recorded, so it owns no receipt...
+    result_a = _run(spec_a, folder_a, record=False)
+    a_metrics = lib.metrics_path(folder_a, spec_a)
+    a_receipt = lib.receipt_path(folder_a, spec_a)
+    assert a_metrics.is_file() and not a_receipt.exists()
+    # ...then B's genuine recorded bytes are copied over A's artifact path.
+    a_metrics.write_bytes(b_metrics.read_bytes())
+
+    # The recorder commits the ran row, then refuses the foreign identity before
+    # any receipt is published: spec_hash is checked before the run-ID mismatch.
+    with pytest.raises(lib.LedgerError, match="spec_hash"):
+        lib.record_evaluation(folder_a, spec_a, result_a.results)
+    assert not a_receipt.exists(), "no receipt may be published for a foreign artifact"
+
+    # Promotion refuses the copied artifact for its own identity before it can
+    # even look for a receipt beside it.
+    with pytest.raises(
+        promote.PromotionRefused,
+        match=f"{promote.PROMOTION_LEDGER_RECEIPT_MISSING}.*carries spec_hash",
+    ):
+        promote.validate_recording_receipt(spec_a, a_metrics)

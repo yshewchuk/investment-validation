@@ -135,6 +135,11 @@ evidence. See the models and data component contracts.
     artifact: its unique evaluated-run ID, spec hash and metrics SHA-256 must
     match the receipt. Each recording-enabled evaluation, including a retry
     whose spec hash already has a `ran` row, appends a row for that run. The
+    recorder requires the artifact's embedded `spec_hash` to match the
+    requested spec before publishing a receipt; a mismatch raises `LedgerError`
+    after the `ran` append and does not publish a receipt. Promotion
+    independently requires the artifact, requested spec and receipt hashes to
+    agree, refusing mismatches with `PROMOTION_LEDGER_RECEIPT_MISSING`.
     caller passes the directory where that run wrote its metrics (the arm
     directory for a grid cell). The caller completes its metrics writes before
     invoking the recorder. The recorder appends the `ran` row, finalizes the

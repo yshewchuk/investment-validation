@@ -311,6 +311,14 @@ def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
             f"appended a ran row for run {run_id[:12]}… but found no metrics "
             f"artifact at {metrics}; refusing to publish an unbound receipt")
     artifact = json.loads(metrics.read_text())
+    requested_hash = spec_hash(spec)
+    artifact_spec_hash = str((artifact or {}).get("spec_hash", "") or "")
+    if artifact_spec_hash != requested_hash:
+        raise LedgerError(
+            f"metrics artifact {metrics.name} carries spec_hash "
+            f"{artifact_spec_hash[:12]}… but the recorded spec is "
+            f"{requested_hash[:12]}… — refusing to bind a receipt to a copied "
+            "foreign artifact")
     artifact_run_id = str((artifact or {}).get("run_id", "") or "")
     if artifact_run_id != run_id:
         raise LedgerError(
