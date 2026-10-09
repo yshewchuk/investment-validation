@@ -49,6 +49,7 @@ from engine.v2.data.reference_catalog import (
 )
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import from_document, to_document
+from engine.v2.ops.carried_set import build_uncarried_exclusions, resolve_carried_set
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import register_artifact
 from engine.v2.ops.errors import OpsError, fail
@@ -78,19 +79,31 @@ def direct_scope_for(expected_population) -> dict:
 
 
 def generated_population(conn, store, scope, *, as_of, tickers, clock,
-                         expected_snapshot_id: str | None = None) -> tuple[tuple[str, ...], str]:
-    """``(population, snapshot_id)``: the sorted, de-duplicated ``ticker|strategy|event_date``
-    keys for the events ``scan_forward_board_requests`` finds on ``scope``'s head for ``as_of`` ..
-    ``as_of + GENERATED_HORIZON_DAYS``, restricted to ``tickers``, each crossed with every
-    ``STRATEGY_IDS`` member: the rows the legacy ``score`` stage's ``score_calendar`` emits per
-    event (disabled CAL-P/CND-P included). Never ``DYN-SV``: ``score_calendar`` appends that row
-    only for events its chooser ranked, so no plan can list it. Pure snapshot read: no
-    provider or network call. Pass the returned ``snapshot_id`` to ``pin_snapshot_inputs`` as
+                         expected_snapshot_id: str | None = None
+                         ) -> tuple[tuple[str, ...], str, tuple[dict, ...]]:
+    """``(population, snapshot_id, exclusions)``: the sorted, de-duplicated
+    ``ticker|strategy|event_date`` keys for the events ``scan_forward_board_requests`` finds on
+    ``scope``'s head for ``as_of`` .. ``as_of + GENERATED_HORIZON_DAYS``, restricted to
+    ``tickers``, each crossed with every ``STRATEGY_IDS`` member: the rows the legacy ``score``
+    stage's ``score_calendar`` emits per event (disabled CAL-P/CND-P included). Never
+    ``DYN-SV``: ``score_calendar`` appends that row only for events its chooser ranked, so no
+    plan can list it. Pure snapshot read: no provider or network call.
+
+    Plan-time exclusion: after scanning, the carried set is resolved from the SAME repository
+    and snapshot (:func:`engine.v2.ops.carried_set.resolve_carried_set`); exclusions are built
+    from the distinct ticker names of the raw requests and the requests are filtered to carried
+    tickers before the legacy population is built, so an uncarried ticker's events never enter
+    the plan. ``exclusions`` is a tuple of JSON-ready dicts sorted by ticker, one per uncarried
+    candidate, each with exactly ``ticker``, ``reason_code`` (``UNCARRIED_TICKER``) and
+    ``missing_tables``.
+
+    Pass the returned ``snapshot_id`` to ``pin_snapshot_inputs`` as
     ``expected_snapshot_id``: it re-resolves the head and refuses ``INPUT_CHANGED`` if the head
     moved after this scan, so the plan never pairs this population with another snapshot. No ``tickers`` or an empty window is
     ``INVALID_REQUEST``; a mismatch with ``expected_snapshot_id`` is ``INPUT_CHANGED``; a
-    missing head or a missing/malformed events table is the scan's ``DataError`` as
-    ``INPUT_CHANGED`` (``details.data_code``), as ``pin_snapshot_inputs`` reports it."""
+    missing head, a missing/malformed events table, or an unreadable carried-set table is the
+    reader's ``DataError`` as ``INPUT_CHANGED`` (``details.data_code``), as
+    ``pin_snapshot_inputs`` reports it."""
     if not tickers:
         # The score stage scores the watchlist only: a population over any wider scope (the
         # context universe) could only fail at execution, so refuse at plan time instead.
@@ -101,19 +114,28 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
         if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
             raise fail("INPUT_CHANGED",
                        "the shadow snapshot head moved since it was verified for this session")
+        repository = Repository(conn, store)
         requests = scan_forward_board_requests(
-            Repository(conn, store), snapshot, as_of=as_of,
+            repository, snapshot, as_of=as_of,
             horizon_days=GENERATED_HORIZON_DAYS, tickers=tickers)
+        carried = resolve_carried_set(repository, snapshot, as_of=as_of)
+        exclusions = build_uncarried_exclusions({r.ticker for r in requests}, carried)
+        carried_tickers = set(carried.carried_tickers)
+        requests = [request for request in requests if request.ticker in carried_tickers]
     except DataError as exc:
         raise fail("INPUT_CHANGED", "snapshot events cannot be read for the generated population",
                    details={"data_code": exc.code}) from None
     events = {(r.ticker, r.event_date.date().isoformat()) for r in requests}
     population = tuple(sorted(f"{ticker}|{strategy}|{day}"
                               for ticker, day in events for strategy in STRATEGY_IDS))
+    evidence = tuple({"ticker": exclusion.ticker, "reason_code": exclusion.reason_code,
+                      "missing_tables": list(exclusion.missing_tables)}
+                     for exclusion in exclusions)
     if not population:
-        raise fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's planning window",
-                   details={"as_of": str(as_of), "horizon_days": GENERATED_HORIZON_DAYS})
-    return population, snapshot.snapshot_id
+        raise fail("INVALID_REQUEST", "no eligible earnings events in the pinned snapshot's planning window",
+                   details={"as_of": str(as_of), "horizon_days": GENERATED_HORIZON_DAYS,
+                            "candidate_exclusions": list(evidence)})
+    return population, snapshot.snapshot_id, evidence
 
 
 def scratch_estimate(repository, store, request) -> int:

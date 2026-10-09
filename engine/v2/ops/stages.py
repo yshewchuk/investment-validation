@@ -317,7 +317,7 @@ def _native_parity_kind() -> JobKind:
         parameters=NativeParityParameters,
         resource_classes=frozenset({"validation"}), effects=("staged",),
         retry=RetryPolicy("bounded", 2, (5, 30)),
-        checkpoint_contract="native_parity_report.v1.2",
+        checkpoint_contract="native_parity_report.v1.3",
         namespaces=frozenset({"shadow", "smoke"}))
 
 
