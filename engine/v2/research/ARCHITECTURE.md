@@ -96,6 +96,35 @@ There is no date fallback, partial returned frame, report write or retry here.
 Final holdout reads are unavailable. This read-only interface does not write
 durable refusal receipts or ledger rows.
 
+`experiment_population.load_population` validates an exact committed
+`SnapshotRef` and returns canonical event metadata under that same holdout
+contract, without reading outcomes. Explicit IDs are checked against the full
+canonical calendar, including conflicting siblings, before any caller can
+consume an eligible population. It shares the trade loader's membership and
+ambiguity logic; neither source dates nor ticker names substitute for event IDs.
+Multiple IDs on one ticker/day are ambiguous even when their sessions differ:
+the prediction outcome table cannot distinguish those event identities.
+`prediction_inputs.load_prediction_targets` consumes this population first,
+then scans each eligible ticker/event-date pair in pinned `computed_moves`.
+It returns the signed move, binary `positive_move` target, and
+`target_available_on` date. The date is required and later than the event;
+fold consumers must admit training labels only when available before their
+decision cutoff. This input prerequisite performs no feature construction,
+model fitting, or report/ledger publication, and has no supervisor caller.
+
+| Prediction/population input condition | Outcome |
+|---|---|
+| Snapshot cannot be resolved or its identity does not match (design #372 R2) | Non-retryable `SNAPSHOT_UNRESOLVED`; no source fallback. |
+| Integrity or object failure during a table scan | Repository's typed refusal, such as `MANIFEST_CORRUPT` or `OBJECT_CORRUPT`; no partial returned frame. |
+| Missing table or malformed table contract | Repository's typed refusal; no partial returned frame. |
+| Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
+| Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
+| Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
+| Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
+
+These readers preserve no durable refusal receipt or economic variant identity
+and cannot authorize the separate user-only final holdout read.
+
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
 economics with `price_source="option_chains"` and explicit numeric `fill` in

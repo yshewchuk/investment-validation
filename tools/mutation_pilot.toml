@@ -349,6 +349,7 @@ mutate = [
     "engine/v2/data/event_revisions.py",
 ]
 tests = [
+    "tests/v2/data/test_string_date_intervals.py",
     "tests/test_v2_data_eod_inventory.py",
     "tests/test_v2_data_event_revisions.py",
     "tests/test_v2_data_events_chains.py",
@@ -996,6 +997,7 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/v2/research/test_prediction_inputs.py",
     "tests/v2/research/test_experiment_trades.py",
     "tests/v2/research/test_exp144_v2_trades.py",
     "tests/v2/research/test_experiments_common_v2_store_root.py",

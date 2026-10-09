@@ -148,6 +148,7 @@ KnowledgeMode = Literal["observed", "attested_stable", "reconstructed"]
 #: absent here is refused at construction rather than guessed.
 DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "EXPERIMENT_VARIANT_FAILED": ("internal", False),
+    "SNAPSHOT_UNRESOLVED": ("dependency", False),
     "SNAPSHOT_NOT_FOUND": ("dependency", False),
     "SNAPSHOT_NOT_READY": ("dependency", True),
     "SNAPSHOT_CONFLICT": ("dependency", True),
