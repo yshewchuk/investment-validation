@@ -45,9 +45,11 @@ The user decision from **2026-10-04** (#373) defines two holdouts:
 - The latest six calendar months, rolling monthly.
 - The union is excluded from training, selection folds, and sweeps. Report
   random and rolling results side by side; never average them.
-- A winner's final read on either holdout is spent for that decision. Months
-  released from the rolling set can be used later, but those results must be
-  labelled `post-release selection` and are not holdout evidence.
+- A winner's final read on either holdout is spent for that decision. Events
+  released from the rolling set can be reused only when they are not members of
+  the versioned random holdout. Random-holdout events remain excluded from
+  future training and selection. Reused rolling-only events must be labelled
+  `post-release selection`; they are not holdout evidence.
 
 **Planned enforcement:** exclusion from pinned reads is tracked in [#514](https://github.com/yshewchuk/investment-validation/pull/514).
 Do not describe this enforcement as available until that work is merged.
