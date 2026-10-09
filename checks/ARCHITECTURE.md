@@ -37,7 +37,7 @@ reports `COVERAGE_TEST_INVENTORY_DRIFT` for a test list that differs from the
 active selector and `COVERAGE_SOURCE_DRIFT` when the identity differs from the
 current tree. The relocated-file membership checks are in
 `tests/v2/integration/test_test_selection.py`; suite-version drift is covered
-by `tests/test_v2_ops_engineering.py` and `tests/test_checks_phase3_gate.py`.
+by `tests/test_v2_ops_engineering.py`.
 
 `import_layers.py --all` also checks the planned ops ownership/direction in
 `ops_dependencies.json` against every tracked ops Python file. Static imports
