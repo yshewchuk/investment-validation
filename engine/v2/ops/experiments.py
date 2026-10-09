@@ -286,8 +286,16 @@ def _validate_plan_fields(spec: ExperimentSpec) -> None:
 
 
 def _finite_number(value) -> bool:
-    """A finite JSON number, never a boolean (``type(True) is not int``)."""
-    return type(value) in (int, float) and math.isfinite(value)
+    """A finite JSON number, never a boolean (``type(True) is not int``).
+
+    An ``int`` past float range makes ``math.isfinite`` raise OverflowError,
+    which is refused as nonfinite rather than escaping as a raw error."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _valid_declared_exit(recipe) -> bool:
@@ -319,9 +327,8 @@ def _validate_declared_exit(spec: ExperimentSpec) -> None:
         return
     recipe = spec.economic_params["exit"]
     alpha = spec.economic_params.get("fill")
-    if (not _valid_declared_exit(recipe) or type(alpha) not in (int, float)
-            or not math.isfinite(alpha) or not 0 <= alpha <= 1
-            or spec.price_source != "option_chains"):
+    if (not _valid_declared_exit(recipe) or not _finite_number(alpha)
+            or not 0 <= alpha <= 1 or spec.price_source != "option_chains"):
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "invalid fixed-day or target/stop exit economics or mark source")
 

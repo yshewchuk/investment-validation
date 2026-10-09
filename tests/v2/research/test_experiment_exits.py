@@ -439,6 +439,8 @@ def test_changed_threshold_changes_plan_identity():
     {"kind": "target_stop", "trading_days": 2, "target_pnl": 1.0, "stop_pnl": 0.0},
     {"kind": "target_stop", "trading_days": 2, "target_pnl": float("inf"), "stop_pnl": -1.0},
     {"kind": "target_stop", "trading_days": 2, "target_pnl": float("nan"), "stop_pnl": -1.0},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": 10**400, "stop_pnl": -1.0},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": 1.0, "stop_pnl": -(10**400)},
     {"kind": "target_stop", "trading_days": 2, "target_pnl": 1.0, "stop_pnl": -1.0,
      "unused": 1},
 ])
@@ -447,6 +449,21 @@ def test_target_stop_recipe_validation(recipe):
         resolve_experiment_plan(_exit_spec(recipe))
     with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
         walk_exit(None, None, (), economic_params={"exit": recipe, "fill": 0.25})
+
+
+@pytest.mark.parametrize("economics", [
+    {"exit": {"kind": "fixed_day", "trading_days": 2}, "fill": 10**400},
+    {"exit": {"kind": "target_stop", "trading_days": 2, "target_pnl": 1.0,
+              "stop_pnl": -1.0}, "fill": 10**400},
+])
+def test_oversized_fill_validation(economics):
+    # An int past float range overflows ``math.isfinite``; the spec check
+    # refuses it as an invalid experiment spec and the exit walk refuses it
+    # as invalid exit economics.
+    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+        resolve_experiment_plan(replace(_spec(), economic_params=economics))
+    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
+        walk_exit(None, None, (), economic_params=economics)
 
 
 def test_report_frame_columns_and_provenance(source):

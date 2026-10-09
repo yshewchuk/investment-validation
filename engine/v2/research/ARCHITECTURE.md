@@ -95,7 +95,7 @@ and its exit value and P&L are priced at the worst existing alpha (0.0) so the
 ambiguous result cannot be better than the stop. No crossing by N sessions
 uses the 7a fixed-day fallback; the existing expiry bound and typed refusal
 still apply. Results are
-`mark_based` per-option-unit P&L with exit reason/date, visited dates, source,
+`mark_based` net held-position P&L with exit reason/date, visited dates, source,
 the declared recipe alpha, the alpha actually applied at exit
 (`exit_fill_alpha`, equal to the recipe alpha except for an ambiguous stop) and
 snapshot identity. `exit_report_frame` projects those
