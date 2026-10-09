@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from engine.v2.foundation import Clock, SystemClock, format_timestamp
-from engine.v2.ops.decision_validation import population_key
+from engine.v2.foundation.score_population import population_key as _population_key
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_shadow_render import native_shadow_serving_mode
 from engine.v2.parity.dimensions import (
@@ -150,7 +150,7 @@ def _population_key_from_board_request_key(key: str) -> str:
     """Project one ``records.json``/``refusals.json`` canonical key (the
     4-field ``f"{ticker}|{strategy}|{event_date_iso}|{session}"`` string
     ``native_score_batch._board_request_key`` builds) down to the 3-field
-    ``population_key`` format :func:`engine.v2.ops.decision_validation.
+    ``population_key`` format :func:`engine.v2.foundation.score_population.
     population_key` already uses for legacy rows.
 
     Splits on ``"|"`` into exactly 4 parts and reuses ``population_key``'s
@@ -169,7 +169,7 @@ def _population_key_from_board_request_key(key: str) -> str:
                    "native canonical key does not have exactly 4 parts",
                    details={"key": key, "parts": len(parts)})
     ticker, strategy, event_date, _session = parts
-    return population_key({"ticker": ticker, "strategy": strategy, "event_date": event_date})
+    return _population_key({"ticker": ticker, "strategy": strategy, "event_date": event_date})
 
 
 def _native_comparison_row(record: Mapping[str, Any]) -> dict[str, Any]:

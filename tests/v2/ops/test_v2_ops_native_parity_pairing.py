@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from engine.v2.ops.decision_validation import population_key
+from engine.v2.foundation.score_population import population_key
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly import legacy_parity_rows
 from engine.v2.ops.native_parity_report import (

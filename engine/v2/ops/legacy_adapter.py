@@ -823,7 +823,8 @@ def _action_decision_replay(parameters, root):
     """
     from engine.jsonio import json_safe
     from engine.v2.foundation import content_hash
-    from engine.v2.ops.decision_replay import compare_rows, decision_population, population_key
+    from engine.v2.foundation.score_population import population_key as _population_key
+    from engine.v2.ops.decision_replay import compare_rows, decision_population
     from engine.v2.ops.session_resolution import resolve_effective_session
 
     session = resolve_effective_session(_load_finality(root), parameters["session"])
@@ -848,14 +849,14 @@ def _action_decision_replay(parameters, root):
     rows = json_safe(frame.to_dict(orient="records"), round_to=None)
     for row in rows:
         row["row_id"] = _score_row_id(row)
-    eligible_keys = {population_key(row) for row in population}
-    replayed = [row for row in rows if population_key(row) in eligible_keys]
+    eligible_keys = {_population_key(row) for row in population}
+    replayed = [row for row in rows if _population_key(row) in eligible_keys]
     worker_progress.step_end("replay", units=len(eligible_tickers))
     worker_progress.step_start("write_outputs")
     output = _write_action(root, "replay.json", {
         "schema_version": "decision_replay.v1.0", "session": session,
         "requested_session": parameters["session"],
-        "population": [population_key(row) for row in population],
+        "population": [_population_key(row) for row in population],
         "source_rows": population, "replayed_rows": replayed,
         "source_rows_hash": content_hash(population),
         "replayed_rows_hash": content_hash(replayed),

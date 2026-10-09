@@ -13,13 +13,13 @@ from typing import Any, Callable, Mapping
 
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.artifacts import ArtifactError
+from engine.v2.foundation.score_population import population_key as _population_key
 from engine.v2.ops.calendar_moves_jobs import (
     COMPUTED_MOVES_REFRESH_ACTION,
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     cached_unit_outcomes,
 )
 from engine.v2.ops.checkpoints import artifact
-from engine.v2.ops.decision_validation import population_key
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.legacy_adapter import copy_read_set
@@ -39,7 +39,7 @@ ORATS_CALLS_PER_DAILY_MARKET_UNIT = 4
 
 def legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]:
     """Key a legacy ``score.json`` document's own ``rows`` array by
-    ``engine.v2.ops.decision_validation.population_key``'s
+    ``engine.v2.foundation.score_population.population_key``'s
     ``"ticker|strategy|event_date"`` format.
 
     Pure: no filesystem, no clock. A ``score_document`` with no ``"rows"``
@@ -88,7 +88,7 @@ def legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]:
                 raise fail("VALIDATION_FAILED",
                            "legacy parity row field contains the population key delimiter",
                            details={"index": index, "field": field_name})
-    keys = [population_key(row) for row in rows]
+    keys = [_population_key(row) for row in rows]
     seen: dict[str, int] = {}
     for index, key in enumerate(keys):
         if key in seen:

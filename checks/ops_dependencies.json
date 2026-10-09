@@ -31,8 +31,6 @@
       ["cli", "supervisor"],
       ["computed_moves_store", "incremental_data"],
       ["computed_moves_store", "unit_receipts"],
-      ["decision_replay", "decision_validation"],
-      ["decision_validation", "decision_replay"],
       ["finality", "legacy_adapter"],
       ["forward_calendar_store", "incremental_data"],
       ["forward_calendar_store", "unit_receipts"],

@@ -581,7 +581,7 @@ def _commit_one_prediction(conn, store, clock, supervisor, *, key, deployment, d
     _ensure_authority(conn, clock)
     score, finality = _score_and_finality()
     # ``expected_population``/``candidates.population`` key off
-    # ticker|strategy|event_date (``decision_validation.population_key``) --
+    # ticker|strategy|event_date (``foundation.score_population.population_key``) --
     # narrower than ``row_id`` (``decision_replay.score_row_id``, which also
     # carries strike/expiry and is the candidate's own generation-independent
     # decision identity).

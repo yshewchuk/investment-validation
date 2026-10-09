@@ -48,8 +48,9 @@ from engine.v2.ops.decision_commit import (
     validate_candidates,
     validated_decision_candidate,
 )
+from engine.v2.foundation.score_population import population_key
 from engine.v2.ops.decision_evidence import derive
-from engine.v2.ops.decision_replay import compare_rows, decision_population, population_key
+from engine.v2.ops.decision_replay import compare_rows, decision_population
 from engine.v2.ops.decision_validation import _validate_causality, validate
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, file_hash, worker_source_manifest
