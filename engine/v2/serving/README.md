@@ -151,7 +151,7 @@ matching score row (an `EXISTS` against `serving_score_summary`) and narrow
 each returned event's attached `scores` to those same matching rows.
 
 api (P3-2): `create_app(*, serving_db, store_root, serving_root, token,
-resolver=None) -> FastAPI` wires §6's six routes over `projections`' route-specific
+resolver=None, ops_root=None, native_parity_report_path=None) -> FastAPI` wires §6's six routes over `projections`' route-specific
 read helpers only — no route or app-startup path imports or initiates
 scoring, a provider, `engine.v2.ops` or legacy `engine.*` (`tests/
 test_v2_serving_api.py` proves this with a real subprocess and two
@@ -357,10 +357,13 @@ one place (`tools/`) allowed to import both.
 
 `python3 -m engine.v2.serving.api --host 127.0.0.1 --port 8766 --serving-db
 serving/serving.sqlite --store-root serving/objects --serving-root serving
---publication-root <ops_root>/releases/<scope>` starts the read API under
+--publication-root <ops_root>/releases/<scope> --ops-root <ops_root>` starts the read API under
 uvicorn, "current" resolved through that fenced ops publisher's own pointer
 (§5.4/P3-1c; omit `--publication-root` for no configured pointer). The
-token comes from the `V2_DASHBOARD_TOKEN` environment variable — the
+explicit `--ops-root` also enables read-only discovery of the newest
+succeeded shadow `native_parity` job when `--native-parity-report-path` is
+omitted; the explicit report path takes precedence. Omit `--ops-root` to
+retain `no_report` when no report path is supplied. The token comes from the `V2_DASHBOARD_TOKEN` environment variable — the
 launcher refuses to start without one, and refuses a non-loopback `--host`
 without `--allow-non-loopback`, exactly the two refusals `engine/v2/
 dashboard/preview.py`'s launcher already makes for the compatibility
