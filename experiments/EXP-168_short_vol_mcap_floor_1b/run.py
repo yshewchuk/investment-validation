@@ -289,7 +289,6 @@ def main() -> None:
         return report_sections(events, accounts, complete)
 
     report_order = ("baseline_10b", "incremental_1b_10b", PRIMARY)
-    primary_run_id = ""
     for arm in report_order:
         run_dir = HERE if arm == PRIMARY else HERE / "arms" / arm
         cell = arm_spec(spec, arm)
@@ -307,8 +306,8 @@ def main() -> None:
             write_report=True,
         )
         headlines[arm] = result.results["headline"]
-        if arm == PRIMARY:
-            primary_run_id = result.results["run_id"]
+        if not args.no_ledger and not args.smoke:
+            lib.record_evaluation_result(result, cell)
         log(f"{arm}: mid mean {headlines[arm].get('mean', float('nan')):+.3%}")
     write_json(RESULTS / "comparison.json", {
         "policy": POLICY,
@@ -319,8 +318,6 @@ def main() -> None:
         "accounts": accounts,
         "headlines": headlines,
     })
-    if not args.no_ledger and not args.smoke:
-        lib.record_evaluation(HERE, spec, {"run_id": primary_run_id, "headline": headlines[PRIMARY]})
     print(f"[EXP-168] report: {HERE / 'REPORT.md'}", flush=True)
 
 
