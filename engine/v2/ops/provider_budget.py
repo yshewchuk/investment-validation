@@ -1,10 +1,13 @@
 """Account-wide leases, conservative call accounting and durable source backoff."""
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
 from datetime import timedelta
+from types import SimpleNamespace
 
 from engine.v2.foundation import format_timestamp
-from engine.v2.ops.catalog import transaction
+from engine.v2.ops.catalog import connect, transaction
 from engine.v2.ops.errors import fail
 from engine.v2.ops.lifecycle import verify_fence
 
@@ -52,6 +55,22 @@ def before_request(conn, claim, account, *, clock):
                      "WHERE account = ? AND attempt_id = ?", (account, claim.attempt_id))
         conn.execute("UPDATE provider_accounts SET remaining = MAX(0,remaining-1), uncertain = 1 "
                      "WHERE account = ?", (account,))
+
+
+def budgeted_fetcher(fetcher, *, catalog_path, attempt_id, fence, account, clock):
+    """Charge one fenced provider-unit call before provider I/O."""
+    claim = SimpleNamespace(attempt_id=attempt_id, fence=fence)
+
+    def fetch(argument):
+        """Close the accounting connection before invoking the wrapped edge."""
+        try:
+            with closing(connect(catalog_path, must_exist=True)) as conn:
+                before_request(conn, claim, account, clock=clock)
+        except (OSError, sqlite3.Error):
+            raise fail("RESOURCE_UNAVAILABLE", "provider budget catalog is unavailable") from None
+        return fetcher(argument)
+
+    return fetch
 
 
 def record_response(conn, account, status, *, clock, remaining=None, empty=False, final=True):
