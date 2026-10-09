@@ -8,6 +8,18 @@ Layer 0.5 in the root `/ARCHITECTURE.md`; owns pure session arithmetic ported fr
 
 `market_calendar.build_calendar_sessions` projects sessions from observed source dates; `planned_exit_date` applies native strategy anchors. `CalendarEventKey` is structural so ops requests satisfy it without a foundation dependency on ops.
 
+`experiment_holdouts.ExperimentHoldouts` owns the shared, versioned membership
+definitions from [#373](https://github.com/yshewchuk/investment-validation/pull/373).
+Random membership hashes immutable canonical event identity, independently of
+snapshot contents and arrival order; monthly release cannot change it.
+The rolling set includes the explicit as-of month and its five preceding
+calendar months (user decision 2026-10-08), inclusive of both boundary months.
+Future-month dates, timezone-bearing timestamps and non-midnight timestamps
+are ambiguous rather than released into selection.
+Classification retains both labels for overlap and labels invalid identity/date
+inputs `ambiguous`; no holdout read or authorization API is supplied.
+Invalid as-of month raises `ValueError`; research converts it to its typed refusal.
+
 ## Inputs
 
 The factory accepts observed ISO session days and an event-through day. Exit planning accepts a structural event key and a `CalendarSessions` value.
