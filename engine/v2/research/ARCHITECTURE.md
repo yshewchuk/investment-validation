@@ -26,9 +26,11 @@ named snapshot per run instead of the legacy mutable Tier-2 store. It
 produces measured tables and reports for a person to read; it never decides
 a research conclusion, never fetches from a network provider, and never
 mutates the legacy trades ledger. `experiment_trades.load_trades` extends
-this same one-snapshot-per-read contract to `experiments/` callers (decision
-2026-09-29, option A): read the committed `trades` version
+this same one-snapshot-per-read contract to the v2 experiment platform:
+read the committed `trades` version
 `tools/v2_build_trades.py` published, never the legacy mutable store.
+Completed experiments need not remain runnable;
+their historical wrappers are not a supported experiment execution boundary.
 
 ## Primary contracts and public interfaces
 
@@ -60,12 +62,13 @@ one; the library entrypoints below are this package's real public interface:
 `_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`,
 `_pricing.execution_variant_label`.
 
-`experiment_trades.load_trades(repository, snapshot, strategy)` is a second
+`experiment_trades.load_trades(repository, snapshot, strategy, *, as_of_month,
+purpose="training", event_ids=None)` is a second
 kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
-for a caller — today only `experiments/common_v2.py` — that already holds a
+for a v2 platform caller that already holds a
 `Repository` and a resolved `SnapshotRef` and wants one strategy's committed
-`trades` rows, session-joined, in the same frame `experiments/common.py`'s
-legacy `load_engine_trades` returns. `_pricing.trading_calendar_from_snapshot`
+`trades` rows, session-joined, with legacy-compatible trade columns plus
+holdout context. `_pricing.trading_calendar_from_snapshot`
 is a third: carved out of `_pricing.py`'s otherwise-internal contents the
 same way `_pricing.STRUCTURES` already is, for the same caller — a repricer
 built over a pinned snapshot needs the identical trading calendar `replay()`
@@ -75,6 +78,23 @@ for `experiments/v2_candidate_grid.py`'s `price_candidate_grid` (issue #266
 slice 2), which labels each priced grid-position step with the same
 execution-variant string `replay()` itself uses, rather than reimplementing
 that labeling.
+
+Experiment training, selection-fold and sweep reads exclude the union of the
+two holdouts specified in [#373](https://github.com/yshewchuk/investment-validation/pull/373).
+Shared membership definitions live in `foundation.experiment_holdouts`.
+The explicit rolling as-of month and both membership versions accompany the
+snapshot id in returned columns; exclusion labels are in `holdout_exclusions`
+frame attributes. Conflicting event IDs at one ticker/date/session or cluster,
+and other ambiguous canonical identity/date matches, are excluded and
+labelled `ambiguous`. Released eligible rows are labelled `post-release selection`.
+A requested `event_ids` population containing any excluded event raises the
+non-retryable `DataError(HOLDOUT_ACCESS_DENIED)` during population validation,
+before returning a frame to metric/report writers. Missing/invalid context,
+an as-of month later than the current UTC month,
+unknown purposes and an entirely excluded population receive the same refusal.
+There is no date fallback, partial returned frame, report write or retry here.
+Final holdout reads are unavailable. This read-only interface does not write
+durable refusal receipts or ledger rows.
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
@@ -192,12 +212,9 @@ This bounds retained unmatched rows, not total process RSS.
   outcome summary (`committed`, `outcome`, `committed_snapshot_id`,
   `emitted_revisions`) — never a rewrite of the table version the run read.
 - Every output that carries data also carries the `snapshot_id` it was
-  read from, so a report is reproducible without re-resolving anything. One
-  exception: `experiment_trades.load_trades`'s returned frame carries no
-  `snapshot_id` column, by design — it mirrors `experiments.common.
-  load_engine_trades`'s frame contract exactly (see Primary contracts), and
-  its caller supplied that exact `snapshot_id` as a required argument, never
-  inferred, so there is no reproducibility gap this rule exists to close.
+  read from, so a report is reproducible without re-resolving anything.
+  `experiment_trades.load_trades` includes its explicit snapshot and holdout
+  context columns alongside the legacy-compatible trade columns.
 
 ## Dependencies
 
@@ -238,7 +255,8 @@ Callers: nothing inside `engine/` imports this package (checked against
 `checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
 listed above are one consumer; `experiments/common_v2.py` is another, for
 `experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
-and `_chains.load_chain_index`; the pinned EXP-147 confirmatory-validation
+and `_chains.load_chain_index`; its archived trade-read caller omits the now-required
+holdout context and is refused. The historical EXP-147 confirmatory-validation
 runner is a third, for `experiment_trades.PROVENANCE` alone (its native
 replay tag, selecting that runner's analog population).
 `experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266
@@ -362,12 +380,9 @@ uncaught traceback instead.
     read_existing_trades`). `CONTRACT_MISMATCH`, the same code and the same
     helper `tools/v2_build_trades.py`'s own read-before-append already uses
     for this condition. `load_trades` raises the same `CONTRACT_MISMATCH`
-    for two more of its own cases: a zero-fragment `earnings_events` table
-    (the same issue #70 bare `ValueError`, converted the same way), and a
-    surviving trades row whose `event_id` has no `earnings_events` match or
-    whose matched event's `session` is null — either way, a trade this
-    function cannot session-join is refused rather than returned with a
-    missing value.
+    for a zero-fragment `earnings_events` table (the same issue #70 bare
+    `ValueError`, converted the same way). Missing or ambiguous event joins
+    are excluded under the holdout population contract above.
 - **R2, cache.** None: every run resolves its snapshot and reads its tables
   fresh through `Repository.scan`; nothing is cached across runs or across
   processes. Within one run, the resolved `SnapshotRef` and, in the replay
@@ -424,9 +439,7 @@ uncaught traceback instead.
   later lookups use the explicit id; the id is threaded through every read
   and written into every output
   (root doc §5's "no silent default" invariant, applied to research reads) —
-  except `experiment_trades.load_trades`'s returned frame, which carries no
-  `snapshot_id` column so it can match the legacy loader's frame exactly
-  (see Outputs).
+  including the experiment loader's returned context columns (see Outputs).
 - Never reads the legacy mutable Tier-2 store (`engine.data.store`) —
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.
