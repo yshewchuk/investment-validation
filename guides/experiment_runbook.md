@@ -78,11 +78,14 @@ exit walker that applies this contract is **planned** in [#516](https://github.c
    the report, ledger row, and figures are final, sync them to the private
    mirror once with [`python3 tools/private_mirror.py --experiment EXP-123 --push`](../tools/private_mirror.py),
    replacing `EXP-123` with the completed experiment ID. The CLI inventories
-   configured mirror roots first, then selects files for that experiment and
-   the shared ledger; pruning and pushed paths are limited to those selections.
-   Do not sync intermediate iterations. Use `--dry-run` first if anything
-   about the run was unusual. The report, ledger row, and figures are the
-   durable record.
+   configured mirror roots first, then `--experiment` selects files for that
+   experiment and the shared ledger. Pruning is limited to that experiment,
+   and the option limits paths passed to the helper's `git add`. The helper's
+   commit includes the entire mirror-clone index and its push updates that
+   branch. Before using `--push`, check that the index contains only the
+   intended sync changes. Do not sync intermediate iterations. Use `--dry-run`
+   first if anything about the run was unusual. The report, ledger row, and
+   figures are the durable record.
 10. Once the experiment is complete and its `REPORT.md` has been written and
     mirrored using step 9, it need not remain runnable and its intermediate
     data need not be retained. This is the user decision of **2026-10-08**.
