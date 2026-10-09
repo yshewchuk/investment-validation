@@ -15,6 +15,7 @@ placeholder shape is exactly what the review reproduced as a false pass, and
 is now its own negative test (``test_placeholder_agreement_json_gives_
 artifact_shape_invalid``).
 """
+# packages: engine.v2.contracts, engine.v2.foundation, engine.v2.data, engine.v2.features, engine.v2.models, engine.v2.registry, engine.v2.domain.generation, engine.v2.domain.scenarios, engine.v2.domain.valuation, engine.v2.domain.simulation, engine.v2.scoring, engine.v2.evaluation, engine.v2.research, engine.v2.ledger, engine.v2.models.training, engine.v2.serving, engine.v2.ops, engine.v2.dashboard, engine.v2.diagnosis, engine.v2.parity
 from __future__ import annotations
 
 import hashlib

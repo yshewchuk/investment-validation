@@ -27,7 +27,9 @@ selects tests for those packages and their allowed importers. Unsafe or
 unmapped input selects the full suite.
 The test-layout ratchet blocks new tests outside `tests/v2/<package>/` and
 `tests/v2/integration/`; the root-level unmoved test count stays the same or
-decreases.
+decreases, and a root-level test cannot be modified in place (move it first).
+`phase1_suite()` in `v2_coverage_ratchet.py` resolves baseline tests where they
+now live and raises `FileNotFoundError` if one is missing.
 
 The Phase 1 check binds the active test inventory to source and test
 contents. It reports suite-version, inventory, or source drift when the
@@ -79,7 +81,8 @@ check defines missing-input and failure outcomes:
 | Partial write | No shared atomic-write or rollback guarantee |
 | Repeat invocation | No package-wide idempotency guarantee; effects vary |
 | Selector input or declaration is unsafe | Report the reason and select the full suite |
-| Root test count or layout budget grows/stales | Ratchet check fails |
+| Root test count or layout budget grows/stales, or a root test is modified in place | Ratchet check fails |
+| A phase-one baseline test cannot be found | `phase1_suite()` raises `FileNotFoundError` |
 | Tier-0 support gets an invalid record/receipt | Existing copy, rounding or attribute errors propagate; no retry, cache, transaction or partial writes |
 
 ## Invariants

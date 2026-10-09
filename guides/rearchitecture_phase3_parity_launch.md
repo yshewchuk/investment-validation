@@ -391,7 +391,7 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
 
 1. **Separate a retry from a new same-session plan.** **Done**, commit
    56d8709; see
-   `tests/test_v2_ops_same_session_replan.py`, which reproduces the Sep-14
+   `tests/v2/ops/test_v2_ops_same_session_replan.py`, which reproduces the Sep-14
    operator trace (plan -> submit -> cancel all -> re-plan after a code/
    manifest change -> submit) and proves it now succeeds with fresh job ids
    while the cancelled rows are untouched.
@@ -448,7 +448,7 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    unchanged (`tests/test_v2_ops_authority.py`). A newer generation may now
    become the published release; the prior release stays on disk and
    readable, and rollback is the same restage-under-a-fresh-id path proven
-   in `tests/test_v2_ops_same_session_replan.py`.
+   in `tests/v2/ops/test_v2_ops_same_session_replan.py`.
 
    Decisions/predictions stay intentionally generation-INDEPENDENT: the
    first committed record for a scheduled occurrence is authoritative
@@ -457,7 +457,7 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    failing the job or silently duplicating. See
    `engine.v2.ledger.decisions.record_divergence`,
    `engine.v2.ops.decision_commit.commit_decisions_in_transaction`, and
-   `tests/test_v2_ops_same_session_replan.py`/
+   `tests/v2/ops/test_v2_ops_same_session_replan.py`/
    `tests/test_v2_ops_generation_effects.py` for the full test coverage
    (two generations of engineering_gate/ledger_export/backup/publication;
    identical-retry idempotency; same-generation conflict; divergence
