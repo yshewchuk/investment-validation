@@ -628,6 +628,7 @@ tests = [
     "tests/test_v2_ops_explain_from_logs.py",
     "tests/test_v2_ops_generation_effects.py",
     "tests/test_v2_ops_health.py",
+    "tests/v2/research/test_experiment_exits.py",
     "tests/v2/ops/test_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
     "tests/test_v2_ops_outcome_session_backfill_wiring.py",
@@ -999,6 +1000,7 @@ tests = [
     "tests/test_v2_research_replay.py",
     "tests/test_v2_research_tools.py",
     "tests/v2/research/test_experiment_no_ledger.py",
+    "tests/v2/research/test_experiment_exits.py",
 ]
 
 [modules.contracts]
