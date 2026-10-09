@@ -138,6 +138,7 @@ def plan_refresh(
     fetch_history: Mapping[str, Iterable] | None = None,
     horizon_days: int = HORIZON_DAYS,
     post_event_sessions: int = POST_EVENT_TRADING_SESSIONS,
+    always_daily: Iterable[str] = (),
 ) -> dict:
     """Pure planning: which tickers get fetched today, which wait for their
     monthly turn, and which are skipped because a run already covered them.
@@ -164,6 +165,10 @@ def plan_refresh(
         resumability: a daily ticker already fetched on ``session`` is
         skipped; a monthly ticker already fetched somewhere in ``session``'s
         calendar month is skipped. Omit (or ``{}``) for a from-scratch plan.
+    always_daily:
+        Tickers that are always on the daily schedule regardless of events,
+        e.g. the native calendar series. A forced ticker already fetched on
+        ``session`` is skipped like any other daily fetch.
 
     Returns
     -------
@@ -183,14 +188,15 @@ def plan_refresh(
     for row in events.itertuples():
         events_by_ticker.setdefault(str(row.ticker), []).append(row.event_date)
 
-    universe = {str(t) for t in price_universe} | set(events_by_ticker)
+    forced = {str(t) for t in always_daily}
+    universe = {str(t) for t in price_universe} | set(events_by_ticker) | forced
 
     daily: list[str] = []
     monthly: list[str] = []
     skipped: list[str] = []
 
     for ticker in sorted(universe):
-        on_board = any(
+        on_board = ticker in forced or any(
             in_daily_window(session_ts, event_date, horizon_days=horizon_days,
                             post_event_sessions=post_event_sessions)
             for event_date in events_by_ticker.get(ticker, ())

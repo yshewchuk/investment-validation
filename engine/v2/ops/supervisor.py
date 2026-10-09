@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import re
 import sys
 import time
 from pathlib import Path
 
-from engine.v2.contracts import CheckpointCandidate, OutputCandidate, ProgressEvent
+from engine.v2.contracts import CheckpointCandidate, OutputCandidate, Problem, ProgressEvent
 from engine.v2.foundation import (
     ArtifactStore,
     artifact_reference,
@@ -164,6 +165,23 @@ class _StepState:
     #: max memory observed (any tick) since the last heartbeat row was written.
     interval_peak: int = 0
     interval_peak_step: str | None = None
+
+
+def _bounded_problem_details(details):
+    """A ``Problem``'s ``details`` trimmed for the failure log: at most eight
+    entries, each a short scalar or a short list of short strings."""
+    bounded = {}
+    for key, value in list((details or {}).items())[:8]:
+        if len(str(key)) > 120:
+            continue
+        if isinstance(value, float) and not math.isfinite(value):
+            continue
+        if isinstance(value, (str, int, float, bool)) and len(str(value)) <= 120:
+            bounded[str(key)] = value
+        elif (isinstance(value, list) and len(value) <= 8
+              and all(isinstance(item, str) and len(item) <= 120 for item in value)):
+            bounded[str(key)] = value
+    return bounded
 
 
 class Service:
@@ -468,17 +486,24 @@ class Service:
         self._native_score_batch_memo = memo
 
     def _report_native_score_batch_problem(self, exc):
-        """Dedup-by-(code, message) report, identical pattern to
+        """Dedup-by-(code, message, error-type) report, identical pattern to
         _report_computed_moves_problem (Cutover PR-7a)."""
-        problem = exc.problem if isinstance(exc, OpsError) else make_problem(
-            "VALIDATION_FAILED", "native_score_batch shadow reconciliation failed")
-        problem_key = (problem.code, problem.message)
+        problem = getattr(exc, "problem", None)
+        if not isinstance(problem, Problem):
+            problem = make_problem("VALIDATION_FAILED",
+                                   "native_score_batch shadow reconciliation failed")
+        problem_key = (problem.code, problem.message, type(exc).__name__)
         if problem_key == self._last_native_score_batch_problem:
             return
         self._last_native_score_batch_problem = problem_key
+        document = to_document(problem)
         print(json.dumps({"event": "native_score_batch_reconcile_failed",
-                          "problem": {field: to_document(problem)[field]
-                                      for field in ("code", "category", "retryable", "message")}}))
+                          "error_type": type(exc).__name__,
+                          "problem": {**{field: document[field]
+                                         for field in ("code", "category", "retryable",
+                                                       "message")},
+                                      "details": _bounded_problem_details(
+                                          document.get("details"))}}))
 
     def _computed_moves_identity_or_none(self, now):
         """The two CHEAP checks (plain indexed ``SELECT``s, no pandas scan)

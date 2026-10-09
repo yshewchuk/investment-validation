@@ -974,6 +974,7 @@ tests = [
     "tests/test_v2_ops_generation_binding_lineage.py",
     "tests/test_v2_ops_price_history.py",
     "tests/test_v2_ops_snapshot_stages.py",
+    "tests/v2/ops/test_calendar_ticker_price_history.py",
 ]
 
 [modules.research]

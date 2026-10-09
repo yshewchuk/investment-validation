@@ -49,7 +49,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `ledger {import-history,status,calibrate,book}` — history summaries count new provenance writes as `imported` (excluding new divergences), and remaining lines as `already_present`; identical committed content under another purpose writes no provenance. Dry runs report the same projected counts and roll back writes.
 - `decisions supersede --row-id --reason --from-json`
 - `price-refresh --session [--dry-run]`
-- `price-history capture --source-root --scope [--dry-run]` (rebuild: [guide](../../../guides/native_board_rebuild_runbook.md))
+- `price-history capture --source-root --scope [--dry-run]` (refuses `SOURCE_NOT_FOUND` without a usable calendar ticker, SPY; rebuild: [guide](../../../guides/native_board_rebuild_runbook.md))
 - `computed-moves capture --source-root --scope --as-of [--dry-run]`
 - `get`/`logs`/`cancel`/`resume`/`explain <job_id>`
 
@@ -110,7 +110,7 @@ The `native_parity` job kind -- `stages.py::_native_parity_kind`,
 `nightly.submit_native_parity_if_ready`/`_native_parity_identity`, and
 its tick-loop caller, `supervisor.Service._reconcile_native_parity`, are
 both real too: `Service.tick()` calls it every tick the way
-`_reconcile_native_score_batch_shadow` (`#88`) already does. The
+`_reconcile_native_score_batch_shadow` (`#88`) already does (its failures print `native_score_batch_reconcile_failed` with `error_type` and the typed problem's code and bounded details: short scalars and short string lists). The
 `nightly.GRAPH` node width is doc-only (`run_shadow_nightly`'s test-only
 graph walk; no submission path reads it). Cutover
 PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`)
