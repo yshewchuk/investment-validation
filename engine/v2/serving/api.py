@@ -718,7 +718,7 @@ def _selected_native_parity_ref(conn, job_id: str):
     try:
         return projections.from_document(projections.ArtifactRef,
                                          json.loads(artifact["ref_json"]))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         # A malformed stored reference is this job's own broken output:
         # the caller's typed malformed refusal, never an older fallback.
         raise _parity_malformed() from None

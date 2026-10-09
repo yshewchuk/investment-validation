@@ -289,3 +289,19 @@ def test_selected_unverifiable_output_refuses_without_older_fallback(ops):
     object_path.write_bytes(b"!" + payload[1:])
 
     _assert_malformed(ops)
+
+
+def test_selected_deeply_nested_ref_json_refuses_without_older_fallback(ops):
+    """A stored reference that is valid JSON text but too deeply nested for
+    ``json.loads`` to parse (``RecursionError``) is the selected job's own
+    broken output: every parity route refuses with the typed 503 malformed
+    refusal -- no untyped 500, and no fallback to the older valid report."""
+    _seed(ops, as_of="2026-01-01", row_count=3)
+    ops.clock.advance(60)
+    job_id = _insert_job(ops, as_of="2026-01-02")
+    ref = _publish_report(ops, job_id, _payload(1))
+    ops.conn.execute("UPDATE artifacts SET ref_json = ? WHERE artifact_id = ?",
+                     ("[" * 100000 + "]" * 100000, ref.artifact_id))
+    ops.conn.commit()
+
+    _assert_malformed(ops)
