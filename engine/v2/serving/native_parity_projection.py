@@ -523,6 +523,8 @@ def native_parity_snapshot(report_path: str | os.PathLike | None, *,
         native_refused_unmatched = report.get("native_refused_unmatched", [])
         partial = not (has_refused and has_refused_unmatched)
         reason_counts = _reason_counts(native_refused + native_refused_unmatched)
+        native_refused_tickers = _refused_ticker_items(
+            native_refused + native_refused_unmatched)
         captured = (
             _project_captured_comparison(report["captured_comparison"])
             if "captured_comparison" in report else None)
@@ -548,8 +550,7 @@ def native_parity_snapshot(report_path: str | os.PathLike | None, *,
         "native_refused_count": len(native_refused),
         "native_refused_unmatched_count": len(native_refused_unmatched),
         "native_refused_reasons": reason_counts,
-        "native_refused_tickers": _refused_ticker_items(
-            native_refused + native_refused_unmatched),
+        "native_refused_tickers": native_refused_tickers,
     }
     if captured is not None:
         summary["captured_comparison"] = captured

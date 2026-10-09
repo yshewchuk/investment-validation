@@ -282,7 +282,7 @@ def test_no_report(parity, tmp_path):
 
 
 _MALFORMED_CASES = ("not_json", "missing_identity_keys", "missing_both_identity_keys",
-                    "malformed_as_of", "missing_value_pair")
+                    "malformed_as_of", "missing_value_pair", "empty_refusal_code")
 
 
 def _corrupt_report(parity, case):
@@ -301,6 +301,10 @@ def _corrupt_report(parity, case):
         mismatch = next(entry for entry in document["mismatches"]
                         if entry["finding_fields"])
         mismatch["values"][mismatch["finding_fields"][0]].pop("native")
+    elif case == "empty_refusal_code":
+        document["native_refused"] = [{"row_key": "AAA|S|2026-01-01",
+                                       "refusal_code": "", "ticker": "AAA"}]
+        document["native_refused_unmatched"] = []
     else:
         raise AssertionError(case)
     parity.report_path.write_text(json.dumps(document))
