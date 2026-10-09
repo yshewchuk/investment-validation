@@ -54,6 +54,7 @@ failure details and a nonblank UTF-8 success report before any ledger effect.
 | --- | --- |
 | R1 invalid specification, R2 unresolved snapshot, or R6 identity conflict | `publish_native_refusal` publishes private evidence only; no result or ledger row. |
 | Empty, directory or symlinked recorded ledger destination | R1 before outcome reservation or ledger access; no default-ledger fallback or conflict evidence. |
+| Publish, replay or export called within an active caller transaction | R1 before path access or artifact/CSV effects; leave the caller transaction unchanged. |
 | Admitted R3 look-ahead or R5 holdout denial | Immutable refusal and `refused` row, unless smoke; no current-attempt report. |
 | Admitted R4 variant failure | Immutable refusal and `failed` row, unless smoke; no current-attempt report. |
 | Same registration/result/destination repeated | Reuse the first outcome and date; reconcile one terminal CSV row per experiment/variant identity without refitting. |

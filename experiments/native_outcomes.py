@@ -140,6 +140,8 @@ def _typed(operation):
     @wraps(operation)
     def call(conn, store, registration, *args, **kwargs):
         try:
+            if conn.in_transaction:
+                raise fail("INVALID_EXPERIMENT_SPEC", "native outcomes require an idle catalog connection")
             return operation(conn, store, registration, *args, **kwargs)
         except (foundation.ArtifactError, LedgerError, ValueError, KeyError, TypeError):
             raise _conflict(store, registration) from None

@@ -84,8 +84,8 @@ resolves the release once, reads staged `events.json` (plus an optional
 writes `records.json`/`refusals.json`. **Supports `STR-THRU` only** — any
 other strategy refuses per-row. `supervisor.Service`'s tick sidecar (below) is
 its one production caller: once it has staged and registered both documents it
-submits the shadow JobSpec for a new eligible snapshot-pinned identity, while
-the production-default `legacy`/unpinned path stays a no-op.
+submits the shadow JobSpec with the `projection` profile for a new eligible
+snapshot-pinned identity; the production-default `legacy`/unpinned path stays a no-op.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
@@ -622,14 +622,12 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   parent. `computed-moves capture` uses the newest successful Tier-1 yfinance `history(period=max)` entry; missing
   history is `legitimate_empty`, it never fetches live, and dry-run reports cache coverage without writing. The selected source root is authoritative: catalog unit receipts do not substitute for missing or changed Tier-1 entries. The worker binds `as_of` and the fetcher; target selection follows the legacy ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
 - `forward_calendar_store` derives trading calendars from pinned `daily_market` (weekday fallback if absent), then uses the `catalog_path`, `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences in "Primary contracts", plus injected Nasdaq date and yfinance pending-ticker fetchers.
-- Bounded retention (`computed_moves_store`): a lease is transient, so the store never accumulates leases into a
-  history-sized list or frame. It scans each source table once keeping only per-ticker counters (row counts,
-  ORATS-confirmed sessioned events before `as_of`, newest such event date), packs the targets in plan order into chunks
-  whose rows across both tables total at most `MAX_SCAN_ROWS` minus a lease cap (the lesser of 50,000 and half the
-  guard), then rescans per chunk through leases of at most that cap, keeping only that chunk's rows, released before the
-  next. Chunk plus lease never exceed `MAX_SCAN_ROWS`, whatever the source history; pin, columns, key order, filters and
-  null/correction/date handling are unchanged. Forward-calendar is not
-  yet bounded: it builds whole-history daily-market frames and an existing-earnings index, capped by `MAX_SCAN_ROWS`.
+- Bounded retention on the active refresh paths (the exported `daily_by_ticker` helper is unbounded and unused there): neither store accumulates scan leases into a history-sized list or frame.
+  `computed_moves_store` retains per-ticker summaries plus at most one bounded ticker chunk, never a whole source table.
+  `forward_calendar_store` retains only the distinct `daily_market` session dates and only the existing
+  `earnings_events` rows whose `(ticker, event_date)` is a claim key, so retained rows follow sessions and claims, not
+  table size. Pin, results, typed refusals (an empty `daily_market` pin still selects the weekday fallback) and the
+  `MAX_SCAN_ROWS` guard are unchanged; a ticker above the guard refuses `RESOURCE_LIMIT_EXCEEDED`.
 - `ops.pinned_partition_reader` yields bounded leases to both stores; `MAX_SCAN_ROWS` bounds live input; consume before advancing (advance clears it; `list(iterator)` retains empty leases). R1 missing,
   corrupt or incompatible pin → typed refusal, never empty/newer; R2 provisional until full validation; R3 integrity
   refusal terminal/no retry; R4 each partition uses the same pin/scope; R5 failure discards attempt state/output;
@@ -1177,10 +1175,10 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 |---|---|
 | Unknown/unused spec field, invalid fixed-day or target/stop exit recipe/source/fill, mismatched resolved plan, economics without `execution_plan`, malformed fold rows/labels/rule, numeric overflow, mismatched named columns, or mixed named/positional features | `INVALID_EXPERIMENT_SPEC`; refuse before work, return no result, and write no artifact, report, or ledger row. Target/stop recipes are refused during plan resolution, require positive target P&L, negative stop P&L, and positive `trading_days`, and retain every recipe field in canonical plan identity. |
 | Plan write, later runner failure, or fold clone/fit/score/threshold failure, including absent or malformed fitted `classes_` | Typed attempt failure; candidate stays unpublished. A failed plan write may leave partial bytes in the failed attempt root. Worker exit status determines `WORKER_FAILED`; fold scoring failure is non-retryable `EXPERIMENT_VARIANT_FAILED`, with no fitted result retained, no artifact, report, or ledger row written, and the source estimator unchanged. |
+| Spec names a retired registered runner (EXP-184/EXP-185; absent from `RUNNER_INVENTORY` and `REGISTERED_RUNNERS`) | Admitted at plan time. Refused before any subprocess: `worker.dispatch` raises non-retryable `INVALID_EXPERIMENT_SPEC`. `runner_manifest` and `legacy_adapter.run_legacy_script` raise `INVALID_REQUEST`. No resolved plan, report, or ledger row is written. |
 | Feature read: snapshot mismatch; no match; any post-entry match; conflicting tie at latest eligible instant<br>Successful fold helper call | `SNAPSHOT_UNRESOLVED`; `FEATURES_MISSING`; non-retryable `FEATURE_LOOKAHEAD` (no clipping, shifting, or dropping); `INVALID_EXPERIMENT_SPEC`, respectively. Refusal returns no feature value and writes no artifact or report.<br>Returns only an in-memory result; writes no artifact, report, or ledger row. |
 
 Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row supplies the retry receipt and short-circuits the effect. Two distinct heartbeats govern a live attempt: `attempts.heartbeat_at` is the fenced lease-renewal stamp (`lifecycle.heartbeat`), while a `progress_events` row of `kind="heartbeat"` is only a throttled supervisor observation event (`HEARTBEAT_EVENT_SECONDS` or a state change) and never a lease signal; failure diagnostics expose the lease heartbeat stamp and the worker process-family liveness (recorded launch `ProcessIdentity`, ownership proof) separately from the latest progress event/step.<br>`fit_walk_forward_fold(estimator, train_features, train_labels, test_features, threshold_rule: TrainFoldRule) -> WalkForwardFoldFit` and `TrainFoldRule.fit_threshold(scores, labels) -> float` are pure fold-local helpers; `TrainFoldRule` accepts an optional `top_fraction`. The threshold uses training-fold scores and binary labels only; the estimator fits only on training rows, then scores test rows. Positive scores use the probability column whose fitted `classes_` label is `1`; `classes_` must be exactly binary `{0, 1}` in either order. Test labels are not accepted. Feature matrices are copied before estimator calls so caller-owned rows remain unchanged across folds, and threshold scoring uses original-value training rows even if fitting mutates its input. Named train/test frames require identical column names in identical order; unnamed arrays use positional columns, and mixed named/positional inputs are refused. Callers must apply `ExperimentFeatureContext` while building feature rows to enforce `FEATURE_LOOKAHEAD`; `fit_walk_forward_fold` does not inspect temporal metadata. Test-owned job polling in `tests/ops_support.py` is bounded by the test's own deadline. If that budget or an earlier helper deadline expires before the job is terminal, polling raises a typed timeout that identifies the last observed job state and reports its queue/admission reason, attempt count, and last heartbeat. The admission watch shares the polling deadline and cannot defer those diagnostics beyond it. A timeout is observational: it does not retry the job or extend the polling budget.
-
 ### `board_requests` (`native_board_universe.py`)
 
 | Condition | Outcome |

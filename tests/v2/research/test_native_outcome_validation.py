@@ -371,3 +371,109 @@ def test_complete_pending_success_still_reconciles_normally(
     else:
         assert _rows(ledger) == ([UNRELATED_ROW] if existing else []) + [saved["ledger_row"]]
     _assert_objects_preserved(source, objects)
+
+
+def _transaction_effects(source, root, ledger, fallback):
+    """Capture durable bytes, lock files, exports, and even newly created directories."""
+    return {
+        "objects": _objects(source.store),
+        "store_files": {str(path.relative_to(source.store.root)): path.read_bytes()
+                        for path in source.store.root.rglob("*") if path.is_file()},
+        "target_csv": _csv_state(ledger),
+        "default_csv": _csv_state(fallback),
+        "locks": {str(path.relative_to(root)): path.read_bytes()
+                  for path in root.rglob("*.lock") if path.is_file()},
+        "reports": {str(path.relative_to(root)): path.read_bytes()
+                    for path in root.rglob("REPORT.md")},
+        "directories": sorted(str(path.relative_to(root))
+                              for path in root.rglob("*") if path.is_dir()),
+    }
+
+
+@pytest.mark.parametrize("operation", ["publish", "replay", "export"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("state,existing", [("fresh", False), ("pending", False),
+                                            ("pending", True), ("completed", True)])
+@pytest.mark.parametrize("finish", ["rollback", "commit"])
+def test_active_caller_transaction_is_r1_before_native_effects(
+        source, tmp_path, monkeypatch, safe_default_ledger, operation, no_ledger,
+        state, existing, finish):
+    """Public entrypoints cannot publish, record, or hijack a caller's transaction."""
+    registration = _call(source)
+    ledger = tmp_path / "target" / "ledger.csv"
+    _seed_csv(ledger, existing)
+    _seed_csv(safe_default_ledger, True)
+    if state == "pending":
+        key, saved = _pending(source, registration, ledger, monkeypatch, no_ledger=no_ledger)
+    elif state == "completed":
+        _publish(source, registration, ledger, no_ledger=no_ledger)
+        report = outcomes.export_native_report(source.conn, source.store, registration,
+                                                ledger_path=ledger, no_ledger=no_ledger)
+        assert report.read_bytes() == REPORT.encode()
+
+    source.conn.execute("CREATE TABLE caller_owned (value TEXT NOT NULL)")
+    committed = _catalog(source.conn)
+    source.conn.execute("BEGIN")
+    source.conn.execute("INSERT INTO caller_owned VALUES ('caller-owned-uncommitted')")
+    assert source.conn.in_transaction
+    before = _catalog(source.conn)
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+
+    with pytest.raises(OpsError) as captured:
+        _invoke(operation, source, registration, ledger, no_ledger=no_ledger)
+
+    assert captured.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert captured.value.problem.retryable is False
+    assert source.conn.in_transaction
+    assert _catalog(source.conn) == before
+    assert _transaction_effects(source, tmp_path, ledger, safe_default_ledger) == effects
+    getattr(source.conn, finish)()
+    assert not source.conn.in_transaction
+    assert _catalog(source.conn) == (committed if finish == "rollback" else before)
+    assert _transaction_effects(source, tmp_path, ledger, safe_default_ledger) == effects
+
+    if state == "pending" and finish == "rollback":
+        result = _replay(source, registration, ledger, no_ledger=no_ledger)
+        assert result["outcome"] == saved
+        assert key + "_receipt" in _evidence(source, registration.run_id)
+        assert source.conn.execute("SELECT COUNT(*) FROM caller_owned").fetchone()[0] == 0
+        assert not source.conn.in_transaction
+        if no_ledger:
+            assert _csv_state(ledger) == effects["target_csv"]
+        else:
+            assert _rows(ledger) == ([UNRELATED_ROW] if existing else []) + [saved["ledger_row"]]
+        assert _csv_state(safe_default_ledger) == effects["default_csv"]
+        assert not list(source.store.root.rglob("REPORT.md"))
+
+
+@pytest.mark.parametrize("operation", ["publish", "replay", "export"])
+def test_active_caller_transaction_refuses_before_dependency_access(
+        source, tmp_path, monkeypatch, safe_default_ledger, operation):
+    """Recorded calls refuse before path coercion, catalog SQL, or artifact access."""
+    registration = _call(source)
+    ledger = tmp_path / "untouched" / "ledger.csv"
+    _seed_csv(safe_default_ledger, True)
+    source.conn.execute("CREATE TABLE caller_owned (value TEXT NOT NULL)")
+    committed = _catalog(source.conn)
+    source.conn.execute("BEGIN")
+    source.conn.execute("INSERT INTO caller_owned VALUES ('caller-owned-uncommitted')")
+    before = _catalog(source.conn)
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    statements = []
+    source.conn.set_trace_callback(statements.append)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(source.store, "read_verified", _forbid)
+            patch.setattr(source.store, "publish_bytes", _forbid)
+            with pytest.raises(OpsError) as captured:
+                _invoke(operation, source, registration, PoisonLedger())
+    finally:
+        source.conn.set_trace_callback(None)
+    assert captured.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert statements == []
+    assert source.conn.in_transaction
+    assert _catalog(source.conn) == before
+    assert _transaction_effects(source, tmp_path, ledger, safe_default_ledger) == effects
+    source.conn.rollback()
+    assert not source.conn.in_transaction
+    assert _catalog(source.conn) == committed
