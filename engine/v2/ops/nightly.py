@@ -248,6 +248,9 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
     # scoring/replay action loads (``FeatureContext.load``); ``tickers`` stays
     # the direct watchlist actually scored. Defaults to ``tickers`` so a
     # caller that predates this parameter is unchanged.
+    if action == "legacy_score" and plan.get("candidate_exclusions"):
+        tickers = sorted({str(key).split("|")[0]
+                          for key in plan["expected_population"]})
     context = tuple(sorted(context_tickers)) if context_tickers else tuple(sorted(tickers))
     params = {"expected_ids": (action,), "session": plan["session"],
               "tickers": tuple(sorted(tickers)), "context_tickers": context,
@@ -484,7 +487,8 @@ def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_s
     if stage == "materialize":
         return {"expected_ids": ("legacy_materialize",), "input_bindings": {},
                 "scratch_estimate_bytes": int(snapshot["scratch_estimate_bytes"])}
-    params = _legacy_params(_action_for(stage), plan, tickers, year_start, year_end, keys,
+    action = _action_for(stage)
+    params = _legacy_params(action, plan, tickers, year_start, year_end, keys,
                             effect_scope=effect_scope, prior_selfcheck_ref=prior_selfcheck_ref,
                             context_tickers=context_tickers)
     if snapshot is not None:
@@ -1418,7 +1422,12 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     plan_identity = _plan_identity(plan, input_refs)
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
                              context_tickers=context_tickers, plan_identity=plan_identity)
-    effect_scope = effect_scope_for(tickers, full_universe)
+    if plan.get("candidate_exclusions"):
+        effect_tickers = sorted({str(key).split("|")[0]
+                                 for key in plan["expected_population"]})
+        effect_scope = effect_scope_for(effect_tickers)
+    else:
+        effect_scope = effect_scope_for(tickers, full_universe)
     stages = _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode)
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage
