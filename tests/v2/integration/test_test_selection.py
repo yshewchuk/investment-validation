@@ -112,6 +112,23 @@ def test_phase1_baseline_identity_matches_the_real_measurement():
     assert baseline["source_hash"] == phase1_measurement_identity(ROOT)
 
 
+def test_phase1_validation_reports_inventory_and_source_drift():
+    """A measurement with the wrong suite and source must report both drifts."""
+    from checks.layer_map import PACKAGES
+    from checks.v2_coverage_ratchet import phase1_validate_measurement
+
+    measured = {
+        "schema_version": "phase1_coverage.v1.0",
+        "test_files": ["tests/test_deliberately_wrong.py"],
+        "packages": {p.dotted: {} for p in PACKAGES},
+        "source_hash": "sha256:definitely-not-the-real-source",
+    }
+    findings = phase1_validate_measurement(measured, root=ROOT)
+    codes = {finding["code"] for finding in findings}
+    assert "COVERAGE_TEST_INVENTORY_DRIFT" in codes
+    assert "COVERAGE_SOURCE_DRIFT" in codes
+
+
 def _integration(root, name, body):
     directory = root / "tests/v2/integration"
     directory.mkdir(parents=True, exist_ok=True)
