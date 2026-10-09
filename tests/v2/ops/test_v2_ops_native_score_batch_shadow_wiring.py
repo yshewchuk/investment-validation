@@ -18,18 +18,20 @@ submitted through the real ``submit_graph``, and only then UPDATEd to
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from engine.paths import ROOT
 from engine.v2.contracts import JobReceipt
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, canonical_json
+from engine.v2.foundation import ArtifactStore, canonical_json, content_hash
 from engine.v2.models import deployment
 from engine.v2.ops import nightly
 from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.fingerprints import environment_identity
+from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.stages import LegacyParameters, registry
 from engine.v2.ops.submission import (
     NamespacePolicy,
@@ -40,7 +42,6 @@ from engine.v2.ops.submission import (
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import catalog
 
-ROOT = Path(__file__).resolve().parents[1]
 _POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 
 
@@ -72,6 +73,14 @@ def _native_score_batch_job_count(conn):
     return conn.execute(
         "SELECT COUNT(*) AS n FROM jobs WHERE kind = ?", ("native_score_batch",)
     ).fetchone()["n"]
+
+
+def _assert_sidecar_runtime_identity(resource_class, environment_ref,
+                                     expected_resource_class):
+    assert resource_class == expected_resource_class
+    profile = profile_named(DEFAULT_POLICY, expected_resource_class)
+    thread_count = profile.thread_count or profile.cpu_count
+    assert environment_ref == content_hash(environment_identity(thread_count))
 
 
 # --------------------------------------------------------------------------
@@ -355,6 +364,14 @@ def test_submit_builds_one_shadow_batch_request_from_the_slice5_refs(tmp_path, m
 
     assert len(captured) == 1
     request = captured[0]
+    _assert_sidecar_runtime_identity(
+        request.job.resource_class, request.job.environment_ref, "io_fetch")
+    with pytest.raises(AssertionError):
+        _assert_sidecar_runtime_identity(
+            "validation", request.job.environment_ref, "io_fetch")
+    with pytest.raises(AssertionError):
+        _assert_sidecar_runtime_identity(
+            request.job.resource_class, "corrupted", "io_fetch")
     assert request.namespace == "shadow"
     assert request.principal == "operator"
     assert request.job.kind == "native_score_batch"
