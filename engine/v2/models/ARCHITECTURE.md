@@ -55,7 +55,9 @@ The full list is `README.md`'s `<!-- public-interface: ... -->` directive
   — validate, then durably stage. Never touches `DEPLOYED`.
 - `deployment.promote(root, release_id, *, clock, expected_previous_release_id=None) -> PointerState` /
   `deployment.rollback(root, *, clock) -> PointerState` — the one atomic
-  pointer swap, in either direction.
+  pointer swap, in either direction. Rollback selects the prior incumbent
+  from deployment history; an empty or single-entry undo stack raises the
+  typed `NoPriorRelease` refusal without changing the pointer.
 - `deployment.resolve_release(root, release_id) -> ModelRelease` /
   `deployment.current_release(root) -> ModelRelease | None` — read a staged
   release by id, or by the live pointer.
@@ -222,7 +224,9 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 - **`promote`/`rollback`**: the single `DEPLOYED` pointer file (atomic
   temp-write + `fsync` + `os.replace` + `fsync(dir)`, so a crash leaves
   either the old pointer or the new one, never a partial file) and one new,
-  append-only, sequence-numbered file under `<root>/history/`.
+  append-only, sequence-numbered file under `<root>/history/`. Rollback
+  refuses with `NoPriorRelease` before either write when history has no
+  earlier incumbent.
 - **`restage_semantic_hash`**: rewrites exactly one file,
   `<root>/releases/<release_id>/manifest.json`, atomically, in place. No
   other file under the release store is ever touched by this function.

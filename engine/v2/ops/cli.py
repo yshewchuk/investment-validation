@@ -273,7 +273,8 @@ def _add_plan_command(commands):
     """The ``ops plan`` subparser, split out of :func:`parser` to keep that
     function under the line budget."""
     plan = commands.add_parser("plan")
-    plan.add_argument("kind", choices=("nightly", "experiment", "training", "promote"))
+    plan.add_argument("kind", choices=("nightly", "experiment", "training", "promote",
+                                       "rollback"))
     plan.add_argument("--as-of")
     plan.add_argument("--mode", default="shadow", choices=("shadow",))
     plan.add_argument("--spec", type=Path)
@@ -565,6 +566,9 @@ def _plan_command(args, root, conn, clock):
                        "unguarded behavior")
         plan = promote_plan(release_root=args.release_root, release_id=args.release_id,
                             expected_previous_release_id=expected_previous)
+    elif args.kind == "rollback":
+        from engine.v2.ops.training import rollback_plan
+        plan = rollback_plan(release_root=args.release_root)
     else:
         from engine.v2.ops.experiments import experiment_plan
         if args.no_ledger and args.activate_ledger:

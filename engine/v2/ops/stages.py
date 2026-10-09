@@ -12,7 +12,7 @@ from engine.v2.ops.calendar_moves_jobs import (
 from engine.v2.ops.errors import fail
 from engine.v2.ops.incremental_data import refresh_job_kind
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
-from engine.v2.ops.training import promote_job_kind, training_job_kind
+from engine.v2.ops.training import promote_job_kind, rollback_job_kind, training_job_kind
 
 
 @dataclass(frozen=True)
@@ -399,6 +399,7 @@ def _core_kinds():
             namespaces=frozenset({"shadow", "smoke"})),
         training_job_kind(),
         promote_job_kind(),
+        rollback_job_kind(),
         _decisions_supersede_kind(),
     ]
 

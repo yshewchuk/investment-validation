@@ -35,8 +35,8 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 
 - `init`, `doctor`, `health`
 - `serve` — starts the supervisor loop
-- `plan {nightly,experiment,training,promote}` — builds and saves a plan
-  document; `training`/`promote` take operator-only arguments
+- `plan {nightly,experiment,training,promote,rollback}` — builds and saves a plan
+  document; `training`/`promote`/`rollback` take operator-only arguments
   (`--training-mode`, `--recipe`, `--state`, `--alpha`, `--cutoff`,
   `--strategy`, `--pairs`, `--ticker-chunk`, `--release-root`,
   `--release-id`, `--expected-previous-release-id`) and are never part of the nightly DAG
@@ -1007,29 +1007,23 @@ waits without submitting until its paired succeeded inputs are ready.
   snapshot's own rows reports `noop` rather than a spurious `complete` (the
   commit layer's own equality check decides this, never key presence in the
   parent).
-- `training`/`models_promote` are ordinary `_core_kinds()` job kinds, not
-  `supervisor._COORDINATOR_EFFECT_KINDS` members: the worker subprocess does
-  the real write itself. `run_training_worker` calls one of
-  `tools/phase5_training_job.py`'s four job functions and writes
-  `training_result.json`; `run_promote_worker` calls
-  `engine.v2.models.deployment.promote`'s release-store pointer swap and
-  writes `pointer_state.json`. Neither ever runs inside the nightly DAG —
-  both are submitted by an operator's own `ops plan training|promote` +
-  `ops submit`.
+- `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not
+  `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes.
+  `run_training_worker` calls one of four `tools/phase5_training_job.py`
+  functions and writes `training_result.json`; `run_promote_worker` calls
+  `deployment.promote`'s release-store pointer swap; `run_rollback_worker`
+  calls `deployment.rollback` and writes `pointer_state.json`. None run in
+  the nightly DAG; operators submit with
+  `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
+  `operator`, namespace `shadow` and the caller idempotency key like promote.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
 
 **`computed_moves_refresh` and `forward_calendar_refresh` nightly wiring.**
-Both are registered `_core_kinds()` job kinds (`calendar_moves_jobs.
-computed_moves_job_kind()`/`forward_calendar_job_kind()`), dispatched by
-`worker.py::dispatch` to `run_computed_moves_worker`/`run_forward_calendar_worker`.
-Only `computed_moves_refresh` has a nightly `GRAPH`/`OPTIONAL` node and a
-submitter; `forward_calendar_refresh` has neither yet — building its
-nightly node and submitter is a separate, unbuilt piece
-([#206](https://github.com/yshewchuk/investment-validation/issues/206)),
-and until then it is reachable only through direct `ops submit`, same as
-`training`/`models_promote` above.
+Both job kinds dispatch through `worker.py` to `calendar_moves_jobs`.
+Only `computed_moves_refresh` has a nightly `GRAPH`/`OPTIONAL` node and submitter.
+`forward_calendar_refresh` is direct-submit only.
 
 `computed_moves_refresh` is submitted only by `supervisor.Service`'s own
 tick loop (`_reconcile_computed_moves_refresh`, wrapped in the same
@@ -1043,18 +1037,23 @@ tick. It is submitted alone (`submission.submit`, never `submit_graph`),
 never sharing `build_legacy_job_requests`'s graph — bundling a REQUIRED and
 an OPTIONAL job into one all-or-nothing graph submission is exactly what
 R4 below forbids. If a job already exists under that key, in any state,
-nothing is rebuilt or resubmitted. Rebuild attempts against an identity
-that keeps coming back empty are memoized with a bounded retry budget
-(`Service._computed_moves_memo`), so a full target-ticker scan is not
-repeated every tick; a changed identity (new session, or the same session
-on a new head) always gets a fresh budget. `completed_ids` on a
-`"complete"`/`"noop"` result is the full whole-market target set the
-worker itself derives at run time, not only tickers that got a written
-fragment, so a caller's coverage denominator never disagrees with the
-worker. `forward_calendar_refresh` does not share this denominator design
-— its own `expected_ids` is always `set(tickers)`, so a whole-market
-(`tickers=()`) submission is not supported as a job today, only the
-standalone runner accepts it.
+nothing is rebuilt or resubmitted. `Service._computed_moves_memo` bounds
+unsuccessful rebuild attempts; a new session or head resets that budget.
+Its `complete`/`noop` coverage is the full derived whole-market target set,
+including targets without a written fragment.
+
+**Forward-calendar admission boundary.** Direct `submission.submit` requires
+nonempty, unique `tickers` and `expected_ids` with equal sets; order can differ.
+An empty selection or mismatched coverage is `INVALID_REQUEST` before inserting
+a job row or opening the submission transaction. Only the standalone runner accepts
+whole-market `tickers=()`. Submission queues without fetching or executing.
+`plan_forward_calendar` returns separate Nasdaq and yfinance plans. The
+yfinance confirmation plan uses tickers derived from discovery claims.
+`JobSpec.provider_budget_ref` and scheduler admission/reservation
+name one account, so a single job does not reserve both source budgets.
+Native refresh `expected_ids` are unit IDs; unit `expected_keys` carry context
+tickers, not the paired score request's watchlist and horizon. These are
+current integration constraints; automatic submission remains unimplemented.
 
 Both stores validate their own staged input document and `parameters`
 up front, before the sqlite connection opens (unknown keys, wrong types,
@@ -1217,14 +1216,14 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | a job already exists under today's session key, in any state | never rebuilt or resubmitted |
 | idempotency key | session-only, never `scope_hash`-qualified — this job's target set is the whole scoreable universe, independent of which watchlist's `"score"` job happened to trigger the tick |
 
-### Training / promotion (`training.py`, `deployment.py`)
+### Training / deployment (`training.py`, `deployment.py`)
 
 | Condition | Outcome |
 |---|---|
-| a training-tool refusal, or a `deployment.DeploymentError` (including a superseded release hash or `ConcurrentPromote` (`CONCURRENT_PROMOTE`) when a supplied incumbent is absent or no longer current and the target is not already live) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a refusal writes no successful pointer-state output |
+| a training-tool refusal, or `deployment.DeploymentError` (including a superseded release hash, `ConcurrentPromote` (`CONCURRENT_PROMOTE`) for a missing/stale expected incumbent when the target is not already live, or `NoPriorRelease` when rollback history has no earlier incumbent) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; refusal writes no successful pointer-state output or pointer/history change |
 | no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset, or `ops plan promote` supplies a blank `--expected-previous-release-id` | `INVALID_REQUEST` at plan time; no empty `release_root` reaches the worker, and only an absent incumbent option means no guard |
 | a recipe job's `pairs_path` does not resolve beneath the attempt's own pinned legacy root | `INPUT_CHANGED` at execution, even after passing plan-time validation |
-| any `models_promote` claim | serialized globally by one write lease on the deployment pointer |
+| any `models_promote` or `models_rollback` claim | serialized globally by one write lease on the deployment pointer; resubmission with the same namespace and idempotency key returns the existing job |
 
 ### `native_score_batch.py`
 

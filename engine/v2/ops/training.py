@@ -58,6 +58,13 @@ class PromoteParameters:
     input_bindings: dict[str, str] | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class RollbackParameters:
+    expected_ids: tuple[str, ...]        # always ("models_rollback",)
+    release_root: str
+    input_bindings: dict[str, str] | None = None
+
+
 def _recipe_problems(params) -> list[str]:
     from tools import phase5_training_job as job
 
@@ -215,6 +222,24 @@ def promote_job_kind() -> JobKind:
                    store_domains=(("deployment_pointer", "write"),))
 
 
+def rollback_job_kind() -> JobKind:
+    """The operator-submitted pointer rollback, the mirror of
+    :func:`promote_job_kind`. ``deployment.rollback`` resolves its target
+    from the release store's own append-only pointer history and then runs
+    the same unlocked ``_swap_pointer`` read-modify-write promote does, so it
+    carries the same shared ``deployment_pointer`` write lease that serializes
+    every pointer swap globally. ``effects=("staged",)`` is the same
+    deliberate understatement promote documents; no reader consumes
+    ``JobKind.effects`` today."""
+    return JobKind(name="models_rollback", worker="models_rollback",
+                   parameters=RollbackParameters,
+                   resource_classes=frozenset({"delivery"}), effects=("staged",),
+                   retry=RetryPolicy("bounded", 1, (30,)),
+                   checkpoint_contract="promote_pointer_state.v1.0",
+                   namespaces=frozenset({"shadow", "smoke"}),
+                   store_domains=(("deployment_pointer", "write"),))
+
+
 def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategies=(),
                   pairs_path="", ticker_chunk=1000, manifest_ref=None) -> dict:
     """Build an operator-submitted ``training`` plan.
@@ -284,6 +309,40 @@ def promote_plan(*, release_root, release_id,
                                expected_previous_release_id=expected_previous_release_id)
     root3 = Path(__file__).resolve().parents[3]
     return {"schema_version": "operations_plan.v1.0", "kind": "promote", "mode": "shadow",
+            "effects": ["staged"], "parameters": vars(params), "input_refs": [],
+            "blocked_prerequisites": [], "spec_hash": content_hash(vars(params)),
+            "implementation_ref": content_hash(worker_source_manifest(root3)),
+            "environment_ref": content_hash(
+                environment_identity(profile.thread_count or profile.cpu_count)),
+            "resource_class": "delivery"}
+
+
+def rollback_plan(*, release_root="") -> dict:
+    """Build an operator-submitted ``models_rollback`` plan.
+
+    Rollback takes no ``release_id`` and no expected-incumbent guard: the
+    target is resolved by ``deployment.rollback`` from the release store's own
+    append-only pointer history. An empty ``release_root`` resolves
+    ``production_deployment_root()`` here, at plan time, exactly like
+    :func:`promote_plan`; a missing key is ``INVALID_REQUEST`` and never
+    reaches the worker with an empty root. The path is made absolute at plan
+    time because the worker's cwd is its code snapshot (``executor.launch``).
+    """
+    from engine.v2.foundation import content_hash
+    from engine.v2.models import deployment
+    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+
+    if not release_root:
+        try:
+            release_root = deployment.production_deployment_root()
+        except deployment.MissingReleaseRoot as exc:
+            raise fail("INVALID_REQUEST", "no release root given and no production "
+                       "release root is configured") from exc
+    release_root = str(Path(release_root).expanduser().resolve())
+    profile = profile_named(DEFAULT_POLICY, "delivery")
+    params = RollbackParameters(expected_ids=("models_rollback",), release_root=release_root)
+    root3 = Path(__file__).resolve().parents[3]
+    return {"schema_version": "operations_plan.v1.0", "kind": "rollback", "mode": "shadow",
             "effects": ["staged"], "parameters": vars(params), "input_refs": [],
             "blocked_prerequisites": [], "spec_hash": content_hash(vars(params)),
             "implementation_ref": content_hash(worker_source_manifest(root3)),
@@ -446,6 +505,32 @@ def run_promote_worker(parameters, root) -> dict:
                 "expected_previous_release_id"))
     except deployment.DeploymentError as exc:
         raise fail("VALIDATION_FAILED", "promote refused",
+                   details={"exception_class": type(exc).__name__}) from exc
+    (Path(root) / "pointer_state.json").write_text(json.dumps(to_document(state), sort_keys=True))
+    return {"outputs": [{"name": "pointer_state", "path": "pointer_state.json",
+                         "schema": "promote_pointer_state.v1.0"}],
+            "completed_ids": list(parameters["expected_ids"]), "no_work": False}
+
+
+def run_rollback_worker(parameters, root) -> dict:
+    """Run one operator-submitted rollback inside its staging root.
+
+    ``deployment.rollback`` resolves its target from the release store's own
+    append-only pointer history and raises ``NoPriorRelease`` (a
+    ``DeploymentError``) when there is nothing to roll back to. That refusal
+    maps to the same typed ``VALIDATION_FAILED`` every deployment refusal uses,
+    never a bare worker failure, and -- because ``rollback`` refuses before any
+    pointer/history write -- leaves no successful pointer state behind. There
+    is no other caller of this worker: no nightly stage names
+    ``"models_rollback"``, only an operator's own ``submit``.
+    """
+    from engine.v2.foundation import to_document
+    from engine.v2.models import deployment
+
+    try:
+        state = deployment.rollback(Path(parameters["release_root"]))
+    except deployment.DeploymentError as exc:
+        raise fail("VALIDATION_FAILED", "rollback refused",
                    details={"exception_class": type(exc).__name__}) from exc
     (Path(root) / "pointer_state.json").write_text(json.dumps(to_document(state), sort_keys=True))
     return {"outputs": [{"name": "pointer_state", "path": "pointer_state.json",
