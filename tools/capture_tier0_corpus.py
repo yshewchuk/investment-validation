@@ -2096,7 +2096,7 @@ def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
         # whole (fragments-deduped-for-rendering-only, still fully expanded
         # in the final text) payload to hash it. stream_content_hash feeds
         # hashlib incrementally from the same chunks instead -- byte- and
-        # digest-identical (tests/test_v2_ops_foundation.py), never a
+        # digest-identical (tests/v2/foundation/test_v2_ops_foundation.py), never a
         # multi-GB string.
         "payload_hash": stream_content_hash(payload, fragments=_SHARED_TRACE_DOCUMENTS),
         "request_hash": stream_content_hash(request),

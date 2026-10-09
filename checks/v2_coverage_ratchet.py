@@ -138,7 +138,8 @@ def phase1_suite(root=ROOT):
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_data_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_dashboard_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_serving_*.py")]
-                  + ["tests/test_diagnosis_comparator.py"])
+                  + ["tests/test_diagnosis_comparator.py"]
+                  + ["tests/v2/foundation/test_v2_ops_foundation.py"])
 
 
 def phase1_measurement_identity(root=ROOT):
