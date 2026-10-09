@@ -54,6 +54,7 @@ from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.errors import OpsError, fail, make_problem
 from engine.v2.ops.lifecycle import block_descendants
 from engine.v2.ops.profiles import profile_named
+from engine.v2.ops.provider_requirements import provider_call_count, provider_requirements
 from engine.v2.ops.resources import ActiveReservation, decide, headroom_bytes, live_window_reason
 from engine.v2.ops.store_barrier import acquire_in, domains_of, lease_reason
 
@@ -259,14 +260,26 @@ def _parameters(row):
 
 
 def _provider_reason(conn, row, now_stamp):
+    """Classify normalized requirements without creating an attempt."""
     spec = load_json(JobSpec, row["spec_json"])
-    if not spec.provider_budget_ref:
-        return None
+    try:
+        requirements = provider_requirements(spec)
+    except OpsError:
+        return QueueReason(code="PROVIDER_UNAVAILABLE", reconsider="specification_change")
+    for requirement in requirements:
+        reason = _provider_requirement_reason(conn, requirement, now_stamp)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _provider_requirement_reason(conn, requirement, now_stamp):
+    """Preserve account readiness ahead of the legacy estimate checks."""
     account = conn.execute(
         "SELECT remaining, live_reserve, blocked_code, next_eligible_at "
         "FROM provider_accounts WHERE account = ?",
-        (spec.provider_budget_ref,)).fetchone()
-    calls = spec.parameters.get("provider_calls", 1)
+        (requirement.account,)).fetchone()
+    calls = requirement.calls
     if account is None or account["blocked_code"]:
         return QueueReason(code="PROVIDER_UNAVAILABLE", reconsider="operator_action")
     if not isinstance(calls, int) or calls <= 0:
@@ -281,7 +294,7 @@ def _provider_reason(conn, row, now_stamp):
                            reconsider="provider_backoff_elapsed")
     active = conn.execute(
         "SELECT 1 FROM provider_reservations WHERE account = ? AND released_at IS NULL",
-        (spec.provider_budget_ref,)).fetchone()
+        (requirement.account,)).fetchone()
     if active or calls > account["remaining"] - account["live_reserve"]:
         return QueueReason(code="PROVIDER_BUDGET", needed={"calls": calls},
                            available={"calls": max(0, account["remaining"] -
@@ -322,9 +335,9 @@ def _create_attempt(conn: sqlite3.Connection, row: sqlite3.Row, profile: Resourc
     conn.executemany("INSERT INTO cpu_assignments (attempt_id, cpu_id) VALUES (?, ?)",
                      [(attempt_id, cpu) for cpu in resources.assigned_cpu_ids])
     spec = load_json(JobSpec, row["spec_json"])
-    if spec.provider_budget_ref:
-        _reserve_provider(conn, spec.provider_budget_ref, attempt_id, fence, spec.parameters,
-                          stamp)
+    for requirement in provider_requirements(spec):
+        _reserve_provider(conn, requirement.account, attempt_id, fence,
+                          {"provider_calls": requirement.calls}, stamp)
     updated = conn.execute(
         "UPDATE jobs SET state = 'running', fence = ?, attempt_count = ?, active_attempt_id = ?, "
         "queue_reason_json = NULL, next_eligible_at = NULL, updated_at = ? "
@@ -340,7 +353,7 @@ def _create_attempt(conn: sqlite3.Connection, row: sqlite3.Row, profile: Resourc
 
 def _reserve_provider(conn, account, attempt_id, fence, parameters, now_stamp):
     """Reserve the account lease in the claim transaction, before launch."""
-    calls = parameters.get("provider_calls", 1) if isinstance(parameters, dict) else 1
+    calls = provider_call_count(parameters)
     if not isinstance(calls, int) or calls <= 0 or calls > 1_000_000:
         raise fail("INVALID_REQUEST", "provider call estimate is invalid")
     row = conn.execute(
