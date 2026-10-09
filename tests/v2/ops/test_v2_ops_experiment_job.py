@@ -249,14 +249,14 @@ def test_primary_runner_bindings_reject_parent_symlink_escape(tmp_path, monkeypa
     assert store.published == []
 
 
-def test_primary_runner_bindings_publish_exp185_simulation_dependency(tmp_path):
-    """The EXP-142 module and frozen EXP-144 population are declared and
+def test_primary_runner_bindings_publish_registered_runner_dependency(tmp_path):
+    """The EXP-181 module and frozen EXP-179 matched trades are declared and
     published with the primary runner's registered input bindings."""
     import shutil
 
-    runner = "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py"
-    dependency = "experiments/EXP-142_str_runup_t14_factor_simulation_pnl_gate/simulation.py"
-    population = "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/results/oos_scores.parquet"
+    runner = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
+    dependency = "experiments/EXP-181_d_1_gated_execution_parity/run.py"
+    population = "experiments/EXP-179_execution_clock_d1_parity/results/trades/STR-THRU/d1_matched.parquet"
     entry = experiments.RUNNER_INVENTORY[runner]
     assert dependency in entry["declared_runtime_sources"]
     assert population in entry["declared_runtime_inputs"]
@@ -270,7 +270,7 @@ def test_primary_runner_bindings_publish_exp185_simulation_dependency(tmp_path):
         shutil.copyfile(REPO / relative, destination)
     input_path = checkout / population
     input_path.parent.mkdir(parents=True, exist_ok=True)
-    input_path.write_bytes(b"synthetic frozen population")
+    input_path.write_bytes(b"synthetic frozen d1 matched trades")
 
     class CapturingStore:
         def __init__(self):
@@ -282,15 +282,15 @@ def test_primary_runner_bindings_publish_exp185_simulation_dependency(tmp_path):
 
     store = CapturingStore()
     plan = {"kind": "experiment",
-            "spec_document": _spec_document(experiment_id="EXP-185", runner=runner,
+            "spec_document": _spec_document(experiment_id="EXP-182", runner=runner,
                                              economic_params={}),
             "parameters": {"runner": runner, "no_ledger": False},
             "preregistration_root": str(checkout)}
     bindings = dict(cli._primary_runner_bindings(plan, store))
     assert bindings[dependency] == (checkout / dependency).read_bytes()
-    assert bindings[population] == b"synthetic frozen population"
+    assert bindings[population] == b"synthetic frozen d1 matched trades"
     assert bindings["spec.yaml"] == (checkout / entry["spec_source"]).read_bytes()
-    assert ("experiment_runner_input.v1.0", b"synthetic frozen population") in store.published
+    assert ("experiment_runner_input.v1.0", b"synthetic frozen d1 matched trades") in store.published
 
 
 def test_activation_refuses_unregistered_experiment_ledger_untouched(tmp_path):
@@ -573,8 +573,6 @@ def test_run_legacy_script_clears_inherited_pinned_source_without_sources(
 
 @pytest.mark.parametrize("runner_id", [
     "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
-    "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
-    "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py",
 ])
 def test_registered_wrappers_separate_data_root_from_adapter_staging(tmp_path, runner_id):
     """A general data-root override must not select staging: the wrapper stays
@@ -633,16 +631,14 @@ def test_registered_wrappers_separate_data_root_from_adapter_staging(tmp_path, r
     assert captured_here.read_text() == str(staged_root.resolve())
 
 
-@pytest.mark.parametrize(("runner_id", "primary_arm_id"), [
-    ("experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
-     "gate_midfill_str_thru_forecast_analog"),
-    ("experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py",
-     "native_nan"),
-])
-def test_worker_dispatch_runs_registered_no_argument_primary_arms(
-        tmp_path, monkeypatch, runner_id, primary_arm_id):
-    """Each registered primary selector reaches the runner adapter as an
-    empty tuple and writes its report in the supplied staging root."""
+def test_worker_dispatch_runs_a_no_argument_primary_arm(tmp_path, monkeypatch):
+    """A registered primary selector with no arguments reaches the runner adapter as an empty tuple (synthetic inventory entry)."""
+    from engine.v2.ops.experiments import RUNNER_INVENTORY
+    runner_id = "experiments/synthetic_noarg/run.py"
+    primary_arm_id = "arm_a"
+    monkeypatch.setitem(RUNNER_INVENTORY, runner_id, {
+        "declared_runtime_sources": ("experiments/synthetic_noarg/source.py",),
+        "fixed_arm_args": {primary_arm_id: ()}})
     from types import SimpleNamespace
 
     run_dir = tmp_path / primary_arm_id
@@ -668,22 +664,29 @@ def test_worker_dispatch_refuses_a_registered_arm_without_an_audited_selector(
     """Fail closed: a registered runner with no audited selector for the
     dispatched primary arm is the non-retryable ``INVALID_EXPERIMENT_SPEC``
     refusal before the resolved plan is written or any runner could be
-    invoked -- even one replaced by a sentinel here. EXP-184 declares no arm
-    selectors at all, and EXP-182's registered spec.yaml hashes its D-1
-    primary declaration, so the selector map carries only the registered
-    primary ``d1``: a ``d0`` dispatch would label a D0 result with EXP-182's
-    D1 identity and must fail closed too."""
+    invoked -- even one replaced by a sentinel here. The retired
+    EXP-184/EXP-185 runners have no inventory entry at all, and EXP-182's
+    registered spec.yaml hashes its D-1 primary declaration, so the
+    selector map carries only the registered primary ``d1``: a ``d0``
+    dispatch would label a D0 result with EXP-182's D1 identity and must
+    fail closed too. Admission output (``experiment_plan``) feeds the
+    dispatch."""
     cases = [
         ("experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
          "fixture"),
+        ("experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py",
+         "native_nan"),
         (REGISTERED_RUNNER, "d0"),
     ]
     for runner_id, primary_arm_id in cases:
         staging = tmp_path / primary_arm_id
         staging.mkdir()
-        (staging / "spec.json").write_text(json.dumps(
+        (staging / "input.json").write_text(json.dumps(
             _spec_document(runner=runner_id, economic_params={},
                            primary_arm_id=primary_arm_id, arms=[primary_arm_id])))
+        plan = experiment_plan(staging / "input.json", smoke=True)
+        assert plan["parameters"]["runner"] == runner_id
+        (staging / "spec.json").write_text(json.dumps(plan["spec_document"]))
         invoked = []
 
         def sentinel(*args, **kwargs):
@@ -691,9 +694,7 @@ def test_worker_dispatch_refuses_a_registered_arm_without_an_audited_selector(
 
         monkeypatch.setattr(legacy_adapter, "run_legacy_script", sentinel)
         with pytest.raises(OpsError) as excinfo:
-            worker.dispatch("experiment", {"expected_ids": ["experiment:x"],
-                                           "runner": runner_id, "no_ledger": True},
-                            staging)
+            worker.dispatch("experiment", plan["parameters"], staging)
         assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
         assert excinfo.value.problem.retryable is False
         assert excinfo.value.problem.details["runner"] == runner_id

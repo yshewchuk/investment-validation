@@ -269,13 +269,17 @@ change than this pass covers -- a real, stated follow-up, not a guess ahead
 of evidence.
 
 v9 (2026-10-08) raises ``projection`` from 2 GiB to 3 GiB. This profile is
-exclusive to ``legacy_render`` (``stages.py::registry``'s profile map and
-``nightly._legacy_resource``: no other kind selects it). The raise is
-INTERIM and is based on the observed 100-ticker render only -- it is NOT
+selected by ``legacy_render`` and ``native_score_batch``
+(``stages.py::registry``'s profile map, ``stages._native_score_batch_kind``
+and ``nightly._legacy_resource``). The native batch sizing rationale -- the
+supervised 512 MiB run killed at 538,800,128 bytes and the standalone 614
+MiB peak -- is in the adjacent mapping comment in ``nightly.py``. The raise
+is INTERIM and is based on the observed 100-ticker render only -- it is NOT
 evidence that a full-universe render fits, and available subset evidence
 does not establish full-universe fit. The real fix is the bounded/chunked
 read design tracked by issue #505; 3 GiB only buys headroom until that
-lands. No other profile changes.
+lands. Profile capacity is unchanged by this routing: ``native_score_batch``
+shares the existing 3 GiB reservation, no bytes change.
 """
 from __future__ import annotations
 

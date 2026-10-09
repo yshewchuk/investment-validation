@@ -9,6 +9,7 @@ from engine.v2.ops.calendar_moves_jobs import (
     computed_moves_job_kind,
     forward_calendar_job_kind,
 )
+from engine.v2.ops.core.snapshot_contracts import SNAPSHOT_BINDINGS
 from engine.v2.ops.errors import fail
 from engine.v2.ops.incremental_data import refresh_job_kind
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
@@ -234,8 +235,6 @@ BARRIER_ONLY_REASONS = {
                        "cross-checked content-for-content against this run's own "
                        "materialization instead (see legacy_adapter._action_finality)",
 }
-SNAPSHOT_BINDINGS = ("snapshot_ref.json", "materialization_request.json",
-                     "materialization_manifest.json")
 
 
 def input_mode_problems(job, params):
@@ -295,7 +294,7 @@ def _native_score_batch_kind() -> JobKind:
     return JobKind(
         name="native_score_batch", worker="native_score_batch",
         parameters=NativeScoreBatchParameters,
-        resource_classes=frozenset({"io_fetch"}), effects=("staged",),
+        resource_classes=frozenset({"projection"}), effects=("staged",),
         retry=RetryPolicy("bounded", 2, (5, 30)),
         checkpoint_contract="native_score_batch_records.v2.0",
         namespaces=frozenset({"shadow", "smoke"}))
