@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 
+from engine.paths import ROOT
 from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
 from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops import nightly
@@ -25,7 +25,6 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit_graph
 from tests.ops_support import catalog
 
-ROOT = Path(__file__).resolve().parents[3]
 _POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 _OMIT = object()
 _RECORDS_OK = json.dumps({

@@ -18,11 +18,11 @@ submitted through the real ``submit_graph``, and only then UPDATEd to
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from engine.paths import ROOT
 from engine.v2.contracts import JobReceipt
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json, content_hash
@@ -42,7 +42,6 @@ from engine.v2.ops.submission import (
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import catalog
 
-ROOT = Path(__file__).resolve().parents[3]
 _POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 
 
