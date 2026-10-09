@@ -113,8 +113,8 @@ is still reviewable.
 
 `phase1_suite()` in `checks/v2_coverage_ratchet.py` resolves every path in the
 baseline's `test_files` wherever the file now lives: the recorded path if it
-exists, else the one file of the same basename under `tests/`, else an entry of
-its explicit rename map. A baseline test that cannot be resolved (missing or
+exists, else its entry in the explicit rename map (when that target exists),
+else the one file of the same basename under `tests/`. A baseline test that cannot be resolved (missing or
 ambiguous) raises `FileNotFoundError`; it is never dropped silently. The extra
 relocated tests it names explicitly are required to exist the same way.
 
