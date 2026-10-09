@@ -77,7 +77,7 @@ _CASES = {
         resource_class="io_fetch", checkpoint_contract="adhoc_rescore_record.v1.0",
         max_attempts=2, backoff=(5, 30), extra_field=None),
     "native_score_batch": dict(
-        resource_class="io_fetch",
+        resource_class="projection",
         checkpoint_contract="native_score_batch_records.v2.0",
         max_attempts=2, backoff=(5, 30),
         extra_field=("calendar_revision", "cal-rev-1"),
