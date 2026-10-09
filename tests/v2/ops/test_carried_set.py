@@ -7,9 +7,11 @@ import pytest
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.ops.carried_set import (
+    _window_bounds,
     build_uncarried_exclusions,
     resolve_carried_set,
 )
+from engine.v2.ops.errors import OpsError
 from tests.data_scan_support import (
     catalog_and_store,
     commit_tables,
@@ -225,3 +227,17 @@ def test_missing_option_chains_raises_contract_mismatch(tmp_path):
     with pytest.raises(DataError) as excinfo:
         resolve_carried_set(repository, snapshot, as_of=AS_OF)
     assert excinfo.value.code == "CONTRACT_MISMATCH"
+
+
+def test_window_bounds_zero_pad_prior_year():
+    session, start_day, end_exclusive = _window_bounds("0002-06-30")
+    assert session == dt.date(2, 6, 30)
+    assert start_day == "0001-01-01"
+    assert end_exclusive == "0002-07-01"
+
+
+@pytest.mark.parametrize("as_of", ["0001-12-31", "9999-12-31"])
+def test_window_bounds_reject_unrepresentable_edges(as_of):
+    with pytest.raises(OpsError) as excinfo:
+        _window_bounds(as_of)
+    assert excinfo.value.code == "INVALID_REQUEST"

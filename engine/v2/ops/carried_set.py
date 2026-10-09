@@ -57,6 +57,16 @@ def _parse_as_of(as_of: str) -> date:
     return parsed
 
 
+def _window_bounds(as_of: str) -> tuple[date, str, str]:
+    """The session date plus its representable four-digit start and exclusive end days."""
+    session = _parse_as_of(as_of)
+    if session.year == 1 or session == date(9999, 12, 31):
+        raise fail("INVALID_REQUEST", "as_of has no representable carried window bounds")
+    start_day = date(session.year - 1, 1, 1).isoformat()
+    end_exclusive = (session + timedelta(days=1)).isoformat()
+    return session, start_day, end_exclusive
+
+
 def _day_string(value: object) -> str:
     """Normalize an Arrow-delivered datetime/date value or ISO string to a day string."""
     if isinstance(value, datetime):
@@ -92,13 +102,12 @@ def _scan_tickers(repository: Repository, snapshot: SnapshotRef, table_name: str
 def resolve_carried_set(repository: Repository, snapshot: SnapshotRef, *,
                         as_of: str) -> CarriedSetResolution:
     """The per-table ticker sets the pinned snapshot carries as of ``as_of``."""
-    session = _parse_as_of(as_of)
-    start_day = f"{session.year - 1}-01-01"
+    session, start_day, end_exclusive = _window_bounds(as_of)
     as_of_day = session.isoformat()
     sets: dict[str, tuple[str, ...]] = {}
     for table_name, (_ticker_column, date_column) in _TABLE_FIELDS.items():
         interval = TimeInterval(column=date_column, start_inclusive=start_day,
-                                end_exclusive=(session + timedelta(days=1)).isoformat())
+                                end_exclusive=end_exclusive)
         sets[table_name] = _scan_tickers(repository, snapshot, table_name, interval,
                                          start_day, as_of_day)
     return CarriedSetResolution(daily_market_tickers=sets[_DAILY_TABLE],
