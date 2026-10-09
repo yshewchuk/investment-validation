@@ -205,7 +205,6 @@ def main(record: bool = True) -> None:
     # Monte Carlo passes would add twenty minutes of reports nobody reads; the
     # comparison this experiment turns on is the table above.
     spy = ecommon.load_spy_daily()
-    already = set(lib.ledger_read().query("stage == 'ran'")["spec_hash"])
     for model in (PRIMARY, REFERENCE):
         bk = books.get(model)
         if bk is None or bk.empty:
@@ -231,8 +230,8 @@ def main(record: bool = True) -> None:
             input_files=[RESULTS / "candidates.parquet"],
             extra_sections=lambda rr, k=model: sections(hits, fams, k),
             write_report=True)
-        if record and lib.spec_hash(cell) not in already:
-            lib.record_evaluation(HERE, cell, result.results)
+        if record:
+            lib.record_evaluation_result(result, cell)
         print(f"[EXP-138] {model}: report {result.report_path}", flush=True)
 
 

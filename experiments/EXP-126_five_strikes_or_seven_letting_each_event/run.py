@@ -220,8 +220,6 @@ def main() -> None:
                   f"mean {100*s['mean']:+.2f}%, on capital "
                   f"{100*s['return_on_capital']:+.2f}%", flush=True)
 
-    already_ran = set(lib.ledger_read().query("stage == 'ran'")["spec_hash"])
-
     # Primary first, then the grid cells, so the ledger reads in that order.
     for key in ["choose_rr", "choose_fit", "seven", "five_wide", "five_tight"]:
         ev = rows.get(key)
@@ -253,14 +251,10 @@ def main() -> None:
             extra_sections=lambda r, k=key: sections(summary, funnels, k),
             write_report=True,
         )
-        # The ledger is a multiple-testing record, not a run log: re-running an
-        # identical spec to regenerate its report is not a new test, so its row
-        # is appended once and only once.
-        if lib.spec_hash(cell) in already_ran:
-            print(f"[EXP-126] {key}: ledger row already recorded, not duplicated",
-                  flush=True)
-        else:
-            lib.record_evaluation(HERE, cell, result.results)
+        # Every recording-enabled evaluation, including a retry whose spec hash
+        # already has a ran row, appends a row for this run and binds the
+        # receipt to this arm's own metrics artifact.
+        lib.record_evaluation_result(result, cell)
         print(f"[EXP-126] {key}: report {result.report_path}", flush=True)
 
 

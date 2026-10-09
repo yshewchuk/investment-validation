@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import runpy
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -165,6 +167,34 @@ def test_scaffold_forwards_record_flag(tmp_root, monkeypatch, argv, expected):
     assert calls[0][3] == {"record": expected}
     assert lib.LEDGER_PATH.read_bytes() == before
     assert lib.ledger_read()["stage"].tolist() == ["planned"]
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def _exp118_runner(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT))  # Mirror run.py's own sys.path edit.
+    return runpy.run_path(
+        str(ROOT / "experiments" / "EXP-118_gate_retrain_on_the_expanded_replay_univ" / "run.py")
+    )
+
+
+def test_exp118_refuses_unregistered_spec_before_baseline_or_arms(monkeypatch):
+    runner = _exp118_runner(monkeypatch)
+    spec = _spec()
+    del spec["preregistered_at"]
+    monkeypatch.setattr(lib, "load_spec", lambda _path: spec)
+    baseline_calls = []
+
+    def refuse_baseline():
+        baseline_calls.append("champion_baseline reached")
+        raise AssertionError("baseline setup must not run before preregistration validation")
+
+    monkeypatch.setitem(runner, "champion_baseline", refuse_baseline)
+    monkeypatch.setattr(sys, "argv", ["run.py", "--no-ledger"])
+    with pytest.raises(PreregistrationError):
+        runner["main"]()
+    assert baseline_calls == []
 
 
 def test_scaffold_help_exposes_no_ledger_before_trade_build(tmp_root, monkeypatch, capsys):

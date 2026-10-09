@@ -188,7 +188,6 @@ def main(record: bool = True) -> None:
     # record carries a provenance block, an alpha sweep and real headline
     # numbers rather than a comparison table alone.
     spy = ecommon.load_spy_daily()
-    already = set(lib.ledger_read().query("stage == 'ran'")["spec_hash"])
     # Each SOURCE is loaded once; `debias` and `both` reuse the same rows as
     # `uncorrected` and `cap` respectively and differ only in which family the
     # adjusted prediction picks.
@@ -229,8 +228,8 @@ def main(record: bool = True) -> None:
             input_files=[RESULTS / "build_meta.json"],
             extra_sections=lambda rr, k=name: sections(arms, b139, k),
             write_report=True)
-        if record and lib.spec_hash(cell) not in already:
-            lib.record_evaluation(HERE, cell, result.results)
+        if record:
+            lib.record_evaluation_result(result, cell)
         print(f"[EXP-139] {name}: report {result.report_path}", flush=True)
 
 

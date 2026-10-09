@@ -407,11 +407,11 @@ def main() -> None:
             write_json(RESULTS / "failure.json", {"arm": arm, "type": type(exc).__name__, "message": str(exc)})
             raise
         evaluations[arm] = result.results["headline"]
+        if not args.no_ledger:
+            lib.record_evaluation_result(result, cell)
         log(f"{arm}: eligible={int(choices['traded'].sum()):,} wanted={account.get('wanted',0):,} funded={account.get('funded',0):,} final=${account.get('final_equity',float('nan')):,.0f}")
     output = {"policy": POLICY, "candidate_rank_metrics": ranks, "event_choice_metrics": events, "account_metrics": accounts, "evaluation_headlines": evaluations, "folds": diagnostics}
     write_json(RESULTS / "comparison.json", output)
-    if not args.no_ledger:
-        lib.record_evaluation(HERE, spec, evaluations[PRIMARY])
     print(f"[EXP-161] report: {HERE / 'REPORT.md'}", flush=True)
 
 

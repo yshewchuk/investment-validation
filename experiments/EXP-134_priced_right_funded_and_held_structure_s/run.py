@@ -205,7 +205,6 @@ def main(record: bool = True) -> None:
     print(f"[EXP-134] acceptance: {acceptance}", flush=True)
     (RESULTS / "acceptance.json").write_text(json.dumps(acceptance, indent=1))
 
-    already = set(lib.ledger_read().query("stage == 'ran'")["spec_hash"])
     for key, book in books.items():
         arm, convention = key.split("|")
         is_primary = key == prim
@@ -224,8 +223,8 @@ def main(record: bool = True) -> None:
             extra_sections=lambda rr, k=key: sections(summary, funded_books,
                                                       built, acceptance, k),
             write_report=True)
-        if record and lib.spec_hash(cell) not in already:
-            lib.record_evaluation(HERE, cell, result.results)
+        if record:
+            lib.record_evaluation_result(result, cell)
         print(f"[EXP-134] {key}: report {result.report_path}", flush=True)
 
 

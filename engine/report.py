@@ -37,6 +37,7 @@ publish paths treat FAIL as blocking.
 from __future__ import annotations
 
 import hashlib
+import csv
 import importlib
 import json
 from datetime import datetime, timezone
@@ -226,13 +227,18 @@ def accuracy_checklist(results: Mapping[str, Any], spec: Mapping[str, Any],
     # not merely the file exist.
     sha = results.get("spec_hash", "")
     if ledger_path is not None and Path(ledger_path).exists():
-        lines = Path(ledger_path).read_text().splitlines()
-        total = max(len(lines) - 1, 0)
+        with open(ledger_path, newline="") as fh:
+            ledger_rows = [row for row in csv.DictReader(fh) if row]
+        total = len(ledger_rows)
         if total == 0:
             items.append(ChecklistItem(
                 "Multiple-testing ledger", "N/A", "no experiments tried yet (ledger empty)"))
         else:
-            rows = [ln for ln in lines[1:] if sha[:16] in ln]
+            # A recorded run, not merely a row mentioning the hash: require an
+            # exact spec-hash match in a ``ran`` row (planned rows and prefixes
+            # do not count as evaluated).
+            rows = [row for row in ledger_rows
+                    if row.get("stage") == "ran" and row.get("spec_hash") == sha]
             if rows:
                 items.append(ChecklistItem(
                     "Multiple-testing ledger", "PASS",
