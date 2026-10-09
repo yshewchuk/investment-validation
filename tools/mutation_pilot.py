@@ -1045,6 +1045,61 @@ class _ImportGraph(dict):
     all."""
 
 
+# -- bounded in-process scan caches ------------------------------------------
+#
+# `build_import_graph()`'s default path and `unresolved_import_files()` both
+# read and `ast.parse` every tracked `.py` file. Within one pytest worker the
+# same whole-repository scan is requested repeatedly (the CI selector tests
+# each build it), so each is memoized here. The key is rebuilt on every lookup
+# from the CURRENT files -- `(str(REPO), ordered tracked tuple, per-file
+# (path, st_size, st_mtime_ns))` -- so a changed tree simply misses. Capped at
+# `_SCAN_CACHE_LIMIT` snapshots: a worker's tree changes at most once per run,
+# so older entries are dead weight. An explicit `build_import_graph(tracked=...)`
+# is NEVER cached (only the `tracked is None` default path is), preserving the
+# parse-count contract on explicit tracked lists.
+_SCAN_CACHE_LIMIT = 2
+_GRAPH_CACHE: list[tuple[tuple, "_ImportGraph"]] = []
+_UNRESOLVED_CACHE: list[tuple[tuple, set[str]]] = []
+
+
+def _scan_cache_key(tracked: list[str]) -> tuple | None:
+    """The current cache key for `tracked`, or None if any path cannot be
+    stat'd. Never raises: a fingerprint failure means 'bypass the cache', so
+    the caller keeps the original uncached behavior exactly."""
+    try:
+        stats = []
+        for rel in tracked:
+            st = os.stat(REPO / rel)
+            stats.append((rel, st.st_size, st.st_mtime_ns))
+    except OSError:
+        return None
+    return (str(REPO), tuple(tracked), tuple(stats))
+
+
+def _scan_cache_get(entries: list, key: tuple):
+    """The cached value for `key`, moved to the MRU end, or None."""
+    for i, (cached_key, value) in enumerate(entries):
+        if cached_key == key:
+            entries.append(entries.pop(i))
+            return value
+    return None
+
+
+def _scan_cache_put(entries: list, key: tuple, value) -> None:
+    entries.append((key, value))
+    while len(entries) > _SCAN_CACHE_LIMIT:
+        entries.pop(0)
+
+
+def _copy_import_graph(graph: dict[str, set[str]]) -> "_ImportGraph":
+    """A defensive copy of an `_ImportGraph` (its `precise` mapping too), so a
+    caller mutating a returned graph cannot corrupt the cached snapshot."""
+    clone = _ImportGraph({rel: set(edges) for rel, edges in graph.items()})
+    clone.precise = {rel: set(edges)
+                     for rel, edges in getattr(graph, "precise", {}).items()}
+    return clone
+
+
 def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     """Static import graph over EVERY git-tracked `.py` file in the repo (no
     hand-kept root allowlist -- see `_tracked_roots`): maps each file to the
@@ -1116,8 +1171,14 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     the graph is unaffected. `.precise` exists for `module_dependency_closure`,
     which needs a DYNAMIC file's real edges without inheriting its catch-all
     as something to expand further (see that function's own docstring)."""
-    tracked = tracked if tracked is not None else [
-        p for p in _tracked(["."]) if p.endswith(".py")]
+    cache_key = None
+    if tracked is None:
+        tracked = [p for p in _tracked(["."]) if p.endswith(".py")]
+        cache_key = _scan_cache_key(tracked)
+        if cache_key is not None:
+            cached = _scan_cache_get(_GRAPH_CACHE, cache_key)
+            if cached is not None:
+                return _copy_import_graph(cached)
     tracked_set = set(tracked)
     roots = _tracked_roots(tracked_set)
     graph = _ImportGraph({rel: set() for rel in tracked})
@@ -1182,6 +1243,8 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
             edges |= tracked_set - {rel}
 
     graph.precise = precise
+    if cache_key is not None:
+        _scan_cache_put(_GRAPH_CACHE, cache_key, _copy_import_graph(graph))
     return graph
 
 
@@ -1662,6 +1725,11 @@ def unresolved_import_files(tracked: list[str]) -> set[str]:
     allowlist-qualified -- a non-Python command loads no tracked module
     however the child's directory is set, so there is no relative target
     for `_subprocess_launch_unresolved` to fail safe on."""
+    cache_key = _scan_cache_key(tracked)
+    if cache_key is not None:
+        cached = _scan_cache_get(_UNRESOLVED_CACHE, cache_key)
+        if cached is not None:
+            return set(cached)
     tracked_set = set(tracked)
     roots = _tracked_roots(tracked_set)
     out: set[str] = set()
@@ -1674,6 +1742,8 @@ def unresolved_import_files(tracked: list[str]) -> set[str]:
                 or _has_unresolved_process_launch(tree)
                 or _subprocess_targets(tree, tracked_set, roots)[1]):
             out.add(rel)
+    if cache_key is not None:
+        _scan_cache_put(_UNRESOLVED_CACHE, cache_key, set(out))
     return out
 
 
