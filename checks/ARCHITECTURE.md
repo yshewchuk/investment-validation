@@ -4,6 +4,10 @@
 
 `checks/` provides standalone verification tools for repository invariants, budgets, and phase evidence. The v2 release gate also invokes its bundle scanner in an isolated subprocess.
 
+`check_bundle` applies `DECLARED_MAX_BYTES` to declared rendered-data files;
+every other path, including undeclared paths under `data/`, uses ordinary
+`MAX_BYTES`.
+
 ## Primary contracts and public interfaces
 
 No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.
