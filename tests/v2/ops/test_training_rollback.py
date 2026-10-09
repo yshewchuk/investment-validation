@@ -617,3 +617,55 @@ def test_rollback_plan_implementation_ref_is_built_from_the_shared_root_helper(t
     plan = training.rollback_plan(release_root=str(tmp_path))
     assert plan["implementation_ref"] == content_hash(
         worker_source_manifest(default_checkout_root()))
+
+
+def test_rollback_plan_with_null_target_is_refused_without_mutation(tmp_path):
+    """A generic submission that nulls the plan's target must not swap unpinned.
+
+    Two real releases are staged and promoted so the store's own resolver names
+    ``r1`` as the rollback target.  The normal plan is built, then its
+    ``target_release_id`` is set to ``None`` while ``incumbent_release_id`` and
+    ``incumbent_sequence`` still name the live ``r2`` -- exactly what a
+    hand-crafted generic ``models_rollback`` submission could send.  The worker
+    must resolve the store's real target, see that it exists, and refuse the
+    same typed ``VALIDATION_FAILED`` stale/target path -- never run
+    ``deployment.rollback`` unpinned -- leaving ``DEPLOYED`` and every history
+    byte exactly as they were and producing no output refs.
+    """
+    conn, clock, _ = catalog(tmp_path)
+    try:
+        _stage_pair(tmp_path)
+        deployment.promote(tmp_path, "r1")
+        deployment.promote(tmp_path, "r2")
+        assert deployment.rollback_target(tmp_path) == "r1"
+
+        plan = training.rollback_plan(release_root=str(tmp_path))
+        assert plan["parameters"]["incumbent_release_id"] == "r2"
+        assert plan["parameters"]["incumbent_sequence"] == 1
+        assert plan["parameters"]["target_release_id"] == "r1"
+        plan["parameters"]["target_release_id"] = None
+        plan["spec_hash"] = content_hash(plan["parameters"])
+
+        before_pointer = (tmp_path / "DEPLOYED").read_bytes()
+        before_history = _history_bytes(tmp_path)
+
+        receipt = submit(conn, stages.registry(), POLICY,
+                         request_from_plan(plan, "rollback-null-target"), clock=clock)
+        service = _service(conn, tmp_path, clock)
+        try:
+            state = run_until(service, conn, receipt.job_id, timeout=90)
+            assert state == "failed", _failure_report(service, conn, receipt.job_id)
+            job = get_job(conn, receipt.job_id)
+            assert job.failure.code == "VALIDATION_FAILED"
+            assert job.failure.retryable is False
+            assert _output_refs(conn, receipt.job_id) == {}
+        finally:
+            service.close()
+
+        assert (tmp_path / "DEPLOYED").read_bytes() == before_pointer
+        assert _history_bytes(tmp_path) == before_history
+        assert deployment.current_pointer(tmp_path).release_id == "r2"
+        assert [entry.action for entry in deployment.pointer_history(tmp_path)] == [
+            "promote", "promote"]
+    finally:
+        conn.close()

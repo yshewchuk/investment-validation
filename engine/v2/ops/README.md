@@ -39,8 +39,10 @@ The model rollback operator command is
 the release store. The plan pins the live
 incumbent and rollback target, refuses `--release-id`, and leaves the target
 unset only for `NoPriorRelease`; that worker refusal is typed
-`VALIDATION_FAILED`. Malformed pointer or history data refuses planning with
-typed `VALIDATION_FAILED`. Submit the saved plan through
+`VALIDATION_FAILED`. A submitted plan with an incumbent but no pinned target
+is also refused as typed `VALIDATION_FAILED` before pointer or history
+mutation. Malformed pointer or history data refuses planning with typed
+`VALIDATION_FAILED`. Submit the saved plan through
 `python3 -m engine.v2.ops submit --plan PLAN --idempotency-key KEY`.
 
 Internal staging API: `nightly_raw_rows.scan_calendar_row` returns

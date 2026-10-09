@@ -595,7 +595,10 @@ def _rollback_for_pinned_plan(deployment, store, incumbent_id, incumbent_sequenc
     pointer that has appeared since the plan makes the plan stale and is
     refused the same typed way, without mutation.  A store with exactly one
     incumbent pins no target and likewise reaches ``deployment.rollback``'s own
-    ``NoPriorRelease``.
+    ``NoPriorRelease``.  A generic submission that pins a matching live
+    incumbent but leaves the target ``None`` while the store now holds an
+    earlier release never named that target, so it is refused the same typed
+    way rather than swapping unpinned.
     """
     recorded = _recorded_rollback(deployment, store, incumbent_id, incumbent_sequence, target)
     if recorded is not None:
@@ -610,9 +613,22 @@ def _rollback_for_pinned_plan(deployment, store, incumbent_id, incumbent_sequenc
             or pointer.release_id != incumbent_id or pointer.sequence != incumbent_sequence):
         raise fail("VALIDATION_FAILED",
                    "rollback plan no longer matches the live pointer; refusing a stale swap")
-    if target is not None and deployment.rollback_target(store) != target:
-        raise fail("VALIDATION_FAILED",
-                   "rollback target changed since the plan was made; refusing a stale swap")
+    if target is not None:
+        if deployment.rollback_target(store) != target:
+            raise fail("VALIDATION_FAILED",
+                       "rollback target changed since the plan was made; refusing a stale swap")
+    else:
+        # A plan that pinned a live incumbent but no target could only come from
+        # a store with no earlier release.  If one now exists the plan never
+        # named it, so swapping to it would be an unpinned rollback: refuse.
+        try:
+            current_target = deployment.rollback_target(store)
+        except deployment.NoPriorRelease:
+            current_target = None
+        if current_target is not None:
+            raise fail("VALIDATION_FAILED",
+                       "rollback plan pinned no target but the store now has one; "
+                       "refusing an unpinned swap")
     return deployment.rollback(store)
 
 
