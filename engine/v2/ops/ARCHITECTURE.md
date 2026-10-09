@@ -184,14 +184,14 @@ submission path reads either edge (the rule Part 4 established for
   dict[str, dict]`** (new, this package). Keys the legacy `score.json`
   document's own `"rows"` array by
   `engine.v2.foundation.score_population.population_key`'s `"ticker|strategy|
-  event_date"` format — REUSED, not re-derived and not re-added: this
-  public function already exists (`decision_replay.py`'s own population
-  comparison already imports it), and it is the identical three-field
-  format `engine.v2.serving.native_render.native_row_key` already derives
-  for a native `ScoreRecord` (that module's own docstring: `"the native
-  twin of bridge._population_key"`; bridge, legacy adapter,
-  and parity all use
-  `foundation.score_population.population_key`). Pure: no
+  event_date"` format for complete identities — REUSED, not re-derived or
+  re-added: this public helper already exists and `decision_replay.py` imports
+  it. Like `native_row_key` for native `ScoreRecord`s, it uses the same
+  three-field format for complete identities; `population_key` fills absent
+  mapping keys with `""`, while `native_row_key` raises a named `KeyError` for
+  missing event-reference `ticker`/`event_date` (a missing strategy remains
+  `""`). Bridge, legacy adapter,
+  and parity all use `foundation.score_population.population_key`. Pure: no
   filesystem, no clock, and — the point of putting this here rather than
   in the composing script below — no import of `engine.v2.serving` (a
   layer-7.0 peer of `engine.v2.ops`, per the root doc's layer table;
