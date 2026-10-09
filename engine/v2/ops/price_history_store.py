@@ -151,6 +151,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -345,6 +346,13 @@ def _read_fragment_rows(store: ArtifactStore, record) -> pd.DataFrame:
     if table.num_rows == 0:
         return pd.DataFrame(columns=columns)
     return table.to_pandas().drop(columns=["ticker"])
+
+
+def _has_live_rows(rows: pd.DataFrame) -> bool:
+    """True iff ``rows`` has at least one date whose latest version is not
+    tombstoned -- an empty parseable retrieval tombstones every prior live
+    row, so a non-empty frame is not by itself a usable ticker."""
+    return bool(len(rows)) and bool((~price_history.latest_state(rows)["deleted"].astype(bool)).any())
 
 
 def _write_ticker_fragment(store: ArtifactStore, ticker: str, rows: pd.DataFrame, *,
@@ -641,7 +649,8 @@ def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: st
 
 
 def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
-           root: Path, dry_run: bool = False, clock: Clock | None = None) -> dict:
+           root: Path, dry_run: bool = False, clock: Clock | None = None,
+           required_tickers: Iterable[str] = ()) -> dict:
     """Read both legacy sources (read-only), capture EVERY not-yet-captured
     retrieval per ticker as its own row-version event -- the px file (if any)
     AND every dated/undated Tier-1 ``history`` entry, merged into one
@@ -650,6 +659,9 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     unless ``dry_run``, commit one new snapshot generation under ``scope``
     carrying every other table's dataset version forward unchanged alongside
     price_history's fresh one. Never touches ``source_root``'s bytes.
+    ``required_tickers`` refuse ``SOURCE_NOT_FOUND``, before writing any
+    fragment, when neither the source (with at least one live (non-tombstoned)
+    row) nor the prior dataset version holds them.
 
     ``root`` (SEND-BACK 2026-09-14 item 4) is the operations root holding
     ``supervisor.lock`` -- held for the whole run, exactly as
@@ -663,13 +675,30 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     if not lock.acquire():
         raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
     try:
-        return _capture(conn, store, source_root, scope=scope, dry_run=dry_run, clock=clock)
+        return _capture(conn, store, source_root, scope=scope, dry_run=dry_run, clock=clock,
+                        required_tickers=required_tickers)
     finally:
         lock.release()
 
 
+def _usable_tickers(required_tickers: frozenset[str], listed: list[str],
+                    prior_by_ticker: dict, store: ArtifactStore,
+                    stored_by_ticker: dict) -> set[str]:
+    """The required tickers with at least one live row either in this run's
+    captured state or in the prior dataset version."""
+    if not required_tickers:
+        return set()
+    usable = {t for t in required_tickers & set(listed) if _has_live_rows(stored_by_ticker[t])}
+    for ticker in required_tickers - set(listed):
+        record = prior_by_ticker.get(ticker)
+        if record is not None and _has_live_rows(_read_fragment_rows(store, record)):
+            usable.add(ticker)
+    return usable
+
+
 def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
-            dry_run: bool, clock: Clock | None) -> dict:
+            dry_run: bool, clock: Clock | None, required_tickers: Iterable[str]) -> dict:
+    required = frozenset(required_tickers)
     clock = clock or SystemClock()
     source_root = Path(source_root)
     px = _px_retrievals(source_root)
@@ -686,13 +715,26 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
     all_attempts: list[dict] = []
     disagreements: dict[str, dict] = {}
 
-    for ticker in tickers:
+    def _capture_outcome(ticker: str) -> _TickerOutcome:
         entries: list[tuple[str, dict]] = []
         if ticker in px:
             entries.append(("legacy_px_csv", px[ticker]))
         entries.extend(("tier1_fetch", e) for e in tier1.get(ticker, []))
         stored = _read_fragment_rows(store, prior_by_ticker.get(ticker))
-        outcome = _capture_ticker(conn, ticker, entries, stored=stored, created_at=created_at)
+        return _capture_ticker(conn, ticker, entries, stored=stored, created_at=created_at)
+
+    precomputed = {t: _capture_outcome(t) for t in tickers if t in required}
+    stored_by_ticker: dict[str, pd.DataFrame] = {t: o.stored for t, o in precomputed.items()}
+    usable = _usable_tickers(required, tickers, prior_by_ticker, store, stored_by_ticker)
+    missing = sorted(required - usable)
+    if missing:
+        raise fail("SOURCE_NOT_FOUND", "price_history source lacks a usable required ticker",
+                   details={"tickers": missing})
+
+    for ticker in tickers:
+        outcome = precomputed.pop(ticker, None)
+        if outcome is None:
+            outcome = _capture_outcome(ticker)
         results.extend(outcome.results)
         all_attempts.extend(outcome.attempts)
         if outcome.changed and not dry_run:
