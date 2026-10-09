@@ -74,7 +74,6 @@ from engine.v2.ops.unit_receipts import (
 __all__ = [
     "SESSION_PRIORITY",
     "daily_by_ticker",
-    "daily_sessions",
     "date_units",
     "horizon_dates",
     "plan_forward_calendar",
