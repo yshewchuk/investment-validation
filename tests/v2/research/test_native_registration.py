@@ -684,3 +684,6 @@ def test_native_ops_imports_are_explicitly_public_and_have_a_documented_consumer
             qualified = node.module.removeprefix("engine.v2.ops.") + "." + alias.name
             assert f"`{qualified}`" in readme
     assert "`experiments/native_registration.py`" in readme
+    architecture = (root / "engine/v2/ops/ARCHITECTURE.md").read_text()
+    assert "`experiments/native_registration.py`" in architecture
+    assert "`catalog.transaction` around `register_hypothesis_in_transaction`" in architecture
