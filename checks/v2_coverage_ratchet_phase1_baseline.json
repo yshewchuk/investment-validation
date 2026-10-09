@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v9",
+  "suite_version": "phase1_coverage_suite.v10",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -111,7 +111,6 @@
     "tests/test_v2_ops_render_parity.py",
     "tests/test_v2_ops_replay_scope.py",
     "tests/test_v2_ops_resolved_session.py",
-    "tests/test_v2_ops_runner_onboarding.py",
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_same_session_replan.py",
     "tests/test_v2_ops_scope_separation.py",
@@ -145,7 +144,8 @@
     "tests/v2/ops/test_forward_calendar_store.py",
     "tests/v2/ops/test_native_parity_pairing.py",
     "tests/v2/ops/test_v2_ops_engineering.py",
-    "tests/v2/ops/test_v2_ops_nightly_completion.py"
+    "tests/v2/ops/test_v2_ops_nightly_completion.py",
+    "tests/v2/ops/test_v2_ops_runner_onboarding.py"
   ],
   "source_hash": "sha256:56d7bf3eb6aa11a4b62385198efe03a80ae769ada533b128855fc1cce06c92a4",
   "packages": {

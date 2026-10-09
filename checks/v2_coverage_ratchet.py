@@ -80,6 +80,12 @@ changing the selected inventory and the measurement identity it feeds; as
 with v5-v8 the package counts remain the historical measurement's, not a
 fresh run.
 
+Bumped to v10 (merge with main): ``origin/main`` added the relocated
+``tests/v2/ops/test_v2_ops_runner_onboarding.py`` to the fixed selector list,
+which this merge keeps alongside the PR's existing relocated-ops paths; as
+with v5-v9 the inventory and measurement identity refresh while the package
+counts remain historical, not a fresh run.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -171,21 +177,23 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v9"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v10"
 
 
 def phase1_suite(root=ROOT):
+    """The fixed test paths the phase-one coverage measurement and validation run, including the relocated rescore and runner-onboarding tests."""
     return sorted([p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_ops_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_data_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_dashboard_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_serving_*.py")]
-                   + ["tests/test_diagnosis_comparator.py"]
-                   + ["tests/v2/foundation/test_v2_ops_foundation.py"]
-                   + ["tests/v2/ops/test_cli_rescore.py"]
-                   + ["tests/v2/ops/test_forward_calendar_store.py"]
-                   + ["tests/v2/ops/test_native_parity_pairing.py"]
-                   + ["tests/v2/ops/test_v2_ops_engineering.py"]
-                   + ["tests/v2/ops/test_v2_ops_nightly_completion.py"])
+                  + ["tests/test_diagnosis_comparator.py"]
+                  + ["tests/v2/foundation/test_v2_ops_foundation.py"]
+                  + ["tests/v2/ops/test_cli_rescore.py"]
+                  + ["tests/v2/ops/test_forward_calendar_store.py"]
+                  + ["tests/v2/ops/test_native_parity_pairing.py"]
+                  + ["tests/v2/ops/test_v2_ops_engineering.py"]
+                  + ["tests/v2/ops/test_v2_ops_nightly_completion.py"]
+                  + ["tests/v2/ops/test_v2_ops_runner_onboarding.py"])
 
 
 def phase1_measurement_identity(root=ROOT):

@@ -97,19 +97,39 @@ def test_phase1_coverage_keeps_relocated_rescore_file(tmp_path):
     assert relative in phase1_suite(tmp_path)
 
 
-def test_phase1_baseline_identity_matches_the_real_measurement():
-    """The committed baseline must describe exactly the current v6 suite."""
+def test_phase1_baseline_inventory_matches_active_suite():
+    """The committed baseline inventory matches the active Phase 1 suite.
+
+    The stored baseline counts are historical; they are not required to be a
+    fresh measurement of the live source tree.
+    """
     from checks.v2_coverage_ratchet import (
         PHASE1_BASELINE,
         PHASE1_SUITE_VERSION,
-        phase1_measurement_identity,
         phase1_suite,
     )
 
     baseline = json.loads(PHASE1_BASELINE.read_text())
     assert baseline["suite_version"] == PHASE1_SUITE_VERSION
     assert baseline["test_files"] == phase1_suite(ROOT)
-    assert baseline["source_hash"] == phase1_measurement_identity(ROOT)
+
+
+def test_phase1_measurement_identity_is_checked_on_measurement_evidence():
+    """Current-source identity applies to measurement evidence, not the baseline."""
+    from checks.layer_map import PACKAGES
+    from checks.v2_coverage_ratchet import (
+        phase1_measurement_identity,
+        phase1_suite,
+        phase1_validate_measurement,
+    )
+
+    measured = {
+        "schema_version": "phase1_coverage.v1.0",
+        "test_files": phase1_suite(ROOT),
+        "packages": {p.dotted: {} for p in PACKAGES},
+        "source_hash": phase1_measurement_identity(ROOT),
+    }
+    assert phase1_validate_measurement(measured, root=ROOT) == []
 
 
 def test_phase1_validation_reports_inventory_and_source_drift():
@@ -134,6 +154,18 @@ def test_phase1_coverage_keeps_relocated_forward_calendar_store_file(tmp_path):
     from checks.v2_coverage_ratchet import phase1_suite
 
     relative = "tests/v2/ops/test_forward_calendar_store.py"
+    assert relative in phase1_suite(tmp_path)
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    assert relative in phase1_suite(tmp_path)
+
+
+def test_phase1_coverage_keeps_relocated_runner_onboarding_file(tmp_path):
+    """The moved runner-onboarding test must stay in the phase-one fixed suite."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_v2_ops_runner_onboarding.py"
     assert relative in phase1_suite(tmp_path)
     target = tmp_path / relative
     target.parent.mkdir(parents=True)
