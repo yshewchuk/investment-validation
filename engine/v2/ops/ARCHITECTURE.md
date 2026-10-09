@@ -1134,17 +1134,17 @@ strategies by construction, so no legacy read is needed; it is instead
 checked against `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset
 assertion paid once at import time, no I/O, no legacy dependency).
 
-**Callers:** `engine.v2.dashboard._server`'s lazy, documented import of
-`cli.refresh_action` (root doc §4); the `tools/v2_*.py` operator CLIs
-(direct import — permitted, `tools/*` is not a layered production package
-per the root doc's §1); `experiments/*` runners submitting plans;
-`checks/rearchitecture_*.py` verification scripts; and the
-`tests/test_v2_ops_*.py` suite. No layered `engine/v2/**` package above
-layer 7.0 imports this package, and no legacy `engine/**` module does
-either, except that one documented dashboard caller. The implemented
-slice-4b raw-row producer consumes `board_requests` as a library and is
-called only by slice 5's `supervisor.Service._reconcile_native_score_batch_shadow`
-in the tick loop; it has no other production caller.
+**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4);
+top-level `tools/v2_*.py` operator CLIs and `experiments/*` plan submitters;
+`checks/rearchitecture_*.py`; and `tests/test_v2_ops_*.py`. Top-level tools are
+unlayered (§1); no other layered or legacy engine caller imports ops.
+The raw-row producer consumes `board_requests`; its sole production caller is
+`supervisor.Service._reconcile_native_score_batch_shadow` in the tick loop.
+`experiments/native_registration.py` may also import the public submodule APIs
+`catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`,
+`experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`,
+and `fingerprints.environment_identity`/`source_closure`. Registration owns the
+`catalog.transaction` around `register_hypothesis_in_transaction`; other modules stay internal.
 
 ## External systems and libraries
 
