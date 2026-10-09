@@ -529,8 +529,8 @@ snapshot before scoring.** `nightly_trigger._default_plan` runs in
 legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
 `"model_evidence"` read through one pinned, frozen snapshot per session.
 `pin_snapshot_inputs` binds that snapshot to the exact `snapshot_id`
-`_ensure_shadow_snapshot` verified. Extending that shared snapshot to
-`native_score_batch` still depends on
+`_ensure_shadow_snapshot` verified; its three required bindings are `core/snapshot_contracts.py::SNAPSHOT_BINDINGS`.
+Extending that shared snapshot to `native_score_batch` still depends on
 [#199](https://github.com/yshewchuk/investment-validation/issues/199)'s reader,
 which removes independent legacy/native store reads from the shadow comparison.
 This never touches the real legacy nightly:
