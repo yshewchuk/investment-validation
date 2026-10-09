@@ -1144,7 +1144,7 @@ The raw-row producer consumes `board_requests`; its sole production caller is
 `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`,
 `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`,
 and `fingerprints.environment_identity`/`source_closure`. Registration owns the
-`catalog.transaction` around `register_hypothesis_in_transaction`; other modules stay internal.
+`catalog.transaction` around `register_hypothesis_in_transaction`. `experiments/native_outcomes.py` also consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact and CSV effects stay outside SQL. Other modules stay internal.
 
 ## External systems and libraries
 
