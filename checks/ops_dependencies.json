@@ -4,7 +4,7 @@
     "entry": ["", "__main__", "cli"],
     "core": ["bootstrap", "catalog", "checkpoints", "decision_replay", "decision_validation", "diagnostics", "discovery", "errors",
       "executor_cgroup", "executor_watchdog", "fingerprints", "input_bindings", "lifecycle", "migrations", "outbox", "parity", "plans",
-      "profiles", "provider_budget", "provider_response", "recovery", "resources", "scheduler", "schema", "schema_runtime",
+      "profiles", "provider_budget", "provider_requirements", "provider_response", "recovery", "resources", "scheduler", "schema", "schema_runtime",
       "session_backfill", "session_resolution", "store_barrier", "submission", "worker_progress"],
     "runtime": ["executor", "supervisor", "worker", "nightly_trigger"],
     "workflows": ["backup", "decision_commit", "decision_evidence", "effects_graph", "experiment_folds", "experiments", "health",
