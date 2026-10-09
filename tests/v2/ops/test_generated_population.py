@@ -337,7 +337,6 @@ def test_filtered_full_run_uses_subset_effect_scope(env, monkeypatch):
     requests = nightly.build_legacy_job_requests(
         plan, tickers=tuple(plan["tickers"]), context_tickers=tuple(plan["context_tickers"]),
         year_start=plan["year_start"], year_end=plan["year_end"],
-        expected_population=tuple(plan["expected_population"]),
         full_universe=tuple(plan["context_tickers"]), input_mode="legacy")
     score_request = next(request for request in requests
                          if request.job.parameters["expected_ids"] == ("legacy_score",))

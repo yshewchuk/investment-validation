@@ -1423,7 +1423,8 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
                              context_tickers=context_tickers, plan_identity=plan_identity)
     if plan.get("candidate_exclusions"):
-        effect_tickers = sorted({str(key).split("|")[0] for key in expected_population})
+        effect_tickers = sorted({str(key).split("|")[0]
+                                 for key in plan["expected_population"]})
         effect_scope = effect_scope_for(effect_tickers)
     else:
         effect_scope = effect_scope_for(tickers, full_universe)
