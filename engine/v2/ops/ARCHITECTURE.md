@@ -184,7 +184,7 @@ walk; runtime parity submission already binds both jobs directly. No
 submission path reads either edge (the rule Part 4 established for
 `computed_moves_refresh`'s own node).
 
-- **`nightly.legacy_parity_rows(score_document: Mapping[str, Any]) ->
+- **`native.parity_inputs.legacy_parity_rows(score_document: Mapping[str, Any]) ->
   dict[str, dict]`** (new, this package). Keys the legacy `score.json`
   document's own `"rows"` array by
   `engine.v2.ops.decision_validation.population_key`'s `"ticker|strategy|
@@ -748,7 +748,7 @@ every value it needs is already a committed job output:
 - **Legacy source.** `job_<score_job_id>#legacy_score` — the SAME `score.json`
   `attempt_outputs` binding every other legacy-dependent job already reads
   (`_job_output("score", keys)`, `nightly.py:180`), decoded into
-  `legacy_rows` via `nightly.legacy_parity_rows` (above), unchanged from
+  `legacy_rows` via `native.parity_inputs.legacy_parity_rows` (above), unchanged from
   the original PR-4 design.
 - **Native source, per `#88`.** `job_<native_score_batch_job_id>#records`
   and `job_<native_score_batch_job_id>#refusals` — the `native_score_batch`
