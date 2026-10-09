@@ -14,7 +14,7 @@ produce"). Root causes, both in ``engine/v2/ops/supervisor.py``:
    propagating) a pre-fix catalog's positional names.
 
 This file is the real-catalog/real-``Service`` proof for the fix, following
-the patterns in ``tests/test_v2_ops_nightly_completion.py`` (``artifact_check``
+the patterns in ``tests/v2/ops/test_v2_ops_nightly_completion.py`` (``artifact_check``
 as a cheap, real, checkpoint-contract kind) and
 ``tests/test_v2_ops_recovery_ownership.py`` (real ``Service``/``claim_next``
 without a live subprocess).

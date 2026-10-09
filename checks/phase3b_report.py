@@ -69,7 +69,7 @@ ACCEPTED_LIMITATION = (
 #: fail only as a worktree/missing-data artifact elsewhere; exactly one test
 #: is genuinely red.
 KNOWN_RED_TESTS = (
-    ("tests/test_v2_ops_nightly_completion.py::"
+    ("tests/v2/ops/test_v2_ops_nightly_completion.py::"
      "test_action_finality_writes_a_coverage_output_from_monkeypatched_frames",
      "R3B-7 (open, not part of this closeout): `covered_tickers: []` where "
      "`['AAA']` is expected -- a per-ticker finality coverage regression. "

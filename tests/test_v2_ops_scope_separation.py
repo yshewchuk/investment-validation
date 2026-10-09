@@ -7,7 +7,7 @@ from other tickers without widening its score population. A real subset
 commit followed by export succeeds under its subset scope and advances no
 global watermark." Tests here go through the real producers -- never a
 pre-seeded scoped watermark -- mirroring the patterns in
-``tests/test_v2_ops_nightly_completion.py``.
+``tests/v2/ops/test_v2_ops_nightly_completion.py``.
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit, submit_graph
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY, sample
-from tests.test_v2_ops_nightly_completion import (
+from tests.v2.ops.test_v2_ops_nightly_completion import (
     _finality_coverage,
     _manifest_ref,
     _publish,

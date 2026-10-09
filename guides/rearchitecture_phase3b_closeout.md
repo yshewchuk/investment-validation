@@ -52,7 +52,7 @@ worktree/missing-data artifact):
   **pass** with real data present. (They fail with `FileNotFoundError` in a
   plain git worktree, because `data/` is gitignored and no worktree carries
   it — an environment artifact, not a defect.)
-- `tests/test_v2_ops_nightly_completion.py::test_action_finality_writes_a_coverage_output_from_monkeypatched_frames`
+- `tests/v2/ops/test_v2_ops_nightly_completion.py::test_action_finality_writes_a_coverage_output_from_monkeypatched_frames`
   is **genuinely red**: `covered_tickers: []` where `['AAA']` is expected.
   This is R3B-7 (below), assigned separately and not fixed by this record.
 

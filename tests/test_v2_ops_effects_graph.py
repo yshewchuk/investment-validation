@@ -4,7 +4,7 @@ outbox effects wired into the nightly job DAG.
 Real SQLite (``open_catalog``), a real ``ArtifactStore`` and real submission/
 claim/commit_attempt machinery throughout. Parent jobs whose only role is to
 give a coordinator effect a durable, resolvable ``job_<id>#<output>`` binding
-are seeded the same way ``tests/test_v2_ops_nightly_completion.py`` seeds
+are seeded the same way ``tests/v2/ops/test_v2_ops_nightly_completion.py`` seeds
 them (``_succeed_parent``): a real ``artifact_check`` submission driven all
 the way through ``commit_attempt``, never a mock. A committed decision itself
 is seeded directly through ``engine.v2.ledger.decisions.insert`` plus the

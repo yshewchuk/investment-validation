@@ -3,7 +3,7 @@ committed ``legacy_score`` jobs (no subprocess, no legacy tree, no provider
 calls: every job is driven straight through the real submit/claim/
 ``commit_attempt`` machinery with a synthetic ``score.json`` artifact
 registered as its output, mirroring
-``tests/test_v2_ops_nightly_completion.py``'s ``_succeed_parent`` pattern),
+``tests/v2/ops/test_v2_ops_nightly_completion.py``'s ``_succeed_parent`` pattern),
 read back as plain rows plus the snapshot binding.
 
 The comparison itself (``compare_records``, tolerances, ``ComparisonReceipt``)

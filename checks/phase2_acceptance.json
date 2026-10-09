@@ -94,7 +94,7 @@
     },
     "D18": {
       "tier": 1,
-      "tests": ["tests/test_v2_ops_nightly_completion.py",
+      "tests": ["tests/v2/ops/test_v2_ops_nightly_completion.py",
                 "tests/test_v2_ops_resolved_session.py",
                 "tests/test_v2_ops_scope_separation.py",
                 "tests/test_v2_ops_decision_validation_order.py",

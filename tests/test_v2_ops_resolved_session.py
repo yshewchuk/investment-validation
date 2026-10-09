@@ -14,7 +14,7 @@ Tier 0: no private data, no real scoring/legacy rebuild. Pure helpers and
 in-process legacy actions are exercised with synthetic docs and
 monkeypatched ``Scorer``/``FeatureContext.load``/``score_calendar``/
 ``score_outcomes``; the decision-commit chain uses the real ``Service``
-and ``TEST_POLICY``, the same pattern ``tests/test_v2_ops_nightly_completion.py``
+and ``TEST_POLICY``, the same pattern ``tests/v2/ops/test_v2_ops_nightly_completion.py``
 and ``tests/test_v2_ops_effects_graph.py`` use.
 """
 from __future__ import annotations
@@ -62,7 +62,7 @@ from tests.test_v2_ops_effects_graph import (
     _seed_decisions,
     _submit_and_claim as _effects_submit_and_claim,
 )
-from tests.test_v2_ops_nightly_completion import (
+from tests.v2.ops.test_v2_ops_nightly_completion import (
     _manifest_ref,
     _publish,
     _run_until_terminal,

@@ -10,7 +10,7 @@ byte must agree.
 ``Scorer``/``FeatureContext.load`` are monkeypatched to a small synthetic
 panel/trades/registry -- the same pattern
 ``test_decision_replay_action_scopes_context_full_and_scoring_eligible`` uses
-in ``tests/test_v2_ops_nightly_completion.py``. No real scoring, no real
+in ``tests/v2/ops/test_v2_ops_nightly_completion.py``. No real scoring, no real
 store, no network.
 """
 from __future__ import annotations
