@@ -58,52 +58,78 @@ def test_lazy_training_imports_keep_every_fixed_target_and_package_init():
         assert targets <= graph.precise[test]
 
 
-def test_phase1_coverage_keeps_relocated_foundation_file(tmp_path):
-    """A missing required test must not silently disappear from the suite."""
+def _phase1_root(tmp_path, listed, present, extra=()):
+    import json
+
+    (tmp_path / "checks").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "checks/v2_coverage_ratchet_phase1_baseline.json").write_text(
+        json.dumps({"test_files": listed}))
+    for rel in [*present, *extra]:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("")
+    return tmp_path
+
+
+_PHASE1_EXTRA = ("tests/v2/ops/test_cli_rescore.py", "tests/v2/ops/test_forward_calendar_store.py")
+
+
+def test_phase1_suite_finds_a_baseline_test_that_moved(tmp_path):
     from checks.v2_coverage_ratchet import phase1_suite
 
-    relative = "tests/v2/foundation/test_v2_ops_foundation.py"
-    assert relative in phase1_suite(tmp_path)
-    target = tmp_path / relative
-    target.parent.mkdir(parents=True)
-    target.write_text("")
-    assert relative in phase1_suite(tmp_path)
+    root = _phase1_root(tmp_path, ["tests/test_old_home.py"],
+                        ["tests/v2/ops/test_old_home.py"], _PHASE1_EXTRA)
+    assert "tests/v2/ops/test_old_home.py" in phase1_suite(root)
+    assert "tests/test_old_home.py" not in phase1_suite(root)
 
 
-def test_phase1_coverage_keeps_relocated_rescore_file(tmp_path):
-    """The moved rescore test must stay in the phase-one fixed suite."""
+def test_phase1_suite_keeps_a_baseline_test_that_did_not_move(tmp_path):
     from checks.v2_coverage_ratchet import phase1_suite
 
-    relative = "tests/v2/ops/test_cli_rescore.py"
-    assert relative in phase1_suite(tmp_path)
-    target = tmp_path / relative
-    target.parent.mkdir(parents=True)
-    target.write_text("")
-    assert relative in phase1_suite(tmp_path)
+    root = _phase1_root(tmp_path, ["tests/test_still_root.py"],
+                        ["tests/test_still_root.py"], _PHASE1_EXTRA)
+    assert "tests/test_still_root.py" in phase1_suite(root)
 
 
-def test_phase1_coverage_keeps_relocated_forward_calendar_store_file(tmp_path):
-    """The moved calendar-store test must stay in the phase-one fixed suite."""
+def test_phase1_suite_resolves_the_explicit_rename(tmp_path):
     from checks.v2_coverage_ratchet import phase1_suite
 
-    relative = "tests/v2/ops/test_forward_calendar_store.py"
-    assert relative in phase1_suite(tmp_path)
-    target = tmp_path / relative
-    target.parent.mkdir(parents=True)
-    target.write_text("")
-    assert relative in phase1_suite(tmp_path)
+    root = _phase1_root(tmp_path, ["tests/test_v2_ops_legacy_defects.py"],
+                        ["tests/v2/ops/test_legacy_defects.py"], _PHASE1_EXTRA)
+    assert "tests/v2/ops/test_legacy_defects.py" in phase1_suite(root)
 
 
-def test_phase1_coverage_keeps_relocated_runner_onboarding_file(tmp_path):
-    """The moved runner-onboarding test must stay in the phase-one fixed suite."""
+def test_phase1_suite_raises_for_a_baseline_test_that_is_gone(tmp_path):
     from checks.v2_coverage_ratchet import phase1_suite
 
-    relative = "tests/v2/ops/test_v2_ops_runner_onboarding.py"
-    assert relative in phase1_suite(tmp_path)
-    target = tmp_path / relative
-    target.parent.mkdir(parents=True)
-    target.write_text("")
-    assert relative in phase1_suite(tmp_path)
+    root = _phase1_root(tmp_path, ["tests/test_gone.py"], [], _PHASE1_EXTRA)
+    with pytest.raises(FileNotFoundError, match="test_gone.py"):
+        phase1_suite(root)
+
+
+def test_phase1_suite_raises_for_an_ambiguous_basename(tmp_path):
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    root = _phase1_root(tmp_path, ["tests/test_twin.py"],
+                        ["tests/v2/ops/test_twin.py", "tests/v2/data/test_twin.py"], _PHASE1_EXTRA)
+    with pytest.raises(FileNotFoundError, match="test_twin.py"):
+        phase1_suite(root)
+
+
+def test_phase1_suite_raises_for_a_missing_extra_test(tmp_path):
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    root = _phase1_root(tmp_path, [], [], [_PHASE1_EXTRA[0]])
+    with pytest.raises(FileNotFoundError, match="test_forward_calendar_store.py"):
+        phase1_suite(root)
+
+
+def test_phase1_suite_resolves_every_real_baseline_test():
+    from checks.v2_coverage_ratchet import ROOT as RATCHET_ROOT, phase1_suite
+
+    suite = phase1_suite()
+    assert suite == sorted(set(suite))
+    assert all((RATCHET_ROOT / rel).is_file() for rel in suite)
+    assert "tests/v2/foundation/test_v2_ops_foundation.py" in suite
 
 
 def _integration(root, name, body):
@@ -364,3 +390,61 @@ def test_cli_fallback_counts_only_root_budget_pattern(tmp_path):
     _git(root, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "base")
     (root / "checks/test_layout_budget.txt").write_text("1\n")
     assert tb.main(["--repo-root", str(root), "--base-ref", "main", "--quiet"]) == 0
+
+
+def _r7_repo(tmp_path, monkeypatch):
+    redirected = str(tmp_path / "redirected.git")
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.setenv(name, redirected)
+    root = tmp_path / "repo"
+    (root / "tests/v2/ops").mkdir(parents=True)
+    (root / "checks").mkdir()
+    _git(root, "init")
+    _git(root, "symbolic-ref", "HEAD", "refs/heads/main")
+    (root / "tests/test_a.py").write_text("x = 1\n")
+    (root / "tests/test_b.py").write_text("")
+    (root / "checks/test_layout_budget.txt").write_text("2\n")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "base")
+    return root
+
+
+def test_r7_editing_a_root_test_in_place_fails(tmp_path, monkeypatch, capsys):
+    root = _r7_repo(tmp_path, monkeypatch)
+    (root / "tests/test_a.py").write_text("x = 2\n")
+    assert tb.main(["--repo-root", str(root), "--base-ref", "main", "--quiet"]) == 1
+    err = capsys.readouterr().err
+    assert "tests/test_a.py: root-level test modified in place" in err
+    assert "git mv" in err and "decrease checks/test_layout_budget.txt by one" in err
+
+
+def test_r7_a_staged_edit_of_a_root_test_fails(tmp_path, monkeypatch):
+    root = _r7_repo(tmp_path, monkeypatch)
+    (root / "tests/test_b.py").write_text("y = 1\n")
+    _git(root, "add", "-A")
+    assert tb.main(["--repo-root", str(root), "--base-ref", "main", "--quiet"]) == 1
+
+
+def test_r7_moving_and_editing_a_root_test_passes(tmp_path, monkeypatch):
+    root = _r7_repo(tmp_path, monkeypatch)
+    _git(root, "mv", "tests/test_a.py", "tests/v2/ops/test_a.py")
+    (root / "tests/v2/ops/test_a.py").write_text("x = 3\n")
+    (root / "checks/test_layout_budget.txt").write_text("1\n")
+    _git(root, "add", "-A")
+    assert tb.main(["--repo-root", str(root), "--base-ref", "main", "--quiet"]) == 0
+
+
+def test_r7_deleting_a_root_test_passes(tmp_path, monkeypatch):
+    root = _r7_repo(tmp_path, monkeypatch)
+    _git(root, "rm", "tests/test_b.py")
+    (root / "checks/test_layout_budget.txt").write_text("1\n")
+    _git(root, "add", "-A")
+    assert tb.main(["--repo-root", str(root), "--base-ref", "main", "--quiet"]) == 0
+
+
+def test_r7_check_layout_ignores_modified_non_root_tests():
+    base = ["tests/test_a.py", "tests/v2/ops/test_c.py"]
+    report = tb.check_layout(base, base, 1, 1, modified_paths=["tests/v2/ops/test_c.py"])
+    assert report.ok
+    report = tb.check_layout(base, base, 1, 1, modified_paths=["tests/test_a.py"])
+    assert not report.ok

@@ -83,22 +83,21 @@ the approved destination and matching budget decrease.
 
 ### Touch it, move it
 
-Recommendation, subject to the gate and user decision: encourage a PR that
-edits an unmoved test to move it into its package folder in the same PR when
-the move remains reviewable. This is not required. Moving while editing can
-reduce future full-suite fallbacks, but combining a rename and behavioral
-change can make review harder. Keep the test at root while it imports an
-unmoved shared helper; move the helper with its owning package, then move the
-test. In particular, move `tests/ops_support.py` to `tests/v2/ops/` and
-`tests/data_scan_support.py` to `tests/v2/data/`. A test and its helper may
-move together when the package ownership is clear.
+Required (R7): a PR may not modify an existing root-level `tests/test_*.py`
+in place. An author who must edit one first `git mv`s it to
+`tests/v2/<package>/` (or the package test dir), fixes its imports and every
+repository reference to the old path, and lowers `checks/test_layout_budget.txt`
+by one. A pure rename out of the root and a deletion are allowed. A test that
+imports an unmoved shared helper moves together with it, or after it: move
+`tests/ops_support.py` to `tests/v2/ops/` and `tests/data_scan_support.py` to
+`tests/v2/data/` with their owning package.
 
 Concurrent PRs can edit or move the same file and conflict on the old path,
 new path, or imports. Coordinate by letting the first change merge, then rebase
 and preserve both changes; the gate and user decide whether the combined move
 is still reviewable.
 
-### Ratchet check failure semantics (R1–R6)
+### Ratchet check failure semantics (R1–R7)
 
 | Case | Contract |
 |---|---|
@@ -108,6 +107,16 @@ is still reviewable.
 | **R4 — unknown package** | Fail if a `tests/v2/<package>/` directory names no package in `checks/layer_map.py`. |
 | **R5 — rename appears as delete plus add** | Apply the same path checks and budget accounting without relying on Git rename detection: root deletion, approved destination, and one lower budget count. A path-only `git mv` adds zero lines. |
 | **R6 — revert restores a moved test** | Fail if a later PR restores that file at root or increases the budget. Move it forward again; the budget never grows. |
+| **R7 — root test modified in place** | Fail when `git diff --diff-filter=M --no-renames <base>` lists a root-level `tests/test_*.py`. The message says to `git mv` it to `tests/v2/<package>/` and lower the budget by one. A move (delete plus add) and a deletion pass. |
+
+### Phase-one coverage suite follows moved tests
+
+`phase1_suite()` in `checks/v2_coverage_ratchet.py` resolves every path in the
+baseline's `test_files` wherever the file now lives: the recorded path if it
+exists, else its entry in the explicit rename map (when that target exists),
+else the one file of the same basename under `tests/`. A baseline test that cannot be resolved (missing or
+ambiguous) raises `FileNotFoundError`; it is never dropped silently. The extra
+relocated tests it names explicitly are required to exist the same way.
 
 ## Selector and workflow boundary
 
