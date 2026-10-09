@@ -189,8 +189,8 @@ submission path reads either edge (the rule Part 4 established for
   it. Like `native_row_key` for native `ScoreRecord`s, it uses the same
   three-field format for complete identities; `population_key` joins the
   ticker/strategy/event_date values from `row.get(key, "")`, while
-  `native_row_key` raises a named `KeyError` if `event_ref` lacks ticker or
-  event_date (a missing strategy remains `""`). Bridge, legacy adapter, and parity use
+  `native_row_key` uses the event reference and resolved request to form its
+  key. Bridge, legacy adapter, and parity use
   `foundation.score_population.population_key`. Pure: no
   filesystem, no clock, and — the point of putting this here rather than
   in the composing script below — no import of `engine.v2.serving` (a
