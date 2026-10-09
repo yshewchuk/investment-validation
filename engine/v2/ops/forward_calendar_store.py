@@ -74,6 +74,7 @@ from engine.v2.ops.unit_receipts import (
 __all__ = [
     "SESSION_PRIORITY",
     "daily_by_ticker",
+    "daily_sessions",
     "date_units",
     "horizon_dates",
     "plan_forward_calendar",
@@ -166,6 +167,24 @@ def daily_by_ticker(repository: Repository, snapshot) -> dict[str, pd.DataFrame]
     frame = pd.concat(chunks, ignore_index=True)
     frame["date"] = pd.to_datetime(frame["date"])
     return {str(ticker): group for ticker, group in frame.groupby("ticker")}
+
+
+def daily_sessions(repository: Repository, snapshot) -> dict[str, pd.DataFrame]:
+    """The pinned ``daily_market``'s DISTINCT session dates, in one frame.
+
+    ``native_trading_calendar`` only needs the distinct ``date`` values, so this
+    streams the leases from ``_scan_rows`` and keeps just a set of normalized
+    dates: retained rows are bounded by the session count, not by tickers x
+    sessions. Returns ``{}`` for a valid empty selection (so the caller's
+    ``ValueError`` weekday fallback is unchanged); repository refusals propagate.
+    """
+    sessions: set[pd.Timestamp] = set()
+    for lease in _scan_rows(repository, snapshot, "daily_market", ("ticker", "date")):
+        with lease as rows:
+            sessions.update(pd.Timestamp(row["date"]).normalize() for row in rows)
+    if not sessions:
+        return {}
+    return {"sessions": pd.DataFrame({"date": sorted(sessions)})}
 
 
 def resolve_session_claims(claims: dict) -> tuple[str | None, str | None]:
@@ -582,15 +601,19 @@ def _fetch_yfinance(conn, store, fetcher, plan, claims: dict, *, received_at: st
 # --------------------------------------------------------------------------
 
 
-def _existing_index(repository, snapshot) -> dict[tuple[str, str], dict]:
-    """Every existing ``earnings_events`` row, keyed ``(ticker, event_date)``."""
+def _existing_index(repository, snapshot, keys) -> dict[tuple[str, str], dict]:
+    """Existing ``earnings_events`` rows keyed ``(ticker, event_date)``, retaining
+    only rows whose key is in ``keys`` (the claim keys), so retained rows are
+    bounded by the claims, not by the table."""
     contract = next(item for item in snapshot.contracts if item.table_name == TABLE_NAME)
     rows = {}
     for lease in _scan_rows(repository, snapshot.snapshot, TABLE_NAME,
                             tuple(column.name for column in contract.columns)):
         with lease as batch:
             for row in batch:
-                rows[(str(row["ticker"]), str(row["event_date"])[:10])] = row
+                key = (str(row["ticker"]), str(row["event_date"])[:10])
+                if key in keys:
+                    rows[key] = row
     return rows
 
 
@@ -742,7 +765,7 @@ def _native_calendar(repository, parent, *, as_of, horizon_days) \
     swallowed into it.
     """
     horizon_end = pd.Timestamp(as_of).normalize() + pd.Timedelta(days=int(horizon_days))
-    daily = daily_by_ticker(repository, parent.snapshot)
+    daily = daily_sessions(repository, parent.snapshot)
     try:
         return native_trading_calendar(daily, horizon_end=horizon_end), ()
     except ValueError as exc:
@@ -888,7 +911,7 @@ def _execute_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
                            refresh_plan_hash=refresh_plan_hash, status="noop",
                            completed_ids=tuple(sorted(wanted)),
                            coverage_advanced=False, warnings=warnings)
-        existing = _existing_index(repository, parent)
+        existing = _existing_index(repository, parent, set(claims))
         receipt = _commit_claims(conn, store, parent, claims, existing,
                                  scope=scope, clock=clock,
                                  expected_head_generation=expected_head_generation,

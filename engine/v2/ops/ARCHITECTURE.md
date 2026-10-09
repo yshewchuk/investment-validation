@@ -622,14 +622,14 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   parent. `computed-moves capture` uses the newest successful Tier-1 yfinance `history(period=max)` entry; missing
   history is `legitimate_empty`, it never fetches live, and dry-run reports cache coverage without writing. The selected source root is authoritative: catalog unit receipts do not substitute for missing or changed Tier-1 entries. The worker binds `as_of` and the fetcher; target selection follows the legacy ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
 - `forward_calendar_store` derives trading calendars from pinned `daily_market` (weekday fallback if absent), then uses the `catalog_path`, `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences in "Primary contracts", plus injected Nasdaq date and yfinance pending-ticker fetchers.
-- Bounded retention (`computed_moves_store`): a lease is transient, so the store never accumulates leases into a
-  history-sized list or frame. It scans each source table once keeping only per-ticker counters (row counts,
-  ORATS-confirmed sessioned events before `as_of`, newest such event date), packs the targets in plan order into chunks
-  whose rows across both tables total at most `MAX_SCAN_ROWS` minus a lease cap (the lesser of 50,000 and half the
-  guard), then rescans per chunk through leases of at most that cap, keeping only that chunk's rows, released before the
-  next. Chunk plus lease never exceed `MAX_SCAN_ROWS`, whatever the source history; pin, columns, key order, filters and
-  null/correction/date handling are unchanged. Forward-calendar is not
-  yet bounded: it builds whole-history daily-market frames and an existing-earnings index, capped by `MAX_SCAN_ROWS`.
+- Bounded retention: leases are transient, so neither store accumulates them into a history-sized list or frame.
+  `computed_moves_store` scans each source table once keeping only per-ticker counters (row counts, ORATS-confirmed
+  sessioned events before `as_of`, newest such event date), packs targets in plan order into chunks of at most
+  `MAX_SCAN_ROWS` minus a lease cap (lesser of 50,000 and half the guard), and rescans per chunk, releasing each before
+  the next. `forward_calendar_store` keeps only the DISTINCT `daily_market` session dates (`daily_sessions`) and only the
+  existing `earnings_events` rows whose `(ticker, event_date)` is a claim key (`_existing_index(..., keys)`), so retained
+  rows follow sessions and claims, not table size. Pin, columns, key order, filters, results, typed refusals (an empty
+  `daily_market` pin still selects the weekday fallback) and the `MAX_SCAN_ROWS` guard are unchanged.
 - `ops.pinned_partition_reader` yields bounded leases to both stores; `MAX_SCAN_ROWS` bounds live input; consume before advancing (advance clears it; `list(iterator)` retains empty leases). R1 missing,
   corrupt or incompatible pin → typed refusal, never empty/newer; R2 provisional until full validation; R3 integrity
   refusal terminal/no retry; R4 each partition uses the same pin/scope; R5 failure discards attempt state/output;

@@ -276,7 +276,7 @@ def test_standalone_whole_market_cache_preserves_unfenced_research_contract(harn
     assert _head(harness) == (result.candidate_snapshot_id, 2)
     repository = Repository(harness.conn, harness.store)
     snapshot = repository.resolve_full(result.candidate_snapshot_id)
-    row = forward_calendar_store._existing_index(repository, snapshot)[("AAPL", AS_OF)]
+    row = forward_calendar_store._existing_index(repository, snapshot, {("AAPL", AS_OF)})[("AAPL", AS_OF)]
     assert (row["session"], row["src_nasdaq"], row["src_yfinance"]) == ("AMC", True, True)
     assert harness.calls == harness.connections == []
     assert _budget_state(harness) == ([], [])
