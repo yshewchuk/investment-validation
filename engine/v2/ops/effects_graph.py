@@ -934,13 +934,15 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
     return _commit, ()
 
 
-def _experiment_refusal_failure_effect(claim, problem, *, code_source, store_root=None
+def _experiment_refusal_failure_effect(claim, problem, *, code_source, store_root=None,
+                                       refusal_receipt=None
                                        ) -> Callable[[sqlite3.Connection], None] | None:
     """The ``commit_attempt(failure_effects=...)`` callback for a refused experiment run.
 
-    A real holdout denial is a typed ``HOLDOUT_ACCESS_DENIED`` the worker
-    already captured privately (``worker._experiment_failure`` puts the pinned
-    refusal receipt on the failure's own ``details`` channel), and its
+    A real holdout denial is a typed ``HOLDOUT_ACCESS_DENIED`` whose pinned
+    refusal receipt the caller loads from the worker's private diagnostics
+    (``worker._experiment_failure``) and passes in separately as
+    ``refusal_receipt``; ``problem.details`` is never read for it. Its
     ``refused`` ledger row belongs to the FAILED attempt's fenced commit, not to
     the worker subprocess: only the coordinator knows the checkout root that
     owns ``experiments/LEDGER.csv``, and a cancelled or expired attempt must
@@ -953,14 +955,14 @@ def _experiment_refusal_failure_effect(claim, problem, *, code_source, store_roo
     experiment holdout refusal, and for a ``no_ledger`` (smoke) attempt, whose
     ledger bytes must stay untouched however the run ended.
 
-    Validation happens here, before any path or closure exists: the receipt's own
-    fields carry the identity, never text scraped off an exception, and evidence
-    that is missing, not a mapping, or carries a wrong ``schema_version`` /
-    ``status`` / ``failure_code``, or a blank or non-string identity/pin field, is
-    the typed ``VALIDATION_FAILED`` refusal naming only the offending keys (the
-    values are private evidence, never diagnostics). The closure captures the two
-    validated strings and the resolved path and mutates neither the supplied
-    Problem nor the receipt.
+    Validation happens here, before any path or closure exists: the supplied
+    ``refusal_receipt`` fields carry the identity, never text scraped off an
+    exception, and evidence that is missing, not a mapping, or carries a wrong
+    ``schema_version`` / ``status`` / ``failure_code``, or a blank or
+    non-string identity/pin field, is the typed ``VALIDATION_FAILED`` refusal
+    naming only the offending keys (the values are private evidence, never
+    diagnostics). The closure captures the two validated strings and the
+    resolved path and mutates neither the supplied Problem nor the receipt.
 
     The checkout root follows ``experiment_effect``'s own resolution — the plan's
     recorded ``preregistration_root`` first, else ``store_root``, else
@@ -972,7 +974,7 @@ def _experiment_refusal_failure_effect(claim, problem, *, code_source, store_roo
         return None
     from engine.v2.ops.experiments import REFUSAL_PIN_FIELDS, REFUSAL_RECEIPT_SCHEMA
 
-    receipt = problem.details.get("refusal_receipt")
+    receipt = refusal_receipt
     if not isinstance(receipt, Mapping):
         raise fail("VALIDATION_FAILED", "holdout refusal receipt evidence is missing",
                    details={"fields": ["refusal_receipt"]})

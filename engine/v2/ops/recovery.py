@@ -50,6 +50,7 @@ __all__ = [
     "SupervisorLock",
     "begin_epoch",
     "expire_leases",
+    "fence_attempt_for_recovery",
     "fence_foreign_epochs",
     "prove_ownership_gone",
     "read_boot_id",
@@ -108,6 +109,25 @@ def _fence_off(conn: sqlite3.Connection, attempt_id: str, job_id: str, stamp: st
                  (attempt_id,))
     conn.execute("UPDATE jobs SET fence = fence + 1, updated_at = ? "
                  "WHERE job_id = ? AND active_attempt_id = ?", (stamp, job_id, attempt_id))
+
+
+def fence_attempt_for_recovery(conn: sqlite3.Connection, attempt_id: str, *,
+                               clock: Clock) -> bool:
+    """Fence one still-active attempt off for reconciliation without ending it.
+
+    Its reservations stay held: stranding the coordinator's completion lets a
+    later reconciliation settle the attempt against the real process tree.
+    """
+    with transaction(conn):
+        row = conn.execute("SELECT a.attempt_id, a.job_id, a.state, j.active_attempt_id "
+                           "FROM attempts AS a JOIN jobs AS j ON j.job_id = a.job_id "
+                           "WHERE a.attempt_id = ?", (attempt_id,)).fetchone()
+        if row is None or row["state"] not in ("starting", "running", "cancelling"):
+            return False
+        if row["active_attempt_id"] != attempt_id:
+            return False
+        _fence_off(conn, row["attempt_id"], row["job_id"], format_timestamp(clock.now()))
+    return True
 
 
 def expire_leases(conn: sqlite3.Connection, *, clock: Clock) -> list[str]:

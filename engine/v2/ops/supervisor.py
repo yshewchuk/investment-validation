@@ -70,6 +70,7 @@ from engine.v2.ops.recovery import (
     SupervisorLock,
     begin_epoch,
     expire_leases,
+    fence_attempt_for_recovery,
     fence_foreign_epochs,
     prove_ownership_gone,
     read_boot_id,
@@ -1496,20 +1497,65 @@ class Service:
             problem = dataclasses.replace(problem, diagnostic_ref=ref.artifact_id)
         return problem
 
+    def _refusal_receipt(self, claim, problem):
+        """The worker's private holdout refusal receipt, or ``None``.
+
+        Read only for a typed ``HOLDOUT_ACCESS_DENIED`` problem, from the same
+        private diagnostics document ``_publish_failure_details`` publishes:
+        its ``refusal_receipt`` field when the decoded document is a mapping,
+        otherwise nothing. Never added to ``Problem.details`` or ``failure_json``.
+        """
+        if problem.code != "HOLDOUT_ACCESS_DENIED":
+            return None
+        path = (self.store.staging_dir(claim.attempt_id)
+                / "diagnostics" / "failure_details.json")
+        document = json.loads(path.read_text())
+        if not isinstance(document, dict):
+            return None
+        return document.get("refusal_receipt")
+
+    def _refusal_effect_failed(self, claim):
+        """Fence an attempt whose holdout refusal effect could not be recorded.
+
+        The refusal ledger row belongs to the failed attempt's fenced commit,
+        so without that effect the attempt must not be marked failed. Returns a
+        redacted ``VALIDATION_FAILED`` problem for the caller to fall through to
+        ``_strand`` with, or ``None`` after fencing the attempt for recovery and
+        reporting it -- stable text only, never exception text or private evidence.
+        """
+        problem = make_problem(
+            "VALIDATION_FAILED", "the experiment refusal effect could not be recorded")
+        if fence_attempt_for_recovery(self.conn, claim.attempt_id, clock=self.clock):
+            _report_stranded(claim, problem)
+            return None
+        return problem
+
     def _commit_failure(self, claim, status, problem):
         """Record the failure under the fence — only while the fence is still held (B)."""
         outcome = Outcome(False, "verified_dead", status["exit_code"], problem)
         if fence_held(self.conn, claim.attempt_id, claim.fence, clock=self.clock):
             try:
                 failure_effects = _experiment_refusal_failure_effect(
-                    claim, problem, code_source=self.code_source, store_root=self.store_root)
+                    claim, problem, code_source=self.code_source, store_root=self.store_root,
+                    refusal_receipt=self._refusal_receipt(claim, problem))
                 commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome,
                                clock=self.clock, failure_effects=failure_effects)
                 return
             except OpsError as exc:
                 if exc.code not in _FENCE_LOST_CODES:
+                    if problem.code != "HOLDOUT_ACCESS_DENIED":
+                        raise
+                    problem = self._refusal_effect_failed(claim)
+                    if problem is None:
+                        return
+                else:
+                    problem = exc.problem
+            except Exception:
+                if problem.code != "HOLDOUT_ACCESS_DENIED":
                     raise
-                problem = exc.problem
+                problem = self._refusal_effect_failed(claim)
+                if problem is None:
+                    return
         self._strand(claim, problem)
 
     def _strand(self, claim, problem):

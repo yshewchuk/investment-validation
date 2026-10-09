@@ -121,7 +121,6 @@ def _holdout_context(snapshot, as_of_month, purpose, event_ids):
         ):
             raise ValueError
     except ValueError:
-        _emit_holdout_refusal_signal({})
         raise errors.fail("HOLDOUT_ACCESS_DENIED", "explicit valid holdout context is required") from None
     return policy, {"snapshot_id": snapshot.snapshot_id, "holdout_as_of_month": as_of_month,
                     "random_membership_version": policy.random_version,
