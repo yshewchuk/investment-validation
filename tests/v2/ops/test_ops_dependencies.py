@@ -227,6 +227,18 @@ def test_real_tree_matches_enumerated_findings_and_layer_ci_entrypoint():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_worker_does_not_import_the_cli_entrypoint_even_lazily():
+    rules = json.loads((ROOT / ops.POLICY).read_bytes())
+    files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)
+             if path.startswith(ops.SOURCE) and path.endswith(".py")}
+    actual = ops.findings(files, rules)
+    assert ("worker", "cli") not in actual["forbidden"]
+    assert ("worker", "cli") not in actual["cycles"]
+    files[ops.SOURCE + "worker.py"] += (
+        b"\n\ndef _planted():\n    from engine.v2.ops import cli\n")
+    assert ("worker", "cli") in ops.findings(files, rules)["forbidden"]
+
+
 def test_layer_cli_rejects_planted_ops_violation(tmp_path):
     files = {name.replace(".", "/") + "/__init__.py": b""
              for name in [*layers.CONTAINERS, *(p.dotted for p in layers.PACKAGES)]}
