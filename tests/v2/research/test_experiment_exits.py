@@ -39,7 +39,8 @@ def test_recipe_contract_table_boundary():
 def test_failure_contract_table():
     document = REPO_ROOT / "engine/v2/research/ARCHITECTURE.md"
     rows = document.read_text().splitlines()
-    for condition in ("Malformed position or leg record", "Missing required leg mark",
+    for condition in ("Malformed position or leg record",
+                      "Missing required leg mark or mark past held-leg expiry",
                       "Unusable quote reaching pricing",
                       "Insufficient calendar coverage"):
         row, = [line for line in rows if line.startswith(f"| {condition} |")]
@@ -186,6 +187,7 @@ def test_target_stop_mark_refusal(source):
     assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
     assert caught.value.problem.category == "internal"
     assert caught.value.problem.retryable is False
+    assert caught.value.problem.details == {"trade_id": "trade-a", "session": DATES[1]}
 
 
 def test_target_stop_expiry_bound(source):
@@ -196,9 +198,12 @@ def test_target_stop_expiry_bound(source):
                                                for leg in _position().legs))
     rows = [dict(row, expiry=pd.Timestamp(expiry)) for row in _rows()
             if row["obs_date"] <= pd.Timestamp(expiry)]
-    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
+    with pytest.raises(DataError) as caught:
         _walk_target_stop(source, rows=rows, target=100.0, stop=-100.0,
                           positions=(position,))
+    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert caught.value.problem.details == {"trade_id": "trade-a",
+                                            "session": DATES[3]}
 
 
 def test_recipe_identity(source):

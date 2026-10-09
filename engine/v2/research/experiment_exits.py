@@ -173,6 +173,14 @@ def _exit_recipe(economic_params):
     return recipe
 
 
+class _SessionError(Exception):
+    """A daily held mark refused, carrying the failing session."""
+
+    def __init__(self, session):
+        super().__init__(session)
+        self.session = session
+
+
 def _decision(position, session, opening, held, dates, snapshot_id, alpha,
               reason, ambiguous=False, exit_alpha=None):
     if exit_alpha is None:
@@ -192,30 +200,35 @@ def _held_decision(position, index, dates, opening, fill, target, stop, snapshot
     alpha (0.0) fill.
     """
     worst, best = FillModel(0.0), FillModel(1.0)
-    for number, day in enumerate(dates[1:], start=1):
-        session = day.date().isoformat()
-        if any(day > _session(leg.expiry) for leg in position.legs):
-            raise ValueError("required mark past expiry")
-        rows = index.get(position.ticker, day)
-        held = _cash_flow(position, rows, fill, closing=True)
-        worst_held = _cash_flow(position, rows, worst, closing=True)
-        pnl = opening + held
-        low = opening + worst_held
-        high = opening + _cash_flow(position, rows, best, closing=True)
-        visited = dates[:number + 1]
-        if low <= stop and high >= target:
-            return _decision(position, session, opening, worst_held, visited, snapshot_id,
-                             float(fill.alpha), "stop", True, exit_alpha=0.0)
-        if pnl >= target:
-            return _decision(position, session, opening, held, visited, snapshot_id,
-                             float(fill.alpha), "target")
-        if pnl <= stop:
-            return _decision(position, session, opening, held, visited, snapshot_id,
-                             float(fill.alpha), "stop")
-    last = dates[-1]
-    held = _cash_flow(position, index.get(position.ticker, last), fill, closing=True)
-    return _decision(position, last.date().isoformat(), opening, held, dates,
-                     snapshot_id, float(fill.alpha), "fixed_day")
+    try:
+        for number, day in enumerate(dates[1:], start=1):
+            session = day.date().isoformat()
+            if any(day > _session(leg.expiry) for leg in position.legs):
+                raise ValueError("required mark past expiry")
+            rows = index.get(position.ticker, day)
+            held = _cash_flow(position, rows, fill, closing=True)
+            worst_held = _cash_flow(position, rows, worst, closing=True)
+            pnl = opening + held
+            low = opening + worst_held
+            high = opening + _cash_flow(position, rows, best, closing=True)
+            visited = dates[:number + 1]
+            if low <= stop and high >= target:
+                return _decision(position, session, opening, worst_held, visited,
+                                 snapshot_id, float(fill.alpha), "stop", True,
+                                 exit_alpha=0.0)
+            if pnl >= target:
+                return _decision(position, session, opening, held, visited, snapshot_id,
+                                 float(fill.alpha), "target")
+            if pnl <= stop:
+                return _decision(position, session, opening, held, visited, snapshot_id,
+                                 float(fill.alpha), "stop")
+        last = dates[-1]
+        session = last.date().isoformat()
+        held = _cash_flow(position, index.get(position.ticker, last), fill, closing=True)
+        return _decision(position, session, opening, held, dates,
+                         snapshot_id, float(fill.alpha), "fixed_day")
+    except (ValueError, TypeError, KeyError, OverflowError):
+        raise _SessionError(session) from None
 
 
 def _walk_target_stop(repository, snapshot, position, calendar, days, fill, target, stop):
@@ -235,6 +248,10 @@ def _walk_target_stop(repository, snapshot, position, calendar, days, fill, targ
                                   snapshot.snapshot_id)
         if not isfinite(decision.pnl):
             raise ValueError("nonfinite P&L")
+    except _SessionError as session_error:
+        raise fail("EXPERIMENT_VARIANT_FAILED", "required daily position mark unavailable",
+                   details={"trade_id": position.trade_id,
+                            "session": session_error.session}) from None
     except (ValueError, TypeError, KeyError, OverflowError):
         raise fail("EXPERIMENT_VARIANT_FAILED", "required daily position mark unavailable",
                    details={"trade_id": position.trade_id, "session": session}) from None
