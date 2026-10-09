@@ -438,7 +438,7 @@ uncaught traceback instead.
   an operator may rerun after the missing head appears or a conflicting
   writer finishes. Limit and integrity refusals, including
   `RESULT_LIMIT_EXCEEDED` and `MANIFEST_CORRUPT`, are not retried.
-- **R4, transaction.** Build-trades and reconcile-trades are the only
+- **R4, transaction.** Build-trades and reconcile-trades are the only table
   writers here; both go through the one shared path,
   `_trades_publish.publish` → `engine.v2.data.generic_incremental.
   build_generic_table_candidate` / `commit_generic_table_candidate`. The
@@ -448,7 +448,9 @@ uncaught traceback instead.
   `SNAPSHOT_CONFLICT` (`category="dependency"`, retryable) rather than
   silently overwriting or merging. `--dry-run` builds the same candidate
   and stops before the commit call, so the changeset can be inspected with
-  no write at all.
+  no table write. The configured `INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL` is
+  `experiment_trades.load_trades`'s only non-table write; its write, sync, or
+  replacement errors propagate.
 - **R5, partial result/write.** Read batches stay provisional until scan
   exhaustion; a later failure returns no partial frame. A smaller explicit
   caller limit raises `RESULT_LIMIT_EXCEEDED`. Writes use the atomic
