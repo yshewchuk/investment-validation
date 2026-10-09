@@ -29,6 +29,14 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   documents. Several of these names are the ones
   `checks/legacy_adapters.json` records as reused by `engine/v2/ops` (see
   the root doc §3's adapter note).
+- `nightly.py::history_backfill_tickers` — the per-ticker history backfill
+  set: the tickers with an upcoming earnings event PLUS `nightly.CONTEXT_TICKERS`
+  (the market-context tickers the scoring path reads from `daily_market`, e.g.
+  `"SPY"`, which never has earnings). Legacy cannot import `engine.v2`, so this
+  constant mirrors the owner, `engine.v2.features.panel_row_inputs.CONTEXT_TICKERS`;
+  a v2 test asserts they are equal. `refresh_calendar_data` backfills this set, so a
+  context ticker's full history is fetched once and an already-cached one
+  costs no call.
 - `selfcheck.py` — `SelfCheckReport`, `selfcheck()`, `reconstruct_request`,
   `scrub_mismatches`: re-scores board rows directly through the engine and
   stops the publish on a mismatch.
