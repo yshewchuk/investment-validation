@@ -186,6 +186,21 @@ def _add_refresh_mode_arguments(plan):
                            "when omitted the shadow head builds the plan at submission")
 
 
+class _ReleaseIdAction(argparse.Action):
+    """Keep ``--release-id``'s default a plain ``""`` in the parsed namespace
+    while remembering whether the operator actually supplied it.
+
+    The shared argument defaults to ``""`` so the parser's namespace contract
+    stays intact, but ``ops plan rollback`` must refuse a supplied
+    ``--release-id`` -- an explicit ``--release-id ""`` looks identical to the
+    omitted default in the namespace alone, so this action also records
+    presence under ``<dest>_supplied``."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, self.dest + "_supplied", True)
+
+
 def _add_operator_plan_arguments(plan):
     """``ops plan training``/``promote``'s arguments (P6 slice 5). ``--mode``
     is already nightly's, hence ``--training-mode``."""
@@ -199,7 +214,7 @@ def _add_operator_plan_arguments(plan):
     plan.add_argument("--pairs", default="")
     plan.add_argument("--ticker-chunk", type=int, default=1000)
     plan.add_argument("--release-root", default="")
-    plan.add_argument("--release-id", default="")
+    plan.add_argument("--release-id", default="", action=_ReleaseIdAction)
     plan.add_argument("--expected-previous-release-id", default=argparse.SUPPRESS,
                       help="optional expected-incumbent guard for promote: the plan's "
                            "worker refuses CONCURRENT_PROMOTE when the live DEPLOYED "
@@ -273,7 +288,8 @@ def _add_plan_command(commands):
     """The ``ops plan`` subparser, split out of :func:`parser` to keep that
     function under the line budget."""
     plan = commands.add_parser("plan")
-    plan.add_argument("kind", choices=("nightly", "experiment", "training", "promote"))
+    plan.add_argument("kind", choices=("nightly", "experiment", "training", "promote",
+                                       "rollback"))
     plan.add_argument("--as-of")
     plan.add_argument("--mode", default="shadow", choices=("shadow",))
     plan.add_argument("--spec", type=Path)
@@ -533,6 +549,25 @@ def _read_refresh_plan(args):
     return json.loads(args.refresh_plan.read_text())
 
 
+def _rollback_plan_from_args(args):
+    """Build a rollback plan, rejecting the inapplicable ``--release-id`` first.
+
+    Rollback resolves its target from the release store's own history, so a
+    named release id is meaningless and refused as ``INVALID_REQUEST`` before
+    any plan is saved -- never quietly ignored.  The shared ``--release-id``
+    argument defaults to ``""`` but records whether it was supplied, so an
+    explicit empty value (``--release-id ""``) is still a supplied value and
+    is refused too, while promote's own missing id keeps failing
+    ``promote_plan``'s validation.
+    """
+    from engine.v2.ops.training import rollback_plan
+    if getattr(args, "release_id_supplied", False):
+        raise fail("INVALID_REQUEST",
+                   "rollback takes no --release-id; the target is resolved from "
+                   "deployment history")
+    return rollback_plan(release_root=args.release_root)
+
+
 def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
@@ -565,6 +600,8 @@ def _plan_command(args, root, conn, clock):
                        "unguarded behavior")
         plan = promote_plan(release_root=args.release_root, release_id=args.release_id,
                             expected_previous_release_id=expected_previous)
+    elif args.kind == "rollback":
+        plan = _rollback_plan_from_args(args)
     else:
         from engine.v2.ops.experiments import experiment_plan
         if args.no_ledger and args.activate_ledger:

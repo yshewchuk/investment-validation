@@ -41,9 +41,12 @@ BUSY_TIMEOUT_MS = 5_000
 _SYNC_FULL = 2
 
 
-def connect(path: Path | str, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
-    """Open the catalog with its required pragmas, verified rather than assumed."""
-    conn = sqlite3.connect(str(path), isolation_level=None, timeout=busy_timeout_ms / 1000.0)
+def connect(path: Path | str, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS,
+            must_exist: bool = False) -> sqlite3.Connection:
+    """Open with verified pragmas; optionally refuse creation of a missing file."""
+    target = Path(path).resolve().as_uri() + "?mode=rw" if must_exist else str(path)
+    conn = sqlite3.connect(target, uri=must_exist, isolation_level=None,
+                           timeout=busy_timeout_ms / 1000.0)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")

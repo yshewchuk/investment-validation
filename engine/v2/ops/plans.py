@@ -153,7 +153,7 @@ def save_plan(conn, root, document, *, clock):
 
 #: Plan kinds enabled for submission, with the effect scope each must carry.
 _ENABLED_PLAN_KINDS = {"artifact_check": ["private_artifacts"], "experiment": ["staged"],
-                       "training": ["staged"], "promote": ["staged"]}
+                       "training": ["staged"], "promote": ["staged"], "rollback": ["staged"]}
 
 #: The checkpoint contract each enabled kind's registered ``JobKind`` declares
 #: (``engine.v2.ops.stages.registry()``); a submission whose contract differs
@@ -161,10 +161,11 @@ _ENABLED_PLAN_KINDS = {"artifact_check": ["private_artifacts"], "experiment": ["
 _PLAN_CHECKPOINT_CONTRACTS = {"artifact_check": "receipt.v1.0",
                               "experiment": "experiment_receipt.v1.0",
                               "training": "training_job_result.v1.0",
-                              "promote": "promote_pointer_state.v1.0"}
+                              "promote": "promote_pointer_state.v1.0",
+                              "rollback": "promote_pointer_state.v1.0"}
 
 #: Plan kinds whose registered job kind differs from the plan kind itself.
-_PLAN_JOB_KINDS = {"promote": "models_promote"}
+_PLAN_JOB_KINDS = {"promote": "models_promote", "rollback": "models_rollback"}
 
 
 def request_from_plan(plan, key):

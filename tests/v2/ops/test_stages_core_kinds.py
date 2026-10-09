@@ -117,6 +117,10 @@ _CASES = {
         max_attempts=1, backoff=(30,), extra_field=("release_root", "root"),
         required={"expected_ids": ["models_promote"], "release_root": "root",
                   "release_id": "r1"}),
+    "models_rollback": dict(
+        resource_class="delivery", checkpoint_contract="promote_pointer_state.v1.0",
+        max_attempts=1, backoff=(30,), extra_field=("release_root", "root"),
+        required={"expected_ids": ["models_rollback"], "release_root": "root"}),
     "decisions_supersede": dict(
         resource_class="io_fetch",
         checkpoint_contract="decisions_supersede_receipt.v1.0",
@@ -130,7 +134,11 @@ _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
 
 #: Pairs of core kinds whose parameters classes genuinely share a field
 #: name -- see test_submission_reads_resource_class_checkpoint_retry_and_max_refs.
-_SHARED_FIELDS = {frozenset({"models_promote", "native_score_batch"}): {"release_root"}}
+_SHARED_FIELDS = {
+    frozenset({"models_promote", "native_score_batch"}): {"release_root"},
+    frozenset({"models_rollback", "models_promote"}): {"release_root"},
+    frozenset({"models_rollback", "native_score_batch"}): {"release_root"},
+}
 
 
 def _extra_params(name):
@@ -343,7 +351,7 @@ def test_claim_next_store_leases_match_each_kinds_declared_store_domains(tmp_pat
     small fake capacity."""
     conn, clock, supervisor = catalog(tmp_path)
     attempt_ids = {}
-    for name in (*_EMPTY_DOMAIN_KINDS, "models_promote", "snapshot_import"):
+    for name in (*_EMPTY_DOMAIN_KINDS, "models_promote", "models_rollback", "snapshot_import"):
         case = _CASES[name]
         params = {"expected_ids": ["one"], **_extra_params(name)}
         submit(conn, stages.registry(), POLICY,
@@ -360,7 +368,7 @@ def test_claim_next_store_leases_match_each_kinds_declared_store_domains(tmp_pat
             (claim.attempt_id,)).fetchall())
         if name == "snapshot_import":
             expected = [("legacy_store", "read")]
-        elif name == "models_promote":
+        elif name in ("models_promote", "models_rollback"):
             expected = [("deployment_pointer", "write")]
         else:
             expected = []

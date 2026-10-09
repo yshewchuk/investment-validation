@@ -35,11 +35,11 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 
 - `init`, `doctor`, `health`
 - `serve` — starts the supervisor loop
-- `plan {nightly,experiment,training,promote}` — builds and saves a plan
-  document; `training`/`promote` take operator-only arguments
-  (`--training-mode`, `--recipe`, `--state`, `--alpha`, `--cutoff`,
-  `--strategy`, `--pairs`, `--ticker-chunk`, `--release-root`,
-  `--release-id`, `--expected-previous-release-id`) and are never part of the nightly DAG
+- `plan {nightly,experiment,training,promote,rollback}` — builds and saves a plan
+  document; flags apply by kind: `training` takes `--training-mode`, `--recipe`,
+  `--state`, `--alpha`, `--cutoff`, `--strategy`, `--pairs`, `--ticker-chunk`;
+  `promote` takes `--release-root`, `--release-id` and `--expected-previous-release-id`;
+  `rollback` takes `--release-root` and refuses `--release-id`. It pins the rollback target at plan time; only `NoPriorRelease` leaves the target unset. A submitted rollback with an incumbent but no pinned target is refused as typed `VALIDATION_FAILED` before pointer or history mutation. Other resolver errors become typed `VALIDATION_FAILED`.
 - `submit --plan --idempotency-key`
 - `rescore --request --native-inputs` — read-only, no provider pulls, no fitting
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
@@ -65,14 +65,10 @@ one per event × native-covered strategy, plus one `DYN-SV` meta-request per eve
 `forward_calendar_refresh` has a `JobKind` (worker dispatch, loader callback, parameter validation) but no `nightly.py`
 `GRAPH`/`OPTIONAL` node and no `supervisor.Service` submitter yet — not on the nightly schedule.
 
-`forward_calendar_store.py` owns native fetching here rather than in another v2 layer.
-Its standalone, keyword-only `run_forward_calendar_refresh` validates every non-fetcher
-argument before catalog/provider access; `tickers=()` means the whole market.
-At commit, `_head_fence` runs before the per-attempt `fence_check` (the same shape as
-`computed_moves_store`), both inside `catalog.commit_snapshot`'s transaction:
-cancelled or lease-expired attempts refuse before any commit. Omitting `fence_check`
-preserves `engine/v2/data/incremental.py`'s generic refresh and
-`engine/v2/research/_trades_publish.py`. No `GRAPH` node or `Service` submitter exists yet.
+`forward_calendar_store.run_forward_calendar_refresh` is a standalone, keyword-only native fetcher in ops: non-fetcher arguments validate before catalog/provider access; empty tickers mean whole market.
+Commit fencing checks the head before the attempt within one transaction; cancelled/expired attempts refuse before commit. An omitted attempt fence preserves generic-refresh and research callers.
+The forward-calendar worker loader wraps both provider-unit fetchers with `provider_budget.budgeted_fetcher`, bound to the staged attempt/fence and each source's own account. Budget transactions/connections end before provider I/O; complete cache hits bypass charging.
+`catalog.connect(must_exist=True)` opens an existing catalog without creating a replacement; its default still permits catalog creation. Guard construction performs no I/O.
 
 `native_score_batch.py`: the batch-shaped seam between the board universe
 (`native_board_universe.BoardRequest`) and
@@ -1007,15 +1003,15 @@ waits without submitting until its paired succeeded inputs are ready.
   snapshot's own rows reports `noop` rather than a spurious `complete` (the
   commit layer's own equality check decides this, never key presence in the
   parent).
-- `training`/`models_promote` are ordinary `_core_kinds()` job kinds, not
-  `supervisor._COORDINATOR_EFFECT_KINDS` members: the worker subprocess does
-  the real write itself. `run_training_worker` calls one of
-  `tools/phase5_training_job.py`'s four job functions and writes
-  `training_result.json`; `run_promote_worker` calls
-  `engine.v2.models.deployment.promote`'s release-store pointer swap and
-  writes `pointer_state.json`. Neither ever runs inside the nightly DAG —
-  both are submitted by an operator's own `ops plan training|promote` +
-  `ops submit`.
+- `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not
+  `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes.
+  `run_training_worker` calls one of four `tools/phase5_training_job.py`
+  functions and writes `training_result.json`; `run_promote_worker` calls `deployment.promote`;
+  `run_rollback_worker` uses its plan-pinned incumbent and target, then writes
+  `pointer_state.json`. Recovery recognizes that exact prior swap without
+  moving the pointer again. None run in the nightly DAG; operators submit with
+  `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
+  `operator`, namespace `shadow` and the caller idempotency key like promote.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
@@ -1179,7 +1175,7 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 
 | Experiment execution condition | Outcome |
 |---|---|
-| Unknown/unused spec field, mismatched resolved plan, economics without `execution_plan`, malformed fold rows/labels/rule, numeric overflow, mismatched named columns, or mixed named/positional features | `INVALID_EXPERIMENT_SPEC`; refuse before work, return no result, and write no artifact, report, or ledger row. |
+| Unknown/unused spec field, invalid fixed-day exit recipe/source/fill, mismatched resolved plan, economics without `execution_plan`, malformed fold rows/labels/rule, numeric overflow, mismatched named columns, or mixed named/positional features | `INVALID_EXPERIMENT_SPEC`; refuse before work, return no result, and write no artifact, report, or ledger row. |
 | Plan write, later runner failure, or fold clone/fit/score/threshold failure, including absent or malformed fitted `classes_` | Typed attempt failure; candidate stays unpublished. A failed plan write may leave partial bytes in the failed attempt root. Worker exit status determines `WORKER_FAILED`; fold scoring failure is non-retryable `EXPERIMENT_VARIANT_FAILED`, with no fitted result retained, no artifact, report, or ledger row written, and the source estimator unchanged. |
 | Feature read: snapshot mismatch; no match; any post-entry match; conflicting tie at latest eligible instant<br>Successful fold helper call | `SNAPSHOT_UNRESOLVED`; `FEATURES_MISSING`; non-retryable `FEATURE_LOOKAHEAD` (no clipping, shifting, or dropping); `INVALID_EXPERIMENT_SPEC`, respectively. Refusal returns no feature value and writes no artifact or report.<br>Returns only an in-memory result; writes no artifact, report, or ledger row. |
 
@@ -1201,7 +1197,10 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | an unknown field, wrong type, or `bool` where `int` is declared | `INVALID_REQUEST`, before decode returns |
 | `tickers` non-empty but not equal to `expected_ids` as a set, or empty specifically for a `forward_calendar_refresh` job | `INVALID_REQUEST` at submission |
 | `attempt_id`/`fence` set inconsistently (one without the other) | `INVALID_REQUEST` before any I/O |
-| both set, but the fence is void or the lease expired | refused inside the same commit transaction, before any row is inserted or the head moves |
+| both set, but the fence is void or the lease expired | refused before publication inside the commit transaction; worker cache misses also refuse `CANCELLED`/`LEASE_LOST` before the provider is called |
+| worker source reservation absent/released/blocked, exhausted, or in backoff | `CREDENTIAL_INVALID`, `RESOURCE_UNAVAILABLE`, or `RATE_LIMITED` before that source call, respectively; no new charge or snapshot publication. Earlier source receipts may remain cached. |
+| SQLite/filesystem error opening or charging the worker budget | redacted `RESOURCE_UNAVAILABLE`, no provider call; owned guard connections close on success or failure. |
+| a charged provider-unit invocation subsequently fails | charge remains committed, including uncertainty; no refund or internal retry. Counts cover date/ticker fetcher invocations, not hidden library HTTP requests. |
 | no committed `daily_market` session on the parent snapshot | not a refusal — weekday-calendar fallback, recorded as a result warning |
 | a unit's provider response is not-final/transient (retryable) or refused/credential-invalid (not) | one of four ranked failure codes; a mixed batch reports the worst, and nothing partial is committed |
 | a cached unit exists (`response_kind="complete"`) | re-read from its receipt, never re-fetched |
@@ -1216,14 +1215,14 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | a job already exists under today's session key, in any state | never rebuilt or resubmitted |
 | idempotency key | session-only, never `scope_hash`-qualified — this job's target set is the whole scoreable universe, independent of which watchlist's `"score"` job happened to trigger the tick |
 
-### Training / promotion (`training.py`, `deployment.py`)
+### Training / deployment (`training.py`, `deployment.py`)
 
 | Condition | Outcome |
 |---|---|
-| a training-tool refusal, or a `deployment.DeploymentError` (including a superseded release hash or `ConcurrentPromote` (`CONCURRENT_PROMOTE`) when a supplied incumbent is absent or no longer current and the target is not already live) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a refusal writes no successful pointer-state output |
+| a training-tool refusal, or `deployment.DeploymentError` (including a superseded release hash, `ConcurrentPromote` (`CONCURRENT_PROMOTE`) for a missing/stale expected incumbent when the target is not already live, or `NoPriorRelease` when rollback history has no earlier incumbent) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a stale rollback plan writes no successful output or pointer/history change |
 | no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset, or `ops plan promote` supplies a blank `--expected-previous-release-id` | `INVALID_REQUEST` at plan time; no empty `release_root` reaches the worker, and only an absent incumbent option means no guard |
 | a recipe job's `pairs_path` does not resolve beneath the attempt's own pinned legacy root | `INPUT_CHANGED` at execution, even after passing plan-time validation |
-| any `models_promote` claim | serialized globally by one write lease on the deployment pointer |
+| any `models_promote` or `models_rollback` claim | serialized globally by one write lease on the deployment pointer; resubmission with the same namespace and idempotency key returns the existing job |
 
 ### `native_score_batch.py`
 
