@@ -29,16 +29,20 @@ from engine.v2.foundation.market_calendar import CalendarSessions
 from engine.v2.ops import nightly_raw_row_producer as nrp
 from engine.v2.ops.decision_validation import population_key
 from engine.v2.ops.native_board_universe import BoardRequest
-from engine.v2.ops.native_parity_report import (
-    _native_comparison_row,
-    run_native_parity_worker,
-)
+from engine.v2.ops.native_parity_report import run_native_parity_worker
 from engine.v2.ops.native_score_batch import (
     _decode_producer_refusals,
     run_native_score_batch_worker,
 )
 from engine.v2.ops.nightly_quote_rows import QuoteRowInputs
 from engine.v2.ops.nightly_raw_rows import CalendarRowInputs
+from engine.v2.parity.dimensions import (
+    ANALOG_FIELDS,
+    FINANCIAL_FIELDS,
+    FORECAST_FIELDS,
+    GATE_FIELDS,
+    SIMULATION_FIELDS,
+)
 from tests.data_scan_support import (
     catalog_and_store,
     commit_tables,
@@ -57,9 +61,14 @@ _SESSION = "BMO"
 _CODE = "PRICE_HISTORY_NOT_AVAILABLE"
 _DETAIL = "the pinned snapshot has no price history for this ticker"
 _PH_REF = contract_ref_for(PRICE_HISTORY_CONTRACT)
+#: The one fixed value every legacy fixture row carries in every canonical
+#: parity comparison field, so the parity report compares native output
+#: against a stable independent fixture rather than a copy of itself.
+_LEGACY_FIXTURE_VALUE = 0.0
 
 
 def _history_row(ticker: str, *, close_raw: float | None = 100.0) -> dict:
+    """One pinned ``price_history`` row for ``ticker`` at the fixture as-of."""
     return {
         "ticker": ticker,
         "date": _AS_OF,
@@ -75,6 +84,8 @@ def _history_row(ticker: str, *, close_raw: float | None = 100.0) -> dict:
 
 
 def _repository_with_history(tmp_path, rows: list[dict]):
+    """Build a real repository and snapshot pinning ONLY the ``price_history``
+    table built from ``rows`` (no ``option_chains`` table)."""
     conn, clock, store = catalog_and_store(tmp_path)
     by_ticker: dict[str, list[dict]] = {}
     for row in rows:
@@ -95,15 +106,18 @@ def _repository_with_history(tmp_path, rows: list[dict]):
 
 
 def _canonical_key(ticker: str) -> str:
+    """The 4-field native score-batch canonical key for ``ticker``."""
     return f"{ticker}|{_STRATEGY}|{_EVENT_DATE}|{_SESSION}"
 
 
 def _population_key(ticker: str) -> str:
+    """The 3-field legacy population key for ``ticker``."""
     return population_key(
         {"ticker": ticker, "strategy": _STRATEGY, "event_date": _EVENT_DATE})
 
 
 def _requests(tickers: tuple[str, ...]) -> tuple[BoardRequest, ...]:
+    """One forward-board request per ticker, sharing the fixture identity."""
     return tuple(
         BoardRequest(
             ticker=ticker,
@@ -117,6 +131,9 @@ def _requests(tickers: tuple[str, ...]) -> tuple[BoardRequest, ...]:
 
 def _patch_context(
         monkeypatch, requests: tuple[BoardRequest, ...], *, real_spot=False):
+    """Patch the producer's board/calendar/panel scans onto fixture data;
+    with ``real_spot`` False the calendar/quote scans are faked too, with it
+    True the real spot and quote paths run."""
     history_days = tuple(
         value.date().isoformat()
         for value in pd.bdate_range(end=_AS_OF, periods=253))
@@ -128,13 +145,16 @@ def _patch_context(
 
     def board_requests(repository, snapshot, *, as_of, horizon_days,
                        tickers=None):
+        """Return the requested fixture board requests verbatim."""
         return requests
 
     def decision_calendar(repository, snapshot, *, decision_session,
                           event_through):
+        """Return the fixture decision calendar covering the event date."""
         return calendar
 
     def panels(repository, snapshot, keys, *, decision_session, history_start):
+        """One shared fixture panel row per requested key."""
         return {
             nrp._panel_marker(key): PanelRowInputs(
                 panel_row={
@@ -150,6 +170,7 @@ def _patch_context(
 
     def forbidden_quotes(repository, snapshot, key, *, expiry,
                         decision_session):
+        """Fail loudly if a quote scan is reached after a spot refusal."""
         raise AssertionError("quote scan must not be reached after a spot refusal")
 
     monkeypatch.setattr(nrp, "scan_forward_board_requests", board_requests)
@@ -160,6 +181,7 @@ def _patch_context(
         return
 
     def calendar_row(repository, snapshot, key, *, decision_session, calendar):
+        """One fixture calendar row with a usable pinned spot for ``key``."""
         return CalendarRowInputs(
             calendar_revision="cal-v1",
             calendar_row={
@@ -175,6 +197,7 @@ def _patch_context(
             })
 
     def quotes(repository, snapshot, key, *, expiry, decision_session):
+        """One fixture call/put quote pair per key at the fixture expiry."""
         rows = tuple(
             {
                 "ticker": key.ticker,
@@ -193,27 +216,33 @@ def _patch_context(
     monkeypatch.setattr(nrp, "scan_quote_rows", quotes)
 
 
-def _legacy_score_rows(records: dict[str, object]) -> list[dict]:
+def _legacy_score_rows(tickers: tuple[str, ...]) -> list[dict]:
+    """Independent legacy fixture rows: identifiers come from the requested
+    ticker constants only, never from native record values, and every
+    canonical parity dimension field carries the fixed
+    ``_LEGACY_FIXTURE_VALUE`` -- so the parity report compares native output
+    against a stable independent fixture rather than a copy of itself."""
     rows = []
-    for canonical_key, record in records.items():
-        ticker, strategy, event_date, _session = canonical_key.split("|")
+    for ticker in tickers:
         row = {
             "ticker": ticker,
-            "strategy": strategy,
-            "event_date": event_date,
+            "strategy": _STRATEGY,
+            "event_date": _EVENT_DATE,
         }
-        row.update(_native_comparison_row(record))
+        for fields in (FORECAST_FIELDS, SIMULATION_FIELDS, FINANCIAL_FIELDS,
+                       GATE_FIELDS, ANALOG_FIELDS):
+            row.update(dict.fromkeys(fields, _LEGACY_FIXTURE_VALUE))
         rows.append(row)
-    rows.append({
-        "ticker": _MISSING_TICKER,
-        "strategy": _STRATEGY,
-        "event_date": _EVENT_DATE,
-    })
     return rows
 
 
 def test_missing_ticker_history_is_refused_while_other_tickers_compose(
         tmp_path, monkeypatch):
+    """A ticker absent from the pinned ``price_history`` table is refused
+    per-key while the present tickers still compose, score through the real
+    score worker, and surface as ``native_refused`` entries in the real
+    parity worker's report; the report's comparison mismatches all stem from
+    the independent fixed legacy fixture."""
     repository, snapshot = _repository_with_history(
         tmp_path, [_history_row(ticker) for ticker in _HISTORY_TICKERS])
     _patch_context(
@@ -284,7 +313,7 @@ def test_missing_ticker_history_is_refused_while_other_tickers_compose(
     assert worker_refusals == {
         _canonical_key(_MISSING_TICKER): {"code": _CODE, "detail": _DETAIL}}
 
-    score_rows = _legacy_score_rows(worker_records)
+    score_rows = _legacy_score_rows((*_HISTORY_TICKERS, _MISSING_TICKER))
     (job_root / "score.json").write_text(
         json.dumps({"rows": score_rows}, sort_keys=True))
     parity_result = run_native_parity_worker(parameters, job_root)
@@ -295,7 +324,12 @@ def test_missing_ticker_history_is_refused_while_other_tickers_compose(
     refused = report["native_refused"]
     assert report["compared"] == [
         _population_key(ticker) for ticker in _HISTORY_TICKERS]
-    assert report["mismatches"] == []
+    assert report["mismatches"]
+    for mismatch in report["mismatches"]:
+        assert mismatch["row_key"] in report["compared"]
+        assert mismatch["values"]
+        assert all(values["legacy"] == _LEGACY_FIXTURE_VALUE
+                   for values in mismatch["values"].values())
     assert report["only_legacy"] == []
     assert report["only_native"] == []
     assert [entry["row_key"] for entry in refused] == [
@@ -306,8 +340,29 @@ def test_missing_ticker_history_is_refused_while_other_tickers_compose(
     assert report["native_refused_unmatched"] == []
 
 
+def test_missing_option_chains_still_fails_when_every_ticker_is_refused(
+        tmp_path, monkeypatch):
+    """When price-history admission refuses every non-intraday request there
+    is no event left to compose, so the producer stops being per-key
+    forgiving: this fixture snapshot pins ``price_history`` only, and its
+    absent ``option_chains`` table propagates as ``CONTRACT_MISMATCH``
+    instead of the build returning a per-ticker refusal document."""
+    repository, snapshot = _repository_with_history(
+        tmp_path, [_history_row(ticker) for ticker in _HISTORY_TICKERS])
+    _patch_context(monkeypatch, _requests((_MISSING_TICKER,)))
+
+    with pytest.raises(DataError) as caught:
+        nrp.build_native_score_batch_events(
+            repository, snapshot, as_of=_AS_OF, horizon_days=30)
+
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert caught.value.code != _CODE
+
+
 def test_present_but_unusable_history_still_fails_the_producer(
         tmp_path, monkeypatch):
+    """A present series whose exact-session close is null is not an absence:
+    the real spot read propagates ``CONTRACT_MISMATCH`` through the build."""
     ticker = "BAD"
     repository, snapshot = _repository_with_history(
         tmp_path, [_history_row(ticker, close_raw=None)])
@@ -322,28 +377,14 @@ def test_present_but_unusable_history_still_fails_the_producer(
         "exact-session pinned spot close is unusable")
 
 
-def test_malformed_present_history_still_fails_the_producer(
-        tmp_path, monkeypatch):
-    """A malformed-but-schema-valid series is present, never absent: the real
-    membership check admits the ticker, and the real ``get_price_series`` read
-    plus ``scan_calendar_row_inputs`` spot conversion refuses, so the producer
-    build propagates the error instead of refusing
-    ``PRICE_HISTORY_NOT_AVAILABLE``. The pinned fragment writer builds a
-    ``float64`` array for ``close_raw`` and rejects a nonnumeric string before
-    any reader sees it, so the malformed value here is a schema-valid
-    non-finite price."""
+def test_malformed_history_is_rejected_before_snapshot_admission(tmp_path):
+    """The real fragment validator rejects malformed non-finite stored history
+    before it can ever be pinned into a snapshot."""
     ticker = "NONFINITE"
-    repository, snapshot = _repository_with_history(
-        tmp_path, [_history_row(ticker, close_raw=float("inf"))])
-    _patch_context(monkeypatch, _requests((ticker,)), real_spot=True)
-
     with pytest.raises(DataError) as caught:
-        nrp.build_native_score_batch_events(
-            repository, snapshot, as_of=_AS_OF, horizon_days=30)
+        _repository_with_history(
+            tmp_path, [_history_row(ticker, close_raw=float("inf"))])
 
     assert caught.value.code == "CONTRACT_MISMATCH"
-    assert caught.value.code != _CODE
     assert caught.value.problem.message == (
-        "exact-session pinned spot close is unusable")
-    assert nrp.tickers_with_price_history(
-        repository, snapshot, {ticker}) == frozenset({ticker})
+        "close_raw: an infinite value is never valid")

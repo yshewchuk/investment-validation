@@ -26,7 +26,7 @@ from typing import Any
 import pandas as pd
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.data.errors import DataError
+from engine.v2.data.errors import DataError, fail
 from engine.v2.data.price_history_query import tickers_with_price_history
 from engine.v2.data.price_history_table import PRICE_HISTORY_TABLE_NAME
 from engine.v2.data.repository import Repository
@@ -233,7 +233,9 @@ def build_native_score_batch_events(
     from pinned table membership, refused at its original position while the
     rest of the build proceeds; a malformed series, an absent ``price_history``
     table, and an exact-session spot failure propagate, as does every other
-    refusal, repository or caller-input failure, and the whole build fails.
+    refusal, repository or caller-input failure, and an absent
+    ``option_chains`` table once price-history admission refuses every
+    non-intraday request, and the whole build fails.
     """
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
@@ -248,8 +250,12 @@ def build_native_score_batch_events(
             refusals[position] = _refusal(key, _INTRADAY_CODE, _INTRADAY_DETAIL)
         else:
             admitted.append((position, key))
+    had_non_intraday = bool(admitted)
     admitted = _admit_price_history_requests(repository, snapshot, admitted, refusals)
     if not admitted:
+        if had_non_intraday and "option_chains" not in snapshot.table_versions:
+            raise fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
+                       details={"table_name": "option_chains"})
         return [], _refusals_document(ordered())
 
     decision_session = validated_as_of(as_of).normalize().date().isoformat()

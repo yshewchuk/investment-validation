@@ -324,7 +324,7 @@ def test_native_parity_handler_status_is_explicit_and_the_report_is_separate(tmp
         native_rows=rows, report_path=report_path)({"session": _EVENT_DATE})
     assert native["native_parity"]["status"] == "compared"
     report = json.loads(report_path.read_text())
-    assert report["schema_version"] == "native_parity_report.v1.2"
+    assert report["schema_version"] == "native_parity_report.v1.3"
     assert report["as_of"] == _EVENT_DATE
     assert isinstance(report["generated_at"], str) and report["generated_at"]
     assert sorted(report["compared"]) == sorted(rows)
@@ -379,7 +379,7 @@ def test_native_parity_handler_report_always_carries_v1_1_refusal_fields(tmp_pat
     assert native["native_parity"]["status"] == "compared"
 
     report = json.loads(report_path.read_text())
-    assert report["schema_version"] == "native_parity_report.v1.2"
+    assert report["schema_version"] == "native_parity_report.v1.3"
     assert report["native_refused"] == []
     assert report["native_refused_unmatched"] == []
 
@@ -482,7 +482,7 @@ def test_native_parity_stage_runs_optional_in_the_real_shadow_graph(tmp_path):
     stage_receipt = next(row for row in receipt["stages"]
                          if row["stage_id"] == "native_parity")
     assert stage_receipt["status"] == "succeeded"
-    assert json.loads(report_path.read_text())["schema_version"] == "native_parity_report.v1.2"
+    assert json.loads(report_path.read_text())["schema_version"] == "native_parity_report.v1.3"
 
 
 # --------------------------------------------------------------------------
