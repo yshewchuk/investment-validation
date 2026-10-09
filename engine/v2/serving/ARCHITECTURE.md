@@ -115,16 +115,37 @@ legacy details validate the values they return.
 Finite numbers, large integers, nulls and string markers remain valid values.
 Pre-v1.2 reports and unstamped diagnostic comparisons retain their legacy
 summary behavior; the API requires complete run identity for v1.2 reports.
-The API takes an optional configured report path; no path means `no_report`.
+The API takes an optional configured report path. `no_report` is the default
+only when neither an explicit report path nor an ops root is configured; with
+an ops root and no explicit path, the API discovers the report from the catalog.
 Freshness projection uses the API's current resolver, index opener and release reader; the API
 declares its recoverable resolver exception types, while the projection classifies
 SQLite failures and closes every opened connection. Standalone report
 summary reads do not query the serving index.
 
+When an ops root is configured and no explicit report path is supplied, the
+API discovers the report read-only from the ops catalog: it selects the
+`native_parity` job in namespace `shadow` with state `SUCCEEDED`, ordered by
+as-of session descending and then job commit time descending. It queries
+`attempt_outputs` and `artifacts` for the selected job's committed `report`
+output, decodes its stored reference, and calls `ArtifactStore.verify` before
+reading the report; serving does not guess artifact paths or write to the ops
+root. An explicit report path takes precedence over catalog discovery. Without
+either source, the existing `no_report` result is unchanged. An ops root with no succeeded
+shadow parity job returns `no_report` with typed reason
+`NATIVE_PARITY_JOB_NOT_FOUND`. If the selected job's output is missing,
+unreadable, or schema-invalid, the API returns a typed
+`NATIVE_PARITY_REPORT_MALFORMED` refusal and does not silently show an empty
+table or fall back to an older job. For schema v1.2, the API preserves the
+report's run identity and as-of session so the dashboard can label the run it
+displays.
+
 | Native parity condition | Outcome |
 |---|---|
-| Report absent | `no_report` (200) |
+| Neither report path nor ops root configured | `no_report` (200) |
+| Configured ops root has no succeeded `native_parity` job in `shadow` | `no_report` (200), reason `NATIVE_PARITY_JOB_NOT_FOUND` |
 | Report malformed or cannot be read safely | `NATIVE_PARITY_REPORT_MALFORMED` Problem (503); no data |
+| Selected catalog output missing or unreadable, or selected report schema invalid | `NATIVE_PARITY_REPORT_MALFORMED` Problem (503); no fallback to an older job |
 | Report `as_of` predates current release `resolved_as_of` | `stale` (200); all retained data still returned |
 | Current release cannot be resolved, including pointer read or SQLite operational failures | Report `available`; freshness indeterminate; serving-index integrity errors retain their normal propagation |
 | Detail `row_key` absent from the report | 404 Problem |
