@@ -39,7 +39,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
   document; flags apply by kind: `training` takes `--training-mode`, `--recipe`,
   `--state`, `--alpha`, `--cutoff`, `--strategy`, `--pairs`, `--ticker-chunk`;
   `promote` takes `--release-root`, `--release-id` and `--expected-previous-release-id`;
-  `rollback` takes `--release-root`, refuses `--release-id`, pins its target; only `NoPriorRelease` leaves it unset, while other resolver errors become typed `VALIDATION_FAILED`.
+  `rollback` takes `--release-root` and refuses `--release-id`. It pins the rollback target at plan time. Only `NoPriorRelease` leaves the target unset. Other resolver errors become typed `VALIDATION_FAILED`.
 - `submit --plan --idempotency-key`
 - `rescore --request --native-inputs` — read-only, no provider pulls, no fitting
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
