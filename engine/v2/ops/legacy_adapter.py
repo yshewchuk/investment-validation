@@ -286,9 +286,10 @@ def invoke_price_refresh(session, *, dry_run: bool = False):
         plan_refresh,
         run_refresh,
     )
+    from engine.v2.data.price_history_table import CALENDAR_TICKER
 
     plan = plan_refresh(session, events=load_events(), price_universe=load_price_universe(),
-                        fetch_history=load_fetch_history())
+                        fetch_history=load_fetch_history(), always_daily=(CALENDAR_TICKER,))
     if dry_run:
         return {"plan": plan, "report": None}
     from engine.data.fetch import Fetcher

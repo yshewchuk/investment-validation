@@ -303,8 +303,28 @@ class TestDryRun:
         document = cli.price_refresh_command(args, tmp_path / "ops")
 
         assert document["dry_run"] is True
-        assert document["counts"]["daily"] == 1
+        # AAA's event plus the always-daily native calendar ticker (SPY)
+        assert document["counts"]["daily"] == 2
         assert not (tmp_path / "ops").exists()
+
+    def test_price_refresh_adapter_forces_the_declared_calendar_ticker(self, monkeypatch):
+        from engine.v2.data.price_history_table import CALENDAR_TICKER
+        from engine.v2.ops.legacy_adapter import invoke_price_refresh
+
+        monkeypatch.setattr(pr, "load_events", lambda: _events([("AAA", "2026-09-14")]))
+        monkeypatch.setattr(pr, "load_price_universe", lambda: {"ZZZ"})
+        monkeypatch.setattr(pr, "load_fetch_history", lambda: {})
+
+        result = invoke_price_refresh("2026-09-14", dry_run=True)
+        assert result["plan"]["daily"] == sorted(["AAA", CALENDAR_TICKER])
+        assert result["report"] is None
+
+        import engine.v2.data.price_history_table as price_history_table
+
+        monkeypatch.setattr(price_history_table, "CALENDAR_TICKER", "QQQ")
+        patched = invoke_price_refresh("2026-09-14", dry_run=True)
+        assert "QQQ" in patched["plan"]["daily"]
+        assert "SPY" not in patched["plan"]["daily"]
 
 
 # --------------------------------------------------------------------------
