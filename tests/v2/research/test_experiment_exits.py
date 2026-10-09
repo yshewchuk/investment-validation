@@ -28,6 +28,16 @@ def test_recipe_contract_table_boundary():
     assert "invalid fixed-day exit recipe/source/fill" in table
 
 
+def test_failure_contract_table():
+    document = Path(__file__).parents[3] / "engine/v2/research/ARCHITECTURE.md"
+    rows = document.read_text().splitlines()
+    for condition in ("Missing required leg mark", "Unusable quote reaching pricing",
+                      "Insufficient calendar coverage"):
+        row, = [line for line in rows if line.startswith(f"| {condition} |")]
+        assert "Non-retryable `EXPERIMENT_VARIANT_FAILED`" in row
+        assert "whole call fails, no excluded trade or partial tuple" in row
+
+
 def _spec(days=2, alpha=0.25):
     return experiment_spec_from_document({
         "experiment_id": "synthetic-exit", "hypothesis": "synthetic",
@@ -148,6 +158,8 @@ def test_recipe_identity(source):
 def test_recipe_validation(days):
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
         resolve_experiment_plan(_spec(days))
+    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
+        walk_fixed_day(None, None, (), economic_params=_spec(days).economic_params)
 
 
 @pytest.mark.parametrize("economics", [
@@ -163,6 +175,8 @@ def test_recipe_validation(days):
 def test_recipe_fields(economics):
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
         resolve_experiment_plan(replace(_spec(), economic_params=economics))
+    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
+        walk_fixed_day(None, None, (), economic_params=economics)
 
 
 def test_source_contract():

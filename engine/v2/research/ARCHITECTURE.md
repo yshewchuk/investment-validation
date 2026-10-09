@@ -86,10 +86,15 @@ through entry plus the declared positive `trading_days`, using the pinned
 `daily_market` calendar and `option_chains` quotes with `_pricing.FillModel`'s
 existing alpha ladder; no projected calendar, replacement contract or mark source.
 Results are `mark_based` per-option-unit P&L with exit decision, visited dates,
-source, alpha fill convention and snapshot identity. Missing required leg marks,
-unusable quotes reaching pricing and insufficient calendar coverage raise non-retryable
-`EXPERIMENT_VARIANT_FAILED`; the whole call fails, never excludes a trade or
-returns a partial tuple (design #372 R4). Other repository refusals propagate.
+source, alpha fill convention and snapshot identity.
+
+| Fixed-day failure condition | Outcome (design #372 R4) |
+|---|---|
+| Missing required leg mark | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+| Unusable quote reaching pricing | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+| Insufficient calendar coverage | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+
+Other repository refusals propagate.
 No cache, retry, transaction or write: identical inputs return identical results.
 Report/ledger publication, target/stop recipes and aggregation belong to slice 7b.
 
