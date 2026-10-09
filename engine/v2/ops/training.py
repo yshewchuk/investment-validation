@@ -359,7 +359,11 @@ def rollback_plan(*, release_root="") -> dict:
             raise fail("INVALID_REQUEST", "no release root given and no production "
                        "release root is configured") from exc
     store = Path(release_root).expanduser().resolve()
-    pointer = deployment.current_pointer(store)
+    try:
+        pointer = deployment.current_pointer(store)
+    except ValueError as exc:
+        raise fail("VALIDATION_FAILED", "rollback pointer could not be read",
+                   details={"exception_class": type(exc).__name__}) from exc
     try:
         target = deployment.rollback_target(store)
     except deployment.NoPriorRelease:

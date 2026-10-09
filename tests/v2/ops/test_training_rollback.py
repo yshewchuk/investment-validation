@@ -254,6 +254,50 @@ def test_unreadable_rollback_history_at_plan_time_is_typed_validation_failed(tmp
     assert deployment.current_pointer(tmp_path).release_id == "r2"
 
 
+def test_cli_plan_rollback_malformed_pointer_is_typed_validation_failed(tmp_path, capsys):
+    """A corrupt DEPLOYED pointer refuses the plan, typed, mutating nothing.
+
+    Real stage/promote APIs build a two-release store, then the live pointer's
+    actual ``DEPLOYED`` bytes are corrupted with malformed JSON. Running the
+    real ``cli.main`` for ``plan rollback --release-root <store>`` must report a
+    JSON ``VALIDATION_FAILED`` carrying the pointer decode's own
+    ``JSONDecodeError`` -- never the CLI's catch-all ``INVALID_REQUEST`` -- and
+    save no plan artifact, leaving both the corrupt pointer and every history
+    byte exactly as they were.
+    """
+    root = tmp_path / "ops"
+    assert cli.main(["--root", str(root), "init"]) == 0
+    capsys.readouterr()
+    _stage_pair(tmp_path)
+    deployment.promote(tmp_path, "r1")
+    deployment.promote(tmp_path, "r2")
+    (tmp_path / "DEPLOYED").write_bytes(b"{ not json")
+    pointer_before = (tmp_path / "DEPLOYED").read_bytes()
+    history_before = _history_bytes(tmp_path)
+
+    conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert cli.main(["--root", str(root), "plan", "rollback",
+                     "--release-root", str(tmp_path)]) == 2
+    body = json.loads(capsys.readouterr().out)
+    assert body["code"] == "VALIDATION_FAILED"
+    assert body["details"] == {"exception_class": "JSONDecodeError"}
+
+    conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
+    try:
+        after = conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+        assert after == before
+    finally:
+        conn.close()
+
+    assert (tmp_path / "DEPLOYED").read_bytes() == pointer_before
+    assert _history_bytes(tmp_path) == history_before
+
+
 def test_rollback_resubmission_same_key_returns_same_job(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     try:

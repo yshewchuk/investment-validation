@@ -34,6 +34,15 @@ attempt inspection, cancellation, recovery planning, health and supervisor
 execution. Python modules are internal to ops; other production packages consume
 versioned artifacts instead of importing the supervisor.
 
+The model rollback operator command is
+`python3 -m engine.v2.ops plan rollback`. Use `--release-root ROOT` to select
+the release store. The plan pins the live
+incumbent and rollback target, refuses `--release-id`, and leaves the target
+unset only for `NoPriorRelease`; that worker refusal is typed
+`VALIDATION_FAILED`. Malformed pointer or history data refuses planning with
+typed `VALIDATION_FAILED`. Submit the saved plan through
+`python3 -m engine.v2.ops submit --plan PLAN --idempotency-key KEY`.
+
 Internal staging API: `nightly_raw_rows.scan_calendar_row` returns
 `CalendarRowInputs` from a pinned earnings event and explicit market context.
 It has no production caller; see the component architecture contract.
