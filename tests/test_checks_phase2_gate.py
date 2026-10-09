@@ -999,7 +999,7 @@ def test_removing_each_registry_required_field_in_turn_turns_the_real_gate_red(t
 # worlds) are unchanged.
 #
 # `tests/test_checks_phase2_gate.py` itself is not named in any registry row's
-# "tests" list (only tests/test_v2_ops_engineering.py is added implicitly by
+# "tests" list (only tests/v2/ops/test_v2_ops_engineering.py is added implicitly by
 # p2cov.phase2_suite()), so nothing here re-enters a suite measurement of this file.
 
 def test_real_repo_smoke_matches_registry_against_the_real_tree():

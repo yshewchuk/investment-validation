@@ -61,10 +61,18 @@ Bumped to v6 (merge with main): ``tests/v2/ops/test_cli_rescore.py`` joined
 the fixed suite from main, so the declared file list and measurement identity
 refresh again; the package counts remain the v5 measurement's.
 
+Bumped to v7: ``tests/test_v2_ops_engineering.py`` moved under
+``tests/v2/ops/``, where the flat ``test_v2_ops_*.py`` root glob no longer
+finds it. The relocated path remains explicitly selected for the same reason
+as the earlier moves: a moved file must not silently drop out of the fixed
+suite and leave ``engine.v2.ops`` looking less covered. As with v5/v6 this
+refreshes the declared file list (and the measurement identity it feeds);
+the package counts remain the v6 measurement's, not a fresh run.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
-that currently exists on disk, plus ``tests/test_v2_ops_engineering.py``
+that currently exists on disk, plus ``tests/v2/ops/test_v2_ops_engineering.py``
 (phase-2 guide §12.1). ``suite_version`` is a hash of that exact file list, so
 a registry change that adds or removes a covered file invalidates the
 committed baseline (``SUITE_DRIFT``) rather than silently comparing two
@@ -152,7 +160,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v6"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v7"
 
 
 def phase1_suite(root=ROOT):
@@ -162,8 +170,9 @@ def phase1_suite(root=ROOT):
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_serving_*.py")]
                   + ["tests/test_diagnosis_comparator.py"]
                   + ["tests/v2/foundation/test_v2_ops_foundation.py"]
-                  + ["tests/v2/ops/test_cli_rescore.py"]
-                  + ["tests/v2/ops/test_v2_ops_native_parity_pairing.py"]
+                   + ["tests/v2/ops/test_cli_rescore.py"]
+                   + ["tests/v2/ops/test_v2_ops_engineering.py"]
+                   + ["tests/v2/ops/test_v2_ops_native_parity_pairing.py"]
                   + ["tests/v2/ops/test_v2_ops_nightly_completion.py"])
 
 
@@ -322,7 +331,7 @@ def phase2_suite(root=ROOT, registry=None):
     """The fixed, existing test files: every registry test that exists, plus engineering."""
     registry = phase2_load_registry() if registry is None else registry
     declared = {t for row in registry.values() for t in row.get("tests", [])}
-    declared.add("tests/test_v2_ops_engineering.py")
+    declared.add("tests/v2/ops/test_v2_ops_engineering.py")
     return sorted(rel for rel in declared if (root / rel).is_file())
 
 

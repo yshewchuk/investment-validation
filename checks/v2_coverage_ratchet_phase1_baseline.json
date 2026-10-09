@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v6",
+  "suite_version": "phase1_coverage_suite.v7",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -65,7 +65,6 @@
     "tests/test_v2_ops_effects.py",
     "tests/test_v2_ops_effects_backup.py",
     "tests/test_v2_ops_effects_graph.py",
-    "tests/test_v2_ops_engineering.py",
     "tests/test_v2_ops_engineering_history.py",
     "tests/test_v2_ops_executor_faults.py",
     "tests/test_v2_ops_experiment_context.py",
@@ -148,10 +147,11 @@
     "tests/test_v2_serving_publication_binding.py",
     "tests/v2/foundation/test_v2_ops_foundation.py",
     "tests/v2/ops/test_cli_rescore.py",
+    "tests/v2/ops/test_v2_ops_engineering.py",
     "tests/v2/ops/test_v2_ops_native_parity_pairing.py",
     "tests/v2/ops/test_v2_ops_nightly_completion.py"
   ],
-  "source_hash": "sha256:75963ce79d5f529c56b387e8614d3b6d39edbac693aaa9c5b6d03863bcaa9666",
+  "source_hash": "sha256:dbae151505a25f191ec654d7be976622ceef99757fa8f38acf2b7157937205e5",
   "packages": {
     "engine.v2.contracts": {
       "executed": 802,

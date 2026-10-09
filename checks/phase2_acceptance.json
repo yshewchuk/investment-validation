@@ -89,7 +89,7 @@
     },
     "D17": {
       "tier": 0,
-      "tests": ["tests/test_v2_ops_engineering.py"],
+      "tests": ["tests/v2/ops/test_v2_ops_engineering.py"],
       "reuse_phase1_structural_engineering": true
     },
     "D18": {

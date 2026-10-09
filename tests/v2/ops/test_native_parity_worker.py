@@ -4,7 +4,7 @@
 from the paired legacy score job, ``records.json``/``refusals.json`` from
 the paired ``native_score_batch`` job), classifies every row through the
 pairing core, and writes ``native_parity_report.json``.  Fixture shapes
-mirror ``tests/v2/ops/test_v2_ops_native_parity_pairing.py`` and
+mirror ``tests/v2/ops/test_native_parity_pairing.py`` and
 ``tests/test_v2_ops_native_score_batch.py``.
 """
 from __future__ import annotations
@@ -263,7 +263,8 @@ def test_run_native_parity_worker_all_refused_keyable(tmp_path):
     assert report["compared"] == []
     assert report["only_legacy"] == []
     assert report["native_refused"] == [
-        {"row_key": _row_key(row), "refusal_code": "RELEASE_MISSING_ROLE"}]
+        {"row_key": _row_key(row), "refusal_code": "RELEASE_MISSING_ROLE",
+         "ticker": "AAA", "reason": "RELEASE_MISSING_ROLE"}]
     assert report["native_refused_unmatched"] == []
 
 
@@ -281,7 +282,8 @@ def test_run_native_parity_worker_all_refused_unkeyable_only(tmp_path):
     assert report["only_legacy"] == [_row_key(row)]
     assert report["native_refused"] == []
     assert report["native_refused_unmatched"] == [
-        {"row_key": entry["key"], "refusal_code": "INVALID_KEY_FIELD"}]
+        {"row_key": entry["key"], "refusal_code": "INVALID_KEY_FIELD",
+         "ticker": entry["key"]["ticker"], "reason": "INVALID_KEY_FIELD"}]
 
 
 def test_run_native_parity_worker_disjoint_native_rows_with_keyed_refusal(tmp_path):
@@ -301,7 +303,8 @@ def test_run_native_parity_worker_disjoint_native_rows_with_keyed_refusal(tmp_pa
     assert report["only_legacy"] == []
     assert report["only_native"] == ["ZZZ|STR-THRU|2026-01-15"]
     assert report["native_refused"] == [
-        {"row_key": _row_key(row), "refusal_code": "RELEASE_MISSING_ROLE"}]
+        {"row_key": _row_key(row), "refusal_code": "RELEASE_MISSING_ROLE",
+         "ticker": "AAA", "reason": "RELEASE_MISSING_ROLE"}]
 
 
 def test_run_native_parity_worker_intraday_refusal_preserves_timestamp(tmp_path):
@@ -323,7 +326,8 @@ def test_run_native_parity_worker_intraday_refusal_preserves_timestamp(tmp_path)
     assert report["native_refused"] == []
     assert report["native_refused_unmatched"] == [
         {"row_key": "AAA|STR-THRU|2026-01-15T09:30:00",
-         "refusal_code": "RELEASE_MISSING_ROLE"}]
+         "refusal_code": "RELEASE_MISSING_ROLE",
+         "ticker": "AAA", "reason": "RELEASE_MISSING_ROLE"}]
 
     report_bytes = (tmp_path / "native_parity_report.json").read_bytes()
     run_native_parity_worker(

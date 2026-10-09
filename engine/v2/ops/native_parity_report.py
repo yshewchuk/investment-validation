@@ -67,7 +67,10 @@ __all__ = [
 #: v1.1 -> v1.2: adds the top-level run identity ``as_of``/``generated_at``
 #: and, inside each ``mismatches`` entry, ``values`` -- that entry's own
 #: mismatched fields only, keyed ``{legacy, native}``.
-SCHEMA_VERSION = "native_parity_report.v1.2"
+#: v1.2 -> v1.3: every native refusal entry (keyed or unkeyable, matched or
+#: unmatched) gains ``ticker`` and ``reason`` (``reason`` repeats
+#: ``refusal_code``); ``row_key``/``refusal_code`` are preserved unchanged.
+SCHEMA_VERSION = "native_parity_report.v1.3"
 
 #: The exact ``schema_version`` tags
 #: ``native_score_batch._native_score_batch_documents`` writes for its v2.0
@@ -371,6 +374,15 @@ def _empty_native_report(
     }
 
 
+def _ticker_from_population_key(key: str) -> str:
+    """The ``ticker`` carried by a three-field ``population_key`` string: the
+    first component before the first ``"|"`` -- the exact join format
+    :func:`engine.v2.ops.decision_validation.population_key` builds from
+    ``("ticker", "strategy", "event_date")``.
+    """
+    return key.split("|", 1)[0]
+
+
 def apply_native_refusals(
     report: dict,
     native_refusals: Mapping[str, str],
@@ -383,10 +395,14 @@ def apply_native_refusals(
     ``native_refusals`` maps a ``population_key`` string to a refusal code
     string. Any key that is also present in ``report["only_legacy"]``
     moves there (removed from ``only_legacy``, appended to a new
-    ``"native_refused"`` list as ``{"row_key": key, "refusal_code": code}``).
+    ``"native_refused"`` list as ``{"row_key": key, "refusal_code": code,
+    "ticker": ..., "reason": code}`` -- ``ticker`` derived from the
+    population key by :func:`_ticker_from_population_key`, ``reason`` the
+    same code as ``refusal_code``).
     A ``native_refusals`` key that is NOT in ``only_legacy`` is appended
     instead to a new ``"native_refused_unmatched"`` list, same
-    ``{"row_key": key, "refusal_code": code}`` shape -- a native refusal
+    ``{"row_key": key, "refusal_code": code, "ticker": ..., "reason":
+    code}`` shape -- a native refusal
     with no legacy counterpart to explain (a row native's own board
     universe found and refused that legacy's ``score.json`` never carried).
     Iterates ``native_refusals`` in ``sorted()`` key order, so the output
@@ -396,7 +412,8 @@ def apply_native_refusals(
     ``{"key": {...raw ticker/strategy/event_date/session fields...},
     "code": ..., "detail": ...}``) is appended unconditionally to the SAME
     ``"native_refused_unmatched"`` list, in the given order, as
-    ``{"row_key": entry["key"], "refusal_code": entry["code"]}`` -- using
+    ``{"row_key": entry["key"], "refusal_code": entry["code"], "ticker":
+    entry["key"]["ticker"], "reason": entry["code"]}`` -- using
     its raw structured key instead of a population-key string, since an
     unkeyable refusal has no ``population_key`` to project.
 
@@ -410,14 +427,25 @@ def apply_native_refusals(
     native_refused_unmatched: list[dict[str, Any]] = []
     for key in sorted(native_refusals):
         code = native_refusals[key]
+        refusal_entry = {
+            "row_key": key,
+            "refusal_code": code,
+            "ticker": _ticker_from_population_key(key),
+            "reason": code,
+        }
         if key in only_legacy_set:
             only_legacy.remove(key)
-            native_refused.append({"row_key": key, "refusal_code": code})
+            native_refused.append(refusal_entry)
         else:
-            native_refused_unmatched.append({"row_key": key, "refusal_code": code})
+            native_refused_unmatched.append(refusal_entry)
     for entry in unkeyable_refusals:
-        native_refused_unmatched.append(
-            {"row_key": entry["key"], "refusal_code": entry["code"]})
+        code = entry["code"]
+        native_refused_unmatched.append({
+            "row_key": entry["key"],
+            "refusal_code": code,
+            "ticker": entry["key"]["ticker"],
+            "reason": code,
+        })
     updated = dict(report)
     updated["only_legacy"] = only_legacy
     updated["native_refused"] = native_refused

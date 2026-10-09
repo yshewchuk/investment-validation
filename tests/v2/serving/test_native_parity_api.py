@@ -139,7 +139,7 @@ def test_authenticated_summary_and_bounded_detail_pages(parity):
     summary = json.loads(body)
     assert summary["schema_version"] == "native_parity_summary.v1.0"
     assert summary["status"] == "available"
-    assert summary["source_schema_version"] == "native_parity_report.v1.2"
+    assert summary["source_schema_version"] == "native_parity_report.v1.3"
     assert summary["as_of"] == AS_OF
     assert summary["generated_at"] == GENERATED_AT
     assert summary["tolerance_policy_id"] == "score_record.exact.v1"
@@ -317,7 +317,9 @@ def test_keyed_refusal_entries_are_known_row_keys(parity, collection, refused_ke
     report = compare_native_vs_legacy(legacy, native, ("forecasts", "simulation"))
     report = apply_native_refusals(report, {refused_key: _REFUSAL_CODE})
     report = _stamp_report_identity(report, as_of=AS_OF, clock=_FixedClock())
-    assert report[collection] == [{"row_key": refused_key, "refusal_code": _REFUSAL_CODE}]
+    assert report[collection] == [{"row_key": refused_key, "refusal_code": _REFUSAL_CODE,
+                                   "ticker": refused_key.split("|", 1)[0],
+                                   "reason": _REFUSAL_CODE}]
     other = ({"native_refused": "native_refused_unmatched",
               "native_refused_unmatched": "native_refused"}[collection])
     assert report[other] == [], collection
@@ -775,7 +777,7 @@ def test_raw_v12_diagnostic_reads_shared_but_api_refuses_missing_identity(parity
     readable by the shared reader, while the API route refuses it."""
     legacy, native = _source_rows()
     report = compare_native_vs_legacy(legacy, native, ("forecasts", "simulation"))
-    assert report["schema_version"] == "native_parity_report.v1.2"
+    report["schema_version"] = "native_parity_report.v1.2"
     assert "as_of" not in report and "generated_at" not in report
     write_parity_report(report, parity.report_path)
 
