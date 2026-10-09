@@ -86,37 +86,6 @@ def test_leaking_runner_is_caught_by_the_write_audit(tmp_path):
     assert {"path": "ledger/predictions/leak.jsonl", "kind": "new"} in findings
 
 
-def test_exp184_runner_manifest_is_registered():
-    root = Path(__file__).resolve().parents[1]
-    registered = "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py"
-    manifest = runner_manifest(root, registered)
-    assert manifest["schema_version"] == "runner_capability_manifest.v1.0"
-    assert manifest["no_ledger_support"] is True
-    assert manifest["spec_hash"].startswith("sha256:")
-    closure = manifest["source_closure"]
-    assert registered in closure
-    assert "experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py" in closure
-    assert manifest["report_path"] == "REPORT.md"
-
-
-def test_exp185_runner_manifest_is_registered():
-    root = Path(__file__).resolve().parents[1]
-    registered = (
-        "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py"
-    )
-    manifest = runner_manifest(root, registered)
-    assert manifest["schema_version"] == "runner_capability_manifest.v1.0"
-    assert manifest["no_ledger_support"] is True
-    assert manifest["spec_hash"].startswith("sha256:")
-    closure = manifest["source_closure"]
-    assert registered in closure
-    assert (
-        "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/run.py" in closure
-    )
-    assert manifest["report_path"] == "REPORT.md"
-    assert "gate_midfill_str_runup" in manifest["registry_effects"]
-
-
 def test_exp185_wrapper_patches_here_and_results_before_main():
     import importlib.util
 
@@ -140,10 +109,40 @@ def test_exp185_wrapper_patches_here_and_results_before_main():
     assert wrapper.module.RESULTS == wrapper_dir / "results"
 
 
-def test_exp185_is_a_registered_runner():
-    from engine.v2.ops.legacy_adapter import REGISTERED_RUNNERS
+RETIRED_RUNNERS = (
+    "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
+    "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py",
+)
 
-    assert (
-        "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py"
-        in REGISTERED_RUNNERS
-    )
+
+@pytest.mark.parametrize("retired", RETIRED_RUNNERS)
+def test_retired_runner_is_refused_before_any_subprocess(retired, monkeypatch):
+    import subprocess
+    from engine.v2.ops import legacy_adapter
+    from engine.v2.ops.experiments import RUNNER_INVENTORY
+
+    root = Path(__file__).resolve().parents[1]
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)))
+    assert retired not in RUNNER_INVENTORY
+    assert retired not in legacy_adapter.REGISTERED_RUNNERS
+    with pytest.raises(OpsError) as manifest_error:
+        runner_manifest(root, retired)
+    assert manifest_error.value.code == "INVALID_REQUEST"
+    with pytest.raises(OpsError) as run_error:
+        legacy_adapter.run_legacy_script(root, retired)
+    assert run_error.value.code == "INVALID_REQUEST"
+    assert calls == []
+
+
+def test_active_registration_keeps_its_audited_source_closure():
+    from engine.v2.ops import legacy_adapter
+    from engine.v2.ops.experiments import RUNNER_INVENTORY
+
+    root = Path(__file__).resolve().parents[1]
+    assert set(RUNNER_INVENTORY) == {REGISTERED}
+    assert legacy_adapter.REGISTERED_RUNNERS == frozenset({REGISTERED})
+    manifest = runner_manifest(root, REGISTERED)
+    assert manifest["no_ledger_support"] is True
+    assert REGISTERED in manifest["source_closure"]
+    assert "experiments/EXP-181_d_1_gated_execution_parity/run.py" in manifest["source_closure"]
