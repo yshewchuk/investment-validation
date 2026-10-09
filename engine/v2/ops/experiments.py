@@ -29,9 +29,9 @@ SPEC_FIELDS = frozenset({"experiment_id", "hypothesis", "primary_arm_id", "arms"
                          "seed", "folds", "economic_params", "price_source",
                          "input_files", "runner"})
 
-#: The only economic declaration with a defined execution meaning today;
+#: Economic declarations with a defined execution meaning;
 #: any other key is an unused declaration, refused before the runner.
-SUPPORTED_ECONOMIC_KEYS = frozenset({"fill"})
+SUPPORTED_ECONOMIC_KEYS = frozenset({"fill", "exit"})
 
 
 def default_checkout_root() -> Path:
@@ -285,6 +285,18 @@ def _validate_plan_fields(spec: ExperimentSpec) -> None:
                    details={"type": type(spec.economic_params).__name__})
 
 
+def _validate_declared_exit(spec: ExperimentSpec) -> None:
+    if "exit" not in spec.economic_params:
+        return
+    recipe = spec.economic_params["exit"]
+    alpha = spec.economic_params.get("fill")
+    if (not isinstance(recipe, Mapping) or set(recipe) != {"kind", "trading_days"}
+            or recipe["kind"] != "fixed_day" or type(recipe["trading_days"]) is not int
+            or recipe["trading_days"] <= 0 or type(alpha) not in (int, float)
+            or not 0 <= alpha <= 1 or spec.price_source != "option_chains"):
+        raise fail("INVALID_EXPERIMENT_SPEC", "invalid fixed-day exit economics or mark source")
+
+
 def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
     """Refuse malformed plan fields and economically unused declarations,
     then freeze the one plan."""
@@ -294,6 +306,7 @@ def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
                    details={"type": type(spec.economic_params).__name__})
     # Order matters: the field check types the economic keys before the sort.
     _validate_plan_fields(spec)
+    _validate_declared_exit(spec)
     # A fixed-arm experiment declares exactly one arm and names it as primary;
     # any other shape is refused here, before staging or any durable effect.
     if len(spec.arms) != 1 or spec.arms[0] != spec.primary_arm_id:

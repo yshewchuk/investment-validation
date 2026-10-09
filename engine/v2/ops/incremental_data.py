@@ -24,6 +24,7 @@ from typing import Callable, Literal, Mapping, Protocol, Sequence
 from engine.v2.contracts import DataQuery, DependencyPlan, JobSpec, SnapshotRef
 from engine.v2.foundation import (
     DocumentError,
+    SystemClock,
     content_hash,
     from_document,
     to_document,
@@ -518,7 +519,12 @@ def _load_forward_calendar_refresh_callback() -> RefreshCallback:
     network, the same lazy shape ``_load_computed_moves_refresh_callback``
     already has.
     """
-    from engine.v2.ops.forward_calendar_store import run_forward_calendar_refresh
+    from engine.v2.ops.forward_calendar_store import (
+        NATIVE_NASDAQ_ACCOUNT,
+        NATIVE_YFINANCE_ACCOUNT,
+        run_forward_calendar_refresh,
+    )
+    from engine.v2.ops.provider_budget import budgeted_fetcher
     from engine.v2.ops.providers import nasdaq_calendar_fetcher, yfinance_earnings_fetcher
     from engine.v2.ops.refresh_staging import REFRESH_INPUT_DOCUMENT_NAMES
 
@@ -532,6 +538,8 @@ def _load_forward_calendar_refresh_callback() -> RefreshCallback:
             raise fail("INVALID_REQUEST",
                        "expected_head_snapshot_id must be a bounded nonempty string")
         attempt_id, fence = _staged_forward_calendar_attempt(Path(root), document_name)
+        budget = dict(catalog_path=parameters.catalog_path, attempt_id=attempt_id,
+                      fence=fence, clock=SystemClock())
         return run_forward_calendar_refresh(
             catalog_path=parameters.catalog_path,
             objects_root=parameters.objects_root,
@@ -544,7 +552,8 @@ def _load_forward_calendar_refresh_callback() -> RefreshCallback:
             expected_head_generation=parameters.expected_head_generation,
             expected_head_snapshot_id=parameters.expected_head_snapshot_id,
             attempt_id=attempt_id, fence=fence,
-            nasdaq_fetcher=nasdaq_fetcher, earnings_fetcher=earnings_fetcher)
+            nasdaq_fetcher=budgeted_fetcher(nasdaq_fetcher, account=NATIVE_NASDAQ_ACCOUNT, **budget),
+            earnings_fetcher=budgeted_fetcher(earnings_fetcher, account=NATIVE_YFINANCE_ACCOUNT, **budget))
 
     return _callback
 

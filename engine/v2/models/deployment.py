@@ -87,6 +87,7 @@ __all__ = [
     "resolve_release",
     "restage_semantic_hash",
     "rollback",
+    "rollback_target",
     "stage_release",
 ]
 
@@ -980,6 +981,23 @@ def _rollback_target(root: Path) -> str:
                    f"DEPLOYED says {live_release_id!r}",
         ),))
     return stack[-2]
+
+
+def rollback_target(root: Path) -> str:
+    """The release id the next :func:`rollback` would land on, read-only.
+
+    Public wrapper over the canonical :func:`_rollback_target` resolver: it
+    replays ``pointer_history`` as an undo stack, resolving exactly what
+    :func:`rollback` would without writing anything -- no pointer swap, no
+    history repair, no temp file. Refuses :class:`NoPriorRelease` when the
+    store has no earlier release to return to, and every
+    :class:`DeploymentError`/:class:`StagingRefused` the resolver raises
+    (``HISTORY_UNREADABLE``, ``HISTORY_SEQUENCE_GAP``,
+    ``HISTORY_INCONSISTENT``) propagates unchanged. It is the resolver
+    operator plans pin their target with, so a plan's pinned target and
+    :func:`rollback`'s own choice can never drift.
+    """
+    return _rollback_target(Path(root))
 
 
 def rollback(root: Path, *, clock: Clock = SystemClock()) -> PointerState:

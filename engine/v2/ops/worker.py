@@ -171,7 +171,7 @@ def dispatch(worker, parameters, root, *, envelope=None):
                              "threads": os.environ["OMP_NUM_THREADS"]}}
     if worker == "experiment":
         return _dispatch_experiment(parameters, root)
-    if worker in ("training", "models_promote"):
+    if worker in ("training", "models_promote", "models_rollback"):
         return _dispatch_model_worker(worker, parameters, root)
     raise ValueError("unsupported worker")
 
@@ -196,10 +196,15 @@ def _dispatch_legacy_action(worker, parameters, root, envelope):
 
 
 def _dispatch_model_worker(worker, parameters, root):
-    from engine.v2.ops.training import run_promote_worker, run_training_worker
+    from engine.v2.ops.training import (
+        run_promote_worker,
+        run_rollback_worker,
+        run_training_worker,
+    )
 
-    runner = run_training_worker if worker == "training" else run_promote_worker
-    return runner(parameters, root)
+    runners = {"training": run_training_worker, "models_promote": run_promote_worker,
+               "models_rollback": run_rollback_worker}
+    return runners[worker](parameters, root)
 
 
 def _dispatch_native_score_batch(parameters, root):
