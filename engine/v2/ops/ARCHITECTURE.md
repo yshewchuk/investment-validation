@@ -134,7 +134,7 @@ that gap through `run_shadow_nightly` at all.** That function keeps its
 existing stage-walk and `native_parity_handler`'s existing signature
 contract completely unchanged (both already correctly consume real
 `legacy_rows`/`native_rows` dicts today — proven by
-`tests/test_v2_ops_native_shadow_render.py` — and stay exactly the
+`tests/v2/ops/test_native_shadow_render.py` — and stay exactly the
 test-only path they always were; nothing before this redo, or in it,
 builds real dicts to hand `run_shadow_nightly` in production). The gap
 closes through a SEPARATE production path: a new `native_parity` job
@@ -1431,7 +1431,7 @@ flowchart TD
     class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh,native_score_batch optional
 ```
 
-Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never blocks the graph. This diagram is the *shadow* graph — `run_shadow_nightly` is the only function that walks it whole, inline, for every stage including `native_parity`; it has no production caller, only `tests/test_v2_ops_legacy_workflows.py` and `tests/test_v2_ops_native_shadow_render.py` call it. `computed_moves_refresh` and `native_score_batch` are both real submittable job kinds and `GRAPH` nodes; `run_shadow_nightly` reaches both through its whole-graph walk. Automatic *production* submission reaches them only through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` / `Service._reconcile_native_score_batch_shadow`); `_stage_sequence` filters both out of every job-submission stage list by name (see "Outputs"). `native_score_batch`'s sidecar returns a normal no-op if the selected `"score"` job pinned no snapshot or no eligible identity exists (never a JobSpec, never a raise — R3 above); for a new eligible snapshot-pinned job it is the raw-row producer's only production caller — see "Outputs"/"Failure semantics" for both cases.
+Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never blocks the graph. This diagram is the *shadow* graph — `run_shadow_nightly` is the only function that walks it whole, inline, for every stage including `native_parity`; it has no production caller, only `tests/test_v2_ops_legacy_workflows.py` and `tests/v2/ops/test_native_shadow_render.py` call it. `computed_moves_refresh` and `native_score_batch` are both real submittable job kinds and `GRAPH` nodes; `run_shadow_nightly` reaches both through its whole-graph walk. Automatic *production* submission reaches them only through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` / `Service._reconcile_native_score_batch_shadow`); `_stage_sequence` filters both out of every job-submission stage list by name (see "Outputs"). `native_score_batch`'s sidecar returns a normal no-op if the selected `"score"` job pinned no snapshot or no eligible identity exists (never a JobSpec, never a raise — R3 above); for a new eligible snapshot-pinned job it is the raw-row producer's only production caller — see "Outputs"/"Failure semantics" for both cases.
 
 **`native_parity`.** The job kind and its worker
 (`run_native_parity_worker`, dispatched from `worker.py`) receive jobs through

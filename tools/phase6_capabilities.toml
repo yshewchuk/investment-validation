@@ -61,7 +61,7 @@ old = []
 new = ["nightly:v2 native_parity", "py:engine/v2/ops/native_parity_report.py::native_parity_handler"]
 producer = "run_shadow_nightly walks the full GRAPH including native_parity; _DAG_STAGES omits it from production job submission (no legacy_native_parity job kind exists)"
 identity = "<private>/native_parity_report.json"
-tests = ["tests/test_v2_ops_native_shadow_render.py"]
+tests = ["tests/v2/ops/test_native_shadow_render.py"]
 disposition = "native"
 owner = "P6-6"
 notes = "Not in _DAG_STAGES, so the default plan omits it before NO_JOB_STAGES ever runs; only include_prerequisites=True starts from plan[\"order\"] (which does include it) and NO_JOB_STAGES filters it out there. Neither planning path ever submits it as a job; only run_shadow_nightly (test-only, walks the whole GRAPH inline) executes it. See engine/v2/ops/ARCHITECTURE.md's native_parity discussion."
@@ -662,7 +662,7 @@ old = []
 new = ["py:engine/v2/serving/native_parity_projection.py::native_parity_summary", "route:v2-api GET /api/v1/native_parity", "route:v2-api GET /api/v1/native_parity/mismatches", "route:v2-api GET /api/v1/native_parity/unpaired", "view:ui #nativeParity"]
 producer = "projection reads the configured saved native_parity_report.v1.2 file; no automatic selection of outputs; run_shadow_nightly's supplied output path is separate from the native_parity worker's native_parity_report.json job output"
 identity = "the API takes an optional --native-parity-report-path independent of --publication-root"
-tests = ["tests/test_v2_serving_native_parity.py", "tests/test_v2_route_probe.py", "tests/test_v2_serving_native_parity_api.py", "tests/test_v2_native_parity_browser.py"]
+tests = ["tests/test_v2_serving_native_parity.py", "tests/test_v2_route_probe.py", "tests/v2/serving/test_native_parity_api.py", "tests/test_v2_native_parity_browser.py"]
 disposition = "native"
 owner = "P6-4"
 notes = "No legacy equivalent (old = []): the React screen displays report identity, aggregate counts, and refusal reasons. Per-row mismatch/unpaired details are deferred; future mismatch detail follows the design's mismatched-fields-only rule. The operations HTML/JSON preview is retired."
