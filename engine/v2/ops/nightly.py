@@ -1157,7 +1157,7 @@ def submit_native_parity_if_ready(conn, registry, policy, store, *, catalog_path
         dependency_job_ids=(score_job_id, native_score_batch_job_id),
         output_namespace="shadow",
         retry_policy_ref="bounded",
-        checkpoint_contract_ref="native_parity_report.v1.2",
+        checkpoint_contract_ref="native_parity_report.v1.3",
         **_sidecar_runtime_identity("native_parity"))
     return submit(conn, registry, policy, SubmitRequest(
         namespace="shadow", idempotency_key=key, principal="operator", job=job),

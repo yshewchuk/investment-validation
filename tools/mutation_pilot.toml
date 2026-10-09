@@ -941,7 +941,7 @@ tests = [
     "tests/v2/ops/test_provider_response_boundary.py",
     "tests/v2/ops/test_native_parity_inputs_leaf.py",
     "tests/v2/ops/test_carried_set.py",
-    "tests/test_v2_ops_native_parity_pairing.py",
+    "tests/v2/ops/test_native_parity_pairing.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",
