@@ -659,8 +659,8 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     unless ``dry_run``, commit one new snapshot generation under ``scope``
     carrying every other table's dataset version forward unchanged alongside
     price_history's fresh one. Never touches ``source_root``'s bytes.
-    ``required_tickers`` refuse ``SOURCE_NOT_FOUND``, before committing a
-    snapshot, when neither the source (with at least one live (non-tombstoned)
+    ``required_tickers`` refuse ``SOURCE_NOT_FOUND``, before writing any
+    fragment, when neither the source (with at least one live (non-tombstoned)
     row) nor the prior dataset version holds them.
 
     ``root`` (SEND-BACK 2026-09-14 item 4) is the operations root holding
@@ -710,21 +710,31 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
     prior_manifest, prior_records = repository.latest_dataset_version(PRICE_HISTORY_CONTRACT.contract_id)
     prior_by_ticker = {r.partition_key: r for r in prior_records}
     updated_records = dict(prior_by_ticker)
-    stored_by_ticker: dict[str, pd.DataFrame] = {}
 
     results: list[dict] = []
     all_attempts: list[dict] = []
     disagreements: dict[str, dict] = {}
 
-    for ticker in tickers:
+    def _capture_outcome(ticker: str) -> _TickerOutcome:
         entries: list[tuple[str, dict]] = []
         if ticker in px:
             entries.append(("legacy_px_csv", px[ticker]))
         entries.extend(("tier1_fetch", e) for e in tier1.get(ticker, []))
         stored = _read_fragment_rows(store, prior_by_ticker.get(ticker))
-        outcome = _capture_ticker(conn, ticker, entries, stored=stored, created_at=created_at)
-        if ticker in required:
-            stored_by_ticker[ticker] = outcome.stored
+        return _capture_ticker(conn, ticker, entries, stored=stored, created_at=created_at)
+
+    precomputed = {t: _capture_outcome(t) for t in tickers if t in required}
+    stored_by_ticker: dict[str, pd.DataFrame] = {t: o.stored for t, o in precomputed.items()}
+    usable = _usable_tickers(required, tickers, prior_by_ticker, store, stored_by_ticker)
+    missing = sorted(required - usable)
+    if missing:
+        raise fail("SOURCE_NOT_FOUND", "price_history source lacks a usable required ticker",
+                   details={"tickers": missing})
+
+    for ticker in tickers:
+        outcome = precomputed.pop(ticker, None)
+        if outcome is None:
+            outcome = _capture_outcome(ticker)
         results.extend(outcome.results)
         all_attempts.extend(outcome.attempts)
         if outcome.changed and not dry_run:
@@ -737,12 +747,6 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
                 disagreements[ticker] = _overlap_disagreement(px[ticker], tier1[ticker][-1])
             except Exception:  # noqa: BLE001 -- best-effort reporting only.
                 pass
-
-    usable = _usable_tickers(required, tickers, prior_by_ticker, store, stored_by_ticker)
-    missing = sorted(required - usable)
-    if missing:
-        raise fail("SOURCE_NOT_FOUND", "price_history source lacks a usable required ticker",
-                   details={"tickers": missing})
 
     report = _summarize(results, disagreements, dry_run=dry_run)
     if dry_run:

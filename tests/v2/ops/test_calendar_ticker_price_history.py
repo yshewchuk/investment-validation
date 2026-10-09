@@ -270,3 +270,16 @@ def test_capture_keeps_resulting_rows_only_for_required_tickers(tmp_path, monkey
     capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
             required_tickers=("SPY",))
     assert recorded == [{"SPY"}]
+
+
+def test_refused_capture_writes_no_objects(tmp_path):
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=False)
+    before = {path for path in store.root.rglob("*") if path.is_file()}
+    with pytest.raises(OpsError) as exc:
+        capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
+                required_tickers=("SPY",))
+    assert exc.value.problem.code == "SOURCE_NOT_FOUND"
+    assert {path for path in store.root.rglob("*") if path.is_file()} == before
+

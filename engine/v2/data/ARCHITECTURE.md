@@ -490,10 +490,11 @@ Root doc §5 invariants this package is responsible for:
   scope or board universe. The source feeding capture must therefore carry it:
   `ops price-refresh` schedules it daily (skipped only when already fetched
   that session), and `ops price-history capture` refuses `SOURCE_NOT_FOUND`
-  (details name the ticker) before committing a snapshot when neither the
-  resulting state nor the prior dataset version holds a live (non-tombstoned)
-  latest-state row for it, so
-  the gap surfaces at capture rather than as a failed native calendar scan
+  (details name the ticker) before writing any fragment unless it has a live
+  (non-tombstoned) latest-state row: for a ticker the source lists, in the
+  capture's resulting state (the prior version is not consulted, so a listed
+  but fully tombstoned ticker refuses); for a ticker the source does not list,
+  in the prior dataset version. The gap surfaces at capture rather than as a failed native calendar scan
   (`CONTRACT_MISMATCH`, no `price_history` for the ticker) in the nightly.
 - **Registered contract definitions are immutable.** `catalog.commit_snapshot`
   refuses (`IDENTITY_CONFLICT`) a changed definition under an existing
