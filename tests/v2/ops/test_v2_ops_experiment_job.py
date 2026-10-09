@@ -951,6 +951,8 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
     problem = service._worker_typed_problem(claim, running)
     assert problem is not None
 
+    real_append = experiments._append_refusal_row
+
     def append_fails(experiment_id, refused_variant_id, ledger_path):
         raise OSError("simulated ledger append failure")
 
@@ -969,6 +971,40 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
         assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
                             "WHERE released_at IS NULL").fetchone()[0] == 1
+
+        monkeypatch.setattr(supervisor, "prove_ownership_gone",
+                            lambda *args, **kwargs: types.SimpleNamespace(
+                                proven=True, known=(), alive=(), blockers=()))
+        service.reconcile()
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "recovery_pending"
+        assert attempt["failure_json"] is None
+        assert attempt["ended_at"] is None
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0] == 1
+
+        monkeypatch.setattr(experiments, "_append_refusal_row", real_append)
+        service.reconcile()
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
+                                        {"id": "x", "stage": "refused"}]
+        assert len([row for row in _ledger_rows(ledger)
+                    if row["stage"] == "refused"]) == 1
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "failed"
+        assert "LEASE_LOST" in attempt["failure_json"]
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
+        assert attempt["ended_at"] is not None
+        job = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
+                           (claim.job_id,)).fetchone()
+        assert job["state"] == "retry_wait"
+        assert "LEASE_LOST" in job["failure_json"]
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0] == 0
     finally:
         conn.close()
 

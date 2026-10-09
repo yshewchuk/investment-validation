@@ -9,8 +9,15 @@ import re
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
-from engine.v2.contracts import CheckpointCandidate, OutputCandidate, Problem, ProgressEvent
+from engine.v2.contracts import (
+    CheckpointCandidate,
+    JobSpec,
+    OutputCandidate,
+    Problem,
+    ProgressEvent,
+)
 from engine.v2.foundation import (
     ArtifactStore,
     artifact_reference,
@@ -19,7 +26,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops import executor
-from engine.v2.ops.catalog import transaction
+from engine.v2.ops.catalog import load_json, transaction
 from engine.v2.ops.checkpoints import (
     artifact,
     cache_identity,
@@ -287,8 +294,71 @@ class Service:
             signal_owned(proof.alive, self.boot, hard=True)
             if proof.known:
                 executor.persist_members(self.conn, row["attempt_id"], proof.known)
+            if proof.proven:
+                # Replay the refusal effect only AFTER the ownership proof; a
+                # quarantined (unproven) attempt keeps the generic path.
+                claim = SimpleNamespace(job_id=row["job_id"], attempt_id=row["attempt_id"])
+                try:
+                    self._replay_recovery_refusal(row)
+                except Exception:
+                    # A recognized receipt whose effect could not be recorded
+                    # leaves the attempt recovery_pending, reservations held
+                    # (ARCHITECTURE.md "pinned experiment trade loader"):
+                    # never settle it as a plain LEASE_LOST with the ledger
+                    # row unappended.
+                    _report_stranded(claim, make_problem(
+                        "VALIDATION_FAILED",
+                        "the holdout refusal recovery replay could not be recorded"))
+                    continue
             state = "verified_dead" if proof.proven else "quarantined"
             reconcile_attempt(self.conn, row["attempt_id"], process_state=state, clock=self.clock)
+
+    def _replay_recovery_refusal(self, attempt_row) -> bool:
+        """Re-append a dead attempt's holdout refusal ledger row before settling it.
+
+        ``_commit_failure`` appends the refusal row inside the failed
+        attempt's fenced commit; when that commit strands the attempt in
+        ``recovery_pending`` instead, the row would otherwise never exist.
+        Only a proven-gone attempt is replayed here (the old fence is
+        already revoked by ``fence_attempt_for_recovery``, so the effect runs
+        against this connection directly, never under the stale fence); the
+        append is idempotent, so replaying one that did land costs nothing.
+
+        ``False`` -- nothing to replay, let the generic ``reconcile_attempt``
+        settle the row as usual -- only when there is no staging diagnostics
+        mapping document or no ``refusal_receipt`` key in it. A present key
+        is a recognized receipt even with a malformed value: the job's
+        ``JobSpec`` is reloaded, a minimal claim (the effect reads only
+        ``spec.kind``/``spec.parameters``) carries it, and a redacted
+        ``HOLDOUT_ACCESS_DENIED`` Problem -- the worker's own stable text,
+        the receipt never entering ``details`` or ``failure_json`` -- drives
+        ``_experiment_refusal_failure_effect``; any validation raise propagates
+        to the caller, which leaves the row ``recovery_pending`` for a later
+        tick rather than losing the refusal.
+        """
+        path = (self.store.staging_dir(attempt_row["attempt_id"])
+                / "diagnostics" / "failure_details.json")
+        if not path.is_file():
+            return False
+        try:
+            document = json.loads(path.read_text())
+        except ValueError:
+            return False
+        if not isinstance(document, dict) or "refusal_receipt" not in document:
+            return False
+        job = self.conn.execute("SELECT spec_json FROM jobs WHERE job_id = ?",
+                                 (attempt_row["job_id"],)).fetchone()
+        claim = SimpleNamespace(spec=load_json(JobSpec, job["spec_json"]),
+                                job_id=attempt_row["job_id"],
+                                attempt_id=attempt_row["attempt_id"])
+        problem = make_problem("HOLDOUT_ACCESS_DENIED",
+                               "registered experiment loader refused holdout data")
+        effect = _experiment_refusal_failure_effect(
+            claim, problem, code_source=self.code_source, store_root=self.store_root,
+            refusal_receipt=document["refusal_receipt"])
+        if effect is not None:
+            effect(self.conn)
+        return True
 
     def tick(self):
         self._clock_check()
