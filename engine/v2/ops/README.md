@@ -34,6 +34,10 @@ attempt inspection, cancellation, recovery planning, health and supervisor
 execution. Python modules are internal to ops; other production packages consume
 versioned artifacts instead of importing the supervisor.
 
+`native.input_decoding._load_native_score_inputs` is an internal decoder shared
+by the CLI, worker and dashboard projection tool, separate from the versioned
+command protocol.
+
 The model rollback operator command is
 `python3 -m engine.v2.ops plan rollback`. Use `--release-root ROOT` to select
 the release store. The plan pins the live
@@ -88,6 +92,10 @@ submission write path all load, and `refresh_action` writes the queued jobs to
 the catalog. What the route does NOT do is start the supervisor, execute the
 submitted jobs inline, or switch production authority: it queues the plan and
 returns the job ids, leaving execution to a separately started supervisor.
+
+Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
+`native.input_decoding._load_native_score_inputs`. The dashboard projection
+tool calls the same decoder from `tools/v2_dashboard_project.py`.
 
 <!-- consumers: engine.v2.dashboard -->
 

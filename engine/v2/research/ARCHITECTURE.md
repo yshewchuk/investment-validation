@@ -109,8 +109,8 @@ then scans each eligible ticker/event-date pair in pinned `computed_moves`.
 It returns the signed move, binary `positive_move` target, and
 `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their
-decision cutoff. This is an input prerequisite, with no feature construction,
-model fitting, report/ledger publication, or supervisor caller yet.
+decision cutoff. This input prerequisite performs no feature construction,
+model fitting, or report/ledger publication, and has no supervisor caller.
 
 | Prediction/population input condition | Outcome |
 |---|---|
@@ -121,10 +121,8 @@ model fitting, report/ledger publication, or supervisor caller yet.
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
 | Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
 
-These readers preserve no durable refusal receipt or economic variant identity;
-the remaining #325 harness must supply preregistration, R1/R3/R6 execution
-checks, shared native persistence, three metric families, and no-ledger smoke.
-They cannot authorize the separate user-only final holdout read in #490.
+These readers preserve no durable refusal receipt or economic variant identity
+and cannot authorize the separate user-only final holdout read.
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment

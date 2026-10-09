@@ -70,6 +70,18 @@ def test_phase1_coverage_keeps_relocated_foundation_file(tmp_path):
     assert relative in phase1_suite(tmp_path)
 
 
+def test_phase1_coverage_keeps_relocated_rescore_file(tmp_path):
+    """The moved rescore test must stay in the phase-one fixed suite."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_cli_rescore.py"
+    assert relative in phase1_suite(tmp_path)
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    assert relative in phase1_suite(tmp_path)
+
+
 def _integration(root, name, body):
     directory = root / "tests/v2/integration"
     directory.mkdir(parents=True, exist_ok=True)
