@@ -50,7 +50,7 @@ import subprocess
 import sys
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone
-from importlib import metadata
+from importlib.metadata import PackageNotFoundError, packages_distributions, version
 from pathlib import Path
 from typing import Any
 
@@ -178,13 +178,13 @@ def _distributions(roots: set[str]) -> dict[str, str]:
     and a root with no distribution is dropped rather than guessed: a lock that
     names a package that is not installed cannot reproduce anything.
     """
-    mapping = metadata.packages_distributions()
+    mapping = packages_distributions()
     out: dict[str, str] = {}
     for root in sorted(roots):
         for dist in mapping.get(root, []):
             try:
-                out[dist] = metadata.version(dist)
-            except metadata.PackageNotFoundError:  # pragma: no cover - defensive
+                out[dist] = version(dist)
+            except PackageNotFoundError:  # pragma: no cover - defensive
                 continue
     return out
 
@@ -195,8 +195,8 @@ def environment_lock() -> dict:
     # They still belong to the tested environment lock.
     for distribution in ("ruff", "pytest", "coverage"):
         try:
-            packages[distribution] = metadata.version(distribution)
-        except metadata.PackageNotFoundError:
+            packages[distribution] = version(distribution)
+        except PackageNotFoundError:
             raise RuntimeError(f"required engineering tool is missing: {distribution}") from None
     return part(
         {

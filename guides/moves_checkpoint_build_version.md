@@ -3,7 +3,7 @@
 **Version:** 1.0 · **Date:** 2026-09-11 · **Owner:** YS + Claude
 **Status:** ready to hand off. Small and self-contained: one constant, one
 function, two or three tests. No data pull, no quota, no model.
-**Touches:** `engine/data/pulls/computed_moves.py`, `tests/test_computed_moves.py`
+**Touches:** `engine/data/pulls/computed_moves.py`, `tests/v2/integration/test_computed_moves.py`
 
 ---
 
@@ -136,7 +136,7 @@ work every time the watermark moved. Leave it out.
       `_load_checkpoint` returns `{}` for it.
 - [ ] Two builds that differ only in `BUILD_VERSION` produce different
       fingerprints; two that differ in nothing produce the same one.
-- [ ] The existing 16 tests in `tests/test_computed_moves.py` stay green —
+- [ ] The existing 16 tests in `tests/v2/integration/test_computed_moves.py` stay green —
       especially `test_a_checkpoint_from_another_build_is_not_inherited`, which
       already pins the general rule this extends.
 - [ ] If option (c): the guard test fails when `build_ticker`'s source changes

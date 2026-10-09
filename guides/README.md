@@ -19,6 +19,7 @@ ledger's `health.json`, all of which now exist.**
 
 | Guide | Phase | Depends on |
 |---|---|---|
+| `experiment_runbook.md` | V2 experiment operating contract | [V2 experiment platform](https://github.com/yshewchuk/investment-validation/pull/372) |
 | `phase0_data_foundations.md` | Data tiers, engine core, Sep-1 pulls | — |
 | `phase1_scoring_engine.md` | Model registry + score API | Phase 0 |
 | `phase2_experiment_framework.md` | Experiment harness + evaluation suite | Phase 0; report format from Phase 4 |

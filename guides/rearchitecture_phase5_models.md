@@ -281,7 +281,7 @@ Delivered 2026-09-18. Tests: `tests/test_v2_models_p5_2_acceptance.py`,
 
 | P5-2 acceptance point | test |
 |---|---|
-| legacy fit/cache-write paths rigged: Tier-4 `fit_fold`, `serving_model` miss, `ModelArtifact.save`, the six training `fit`s, `fit_payoff`, `fit_runup_payoff`, `fit_recalibration` | `tests/test_v2_models_no_fit.py` (on/off pair each) |
+| legacy fit/cache-write paths rigged: Tier-4 `fit_fold`, `serving_model` miss, `ModelArtifact.save`, the six training `fit`s, `fit_payoff`, `fit_runup_payoff`, `fit_recalibration` | `tests/v2/models/test_v2_models_no_fit.py` (on/off pair each) |
 | legacy `Registry.save` (the `registry.json` write) and `recalibrate.build_pairs` (pairs-cache write) | added: `test_both_guards_really_rig_the_fit_and_write_paths` |
 | v2 fits rigged: `native_payoff.fit_payoff_line`/`fit_runup_payoff_surface` (v2 guard); training job/estimators (legacy switch); recalibration builder (both) | `test_v2_scoring_native_payoff.py::test_under_v2_guard_inline_path_raises_and_artifact_path_succeeds`, `test_v2_models_training_recipes.py::test_training_job_trips_the_scoring_no_fit_guard_before_touching_disk`, added `test_each_guard_alone_rigs_the_recalibration_builder` |
 | cold == warm | previously only same-process (`test_v2_models_inference.py`, `test_v2_models_no_fit.py::test_frozen_inference_joblib_cold_warm_and_missing_under_guard`); added `test_cold_process_and_warm_same_process_requests_agree` (fresh interpreter, cleared caches and warm caches give identical inference, payoff, recalibration and canonical score record; no file written) plus a changed-artifact negative control |

@@ -172,6 +172,20 @@ def test_registry_artifact_save_unaffected_when_guard_off(tmp_path):
 # engine.models.training.*.fit — one entry per module, synthetic tiny arrays
 # --------------------------------------------------------------------------
 
+def _training_module(name):
+    import importlib
+
+    loaders = {
+        "gate": lambda: importlib.import_module("engine.models.training.gate"),
+        "gate_forecast_analog": lambda: importlib.import_module("engine.models.training.gate_forecast_analog"),
+        "implied_t1": lambda: importlib.import_module("engine.models.training.implied_t1"),
+        "runup_move": lambda: importlib.import_module("engine.models.training.runup_move"),
+        "size_model": lambda: importlib.import_module("engine.models.training.size_model"),
+        "iv_crush": lambda: importlib.import_module("engine.models.training.iv_crush"),
+    }
+    return loaders[name]()
+
+
 _TRAINING_MODULES = (
     "gate",
     "gate_forecast_analog",
@@ -184,9 +198,7 @@ _TRAINING_MODULES = (
 
 @pytest.mark.parametrize("module_name", _TRAINING_MODULES)
 def test_no_fit_guard_blocks_training_module_fit(module_name):
-    import importlib
-
-    module = importlib.import_module(f"engine.models.training.{module_name}")
+    module = _training_module(module_name)
     with no_fit_guard():
         with pytest.raises(RuntimeFitForbidden):
             module.fit(None, None)
@@ -194,9 +206,7 @@ def test_no_fit_guard_blocks_training_module_fit(module_name):
 
 @pytest.mark.parametrize("module_name", _TRAINING_MODULES)
 def test_training_module_fit_unaffected_when_guard_off(module_name):
-    import importlib
-
-    module = importlib.import_module(f"engine.models.training.{module_name}")
+    module = _training_module(module_name)
     rng = np.random.RandomState(0)
     X = rng.rand(30, 2)
     y = rng.rand(30)

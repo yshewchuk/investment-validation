@@ -41,6 +41,7 @@ from typing import Any
 from engine.v2.foundation import Clock, SystemClock, format_timestamp
 from engine.v2.ops.decision_validation import population_key
 from engine.v2.ops.errors import fail
+from engine.v2.ops.native.parity_inputs import legacy_parity_rows
 from engine.v2.ops.native_shadow_render import native_shadow_serving_mode
 from engine.v2.parity.dimensions import (
     ANALOG_FIELDS,
@@ -527,7 +528,7 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
     else is refused with ``VALIDATION_FAILED`` before a single row is read,
     so the generic job-submission API can never route a pre-v2.0 pair past
     this worker. Builds ``legacy_rows`` via
-    :func:`engine.v2.ops.nightly.legacy_parity_rows` and
+    :func:`engine.v2.ops.native.parity_inputs.legacy_parity_rows` and
     ``native_rows``/``native_refusals``/``unkeyable_refusals`` via
     :func:`_native_rows_and_refusals`, projects every native record through
     :func:`_native_comparison_row` (its nested per-dimension dicts flattened
@@ -539,8 +540,6 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
     ``as_of``/``generated_at`` by :func:`_stamp_report_identity`. See
     ARCHITECTURE.md's "Cutover PR-4 (redo)" section for the rationale.
     """
-    from engine.v2.ops.nightly import legacy_parity_rows
-
     expected_ids = parameters["expected_ids"]
     as_of = _as_of_from_expected_ids(expected_ids)
     score_document = json.loads((root / "score.json").read_text())
