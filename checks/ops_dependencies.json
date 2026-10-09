@@ -13,21 +13,19 @@
       "legacy_adapter", "materialization_worker", "render_inputs", "snapshot_roots", "snapshot_stages"],
     "stores": ["calendar_moves_jobs", "computed_moves_store", "forward_calendar_store", "incremental_data", "pinned_partition_reader",
       "price_history_store", "refresh_staging", "snapshot_import", "snapshot_planning", "snapshot_promotion", "snapshots", "unit_receipts"],
-    "native": ["native", "native.parity_inputs", "native_board_universe", "native_parity_report", "native_score_batch", "native_shadow_render", "nightly_calendar_inputs",
+    "native": ["native", "native.input_decoding", "native.parity_inputs", "native_board_universe", "native_parity_report", "native_score_batch", "native_shadow_render", "nightly_calendar_inputs",
       "nightly_quote_rows", "nightly_raw_row_producer", "nightly_raw_rows", "source_availability"],
     "providers": ["providers", "providers.nasdaq_calendar", "providers.orats_daily_market", "providers.yfinance_edge"]
   },
   "exceptions": {
     "forbidden": [
       ["nightly_trigger", "cli"],
-      ["snapshot_stages", "stages"],
-      ["worker", "cli"]
+      ["snapshot_stages", "stages"]
     ],
     "cycles": [
       ["calendar_moves_jobs", "forward_calendar_store"],
       ["calendar_moves_jobs", "incremental_data"],
       ["calendar_moves_jobs", "unit_receipts"],
-      ["cli", "supervisor"],
       ["computed_moves_store", "incremental_data"],
       ["computed_moves_store", "unit_receipts"],
       ["decision_replay", "decision_validation"],
@@ -41,9 +39,7 @@
       ["legacy_adapter", "finality"],
       ["refresh_staging", "calendar_moves_jobs"],
       ["refresh_staging", "incremental_data"],
-      ["supervisor", "worker"],
-      ["unit_receipts", "incremental_data"],
-      ["worker", "cli"]
+      ["unit_receipts", "incremental_data"]
     ]
   }
 }

@@ -150,7 +150,7 @@ def _load_native_inputs(path: Path) -> dict[str, tuple[ScoreRequest, NativeScore
     layer) ``from_document`` cannot reconstruct, so this composes the ops
     layer's own canonical decoder rather than a second one here.
     """
-    from engine.v2.ops.cli import _load_native_score_inputs
+    from engine.v2.ops.native.input_decoding import _load_native_score_inputs
 
     doc = json.loads(path.read_text())
     return {key: (from_document(ScoreRequest, pair["request"]),
