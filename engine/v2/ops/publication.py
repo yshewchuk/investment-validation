@@ -135,14 +135,32 @@ def _safe_target(target):
         raise fail("INTEGRITY_FAILED", "release root is a symlink")
 
 
+def _failed_gates(manifest):
+    """Manifest gate names whose recorded gate did not pass, sorted.
+
+    Only a mapping whose ``ok`` is the boolean ``False`` counts as failed: a
+    missing or malformed entry says nothing about a gate's verdict, and this
+    list names what an operator has to fix -- it does not audit the manifest.
+    """
+    gates = manifest.get("gates") if isinstance(manifest, dict) else None
+    if not isinstance(gates, dict):
+        return []
+    return sorted(name for name, gate in gates.items()
+                  if isinstance(gate, dict) and gate.get("ok") is False)
+
+
 def publish_local(conn, claim, store, target, release_id, *, scope, clock, generation="",
                   fault=None):
     row = conn.execute("SELECT * FROM releases WHERE release_id=?", (release_id,)).fetchone()
-    if row is None or not row["eligible"]:
-        raise fail("PUBLICATION_REFUSED", "release gates are not all valid")
+    if row is None:
+        raise fail("PUBLICATION_REFUSED", "release gates are not all valid",
+                   details={"failed_gates": []})
+    manifest = json.loads(row["manifest_json"])
+    if not row["eligible"]:
+        raise fail("PUBLICATION_REFUSED", "release gates are not all valid",
+                   details={"failed_gates": _failed_gates(manifest)})
     from engine.v2.contracts import ArtifactRef
     from engine.v2.foundation import from_document
-    manifest = json.loads(row["manifest_json"])
     files = {name: from_document(ArtifactRef, ref) for name, ref in manifest["files"].items()}
     materialize(store, target, release_id, files)
     with transaction(conn):
