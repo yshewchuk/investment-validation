@@ -4,6 +4,13 @@
 
 `checks/` provides standalone verification tools for repository invariants, budgets, and phase evidence. The v2 release gate also invokes its bundle scanner in an isolated subprocess.
 
+`check_bundle` applies a 32,000,000-byte limit to declared rendered data files.
+This gives the dashboard book room to grow: `book.json` measured 7,607,125
+bytes on 2026-10-09, and the book grew from about 1.6 MB on 2026-09-15 to
+about 9.1 MB on 2026-10-09. Undeclared files retain the ordinary `MAX_BYTES`
+limit, and secret-needle scanning is unchanged. The bundle-policy tests cover
+the declared-file boundary, the undeclared-file limit and secret scanning.
+
 ## Primary contracts and public interfaces
 
 No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.

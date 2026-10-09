@@ -280,16 +280,16 @@ def check_files(
 #: -- :data:`MAX_BYTES` is a committed-*source* limit and the wrong policy for
 #: a *published* rendered artifact legacy has always shipped uncapped
 #: (``engine/dashboard/publish.py``'s ``secret_scan`` carries no size limit
-#: at all). Real sizes measured off a real shadow attempt-14 bundle
-#: (2026-09-15, ``jobs/render/bundle.tar``): ``data/models.js`` and
-#: ``data/models.json`` ~1.985 MB each, ``data/book.js`` and
-#: ``data/book.json`` ~1.643 MB each. No hosting per-file limit is documented
-#: anywhere in this repo (the Cloudflare Pages/R2 target is a user-configured
-#: credential per ``dashboard/README.md``, not code this repo controls), so
-#: the only anchor is the measured maximum: this cap gives it roughly 2x
-#: headroom. Every path NOT in the declared set -- including an unexpected
-#: path under ``data/`` -- still gets the ordinary :data:`MAX_BYTES` rule.
-DECLARED_MAX_BYTES = 4_000_000  # 4 MB
+#: at all). The anchor is the measured rendered book: ``book.json`` was
+#: 7,607,125 bytes on 2026-10-09, and the book grew from about 1.6 MB on
+#: 2026-09-15 to about 9.1 MB on 2026-10-09. No hosting per-file limit is
+#: documented anywhere in this repo (the Cloudflare Pages/R2 target is a
+#: user-configured credential per ``dashboard/README.md``, not code this repo
+#: controls), so the cap is set on that growth: 32 MB gives more than 3x
+#: headroom against the roughly 9.1 MB current book size. Every path NOT in
+#: the declared set -- including an unexpected path under ``data/`` -- still
+#: gets the ordinary :data:`MAX_BYTES` rule.
+DECLARED_MAX_BYTES = 32_000_000  # 32 MB
 
 
 def check_bundle(
