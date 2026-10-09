@@ -9,21 +9,22 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 
-from engine.v2.foundation import ArtifactStore, format_timestamp
+from engine.paths import ROOT
+from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
 from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops import nightly
 from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.fingerprints import environment_identity
 from engine.v2.ops.native_parity_report import _REFUSALS_SCHEMA_VERSION, _RECORDS_SCHEMA_VERSION
+from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit_graph
 from tests.ops_support import catalog
 
-ROOT = Path(__file__).resolve().parents[1]
 _POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 _OMIT = object()
 _RECORDS_OK = json.dumps({
@@ -134,6 +135,13 @@ def _native_parity_job_count(conn):
 
 def _native_parity_row(conn):
     return conn.execute("SELECT * FROM jobs WHERE kind = ?", ("native_parity",)).fetchone()
+
+
+def _assert_sidecar_runtime_identity(resource_class, environment_ref, expected_resource_class):
+    assert resource_class == expected_resource_class
+    profile = profile_named(DEFAULT_POLICY, expected_resource_class)
+    thread_count = profile.thread_count or profile.cpu_count
+    assert environment_ref == content_hash(environment_identity(thread_count))
 
 
 def test_scope_from_native_score_batch_key_parses_and_rejects():
@@ -522,3 +530,11 @@ def test_submit_native_parity_if_ready_submits_real_paired_score_job(tmp_path):
     assert row["kind"] == "native_parity"
     assert row["checkpoint_contract_ref"] == "native_parity_report.v1.2"
     assert row["resource_class"] == "validation"
+    _assert_sidecar_runtime_identity(row["resource_class"], spec["environment_ref"],
+                                     "validation")
+
+    with pytest.raises(AssertionError):
+        _assert_sidecar_runtime_identity("io_fetch", spec["environment_ref"], "validation")
+
+    with pytest.raises(AssertionError):
+        _assert_sidecar_runtime_identity(row["resource_class"], "corrupted", "validation")

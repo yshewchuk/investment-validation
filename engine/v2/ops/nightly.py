@@ -332,6 +332,12 @@ def _legacy_resource(kind):
     # ``incremental_data.refresh_job_spec``, not ``_job_spec`` below.
     if kind in _NATIVE_REFRESH_ACTIONS:
         return "io_fetch"
+    # Native sidecars pin their own class here too, so ``_thread_count``
+    # fingerprints the SAME class the job spec is submitted with.
+    if kind == "native_score_batch":
+        return "io_fetch"
+    if kind == "native_parity":
+        return "validation"
     if kind in ("legacy_score", "legacy_decision_replay"):
         return "legacy_score"
     if kind == "legacy_model_evidence":
@@ -354,6 +360,18 @@ def _thread_count(kind):
     """A3: the same formula ``_launch`` uses to verify ``environment_ref``."""
     profile = profile_named(DEFAULT_POLICY, _legacy_resource(kind))
     return profile.thread_count or profile.cpu_count
+
+
+def _sidecar_runtime_identity(kind):
+    """The ``resource_class``/``environment_ref`` ``JobSpec`` fields a sidecar
+    submits with, derived from the kind by the module's own formulas
+    (``_legacy_resource`` / ``_thread_count``) so a builder can never pin a
+    resource class that disagrees with the ``environment_ref`` it fingerprints.
+    """
+    from engine.v2.ops.fingerprints import environment_identity
+
+    return {"resource_class": _legacy_resource(kind),
+            "environment_ref": content_hash(environment_identity(_thread_count(kind)))}
 
 
 #: The legacy worker DAG's stages when prerequisites are not included.
@@ -1103,7 +1121,7 @@ def submit_native_parity_if_ready(conn, registry, policy, store, *, catalog_path
     returns ``None`` without touching the catalog."""
     from engine.v2.contracts import JobSpec, SubmitRequest
     from engine.v2.foundation import to_document
-    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+    from engine.v2.ops.fingerprints import worker_source_manifest
     from engine.v2.ops.stages import NativeParityParameters
     from engine.v2.ops.submission import job_id_for, submit
 
@@ -1134,14 +1152,13 @@ def submit_native_parity_if_ready(conn, registry, policy, store, *, catalog_path
         kind="native_parity",
         implementation_ref=content_hash(worker_source_manifest(code_source)),
         spec_hash=None,
-        environment_ref=content_hash(environment_identity(_thread_count("native_parity"))),
         parameters=to_document(parameters),
         input_refs=(),
         dependency_job_ids=(score_job_id, native_score_batch_job_id),
         output_namespace="shadow",
-        resource_class="validation",
         retry_policy_ref="bounded",
-        checkpoint_contract_ref="native_parity_report.v1.2")
+        checkpoint_contract_ref="native_parity_report.v1.2",
+        **_sidecar_runtime_identity("native_parity"))
     return submit(conn, registry, policy, SubmitRequest(
         namespace="shadow", idempotency_key=key, principal="operator", job=job),
         clock=clock)
@@ -1277,7 +1294,7 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
     """
     from engine.v2.contracts import JobSpec, SubmitRequest
     from engine.v2.foundation import to_document
-    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+    from engine.v2.ops.fingerprints import worker_source_manifest
     from engine.v2.ops.stages import NativeScoreBatchParameters
     from engine.v2.ops.submission import job_id_for, submit
 
@@ -1307,8 +1324,7 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
             "native_score_batch cannot be built without its staged producer "
             "refs, the pinned earnings calendar revision, and the pinned snapshot id",
             details={"missing": missing, "session": session, "scope_hash": scope_hash})
-    parameters = NativeScoreBatchParameters(
-        expected_ids=(session + "|" + scope_hash,),
+    parameters = NativeScoreBatchParameters(expected_ids=(session + "|" + scope_hash,),
         release_root=str(release_root), as_of=session, snapshot_id=snapshot_id,
         calendar_revision=str(calendar_revision), feature_names=(),
         input_bindings={"events.json": events_ref,
@@ -1317,14 +1333,13 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
         kind="native_score_batch",
         implementation_ref=content_hash(worker_source_manifest(code_source)),
         spec_hash=None,
-        environment_ref=content_hash(environment_identity(_thread_count("native_score_batch"))),
         parameters=to_document(parameters),
         input_refs=(events_ref, producer_refusals_ref),
         dependency_job_ids=(),
         output_namespace="shadow",
-        resource_class="io_fetch",
         retry_policy_ref="bounded",
-        checkpoint_contract_ref="native_score_batch_records.v2.0")
+        checkpoint_contract_ref="native_score_batch_records.v2.0",
+        **_sidecar_runtime_identity("native_score_batch"))
     request = SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
     return submit(conn, registry, policy, request, clock=clock)
 
