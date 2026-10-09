@@ -8,7 +8,7 @@ importing diagnosis, which nothing may import.
 These are the SAME function objects, not a second canonicalizer: diagnosis may
 depend on foundation (it may read every layer), so the corpus, the receipts and
 the baseline keep hashing through exactly one implementation.
-``tests/test_v2_ops_foundation.py`` asserts the identity and pins the hashes
+``tests/v2/foundation/test_v2_ops_foundation.py`` asserts the identity and pins the hashes
 the phase-0 copy produced before the move.
 """
 from __future__ import annotations

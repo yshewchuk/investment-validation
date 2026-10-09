@@ -37,7 +37,7 @@ underscore convention, and an import of a name absent from this list fails
 
 | Name | What it is |
 |---|---|
-| `canonical_json`, `content_hash`, `CONTENT_HASH_PREFIX` | RFC 8785 canonical form and `sha256:` identity. Moved here from diagnosis unchanged; hashes pinned by `tests/test_v2_ops_foundation.py`. |
+| `canonical_json`, `content_hash`, `CONTENT_HASH_PREFIX` | RFC 8785 canonical form and `sha256:` identity. Moved here from diagnosis unchanged; hashes pinned by `tests/v2/foundation/test_v2_ops_foundation.py`. |
 | `tag_nonfinite`, `untag_nonfinite` | The `canonical_json`/`content_hash` non-finite normalization (contracts §2.1), exposed so a writer can put a legacy NaN/Infinity on disk as valid strict JSON and a reader can decode it back to a real float at its own read boundary — see `engine/v2/ops/legacy_adapter.py::_write_action`/`_action_render` and `engine/v2/ops/render_inputs.py::stage_model_evidence`. |
 | `from_document`, `to_document`, `parse_schema_version`, `DocumentError` | Strict dataclass ⇄ JSON decoding driven by the contract's own annotations. Errors carry a code and a JSON path, never the offending value. |
 | `Clock`, `SystemClock`, `format_timestamp`, `parse_timestamp` | Injected wall/monotonic clocks, and the one timestamp wire form. |
@@ -88,7 +88,7 @@ print(ref.content_hash, content_hash({"a": 1}))
 
 Tier 0: seconds, temporary directories, no data, no network.
 
-- `tests/test_v2_ops_foundation.py` — golden hashes computed by the phase-0
+- `tests/v2/foundation/test_v2_ops_foundation.py` — golden hashes computed by the phase-0
   copy before the move; one canonicalizer in all of v2; strict decoding
   refusals by code and path.
 - `tests/test_v2_ops_artifacts.py` — the unsafe inputs the store exists to

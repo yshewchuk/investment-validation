@@ -624,7 +624,7 @@ def test_fold_receipts_label_rule(role, strategy, output, time_col, max_days):
 def _registry_champion_id(role):
     import json
 
-    models = json.loads((Path(__file__).resolve().parents[1] / "engine/models/registry.json").read_text())["models"]
+    models = json.loads((Path(__file__).resolve().parents[4] / "engine/models/registry.json").read_text())["models"]
     rows = models.values() if isinstance(models, dict) else models
     return next(r["id"] for r in rows if r.get("champion") and r["role"] == role)
 
@@ -710,6 +710,21 @@ def _xy(n=400, k=6, seed=3):
 # constant stays put, and the legacy comparison below would stop matching.
 REAL_LEGACY_SEED = 20260829
 
+
+def _training_module(name):
+    import importlib
+
+    loaders = {
+        "engine.models.training.gate": lambda: importlib.import_module("engine.models.training.gate"),
+        "engine.models.training.gate_forecast_analog": lambda: importlib.import_module("engine.models.training.gate_forecast_analog"),
+        "engine.models.training.implied_t1": lambda: importlib.import_module("engine.models.training.implied_t1"),
+        "engine.models.training.runup_move": lambda: importlib.import_module("engine.models.training.runup_move"),
+        "engine.models.training.size_model": lambda: importlib.import_module("engine.models.training.size_model"),
+        "engine.models.training.iv_crush": lambda: importlib.import_module("engine.models.training.iv_crush"),
+    }
+    return loaders[name]()
+
+
 ESTIMATOR_LEGACY_MODULE = [
     ("size", "*", "champion", "engine.models.training.size_model"),
     ("size", "*", "tier4_monthly", "engine.models.training.size_model"),
@@ -733,10 +748,8 @@ def test_fit_recipe_estimator_matches_legacy_fit_for_every_recipe(role, strategy
     REAL, hardcoded seed -- not a seed read back off the recipe, which would
     make a seed mutation invisible (native and the comparison would drift
     together)."""
-    import importlib
-
     recipe = _recipe(role, strategy, output)
-    module = importlib.import_module(legacy_module)
+    module = _training_module(legacy_module)
     X, y = _xy()
     native = fit_recipe_estimator(recipe, X, y)
     legacy = module.fit(X, y, REAL_LEGACY_SEED)
