@@ -29,6 +29,7 @@ from engine.v2.models import (
 from engine.v2.ops import cli, stages, training
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.errors import OpsError
 from engine.v2.ops.plans import request_from_plan
 from engine.v2.ops.submission import NamespacePolicy, get_job, submit
 from engine.v2.ops.supervisor import Service
@@ -224,6 +225,33 @@ def test_rollback_through_supervisor_on_empty_store_is_typed_no_prior_release(tm
         assert not (tmp_path / "history").exists()
     finally:
         conn.close()
+
+
+def test_unreadable_rollback_history_at_plan_time_is_typed_validation_failed(tmp_path):
+    """A corrupt history file refuses the plan, typed, without mutating the store.
+
+    Real stage/promote APIs build an incumbent plus a prior release, then the
+    store's actual history JSON is corrupted. The real ``rollback_plan`` must
+    surface the resolver's own ``StagingRefused`` (``HISTORY_UNREADABLE``) as
+    typed ``VALIDATION_FAILED`` -- never pinning a bogus target -- and leave
+    both the live pointer and the corrupt history bytes exactly as they were.
+    """
+    _stage_pair(tmp_path)
+    deployment.promote(tmp_path, "r1")
+    deployment.promote(tmp_path, "r2")
+    history_path = sorted((tmp_path / "history").glob("*.json"))[0]
+    history_path.write_bytes(b"{ not json")
+    pointer_before = (tmp_path / "DEPLOYED").read_bytes()
+    history_before = _history_bytes(tmp_path)
+
+    with pytest.raises(OpsError) as excinfo:
+        training.rollback_plan(release_root=str(tmp_path))
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details == {"exception_class": "StagingRefused"}
+
+    assert (tmp_path / "DEPLOYED").read_bytes() == pointer_before
+    assert _history_bytes(tmp_path) == history_before
+    assert deployment.current_pointer(tmp_path).release_id == "r2"
 
 
 def test_rollback_resubmission_same_key_returns_same_job(tmp_path):

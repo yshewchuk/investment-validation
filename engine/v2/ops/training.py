@@ -342,7 +342,10 @@ def rollback_plan(*, release_root="") -> dict:
     time because the worker's cwd is its code snapshot (``executor.launch``).
     A store with no prior incumbent still gets a plan (``target_release_id`` is
     ``None``) rather than a plan-time refusal, so the job fails through the
-    existing typed ``VALIDATION_FAILED``/``NoPriorRelease`` path.
+    existing typed ``VALIDATION_FAILED``/``NoPriorRelease`` path. Every other
+    resolver refusal -- an unreadable, gapped or inconsistent pointer history --
+    is raised here as typed ``VALIDATION_FAILED`` carrying the resolver's own
+    exception class, so a plan is never saved with a bogus target.
     """
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
@@ -359,8 +362,11 @@ def rollback_plan(*, release_root="") -> dict:
     pointer = deployment.current_pointer(store)
     try:
         target = deployment.rollback_target(store)
-    except deployment.DeploymentError:
+    except deployment.NoPriorRelease:
         target = None
+    except deployment.DeploymentError as exc:
+        raise fail("VALIDATION_FAILED", "rollback target could not be resolved",
+                   details={"exception_class": type(exc).__name__}) from exc
     profile = profile_named(DEFAULT_POLICY, "delivery")
     params = RollbackParameters(
         expected_ids=("models_rollback",), release_root=str(store),
