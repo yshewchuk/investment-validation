@@ -93,11 +93,9 @@
     "tests/test_v2_ops_native_refresh_e2e.py",
     "tests/test_v2_ops_native_refresh_nightly_e2e.py",
     "tests/test_v2_ops_native_score_batch.py",
-    "tests/test_v2_ops_native_score_batch_shadow_wiring.py",
     "tests/test_v2_ops_native_shadow_render.py",
     "tests/test_v2_ops_nightly_calendar_inputs.py",
     "tests/test_v2_ops_nightly_decision_clock.py",
-    "tests/test_v2_ops_nightly_native_parity_helpers.py",
     "tests/test_v2_ops_nightly_quote_rows.py",
     "tests/test_v2_ops_nightly_raw_row_producer.py",
     "tests/test_v2_ops_nightly_raw_rows.py",
@@ -153,7 +151,7 @@
     "tests/v2/ops/test_v2_ops_native_parity_pairing.py",
     "tests/v2/ops/test_v2_ops_nightly_completion.py"
   ],
-  "source_hash": "sha256:5d0207990f4b0889006836945446da3848cc5e9cde52ecb22746a0a9f1331cb9",
+  "source_hash": "sha256:75963ce79d5f529c56b387e8614d3b6d39edbac693aaa9c5b6d03863bcaa9666",
   "packages": {
     "engine.v2.contracts": {
       "executed": 802,
