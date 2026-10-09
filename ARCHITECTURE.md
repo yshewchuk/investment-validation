@@ -46,6 +46,7 @@ request body and, if durable, in the operator guides instead — see
 | Component | Doc |
 |---|---|
 | `checks/` | [`checks/ARCHITECTURE.md`](checks/ARCHITECTURE.md) |
+| `experiments/` | [`experiments/ARCHITECTURE.md`](experiments/ARCHITECTURE.md) |
 | `engine/v2/contracts/` | (pending) |
 | `engine/v2/foundation/` | [`engine/v2/foundation/ARCHITECTURE.md`](engine/v2/foundation/ARCHITECTURE.md) |
 | `engine/v2/data/` | [`engine/v2/data/ARCHITECTURE.md`](engine/v2/data/ARCHITECTURE.md) |
@@ -119,6 +120,8 @@ evidence. See the models and data component contracts.
     all those appends without creating or changing that ledger. Reports and
     `results/` metrics/run logs are still written; preregistration checks still
     apply. A no-ledger smoke/subset pass is not a real ledger-recorded run.
+    EXP-118 validates preregistration immediately after loading its spec,
+    before baseline setup, panel loading, or any training arm.
     Scaffolding still records its separate `planned` row. Failure semantics:
     arms run sequentially and any error aborts the run; `ARMS.md` is removed
     at the start and written only
@@ -129,6 +132,37 @@ evidence. See the models and data component contracts.
     `engine.evaluate` takes an optional `report_dir` that
     redirects only the report and figures, never the run log that
     preregistration reads.
+    Promotion additionally requires a receipt for the exact primary metrics
+    artifact: its unique evaluated-run ID, spec hash and metrics SHA-256 must
+    match the receipt. Each recording-enabled evaluation, including a retry
+    whose spec hash already has a `ran` row, appends a row for that run. The
+    recorder requires the artifact's embedded `spec_hash` to match the
+    requested spec before publishing a receipt; a mismatch raises `LedgerError`
+    after the `ran` append and does not publish a receipt. Promotion
+    independently requires the artifact, requested spec and receipt hashes to
+    agree, refusing mismatches with `PROMOTION_LEDGER_RECEIPT_MISSING`.
+    The caller passes the directory where that run wrote its metrics (the arm
+    directory for a grid cell). The caller completes its metrics writes before
+    invoking the recorder. The recorder appends the `ran` row, finalizes the
+    artifact and caller-held result as `recorded`, then publishes a receipt
+    over those final bytes; no metrics write follows receipt publication. The
+    append is the commit point: a crash after it but before receipt publication
+    leaves the row intact and promotion refused until a matching receipt is
+    issued. A ledger row must match the spec; when the append-only ledger has
+    a `run_id` column, that row must also match the receipt's run ID.
+    A ledger-only legacy outcome with no primary metrics artifact may call
+    `record_evaluation(..., publish_receipt=False)`: it appends the `ran` row
+    and does not finalize metrics or publish a receipt, so the row alone cannot
+    authorize promotion. Receipt publication remains the default.
+    A legacy header without the column relies on the receipt's per-run identity.
+    A `planned` row, missing or malformed receipt, stale receipt, or metrics
+    from another run refuses with `PROMOTION_LEDGER_RECEIPT_MISSING`;
+    smoke/subset runs may write metrics but cannot issue this receipt.
+    Re-evaluation overwrites the spec-hash-named primary metrics and removes
+    the old receipt before the new run is recorded. A no-ledger overwrite
+    invalidates an older receipt, while
+    append-only ledger rows remain intact; a retry needs a newly matching run
+    receipt before promotion.
   - **Mutation-testing PR module selection** (`changed_modules`, shared by
     both mutation workflows): on a pull_request run, `changed_modules` selects
     only the enabled mutation-test modules a PR's diff can affect, never
@@ -563,6 +597,12 @@ is shadow-only end to end,
 and nothing on this diagram writes to the legacy board.
 
 ## 5. Invariants
+
+The pinned experiment trade loader excludes both holdout memberships using
+shared foundation definitions; its explicit month/version/snapshot context and
+typed refusal boundary are documented in the research component contract.
+The v2 research boundary requires explicit holdout context over a pinned v2
+snapshot. Completed experiments need not remain runnable.
 
 EOD source availability is a separate admission contract from session identity.
 Pinned object hashes prove which bytes were read; an observation day, import

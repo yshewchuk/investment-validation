@@ -306,6 +306,8 @@ def main() -> None:
             write_report=True,
         )
         headlines[arm] = result.results["headline"]
+        if not args.no_ledger and not args.smoke:
+            lib.record_evaluation_result(result, cell)
         log(f"{arm}: mid mean {headlines[arm].get('mean', float('nan')):+.3%}")
     write_json(RESULTS / "comparison.json", {
         "policy": POLICY,
@@ -316,8 +318,6 @@ def main() -> None:
         "accounts": accounts,
         "headlines": headlines,
     })
-    if not args.no_ledger and not args.smoke:
-        lib.record_evaluation(HERE, spec, {"headline": headlines[PRIMARY]})
     print(f"[EXP-168] report: {HERE / 'REPORT.md'}", flush=True)
 
 

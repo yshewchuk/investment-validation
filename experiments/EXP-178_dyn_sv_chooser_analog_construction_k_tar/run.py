@@ -469,7 +469,8 @@ def main() -> None:
     if not triggers_retrain:
         log("incumbent wins — Stage 2 not run. Recording the null result.")
         if not args.no_ledger:
-            lib.record_evaluation(HERE, spec, {"headline": {}}, promoted=False)
+            lib.record_evaluation(HERE, spec, {"headline": {}}, promoted=False,
+                                  publish_receipt=False)
         return
 
     log(f"non-incumbent winner (k={winner['k']}, target={winner['target']}, "

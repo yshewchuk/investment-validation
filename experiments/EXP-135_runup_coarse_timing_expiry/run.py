@@ -155,8 +155,6 @@ def main():
     write_json(RESULTS/"control_summary.json",control_stats)
 
     spec = lib.load_spec(HERE/"spec.yaml")
-    ledger = lib.ledger_read()
-    already = set(ledger.loc[ledger.stage == "ran", "spec_hash"])
     if not args.skip_harness:
         for rule in RULES:
             for offset in OFFSETS:
@@ -171,10 +169,8 @@ def main():
                 result = evaluate(cell_spec,cell,run_dir=run_dir,mc_paths=200,
                                   fractions=(.02,.05),write_report=True,
                                   input_files=[RESULTS/"grid_trades.parquet"])
-                cell_hash = lib.spec_hash(cell_spec)
-                if not args.no_ledger and cell_hash not in already:
-                    lib.record_evaluation(run_dir,cell_spec,result.results)
-                    already.add(cell_hash)
+                if not args.no_ledger:
+                    lib.record_evaluation_result(result,cell_spec)
     plot(summaries,yearly)
     report(summaries,pairs,expiry_pairs,control_stats,coverage,len(matched_ids),history)
     log("Engine evaluation: registered incumbent control for root report")
@@ -187,12 +183,8 @@ def main():
         extra_sections=comparison_sections(
             summaries, pairs, expiry_pairs, sensitivities, control_stats,
             coverage, len(matched_ids)))
-    root_rows = ledger[(ledger.spec_hash == lib.spec_hash(spec)) & (ledger.stage == "ran")]
-    root_has_metrics = bool(
-        len(root_rows) and
-        (root_rows.oos_mean_mid.notna() & root_rows.sharpe_trade.notna()).any())
-    if not args.no_ledger and not root_has_metrics:
-        lib.record_evaluation(HERE,spec,root_result.results)
+    if not args.no_ledger:
+        lib.record_evaluation_result(root_result,spec)
     log(f"Finished: {root_result.report_path}")
 
 def comparison_sections(summaries,pairs,expiry_pairs,sensitivities,control,coverage,n):

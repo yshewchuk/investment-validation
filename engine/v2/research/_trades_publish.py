@@ -39,11 +39,12 @@ def resolve(repository, *, scope, snapshot_id=None):
     return resolve_snapshot(repository, scope=scope, snapshot_id=snapshot_id)
 
 
-def read_event_rows(repository, snapshot):
+def read_event_rows(repository, snapshot, *,
+                    columns=("event_id", "ticker", "event_date", "session")):
     """The canonical-event universe columns, read through the pinned snapshot."""
     return read_table(
         repository, snapshot, "earnings_events",
-        ["event_id", "ticker", "event_date", "session"],
+        columns,
     )
 
 
