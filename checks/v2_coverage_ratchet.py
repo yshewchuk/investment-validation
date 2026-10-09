@@ -48,6 +48,15 @@ The v4 baseline inventory also corrects the stale path recorded for
 already explicitly present in ``phase1_suite()`` before v4, so v4 only
 refreshed the committed file list, not the suite's composition.
 
+Bumped to v5: ``tests/v2/ops/test_v2_ops_native_parity_pairing.py`` moved under
+``tests/v2/ops/`` exactly as ``test_v2_ops_nightly_completion.py`` did before
+it, so the flat ``test_v2_ops_*.py`` root glob no longer matches it. The
+relocated path is named explicitly for the same reason: a moved file must not
+silently drop out of the fixed suite and leave ``engine.v2.ops`` looking less
+covered. As with v4 this refreshes the declared file list (and the measurement
+identity it feeds); the package coverage counts stay the v4 measurement's, not
+a fresh run.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -139,7 +148,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v4"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v5"
 
 
 def phase1_suite(root=ROOT):
@@ -149,6 +158,7 @@ def phase1_suite(root=ROOT):
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_serving_*.py")]
                   + ["tests/test_diagnosis_comparator.py"]
                   + ["tests/v2/foundation/test_v2_ops_foundation.py",
+                     "tests/v2/ops/test_v2_ops_native_parity_pairing.py",
                      "tests/v2/ops/test_v2_ops_nightly_completion.py"])
 
 

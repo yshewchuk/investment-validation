@@ -76,6 +76,15 @@ def test_phase1_coverage_keeps_relocated_nightly_completion_file():
     assert relative in phase1_suite(ROOT)
 
 
+def test_phase1_coverage_keeps_relocated_native_parity_pairing_file():
+    """A root glob cannot match a moved test; its new path is named explicitly."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_v2_ops_native_parity_pairing.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
+
+
 def _integration(root, name, body):
     directory = root / "tests/v2/integration"
     directory.mkdir(parents=True, exist_ok=True)
