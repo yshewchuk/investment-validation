@@ -1073,7 +1073,7 @@ def _scan_cache_key(tracked: list[str]) -> tuple | None:
             stats.append((rel, st.st_size, st.st_mtime_ns))
     except OSError:
         return None
-    return (str(REPO), tuple(tracked), tuple(stats))
+    return (str(REPO.resolve()), tuple(tracked), tuple(stats))
 
 
 def _scan_cache_get(entries: list, key: tuple):
