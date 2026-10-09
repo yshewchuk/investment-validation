@@ -668,7 +668,8 @@ def test_worker_dispatch_refuses_a_registered_arm_without_an_audited_selector(
     registered spec.yaml hashes its D-1 primary declaration, so the
     selector map carries only the registered primary ``d1``: a ``d0``
     dispatch would label a D0 result with EXP-182's D1 identity and must
-    fail closed too."""
+    fail closed too. Admission output (``experiment_plan``) feeds the
+    dispatch."""
     cases = [
         ("experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
          "fixture"),
@@ -679,9 +680,12 @@ def test_worker_dispatch_refuses_a_registered_arm_without_an_audited_selector(
     for runner_id, primary_arm_id in cases:
         staging = tmp_path / primary_arm_id
         staging.mkdir()
-        (staging / "spec.json").write_text(json.dumps(
+        (staging / "input.json").write_text(json.dumps(
             _spec_document(runner=runner_id, economic_params={},
                            primary_arm_id=primary_arm_id, arms=[primary_arm_id])))
+        plan = experiment_plan(staging / "input.json", smoke=True)
+        assert plan["parameters"]["runner"] == runner_id
+        (staging / "spec.json").write_text(json.dumps(plan["spec_document"]))
         invoked = []
 
         def sentinel(*args, **kwargs):
@@ -689,9 +693,7 @@ def test_worker_dispatch_refuses_a_registered_arm_without_an_audited_selector(
 
         monkeypatch.setattr(legacy_adapter, "run_legacy_script", sentinel)
         with pytest.raises(OpsError) as excinfo:
-            worker.dispatch("experiment", {"expected_ids": ["experiment:x"],
-                                           "runner": runner_id, "no_ledger": True},
-                            staging)
+            worker.dispatch("experiment", plan["parameters"], staging)
         assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
         assert excinfo.value.problem.retryable is False
         assert excinfo.value.problem.details["runner"] == runner_id

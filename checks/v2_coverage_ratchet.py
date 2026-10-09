@@ -134,6 +134,7 @@ PHASE1_SUITE_VERSION = "phase1_coverage_suite.v3"
 
 
 def phase1_suite(root=ROOT):
+    """The fixed test paths the phase-one coverage measurement and validation run, including the relocated rescore and runner-onboarding tests."""
     return sorted([p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_ops_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_data_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_dashboard_*.py")]
