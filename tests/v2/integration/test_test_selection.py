@@ -23,6 +23,10 @@ from checks import test_selection as ts  # noqa: E402
 
 
 def test_fixed_dependency_spellings_have_no_unresolved_loads():
+    """Classify five source files in a bounded graph, not their full closure.
+
+    The adjacent regression checks fixed training targets and package inits.
+    """
     from tools import mutation_pilot as mp
 
     paths = [
@@ -55,9 +59,11 @@ def test_lazy_training_imports_keep_every_fixed_target_and_package_init():
 
 
 def test_phase1_coverage_keeps_relocated_foundation_file(tmp_path):
+    """A missing required test must not silently disappear from the suite."""
     from checks.v2_coverage_ratchet import phase1_suite
 
     relative = "tests/v2/foundation/test_v2_ops_foundation.py"
+    assert relative in phase1_suite(tmp_path)
     target = tmp_path / relative
     target.parent.mkdir(parents=True)
     target.write_text("")
