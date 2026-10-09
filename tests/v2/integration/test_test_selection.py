@@ -85,6 +85,33 @@ def test_phase1_coverage_keeps_relocated_native_parity_pairing_file():
     assert relative in phase1_suite(ROOT)
 
 
+def test_phase1_coverage_keeps_relocated_rescore_file(tmp_path):
+    """The moved rescore test must stay in the phase-one fixed suite."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_cli_rescore.py"
+    assert relative in phase1_suite(tmp_path)
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    assert relative in phase1_suite(tmp_path)
+
+
+def test_phase1_baseline_identity_matches_the_real_measurement():
+    """The committed baseline must describe exactly the current v6 suite."""
+    from checks.v2_coverage_ratchet import (
+        PHASE1_BASELINE,
+        PHASE1_SUITE_VERSION,
+        phase1_measurement_identity,
+        phase1_suite,
+    )
+
+    baseline = json.loads(PHASE1_BASELINE.read_text())
+    assert baseline["suite_version"] == PHASE1_SUITE_VERSION
+    assert baseline["test_files"] == phase1_suite(ROOT)
+    assert baseline["source_hash"] == phase1_measurement_identity(ROOT)
+
+
 def _integration(root, name, body):
     directory = root / "tests/v2/integration"
     directory.mkdir(parents=True, exist_ok=True)

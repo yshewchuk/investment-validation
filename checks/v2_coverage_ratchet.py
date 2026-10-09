@@ -57,6 +57,10 @@ covered. As with v4 this refreshes the declared file list (and the measurement
 identity it feeds); the package coverage counts stay the v4 measurement's, not
 a fresh run.
 
+Bumped to v6 (merge with main): ``tests/v2/ops/test_cli_rescore.py`` joined
+the fixed suite from main, so the declared file list and measurement identity
+refresh again; the package counts remain the v5 measurement's.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -148,7 +152,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v5"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v6"
 
 
 def phase1_suite(root=ROOT):
@@ -157,9 +161,10 @@ def phase1_suite(root=ROOT):
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_dashboard_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_serving_*.py")]
                   + ["tests/test_diagnosis_comparator.py"]
-                  + ["tests/v2/foundation/test_v2_ops_foundation.py",
-                     "tests/v2/ops/test_v2_ops_native_parity_pairing.py",
-                     "tests/v2/ops/test_v2_ops_nightly_completion.py"])
+                  + ["tests/v2/foundation/test_v2_ops_foundation.py"]
+                  + ["tests/v2/ops/test_cli_rescore.py"]
+                  + ["tests/v2/ops/test_v2_ops_native_parity_pairing.py"]
+                  + ["tests/v2/ops/test_v2_ops_nightly_completion.py"])
 
 
 def phase1_measurement_identity(root=ROOT):

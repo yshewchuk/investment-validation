@@ -28,15 +28,16 @@ decreases.
 The Phase 1 profile in `checks/v2_coverage_ratchet.py` selects root-level
 `test_v2_ops_*`, `test_v2_data_*`, `test_v2_dashboard_*`, and
 `test_v2_serving_*` files, `tests/test_diagnosis_comparator.py`, and explicit
-paths for relocated foundation, nightly-completion, and native-parity-pairing
-tests. `PHASE1_SUITE_VERSION` identifies this membership. The measurement
+paths for relocated foundation, CLI-rescore, nightly-completion, and
+native-parity-pairing tests. The active suite is v6; `PHASE1_SUITE_VERSION`
+identifies its membership. The measurement
 identity hashes every `engine/v2` Python source and every selected test path
 and file content. `phase1_compare` reports `COVERAGE_SUITE_DRIFT` if either
 the measurement or baseline version differs from `PHASE1_SUITE_VERSION`,
 including when both share the same stale version; `phase1_validate_measurement`
 reports `COVERAGE_TEST_INVENTORY_DRIFT` for a test list that differs from the
 active selector and `COVERAGE_SOURCE_DRIFT` when the identity differs from the
-current tree. The relocated-file membership checks are in
+current tree. Relocated-file membership and baseline identity checks are in
 `tests/v2/integration/test_test_selection.py`; suite-version drift is covered
 by `tests/test_v2_ops_engineering.py`.
 

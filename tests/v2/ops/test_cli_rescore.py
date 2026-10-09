@@ -14,7 +14,8 @@ from engine.v2.models.payoff_artifact import (
     make_payoff_surface_artifact,
     payoff_artifact_key,
 )
-from engine.v2.ops.cli import _load_native_score_inputs, rescore_command
+from engine.v2.ops.cli import rescore_command
+from engine.v2.ops.native.input_decoding import _load_native_score_inputs
 from engine.v2.scoring.stages import NativeScoreInputs, STAGE_NAMES, StageReceipt
 
 

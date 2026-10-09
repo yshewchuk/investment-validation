@@ -274,7 +274,7 @@ def _dispatch_adhoc_rescore(parameters, root):
     from engine.v2.contracts import ScoreRequest
     from engine.v2.foundation import from_document, to_document
     from engine.v2.models.no_fit import no_fit_guard
-    from engine.v2.ops.cli import _load_native_score_inputs
+    from engine.v2.ops.native.input_decoding import _load_native_score_inputs
     from engine.v2.scoring.application import score_one
 
     request_doc = json.loads((root / "request.json").read_text())
