@@ -1087,6 +1087,56 @@ def test_permanent_refusal_receipt_validation_settles_after_proof(tmp_path, monk
         conn.close()
 
 
+def test_recovery_does_not_replay_unmarked_refusal_receipt(tmp_path, monkeypatch):
+    """Issue #489: a lease expiry after the worker wrote its private refusal
+    diagnostics but before the fenced failure callback leaves the attempt
+    ``recovery_pending`` with no ``failure_json`` marker at all. A valid,
+    replayable receipt sits in the staging directory, yet recovery must not
+    append a refused row for an attempt that was never marked as a holdout
+    refusal: ``_replay_recovery_refusal`` replays a receipt only for a known
+    ``HOLDOUT_ACCESS_DENIED`` marker. Unmarked, the ownership proof settles the
+    attempt through the generic path as a plain ``LEASE_LOST`` failure, the
+    checkout keeps only its PLANNED row, no durable run exists, and the
+    reservation is released."""
+    conn, clock, claim, _, checkout = _claimed_primary_effect(
+        tmp_path, key="primary-refusal-unmarked-recovery")
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    spec = experiments.experiment_spec_from_document(_spec_document())
+    variant_id = experiments.expected_variant_identity(checkout, spec, "primary")
+    receipt = {"schema_version": experiments.REFUSAL_RECEIPT_SCHEMA, "status": "refused",
+               "failure_code": "HOLDOUT_ACCESS_DENIED", "experiment_id": spec.experiment_id,
+               "variant_id": variant_id, "snapshot_id": "snapshot-489",
+               "holdout_as_of_month": "2025-01",
+               "random_membership_version": "canonical-event-sha256.v1",
+               "rolling_membership_version": "calendar-months.v1"}
+    service = Service(conn, tmp_path / "ops", stages.registry(), TEST_POLICY, clock=clock,
+                      code_source=REPO, store_root=checkout)
+    worker._write_failure_details(service.store.staging_dir(claim.attempt_id),
+                                  {"refusal_receipt": receipt})
+    try:
+        assert supervisor.fence_attempt_for_recovery(conn, claim.attempt_id, clock=clock)
+        fenced = conn.execute("SELECT state, failure_json FROM attempts WHERE attempt_id=?",
+                              (claim.attempt_id,)).fetchone()
+        assert fenced["state"] == "recovery_pending"
+        assert fenced["failure_json"] is None
+
+        monkeypatch.setattr(supervisor, "prove_ownership_gone",
+                            lambda *args, **kwargs: types.SimpleNamespace(
+                                proven=True, known=(), alive=(), blockers=()))
+        service.reconcile()
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "failed"
+        assert "LEASE_LOST" in attempt["failure_json"]
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0] == 0
+    finally:
+        service.close()
+        conn.close()
+
+
 def test_missing_refusal_diagnostics_settles_validation_failed_after_proof(tmp_path,
                                                                            monkeypatch):
     """Issue #489: the worker still emits its typed ``HOLDOUT_ACCESS_DENIED``

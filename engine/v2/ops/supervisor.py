@@ -370,6 +370,8 @@ class Service:
             failure = None
         known_refusal = (failure is not None
                          and failure.code == "HOLDOUT_ACCESS_DENIED")
+        if not known_refusal:
+            return False
         unusable = OpsError(make_problem(
             "VALIDATION_FAILED", "the holdout refusal receipt is missing or unusable"))
         if not path.is_file():
