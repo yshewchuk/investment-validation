@@ -142,6 +142,14 @@ HEARTBEAT_EVENT_SECONDS = 10.0
 #: nothing more may be written under it, not even the attempt's own failure.
 _FENCE_LOST_CODES = frozenset({"LEASE_LOST", "CANCELLED"})
 
+#: A recovery replay of a holdout refusal that raises one of these can never
+#: succeed on a later tick either: the receipt failed its own validation, or
+#: the ledger already carries a refused row for a different variant identity.
+#: Both are permanent, already typed and redacted, so ``reconcile`` settles a
+#: proven-dead attempt with that problem as its recorded failure instead of
+#: replaying the same refusal forever.
+_PERMANENT_REFUSAL_REPLAY_CODES = frozenset({"VALIDATION_FAILED", "IDEMPOTENCY_CONFLICT"})
+
 #: A pre-fix catalog named checkpoint outputs by their enumeration index
 #: ('0', '1', ...) instead of the worker's declared name. Such a name is
 #: purely positional and must never be reused or propagated.
@@ -297,18 +305,32 @@ class Service:
             if proof.proven:
                 # Replay the refusal effect only AFTER the ownership proof; a
                 # quarantined (unproven) attempt keeps the generic path.
-                claim = SimpleNamespace(job_id=row["job_id"], attempt_id=row["attempt_id"])
                 try:
                     self._replay_recovery_refusal(row)
+                except OpsError as exc:
+                    if exc.code not in _PERMANENT_REFUSAL_REPLAY_CODES:
+                        # Any other typed failure is transient here (an
+                        # unavailable resource, a stale expectation): the
+                        # attempt stays recovery_pending with its reservations
+                        # held, and a later tick replays it.
+                        continue
+                    # Permanent typed evidence/conflict failure: another tick
+                    # replays the same refusal, so settle the proven-dead
+                    # attempt with THIS problem as its recorded failure. Only
+                    # now, past the ownership proof, are reservations released.
+                    reconcile_attempt(self.conn, row["attempt_id"],
+                                      process_state="verified_dead", clock=self.clock,
+                                      failure=exc.problem)
+                    continue
                 except Exception:
                     # A recognized receipt whose effect could not be recorded
                     # leaves the attempt recovery_pending, reservations held
                     # (ARCHITECTURE.md "pinned experiment trade loader"):
                     # never settle it as a plain LEASE_LOST with the ledger
-                    # row unappended.
-                    _report_stranded(claim, make_problem(
-                        "VALIDATION_FAILED",
-                        "the holdout refusal recovery replay could not be recorded"))
+                    # row unappended. Nothing is reported from this loop --
+                    # ``_commit_failure`` already emitted the one redacted
+                    # stranded event when the attempt was fenced off, so
+                    # repeated ticks must not repeat the stderr line.
                     continue
             state = "verified_dead" if proof.proven else "quarantined"
             reconcile_attempt(self.conn, row["attempt_id"], process_state=state, clock=self.clock)
@@ -332,9 +354,13 @@ class Service:
         ``spec.kind``/``spec.parameters``) carries it, and a redacted
         ``HOLDOUT_ACCESS_DENIED`` Problem -- the worker's own stable text,
         the receipt never entering ``details`` or ``failure_json`` -- drives
-        ``_experiment_refusal_failure_effect``; any validation raise propagates
-        to the caller, which leaves the row ``recovery_pending`` for a later
-        tick rather than losing the refusal.
+        ``_experiment_refusal_failure_effect``; a raise propagates to the
+        caller, which settles the proven-dead row with that typed
+        ``VALIDATION_FAILED``/``IDEMPOTENCY_CONFLICT`` problem -- permanent
+        evidence/conflict failures a later tick could only replay the same way
+        -- and keeps the attempt ``recovery_pending``, reservations held, for
+        any other (transient) OpsError or exception, rather than losing the
+        refusal.
         """
         path = (self.store.staging_dir(attempt_row["attempt_id"])
                 / "diagnostics" / "failure_details.json")

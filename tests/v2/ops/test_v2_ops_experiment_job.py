@@ -984,6 +984,7 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
         assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
                             "WHERE released_at IS NULL").fetchone()[0] == 1
+        assert capsys.readouterr().err == ""
 
         monkeypatch.setattr(experiments, "_append_refusal_row", real_append)
         service.reconcile()
@@ -1005,6 +1006,77 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
         assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
                             "WHERE released_at IS NULL").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_permanent_refusal_receipt_validation_settles_after_proof(tmp_path, monkeypatch,
+                                                                  capsys):
+    """Issue #489: a proven-dead attempt whose retained refusal receipt can
+    never validate must not replay forever. Every required receipt field is
+    present but its ``snapshot_id`` is empty, so
+    ``_experiment_refusal_failure_effect`` raises the typed
+    ``VALIDATION_FAILED`` deterministically: the initial ``_commit_failure``
+    fences the attempt to recovery with its one redacted stranded event, and
+    after the ownership proof the replay's permanent typed failure settles
+    the attempt as failed with that problem, releases the reservation and
+    reports nothing new -- no refused row is ever appended and no durable
+    run exists, and a further tick stays silent."""
+    conn, clock, claim, _, checkout = _claimed_primary_effect(
+        tmp_path, key="primary-refusal-permanent-invalid-receipt")
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    spec = experiments.experiment_spec_from_document(_spec_document())
+    variant_id = experiments.expected_variant_identity(checkout, spec, "primary")
+    malformed_receipt = {"schema_version": experiments.REFUSAL_RECEIPT_SCHEMA,
+                         "status": "refused", "failure_code": "HOLDOUT_ACCESS_DENIED",
+                         "experiment_id": spec.experiment_id, "variant_id": variant_id,
+                         "snapshot_id": "", "holdout_as_of_month": "2025-01",
+                         "random_membership_version": "canonical-event-sha256.v1",
+                         "rolling_membership_version": "calendar-months.v1"}
+    service = Service(conn, tmp_path / "ops", stages.registry(), TEST_POLICY, clock=clock,
+                      code_source=REPO, store_root=checkout)
+    worker._write_failure_details(service.store.staging_dir(claim.attempt_id),
+                                  {"refusal_receipt": malformed_receipt})
+    running = types.SimpleNamespace(data=json.dumps(
+        {"problem": {"code": "HOLDOUT_ACCESS_DENIED",
+                     "message": "requested events are excluded from experiment reads",
+                     "category": "validation", "retryable": False}}).encode())
+    problem = service._worker_typed_problem(claim, running)
+    assert problem is not None
+    try:
+        service._commit_failure(claim, {"exit_code": 1}, problem)
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "recovery_pending"
+        assert attempt["failure_json"] is None
+        assert attempt["ended_at"] is None
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        stderr = capsys.readouterr().err
+        assert "attempt_left_for_recovery" in stderr
+        assert "snapshot-489" not in stderr
+        assert "refusal_receipt" not in stderr
+
+        monkeypatch.setattr(supervisor, "prove_ownership_gone",
+                            lambda *args, **kwargs: types.SimpleNamespace(
+                                proven=True, known=(), alive=(), blockers=()))
+        service.reconcile()
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "failed"
+        assert "VALIDATION_FAILED" in attempt["failure_json"]
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
+        assert attempt["ended_at"] is not None
+        job = conn.execute("SELECT state FROM jobs WHERE job_id=?",
+                           (claim.job_id,)).fetchone()
+        assert job["state"] == "failed"
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0] == 0
+        assert capsys.readouterr().err == ""
+        service.reconcile()
+        assert capsys.readouterr().err == ""
     finally:
         conn.close()
 

@@ -32,7 +32,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from engine.v2.contracts import ProcessIdentity
+from engine.v2.contracts import Problem, ProcessIdentity
 from engine.v2.foundation import Clock, content_hash, format_timestamp
 from engine.v2.ops.catalog import load_json, transaction
 from engine.v2.ops.errors import fail, make_problem
@@ -203,7 +203,7 @@ def prove_ownership_gone(conn: sqlite3.Connection, attempt_id: str, *,
 
 
 def reconcile_attempt(conn: sqlite3.Connection, attempt_id: str, *, process_state: str,
-                      clock: Clock) -> str:
+                      clock: Clock, failure: Problem | None = None) -> str:
     """Resolve a ``recovery_pending`` attempt from the executor's process verdict.
 
     Returns the attempt's state afterwards: still ``recovery_pending`` unless the
@@ -220,11 +220,11 @@ def reconcile_attempt(conn: sqlite3.Connection, attempt_id: str, *, process_stat
                          (process_state, attempt_id))
             return "recovery_pending"
         job = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (attempt["job_id"],)).fetchone()
-        return _settle(conn, job, attempt_id, process_state, now)
+        return _settle(conn, job, attempt_id, process_state, now, failure=failure)
 
 
 def _settle(conn: sqlite3.Connection, job: sqlite3.Row, attempt_id: str, process_state: str,
-            now) -> str:
+            now, failure: Problem | None = None) -> str:
     if job["state"] == "cancelling":
         failure = make_problem("CANCELLED", "cancelled; the worker was reconciled after "
                                "losing its lease")
@@ -235,8 +235,9 @@ def _settle(conn: sqlite3.Connection, job: sqlite3.Row, attempt_id: str, process
                      (format_timestamp(now), job["job_id"]))
         block_descendants(conn, job["job_id"], now)
         return "cancelled"
-    failure = make_problem("LEASE_LOST", "the attempt lost its lease; its process tree was "
-                           "verified gone before resources were released")
+    if failure is None:
+        failure = make_problem("LEASE_LOST", "the attempt lost its lease; its process tree was "
+                               "verified gone before resources were released")
     outcome = Outcome(succeeded=False, process_state=process_state, failure=failure)
     end_attempt(conn, attempt_id, "failed", outcome, now)
     if job["active_attempt_id"] == attempt_id:

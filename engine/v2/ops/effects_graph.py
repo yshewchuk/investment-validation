@@ -991,7 +991,9 @@ def _experiment_refusal_failure_effect(claim, problem, *, code_source, store_roo
         return None
     checkout_root = (claim.spec.parameters.get("preregistration_root")
                      or store_root or code_source)
-    ledger_path = Path(checkout_root) / "experiments" / "LEDGER.csv"
+    from engine.v2.ops.experiments import experiments_ledger_path
+
+    ledger_path = experiments_ledger_path(Path(checkout_root))
     experiment_id = receipt["experiment_id"]
     variant_id = receipt["variant_id"]
 
