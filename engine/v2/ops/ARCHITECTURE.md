@@ -59,7 +59,7 @@ coordinator-effect functions in `effects_graph.py`; `training.py`'s `training_jo
 `stages.py::_core_kinds`, not in `supervisor._COORDINATOR_EFFECT_KINDS`), `training_plan`/`promote_plan`,
 `run_training_worker`/`run_promote_worker`; `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
 (`native_board_universe.py`) — `board_requests` emits one `BoardRequest` — the pure key `(ticker, strategy, event_date, session)` — per event ×
-native-covered strategy, plus one `DYN-SV` meta-request per event (proposal, not yet implemented: plan-time carried-ticker eligibility would filter these requests for supervised legacy/native candidates; definition, exclusions and failure contract in the design PR body); `calendar_moves_jobs.py`'s
+native-covered strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
 `computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
 `calendar_moves_job_spec`, and `run_computed_moves_worker`/`run_forward_calendar_worker` (dispatched by `worker.py`).
 `forward_calendar_refresh` has a `JobKind` (worker dispatch, loader callback, parameter validation) but no `nightly.py`
