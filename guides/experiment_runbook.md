@@ -32,11 +32,8 @@ the v2 procedure.
 6. After the smoke test, run the registered variant against its pinned
    snapshot and declared folds. Keep each arm's actual consumed inputs bound
    to its variant identity. Do not change the spec after seeing results; a
-   changed specification is a newly preregistered variant. Once an
-   experiment is complete and its report written, its registered runner is
-   retired from the ops dispatch inventory (user decision **2026-10-08**,
-   #535: EXP-184 and EXP-185 are retired); to recreate its data, re-run the
-   hypothesis on the current v2 snapshot as a new variant.
+   changed specification is a newly preregistered variant. A completed
+   experiment's registered runner is retired from the ops dispatch inventory.
 7. Keep training and model/threshold selection inside the declared folds.
    Report out-of-fold results and all attempted variants. A comparison arm
    must use the same snapshot, folds, and holdout policy as its candidate.

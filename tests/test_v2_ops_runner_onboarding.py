@@ -122,8 +122,13 @@ def test_retired_runner_is_refused_before_any_subprocess(retired, monkeypatch):
     from engine.v2.ops.experiments import RUNNER_INVENTORY
 
     root = Path(__file__).resolve().parents[1]
-    calls = []
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)))
+    spawn_calls = []
+
+    def fail_spawn(*a, **k):
+        spawn_calls.append((a, k))
+        raise AssertionError("retired runner spawned a subprocess")
+
+    monkeypatch.setattr(subprocess, "Popen", fail_spawn)
     assert retired not in RUNNER_INVENTORY
     assert retired not in legacy_adapter.REGISTERED_RUNNERS
     with pytest.raises(OpsError) as manifest_error:
@@ -132,7 +137,7 @@ def test_retired_runner_is_refused_before_any_subprocess(retired, monkeypatch):
     with pytest.raises(OpsError) as run_error:
         legacy_adapter.run_legacy_script(root, retired)
     assert run_error.value.code == "INVALID_REQUEST"
-    assert calls == []
+    assert spawn_calls == []
 
 
 def test_active_registration_keeps_its_audited_source_closure():
