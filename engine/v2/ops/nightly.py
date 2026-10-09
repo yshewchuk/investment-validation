@@ -334,8 +334,16 @@ def _legacy_resource(kind):
         return "io_fetch"
     # Native sidecars pin their own class here too, so ``_thread_count``
     # fingerprints the SAME class the job spec is submitted with.
+    # native_score_batch measurement basis (resource-profile sizing): the
+    # supervised 512 MiB (io_fetch) run was killed at 538,800,128 bytes; a
+    # standalone real-handler run with zero events peaked at 614 MiB RSS in
+    # 10.3 seconds; release loading used about 105 -> 546 MiB RSS while
+    # loading an approximately 217 MB deployment, with native_score_batch
+    # imports adding about 55 MiB on top.  This justifies routing the kind
+    # to the existing 3 GiB/2 CPU ``projection`` profile; it does not claim
+    # full-scale per-event memory is measured.
     if kind == "native_score_batch":
-        return "io_fetch"
+        return "projection"
     if kind == "native_parity":
         return "validation"
     if kind in ("legacy_score", "legacy_decision_replay"):
