@@ -19,17 +19,19 @@ from tests.data_scan_support import (
 )
 
 DATES = ("2024-05-24", "2024-05-28", "2024-05-29", "2024-05-30")
+REPO_ROOT = next(parent for parent in Path(__file__).resolve().parents
+                 if (parent / "checks/layer_map.py").is_file())
 
 
 def test_recipe_contract_table_boundary():
-    document = Path(__file__).parents[3] / "engine/v2/ops/ARCHITECTURE.md"
+    document = REPO_ROOT / "engine/v2/ops/ARCHITECTURE.md"
     before, table = document.read_text().split("| Experiment execution condition | Outcome |", 1)
     assert before.endswith("\n\n"), "the experiment table needs its own Markdown block"
     assert "invalid fixed-day exit recipe/source/fill" in table
 
 
 def test_failure_contract_table():
-    document = Path(__file__).parents[3] / "engine/v2/research/ARCHITECTURE.md"
+    document = REPO_ROOT / "engine/v2/research/ARCHITECTURE.md"
     rows = document.read_text().splitlines()
     for condition in ("Malformed position or leg record", "Missing required leg mark",
                       "Unusable quote reaching pricing",

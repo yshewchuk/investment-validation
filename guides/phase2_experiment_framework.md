@@ -1,5 +1,8 @@
 # Phase 2 Guide — Experiment Framework & Evaluation Suite
 
+> **Historical:** This describes the legacy experiment workflow. For current
+> v2 experiments, use the [v2 experiment runbook](experiment_runbook.md).
+
 **Objective:** the EXP-000..050 discipline as reusable scaffolding: any
 candidate (model, gate, structure, parameter change) runs one standardized
 evaluation and either beats the champion or doesn't — evidence auto-generated,
