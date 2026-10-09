@@ -1422,7 +1422,11 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     plan_identity = _plan_identity(plan, input_refs)
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
                              context_tickers=context_tickers, plan_identity=plan_identity)
-    effect_scope = effect_scope_for(tickers, full_universe)
+    if plan.get("candidate_exclusions"):
+        effect_tickers = sorted({str(key).split("|")[0] for key in expected_population})
+        effect_scope = effect_scope_for(effect_tickers)
+    else:
+        effect_scope = effect_scope_for(tickers, full_universe)
     stages = _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode)
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage

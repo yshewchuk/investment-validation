@@ -329,6 +329,25 @@ def test_plan_filters_legacy_and_native_enumerators_to_the_same_carried_events(e
     assert all(ticker != "EEE" for ticker, _ in native_events)
 
 
+def test_filtered_full_run_uses_subset_effect_scope(env, monkeypatch):
+    plan, _ = _plan(env, monkeypatch, "--full-run")
+    assert plan["full_run"] is True
+    eligible_tickers = tuple(sorted({key.split("|")[0] for key in plan["expected_population"]}))
+
+    requests = nightly.build_legacy_job_requests(
+        plan, tickers=tuple(plan["tickers"]), context_tickers=tuple(plan["context_tickers"]),
+        year_start=plan["year_start"], year_end=plan["year_end"],
+        expected_population=tuple(plan["expected_population"]),
+        full_universe=tuple(plan["context_tickers"]), input_mode="legacy")
+    score_request = next(request for request in requests
+                         if request.job.parameters["expected_ids"] == ("legacy_score",))
+
+    assert score_request.job.parameters["tickers"] == eligible_tickers == ("AAA", "BBB")
+    assert score_request.job.parameters["context_tickers"] == tuple(plan["context_tickers"])
+    assert score_request.job.parameters["effect_scope"] == nightly.effect_scope_for(eligible_tickers)
+    assert score_request.job.parameters["effect_scope"] != "shadow"
+
+
 def test_a_plan_without_a_watchlist_is_refused_not_widened_to_the_context(env, monkeypatch):
     with pytest.raises(OpsError) as raised:  # the score stage scores --tickers only
         _plan(env, monkeypatch, "--context-tickers", "AAA,BBB", tickers="")
