@@ -16,6 +16,7 @@ finalized metrics ever appear, so promotion still refuses there.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import uuid
 from pathlib import Path
@@ -25,6 +26,10 @@ import pytest
 
 from experiments import lib
 from experiments import promote
+
+#: The real EXP-156 runner, whose ``refresh_report`` helper is exercised below.
+EXP156_PATH = (Path(__file__).resolve().parents[3] / "experiments"
+               / "EXP-156_size_broad_market_volatility" / "run.py")
 
 
 @pytest.fixture(autouse=True)
@@ -422,3 +427,149 @@ def test_non_object_receipt_json_refuses(tmp_root, monkeypatch):
     champion.write_text(json.dumps(_weak_champion()))
     rc = promote.main(["EXP-914", "--champion-metrics", str(champion), "--dry-run"])
     assert rc == 2
+
+
+def test_receipt_run_id_of_non_string_json_refuses(tmp_root, monkeypatch):
+    spec = _spec(exp_id="EXP-917")
+    folder = _experiment(tmp_root, spec, "EXP-917")
+    result = _run(spec, folder)
+    assert result.results["run_id"]
+
+    metrics = lib.metrics_path(folder, spec)
+    receipt = lib.receipt_path(folder, spec)
+    doc = json.loads(receipt.read_text())
+    doc["run_id"] = 47512
+    receipt.write_text(json.dumps(doc))
+
+    with pytest.raises(promote.PromotionRefused,
+                       match=promote.PROMOTION_LEDGER_RECEIPT_MISSING):
+        promote.validate_recording_receipt(spec, metrics)
+
+    monkeypatch.setattr(lib, "EXPERIMENTS_DIR", tmp_root / "experiments")
+    champion = tmp_root / "champion.json"
+    champion.write_text(json.dumps(_weak_champion()))
+    rc = promote.main(["EXP-917", "--champion-metrics", str(champion), "--dry-run"])
+    assert rc == 2
+
+
+def _evaluate(spec, run_dir):
+    """Run the real evaluator without recording; return its ``EvalResult``."""
+    from engine.evaluate import evaluate
+
+    return evaluate(
+        spec, _trades(), run_dir=run_dir, alphas=(0.0, 0.5, 1.0),
+        fractions=(0.05,), mc_paths=2, stress=False, write_report=False,
+    )
+
+
+def _load_exp156():
+    """Import the real EXP-156 runner module (name has a hyphen, so importlib)."""
+    module_spec = importlib.util.spec_from_file_location("exp156_run", EXP156_PATH)
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
+
+
+def test_record_evaluation_result_binds_the_arm_run(tmp_root):
+    """A grid/arm result records from its own directory, not the primary's.
+
+    The evaluator writes the arm's metrics under the arm directory; the
+    recorder must bind THAT artifact and append the arm run's ``ran`` row.
+    """
+    spec = _spec(exp_id="EXP-920")
+    folder = _experiment(tmp_root, spec, "EXP-920")
+    arm_dir = folder / "arms" / "cell"
+    arm_dir.mkdir(parents=True)
+    result = _evaluate(spec, arm_dir)
+
+    lib.record_evaluation_result(result, spec)
+
+    metrics = lib.metrics_path(arm_dir, spec)
+    receipt = lib.receipt_path(arm_dir, spec)
+    assert receipt.is_file()
+    doc = json.loads(receipt.read_text())
+    assert doc["run_id"] == result.results["run_id"]
+    assert doc["spec_hash"] == lib.spec_hash(spec)
+    assert doc["metrics_sha256"] == lib.file_sha256(metrics)
+
+    # The caller-held result was finalized in place to the artifact's verdict.
+    assert result.results["recording_mode"] == "recorded"
+    assert result.results["checklist"] == json.loads(metrics.read_text())["checklist"]
+
+    rows = lib.ledger_read()
+    assert rows["stage"].tolist() == ["ran"]
+    assert rows["spec_hash"].tolist() == [lib.spec_hash(spec)]
+
+    # The arm-side artifact validates as a recorded run of this spec.
+    artifact = promote.validate_recording_receipt(spec, metrics)
+    assert artifact["run_id"] == result.results["run_id"]
+
+
+def test_retry_records_both_runs_and_authorizes_the_second(tmp_root):
+    """A retry of an already-recorded spec still gets its own row and receipt."""
+    spec = _spec(exp_id="EXP-921")
+    folder = _experiment(tmp_root, spec, "EXP-921")
+    runid_ledger = lib.LEDGER_PATH
+    runid_ledger.write_text(
+        "id,spec_hash,date,stage,oos_mean_mid,sharpe_trade,promoted,run_id\n")
+
+    first = _evaluate(spec, folder)
+    lib.record_evaluation_result(first, spec)
+    assert lib.receipt_path(folder, spec).is_file()
+
+    second = _evaluate(spec, folder)
+    # The real evaluator dropped the first receipt as it rewrote the metrics;
+    # recording the second run then appends a second ran row and binds a new
+    # receipt without consulting the old ledger row.
+    assert not lib.receipt_path(folder, spec).exists()
+    assert first.results["run_id"] != second.results["run_id"]
+    lib.record_evaluation_result(second, spec)
+
+    rows = lib.ledger_read(runid_ledger)
+    assert rows["stage"].tolist() == ["ran", "ran"]
+    assert rows["run_id"].tolist() == [
+        first.results["run_id"], second.results["run_id"]]
+
+    artifact = promote.validate_recording_receipt(spec, lib.metrics_path(folder, spec))
+    assert artifact["run_id"] == second.results["run_id"]
+
+
+def test_exp156_refresh_report_preserves_recorded_metrics(tmp_root, monkeypatch):
+    """EXP-156's ``refresh_report`` must not rewrite a receipt-bound artifact.
+
+    After the recorder finalizes the result and publishes the receipt, the
+    helper still renders the refreshed report from the finalized checklist but
+    leaves the metrics bytes the receipt's digest covers untouched.
+    """
+    exp156 = _load_exp156()
+    spec = _spec(exp_id="EXP-922")
+    folder = _experiment(tmp_root, spec, "EXP-922")
+    result = _evaluate(spec, folder)
+    lib.record_evaluation_result(result, spec)
+
+    metrics = lib.metrics_path(folder, spec)
+    before = metrics.read_bytes()
+    assert lib.receipt_path(folder, spec).is_file()
+
+    seen: dict = {}
+
+    class _StubReport:
+        def write(self, out_dir):
+            path = Path(out_dir) / "REPORT.md"
+            path.write_text("stub")
+            return path
+
+    def fake_from_eval(refreshed, **kwargs):
+        seen["checklist"] = refreshed.results.get("checklist")
+        seen["recording_mode"] = refreshed.results.get("recording_mode")
+        return _StubReport()
+
+    from engine.report import Report
+    monkeypatch.setattr(Report, "from_eval", fake_from_eval)
+
+    exp156.refresh_report(result, spec, folder, [], [])
+
+    assert metrics.read_bytes() == before, "the receipt-bound metrics were rewritten"
+    assert seen["recording_mode"] == "recorded"
+    assert seen["checklist"] == result.results["checklist"]
+    assert seen["checklist"], "the refreshed report saw no finalized checklist"

@@ -279,28 +279,36 @@ def arm_spec(spec: dict, arm: str) -> dict:
 
 
 def refresh_report(result, spec: dict, run_dir: Path, inputs, sections) -> None:
-    """Refresh the report after its ledger row exists.
+    """Render the report after the run's ledger row exists.
 
     The evaluator renders before this runner appends the multiple-testing
     ledger row. Recomputing the checklist here makes the final persisted report
     reflect the completed experiment rather than that harmless ordering gap.
+
+    A recorded result is already finalized against that ledger row, and its
+    metrics artifact is bound by the receipt's digest: rewriting it would
+    invalidate the receipt. So a recorded result with a published receipt is
+    rendered as-is and its metrics bytes are left untouched. An unrecorded or
+    no-ledger result still gets its final metrics write.
     """
     from engine.evaluate import EvalResult
     from engine.report import Report, accuracy_checklist
 
-    checks = accuracy_checklist(
-        result.results, spec, ledger_path=paths.ROOT / "experiments" / "LEDGER.csv"
-    )
-    result.results["checklist"] = [
-        {"name": item.name, "status": item.status, "evidence": item.evidence}
-        for item in checks
-    ]
-    result.results["checklist_fails"] = sum(
-        item.status == "FAIL" for item in checks
-    )
-    stem = lib.spec_hash(spec)[:12]
-    metrics = run_dir / "results" / f"metrics_{stem}.json"
-    metrics.write_text(json.dumps(result.results, indent=1, default=str))
+    metrics = run_dir / "results" / f"metrics_{lib.spec_hash(spec)[:12]}.json"
+    recorded = result.results.get("recording_mode") == "recorded"
+    receipt = lib.receipt_path(run_dir, spec)
+    if not (recorded and receipt.exists()):
+        checks = accuracy_checklist(
+            result.results, spec, ledger_path=paths.ROOT / "experiments" / "LEDGER.csv"
+        )
+        result.results["checklist"] = [
+            {"name": item.name, "status": item.status, "evidence": item.evidence}
+            for item in checks
+        ]
+        result.results["checklist_fails"] = sum(
+            item.status == "FAIL" for item in checks
+        )
+        metrics.write_text(json.dumps(result.results, indent=1, default=str))
     refreshed = EvalResult(spec=spec, results=result.results, run_dir=run_dir)
     result.report_path = Report.from_eval(
         refreshed, input_files=inputs, extra_sections=sections

@@ -398,8 +398,6 @@ def main():
     sensitivities = []
     selections = {}
     evaluations = {}
-    ledger = lib.ledger_read()
-    already = set(ledger.loc[ledger.stage == "ran", "spec_hash"])
 
     ordered = [
         (rule, offset) for rule in RULES for offset in OFFSETS
@@ -487,10 +485,8 @@ def main():
                         pct(base_stats["mid"]), pct(gated["mid"]),
                         pct(item["gate_lift"])]],
                 }])
-            cell_hash = lib.spec_hash(cell_cfg)
-            if not args.no_ledger and cell_hash not in already:
-                lib.record_evaluation(run_dir, cell_cfg, result.results)
-                already.add(cell_hash)
+            if not args.no_ledger:
+                lib.record_evaluation_result(result, cell_cfg)
 
     paired = compare_cells(selections)
     write_json(RESULTS / "summary.json", summary)
@@ -520,9 +516,8 @@ def main():
             RESULTS / "gate_dataset.parquet"],
         extra_sections=report_sections(
             summary, paired, yearly, sensitivities, entry))
-    primary_hash = lib.spec_hash(primary_cfg)
-    if not args.no_ledger and primary_hash not in already:
-        lib.record_evaluation(HERE, primary_cfg, result.results)
+    if not args.no_ledger:
+        lib.record_evaluation_result(result, primary_cfg)
     log(f"Finished: {result.report_path}")
 
 

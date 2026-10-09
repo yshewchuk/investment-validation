@@ -273,6 +273,11 @@ def validate_recording_receipt(spec: Mapping[str, Any], metrics_file: Path | str
     if missing:
         raise PromotionRefused(
             f"{PROMOTION_LEDGER_RECEIPT_MISSING}: receipt missing {missing}")
+    if not isinstance(receipt["run_id"], str):
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: receipt run_id "
+            f"{receipt['run_id']!r} is not a string — a receipt is only "
+            "issued for a recorded run and always binds a string run ID")
     if receipt["spec_hash"] != sha:
         raise PromotionRefused(
             f"{PROMOTION_LEDGER_RECEIPT_MISSING}: receipt spec_hash "

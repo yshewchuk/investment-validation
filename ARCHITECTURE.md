@@ -133,24 +133,30 @@ evidence. See the models and data component contracts.
     preregistration reads.
     Promotion additionally requires a receipt for the exact primary metrics
     artifact: its unique evaluated-run ID, spec hash and metrics SHA-256 must
-    match the receipt, which is issued only after that run's `ran` row is
-    appended. The `ran` append is the commit point: a crash after it but before
-    receipt publication leaves the row intact and promotion refused until a
-    matching receipt is issued. Promotion requires a matching `ran` row for
-    the spec; when the append-only ledger header has a `run_id` column, that
-    row must match too.
+    match the receipt. Each recording-enabled evaluation, including a retry
+    whose spec hash already has a `ran` row, appends a row for that run. The
+    caller passes the directory where that run wrote its metrics (the arm
+    directory for a grid cell). The caller completes its metrics writes before
+    invoking the recorder. The recorder appends the `ran` row, finalizes the
+    artifact and caller-held result as `recorded`, then publishes a receipt
+    over those final bytes; no metrics write follows receipt publication. The
+    append is the commit point: a crash after it but before receipt publication
+    leaves the row intact and promotion refused until a matching receipt is
+    issued. A ledger row must match the spec; when the append-only ledger has
+    a `run_id` column, that row must also match the receipt's run ID.
     A ledger-only legacy outcome with no primary metrics artifact may call
     `record_evaluation(..., publish_receipt=False)`: it appends the `ran` row
     and does not finalize metrics or publish a receipt, so the row alone cannot
     authorize promotion. Receipt publication remains the default.
     A legacy header without the column relies on the receipt's per-run identity.
-    A `planned` row, missing receipt, stale receipt, or metrics from another
-    run refuses with `PROMOTION_LEDGER_RECEIPT_MISSING`; smoke/subset runs may
-    write metrics but cannot issue this receipt. Re-evaluation overwrites the
-    spec-hash-named primary metrics and replaces its receipt only after the
-    corresponding `ran` row is recorded. A no-ledger overwrite therefore
-    invalidates an older receipt, while append-only ledger rows remain intact;
-    a retry needs a newly matching run receipt before promotion.
+    A `planned` row, missing or malformed receipt, stale receipt, or metrics
+    from another run refuses with `PROMOTION_LEDGER_RECEIPT_MISSING`;
+    smoke/subset runs may write metrics but cannot issue this receipt.
+    Re-evaluation overwrites the spec-hash-named primary metrics and removes
+    the old receipt before the new run is recorded. A no-ledger overwrite
+    invalidates an older receipt, while
+    append-only ledger rows remain intact; a retry needs a newly matching run
+    receipt before promotion.
   - **Mutation-testing PR module selection** (`changed_modules`, shared by
     both mutation workflows): on a pull_request run, `changed_modules` selects
     only the enabled mutation-test modules a PR's diff can affect, never

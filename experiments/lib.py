@@ -20,6 +20,7 @@ import hashlib
 import io
 import json
 import re
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -43,6 +44,8 @@ __all__ = [
     "save_spec",
     "spec_hash",
     "slugify",
+    "record_evaluation",
+    "record_evaluation_result",
 ]
 
 EXPERIMENTS_DIR = paths.ROOT / "experiments"
@@ -269,6 +272,11 @@ def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
     publish the receipt binding the run ID, spec hash and SHA-256 of the exact
     bytes promotion will later read.
 
+    The caller's mutable ``results`` mapping is finalized in place to the same
+    ``checklist``, ``checklist_fails`` and ``recording_mode="recorded"`` values
+    the artifact carries, before the receipt is published — so an in-memory
+    caller sees the recorded verdict without re-reading disk.
+
     ``publish_receipt=False`` is the ledger-only legacy mode for outcomes with
     no primary metrics artifact (e.g. a null result where the incumbent won):
     it appends the ``ran`` row and returns without validating, finalizing or
@@ -277,6 +285,7 @@ def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
 
     exp_dir = Path(exp_dir)
     ledger_path = Path(ledger_path or LEDGER_PATH)
+    caller_results = results if isinstance(results, MutableMapping) else None
     results = results if isinstance(results, Mapping) else {}
     headline = results.get("headline", {}) or {}
     run_id = str(results.get("run_id", "") or "")
@@ -314,18 +323,50 @@ def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
     from engine.report import accuracy_checklist
 
     checklist = accuracy_checklist(artifact, spec, ledger_path=ledger_path)
-    artifact["checklist"] = [
+    finalized = [
         {"name": item.name, "status": item.status, "evidence": item.evidence}
         for item in checklist
     ]
+    artifact["checklist"] = finalized
     artifact["checklist_fails"] = sum(1 for item in checklist if item.status == "FAIL")
     artifact["recording_mode"] = "recorded"
     metrics.write_text(json.dumps(artifact, indent=1, default=str))
+    # Finalize the caller-held result to exactly what the artifact carries, and
+    # do it before the receipt binds those bytes: no metrics write may follow
+    # receipt publication.
+    if caller_results is not None:
+        caller_results["checklist"] = [dict(item) for item in finalized]
+        caller_results["checklist_fails"] = artifact["checklist_fails"]
+        caller_results["recording_mode"] = "recorded"
     receipt_path(exp_dir, spec).write_text(json.dumps({
         "run_id": run_id,
         "spec_hash": spec_hash(spec),
         "metrics_sha256": file_sha256(metrics),
     }, indent=1))
+
+
+def record_evaluation_result(result: Any, spec: Mapping[str, Any],
+                             *, promoted: bool = False,
+                             ledger_path: Path | None = None,
+                             publish_receipt: bool = True) -> None:
+    """Record one evaluated run from its own ``EvalResult``.
+
+    The run's metrics artifact lives in ``result.run_dir`` — the arm/cell
+    directory for a secondary, not the primary's folder — so the receipt binds
+    the artifact that run actually wrote. ``record_evaluation`` finalizes the
+    same ``result.results`` mapping in place.
+    """
+    run_dir = getattr(result, "run_dir", None)
+    if run_dir is None:
+        raise LedgerError(
+            "cannot record an EvalResult with no run_dir: a receipt must bind "
+            "the directory that owns the run's metrics")
+    results = getattr(result, "results", None)
+    if not isinstance(results, Mapping):
+        raise LedgerError("EvalResult carries no results mapping to record")
+    record_evaluation(
+        run_dir, spec, results, promoted=promoted, ledger_path=ledger_path,
+        publish_receipt=publish_receipt)
 
 
 ARMS_DIR = "arms"

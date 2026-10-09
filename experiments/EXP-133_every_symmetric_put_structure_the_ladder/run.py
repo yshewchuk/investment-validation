@@ -818,7 +818,6 @@ def main(record: bool = True) -> None:
     print(f"[EXP-133] acceptance: {acceptance}", flush=True)
     (RESULTS / "acceptance.json").write_text(json.dumps(acceptance, indent=1))
 
-    already = set(lib.ledger_read().query("stage == 'ran'")["spec_hash"])
     for arm in build_mod.ARMS:
         book = books[arm]
         if book is None or book.empty:
@@ -849,10 +848,8 @@ def main(record: bool = True) -> None:
         )
         if not record:
             print(f"[EXP-133] {arm}: --no-ledger, no row written", flush=True)
-        elif lib.spec_hash(cell) in already:
-            print(f"[EXP-133] {arm}: ledger row already recorded", flush=True)
         else:
-            lib.record_evaluation(HERE, cell, result.results)
+            lib.record_evaluation_result(result, cell)
         print(f"[EXP-133] {arm}: report {result.report_path}", flush=True)
 
 
