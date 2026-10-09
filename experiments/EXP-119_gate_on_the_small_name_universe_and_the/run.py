@@ -28,6 +28,7 @@ figures as EXP-102/EXP-105: equity curve and drawdown, fill-quality
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -444,6 +445,10 @@ def champion_context() -> dict:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-ledger", action="store_true",
+                        help="evaluate and write artifacts without appending to the experiment ledger")
+    args = parser.parse_args()
     started = time.time()
     spec = lib.load_spec(HERE / "spec.yaml")
     RESULTS.mkdir(exist_ok=True)
@@ -585,6 +590,7 @@ def main() -> int:
         "spec_id": spec.get("id"),
         "spec_hash": sha,
         "run_id": uuid.uuid4().hex,
+        "recording_mode": "unrecorded",
         "preregistration": prereg,
         "equity_mode": "cashflow",
         "elapsed_s": 0.0,
@@ -930,7 +936,8 @@ def main() -> int:
         "sharpe_trade": headline.get("sharpe_trade"),
         "stage": "ran",
     })
-    lib.record_evaluation(HERE, spec, results)
+    if not args.no_ledger:
+        lib.record_evaluation(HERE, spec, results)
 
     print()
     print(f"{'arm':10s} {'status':34s} {'n OOS':>6} {'base':>8} {'gated20':>8} "
