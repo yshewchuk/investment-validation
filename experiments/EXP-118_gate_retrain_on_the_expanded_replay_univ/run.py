@@ -222,6 +222,9 @@ def main() -> int:
                         help="evaluate and write artifacts without appending to the experiment ledger")
     args = parser.parse_args()
     spec = lib.load_spec(HERE / "spec.yaml")
+    # Refuse an unregistered or re-edited spec before any baseline lookup,
+    # panel load, or training arm can touch the data.
+    preregistration = check_preregistration(spec, HERE)
     baseline = champion_baseline()
     log("loading panel once for all arms")
     panel = load_panel()
@@ -267,7 +270,7 @@ def main() -> int:
         "recording_mode": "unrecorded",
         "headline": headline,
         "headline_stage": "wf_oos",
-        "preregistration": check_preregistration(spec, HERE),
+        "preregistration": preregistration,
     }
     lib.metrics_path(HERE, spec).write_text(json.dumps(artifact, indent=1, default=str))
     if not args.no_ledger:

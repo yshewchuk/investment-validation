@@ -119,6 +119,8 @@ evidence. See the models and data component contracts.
     all those appends without creating or changing that ledger. Reports and
     `results/` metrics/run logs are still written; preregistration checks still
     apply. A no-ledger smoke/subset pass is not a real ledger-recorded run.
+    EXP-118 validates preregistration immediately after loading its spec,
+    before baseline setup, panel loading, or any training arm.
     Scaffolding still records its separate `planned` row. Failure semantics:
     arms run sequentially and any error aborts the run; `ARMS.md` is removed
     at the start and written only
