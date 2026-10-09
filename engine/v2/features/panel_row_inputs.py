@@ -51,11 +51,15 @@ from engine.v2.contracts.data import (
 from engine.v2.data import errors, price_history_query, repository
 from engine.v2.features import daily_state_inputs, panel_math, regime, runup_math
 
-__all__ = ["PanelRowInputs", "scan_panel_row"]
+__all__ = ["CONTEXT_TICKERS", "PanelRowInputs", "scan_panel_row"]
 
 _COMPUTED_MOVES_TABLE = "computed_moves"
 _DAILY_MARKET_TABLE = "daily_market"
-_SPY = "SPY"
+#: Fixed market-context tickers whose ``daily_market`` history the feature path
+#: reads. The nightly's per-ticker history backfill includes all of them (they
+#: have no earnings event, so nothing else would backfill them).
+CONTEXT_TICKERS: tuple[str, ...] = ("SPY",)
+_SPY = CONTEXT_TICKERS[0]
 _BATCH_LIMIT = 1000
 _RESULT_LIMIT = 10000
 
