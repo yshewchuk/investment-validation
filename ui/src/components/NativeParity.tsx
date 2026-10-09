@@ -74,6 +74,7 @@ function ReadError({ error, prefix, name, label }: {
 export function NativeParity({ client }: { client: DataClient }) {
   const summary = useRead("summary", (signal) => client.getNativeParity(signal));
   const refusalReasons: [string, number][] = summary.status === "ready" && summary.data.status !== "no_report" ? Object.entries(summary.data.native_refused_reasons) : [];
+  const refusedTickers: { ticker: string; reason: string }[] = summary.status === "ready" && (summary.data.status === "available" || summary.data.status === "stale") ? summary.data.native_refused_tickers : [];
   return (
     <main className="app">
       <h1>v2 native parity (shadow)</h1>
@@ -92,6 +93,12 @@ export function NativeParity({ client }: { client: DataClient }) {
           <h2>Refusal reasons</h2>
           {refusalReasons.length === 0 && <p data-testid="parity-refusal-reasons-empty">No refusal reasons.</p>}
           {refusalReasons.length > 0 && <ul>{refusalReasons.map(([reason, count]) => <li key={reason} data-testid="parity-refusal-reason">{reason}: {fmtNumber(count, 0)}</li>)}</ul>}
+          {refusedTickers.length > 0 && (
+            <>
+              <h2 data-testid="parity-refused-tickers-heading">Refused tickers ({fmtNumber(refusedTickers.length, 0)})</h2>
+              <ul>{refusedTickers.map(({ ticker, reason }, index) => <li key={`${ticker}-${index}`} data-testid="parity-refused-ticker">{ticker}: {reason}</li>)}</ul>
+            </>
+          )}
         </>
       )}
     </main>

@@ -151,6 +151,7 @@ def test_authenticated_summary_and_bounded_detail_pages(parity):
     assert summary["native_refused_count"] == 0
     assert summary["native_refused_unmatched_count"] == 0
     assert summary["native_refused_reasons"] == {}
+    assert summary["native_refused_tickers"] == []
     assert headers.get("Cache-Control") == "no-store"
     assert headers.get("ETag") is None
 
@@ -198,6 +199,51 @@ def test_authenticated_summary_and_bounded_detail_pages(parity):
                 break
         assert cursor is None
         assert seen == expected
+
+
+def test_summary_projects_keyed_refusal_ticker_and_reason(parity):
+    report = apply_native_refusals(
+        _build_report(), {"DDD|S|2026-01-04": "PRICE_HISTORY_NOT_AVAILABLE"})
+    write_parity_report(report, parity.report_path)
+
+    code, body, _ = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    summary = json.loads(body)
+    assert summary["native_refused_tickers"] == [
+        {"ticker": "DDD", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
+    assert summary["native_refused_count"] == 1
+
+
+def test_summary_projects_unmatched_refusal_ticker_and_count(parity):
+    report = apply_native_refusals(
+        _build_report(), {"HHH|S|2026-01-08": "PRICE_HISTORY_NOT_AVAILABLE"})
+    assert report["native_refused_unmatched"] == [
+        {"row_key": "HHH|S|2026-01-08", "refusal_code": "PRICE_HISTORY_NOT_AVAILABLE",
+         "ticker": "HHH", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
+    write_parity_report(report, parity.report_path)
+
+    code, body, _ = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    summary = json.loads(body)
+    assert summary["native_refused_tickers"] == [
+        {"ticker": "HHH", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
+    assert summary["native_refused_unmatched_count"] == 1
+
+
+def test_v12_compat_report_projects_row_key_prefix_and_refusal_code(parity):
+    report = apply_native_refusals(
+        _build_report(), {"DDD|S|2026-01-04": "PRICE_HISTORY_NOT_AVAILABLE"})
+    report["schema_version"] = "native_parity_report.v1.2"
+    entry = report["native_refused"][0]
+    del entry["ticker"]
+    del entry["reason"]
+    parity.report_path.write_text(json.dumps(report))
+
+    code, body, _ = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    summary = json.loads(body)
+    assert summary["native_refused_tickers"] == [
+        {"ticker": "DDD", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
 
 
 _PARITY_ROUTES = ("/api/v1/native_parity", "/api/v1/native_parity/mismatches",

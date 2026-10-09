@@ -114,6 +114,29 @@ def _reason_counts(entries: list[dict[str, object]]) -> dict[str, int]:
     return _counted(entry["refusal_code"] for entry in entries)
 
 
+def _refused_ticker_items(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Project saved refusal entries to ``{ticker, reason}`` records, in input order.
+
+    Newer reports save ``ticker`` and ``reason`` on every refusal entry; older
+    reports only carry a string ``row_key`` and ``refusal_code``, so the ticker
+    is the row-key prefix before the first vertical bar and the reason falls
+    back to the refusal code. Either projected value must be a non-empty string.
+    """
+    items: list[dict[str, object]] = []
+    for entry in entries:
+        ticker = entry.get("ticker")
+        if not isinstance(ticker, str) or not ticker:
+            row_key = entry.get("row_key")
+            ticker = row_key.split("|", 1)[0] if isinstance(row_key, str) else None
+        reason = entry.get("reason")
+        if not isinstance(reason, str) or not reason:
+            reason = entry.get("refusal_code")
+        if not isinstance(ticker, str) or not ticker or not isinstance(reason, str) or not reason:
+            raise ValueError("native parity refusal entry has no ticker or reason")
+        items.append({"ticker": ticker, "reason": reason})
+    return items
+
+
 def _open_regular_no_follow(path: str | os.PathLike):
     """Open ``path`` for reading without ever following a symlink.
 
@@ -525,6 +548,8 @@ def native_parity_snapshot(report_path: str | os.PathLike | None, *,
         "native_refused_count": len(native_refused),
         "native_refused_unmatched_count": len(native_refused_unmatched),
         "native_refused_reasons": reason_counts,
+        "native_refused_tickers": _refused_ticker_items(
+            native_refused + native_refused_unmatched),
     }
     if captured is not None:
         summary["captured_comparison"] = captured
