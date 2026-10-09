@@ -39,7 +39,7 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.unit_receipts import record_unit_receipt
 from tests.ops_support import catalog, sample
-from tests.test_v2_ops_forward_calendar_store import _seeded_parent
+from tests.v2.ops.test_forward_calendar_store import _seeded_parent
 
 AS_OF = "2026-09-18"
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})

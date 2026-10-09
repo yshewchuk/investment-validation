@@ -18,7 +18,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, from_document
 from engine.v2.ops import forward_calendar_store, pinned_partition_reader
 from tests.ops_support import catalog
-from tests.test_v2_ops_forward_calendar_store import _seeded_parent
+from tests.v2.ops.test_forward_calendar_store import _seeded_parent
 
 _DAILY_DATES = (
     datetime(2026, 1, 2),
