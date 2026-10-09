@@ -763,9 +763,11 @@ tests = [
 why = "claim_next and the legacy store barrier: dependency readiness, admission numbers, deterministic priority ties, the heavy-slot starvation rule and content-hash-pinned read/write leases. A slip double-books a CPU, strands a job queued forever, or lets a reader mix legacy store versions."
 mutate = [
     "engine/v2/ops/scheduler.py",
+    "engine/v2/ops/provider_requirements.py",
     "engine/v2/ops/store_barrier.py",
 ]
 tests = [
+    "tests/v2/ops/test_provider_requirements.py",
     "tests/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_catalog.py",
@@ -798,6 +800,7 @@ mutate = [
     "engine/v2/ops/source_availability.py",
 ]
 tests = [
+    "tests/v2/ops/test_provider_requirements.py",
     "tests/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_catalog.py",
