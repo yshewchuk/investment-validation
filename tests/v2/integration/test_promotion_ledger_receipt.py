@@ -644,3 +644,93 @@ def test_record_evaluation_result_with_non_mapping_results_refuses(tmp_root):
         lib.record_evaluation_result(result, spec)
 
     assert not lib.LEDGER_PATH.exists() or lib.ledger_read().empty
+
+
+#: The real EXP-161 runner, whose multi-arm recording path is exercised below.
+EXP161_PATH = (Path(__file__).resolve().parents[3] / "experiments"
+               / "EXP-161_dynamic_short_vol_neural_structure_picker" / "run.py")
+
+
+def _load_exp161():
+    """Import the real EXP-161 runner module (name has a hyphen, so importlib)."""
+    module_spec = importlib.util.spec_from_file_location("exp161_run", EXP161_PATH)
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
+
+
+def test_exp161_records_every_arm_from_its_own_run(tmp_root, monkeypatch):
+    """Each EXP-161 arm records its own run, never an extra empty primary row.
+
+    Data and evaluation layers are stubbed: ``load_data`` /
+    ``add_causal_analogs`` / ``generate_choices`` / the metric summary helpers /
+    ``selected_mid`` / ``account_score`` / ``selected_all_alphas`` /
+    ``common.load_spy_daily`` produce tiny synthetic frames, and ``evaluate``
+    writes a valid metrics artifact for its supplied ``run_dir`` and returns an
+    ``EvalResult``-like object. Everything downstream — the real
+    ``lib.record_evaluation_result``, the recorder, the accuracy checklist, the
+    ledger append and the receipt publication — stays real. The runner's
+    ``HERE``/``RESULTS`` globals are redirected to the tmp tree so the real
+    experiment folder is never written to.
+    """
+    import sys
+
+    exp = _load_exp161()
+    folder = tmp_root / "experiments" / "EXP-161_under_test"
+    folder.mkdir(parents=True)
+    (folder / "spec.yaml").write_bytes((EXP161_PATH.parent / "spec.yaml").read_bytes())
+    monkeypatch.setattr(exp, "HERE", folder)
+    monkeypatch.setattr(exp, "RESULTS", folder / "results")
+    lib.LEDGER_PATH.write_text(
+        "id,spec_hash,date,stage,oos_mean_mid,sharpe_trade,promoted,run_id\n")
+
+    monkeypatch.setattr(exp, "load_data", lambda: (pd.DataFrame({"event_id": ["e0"]}),
+                                                   pd.DataFrame({"candidate_id": ["e0"]})))
+    monkeypatch.setattr(exp, "add_causal_analogs", lambda frame: frame)
+    monkeypatch.setattr(exp, "generate_choices",
+                        lambda dataset, force: (None, pd.DataFrame({"traded": [False]}), []))
+    monkeypatch.setattr(exp, "candidate_rank_metrics", lambda scores: {})
+    monkeypatch.setattr(exp, "event_metrics", lambda choices: {})
+    monkeypatch.setattr(exp, "selected_mid", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(exp, "account_score",
+                        lambda book: (pd.DataFrame(), {"wanted": 0, "funded": 0}))
+    monkeypatch.setattr(exp, "selected_all_alphas", lambda *args, **kwargs: pd.DataFrame())
+    from experiments import common
+    monkeypatch.setattr(common, "load_spy_daily", lambda: None)
+
+    written: dict[Path, str] = {}
+
+    def fake_evaluate(spec, rows, *, run_dir, **kwargs):
+        results = {
+            "spec_id": spec.get("id"), "spec_hash": lib.spec_hash(spec),
+            "run_id": uuid.uuid4().hex, "recording_mode": "unrecorded",
+            "headline": {"mean": 0.01, "sharpe_trade": 0.5, "alpha_sweep": {},
+                         "breakeven_alpha": 0.5},
+            "headline_stage": "wf_oos", "walk_forward": {},
+            "preregistration": {"valid": True}, "checklist": [], "checklist_fails": 0,
+        }
+        metrics = lib.metrics_path(run_dir, spec)
+        metrics.parent.mkdir(parents=True, exist_ok=True)
+        metrics.write_text(json.dumps(results))
+        written[Path(run_dir)] = results["run_id"]
+        return types.SimpleNamespace(spec=spec, results=results, run_dir=Path(run_dir),
+                                     report_path=None)
+
+    monkeypatch.setattr(exp, "evaluate", fake_evaluate)
+    monkeypatch.setattr(sys, "argv", ["run.py"])
+    exp.main()
+
+    spec = lib.load_spec(folder / "spec.yaml")
+    arms = (exp.INCUMBENT, *exp.ARMS)
+    dirs = {arm: (folder if arm == exp.PRIMARY else folder / "arms" / arm) for arm in arms}
+    ran = lib.ledger_read(lib.LEDGER_PATH)
+    ran = ran[ran["stage"] == "ran"]
+    assert ran["run_id"].tolist() == [written[dirs[arm]] for arm in arms]
+    assert all(ran["run_id"].tolist())
+    for arm in arms:
+        cell = exp.arm_spec(spec, arm)
+        receipt = json.loads(lib.receipt_path(dirs[arm], cell).read_text())
+        assert receipt["run_id"] == written[dirs[arm]]
+        assert receipt["spec_hash"] == lib.spec_hash(cell)
+        assert receipt["metrics_sha256"] == lib.file_sha256(
+            lib.metrics_path(dirs[arm], cell))
