@@ -632,6 +632,7 @@ tests = [
     "tests/test_v2_ops_generation_effects.py",
     "tests/test_v2_ops_health.py",
     "tests/v2/research/test_experiment_exits.py",
+    "tests/v2/research/test_experiment_ledger_durability.py",
     "tests/v2/ops/test_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
     "tests/test_v2_ops_outcome_session_backfill_wiring.py",

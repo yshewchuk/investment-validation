@@ -16,10 +16,13 @@ ever appended.
 from __future__ import annotations
 
 import csv
+import fcntl
 import hashlib
 import io
 import json
+import os
 import re
+import tempfile
 from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -27,6 +30,7 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from engine import paths
+from engine.v2.foundation import ensure_directory, fsync_directory
 
 __all__ = [
     "EXPERIMENTS_DIR",
@@ -95,11 +99,7 @@ def ledger_ensure(path: Path | None = None) -> Path:
     must never create a file in the checkout.
     """
     path = Path(path or LEDGER_PATH)
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        buf = io.StringIO()
-        csv.DictWriter(buf, fieldnames=LEDGER_COLUMNS).writeheader()
-        path.write_bytes(buf.getvalue().encode())
+    ledger_append([], path=path)
     return path
 
 
@@ -114,55 +114,109 @@ def ledger_read(path: Path | None = None) -> pd.DataFrame:
     return frame
 
 
-def _ledger_fieldnames(path: Path) -> list[str]:
-    """The fieldnames one append must use: the file's own header if it has
-    one, else the fixed new-ledger header. An existing ledger keeps its own
-    header byte-for-byte and is never rewritten or corrupted."""
-    if path.exists():
-        with open(path, newline="") as fh:
-            header = next(csv.reader(fh), None)
-        if header:
-            return header
-    return list(LEDGER_COLUMNS)
+def _ledger_rows(before):
+    """Validate complete CSV records while retaining the original header bytes."""
+    if not before:
+        return list(LEDGER_COLUMNS), []
+    try:
+        reader = csv.DictReader(io.StringIO(before.decode("utf-8"), newline=""), strict=True)
+        fieldnames, stored = reader.fieldnames, list(reader)
+        if (not before.endswith(b"\n") or not fieldnames
+                or any(not name.strip() for name in fieldnames)
+                or len(set(fieldnames)) != len(fieldnames)
+                or not set(LEDGER_COLUMNS).issubset(fieldnames)
+                or any(None in row or None in row.values() for row in stored)):
+            raise ValueError
+    except (UnicodeError, csv.Error, ValueError):
+        raise LedgerError("ledger has an invalid header or incomplete CSV record") from None
+    return fieldnames, stored
 
 
-def ledger_append(rows: Sequence[Mapping[str, Any]], path: Path | None = None) -> int:
-    """Append rows, enforcing the append-only invariant.
+def _sync_ledger_directory(directory):
+    """Also finish parent creation left incomplete by an earlier failed sync."""
+    for ancestor in (directory, *directory.parents):
+        fsync_directory(ancestor)
 
-    The file is read first, the new rows are appended, and the result is
-    verified to start with the exact previous bytes. A row can therefore never
-    be rewritten or deleted through this API — any attempt to hand-edit the
-    file between ledger operations is caught by the prefix check, and there is
-    simply no replace/delete function to call.
-    """
-    path = Path(path or LEDGER_PATH)
-    ledger_ensure(path)
+
+def _commit_ledger(path, before, suffix):
+    """Publish a complete prefix-preserving file; never restore stale bytes."""
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    temp = tempfile.NamedTemporaryFile(dir=path.parent, prefix=".ledger-", delete=False)
+    try:
+        with temp:
+            temp.write(before + suffix)
+            temp.flush()
+            os.fchmod(temp.fileno(), mode)
+            os.fsync(temp.fileno())
+        current = path.read_bytes() if path.exists() else b""
+        if current != before:
+            raise LedgerError("ledger changed outside the shared append lock")
+        os.replace(temp.name, path)
+        _sync_ledger_directory(path.parent)
+    finally:
+        Path(temp.name).unlink(missing_ok=True)
+
+
+def _append_ledger_locked(rows, path, unique_by):
+    """Validate and serialize an entire append while the publication lock is held."""
+    if path.is_symlink():
+        raise LedgerError("ledger destination must not be a symbolic link")
     before = path.read_bytes() if path.exists() else b""
-    fieldnames = _ledger_fieldnames(path)
-
+    if path.exists() and not before:
+        raise LedgerError("existing ledger is missing its header")
+    fieldnames, stored = _ledger_rows(before)
+    if unique_by and any(name not in fieldnames for name in unique_by):
+        raise LedgerError("ledger replay key is absent from the stored header")
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     if not before:
         writer.writeheader()
+    appended = 0
     for row in rows:
-        missing = [c for c in LEDGER_COLUMNS if c not in row]
-        if missing:
-            raise LedgerError(f"ledger row missing columns {missing}: {row}")
-        writer.writerow({c: row.get(c, "") for c in fieldnames})
+        if not isinstance(row, Mapping) or not set(LEDGER_COLUMNS).issubset(row):
+            raise LedgerError("ledger row is missing required columns")
+        normalized = {name: "" if row.get(name) is None else str(row.get(name, ""))
+                      for name in fieldnames}
+        if unique_by:
+            matches = [old for old in stored
+                       if all(old[name] == normalized[name] for name in unique_by)]
+            if matches:
+                if matches != [normalized]:
+                    raise LedgerError("ledger replay key conflicts with existing rows")
+                continue
+        writer.writerow(normalized)
+        stored.append(normalized)
+        appended += 1
+    suffix = buf.getvalue().encode("utf-8")
+    if suffix:
+        _ledger_rows(before + suffix)
+        _commit_ledger(path, before, suffix)
+    else:
+        _sync_ledger_directory(path.parent)
+    return appended
 
-    with open(path, "ab") as fh:
-        fh.write(buf.getvalue().encode())
 
-    after = path.read_bytes()
-    if not verify_append(before, after):
-        # Roll the corrupted append back: the file must be the old bytes or
-        # the old bytes plus exactly what we added — never a rewrite.
-        path.write_bytes(before)
-        raise LedgerError(
-            "ledger prefix changed during append — the file was edited out of "
-            "band; the append was rolled back"
-        )
-    return len(rows)
+def ledger_append(rows: Sequence[Mapping[str, Any]], path: Path | None = None,
+                  *, unique_by: tuple[str, ...] | None = None) -> int:
+    """Durably append complete rows; optional exact-key replay returns no duplicates.
+
+    The stable append lock serializes this API and ledger_ensure, independently
+    of a caller's outer identity lock. Uncooperative direct file edits are not
+    serialized. A post-replacement directory-sync error never rolls history back.
+    """
+    if unique_by is not None and (not isinstance(unique_by, tuple) or not unique_by
+            or any(not isinstance(name, str) or not name.strip() for name in unique_by)
+            or len(set(unique_by)) != len(unique_by)):
+        raise LedgerError("invalid ledger replay key")
+    path = Path(path or LEDGER_PATH)
+    path = path.parent.resolve() / path.name
+    ensure_directory(path.parent)
+    with open(path.with_name(path.name + ".append.lock"), "ab") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            return _append_ledger_locked(rows, path, unique_by)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def ledger_context(spec_hash_value: str, path: Path | None = None) -> dict[str, Any]:

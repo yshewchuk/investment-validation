@@ -67,3 +67,26 @@ It is not an admitted supervisor runner or a promotion-authorizing evaluation.
 | Validation or receipt publication fails after the append | Keep the `ran` row; the row alone cannot authorize promotion. |
 | Promotion consumes an artifact | Require matching artifact, requested spec, receipt, run ID, digest, and qualifying ledger row; otherwise refuse with `PROMOTION_LEDGER_RECEIPT_MISSING`. |
 | An `EvalResult` is recorded | Use its own `run_dir` for its metrics artifact, including for grid arms. |
+
+## Durable experiment CSV publication
+
+`lib.ledger_append` and `ledger_ensure` serialize cooperating writers through
+one stable `<ledger>.append.lock`, including first-file creation. Each update
+fsyncs a same-directory temporary containing the exact previous byte prefix
+plus complete CSV rows, replaces the destination, then fsyncs its directory and
+ancestor chain, including parent creation left incomplete by an earlier failure.
+Existing access-mode bits are retained; a newly created ledger is private.
+This lock is distinct from the ops refusal identity lock, which may enclose an
+append; the append helper never acquires that outer lock. Direct file editors
+do not participate in this concurrency guarantee. No catalog transaction is
+opened, and callers remain responsible for their outcome/receipt reconciliation.
+
+| Condition | Outcome |
+| --- | --- |
+| Missing required row/header fields, invalid replay key, malformed CSV, exceeded CSV field limit, unterminated existing record, or symlinked destination | `LedgerError`; no CSV replacement. |
+| `unique_by` omitted | Append every supplied row, preserving existing legacy duplicate-row behavior. |
+| Optional `unique_by` names a previously stored key | An identical complete row is a no-op; contradictory or duplicate stored rows refuse with `LedgerError`. The return value counts newly appended rows. |
+| Temporary write or file fsync fails before replacement | Prior CSV remains; a killed process may leave an unreferenced temporary file. No automatic retry. |
+| Directory fsync fails after replacement | New complete CSV exists, durability is uncertain; no rollback. Exact keyed replay can complete directory sync without duplicating rows. |
+| Existing CSV changes before replacement outside the shared lock | Refuse the observed conflict without restoring stale bytes. Concurrent uncooperative edits are unsupported. |
+| Repeated `ledger_ensure`, or identical keyed replay | Existing CSV bytes remain unchanged. Neither operation emits a recording or promotion receipt. |
