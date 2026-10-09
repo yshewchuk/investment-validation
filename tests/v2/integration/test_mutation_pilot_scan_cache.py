@@ -9,6 +9,7 @@ checkout.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from tools import mutation_pilot as pilot
@@ -64,6 +65,28 @@ def test_rewriting_the_source_with_a_new_size_invalidates_both_caches(tmp_path, 
     target.write_text("import os\nimport sys\n")  # same path, different st_size
     pilot.build_import_graph()
     assert counts[REL] == 3  # graph cache key (size) moved, so it reparsed
+    pilot.unresolved_import_files([REL])
+    assert counts[REL] == 4  # unresolved cache moved too, so it reparsed
+
+
+def test_same_size_rewrite_with_restored_mtime_invalidates_both_caches(tmp_path, monkeypatch):
+    target = _redirect(monkeypatch, tmp_path)
+    counts = _install_parse_spy(monkeypatch)
+
+    pilot.build_import_graph()
+    pilot.unresolved_import_files([REL])
+    assert counts[REL] == 2
+
+    before = target.stat()
+    target.write_text("import re\n")  # same path, exactly the same byte length
+    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = target.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ctime_ns != before.st_ctime_ns  # the write moved ctime
+
+    pilot.build_import_graph()
+    assert counts[REL] == 3  # graph cache key moved (ctime), so it reparsed
     pilot.unresolved_import_files([REL])
     assert counts[REL] == 4  # unresolved cache moved too, so it reparsed
 

@@ -1052,7 +1052,15 @@ class _ImportGraph(dict):
 # same whole-repository scan is requested repeatedly (the CI selector tests
 # each build it), so each is memoized here. The key is rebuilt on every lookup
 # from the CURRENT files -- `(str(REPO), ordered tracked tuple, per-file
-# (path, st_size, st_mtime_ns))` -- so a changed tree simply misses. Capped at
+# (path, st_size, st_mtime_ns, st_ctime_ns))` -- so a changed tree simply
+# misses. `st_ctime_ns` guards the stale-cache hole that size+mtime alone
+# leave open: a same-size rewrite of a file whose old mtime is then restored
+# via `os.utime` leaves size and mtime unchanged, but ctime (inode change
+# time, set by the write itself and not restorable through `os.utime`)
+# moves, so the rewritten file misses the cache and is reparsed. All four
+# fields come from the SAME single `os.stat` result per file -- no extra
+# hashing or reading of file contents, keeping the cache lookup stat-only.
+# Capped at
 # `_SCAN_CACHE_LIMIT` snapshots: a worker's tree changes at most once per run,
 # so older entries are dead weight. An explicit `build_import_graph(tracked=...)`
 # is NEVER cached (only the `tracked is None` default path is), preserving the
@@ -1070,7 +1078,7 @@ def _scan_cache_key(tracked: list[str]) -> tuple | None:
         stats = []
         for rel in tracked:
             st = os.stat(REPO / rel)
-            stats.append((rel, st.st_size, st.st_mtime_ns))
+            stats.append((rel, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
     except OSError:
         return None
     return (str(REPO.resolve()), tuple(tracked), tuple(stats))
