@@ -511,8 +511,9 @@ Only a tracked path absent from the worktree reads as empty.
 
   `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`
   is a pure, read-only aggregate over the `native_parity` stage's own
-  report artifact (`engine/v2/ops/native_parity_report.py`'s
-  `native_parity_report.v1.2` JSON). It reports exactly what that stored
+  report artifact (`engine/v2/ops/native_parity_report.py`'s current
+  `native_parity_report.v1.3` JSON; the serving projection also accepts v1.2).
+  It reports exactly what that stored
   artifact's own `mismatches`/`only_legacy`/`only_native`/`native_refused*`
   fields already say, never a second implementation of the one shared
   comparator (§5) — but the artifact itself can be stale, or was produced
