@@ -1,10 +1,9 @@
 """Trades read for experiment consumers, over one pinned snapshot.
 
-This is the research package's entrypoint for engine/v2 consumers outside
-``tools/v2_*.py``: it lets ``experiments/common_v2.py`` read the committed
-``trades`` dataset version ``tools/v2_build_trades.py`` publishes, without
-the caller touching this package's internal read helpers directly. No CLI
-of its own; no write path.
+This is the research entrypoint for v2 experiment reads of the committed
+``trades`` version published by ``tools/v2_build_trades.py``. Completed
+experiment wrappers are not maintained; missing holdout context refuses.
+There is no CLI of its own or write path.
 """
 from __future__ import annotations
 

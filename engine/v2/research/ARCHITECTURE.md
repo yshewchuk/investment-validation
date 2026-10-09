@@ -26,9 +26,11 @@ named snapshot per run instead of the legacy mutable Tier-2 store. It
 produces measured tables and reports for a person to read; it never decides
 a research conclusion, never fetches from a network provider, and never
 mutates the legacy trades ledger. `experiment_trades.load_trades` extends
-this same one-snapshot-per-read contract to `experiments/` callers (decision
-2026-09-29, option A): read the committed `trades` version
+this same one-snapshot-per-read contract to the v2 experiment platform:
+read the committed `trades` version
 `tools/v2_build_trades.py` published, never the legacy mutable store.
+Completed experiments need not remain runnable (user decision 2026-10-08);
+their historical wrappers are not a supported experiment execution boundary.
 
 ## Primary contracts and public interfaces
 
@@ -63,7 +65,7 @@ one; the library entrypoints below are this package's real public interface:
 `experiment_trades.load_trades(repository, snapshot, strategy, *, as_of_month,
 purpose="training", event_ids=None)` is a second
 kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
-for a caller — today only `experiments/common_v2.py` — that already holds a
+for a v2 platform caller that already holds a
 `Repository` and a resolved `SnapshotRef` and wants one strategy's committed
 `trades` rows, session-joined, with legacy-compatible trade columns plus
 holdout context. `_pricing.trading_calendar_from_snapshot`
@@ -214,7 +216,8 @@ Callers: nothing inside `engine/` imports this package (checked against
 `checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
 listed above are one consumer; `experiments/common_v2.py` is another, for
 `experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
-and `_chains.load_chain_index`; the pinned EXP-147 confirmatory-validation
+and `_chains.load_chain_index`; its archived trade-read caller omits the now-required
+holdout context and is refused. The historical EXP-147 confirmatory-validation
 runner is a third, for `experiment_trades.PROVENANCE` alone (its native
 replay tag, selecting that runner's analog population).
 `experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266

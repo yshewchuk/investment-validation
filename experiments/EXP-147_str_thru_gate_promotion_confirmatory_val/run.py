@@ -51,7 +51,6 @@ def main(
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-ledger", action="store_true")
-    parser.add_argument("--holdout-as-of-month", required=True)
     args = parser.parse_args()
     spec = lib.load_spec(HERE / "spec.yaml")
     v2_snapshot_id = spec.get("v2_snapshot_id")
@@ -64,7 +63,6 @@ def main(
     print(f"[{spec['id']}] loading engine trades …", flush=True)
     trades = common_v2.load_v2_trades(
         STRATEGY, catalog=V2_CATALOG, store_root=V2_STORE_ROOT, snapshot_id=v2_snapshot_id,
-        as_of_month=args.holdout_as_of_month,
     )
     print(f"[{spec['id']}] {len(trades):,} rows / "
           f"{trades['event_id'].nunique():,} events", flush=True)

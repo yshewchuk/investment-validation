@@ -49,7 +49,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `ledger {import-history,status,calibrate,book}` — history summaries count new provenance writes as `imported` (excluding new divergences), and remaining lines as `already_present`; identical committed content under another purpose writes no provenance. Dry runs report the same projected counts and roll back writes.
 - `decisions supersede --row-id --reason --from-json`
 - `price-refresh --session [--dry-run]`
-- `price-history capture --source-root --scope [--dry-run]` (rebuild: [guide](../../../guides/native_board_rebuild_runbook.md))
+- `price-history capture --source-root --scope [--dry-run]` (refuses `SOURCE_NOT_FOUND` without a usable calendar ticker, SPY; rebuild: [guide](../../../guides/native_board_rebuild_runbook.md))
 - `computed-moves capture --source-root --scope --as-of [--dry-run]`
 - `get`/`logs`/`cancel`/`resume`/`explain <job_id>`
 
@@ -110,7 +110,7 @@ The `native_parity` job kind -- `stages.py::_native_parity_kind`,
 `nightly.submit_native_parity_if_ready`/`_native_parity_identity`, and
 its tick-loop caller, `supervisor.Service._reconcile_native_parity`, are
 both real too: `Service.tick()` calls it every tick the way
-`_reconcile_native_score_batch_shadow` (`#88`) already does. The
+`_reconcile_native_score_batch_shadow` (`#88`) already does (its failures print `native_score_batch_reconcile_failed` with `error_type` and the typed problem's code and bounded details: short scalars and short string lists). The
 `nightly.GRAPH` node width is doc-only (`run_shadow_nightly`'s test-only
 graph walk; no submission path reads it). Cutover
 PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`)
@@ -1042,18 +1042,18 @@ unsuccessful rebuild attempts; a new session or head resets that budget.
 Its `complete`/`noop` coverage is the full derived whole-market target set,
 including targets without a written fragment.
 
-**Forward-calendar admission boundary.** Direct `submission.submit` requires
-nonempty, unique `tickers` and `expected_ids` with equal sets; order can differ.
-An empty selection or mismatched coverage is `INVALID_REQUEST` before inserting
-a job row or opening the submission transaction. Only the standalone runner accepts
-whole-market `tickers=()`. Submission queues without fetching or executing.
-`plan_forward_calendar` returns separate Nasdaq and yfinance plans. The
-yfinance confirmation plan uses tickers derived from discovery claims.
-`JobSpec.provider_budget_ref` and scheduler admission/reservation
-name one account, so a single job does not reserve both source budgets.
-Native refresh `expected_ids` are unit IDs; unit `expected_keys` carry context
-tickers, not the paired score request's watchlist and horizon. These are
-current integration constraints; automatic submission remains unimplemented.
+**Provider requirements.** `provider_requirements.py` normalizes scalar input for submission/scheduler: no account means no requirement; otherwise one `(account, calls)`, defaulting omitted calls to one. No I/O, cache or retry occurs there.
+`JobSpec`/parameter wire documents and request digests are unchanged; existing scheduler guards retain their precedence.
+
+| Condition | Outcome |
+|---|---|
+| `parameters.provider_calls_by_account` present, including empty/null | `INVALID_REQUEST` before submission SQL; a stored request stays queued with `PROVIDER_UNAVAILABLE` / `specification_change`, without an attempt or reservation. |
+| Forward-calendar tickers or expected IDs empty/duplicated, or their sets differ | `INVALID_REQUEST` before a submission transaction or job insertion. |
+| Forward-calendar unique nonempty selections have equal sets in different orders | Queued without fetching or executing; no attempt or raw receipt is created by submission. |
+
+`forward_calendar_refresh` remains direct-submit only; only its standalone runner accepts whole-market `tickers=()`.
+`plan_forward_calendar` returns separate Nasdaq/yfinance plans; confirmation tickers derive from discovery claims. Scalar scheduler admission/reservation names one account, so one job does not reserve both sources.
+Native refresh `expected_ids` identify units; unit `expected_keys` carry context tickers, not the paired score request's watchlist and horizon.
 
 Both stores validate their own staged input document and `parameters`
 up front, before the sqlite connection opens (unknown keys, wrong types,

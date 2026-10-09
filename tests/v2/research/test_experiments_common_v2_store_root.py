@@ -5,9 +5,9 @@
 EXP-147's ``run.py`` used to set ``V2_STORE_ROOT = <ops root>/objects``, which
 made the real store resolve one ``objects/`` too deep: the catalog verified
 fine, then every published fragment's object was unreachable. This test
-proves the convention end-to-end through the full
-``common_v2.load_v2_trades`` call: the correct root finds the row, the old
-``<ops root>/objects`` root does not. It uses the full loader (rather than a
+preserves the convention through the supported pinned v2 loader:
+the correct root finds the row, the old ``<ops root>/objects`` root does not.
+Completed-runner availability is retired. It uses the full loader (rather than a
 direct ``ArtifactStore``/``Repository`` round-trip) because the real fixture
 is small — ``tests/data_scan_support`` plus the ``_trade_row``/``_event_rows``
 helpers — following ``tests/test_v2_research_experiment_trades.py``.
@@ -25,8 +25,9 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.data.errors import DataError  # noqa: E402
+from engine.v2.data.repository import Repository  # noqa: E402
+from engine.v2.foundation import ArtifactStore  # noqa: E402
 from engine.v2.research import experiment_trades  # noqa: E402
-from experiments import common_v2  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
     commit_tables,
@@ -46,7 +47,7 @@ assert _spec.loader is not None
 _spec.loader.exec_module(_exp147_run)
 
 
-def test_load_v2_trades_store_root_is_the_ops_root_not_root_objects(tmp_path):
+def test_pinned_v2_loader_store_root_is_the_ops_root_not_root_objects(tmp_path):
     conn, clock, store = catalog_and_store(tmp_path)
     trades_contract = contract_for("trades")
     events_contract = contract_for("earnings_events")
@@ -61,7 +62,6 @@ def test_load_v2_trades_store_root_is_the_ops_root_not_root_objects(tmp_path):
         {"trades": [trades_record], "earnings_events": [events_record]},
         {"trades": trades_contract, "earnings_events": events_contract},
         store=store)
-    conn.close()
 
     # ``catalog_and_store``'s ArtifactStore root -- the value ``V2_STORE_ROOT``
     # must hold. The published fragments live under ``<ops_root>/objects/...``.
@@ -71,9 +71,8 @@ def test_load_v2_trades_store_root_is_the_ops_root_not_root_objects(tmp_path):
         "run.py's V2_STORE_ROOT regressed to the ops_root/\"objects\" bug"
     )
 
-    trades = common_v2.load_v2_trades(
-        "STR-THRU", catalog=tmp_path / "catalog.sqlite", store_root=ops_root,
-        snapshot_id=snapshot.snapshot_id, as_of_month="2025-01")
+    trades = experiment_trades.load_trades(
+        Repository(conn, ArtifactStore(ops_root)), snapshot, "STR-THRU", as_of_month="2025-01")
     assert list(trades["trade_id"]) == ["T-THRU-A"]
     assert list(trades["session"]) == ["AMC"]
 
@@ -84,10 +83,10 @@ def test_load_v2_trades_store_root_is_the_ops_root_not_root_objects(tmp_path):
     # verification refusing with OBJECT_CORRUPT, wrapping ArtifactStore's
     # MISSING.
     with pytest.raises(DataError) as excinfo:
-        common_v2.load_v2_trades(
-            "STR-THRU", catalog=tmp_path / "catalog.sqlite",
-            store_root=ops_root / "objects", snapshot_id=snapshot.snapshot_id, as_of_month="2025-01")
+        experiment_trades.load_trades(Repository(conn, ArtifactStore(ops_root / "objects")),
+                                      snapshot, "STR-THRU", as_of_month="2025-01")
     assert excinfo.value.code == "OBJECT_CORRUPT"
+    conn.close()
 
 
 def test_pinned_runner_builds_the_native_v2_provenance():

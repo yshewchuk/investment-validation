@@ -31,8 +31,7 @@ _KNOWN_STRESS_SHIFT_DAYS: tuple[int, ...] = (-1, 1)
 
 
 def load_v2_trades(strategy: str, *, catalog: Path | str, store_root: Path | str,
-                   snapshot_id: str, as_of_month=None, purpose="training",
-                   event_ids=None) -> pd.DataFrame:
+                   snapshot_id: str) -> pd.DataFrame:
     """The committed v2-replay trades for ``strategy``, one pinned snapshot.
     SNAPSHOT_NOT_FOUND -- unknown ``snapshot_id`` (``Repository.resolve``);
     CONTRACT_MISMATCH -- that snapshot carries no ``trades`` table;
@@ -40,9 +39,7 @@ def load_v2_trades(strategy: str, *, catalog: Path | str, store_root: Path | str
     conn = open_catalog(Path(catalog), clock=SystemClock())
     try:
         repository = Repository(conn, ArtifactStore(Path(store_root)))
-        return experiment_trades.load_trades(
-            repository, repository.resolve(snapshot_id), strategy,
-            as_of_month=as_of_month, purpose=purpose, event_ids=event_ids)
+        return experiment_trades.load_trades(repository, repository.resolve(snapshot_id), strategy)
     finally:
         conn.close()
 

@@ -561,6 +561,8 @@ and nothing on this diagram writes to the legacy board.
 The pinned experiment trade loader excludes both holdout memberships using
 shared foundation definitions; its explicit month/version/snapshot context and
 typed refusal boundary are documented in the research component contract.
+Experiments run through the v2 platform over a pinned v2 snapshot. Completed
+experiments need not remain runnable (user decision 2026-10-08).
 
 EOD source availability is a separate admission contract from session identity.
 Pinned object hashes prove which bytes were read; an observation day, import

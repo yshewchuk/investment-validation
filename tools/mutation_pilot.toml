@@ -654,10 +654,12 @@ mutate = [
     "engine/v2/ops/discovery.py",
     "engine/v2/ops/profiles.py",
     "engine/v2/ops/provider_budget.py",
+    "engine/v2/ops/provider_requirements.py",
     "engine/v2/ops/refresh_staging.py",
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
+    "tests/v2/ops/test_provider_requirements.py",
     "tests/test_v2_ops_catalog.py",
     "tests/test_v2_ops_checkpoint_output_names.py",
     "tests/test_v2_ops_coordinator_lease.py",
@@ -767,6 +769,7 @@ mutate = [
     "engine/v2/ops/store_barrier.py",
 ]
 tests = [
+    "tests/v2/ops/test_provider_requirements.py",
     "tests/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_catalog.py",
@@ -799,6 +802,7 @@ mutate = [
     "engine/v2/ops/source_availability.py",
 ]
 tests = [
+    "tests/v2/ops/test_provider_requirements.py",
     "tests/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_catalog.py",
@@ -975,6 +979,7 @@ tests = [
     "tests/test_v2_ops_generation_binding_lineage.py",
     "tests/test_v2_ops_price_history.py",
     "tests/test_v2_ops_snapshot_stages.py",
+    "tests/v2/ops/test_calendar_ticker_price_history.py",
 ]
 
 [modules.research]

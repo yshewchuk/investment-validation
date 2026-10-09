@@ -21,6 +21,7 @@ from typing import Any
 from engine.v2.contracts import DataQuery, KeyPredicate, PriceQuery, SnapshotRef
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.price_history_query import get_price_series
+from engine.v2.data.price_history_table import CALENDAR_TICKER
 from engine.v2.data.repository import Repository
 from engine.v2.foundation.market_calendar import (
     CalendarSessions,
@@ -39,7 +40,7 @@ from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
 
 __all__ = ["scan_calendar_row_inputs", "scan_candidate_expiries", "scan_decision_calendar"]
 
-_CALENDAR_TICKER = "SPY"
+_CALENDAR_TICKER = CALENDAR_TICKER
 _CHAIN_TABLE = "option_chains"
 _CANDIDATE_COLUMNS = ("right", "strike", "expiry")
 _RIGHTS = frozenset({"C", "P"})

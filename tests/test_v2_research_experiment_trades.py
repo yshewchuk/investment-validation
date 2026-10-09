@@ -343,15 +343,16 @@ def test_no_missing_context_fallback_or_final_read_api(tmp_path, kwargs):
         conn.close()
 
 
-def test_entirely_excluded_population_refuses_and_wrapper_cannot_bypass(tmp_path):
-    conn, _, snapshot = _holdout_snapshot(tmp_path, [_RANDOM, _OVERLAP])
-    conn.close()
-    with pytest.raises(DataError) as caught:
-        common_v2.load_v2_trades("STR-THRU", catalog=tmp_path / "catalog.sqlite",
-            store_root=tmp_path / "store", snapshot_id=snapshot.snapshot_id,
-            as_of_month="2024-10", purpose="sweep")
-    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
-    assert len(caught.value.problem.details["holdout_exclusions"]) == 2
+def test_entirely_excluded_population_refuses(tmp_path):
+    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM, _OVERLAP])
+    try:
+        with pytest.raises(DataError) as caught:
+            experiment_trades.load_trades(repository, snapshot, "STR-THRU",
+                                          as_of_month="2024-10", purpose="sweep")
+        assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+        assert len(caught.value.problem.details["holdout_exclusions"]) == 2
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("override", [{"date_conflict": True}, {"session": None}])

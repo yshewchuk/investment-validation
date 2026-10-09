@@ -528,6 +528,14 @@ def _settlement_calendar() -> pd.DataFrame:
                             columns=["event_id", "ticker", "event_date", "session"])
 
 
+def _group_events(group: dict) -> pd.DataFrame:
+    events = pd.DataFrame([{
+        "event_id": r["event_id"], "ticker": r["ticker"],
+        "event_date": pd.Timestamp(r["event_date"]), "session": r.get("session"),
+    } for r in group["rows"]]).drop_duplicates()
+    return events.reset_index(drop=True)
+
+
 def score_outcomes(through=None, *, resolved_at=None, finality_fn=None) -> dict:
     """Settle recorded selection rules with simulated ORATS quote fills.
 
@@ -611,19 +619,69 @@ def score_outcomes(through=None, *, resolved_at=None, finality_fn=None) -> dict:
 
     # A replay is shared only by identical recorded rules and fill assumptions.
     # Assign results back to row_id, never to a global event/strategy/alpha key.
+    #
+    # Chains are shared too: every group plans first (pure calendar arithmetic)
+    # so the union of the plans' keys is known, then ONE available-key set and
+    # ONE ChainIndex are built and reused by every group. A pass over many
+    # groups then reads each year partition once instead of once per group.
+    # A group whose planning fails keeps the per-group error and is skipped;
+    # if the shared load itself fails, every group falls back to its own replay.
+    events_by_key = {key: _group_events(group) for key, group in groups.items()}
+    plans, failed = {}, set()
+    try:
+        replay_calendar = replay_mod.trading_calendar()
+    except FileNotFoundError:
+        replay_calendar = None
+    except (KeyError, TypeError, ValueError) as exc:
+        # The old scorer loaded the calendar lazily inside each group's replay,
+        # so these three error types became per-group "recorded replay
+        # unavailable" outcomes. Loading it once up front must not turn a bad
+        # group into a crash: mark every otherwise-valid group failed with the
+        # same message. Any other type propagated before and still does.
+        replay_calendar = None
+        for key, group in groups.items():
+            failed.add(key)
+            for row in group["rows"]:
+                errors[row["row_id"]] = f"recorded replay unavailable: {exc}"
+
+    index = None
+    available = None
+    if replay_calendar is not None and groups:
+        for key, group in groups.items():
+            try:
+                plans[key] = replay_mod.plan_events(
+                    group["structure"], events_by_key[key], calendar=replay_calendar)
+            except (KeyError, TypeError, ValueError) as exc:
+                failed.add(key)
+                for row in group["rows"]:
+                    errors[row["row_id"]] = f"recorded replay unavailable: {exc}"
+        if any(len(plans[key].frame) for key in plans):
+            try:
+                available = replay_mod.available_chain_keys()
+                chain_keys = set()
+                for key in plans:
+                    plans[key] = replay_mod.filter_plan_by_availability(
+                        plans[key], available)
+                    chain_keys |= plans[key].chain_keys
+                if chain_keys:
+                    index = replay_mod.load_chain_index(chain_keys)
+            except (KeyError, TypeError, ValueError):
+                index, available = None, None
+
     priced = {}
-    for i, ((strategy, _), group) in enumerate(groups.items(), 1):
+    for i, (key, group) in enumerate(groups.items(), 1):
+        strategy = key[0]
+        if key in failed:
+            continue
         print(f"  [ledger] replay group {i}/{len(groups)}: {strategy}, "
               f"{len(group['rows'])} predictions", flush=True)
-        events = pd.DataFrame([{
-            "event_id": r["event_id"], "ticker": r["ticker"],
-            "event_date": pd.Timestamp(r["event_date"]), "session": r.get("session"),
-        } for r in group["rows"]]).drop_duplicates()
+        shared = {} if index is None else {
+            "calendar": replay_calendar, "index": index, "available": available}
         try:
             result = replay_mod.replay(
-                strategy, events.reset_index(drop=True), structure=group["structure"],
+                strategy, events_by_key[key], structure=group["structure"],
                 variant=group["variant"], alphas=[group["alpha"]],
-                include_legs=True, progress_every=25,
+                include_legs=True, progress_every=25, **shared,
             )
         except (KeyError, TypeError, ValueError) as exc:
             for row in group["rows"]:
