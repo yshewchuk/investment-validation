@@ -997,6 +997,7 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/v2/research/test_gate_variant.py",
     "tests/v2/research/test_prediction_inputs.py",
     "tests/v2/research/test_experiment_trades.py",
     "tests/v2/research/test_exp144_v2_trades.py",

@@ -19,7 +19,7 @@ The planned dependency direction is entrypoints → runtime → workflows → st
 Before implementation, remove prerequisite cycles and migrate all callers per move; no compatibility modules or re-export shims.
 
 ## Primary contracts and public interfaces
-
+`publication.publish_local` refuses an ineligible release with `PUBLICATION_REFUSED` and sorted `details.failed_gates` names from the manifest's `gates` whose `ok` value is `false`.
 **Operations health output.** `health` emits `operations_health.v1.1`; it selects the current delivered release from each published scope's `CURRENT` pointer, then orders those releases by occurrence, delivery time and release ID. `requested_session` and `resolved_session` come from the unique delivered `ledger_export_receipt.v1.0` associated through a consistent `release_intent` receipt with that release, including same-session reruns; the export receipt's scope must match the selected pointer scope or validation is `VALIDATION_FAILED`. Sessions never come from `generated_at`. Invalid or ambiguous evidence is `VALIDATION_FAILED`; the CLI removes its output and does not retry. Identical catalog, pointer and clock inputs produce byte-identical JSON; evolution follows `guides/component_contracts.md` §2.3 and older versions remain valid. A publication status sidecar compares withheld releases against its own scope's delivered `CURRENT` row; when none exists, it treats current as absent and does not fall back to another scope's latest delivery. Unsafe unrelated-scope pointers do not prevent that write; aggregate health reads each published scope pointer and propagates unsafe-pointer errors. **I/O outcomes:**
 
 | Condition | Outcome |
