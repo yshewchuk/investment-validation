@@ -29,7 +29,7 @@ mutates the legacy trades ledger. `experiment_trades.load_trades` extends
 this same one-snapshot-per-read contract to the v2 experiment platform:
 read the committed `trades` version
 `tools/v2_build_trades.py` published, never the legacy mutable store.
-Completed experiments need not remain runnable (user decision 2026-10-08);
+Completed experiments need not remain runnable;
 their historical wrappers are not a supported experiment execution boundary.
 
 ## Primary contracts and public interfaces
