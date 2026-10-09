@@ -305,3 +305,26 @@ def test_selected_deeply_nested_ref_json_refuses_without_older_fallback(ops):
     ops.conn.commit()
 
     _assert_malformed(ops)
+
+
+def test_selected_lone_surrogate_ref_json_refuses_without_older_fallback(ops):
+    """A stored reference whose ``content_hash`` and ``storage_key`` end in an
+    escaped lone surrogate passes JSON and model decoding and the store's
+    path/hash consistency checks, but the filesystem cannot encode the path
+    (``UnicodeEncodeError``, not an ``OSError``): the selected job's own broken
+    output, so every parity route refuses with the typed 503 malformed refusal
+    -- no untyped 500 and no fallback to the older valid report."""
+    _seed(ops, as_of="2026-01-01", row_count=3)
+    ops.clock.advance(60)
+    job_id = _insert_job(ops, as_of="2026-01-02")
+    ref = _publish_report(ops, job_id, _payload(1))
+    row = ops.conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?",
+                           (ref.artifact_id,)).fetchone()
+    document = json.loads(row[0])
+    document["content_hash"] += "\ud800"
+    document["storage_key"] += "\ud800"
+    ops.conn.execute("UPDATE artifacts SET ref_json = ? WHERE artifact_id = ?",
+                     (json.dumps(document), ref.artifact_id))
+    ops.conn.commit()
+
+    _assert_malformed(ops)

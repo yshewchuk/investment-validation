@@ -753,7 +753,7 @@ def _ops_native_parity_report_source(ops_root):
             raise _parity_malformed()
         try:
             return str(store.verify(ref))
-        except (ArtifactError, OSError):
+        except (ArtifactError, OSError, UnicodeError):
             raise _parity_malformed() from None
 
     return source
