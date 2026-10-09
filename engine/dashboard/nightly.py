@@ -283,6 +283,23 @@ def _remember_unknown_symbol(ticker: str) -> None:
         pass
 
 
+#: Market-context tickers the v2 feature path reads from ``daily_market``. Legacy
+#: code must not import engine.v2 (layer rule), so this mirrors
+#: ``engine.v2.features.panel_row_inputs.CONTEXT_TICKERS``, the owner; a v2 test
+#: asserts the two are equal.
+CONTEXT_TICKERS: tuple[str, ...] = ("SPY",)
+
+
+def history_backfill_tickers(tickers) -> list[str]:
+    """``tickers`` plus the market-context tickers the feature path reads.
+
+    Context tickers (SPY) never have an earnings event, so the calendar-driven
+    ``tickers`` never include them; without this they keep only the market-wide
+    daily pull's short history and the regime feature has too few sessions.
+    """
+    return sorted({str(t) for t in tickers} | set(CONTEXT_TICKERS))
+
+
 def backfill_ticker_history(tickers, *, fetcher=None) -> dict:
     """Full per-ticker history for names we have never fetched, once each.
 
@@ -597,7 +614,8 @@ def refresh_calendar_data(
     # Costs nothing after the first time a ticker is seen, and it is what turns
     # a row with no prior prints into a scoreable one: the prior-move features
     # need ~12 past prints, which no amount of today's data supplies.
-    out["history"] = backfill_ticker_history(tickers, fetcher=fetcher)
+    # Context tickers (SPY) are included: they have no earnings events.
+    out["history"] = backfill_ticker_history(history_backfill_tickers(tickers), fetcher=fetcher)
     out["calls"] += out["history"]["calls"]
 
     # -- 2. market-wide summaries and cores: one ORATS call each ------------
