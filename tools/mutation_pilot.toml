@@ -921,6 +921,7 @@ mutate = [
     # test_mutation_ci's tracked-pattern expansion.
     "engine/v2/ops/n*.py",
     "engine/v2/ops/native/*.py",
+    "engine/v2/ops/carried_set.py",
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",
     "engine/v2/ops/fingerprints.py",
@@ -939,6 +940,7 @@ tests = [
     "tests/v2/ops/test_provider_response.py",
     "tests/v2/ops/test_provider_response_boundary.py",
     "tests/v2/ops/test_native_parity_inputs_leaf.py",
+    "tests/v2/ops/test_carried_set.py",
     "tests/test_v2_ops_native_parity_pairing.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/test_v2_ops_capture_inputs.py",
