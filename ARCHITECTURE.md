@@ -564,6 +564,12 @@ and nothing on this diagram writes to the legacy board.
 
 ## 5. Invariants
 
+The pinned experiment trade loader excludes both holdout memberships using
+shared foundation definitions; its explicit month/version/snapshot context and
+typed refusal boundary are documented in the research component contract.
+The v2 research boundary requires explicit holdout context over a pinned v2
+snapshot. Completed experiments need not remain runnable.
+
 EOD source availability is a separate admission contract from session identity.
 Pinned object hashes prove which bytes were read; an observation day, import
 timestamp or reconstructed midnight does not prove EOD availability or finality.

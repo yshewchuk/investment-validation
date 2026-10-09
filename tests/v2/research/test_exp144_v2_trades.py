@@ -16,9 +16,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from engine.v2.data.errors import DataError  # noqa: E402
+from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.research import experiment_trades  # noqa: E402
 from tests.data_scan_support import catalog_and_store  # noqa: E402
 from tests.test_v2_research_build_trades import _commit_all  # noqa: E402
@@ -86,7 +88,7 @@ def test_require_v2_snapshot_id_refuses_a_missing_or_null_pin():
     ) == "snap_abc"
 
 
-def test_load_trades_reads_the_pinned_v2_snapshot(tmp_path):
+def test_completed_runner_cannot_read_without_explicit_holdout_context(tmp_path):
     module = _exp144()
     module.V2_CATALOG = tmp_path / "catalog.sqlite"
     module.V2_STORE_ROOT = tmp_path / "store"
@@ -95,21 +97,25 @@ def test_load_trades_reads_the_pinned_v2_snapshot(tmp_path):
     snapshot = _commit_all(conn, clock, store, receipt_id="r1", trades_rows=[
         _runup_row("T-RUNUP-MID", wanted, PROVENANCE, fill_alpha=0.5),
         _runup_row("T-RUNUP-WORST", wanted, PROVENANCE, fill_alpha=0.0),
-        # planted decoys: a different variant, and a legacy-provenance row for
-        # the wanted variant. Neither may survive the v2 read plus the filter.
+        # The v2 population retains another variant of the same strategy,
+        # while the legacy-provenance decoy must be excluded.
         _runup_row("T-OTHER-VARIANT", "e+0_x+1", PROVENANCE),
         _runup_row("T-LEGACY-PROVENANCE", wanted, LEGACY_PROVENANCE),
     ])
 
-    frame = module.load_trades(snapshot.snapshot_id)
-    conn.close()
-
-    assert sorted(frame["trade_id"].astype(str)) == ["T-RUNUP-MID", "T-RUNUP-WORST"]
+    with pytest.raises(DataError) as caught:
+        module.load_trades(snapshot.snapshot_id)
+    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+    # Completed-runner availability is retired; the supported pinned v2 read
+    # still preserves the rows, provenance filter and date representation.
+    frame = experiment_trades.load_trades(Repository(conn, store), snapshot, "STR-RUNUP",
+                                          as_of_month="2025-01")
+    assert sorted(frame["trade_id"].astype(str)) == ["T-OTHER-VARIANT", "T-RUNUP-MID", "T-RUNUP-WORST"]
     assert set(frame["event_id"].astype(str)) == {"TEST_2024-05-02"}
-    assert set(frame["variant"].astype(str)) == {wanted}
-    assert list(frame.columns) == PROJECTED_COLUMNS
+    assert set(PROJECTED_COLUMNS) <= set(frame.columns)
     for column in DATE_COLUMNS:
         assert pd.api.types.is_datetime64_any_dtype(frame[column]), column
+    conn.close()
 
 
 def test_add_champion_decisions_selects_on_the_stored_threshold():
