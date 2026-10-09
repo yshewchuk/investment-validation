@@ -10,7 +10,7 @@ the correct root finds the row, the old ``<ops root>/objects`` root does not.
 Completed-runner availability is retired. It uses the full loader (rather than a
 direct ``ArtifactStore``/``Repository`` round-trip) because the real fixture
 is small — ``tests/data_scan_support`` plus the ``_trade_row``/``_event_rows``
-helpers — following ``tests/test_v2_research_experiment_trades.py``.
+helpers — following ``tests/v2/research/test_experiment_trades.py``.
 """
 from __future__ import annotations
 
