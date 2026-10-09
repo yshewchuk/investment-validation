@@ -46,14 +46,18 @@ catalog table or supervisor coordinator is introduced. File/CSV effects stay out
 short catalog transactions; completion follows durable append and never authorizes promotion.
 `export_native_report` creates `REPORT.md` at the registration's fixed store-local
 smoke/recorded address only after verified completion; existing bytes never change.
+Recorded destinations must be nonempty and bind the exact normalized path used
+for append. Saved outcomes require the complete canonical schema, object-valued
+failure details and a nonblank UTF-8 success report before any ledger effect.
 
 | Condition | Outcome |
 | --- | --- |
 | R1 invalid specification, R2 unresolved snapshot, or R6 identity conflict | `publish_native_refusal` publishes private evidence only; no result or ledger row. |
+| Empty recorded ledger destination | R1 before outcome reservation or ledger access; no default-ledger fallback. |
 | Admitted R3 look-ahead or R5 holdout denial | Immutable refusal and `refused` row, unless smoke; no current-attempt report. |
 | Admitted R4 variant failure | Immutable refusal and `failed` row, unless smoke; no current-attempt report. |
 | Same registration/result/destination repeated | Reuse the first outcome and date; reconcile one terminal CSV row per experiment/variant identity without refitting. |
-| Changed result, status, binding or recording destination; corrupt referenced bytes | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private conflict evidence; preserve prior report, catalog slot and CSV bytes. |
+| Changed result, status, binding or recording destination; corrupt, incomplete or semantically invalid saved evidence | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private conflict evidence before ledger effects; preserve prior report, catalog slot and CSV bytes. |
 | Publication/append/commit interruption | Keep complete published objects and any committed intent/row; no rollback or automatic retry. Explicit replay reconciles the same intent. |
 | `no_ledger=True` | Do not resolve, read, create, lock or append any ledger path. The smoke slot cannot consume the recorded slot. |
 

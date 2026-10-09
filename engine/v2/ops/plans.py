@@ -64,10 +64,33 @@ def check_plan(source_root, expected_ids):
             "input_refs": [], "blocked_prerequisites": []}
 
 
+def _candidate_exclusion_document(record):
+    """One plan-time exclusion record as JSON-native primitives.
+
+    Accepts either the typed ``CarriedTickerExclusion`` returned by
+    ``carried_set.build_uncarried_exclusions`` or the JSON-ready mapping
+    ``snapshot_planning.generated_population`` already returns.
+    """
+    if isinstance(record, dict):
+        ticker, reason_code, missing_tables = (record["ticker"], record["reason_code"],
+                                               record["missing_tables"])
+    else:
+        ticker, reason_code, missing_tables = (record.ticker, record.reason_code,
+                                               record.missing_tables)
+    return {"ticker": str(ticker), "reason_code": str(reason_code),
+            "missing_tables": sorted(str(table) for table in missing_tables)}
+
+
+def _normalize_candidate_exclusions(records):
+    """Plan-time evidence sorted by ticker, JSON-native in every field."""
+    return sorted((_candidate_exclusion_document(record) for record in records),
+                  key=lambda exclusion: exclusion["ticker"])
+
+
 def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                  tickers=(), context_tickers=(), year_start=2024, year_end=2026,
-                 expected_population=(), clock=None, input_mode="legacy", snapshot_inputs=None,
-                 full_run=False, refresh_mode="legacy", refresh_plan=None,
+                 expected_population=(), candidate_exclusions=(), clock=None, input_mode="legacy",
+                 snapshot_inputs=None, full_run=False, refresh_mode="legacy", refresh_plan=None,
                  catalog_path=None, objects_root=None):
     """``full_run`` (``--full-run``, decision: writing the global ``"shadow"``
     effect scope must be explicit) records this plan's universe declaration.
@@ -108,6 +131,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                   details={"tickers": sorted(tickers), "context_tickers": sorted(context_tickers)})
     plan = check_plan(source_root, [])
     population = tuple(expected_population)
+    exclusions = tuple(_normalize_candidate_exclusions(candidate_exclusions))
     blocked = [] if manifest_ref else ["frozen_legacy_input_manifest", "adapter_parity_receipt"]
     if not population:
         blocked.append("planned_population")
@@ -116,6 +140,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                 "context_tickers": list(context_tickers), "full_run": bool(full_run),
                 "year_start": year_start, "year_end": year_end,
                 "expected_population": list(population),
+                "candidate_exclusions": list(exclusions),
                 "implementation": plan["implementation_ref"]}
     if input_mode != "legacy":
         # P2-6 §9.3/§8.1: the head was resolved once by the caller; the plan
@@ -132,6 +157,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                 context_tickers=list(context_tickers), full_run=bool(full_run),
                 year_start=year_start, year_end=year_end,
                 expected_population=list(population),
+                candidate_exclusions=list(exclusions),
                 # P2-5/B1c: pinned once, here, at planning time. The saved
                 # plan artifact carries this value forever; every job the DAG
                 # later builds off this SAME plan (including a resubmission

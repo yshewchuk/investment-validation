@@ -802,7 +802,7 @@ def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, repo
         raise _parity_malformed()
     if report is None:
         return summary if section is None else {"status": "no_report"}
-    if (report["schema_version"] == "native_parity_report.v1.2"
+    if (report["schema_version"] in ("native_parity_report.v1.2", "native_parity_report.v1.3")
             and not {"as_of", "generated_at"} <= report.keys()):
         raise _parity_malformed()
     summary["status"] = _native_parity_freshness(serving_db, resolve_current, summary.get("as_of"))

@@ -92,7 +92,7 @@ _CASES = {
                   "gate_policy": {"STR-THRU": {"threshold": 0.0}}}),
     "native_parity": dict(
         resource_class="validation",
-        checkpoint_contract="native_parity_report.v1.2",
+        checkpoint_contract="native_parity_report.v1.3",
         max_attempts=2, backoff=(5, 30), extra_field=None),
     "snapshot_import": dict(
         resource_class="legacy_rebuild",
@@ -274,7 +274,7 @@ def test_native_parity_kind_is_declared_correctly():
     assert kind.parameters is stages.NativeParityParameters
     assert kind.resource_classes == frozenset({"validation"})
     assert kind.effects == ("staged",)
-    assert kind.checkpoint_contract == "native_parity_report.v1.2"
+    assert kind.checkpoint_contract == "native_parity_report.v1.3"
     assert kind.namespaces == frozenset({"shadow", "smoke"})
     assert kind.retry.name == "bounded"
     assert kind.retry.max_attempts == 2
