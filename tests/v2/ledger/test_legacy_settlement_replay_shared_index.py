@@ -311,6 +311,74 @@ def test_shared_load_failure_falls_back_per_group(root, calendar, monkeypatch):
         assert outcomes[rid] == expected[rid]
 
 
+def test_transient_shared_load_failure_falls_back_to_real_replays(
+        root, calendar, monkeypatch):
+    """A failed shared index load retries each group on the real loader.
+
+    The existing persistent-failure test proves the recorded unresolvable
+    error semantics; this one proves the transient case. The real
+    ``iter_table`` call-through fails only the first year-partition
+    ``option_chains`` read (the shared load) and delegates every later read,
+    so the fallback per-group replays must resolve both rows to exactly the
+    outcomes of independent planned-and-loaded baselines.
+    """
+    _write_chains()
+    predictions = [_prediction(0.5), _prediction(0.25)]
+    ledger.write_predictions(predictions)
+
+    # Baselines run against real storage, before the transient failure is
+    # injected: each group's own planned-and-loaded replay.
+    baselines = {row["row_id"]: _baseline(row["intended_prices"]["alpha"])
+                 for row in predictions}
+
+    from engine import replay as replay_mod
+    from engine.data import store as store_mod
+
+    real = store_mod.iter_table
+    year_calls: list[tuple[str, tuple[int, ...]]] = []
+    shared_failed = False
+
+    def transient(name, **kwargs):
+        nonlocal shared_failed
+        years = kwargs.get("years")
+        if name == "option_chains" and years is not None:
+            partition = tuple(sorted(years))
+            if shared_failed:
+                year_calls.append(("real", partition))
+            else:
+                shared_failed = True
+                year_calls.append(("failed", partition))
+                raise ValueError("option chain store transiently unavailable")
+        return real(name, **kwargs)
+
+    monkeypatch.setattr(store_mod, "iter_table", transient)
+
+    # The baselines cached the available-key scan; drop it so the scorer's
+    # shared availability scan and index load are the real ones.
+    replay_mod._AVAILABLE_KEYS = None
+
+    result = ledger.score_outcomes(through=OBS_EXIT, resolved_at=RESOLVED_AT)
+    assert result["resolved"] == 2, result
+    assert result["unresolvable"] == 0, result
+
+    # One year-partition read failed as the shared load, then the per-group
+    # fallback really loaded 2024 once per group.
+    assert shared_failed, year_calls
+    assert year_calls == [("failed", (2024,)), ("real", (2024,)),
+                          ("real", (2024,))], year_calls
+
+    outcomes = {o["row_id"]: o for o in ledger.read_outcomes()}
+    assert set(outcomes) == {row["row_id"] for row in predictions}, outcomes
+
+    file_rows = {row["row_id"]: row for row in ledger.read_predictions()}
+    for row in predictions:
+        baseline = baselines[row["row_id"]]
+        assert len(baseline.trades) == 1
+        trade = baseline.trades.iloc[0].to_dict()
+        assert outcomes[row["row_id"]] == _project_outcome(
+            file_rows[row["row_id"]], trade, RESOLVED_AT)
+
+
 def test_shared_calendar_load_failure_marks_all_groups_failed(root, monkeypatch):
     _write_chains()
     predictions = [_prediction(0.5), _prediction(0.25)]
