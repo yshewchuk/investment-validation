@@ -5,13 +5,15 @@ fast the commit is removed. These tests are the reason to trust the hook.
 """
 from __future__ import annotations
 
+# packages: ops
+
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from checks.repo_hygiene import (  # noqa: E402
     DECLARED_MAX_BYTES,
@@ -216,7 +218,7 @@ class TestCli:
     def repo(self, tmp_path):
         root = tmp_path / "repo"
         (root / "checks").mkdir(parents=True)
-        source = Path(__file__).resolve().parents[1] / "checks" / "repo_hygiene.py"
+        source = Path(__file__).resolve().parents[3] / "checks" / "repo_hygiene.py"
         (root / "checks" / "repo_hygiene.py").write_text(source.read_text())
         (root / ".env").write_text(ENV_BODY)
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -273,12 +275,15 @@ class TestBundlePolicy:
     DECLARED = frozenset({"bundle/data/models.json", "bundle/data/models.js"})
 
     def test_a_declared_file_under_the_cap_passes(self, needles):
-        files = {"bundle/data/models.json": b"x" * 2_000_000}
+        # One byte below the boundary: the cap is a ceiling, not a target.
+        files = {"bundle/data/models.json": b"x" * (DECLARED_MAX_BYTES - 1)}
         report = check_bundle(files, needles, declared=self.DECLARED)
         assert report.ok, report.violations
 
-    def test_an_undeclared_file_the_same_size_refuses(self, needles):
-        files = {"bundle/data/unexpected.json": b"x" * 2_000_000}
+    def test_an_undeclared_file_over_the_source_cap_refuses(self, needles):
+        # The raised cap is name-matched only: an undeclared file -- here an
+        # unexpected one under `data/` -- still answers to `MAX_BYTES`.
+        files = {"bundle/data/unexpected.json": b"x" * (MAX_BYTES + 1)}
         report = check_bundle(files, needles, declared=self.DECLARED)
         assert not report.ok
         assert any(v.rule == "oversize" for v in report.violations)

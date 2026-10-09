@@ -93,8 +93,8 @@ interface section; this names only the load-bearing entry points.
   point for every query this file does not vectorize, and for any caller
   testing more than one row against the same `DataQuery`: it normalizes
   every `key_filter` predicate's `wanted` values and the `time_interval`'s
-  bounds eagerly, once, at compile time, and returns a closure with no
-  further normalization in its per-row path — the closure is only valid
+  bounds eagerly, once, at compile time; stored string-date observations are
+  normalized per row. The returned closure is only valid
   for the `contract`/`query` it was compiled from and carries no state
   across scans. Both compiled forms must agree on every row the batch form
   accepts (the equivalence fixture in `tests/test_v2_data_query.py` pins
@@ -114,6 +114,10 @@ interface section; this names only the load-bearing entry points.
   `computed_moves_store.target_tickers_from_snapshot()` → `_scan_rows()` →
   `Repository.scan()` → `_fragment_rows()` → `query.compile_batch_matcher()`
   (row-path fallback: `query.compile_row_matcher()`).
+  Time-interval comparisons normalize both stored fragment bounds and stored
+  string-date observation values to the same timestamp form as query bounds.
+  Invalid dates refuse `CONTRACT_MISMATCH`; pruning never drops a matching
+  calendar day merely because its stored representation lacks a time suffix.
 - **Legacy-touching seam** — `legacy_adapter.py`, the package's only module
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
@@ -267,6 +271,7 @@ directly, without conversion to `DataError`.
 | Code | Category | Retryable | When |
 |---|---|---|---|
 | `SNAPSHOT_NOT_FOUND` | dependency | no | unknown `snapshot_id` |
+| `SNAPSHOT_UNRESOLVED` | dependency | no | experiment input reader cannot verify the supplied exact committed snapshot |
 | `SNAPSHOT_NOT_READY` | dependency | yes | scope has no committed head yet |
 | `SNAPSHOT_CONFLICT` | dependency | yes | head-fence or compare-and-swap mismatch |
 | `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract, including malformed timestamp key-predicate strings, non-string timestamp predicate values, or predicate scalars incompatible with fragment key bounds |
