@@ -246,14 +246,34 @@ def spec_hash(spec: Mapping[str, Any]) -> str:
     return _hash(spec)
 
 
+def metrics_path(run_dir: Path | str, spec: Mapping[str, Any]) -> Path:
+    """The spec-hash-named primary metrics artifact for one spec."""
+    return Path(run_dir) / "results" / f"metrics_{spec_hash(spec)[:12]}.json"
+
+
+def receipt_path(run_dir: Path | str, spec: Mapping[str, Any]) -> Path:
+    """The recording receipt binding a spec's metrics artifact to a run."""
+    return Path(run_dir) / "results" / f"receipt_{spec_hash(spec)[:12]}.json"
+
+
+def file_sha256(path: Path | str) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
                       results: Mapping[str, Any], promoted: bool = False,
                       ledger_path: Path | None = None) -> None:
-    """Append the RAN row for one evaluated spec (primary or grid cell)."""
+    """Append this run's ``ran`` row, refresh the metrics artifact's accuracy
+    checklist against that exact ledger, finalize it to ``"recorded"`` and
+    publish the receipt binding the run ID, spec hash and SHA-256 of the exact
+    bytes promotion will later read."""
     from datetime import datetime, timezone
 
-    ledger_path = ledger_ensure(ledger_path)
-    headline = results.get("headline", {}) if isinstance(results, Mapping) else {}
+    exp_dir = Path(exp_dir)
+    ledger_path = Path(ledger_path or LEDGER_PATH)
+    results = results if isinstance(results, Mapping) else {}
+    headline = results.get("headline", {}) or {}
+    run_id = str(results.get("run_id", "") or "")
     ledger_append(
         [{
             "id": spec.get("id", ""),
@@ -263,9 +283,41 @@ def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
             "oos_mean_mid": headline.get("mean", ""),
             "sharpe_trade": headline.get("sharpe_trade", ""),
             "promoted": str(bool(promoted)),
+            "run_id": run_id,
         }],
         path=ledger_path,
     )
+
+    metrics = metrics_path(exp_dir, spec)
+    if not metrics.is_file():
+        raise LedgerError(
+            f"appended a ran row for run {run_id[:12]}… but found no metrics "
+            f"artifact at {metrics}; refusing to publish an unbound receipt")
+    artifact = json.loads(metrics.read_text())
+    artifact_run_id = str((artifact or {}).get("run_id", "") or "")
+    if artifact_run_id != run_id:
+        raise LedgerError(
+            f"metrics artifact {metrics.name} carries run_id {artifact_run_id[:12]}… "
+            f"but the recorded run is {run_id[:12]}… — refusing to bind a receipt "
+            "to a foreign artifact")
+    # The checklist's ledger item depends on the ``ran`` row this call just
+    # appended, so recompute it here (against the exact ledger) and store the
+    # final verdict in the artifact the receipt's digest covers.
+    from engine.report import accuracy_checklist
+
+    checklist = accuracy_checklist(artifact, spec, ledger_path=ledger_path)
+    artifact["checklist"] = [
+        {"name": item.name, "status": item.status, "evidence": item.evidence}
+        for item in checklist
+    ]
+    artifact["checklist_fails"] = sum(1 for item in checklist if item.status == "FAIL")
+    artifact["recording_mode"] = "recorded"
+    metrics.write_text(json.dumps(artifact, indent=1, default=str))
+    receipt_path(exp_dir, spec).write_text(json.dumps({
+        "run_id": run_id,
+        "spec_hash": spec_hash(spec),
+        "metrics_sha256": file_sha256(metrics),
+    }, indent=1))
 
 
 ARMS_DIR = "arms"

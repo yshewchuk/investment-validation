@@ -129,6 +129,19 @@ evidence. See the models and data component contracts.
     `engine.evaluate` takes an optional `report_dir` that
     redirects only the report and figures, never the run log that
     preregistration reads.
+    Promotion additionally requires a receipt for the exact primary metrics
+    artifact: its unique evaluated-run ID, spec hash and metrics SHA-256 must
+    match the receipt, which is issued only after that run's `ran` row is
+    appended. Promotion requires a matching `ran` row for the spec; when the
+    append-only ledger header has a `run_id` column, that row must match too.
+    A legacy header without the column relies on the receipt's per-run identity.
+    A `planned` row, missing receipt, stale receipt, or metrics from another
+    run refuses with `PROMOTION_LEDGER_RECEIPT_MISSING`; smoke/subset runs may
+    write metrics but cannot issue this receipt. Re-evaluation overwrites the
+    spec-hash-named primary metrics and replaces its receipt only after the
+    corresponding `ran` row is recorded. A no-ledger overwrite therefore
+    invalidates an older receipt, while append-only ledger rows remain intact;
+    a retry needs a newly matching run receipt before promotion.
   - **Mutation-testing PR module selection** (`changed_modules`, shared by
     both mutation workflows): on a pull_request run, `changed_modules` selects
     only the enabled mutation-test modules a PR's diff can affect, never
