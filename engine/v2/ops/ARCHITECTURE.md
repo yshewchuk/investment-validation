@@ -1042,8 +1042,7 @@ unsuccessful rebuild attempts; a new session or head resets that budget.
 Its `complete`/`noop` coverage is the full derived whole-market target set,
 including targets without a written fragment.
 
-**Provider requirements.** `provider_requirements.py` supplies submission/scheduler scalar normalization:
-no account means no requirement; otherwise one `(account, calls)`. Missing estimates remain one call; no I/O, cache or retry occurs there.
+**Provider requirements.** `provider_requirements.py` normalizes scalar input for submission/scheduler: no account means no requirement; otherwise one `(account, calls)`, defaulting omitted calls to one. No I/O, cache or retry occurs there.
 `JobSpec`/parameter wire documents and request digests are unchanged; existing scheduler guards retain their precedence.
 
 | Condition | Outcome |
@@ -1051,6 +1050,7 @@ no account means no requirement; otherwise one `(account, calls)`. Missing estim
 | `parameters.provider_calls_by_account` present, including empty/null | `INVALID_REQUEST` before submission SQL; a stored request stays queued with `PROVIDER_UNAVAILABLE` / `specification_change`, without an attempt or reservation. |
 | Forward-calendar tickers or expected IDs empty/duplicated, or their sets differ | `INVALID_REQUEST` before a submission transaction or job insertion. |
 | Forward-calendar unique nonempty selections have equal sets in different orders | Queued without fetching or executing; no attempt or raw receipt is created by submission. |
+
 `forward_calendar_refresh` remains direct-submit only; only its standalone runner accepts whole-market `tickers=()`.
 `plan_forward_calendar` returns separate Nasdaq/yfinance plans; confirmation tickers derive from discovery claims. Scalar scheduler admission/reservation names one account, so one job does not reserve both sources.
 Native refresh `expected_ids` identify units; unit `expected_keys` carry context tickers, not the paired score request's watchlist and horizon.

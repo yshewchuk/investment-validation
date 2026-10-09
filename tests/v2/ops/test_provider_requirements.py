@@ -1,6 +1,7 @@
 """Scalar normalization preserves wire identity and real admission semantics."""
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -306,3 +307,12 @@ def test_unusable_requirement_does_not_prevent_an_independent_job_from_claiming(
     assert [tuple(row) for row in reservations] == [("healthy", 2)]
     account = conn.execute("SELECT remaining FROM provider_accounts WHERE account = 'acct'").fetchone()
     assert account[0] == 10
+
+
+def test_provider_contract_table_ends_before_following_prose():
+    """A blank boundary keeps the adjacent contract out of the Markdown table."""
+    root = Path(__file__).resolve().parents[3]
+    document = (root / "engine/v2/ops/ARCHITECTURE.md").read_text()
+    preceding, _ = document.split("`forward_calendar_refresh` remains direct-submit only;", 1)
+    assert preceding.rstrip().endswith("|")
+    assert preceding.endswith("\n\n")
