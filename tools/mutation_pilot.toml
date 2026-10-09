@@ -953,7 +953,7 @@ tests = [
     "tests/test_v2_ops_explain_from_logs.py",
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/test_v2_ops_fingerprints_model_scan.py",
-    "tests/test_v2_ops_forward_calendar_store.py",
+    "tests/v2/ops/test_forward_calendar_store.py",
     "tests/test_v2_ops_incremental_data.py",
     "tests/test_v2_ops_incremental_refresh_wiring.py",
     "tests/test_v2_ops_incremental_registration.py",
