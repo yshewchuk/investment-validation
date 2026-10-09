@@ -118,8 +118,9 @@ def _refused_ticker_items(entries: list[dict[str, object]]) -> list[dict[str, ob
     """Project saved refusal entries to ``{ticker, reason}`` records, in input order.
 
     Newer reports save ``ticker`` and ``reason`` on every refusal entry; older
-    reports only carry a string ``row_key`` and ``refusal_code``, so the ticker
-    is the row-key prefix before the first vertical bar and the reason falls
+    reports only carry ``row_key`` and ``refusal_code``, so the ticker is the
+    ``row_key`` object's ``ticker`` field when the key is structured, else the
+    string row-key's prefix before the first vertical bar, and the reason falls
     back to the refusal code. Either projected value must be a non-empty string.
     """
     items: list[dict[str, object]] = []
@@ -127,7 +128,12 @@ def _refused_ticker_items(entries: list[dict[str, object]]) -> list[dict[str, ob
         ticker = entry.get("ticker")
         if not isinstance(ticker, str) or not ticker:
             row_key = entry.get("row_key")
-            ticker = row_key.split("|", 1)[0] if isinstance(row_key, str) else None
+            if isinstance(row_key, dict):
+                ticker = row_key.get("ticker")
+            elif isinstance(row_key, str):
+                ticker = row_key.split("|", 1)[0]
+            else:
+                ticker = None
         reason = entry.get("reason")
         if not isinstance(reason, str) or not reason:
             reason = entry.get("refusal_code")

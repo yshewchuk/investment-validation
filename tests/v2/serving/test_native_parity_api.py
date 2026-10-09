@@ -246,6 +246,32 @@ def test_v12_compat_report_projects_row_key_prefix_and_refusal_code(parity):
         {"ticker": "DDD", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
 
 
+def test_v12_compat_unmatched_report_projects_structured_row_key_and_refusal_code(parity):
+    report = apply_native_refusals(
+        _build_report(), {"HHH|S|2026-01-08": "PRICE_HISTORY_NOT_AVAILABLE"})
+    report["schema_version"] = "native_parity_report.v1.2"
+    entry = report["native_refused_unmatched"][0]
+    entry["key"] = {"ticker": "HHH", "strategy": "S",
+                    "event_date": "2026-01-08", "session": "AMC"}
+    entry["row_key"] = entry.pop("key")
+    del entry["ticker"]
+    del entry["reason"]
+    write_parity_report(report, parity.report_path)
+
+    code, body, _ = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    summary = json.loads(body)
+    assert summary["native_refused_tickers"] == [
+        {"ticker": "HHH", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
+    assert summary["native_refused_unmatched_count"] == 1
+
+    for path in _PARITY_ROUTES:
+        params = {"side": "legacy"} if path.endswith("unpaired") else None
+        code, body, headers = _get(parity.base, path, token=parity.token, params=params)
+        assert code == 200, path
+        _assert_no_store(headers)
+
+
 _PARITY_ROUTES = ("/api/v1/native_parity", "/api/v1/native_parity/mismatches",
                   "/api/v1/native_parity/unpaired")
 
