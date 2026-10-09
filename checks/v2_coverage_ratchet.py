@@ -133,17 +133,50 @@ PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
 PHASE1_SUITE_VERSION = "phase1_coverage_suite.v3"
 
 
+# Baseline tests whose file was renamed (not just moved) after the baseline was written.
+PHASE1_RENAMED = {
+    "tests/test_v2_ops_legacy_defects.py": "tests/v2/ops/test_legacy_defects.py",
+}
+# Relocated tests that are in the suite but were never in the baseline's test_files.
+PHASE1_EXTRA = (
+    "tests/v2/ops/test_cli_rescore.py",
+    "tests/v2/ops/test_forward_calendar_store.py",
+)
+
+
+def _phase1_resolve(root, rel):
+    """Where a baseline-listed test lives now; raise if it cannot be found."""
+    if (root / rel).is_file():
+        return rel
+    renamed = PHASE1_RENAMED.get(rel)
+    if renamed is not None and (root / renamed).is_file():
+        return renamed
+    found = sorted(p.relative_to(root).as_posix()
+                   for p in (root / "tests").rglob(Path(rel).name) if p.is_file())
+    if len(found) != 1:
+        raise FileNotFoundError(
+            f"phase1 baseline test {rel} not found under tests/ "
+            f"({len(found)} basename matches); add it to PHASE1_RENAMED or restore it")
+    return found[0]
+
+
 def phase1_suite(root=ROOT):
-    """The fixed test paths the phase-one coverage measurement and validation run, including the relocated rescore and runner-onboarding tests."""
-    return sorted([p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_ops_*.py")]
-                  + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_data_*.py")]
-                  + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_dashboard_*.py")]
-                  + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_serving_*.py")]
-                  + ["tests/test_diagnosis_comparator.py"]
-                  + ["tests/v2/foundation/test_v2_ops_foundation.py"]
-                  + ["tests/v2/ops/test_cli_rescore.py"]
-                  + ["tests/v2/ops/test_forward_calendar_store.py"]
-                  + ["tests/v2/ops/test_v2_ops_runner_onboarding.py"])
+    """The fixed test paths the phase-one coverage measurement and validation run.
+
+    Root globs plus every baseline-listed test resolved to wherever it lives now
+    (``_phase1_resolve``) plus ``PHASE1_EXTRA``; a missing test raises instead of dropping.
+    """
+    root = Path(root)
+    tests = {p.relative_to(root).as_posix() for pattern in (
+        "test_v2_ops_*.py", "test_v2_data_*.py", "test_v2_dashboard_*.py",
+        "test_v2_serving_*.py") for p in (root / "tests").glob(pattern)}
+    baseline = json.loads((root / PHASE1_BASELINE.relative_to(ROOT)).read_text())
+    tests.update(_phase1_resolve(root, rel) for rel in baseline["test_files"])
+    for rel in PHASE1_EXTRA:
+        if not (root / rel).is_file():
+            raise FileNotFoundError(f"phase1 extra test {rel} not found")
+        tests.add(rel)
+    return sorted(tests)
 
 
 def phase1_measurement_identity(root=ROOT):
