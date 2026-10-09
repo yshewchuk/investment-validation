@@ -622,7 +622,7 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   parent. `computed-moves capture` uses the newest successful Tier-1 yfinance `history(period=max)` entry; missing
   history is `legitimate_empty`, it never fetches live, and dry-run reports cache coverage without writing. The selected source root is authoritative: catalog unit receipts do not substitute for missing or changed Tier-1 entries. The worker binds `as_of` and the fetcher; target selection follows the legacy ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
 - `forward_calendar_store` derives trading calendars from pinned `daily_market` (weekday fallback if absent), then uses the `catalog_path`, `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences in "Primary contracts", plus injected Nasdaq date and yfinance pending-ticker fetchers.
-- Bounded retention: neither store accumulates scan leases into a history-sized list or frame.
+- Bounded retention on the active refresh paths (the exported `daily_by_ticker` helper is unbounded and unused there): neither store accumulates scan leases into a history-sized list or frame.
   `computed_moves_store` retains per-ticker summaries plus at most one bounded ticker chunk, never a whole source table.
   `forward_calendar_store` retains only the distinct `daily_market` session dates and only the existing
   `earnings_events` rows whose `(ticker, event_date)` is a claim key, so retained rows follow sessions and claims, not
