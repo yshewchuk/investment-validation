@@ -73,6 +73,14 @@ producer documents before calling
 `submit_native_score_batch_shadow_if_ready`. See the component architecture
 contract.
 
+`carried_set.CarriedTickerExclusion`, `carried_set.CarriedSetResolution`,
+`carried_set.resolve_carried_set`, and
+`carried_set.build_uncarried_exclusions` expose slice-1 carried-set evidence.
+The resolver returns the ticker sets held in a pinned snapshot; the exclusion
+builder returns sorted `UNCARRIED_TICKER` evidence for candidates missing from
+either required table. Their current consumer is
+`tests/v2/ops/test_carried_set.py`; this slice has no production caller.
+
 <!-- public-interface: registered_artifact, verify_eod_availability -->
 
 ## Consumers
