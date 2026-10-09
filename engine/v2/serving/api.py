@@ -105,6 +105,11 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 _OPERATIONS_STATUS_SCHEMA = "operations_status.v1.0"
 _IMMUTABLE_CACHE = "private, max-age=31536000, immutable"
 
+#: §Native parity: an ops root with no committed succeeded shadow parity job.
+_NATIVE_PARITY_JOB_NOT_FOUND = "NATIVE_PARITY_JOB_NOT_FOUND"
+#: Report-source result distinct from "no configured report" (``None``).
+_JOB_NOT_FOUND = object()
+
 
 class ApiError(Exception):
     """One route or dependency refusal, carrying its own ``Problem`` body."""
@@ -601,6 +606,144 @@ def _parity_malformed() -> ApiError:
                                   "the native parity report is malformed"))
 
 
+# ops-root native-parity discovery: strictly read-only and file-only about the
+# ops catalog (serving may not import ``engine.v2.ops``); the selected report is
+# read through the same verified foundation store reader.
+
+
+def _no_report_source():
+    """No configured report source: the unchanged ``no_report`` result."""
+    return None
+
+
+def _fixed_report_source(report_path):
+    """The explicit ``--native-parity-report-path`` always wins: only it."""
+    return lambda: report_path
+
+
+def _native_parity_report_source(native_parity_report_path, ops_root):
+    """The one precedence rule: an explicit report path, else ops discovery."""
+    if native_parity_report_path is not None:
+        return _fixed_report_source(native_parity_report_path)
+    if ops_root is not None:
+        return _ops_native_parity_report_source(ops_root)
+    return _no_report_source
+
+
+def _job_not_found_report(section: str | None) -> dict:
+    """The typed ``no_report`` body for an ops root with no succeeded job."""
+    reason = {"reason_code": _NATIVE_PARITY_JOB_NOT_FOUND}
+    if section is None:
+        return {"schema_version": native_parity_projection.NATIVE_PARITY_SUMMARY_V1,
+                "status": "no_report", **reason}
+    return {"status": "no_report", **reason}
+
+
+def _native_parity_as_of(idempotency_key: str) -> str | None:
+    """Recover the as-of from a ``nightly:<as_of>:<scope_hash>:native_parity`` key;
+    mirrors ``engine.v2.ops.nightly``'s parser (``partition``/``rpartition``)."""
+    prefix, sep1, rest = idempotency_key.partition(":")
+    if prefix != "nightly" or not sep1:
+        return None
+    as_of, sep2, remainder = rest.partition(":")
+    if not sep2 or not as_of:
+        return None
+    _scope_hash, sep3, stage = remainder.rpartition(":")
+    if not sep3 or stage != "native_parity":
+        return None
+    return as_of
+
+
+def _open_ops_catalog(catalog_path: str):
+    """A strictly read-only ``mode=ro`` connection that never migrates or writes."""
+    conn = projections.sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
+    conn.row_factory = projections.sqlite3.Row
+    return conn
+
+
+#: Jobs only -- a succeeded job with no committed output is still considered.
+_NEWEST_NATIVE_PARITY_JOB = (
+    "SELECT j.job_id, j.idempotency_key, "
+    "(SELECT MAX(a.ended_at) FROM attempts a "
+    " WHERE a.job_id = j.job_id AND a.state = 'succeeded') AS commit_at "
+    "FROM jobs j WHERE j.kind = 'native_parity' AND j.namespace = 'shadow' "
+    "AND j.state = 'succeeded'")
+
+#: The producer registers its report output under the name ``report``.
+_NATIVE_PARITY_REPORT_OUTPUT = (
+    "SELECT ao.artifact_id FROM attempts a "
+    "JOIN attempt_outputs ao ON ao.attempt_id = a.attempt_id "
+    "WHERE a.job_id = ? AND a.state = 'succeeded' AND ao.name = 'report' "
+    "ORDER BY a.attempt_number DESC LIMIT 1")
+
+
+def _newest_native_parity_job(conn) -> str | None:
+    """The newest succeeded shadow parity job id, or ``None`` (ordered by
+    as-of, then output commit time, then job id)."""
+    candidates = []
+    for row in conn.execute(_NEWEST_NATIVE_PARITY_JOB):
+        as_of = _native_parity_as_of(row["idempotency_key"])
+        if as_of is None:
+            continue
+        candidates.append((as_of, row["commit_at"] or "", row["job_id"]))
+    if not candidates:
+        return None
+    return max(candidates)[2]
+
+
+def _selected_native_parity_ref(conn, job_id: str):
+    """The registered ``report`` output ref for a succeeded attempt, or ``None``."""
+    row = conn.execute(_NATIVE_PARITY_REPORT_OUTPUT, (job_id,)).fetchone()
+    if row is None:
+        return None
+    artifact = conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?",
+                            (row["artifact_id"],)).fetchone()
+    if artifact is None:
+        return None
+    try:
+        return projections.from_document(projections.ArtifactRef,
+                                         json.loads(artifact["ref_json"]))
+    except (ValueError, TypeError):
+        # A malformed stored reference is this job's own broken output:
+        # the caller's typed malformed refusal, never an older fallback.
+        raise _parity_malformed() from None
+
+
+def _ops_native_parity_report_source(ops_root):
+    """Discover the newest succeeded shadow ``native_parity`` report read-only.
+
+    The returned callable yields the verified report path, ``_JOB_NOT_FOUND``
+    when none exists, or raises the typed 503 refusal; its connection always closes."""
+    root = os.path.realpath(str(ops_root))
+    catalog_path = os.path.join(root, "catalog.sqlite")
+    store = ArtifactStore(root)
+
+    def source():
+        if not os.path.isfile(catalog_path):
+            return _JOB_NOT_FOUND
+        try:
+            conn = _open_ops_catalog(catalog_path)
+        except projections.sqlite3.Error:
+            raise _parity_malformed() from None
+        try:
+            job_id = _newest_native_parity_job(conn)
+            ref = None if job_id is None else _selected_native_parity_ref(conn, job_id)
+        except projections.sqlite3.Error:
+            raise _parity_malformed() from None
+        finally:
+            conn.close()
+        if job_id is None:
+            return _JOB_NOT_FOUND
+        if ref is None:
+            raise _parity_malformed()
+        try:
+            return str(store.verify(ref))
+        except (ArtifactError, OSError):
+            raise _parity_malformed() from None
+
+    return source
+
+
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
     """Classify report freshness; an ApiError/OSError resolver means unknown current."""
     return native_parity_projection.native_parity_freshness(
@@ -630,13 +773,16 @@ def _native_parity_screen_items(report, section: str, side: str | None, row_key:
         raise _parity_malformed() from None
 
 
-def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, report_path,
+def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, report_source,
                             response: Response, *, section: str | None = None,
                             side: str | None = None, row_key: str | None = None,
                             limit: str | None = None, cursor: str | None = None) -> dict:
     """Load, validate, then serve either the summary or one filtered detail screen."""
-    _status, summary, report = native_parity_projection.native_parity_snapshot(report_path)
+    report_path = report_source()
     response.headers["Cache-Control"] = "no-store"
+    if report_path is _JOB_NOT_FOUND:
+        return _job_not_found_report(section)
+    _status, summary, report = native_parity_projection.native_parity_snapshot(report_path)
     if summary["status"] == "unavailable":
         raise _parity_malformed()
     if report is None:
@@ -675,17 +821,17 @@ def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, repo
 
 
 def _register_native_parity_routes(app, auth, serving_db, resolve_current, cursor_key,
-                                   report_path) -> None:
+                                   report_source) -> None:
     @app.get("/api/v1/native_parity", dependencies=auth)
     def native_parity_summary_route(response: Response):
         return _native_parity_encoded_response(
-            _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response))
+            _native_parity_response(serving_db, resolve_current, cursor_key, report_source, response))
 
     @app.get("/api/v1/native_parity/mismatches", dependencies=auth)
     def native_parity_mismatches_route(response: Response, row_key: str | None = None,
                                        limit: str | None = None, cursor: str | None = None):
         return _native_parity_encoded_response(
-            _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response,
+            _native_parity_response(serving_db, resolve_current, cursor_key, report_source, response,
                                     section="mismatches", row_key=row_key, limit=limit, cursor=cursor))
 
     @app.get("/api/v1/native_parity/unpaired", dependencies=auth)
@@ -693,7 +839,7 @@ def _register_native_parity_routes(app, auth, serving_db, resolve_current, curso
                                      row_key: str | None = None, limit: str | None = None,
                                      cursor: str | None = None):
         return _native_parity_encoded_response(
-            _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response,
+            _native_parity_response(serving_db, resolve_current, cursor_key, report_source, response,
                                     section="unpaired", side=side, row_key=row_key,
                                     limit=limit, cursor=cursor))
 
@@ -704,7 +850,7 @@ def _register_native_parity_routes(app, auth, serving_db, resolve_current, curso
 
 
 def create_app(*, serving_db, store_root, serving_root, token: str, resolver=None,
-              publication_root=None, native_parity_report_path=None) -> FastAPI:
+              publication_root=None, ops_root=None, native_parity_report_path=None) -> FastAPI:
     """Build the read-only API. ``resolver``, given, replaces the default
     current-release resolution with any zero-argument ``Callable[[], str |
     None]`` (may also raise ``ApiError``) -- tests use this to pin a
@@ -713,7 +859,12 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
     scope (``<ops_root>/releases/<scope>``) -- selects the real chain
     (§5.4/P3-1c): its ``CURRENT``, that release's bound ``projection_
     binding.json``, reverified against ``serving_db``. With neither,
-    "current" always resolves to ``None``."""
+    "current" always resolves to ``None``.
+
+    ``ops_root`` is an independent, never-inferred path: when given and no
+    explicit ``native_parity_report_path`` is supplied, the native-parity
+    routes discover the newest committed succeeded shadow report read-only
+    from ``<ops_root>/catalog.sqlite``. An explicit report path always wins."""
     if not token:
         raise ValueError("a nonempty token is required")
     store = ArtifactStore(store_root)
@@ -723,6 +874,7 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
         resolve_current = _publication_resolver(publication_root, serving_db)
     else:
         resolve_current = _no_publication_configured
+    report_source = _native_parity_report_source(native_parity_report_path, ops_root)
     cursor_key = _cursor_key(token)
     app = FastAPI(title="v2 serving read API", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -773,7 +925,7 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
         return _operations_response(publication_root, response, release_id=release_id)
 
     _register_native_parity_routes(app, auth, serving_db, resolve_current, cursor_key,
-                                   native_parity_report_path)
+                                   report_source)
 
     return app
 
@@ -795,6 +947,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                              "(<ops_root>/releases/<scope>); omit for no configured pointer")
     parser.add_argument("--native-parity-report-path", default=None,
                         help="the producer's native parity report JSON; omit for no_report")
+    parser.add_argument("--ops-root", default=None,
+                        help="the ops root (<ops_root>/catalog.sqlite); when given and no "
+                             "explicit report path is set, discover the newest succeeded shadow "
+                             "native_parity report read-only from the ops catalog")
     parser.add_argument("--allow-non-loopback", action="store_true")
     return parser.parse_args(argv)
 
@@ -811,6 +967,7 @@ def main(argv: list[str] | None = None) -> int:
     app = create_app(serving_db=args.serving_db, store_root=args.store_root,
                      serving_root=args.serving_root, token=token,
                      publication_root=args.publication_root,
+                     ops_root=args.ops_root,
                      native_parity_report_path=args.native_parity_report_path)
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
