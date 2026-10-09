@@ -129,6 +129,18 @@ def test_phase1_validation_reports_inventory_and_source_drift():
     assert "COVERAGE_SOURCE_DRIFT" in codes
 
 
+def test_phase1_coverage_keeps_relocated_forward_calendar_store_file(tmp_path):
+    """The moved calendar-store test must stay in the phase-one fixed suite."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_forward_calendar_store.py"
+    assert relative in phase1_suite(tmp_path)
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    assert relative in phase1_suite(tmp_path)
+
+
 def _integration(root, name, body):
     directory = root / "tests/v2/integration"
     directory.mkdir(parents=True, exist_ok=True)

@@ -74,6 +74,12 @@ Bumped to v8: current ``origin/main`` renamed the native-parity test to
 -- and the measurement identity it feeds -- change again; the package
 counts remain from the v6 measurement and are not freshly measured.
 
+Bumped to v9 (merge with main): ``origin/main`` added the relocated
+``tests/v2/ops/test_forward_calendar_store.py`` to the fixed selector list,
+changing the selected inventory and the measurement identity it feeds; as
+with v5-v8 the package counts remain the historical measurement's, not a
+fresh run.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -165,7 +171,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v8"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v9"
 
 
 def phase1_suite(root=ROOT):
@@ -173,12 +179,13 @@ def phase1_suite(root=ROOT):
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_data_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_dashboard_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_serving_*.py")]
-                  + ["tests/test_diagnosis_comparator.py"]
-                  + ["tests/v2/foundation/test_v2_ops_foundation.py"]
+                   + ["tests/test_diagnosis_comparator.py"]
+                   + ["tests/v2/foundation/test_v2_ops_foundation.py"]
                    + ["tests/v2/ops/test_cli_rescore.py"]
-                   + ["tests/v2/ops/test_v2_ops_engineering.py"]
+                   + ["tests/v2/ops/test_forward_calendar_store.py"]
                    + ["tests/v2/ops/test_native_parity_pairing.py"]
-                  + ["tests/v2/ops/test_v2_ops_nightly_completion.py"])
+                   + ["tests/v2/ops/test_v2_ops_engineering.py"]
+                   + ["tests/v2/ops/test_v2_ops_nightly_completion.py"])
 
 
 def phase1_measurement_identity(root=ROOT):

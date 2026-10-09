@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v8",
+  "suite_version": "phase1_coverage_suite.v9",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -75,7 +75,6 @@
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/test_v2_ops_fingerprints_model_scan.py",
     "tests/test_v2_ops_fixtures.py",
-    "tests/test_v2_ops_forward_calendar_store.py",
     "tests/test_v2_ops_generation_binding_lineage.py",
     "tests/test_v2_ops_generation_effects.py",
     "tests/test_v2_ops_health.py",
@@ -143,11 +142,12 @@
     "tests/test_v2_serving_publication_binding.py",
     "tests/v2/foundation/test_v2_ops_foundation.py",
     "tests/v2/ops/test_cli_rescore.py",
+    "tests/v2/ops/test_forward_calendar_store.py",
     "tests/v2/ops/test_native_parity_pairing.py",
     "tests/v2/ops/test_v2_ops_engineering.py",
     "tests/v2/ops/test_v2_ops_nightly_completion.py"
   ],
-  "source_hash": "sha256:d62ac8503cd677ba6300b07dfcc3fc152a988029fa40776827db7ded46d71f06",
+  "source_hash": "sha256:56d7bf3eb6aa11a4b62385198efe03a80ae769ada533b128855fc1cce06c92a4",
   "packages": {
     "engine.v2.contracts": {
       "executed": 802,
