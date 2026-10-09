@@ -88,12 +88,14 @@ def _easter(year: int) -> date:
 
 def _holidays(year: int) -> set[date]:
     """Scheduled NYSE rules with observations, plus the documented one-off full closures."""
-    out = {_nth_weekday(year, 1, 0, 3), _nth_weekday(year, 2, 0, 3),
+    out = {_nth_weekday(year, 2, 0, 3),
            _easter(year) - timedelta(days=2), _last_weekday(year, 5, 0),
            _observed(date(year, 7, 4)), _nth_weekday(year, 9, 0, 1),
            _nth_weekday(year, 11, 3, 4), _observed(date(year, 12, 25))}
     if date(year, 1, 1).weekday() != 5:  # a Saturday New Year takes no Friday observance
         out.add(_observed(date(year, 1, 1)))
+    if year >= 1998:  # MLK Day became a market holiday in 1998
+        out.add(_nth_weekday(year, 1, 0, 3))
     if year >= 2022:  # Juneteenth became a market holiday in 2022
         out.add(_observed(date(year, 6, 19)))
     one_offs = (date(2012, 10, 29), date(2012, 10, 30), date(2018, 12, 5), date(2025, 1, 9))
