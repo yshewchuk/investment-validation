@@ -275,6 +275,7 @@ def test_run_legacy_script_sets_private_signal_path_and_clears_stale_file(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("INVESTING_PLAN_ROOT", str(run_dir))
     result = legacy_adapter.run_legacy_script(
         tmp_path, runner_id,
         args=entry["fixed_arm_args"][primary_arm_id],
@@ -318,6 +319,7 @@ def test_real_subprocess_refusal_signal_round_trip(tmp_path, monkeypatch):
         f"_emit_holdout_refusal_signal({json.dumps(pins)})\n"
         "sys.exit(1)\n")
 
+    monkeypatch.setenv("INVESTING_PLAN_ROOT", str(run_dir))
     result = legacy_adapter.run_legacy_script(
         run_dir, legacy_adapter._FIXED_ARM_RUNNER, args=(),
         declared_runtime_sources=())

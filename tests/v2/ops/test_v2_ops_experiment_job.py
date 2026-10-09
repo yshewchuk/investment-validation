@@ -886,8 +886,10 @@ def test_refusal_failure_effect_appends_refused_row_only_under_the_live_fence(tm
 
     real_append = experiments._append_refusal_row
 
-    def append_then_crash(experiment_id, refused_variant_id, ledger_path):
-        real_append(experiment_id, refused_variant_id, ledger_path)
+    def append_then_crash(experiment_id, refused_variant_id, ledger_path, *,
+                          refusal_pins=None):
+        real_append(experiment_id, refused_variant_id, ledger_path,
+                    refusal_pins=refusal_pins)
         raise OSError("simulated catalog commit failure after ledger append")
 
     try:
@@ -963,7 +965,8 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
 
     real_append = experiments._append_refusal_row
 
-    def append_fails(experiment_id, refused_variant_id, ledger_path):
+    def append_fails(experiment_id, refused_variant_id, ledger_path, *,
+                     refusal_pins=None):
         raise OSError("simulated ledger append failure")
 
     monkeypatch.setattr(experiments, "_append_refusal_row", append_fails)
@@ -1009,19 +1012,84 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
         attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
                                "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
         assert attempt["state"] == "failed"
-        assert "LEASE_LOST" in attempt["failure_json"]
+        assert "HOLDOUT_ACCESS_DENIED" in attempt["failure_json"]
+        assert "LEASE_LOST" not in attempt["failure_json"]
         assert "snapshot-489" not in attempt["failure_json"]
         assert "refusal_receipt" not in attempt["failure_json"]
         assert attempt["ended_at"] is not None
         job = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
                            (claim.job_id,)).fetchone()
-        assert job["state"] == "retry_wait"
-        assert "LEASE_LOST" in job["failure_json"]
+        assert job["state"] == "failed"
+        assert "HOLDOUT_ACCESS_DENIED" in job["failure_json"]
+        assert "LEASE_LOST" not in job["failure_json"]
         assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
                             "WHERE released_at IS NULL").fetchone()[0] == 0
     finally:
         conn.close()
+
+
+def test_real_dispatch_refusal_pin_conflict_across_run_directories(tmp_path, monkeypatch):
+    """Issue #489: the pin-only identity sidecar beside the shared checkout
+    ledger carries a holdout refusal's identity across separate attempt
+    receipt directories. Two real worker dispatches of the same resolved
+    variant into distinct run directories -- the second with a changed rolling
+    as-of pin -- each surface their own genuine refusal receipt; the first
+    coordinator failure commit appends exactly one refused row and persists its
+    pins, and the second commit is refused ``IDEMPOTENCY_CONFLICT`` without
+    duplicating the row."""
+    from tests.v2.ops.test_experiment_holdout_refusal import (
+        _RANDOM,
+        _dispatch,
+        _spec,
+        _spec_document,
+    )
+    from tests.v2.research.test_experiment_trades import _holdout_snapshot
+
+    spec = _spec()
+    checkout = tmp_path / "checkout"
+    _planned_ledger(checkout / "experiments" / "LEDGER.csv",
+                    experiment_id=spec.experiment_id)
+    snapshot_conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM])
+    try:
+        for index, (run_name, as_of_month) in enumerate(
+                (("run-a", "2025-01"), ("run-b", "2025-05"))):
+            claim_root = tmp_path / f"claim-{run_name}"
+            claim_root.mkdir()
+            conn, clock, claim, _, _ = _claimed_primary_effect(
+                claim_root, key=f"primary-refusal-{run_name}",
+                document=_spec_document(spec), checkout=checkout)
+            try:
+                monkeypatch.setenv("INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL",
+                                   str(tmp_path / run_name / "holdout_refusal_signal.json"))
+                with pytest.raises(OpsError) as refused:
+                    _dispatch(monkeypatch, spec, tmp_path / run_name, repository,
+                              snapshot, mode="primary", checkout=checkout,
+                              as_of_month=as_of_month)
+                receipt = refused.value.problem.details["refusal_receipt"]
+                assert receipt["failure_code"] == "HOLDOUT_ACCESS_DENIED"
+                assert receipt["holdout_as_of_month"] == as_of_month
+                effect = effects_graph._experiment_refusal_failure_effect(
+                    claim, refused.value.problem, code_source=checkout,
+                    refusal_receipt=receipt)
+                assert effect is not None
+                outcome = Outcome(False, "verified_dead", 1, refused.value.problem)
+                if index == 0:
+                    commit_attempt(conn, claim.attempt_id, claim.fence, outcome,
+                                   clock=clock, failure_effects=effect)
+                else:
+                    with pytest.raises(OpsError) as conflict:
+                        commit_attempt(conn, claim.attempt_id, claim.fence, outcome,
+                                       clock=clock, failure_effects=effect)
+                    assert conflict.value.code == "IDEMPOTENCY_CONFLICT"
+            finally:
+                conn.close()
+        assert [row for row in _ledger_rows(
+            checkout / "experiments" / "LEDGER.csv")
+            if row["stage"] == "refused"] == [
+                {"id": spec.experiment_id, "stage": "refused"}]
+    finally:
+        snapshot_conn.close()
 
 
 def test_cli_reconcile_settles_a_stranded_holdout_refusal_once(tmp_path, monkeypatch):

@@ -333,22 +333,26 @@ class Service:
 
         ``_replay_recovery_refusal`` runs through ``reconcile_attempt``'s
         ``recovery_effect`` callback, so the replay and the settlement share
-        one immediate catalog transaction: a caller-visible permanent
-        ``VALIDATION_FAILED``/``IDEMPOTENCY_CONFLICT`` becomes the attempt's
-        recorded failure, and either both commit or the transaction rolls back
-        and the attempt stays ``recovery_pending``. Only those permanent codes
-        are returned as a problem; every other exception escapes so the caller
-        leaves the attempt pending with its reservations held. ``None`` -- no
-        marker, or a successful replay -- preserves the generic proven-dead
-        settlement.
+        one immediate catalog transaction and either both commit or the
+        transaction rolls back. No marker returns ``None``, preserving the
+        generic proven-dead settlement; a successful refusal replay returns a
+        redacted ``HOLDOUT_ACCESS_DENIED``, settling the attempt as the same
+        non-retryable refusal the worker recorded rather than retryable
+        ``LEASE_LOST``; a caller-visible permanent
+        ``VALIDATION_FAILED``/``IDEMPOTENCY_CONFLICT`` returns its typed
+        problem as the recorded failure; every other exception escapes so the
+        attempt stays ``recovery_pending``, reservations held.
         """
         def recovery_effect(conn):
             try:
-                self._replay_recovery_refusal(attempt_row)
+                replayed = self._replay_recovery_refusal(attempt_row)
             except OpsError as exc:
                 if exc.code in _PERMANENT_REFUSAL_REPLAY_CODES:
                     return exc.problem
                 raise
+            if replayed:
+                return make_problem("HOLDOUT_ACCESS_DENIED",
+                                    "registered experiment loader refused holdout data")
             return None
 
         reconcile_attempt(self.conn, attempt_row["attempt_id"],
