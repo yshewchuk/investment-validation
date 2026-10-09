@@ -84,7 +84,8 @@ two holdouts specified in [#373](https://github.com/yshewchuk/investment-validat
 Shared membership definitions live in `foundation.experiment_holdouts`.
 The explicit rolling as-of month and both membership versions accompany the
 snapshot id in returned columns; exclusion labels are in `holdout_exclusions`
-frame attributes. Ambiguous canonical identity/date matches are excluded and
+frame attributes. Conflicting event IDs at one ticker/date/session or cluster,
+and other ambiguous canonical identity/date matches, are excluded and
 labelled `ambiguous`. Released eligible rows are labelled `post-release selection`.
 A requested `event_ids` population containing any excluded event raises the
 non-retryable `DataError(HOLDOUT_ACCESS_DENIED)` during population validation,

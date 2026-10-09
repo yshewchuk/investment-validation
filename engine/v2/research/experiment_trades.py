@@ -126,6 +126,8 @@ def _exclude_holdouts(rows, events, policy, context, purpose, event_ids):
     duplicates = set(events.loc[events["event_id"].duplicated(False), "event_id"])
     duplicates.update(events.loc[events["event_cluster_id"].notna()
         & events.duplicated(["ticker", "event_cluster_id"], keep=False), "event_id"])
+    duplicates.update(events.loc[
+        events.duplicated(["ticker", "event_date", "session"], keep=False), "event_id"])
     rows = rows.merge(
         events.rename(columns={"event_date": "canonical_date", "ticker": "canonical_ticker"})
         .drop_duplicates("event_id"),

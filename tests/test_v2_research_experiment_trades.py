@@ -264,10 +264,10 @@ def _holdout_snapshot(tmp_path, members, event_overrides=None, extra_trades=()):
 
 # Golden IDs for the versioned SHA-256 definition, not a search using the
 # classifier under test. EVENT-5/30 are random members; EVENT-0/1/2 are not.
-_SAFE = ("EVENT-0", "2024-01-15", None)
-_RANDOM = ("EVENT-5", "2024-01-15", None)
+_SAFE = ("EVENT-0", "2024-01-01", None)
+_RANDOM = ("EVENT-5", "2024-01-16", None)
 _ROLLING = ("EVENT-1", "2024-09-15", None)
-_OVERLAP = ("EVENT-30", "2024-09-15", None)
+_OVERLAP = ("EVENT-30", "2024-09-16", None)
 _AMBIGUOUS = ("EVENT-2", "2024-01-15", "2024-02-15")
 
 
@@ -426,5 +426,35 @@ def test_null_identity_and_random_exclusions_are_typed_and_json_safe(tmp_path, i
             evidence = caught.value.problem.details["holdout_exclusions"]
         assert evidence == expected
         assert json.loads(json.dumps(evidence, allow_nan=False)) == expected
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("purpose", ["training", "selection", "sweep"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_duplicate_canonical_coordinates_cannot_alias_a_random_holdout(tmp_path, purpose, explicit):
+    alias = (_RANDOM[0], _SAFE[1], None)
+    independent = ("EVENT-2", "2023-12-01", None)
+    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_SAFE, alias, independent])
+    output = tmp_path / "report.json"
+    try:
+        kwargs = dict(as_of_month="2024-10", purpose=purpose)
+        if explicit:
+            # The random alias is outside the requested population, but still
+            # makes its other ID's canonical identity ambiguous.
+            with pytest.raises(DataError) as caught:
+                frame = experiment_trades.load_trades(repository, snapshot, "STR-THRU",
+                                                      event_ids=[_SAFE[0]], **kwargs)
+                output.write_text(str(frame["ret"].mean()))
+            assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+            assert caught.value.problem.details["holdout_exclusions"] == [
+                {"event_id": _SAFE[0], "memberships": ["ambiguous"]}]
+            assert not output.exists()
+        else:
+            frame = experiment_trades.load_trades(repository, snapshot, "STR-THRU", **kwargs)
+            assert frame["event_id"].tolist() == [independent[0]]
+            assert frame.attrs["holdout_exclusions"] == [
+                {"event_id": _SAFE[0], "memberships": ["ambiguous"]},
+                {"event_id": _RANDOM[0], "memberships": ["ambiguous", "random"]}]
     finally:
         conn.close()
