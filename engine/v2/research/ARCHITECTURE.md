@@ -114,7 +114,8 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 
 | Prediction/population input condition | Outcome |
 |---|---|
-| Missing, unknown, corrupt, or mismatched snapshot (design #372 R2) | Non-retryable `SNAPSHOT_UNRESOLVED`; no source fallback. |
+| Snapshot cannot be resolved or its identity does not match (design #372 R2) | Non-retryable `SNAPSHOT_UNRESOLVED`; no source fallback. |
+| Integrity or object failure during a table scan | Repository's typed refusal, such as `MANIFEST_CORRUPT` or `OBJECT_CORRUPT`; no partial returned frame. |
 | Missing table or malformed table contract | Repository's typed refusal; no partial returned frame. |
 | Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
