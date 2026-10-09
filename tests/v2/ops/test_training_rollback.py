@@ -576,9 +576,10 @@ def test_cli_plan_rollback_rejects_explicit_empty_release_id_without_saving_a_pl
         tmp_path, capsys):
     """An explicitly supplied empty ``--release-id`` is still a supplied value.
 
-    The shared argument's default is ``None`` so an omitted id is
-    distinguishable from ``--release-id ""``; rollback refuses the explicit
-    empty value as ``INVALID_REQUEST`` before saving any plan artifact.
+    The shared argument's default is ``""`` but it records whether it was
+    supplied, so an omitted id is distinguishable from ``--release-id ""``;
+    rollback refuses the explicit empty value as ``INVALID_REQUEST`` before
+    saving any plan artifact.
     """
     root = tmp_path / "ops"
     assert cli.main(["--root", str(root), "init"]) == 0
