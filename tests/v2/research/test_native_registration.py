@@ -1,4 +1,5 @@
 """Native admission binds synthetic canonical metadata before any outcome access."""
+import ast
 import builtins
 import io
 import json
@@ -11,6 +12,7 @@ from threading import Barrier
 
 import pytest
 
+from checks.package_readmes import directive
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
@@ -666,3 +668,19 @@ def test_invalid_scope_shape_refuses_before_any_pin_scan_or_write(source, scope,
     assert source.repository.pins == source.repository.scans == []
     assert _catalog(source.conn) == before
     assert _objects(source.store) == objects
+
+
+def test_native_ops_imports_are_explicitly_public_and_have_a_documented_consumer():
+    """Cover this outside-engine consumer, which the engine import graph omits."""
+    root = Path(__file__).resolve().parents[3]
+    readme = (root / "engine/v2/ops/README.md").read_text()
+    public = directive(readme, "public-interface")
+    imports = [node for node in ast.walk(ast.parse(Path(native.__file__).read_text()))
+               if isinstance(node, ast.ImportFrom) and node.module.startswith("engine.v2.ops.")]
+    assert imports
+    for node in imports:
+        for alias in node.names:
+            assert alias.name in public
+            qualified = node.module.removeprefix("engine.v2.ops.") + "." + alias.name
+            assert f"`{qualified}`" in readme
+    assert "`experiments/native_registration.py`" in readme
