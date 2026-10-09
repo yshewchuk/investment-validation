@@ -6,8 +6,8 @@ a second run must actually rebuild (the bug these tests exist for), and an
 interrupted run must resume rather than restart 2,853 network fetches.
 """
 from __future__ import annotations
-# packages: engine.v2.data
 
+# packages: engine.v2.data
 import json
 
 import pandas as pd
