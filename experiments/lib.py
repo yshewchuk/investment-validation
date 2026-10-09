@@ -262,11 +262,17 @@ def file_sha256(path: Path | str) -> str:
 
 def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
                       results: Mapping[str, Any], promoted: bool = False,
-                      ledger_path: Path | None = None) -> None:
+                      ledger_path: Path | None = None,
+                      publish_receipt: bool = True) -> None:
     """Append this run's ``ran`` row, refresh the metrics artifact's accuracy
     checklist against that exact ledger, finalize it to ``"recorded"`` and
     publish the receipt binding the run ID, spec hash and SHA-256 of the exact
-    bytes promotion will later read."""
+    bytes promotion will later read.
+
+    ``publish_receipt=False`` is the ledger-only legacy mode for outcomes with
+    no primary metrics artifact (e.g. a null result where the incumbent won):
+    it appends the ``ran`` row and returns without validating, finalizing or
+    receipting anything, so the row alone can never authorize promotion."""
     from datetime import datetime, timezone
 
     exp_dir = Path(exp_dir)
@@ -287,6 +293,8 @@ def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
         }],
         path=ledger_path,
     )
+    if not publish_receipt:
+        return
 
     metrics = metrics_path(exp_dir, spec)
     if not metrics.is_file():

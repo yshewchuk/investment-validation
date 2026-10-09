@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -583,6 +584,7 @@ def main() -> int:
     results: dict = {
         "spec_id": spec.get("id"),
         "spec_hash": sha,
+        "run_id": uuid.uuid4().hex,
         "preregistration": prereg,
         "equity_mode": "cashflow",
         "elapsed_s": 0.0,

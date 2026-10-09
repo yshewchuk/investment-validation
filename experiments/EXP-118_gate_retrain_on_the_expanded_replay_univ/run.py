@@ -23,6 +23,7 @@ Arms (all pre-registered in spec.yaml before any run):
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -216,6 +217,10 @@ def write_report(spec: dict, arms: dict, baseline: dict, verdicts: dict, snapsho
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-ledger", action="store_true",
+                        help="evaluate and write artifacts without appending to the experiment ledger")
+    args = parser.parse_args()
     spec = lib.load_spec(HERE / "spec.yaml")
     baseline = champion_baseline()
     log("loading panel once for all arms")
@@ -259,12 +264,14 @@ def main() -> int:
         **results,
         "spec_id": spec.get("id"),
         "run_id": run_id,
+        "recording_mode": "unrecorded",
         "headline": headline,
         "headline_stage": "wf_oos",
         "preregistration": check_preregistration(spec, HERE),
     }
     lib.metrics_path(HERE, spec).write_text(json.dumps(artifact, indent=1, default=str))
-    lib.record_evaluation(HERE, spec, {"run_id": run_id, "headline": headline})
+    if not args.no_ledger:
+        lib.record_evaluation(HERE, spec, {"run_id": run_id, "headline": headline})
 
     print()
     print(f"{'arm':14s} {'n':>8} {'r':>7} {'lift':>8} {'gated':>8} {'win':>6}  verdict")

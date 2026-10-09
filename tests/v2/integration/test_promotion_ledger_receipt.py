@@ -8,13 +8,16 @@ metrics edited after recording — plus the crash boundary: the ``ran`` append
 commits, the receipt is never published, and promotion refuses until a
 matching receipt is issued. A clean recorded run is accepted: the recorder
 finalized its checklist against the ledger, so a good run is not blocked by
-the evaluator's pre-recording snapshot.
+the evaluator's pre-recording snapshot. The ledger-only legacy mode
+(``publish_receipt=False``) keeps its ``ran`` row while no receipt or
+finalized metrics ever appear, so promotion still refuses there.
 
 # packages: engine.v2.evaluation
 """
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -363,6 +366,45 @@ def test_crash_after_ran_append_before_receipt_refuses(tmp_root):
     assert results["checklist_fails"] == 0
     promoted, reasons = promote.decide(results, _weak_champion())
     assert promoted, reasons
+
+
+def test_ledger_only_legacy_mode_records_row_without_receipt(tmp_root, monkeypatch):
+    """The ledger-only legacy mode: a null outcome with no metrics artifact.
+
+    ``record_evaluation(..., publish_receipt=False)`` appends the ``ran`` row
+    and stops — nothing is validated, finalized or receipted — so the row alone
+    must never authorize promotion: the real promotion path refuses with
+    PROMOTION_LEDGER_RECEIPT_MISSING and the row survives untouched.
+    """
+    spec = _spec(exp_id="EXP-916")
+    folder = _experiment(tmp_root, spec, "EXP-916")
+    runid_ledger = lib.LEDGER_PATH
+    runid_ledger.write_text(
+        "id,spec_hash,date,stage,oos_mean_mid,sharpe_trade,promoted,run_id\n")
+    run_id = uuid.uuid4().hex
+
+    lib.record_evaluation(folder, spec, {"run_id": run_id, "headline": {}},
+                          publish_receipt=False)
+
+    rows = lib.ledger_read(runid_ledger)
+    assert rows["id"].tolist() == ["EXP-916"]
+    assert rows["stage"].tolist() == ["ran"]
+    assert rows["spec_hash"].tolist() == [lib.spec_hash(spec)]
+    assert rows["run_id"].tolist() == [run_id]
+    assert not lib.metrics_path(folder, spec).exists()
+    assert not lib.receipt_path(folder, spec).exists()
+
+    metrics = lib.metrics_path(folder, spec)
+    with pytest.raises(promote.PromotionRefused,
+                       match=promote.PROMOTION_LEDGER_RECEIPT_MISSING):
+        promote.validate_recording_receipt(spec, metrics)
+
+    # Only experiment discovery is stubbed to the temporary tree: the ledger
+    # append above and the promotion validator below both stay real.
+    monkeypatch.setattr(lib, "EXPERIMENTS_DIR", tmp_root / "experiments")
+    champion = tmp_root / "champion.json"
+    champion.write_text(json.dumps(_weak_champion()))
+    assert promote.main(["EXP-916", "--champion-metrics", str(champion), "--dry-run"]) == 2
 
 
 def test_non_object_receipt_json_refuses(tmp_root, monkeypatch):
