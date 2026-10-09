@@ -9,7 +9,13 @@ from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.experiments import experiment_spec_from_document, resolve_experiment_plan
-from engine.v2.research.experiment_exits import EnteredPosition, PositionLeg, walk_fixed_day
+from engine.v2.research.experiment_exits import (
+    EnteredPosition,
+    PositionLeg,
+    exit_report_frame,
+    walk_exit,
+    walk_fixed_day,
+)
 from tests.data_scan_support import (
     catalog_and_store,
     commit_tables,
@@ -27,13 +33,14 @@ def test_recipe_contract_table_boundary():
     document = REPO_ROOT / "engine/v2/ops/ARCHITECTURE.md"
     before, table = document.read_text().split("| Experiment execution condition | Outcome |", 1)
     assert before.endswith("\n\n"), "the experiment table needs its own Markdown block"
-    assert "invalid fixed-day exit recipe/source/fill" in table
+    assert "invalid fixed-day or target/stop exit recipe/source/fill" in table
 
 
 def test_failure_contract_table():
     document = REPO_ROOT / "engine/v2/research/ARCHITECTURE.md"
     rows = document.read_text().splitlines()
-    for condition in ("Malformed position or leg record", "Missing required leg mark",
+    for condition in ("Malformed position or leg record",
+                      "Missing required leg mark or mark past held-leg expiry",
                       "Unusable quote reaching pricing",
                       "Insufficient calendar coverage"):
         row, = [line for line in rows if line.startswith(f"| {condition} |")]
@@ -70,6 +77,15 @@ def _rows():
     return rows
 
 
+def _rows_falling():
+    rows = _rows()
+    for offset in range(len(DATES)):
+        call, put = rows[2 * offset], rows[2 * offset + 1]
+        call["bid"], call["ask"] = 6.0 - 2.0 * offset, 6.4 - 2.0 * offset
+        put["bid"], put["ask"] = 0.5, 0.9
+    return rows
+
+
 def _snapshot(conn, clock, store, rows, *, scope="shadow", receipt_id="r1", dates=DATES):
     tables, contracts = {}, {}
     sources = {"option_chains": rows, "daily_market": [
@@ -98,6 +114,27 @@ def _walk(source, *, rows=None, days=2, alpha=0.25, positions=None, dates=DATES)
                           economic_params=plan.economic_params), snapshot
 
 
+def _exit_spec(recipe, alpha=0.25):
+    return experiment_spec_from_document({
+        "experiment_id": "synthetic-exit", "hypothesis": "synthetic",
+        "primary_arm_id": "fixed", "arms": ["fixed"], "folds": ["fold"],
+        "economic_params": {"exit": recipe, "fill": alpha},
+        "price_source": "option_chains",
+    })
+
+
+def _walk_target_stop(source, *, rows=None, target=2.0, stop=-1.0, days=3,
+                      alpha=0.25, positions=None, dates=DATES):
+    conn, clock, store = source
+    snapshot = _snapshot(conn, clock, store, _rows() if rows is None else rows, dates=dates)
+    recipe = {"kind": "target_stop", "trading_days": days,
+              "target_pnl": target, "stop_pnl": stop}
+    plan = resolve_experiment_plan(_exit_spec(recipe, alpha))
+    return walk_exit(Repository(conn, store), snapshot,
+                     (_position(),) if positions is None else positions,
+                     economic_params=plan.economic_params), snapshot
+
+
 @pytest.mark.parametrize("alpha,expected", [(0.0, 1.8), (0.25, 2.4), (0.5, 3.0),
                                            (0.75, 3.6), (1.0, 4.2)])
 def test_fill_and_provenance(source, alpha, expected):
@@ -113,6 +150,7 @@ def test_fill_and_provenance(source, alpha, expected):
     assert result.mark_source == "option_chains"
     assert result.fill_convention == "alpha_ladder"
     assert result.fill_alpha == alpha
+    assert result.exit_fill_alpha == alpha
     assert result.snapshot_id == snapshot.snapshot_id
     assert result.trade_id == "trade-a"
     with pytest.raises(FrozenInstanceError):
@@ -137,6 +175,35 @@ def test_mark_refusal(source, missing_day):
     assert caught.value.problem.category == "internal"
     assert caught.value.problem.retryable is False
     assert caught.value.problem.details == {"trade_id": "trade-a", "session": missing_day}
+
+
+def test_target_stop_mark_refusal(source):
+    # Both held contracts' rows are gone for an intermediate session the walk
+    # must reach before any threshold crossing; the whole target/stop call
+    # refuses with the same typed missing-mark failure as the fixed-day walk.
+    rows = [row for row in _rows() if row["obs_date"] != pd.Timestamp(DATES[1])]
+    with pytest.raises(DataError) as caught:
+        _walk_target_stop(source, rows=rows, target=100.0, stop=-100.0)
+    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert caught.value.problem.category == "internal"
+    assert caught.value.problem.retryable is False
+    assert caught.value.problem.details == {"trade_id": "trade-a", "session": DATES[1]}
+
+
+def test_target_stop_expiry_bound(source):
+    # A held leg expiring before the target/stop horizon's final day refuses
+    # once the walker reaches the first session past that expiry.
+    expiry = "2024-05-29"
+    position = replace(_position(), legs=tuple(replace(leg, expiry=expiry)
+                                               for leg in _position().legs))
+    rows = [dict(row, expiry=pd.Timestamp(expiry)) for row in _rows()
+            if row["obs_date"] <= pd.Timestamp(expiry)]
+    with pytest.raises(DataError) as caught:
+        _walk_target_stop(source, rows=rows, target=100.0, stop=-100.0,
+                          positions=(position,))
+    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert caught.value.problem.details == {"trade_id": "trade-a",
+                                            "session": DATES[3]}
 
 
 def test_recipe_identity(source):
@@ -292,3 +359,137 @@ def test_pinned_replay(source):
     assert first[0].pnl != other[0].pnl
     assert conn.total_changes == writes
     assert {p: p.read_bytes() for p in store.root.rglob("*") if p.is_file()} == objects
+
+
+REPORT_FIELDS = ("trade_id", "exit_reason", "exit_day", "mark_based_pnl", "pnl_basis",
+                 "mark_source", "fill_convention", "fill_alpha", "exit_fill_alpha",
+                 "snapshot_id", "ambiguous_exit")
+
+
+def test_walk_exit_fixed_day_matches(source):
+    conn, clock, store = source
+    snapshot = _snapshot(conn, clock, store, _rows())
+    repository = Repository(conn, store)
+    economics = resolve_experiment_plan(_spec(2, 0.25)).economic_params
+    via_exit = walk_exit(repository, snapshot, (_position(),), economic_params=economics)
+    fixed = walk_fixed_day(repository, snapshot, (_position(),), economic_params=economics)
+    assert via_exit == fixed
+    assert via_exit[0].ambiguous_exit is False
+
+
+def test_target_exit(source):
+    (result,), _ = _walk_target_stop(source, target=2.0, stop=-1.0)
+    assert result.reason == "target"
+    assert result.exit_date == DATES[2]
+    assert result.visited_dates == DATES[:3]
+    assert result.pnl == pytest.approx(2.4)
+    assert result.ambiguous_exit is False
+    assert result.pnl_basis == "mark_based"
+    assert result.mark_source == "option_chains"
+    assert result.fill_convention == "alpha_ladder"
+    assert result.fill_alpha == 0.25
+    assert result.exit_fill_alpha == 0.25
+
+
+def test_stop_exit(source):
+    (result,), _ = _walk_target_stop(source, rows=_rows_falling(), target=5.0,
+                                     stop=-3.0)
+    assert result.reason == "stop"
+    assert result.exit_date == DATES[1]
+    assert result.visited_dates == DATES[:2]
+    assert result.pnl == pytest.approx(-4.6)
+    assert result.ambiguous_exit is False
+    assert result.fill_alpha == 0.25
+    assert result.exit_fill_alpha == 0.25
+
+
+def test_spanning_quote_selects_ambiguous_stop(source):
+    rows = _rows()
+    rows[2]["bid"], rows[2]["ask"] = 0.1, 20.0
+    (result,), _ = _walk_target_stop(source, rows=rows, target=1.0, stop=-1.0)
+    assert result.reason == "stop"
+    assert result.ambiguous_exit is True
+    assert result.exit_date == DATES[1]
+    assert result.fill_alpha == 0.25
+    assert result.exit_fill_alpha == 0.0
+    assert result.pnl < 0
+    assert result.pnl <= -1.0
+
+
+def test_no_hit_falls_back_to_fixed_day(source):
+    (result,), _ = _walk_target_stop(source, target=100.0, stop=-100.0)
+    assert result.reason == "fixed_day"
+    assert result.exit_date == DATES[3]
+    assert result.visited_dates == DATES
+    assert result.pnl == pytest.approx(3.9)
+    assert result.ambiguous_exit is False
+    assert result.fill_alpha == 0.25
+    assert result.exit_fill_alpha == 0.25
+
+
+def test_changed_threshold_changes_plan_identity():
+    first = resolve_experiment_plan(_exit_spec(
+        {"kind": "target_stop", "trading_days": 3, "target_pnl": 2.0, "stop_pnl": -1.0}))
+    second = resolve_experiment_plan(_exit_spec(
+        {"kind": "target_stop", "trading_days": 3, "target_pnl": 3.0, "stop_pnl": -1.0}))
+    assert first.json_bytes() != second.json_bytes()
+    assert dict(first.economic_params["exit"])["target_pnl"] == 2.0
+
+
+@pytest.mark.parametrize("recipe", [
+    {"kind": "target_stop", "trading_days": 0, "target_pnl": 1.0, "stop_pnl": -1.0},
+    {"kind": "target_stop", "trading_days": True, "target_pnl": 1.0, "stop_pnl": -1.0},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": True, "stop_pnl": -1.0},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": -1.0, "stop_pnl": 1.0},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": 1.0, "stop_pnl": 0.0},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": float("inf"), "stop_pnl": -1.0},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": float("nan"), "stop_pnl": -1.0},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": 10**400, "stop_pnl": -1.0},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": 1.0, "stop_pnl": -(10**400)},
+    {"kind": "target_stop", "trading_days": 2, "target_pnl": 1.0, "stop_pnl": -1.0,
+     "unused": 1},
+])
+def test_target_stop_recipe_validation(recipe):
+    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+        resolve_experiment_plan(_exit_spec(recipe))
+    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
+        walk_exit(None, None, (), economic_params={"exit": recipe, "fill": 0.25})
+
+
+@pytest.mark.parametrize("economics", [
+    {"exit": {"kind": "fixed_day", "trading_days": 2}, "fill": 10**400},
+    {"exit": {"kind": "target_stop", "trading_days": 2, "target_pnl": 1.0,
+              "stop_pnl": -1.0}, "fill": 10**400},
+])
+def test_oversized_fill_validation(economics):
+    # An int past float range overflows ``math.isfinite``; the spec check
+    # refuses it as an invalid experiment spec and the exit walk refuses it
+    # as invalid exit economics.
+    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+        resolve_experiment_plan(replace(_spec(), economic_params=economics))
+    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
+        walk_exit(None, None, (), economic_params=economics)
+
+
+def test_report_frame_columns_and_provenance(source):
+    decisions, snapshot = _walk_target_stop(source, target=2.0, stop=-1.0)
+    frame = exit_report_frame(decisions)
+    assert list(frame.columns) == list(REPORT_FIELDS)
+    row = frame.iloc[0]
+    assert row["trade_id"] == "trade-a"
+    assert row["exit_reason"] == "target"
+    assert row["exit_day"] == DATES[2]
+    assert row["mark_based_pnl"] == pytest.approx(2.4)
+    assert row["pnl_basis"] == "mark_based"
+    assert row["mark_source"] == "option_chains"
+    assert row["fill_convention"] == "alpha_ladder"
+    assert row["fill_alpha"] == 0.25
+    assert row["exit_fill_alpha"] == 0.25
+    assert row["snapshot_id"] == snapshot.snapshot_id
+    assert bool(row["ambiguous_exit"]) is False
+
+
+def test_report_frame_empty_is_stable():
+    frame = exit_report_frame(())
+    assert list(frame.columns) == list(REPORT_FIELDS)
+    assert len(frame) == 0
