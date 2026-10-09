@@ -54,6 +54,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -1605,6 +1606,12 @@ def evaluate(
     results: dict[str, Any] = {
         "spec_id": spec.get("id"),
         "spec_hash": sha,
+        # Unique identity of THIS run; the receipt binds it so promotion can
+        # refuse a receipt issued for a different run of the same spec.
+        "run_id": uuid.uuid4().hex,
+        # Provisional until record_evaluation() appends the ``ran`` row and
+        # publishes the receipt.
+        "recording_mode": "unrecorded",
         "preregistration": prereg,
         "equity_mode": equity_mode,
         "elapsed_s": 0.0,
@@ -1798,6 +1805,9 @@ def evaluate(
                 log_path.relative_to(paths.ROOT) if log_path.is_relative_to(paths.ROOT)
                 else log_path)
             results["transaction_log"]["sha256"] = _file_sha256(log_path)
+        # A rewrite invalidates the previous run's receipt: an overwrite must not
+        # leave an older receipt able to authorize the new bytes.
+        (results_dir / f"receipt_{sha[:12]}.json").unlink(missing_ok=True)
         (results_dir / f"metrics_{sha[:12]}.json").write_text(
             json.dumps(results, indent=1, default=str))
         append_run_log(run_dir, {

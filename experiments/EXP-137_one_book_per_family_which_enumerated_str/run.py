@@ -263,7 +263,6 @@ def main(record: bool = True) -> None:
     print(f"[EXP-137] acceptance: {acceptance}", flush=True)
 
     spy = ecommon.load_spy_daily()
-    already = set(lib.ledger_read().query("stage == 'ran'")["spec_hash"])
     for fam in FAMILIES:
         rows = e134run.apply_exit(trades[trades["arm"] == fam], "conditional")
         mid = rows[np.isclose(rows["fill_alpha"].astype(float), MID)]
@@ -293,8 +292,8 @@ def main(record: bool = True) -> None:
                 full["fill_alpha"].astype(float), MID)], d=run_dir: sections(
                     results, events, built, k, m, d),
             write_report=True)
-        if record and lib.spec_hash(cell) not in already:
-            lib.record_evaluation(HERE, cell, result.results)
+        if record:
+            lib.record_evaluation_result(result, cell)
         print(f"[EXP-137] {fam}: report {result.report_path}", flush=True)
 
 

@@ -26,6 +26,8 @@ synthetic challengers on both sides of every rule.
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -86,6 +88,14 @@ def metrics_view(doc: Mapping[str, Any]) -> dict[str, Any]:
 #: honest recalibration lands the Brier skill near zero, and this tolerance
 #: absorbs sampling noise while still catching real anti-calibration.
 MIN_BRIER_SKILL = -0.05
+
+
+#: Refusal code for promotion not authorized by a receipt for the exact run.
+PROMOTION_LEDGER_RECEIPT_MISSING = "PROMOTION_LEDGER_RECEIPT_MISSING"
+
+
+class PromotionRefused(RuntimeError):
+    """The primary metrics artifact is not bound to a recorded run."""
 
 
 def decide(
@@ -210,8 +220,116 @@ def decide(
 # --------------------------------------------------------------------------
 
 
+def validate_recording_receipt(spec: Mapping[str, Any], metrics_file: Path | str,
+                               *, ledger_path: Path | None = None) -> dict[str, Any]:
+    """Refuse unless the metrics artifact is a recorded run of ``spec`` (fail-closed);
+    return the parsed artifact, raising :class:`PromotionRefused` otherwise."""
+    sha = lib.spec_hash(spec)
+    metrics_file = Path(metrics_file)
+    if not metrics_file.is_file():
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: no metrics artifact at {metrics_file}")
+
+    # One read binds everything: run_id/recording_mode checks, the receipt's
+    # digest comparison and the returned artifact all come from these bytes, so
+    # a file swapped in after the digest check cannot change what promotion
+    # consumes (read-parse-digest on a single snapshot, no re-read at return).
+    try:
+        raw = metrics_file.read_bytes()
+        artifact = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact unreadable: {exc}")
+    if not isinstance(artifact, dict):
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact "
+            f"{metrics_file.name} is not a JSON object")
+    run_id = str(artifact.get("run_id", "") or "")
+    if not run_id:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact {metrics_file.name} "
+            "carries no run_id — it was not written by a recorded evaluation")
+    if artifact.get("recording_mode") != "recorded":
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact {metrics_file.name} "
+            f"is recording_mode={artifact.get('recording_mode')!r}, not 'recorded' — "
+            "its run was never finalized by the ledger recorder")
+    artifact_spec_hash = str(artifact.get("spec_hash", "") or "")
+    if artifact_spec_hash != sha:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact {metrics_file.name} "
+            f"carries spec_hash {artifact_spec_hash[:12]}… but this spec is {sha[:12]}… "
+            "— the artifact belongs to a different spec (a copied foreign artifact "
+            "cannot authorize promotion for this one)")
+
+    receipt_file = metrics_file.with_name(f"receipt_{sha[:12]}.json")
+    if not receipt_file.is_file():
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: no recording receipt {receipt_file.name} "
+            "beside the primary metrics artifact")
+    try:
+        receipt = json.loads(receipt_file.read_text())
+    except (OSError, ValueError) as exc:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: recording receipt unreadable: {exc}")
+    if not isinstance(receipt, dict):
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: recording receipt "
+            f"{receipt_file.name} is not a JSON object")
+    missing = [k for k in ("run_id", "spec_hash", "metrics_sha256") if not receipt.get(k)]
+    if missing:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: receipt missing {missing}")
+    if not isinstance(receipt["run_id"], str):
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: receipt run_id "
+            f"{receipt['run_id']!r} is not a string — a receipt is only "
+            "issued for a recorded run and always binds a string run ID")
+    if receipt["spec_hash"] != sha:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: receipt spec_hash "
+            f"{str(receipt['spec_hash'])[:12]}… does not match this spec {sha[:12]}…")
+    if receipt["run_id"] != run_id:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: receipt run_id "
+            f"{receipt['run_id'][:12]}… does not match the metrics artifact run "
+            f"{run_id[:12]}… — a receipt from a different run cannot authorize this one")
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    if receipt["metrics_sha256"] != actual_sha:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: receipt metrics_sha256 does not match "
+            "the artifact's bytes — the metrics were modified after recording")
+
+    ledger = Path(ledger_path or lib.LEDGER_PATH)
+    if not ledger.is_file():
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: no ledger at {ledger} to cite")
+    with open(ledger, newline="") as fh:
+        reader = csv.DictReader(fh)
+        columns = reader.fieldnames or []
+        rows = list(reader)
+    # A legacy append-only header without run_id must not block its experiments:
+    # the receipt pins the run, so compare run_id only when the column exists.
+    if "run_id" in columns:
+        matched = any(row.get("stage") == "ran" and row.get("spec_hash") == sha
+                      and row.get("run_id") == run_id for row in rows)
+    else:
+        matched = any(row.get("stage") == "ran" and row.get("spec_hash") == sha
+                      for row in rows)
+    if not matched:
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: no ran ledger row for spec {sha[:12]}… "
+            f"and run {run_id[:12]}… — the run was not recorded under this ledger")
+    return artifact
+
+
 def load_experiment_metrics(exp_id: str, root: Path | None = None) -> tuple[dict, dict]:
-    """(spec, headline results) for an experiment's primary spec."""
+    """(spec, headline results) for an experiment's primary spec, refusing
+    unless its metrics artifact carries a valid recording receipt.
+
+    The artifact already carries the checklist the recorder finalized against
+    the ledger, so it is validated and returned as parsed — never rewritten.
+    """
     dirs = lib.experiment_dirs(root)
     number = lib.parse_experiment_id(exp_id)
     if number not in dirs:
@@ -227,8 +345,7 @@ def load_experiment_metrics(exp_id: str, root: Path | None = None) -> tuple[dict
             f"{folder} has no results for its PRIMARY spec (spec_hash {sha[:12]}…). "
             "Run the experiment's primary spec first; grid cells are never the headline."
         )
-    results = json.loads(metrics_path.read_text())
-    return spec, results
+    return spec, validate_recording_receipt(spec, metrics_path)
 
 
 def champion_from_registry(model_id: str) -> dict[str, Any]:
@@ -323,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         spec, results = load_experiment_metrics(args.exp_id)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, PromotionRefused) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
 
