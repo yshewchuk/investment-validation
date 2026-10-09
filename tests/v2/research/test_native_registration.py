@@ -687,3 +687,14 @@ def test_native_ops_imports_are_explicitly_public_and_have_a_documented_consumer
     architecture = (root / "engine/v2/ops/ARCHITECTURE.md").read_text()
     assert "`experiments/native_registration.py`" in architecture
     assert "`catalog.transaction` around `register_hypothesis_in_transaction`" in architecture
+
+
+def test_native_registration_tests_use_the_supported_engine_mutation_matrix():
+    """Top-level consumers run in the matrix; the pilot mutates engine paths only."""
+    from tools import mutation_pilot
+
+    config = mutation_pilot.load_config()
+    assert "tests/v2/research/test_native_registration.py" in mutation_pilot.test_files(
+        config, "ops_cli")
+    assert all(path.startswith("engine/") for path in mutation_pilot.mutate_files(
+        config, "ops_cli"))
