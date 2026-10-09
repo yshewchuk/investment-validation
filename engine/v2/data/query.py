@@ -287,9 +287,9 @@ def _leading_key_may_match(record: FragmentRecord, contract: TableContract, key_
 def _time_may_match(record: FragmentRecord, interval: TimeInterval | None) -> bool:
     if interval is None or record.time_min is None or record.time_max is None:
         return True
-    if interval.end_exclusive is not None and record.time_min >= _normalize_bound(interval.end_exclusive):
+    if interval.end_exclusive is not None and _normalize_bound(record.time_min) >= _normalize_bound(interval.end_exclusive):
         return False
-    if interval.start_inclusive is not None and record.time_max < _normalize_bound(interval.start_inclusive):
+    if interval.start_inclusive is not None and _normalize_bound(record.time_max) < _normalize_bound(interval.start_inclusive):
         return False
     return True
 
@@ -344,7 +344,7 @@ def compile_row_matcher(contract: TableContract, query: DataQuery) -> Callable[[
             value = row.get(column)
             if value is None:
                 return False
-            comparable = _comparable_value(value, physical)
+            comparable = _normalize_bound(value) if physical == "string" else _comparable_value(value, physical)
             if start_norm is not None and comparable < start_norm:
                 return False
             if end_norm is not None and comparable >= end_norm:
