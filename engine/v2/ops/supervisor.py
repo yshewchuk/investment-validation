@@ -304,27 +304,18 @@ class Service:
                 executor.persist_members(self.conn, row["attempt_id"], proof.known)
             if proof.proven:
                 # Replay the refusal effect only AFTER the ownership proof; a
-                # quarantined (unproven) attempt keeps the generic path.
+                # quarantined (unproven) attempt keeps the generic path. The
+                # callback runs inside reconcile_attempt's own settlement
+                # transaction, so a permanent refusal failure and its
+                # settlement commit or roll back together.
                 try:
-                    self._replay_recovery_refusal(row)
-                except OpsError as exc:
-                    if exc.code not in _PERMANENT_REFUSAL_REPLAY_CODES:
-                        # Any other typed failure is transient here (an
-                        # unavailable resource, a stale expectation): the
-                        # attempt stays recovery_pending with its reservations
-                        # held, and a later tick replays it.
-                        continue
-                    # Permanent typed evidence/conflict failure: another tick
-                    # replays the same refusal, so settle the proven-dead
-                    # attempt with THIS problem as its recorded failure. Only
-                    # now, past the ownership proof, are reservations released.
-                    reconcile_attempt(self.conn, row["attempt_id"],
-                                      process_state="verified_dead", clock=self.clock,
-                                      failure=exc.problem)
-                    continue
+                    self.reconcile_proven_attempt(row)
                 except Exception:
-                    # A recognized receipt whose effect could not be recorded
-                    # leaves the attempt recovery_pending, reservations held
+                    # Any typed failure the callback does not convert to a
+                    # permanent evidence/conflict settlement is transient here
+                    # (an unavailable resource, a stale expectation), and a
+                    # recognized receipt whose effect could not be recorded
+                    # leaves the attempt recovery_pending too, reservations held
                     # (ARCHITECTURE.md "pinned experiment trade loader"):
                     # never settle it as a plain LEASE_LOST with the ledger
                     # row unappended. Nothing is reported from this loop --
@@ -332,8 +323,37 @@ class Service:
                     # stranded event when the attempt was fenced off, so
                     # repeated ticks must not repeat the stderr line.
                     continue
-            state = "verified_dead" if proof.proven else "quarantined"
-            reconcile_attempt(self.conn, row["attempt_id"], process_state=state, clock=self.clock)
+                continue
+            reconcile_attempt(self.conn, row["attempt_id"],
+                              process_state="quarantined", clock=self.clock)
+
+    def reconcile_proven_attempt(self, attempt_row):
+        """Settle an already-proven-dead attempt, replaying its holdout refusal
+        effect inside the settlement transaction.
+
+        ``_replay_recovery_refusal`` runs through ``reconcile_attempt``'s
+        ``recovery_effect`` callback, so the replay and the settlement share
+        one immediate catalog transaction: a caller-visible permanent
+        ``VALIDATION_FAILED``/``IDEMPOTENCY_CONFLICT`` becomes the attempt's
+        recorded failure, and either both commit or the transaction rolls back
+        and the attempt stays ``recovery_pending``. Only those permanent codes
+        are returned as a problem; every other exception escapes so the caller
+        leaves the attempt pending with its reservations held. ``None`` -- no
+        marker, or a successful replay -- preserves the generic proven-dead
+        settlement.
+        """
+        def recovery_effect(conn):
+            try:
+                self._replay_recovery_refusal(attempt_row)
+            except OpsError as exc:
+                if exc.code in _PERMANENT_REFUSAL_REPLAY_CODES:
+                    return exc.problem
+                raise
+            return None
+
+        reconcile_attempt(self.conn, attempt_row["attempt_id"],
+                          process_state="verified_dead", clock=self.clock,
+                          recovery_effect=recovery_effect)
 
     def _replay_recovery_refusal(self, attempt_row) -> bool:
         """Re-append a dead attempt's holdout refusal ledger row before settling it.
@@ -374,20 +394,14 @@ class Service:
             return False
         unusable = OpsError(make_problem(
             "VALIDATION_FAILED", "the holdout refusal receipt is missing or unusable"))
-        if not path.is_file():
-            if known_refusal:
-                raise unusable
-            return False
         try:
+            if not path.is_file():
+                raise unusable
             document = json.loads(path.read_text())
-        except ValueError:
-            if known_refusal:
-                raise unusable
-            return False
+        except (OSError, ValueError):
+            raise unusable
         if not isinstance(document, dict) or "refusal_receipt" not in document:
-            if known_refusal:
-                raise unusable
-            return False
+            raise unusable
         job = self.conn.execute("SELECT spec_json FROM jobs WHERE job_id = ?",
                                  (attempt_row["job_id"],)).fetchone()
         claim = SimpleNamespace(spec=load_json(JobSpec, job["spec_json"]),

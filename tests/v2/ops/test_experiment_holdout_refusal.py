@@ -392,6 +392,34 @@ def test_failure_ordering_and_replay_recovery(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_refusal_signal_replace_failure_propagates_before_receipt(
+        tmp_path, monkeypatch):
+    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM])
+    root = tmp_path / "run"
+    root.mkdir(parents=True, exist_ok=True)
+    signal = root / "holdout_refusal_signal.json"
+    real_replace = experiment_trades.os.replace
+
+    def guarded_replace(src, dst, *args, **kwargs):
+        if Path(dst) == signal:
+            raise OSError("signal write blocked")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setenv("INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL", str(signal))
+    try:
+        monkeypatch.setattr(experiment_trades.os, "replace", guarded_replace)
+        with pytest.raises(OSError, match="signal write blocked"):
+            experiment_trades.load_trades(
+                repository, snapshot, "STR-THRU", as_of_month="2025-01",
+                event_ids=[_RANDOM[0]])
+        assert not signal.exists()
+        assert not (root / "holdout_refusal_receipt.json").exists()
+        assert _refused_rows(
+            tmp_path / "checkout" / "experiments" / "LEDGER.csv") == []
+    finally:
+        conn.close()
+
+
 def test_concurrent_refusal_row_append_is_exactly_once(tmp_path):
     ledger = tmp_path / "LEDGER.csv"
     ledger.write_text(_HEADER)

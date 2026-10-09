@@ -93,8 +93,13 @@ before returning a frame to metric/report writers. Missing/invalid context,
 an as-of month later than the current UTC month,
 unknown purposes and an entirely excluded population receive the same refusal.
 There is no date fallback, partial returned frame, report write or retry here.
-Final holdout reads are unavailable. This read-only interface does not write
-durable refusal receipts or ledger rows.
+Final holdout reads are unavailable. For a pinned population denial (valid
+context and a refused explicit or bulk population), experiment orchestration
+configures `INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL`; the loader writes a private,
+atomically replaced signal containing the refusal code and four holdout pins
+before raising `HOLDOUT_ACCESS_DENIED`. The loader writes no ledger row or
+report. Signal write,
+sync, or replacement errors propagate instead of returning the typed refusal.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout
@@ -123,10 +128,11 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
-| Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
+| Cache, retry, transaction, partial write, replay | No cache or automatic retry; no ledger or report writes; complete scans precede return; identical pinned inputs return identical rows (R6). The configured refusal signal is the sole durable write on `HOLDOUT_ACCESS_DENIED`; its I/O errors propagate. |
 
-These readers preserve no durable refusal receipt or economic variant identity
-and cannot authorize the separate user-only final holdout read.
+These readers preserve no ledger receipt or economic variant identity and
+cannot authorize the separate user-only final holdout read. The refusal signal
+is orchestration input, not authorization for a final holdout read.
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment

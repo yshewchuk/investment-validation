@@ -29,6 +29,7 @@ from __future__ import annotations
 import fcntl
 import os
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -212,8 +213,21 @@ def prove_ownership_gone(conn: sqlite3.Connection, attempt_id: str, *,
 
 
 def reconcile_attempt(conn: sqlite3.Connection, attempt_id: str, *, process_state: str,
-                      clock: Clock, failure: Problem | None = None) -> str:
+                      clock: Clock, failure: Problem | None = None,
+                      recovery_effect: Callable[[sqlite3.Connection],
+                                                 Problem | None] | None = None) -> str:
     """Resolve a ``recovery_pending`` attempt from the executor's process verdict.
+
+    When ``recovery_effect`` is given, it runs inside the same immediate catalog
+    transaction as the settlement — on cancellation-atomic refusal replay, the
+    effect and its typed outcome settle or roll back with the attempt, never in
+    between. It is called only after the current job and attempt states are
+    read: a job already ``cancelling`` skips the callback and settles through
+    the existing cancellation path; otherwise the callback runs while the
+    transaction is held, and a returned Problem becomes the terminal failure of
+    the existing settlement while ``None`` preserves the generic proven-dead
+    settlement. Callback exceptions propagate, so the transaction rolls back
+    and the attempt remains ``recovery_pending``.
 
     Returns the attempt's state afterwards: still ``recovery_pending`` unless the
     tree is verified gone.
@@ -229,6 +243,10 @@ def reconcile_attempt(conn: sqlite3.Connection, attempt_id: str, *, process_stat
                          (process_state, attempt_id))
             return "recovery_pending"
         job = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (attempt["job_id"],)).fetchone()
+        if recovery_effect is not None and job["state"] != "cancelling":
+            effect_failure = recovery_effect(conn)
+            if effect_failure is not None:
+                failure = effect_failure
         return _settle(conn, job, attempt_id, process_state, now, failure=failure)
 
 

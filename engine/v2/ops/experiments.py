@@ -798,6 +798,9 @@ REFUSAL_RECEIPT_SCHEMA = "experiment_holdout_refusal.v1.0"
 REFUSAL_PIN_FIELDS = ("snapshot_id", "holdout_as_of_month",
                       "random_membership_version", "rolling_membership_version")
 
+#: The canonical schema a private pin-only refusal identity sidecar declares.
+REFUSAL_PIN_SIDECAR_SCHEMA = "experiment_refusal_pin.v1.0"
+
 
 def _is_holdout_denied(exc) -> bool:
     """Whether a caught exception is the loader's typed holdout refusal.
@@ -851,7 +854,80 @@ def _exclusive_file_lock(path):
         handle.close()
 
 
-def _append_refusal_row(experiment_id: str, variant_id, ledger_path) -> None:
+def _refusal_pin_sidecar_identity(experiment_id: str, variant_id,
+                                  refusal_pins) -> dict:
+    """Validate one refusal-pin mapping and build its canonical sidecar identity.
+
+    The mapping must carry exactly the four :data:`REFUSAL_PIN_FIELDS`, each a
+    non-blank string; anything else is the typed ``VALIDATION_FAILED`` refusal,
+    raised before the sidecar or any CSV row is touched.
+    """
+    if (not isinstance(refusal_pins, Mapping)
+            or set(refusal_pins) != set(REFUSAL_PIN_FIELDS)):
+        raise fail("VALIDATION_FAILED",
+                   "refusal pins must carry exactly the four identity fields",
+                   details={"fields": list(REFUSAL_PIN_FIELDS)})
+    malformed = [name for name in REFUSAL_PIN_FIELDS
+                 if not isinstance(refusal_pins[name], str) or not refusal_pins[name].strip()]
+    if malformed:
+        raise fail("VALIDATION_FAILED",
+                   "refusal pins must be non-blank strings",
+                   details={"fields": malformed})
+    return {"schema_version": REFUSAL_PIN_SIDECAR_SCHEMA,
+            "experiment_id": experiment_id, "variant_id": variant_id,
+            **{name: refusal_pins[name] for name in REFUSAL_PIN_FIELDS}}
+
+
+def _persist_refusal_pin_sidecar(ledger: Path, experiment_id: str, identity: dict) -> None:
+    """Persist one pin-only identity sidecar beside the ledger, atomically.
+
+    The filename is the SHA-256 of ``experiment_id``, so the ID is never
+    exposed in a directory listing, and the private JSON binds only the schema
+    version, experiment ID, variant ID and the four pins -- no event IDs and no
+    exclusion details. A new file is written to a same-directory temp file,
+    flushed and fsynced, ``os.replace``d into place, and its parent directory
+    fsynced. An existing sidecar is parsed and compared by canonical JSON: a
+    malformed file or a changed identity is the typed ``IDEMPOTENCY_CONFLICT``
+    before any CSV append.
+    """
+    digest = hashlib.sha256(experiment_id.encode("utf-8")).hexdigest()
+    path = ledger.parent / f".refusal_pin.{digest}.json"
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except (OSError, ValueError):
+            raise fail("IDEMPOTENCY_CONFLICT",
+                       "existing refusal pin sidecar is invalid",
+                       details={"experiment_id": experiment_id}) from None
+        if json.dumps(existing, sort_keys=True, separators=(",", ":"),
+                      default=str) != canonical:
+            raise fail("IDEMPOTENCY_CONFLICT",
+                       "existing refusal pin sidecar differs",
+                       details={"experiment_id": experiment_id})
+        return
+    temp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=ledger.parent,
+                                       prefix=".refusal_pin.", suffix=".tmp", delete=False)
+    temp_path = Path(temp.name)
+    try:
+        temp.write(json.dumps(identity, indent=2, sort_keys=True))
+        temp.flush()
+        os.fsync(temp.fileno())
+        temp.close()
+        os.replace(temp_path, path)
+        directory_fd = os.open(ledger.parent,
+                               os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temp.close()
+        temp_path.unlink(missing_ok=True)
+
+
+def _append_refusal_row(experiment_id: str, variant_id, ledger_path, *,
+                        refusal_pins: dict[str, str] | None = None) -> None:
     from datetime import datetime, timezone
 
     from experiments.lib import LEDGER_COLUMNS, ledger_append
@@ -864,17 +940,25 @@ def _append_refusal_row(experiment_id: str, variant_id, ledger_path) -> None:
                 stored = [row.get("spec_hash") for row in csv.DictReader(fh)
                           if row.get("id") == experiment_id
                           and row.get("stage") == "refused"]
-        if variant_id in stored:
-            return
-        if stored:
+        if stored and variant_id not in stored:
             raise fail("IDEMPOTENCY_CONFLICT",
                        "a refused ledger row carries a different variant identity",
                        details={"experiment_id": experiment_id})
+        if refusal_pins is not None:
+            identity = _refusal_pin_sidecar_identity(experiment_id, variant_id, refusal_pins)
+            _persist_refusal_pin_sidecar(ledger, experiment_id, identity)
+        if variant_id in stored:
+            return
         row = {"id": experiment_id, "spec_hash": variant_id,
                "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
                "stage": "refused", "oos_mean_mid": "", "sharpe_trade": "",
                "promoted": "False"}
         ledger_append([{name: row.get(name, "") for name in LEDGER_COLUMNS}], path=ledger)
+
+
+def _refusal_pins_from_details(details) -> dict:
+    """The four validated loader pins, keyed by :data:`REFUSAL_PIN_FIELDS`."""
+    return {name: details[name] for name in REFUSAL_PIN_FIELDS}
 
 
 def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
@@ -949,7 +1033,8 @@ def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
             raise fail("INVALID_REQUEST",
                        "a refusal ledger path is required when ledgering is enabled")
         if not defer_refusal_ledger:
-            _append_refusal_row(spec.experiment_id, variant_id, refusal_ledger_path)
+            _append_refusal_row(spec.experiment_id, variant_id, refusal_ledger_path,
+                                refusal_pins=_refusal_pins_from_details(details))
     receipt.status = "refused"
     receipt.evidence["failure_code"] = "HOLDOUT_ACCESS_DENIED"
     receipt.evidence["failure_details"] = details

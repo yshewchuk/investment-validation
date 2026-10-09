@@ -996,11 +996,13 @@ def _experiment_refusal_failure_effect(claim, problem, *, code_source, store_roo
     ledger_path = experiments_ledger_path(Path(checkout_root))
     experiment_id = receipt["experiment_id"]
     variant_id = receipt["variant_id"]
+    refusal_pins = {name: receipt[name] for name in REFUSAL_PIN_FIELDS}
 
     def _append_refusal(_conn: sqlite3.Connection) -> None:
         from engine.v2.ops.experiments import _append_refusal_row
 
-        _append_refusal_row(experiment_id, variant_id, ledger_path)
+        _append_refusal_row(experiment_id, variant_id, ledger_path,
+                            refusal_pins=refusal_pins)
 
     return _append_refusal
 
