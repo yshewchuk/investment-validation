@@ -28,7 +28,7 @@ boundary stays exactly where it already is -- ``build_candidate``'s own
 ``store``/``conn`` parameters.  This module names no
 ``engine.v2.ops.decision_commit``, ``...ledger_history_import``,
 ``...legacy_actions`` or ``engine.dashboard.nightly`` symbol (the legacy
-board's own write path); ``tests/test_v2_ops_native_shadow_render.py`` walks
+board's own write path); ``tests/v2/ops/test_native_shadow_render.py`` walks
 this module's AST and refuses each one statically.
 
 A native scoring failure propagates uncaught: there is deliberately no
