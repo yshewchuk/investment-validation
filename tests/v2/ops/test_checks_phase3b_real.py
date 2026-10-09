@@ -80,7 +80,7 @@ def test_finality_control_omits_override_and_accepts_joint_coverage(monkeypatch)
             is_final=matched, detail="final" if matched else "split coverage",
             tickers=len(wanted), covered=len(joint))
 
-    monkeypatch.setattr(phase3b_real.v2_finality, "session_finality", correct)
+    monkeypatch.setattr(phase3b_real.legacy_adapter, "session_finality", correct)
     metrics = phase3b_real._finality_metrics("2026-09-17")
 
     assert calls == [{}, {}]
@@ -95,7 +95,7 @@ def test_finality_control_fails_closed_on_split_ticker_false_positive(monkeypatc
             chain_share=1.0, is_final=True, detail="final",
             tickers=len(tuple(tickers)), covered=1)
 
-    monkeypatch.setattr(phase3b_real.v2_finality, "session_finality", faulty)
+    monkeypatch.setattr(phase3b_real.legacy_adapter, "session_finality", faulty)
     metrics = phase3b_real._finality_metrics("2026-09-17")
 
     assert metrics["split_is_final"] is True

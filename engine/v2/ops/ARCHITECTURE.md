@@ -1118,7 +1118,7 @@ It does not import its layer-7.0 peers `engine.v2.serving`/
 `engine.v2.dashboard`), lazily or otherwise. Legacy reads go through the
 one declared adapter module, `engine/v2/ops/legacy_adapter.py`
 (`checks/legacy_adapters.json`); its own further legacy `engine.*` imports
-are the adapter's job and are not layer-checked v2 dependencies.
+are the adapter's job and are not layer-checked v2 dependencies. `finality.py` never imports the adapter: it takes legacy reads and monkeypatch-seam lookups as explicit `FinalityReads` callbacks the adapter supplies, and `legacy_adapter.session_finality`/`resolve_final_session`/`covered_tickers` bind them.
 
 `native_board_universe.py` deliberately never imports `engine.score`,
 `engine.structures`, `engine.replay`, or `engine.fills` — the first two
