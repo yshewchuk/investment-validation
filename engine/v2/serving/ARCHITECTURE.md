@@ -100,7 +100,13 @@ unrecognized publication identity is unknown to clients; failed reads do not
 change a release pin. Serving never retries. Reads have no write or partial
 artifact.
 
-`GET /api/v1/native_parity` exposes report identity and the existing aggregate.
+`GET /api/v1/native_parity` exposes report identity and the existing aggregate,
+plus `native_refused_tickers`, the saved refusal entries from both refusal
+collections projected as `{ticker, reason}` records. Older refusal rows
+without a top-level `ticker` use `row_key.ticker` when `row_key` is a
+structured key object, or the ticker prefix when `row_key` is a string; the
+reason comes from the saved `refusal_code`. The list is empty when the report
+has no refusals.
 `/native_parity/mismatches` pages row-key/dimension entries with known fields
 marked agree/differ and stored values only for differing fields;
 `/native_parity/unpaired?side=legacy|native` pages unpaired row keys.
