@@ -240,7 +240,11 @@ def validate_recording_receipt(spec: Mapping[str, Any], metrics_file: Path | str
     except (OSError, ValueError) as exc:
         raise PromotionRefused(
             f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact unreadable: {exc}")
-    run_id = str((artifact or {}).get("run_id", "") or "")
+    if not isinstance(artifact, dict):
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact "
+            f"{metrics_file.name} is not a JSON object")
+    run_id = str(artifact.get("run_id", "") or "")
     if not run_id:
         raise PromotionRefused(
             f"{PROMOTION_LEDGER_RECEIPT_MISSING}: metrics artifact {metrics_file.name} "
@@ -261,6 +265,10 @@ def validate_recording_receipt(spec: Mapping[str, Any], metrics_file: Path | str
     except (OSError, ValueError) as exc:
         raise PromotionRefused(
             f"{PROMOTION_LEDGER_RECEIPT_MISSING}: recording receipt unreadable: {exc}")
+    if not isinstance(receipt, dict):
+        raise PromotionRefused(
+            f"{PROMOTION_LEDGER_RECEIPT_MISSING}: recording receipt "
+            f"{receipt_file.name} is not a JSON object")
     missing = [k for k in ("run_id", "spec_hash", "metrics_sha256") if not receipt.get(k)]
     if missing:
         raise PromotionRefused(

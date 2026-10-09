@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from engine.data import store  # noqa: E402
+from engine.evaluate import check_preregistration  # noqa: E402
 from engine.features import load_panel  # noqa: E402
 from engine.models.registry import load_registry  # noqa: E402
 from engine.models.training import gate as gate_mod  # noqa: E402
@@ -224,6 +226,17 @@ def main() -> int:
         arms[name] = run_arm(name, strategy, fty, panel)
 
     verdicts = judge(spec, arms)
+    primary = arms["str_thru_2020"]
+    headline = {
+        "mean": primary["gated_mean_ret"],
+        "gate_lift": primary["gate_lift"],
+        "gated_win_rate": primary["gated_win_rate"],
+        "base_mean_ret": primary["base_mean_ret"],
+        "base_win_rate": primary["base_win_rate"],
+        "n_passed": primary["n_passed"],
+        "threshold": primary["threshold"],
+        "r": primary["r"],
+    }
     results = {
         "spec_hash": lib.spec_hash(spec),
         "snapshot": spec.get("data_snapshot"),
@@ -238,11 +251,20 @@ def main() -> int:
         pd.DataFrame(arm["by_year"]).to_csv(out / f"by_year_{name}.csv", index=False)
 
     report = write_report(spec, arms, baseline, verdicts, str(spec.get("data_snapshot")))
-    lib.record_evaluation(
-        HERE,
-        spec,
-        {"headline": {"mean": arms["str_thru_2020"]["gated_mean_ret"]}},
-    )
+    # The spec-hash primary artifact must exist with this run's ID before the
+    # recorder appends the ``ran`` row and publishes the receipt. Never write a
+    # receipt here: record_evaluation issues one only after that append.
+    run_id = uuid.uuid4().hex
+    artifact = {
+        **results,
+        "spec_id": spec.get("id"),
+        "run_id": run_id,
+        "headline": headline,
+        "headline_stage": "wf_oos",
+        "preregistration": check_preregistration(spec, HERE),
+    }
+    lib.metrics_path(HERE, spec).write_text(json.dumps(artifact, indent=1, default=str))
+    lib.record_evaluation(HERE, spec, {"run_id": run_id, "headline": headline})
 
     print()
     print(f"{'arm':14s} {'n':>8} {'r':>7} {'lift':>8} {'gated':>8} {'win':>6}  verdict")

@@ -4,7 +4,9 @@ A promotion must be authorized by the primary metrics artifact whose bytes a
 ``ran`` ledger row recorded. These tests drive the real evaluator and a
 per-test temporary ledger, then prove the four refusal cases: no receipt, a
 receipt from another run of the same spec, a receipt for another spec, and
-metrics edited after recording. A clean recorded run is accepted: the recorder
+metrics edited after recording — plus the crash boundary: the ``ran`` append
+commits, the receipt is never published, and promotion refuses until a
+matching receipt is issued. A clean recorded run is accepted: the recorder
 finalized its checklist against the ledger, so a good run is not blocked by
 the evaluator's pre-recording snapshot.
 
@@ -276,3 +278,105 @@ def test_metrics_replaced_after_digest_read_returns_validated_object(tmp_root, m
     monkeypatch.undo()
     assert metrics.read_bytes() == tampered_bytes, \
         "the regression only counts if the swap really happened"
+
+
+def test_non_object_metrics_json_refuses(tmp_root, monkeypatch):
+    spec = _spec(exp_id="EXP-913")
+    folder = _experiment(tmp_root, spec, "EXP-913")
+    _run(spec, folder)
+
+    metrics = lib.metrics_path(folder, spec)
+    metrics.write_text(json.dumps(["not", "an", "object"]))
+    with pytest.raises(promote.PromotionRefused,
+                       match=promote.PROMOTION_LEDGER_RECEIPT_MISSING):
+        promote.validate_recording_receipt(spec, metrics)
+
+    monkeypatch.setattr(lib, "EXPERIMENTS_DIR", tmp_root / "experiments")
+    champion = tmp_root / "champion.json"
+    champion.write_text(json.dumps(_weak_champion()))
+    rc = promote.main(["EXP-913", "--champion-metrics", str(champion), "--dry-run"])
+    assert rc == 2
+
+
+def test_crash_after_ran_append_before_receipt_refuses(tmp_root):
+    """The crash boundary: the ``ran`` append commits, the receipt does not.
+
+    ``record_evaluation`` runs the ``ran`` append, the metrics finalization and
+    the receipt publication as three real steps, so staging a real filesystem
+    failure at the would-be receipt path (a directory where the file must be
+    written) makes exactly the publication write raise — the crash point after
+    the commit. A single ``record=True`` helper call cannot be staged this way
+    (``evaluate``'s stale-receipt unlink would raise first, before the commit),
+    so the test splits the helper's two statements — the same
+    ``evaluate_with_grid(record=False)`` + ``record_evaluation`` composition the
+    helper runs — with no stubs and no production changes.
+    """
+    spec = _spec(exp_id="EXP-915")
+    folder = _experiment(tmp_root, spec, "EXP-915")
+    # A run_id ledger header makes the exact-run binding explicit: the crash
+    # test asserts the surviving ``ran`` row carries this run's own ID. It is
+    # written to the test's configured ``lib.LEDGER_PATH`` — the ledger
+    # ``load_experiment_metrics`` reads — so the refusals below are answered
+    # by receipt validation, not by an unrelated empty default ledger.
+    runid_ledger = lib.LEDGER_PATH
+    runid_ledger.write_text(
+        "id,spec_hash,date,stage,oos_mean_mid,sharpe_trade,promoted,run_id\n")
+    result = _run(spec, folder, record=False)
+    receipt = lib.receipt_path(folder, spec)
+    receipt.mkdir()  # the crash barrier: nothing can be written to that path
+
+    with pytest.raises(OSError):
+        lib.record_evaluation(folder, spec, result.results)
+
+    # The commit point already happened: the ``ran`` row is intact...
+    rows = lib.ledger_read(runid_ledger)
+    assert rows["stage"].tolist() == ["ran"]
+    assert rows["spec_hash"].tolist() == [lib.spec_hash(spec)]
+    assert rows["run_id"].tolist() == [result.results["run_id"]]
+    # ...the recorder finalized the metrics artifact before the crash...
+    metrics = lib.metrics_path(folder, spec)
+    artifact = json.loads(metrics.read_text())
+    assert artifact["recording_mode"] == "recorded"
+    assert artifact["run_id"] == result.results["run_id"]
+    # ...but the receipt was never published and stays unpublished.
+    assert receipt.is_dir() and not receipt.is_file()
+
+    with pytest.raises(promote.PromotionRefused,
+                       match="no recording receipt"):
+        promote.load_experiment_metrics("EXP-915", root=tmp_root / "experiments")
+
+    # Refused *until a matching receipt is issued*: clear the barrier and let
+    # the real recorder publish; the ledger keeps both append-only ``ran`` rows
+    # and promotion then accepts the same run.
+    receipt.rmdir()
+    lib.record_evaluation(folder, spec, result.results)
+    rows = lib.ledger_read(runid_ledger)
+    assert rows["stage"].tolist() == ["ran", "ran"]
+    assert rows["run_id"].tolist() == [result.results["run_id"]] * 2
+    loaded_spec, results = promote.load_experiment_metrics(
+        "EXP-915", root=tmp_root / "experiments")
+    assert loaded_spec["id"] == "EXP-915"
+    assert results["run_id"] == result.results["run_id"]
+    # The receipt validates against the ledger the run actually recorded into.
+    failed = [i for i in results["checklist"] if i["status"] == "FAIL"]
+    assert not failed, failed
+    assert results["checklist_fails"] == 0
+    promoted, reasons = promote.decide(results, _weak_champion())
+    assert promoted, reasons
+
+
+def test_non_object_receipt_json_refuses(tmp_root, monkeypatch):
+    spec = _spec(exp_id="EXP-914")
+    folder = _experiment(tmp_root, spec, "EXP-914")
+    _run(spec, folder)
+
+    lib.receipt_path(folder, spec).write_text(json.dumps(["not", "an", "object"]))
+    with pytest.raises(promote.PromotionRefused,
+                       match=promote.PROMOTION_LEDGER_RECEIPT_MISSING):
+        promote.validate_recording_receipt(spec, lib.metrics_path(folder, spec))
+
+    monkeypatch.setattr(lib, "EXPERIMENTS_DIR", tmp_root / "experiments")
+    champion = tmp_root / "champion.json"
+    champion.write_text(json.dumps(_weak_champion()))
+    rc = promote.main(["EXP-914", "--champion-metrics", str(champion), "--dry-run"])
+    assert rc == 2
