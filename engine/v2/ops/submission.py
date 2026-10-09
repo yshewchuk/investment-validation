@@ -50,6 +50,7 @@ from engine.v2.foundation import (
 )
 from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.errors import fail, make_problem
+from engine.v2.ops.provider_requirements import validate_scalar_provider_shape
 
 __all__ = [
     "JobKind",
@@ -160,6 +161,7 @@ def validate_request(registry: KindRegistry, policy: NamespacePolicy,
         from_document(SubmitRequest, to_document(request))
     except DocumentError:
         raise fail("INVALID_REQUEST", "unsupported or malformed submission schema") from None
+    validate_scalar_provider_shape(job.parameters)
     for name, value in (("namespace", request.namespace),
                         ("idempotency_key", request.idempotency_key),
                         ("principal", request.principal),
