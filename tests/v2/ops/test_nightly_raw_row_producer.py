@@ -13,6 +13,7 @@ carrying only ``earnings_events``.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -612,6 +613,17 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
             else:
                 # Fall back to original behavior
                 yield from super().scan(query, table_name=table_name)
+
+        def fragment_records(self, snapshot_ref, table_name):
+            """Catalog-free membership metadata for the pinned table: one
+            partition-per-ticker record per stored ``(candidate_table,
+            ticker) -> rows`` batch matching ``table_name``, the shape
+            ``tickers_with_price_history`` reads through the real
+            ``Repository``."""
+            return tuple(
+                SimpleNamespace(partition_key=ticker, row_count=len(rows))
+                for (candidate_table, ticker), rows in self._batches.items()
+                if candidate_table == table_name)
 
     repository = IntervalAwareRepository(snapshot, fixture._contracts(), batches)
 

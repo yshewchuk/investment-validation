@@ -182,7 +182,7 @@ through to `compare_records` (which already had this exact parameter,
 independently, and always did — only `compare_dimension`'s own wrapper
 was the fixed point). `checks/phase4_real.py` and most existing tests
 pass none of them and so cannot observe a behavior change; two tests in
-`tests/test_v2_ops_native_shadow_render.py`, though —
+`tests/v2/ops/test_native_shadow_render.py`, though —
 `test_native_parity_handler_threads_tolerance_policy_into_written_report`
 and `test_tolerance_policy_is_threaded_through_compare_dimension_and_report`
 — DO pass an explicit `tolerance_policy`, which proves the new keyword

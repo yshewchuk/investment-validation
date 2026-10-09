@@ -114,7 +114,7 @@ def test_empty_native_report_all_legacy_only_legacy():
     assert report["only_native"] == []
     assert report["compared"] == []
     assert report["mismatches"] == []
-    assert report["schema_version"] == "native_parity_report.v1.2"
+    assert report["schema_version"] == "native_parity_report.v1.3"
     assert report["tolerance_policy_id"] == SCORE_RECORD_V1.policy_id
 
 
@@ -130,7 +130,9 @@ def test_apply_native_refusals_moves_matched_key():
               "mismatches": []}
     updated = apply_native_refusals(report, {"a": "SOME_CODE"})
     assert updated["only_legacy"] == ["b"]
-    assert updated["native_refused"] == [{"row_key": "a", "refusal_code": "SOME_CODE"}]
+    assert updated["native_refused"] == [
+        {"row_key": "a", "refusal_code": "SOME_CODE",
+         "ticker": "a", "reason": "SOME_CODE"}]
     assert updated["native_refused_unmatched"] == []
     assert report["only_legacy"] == ["a", "b"]
 
@@ -142,7 +144,8 @@ def test_apply_native_refusals_unmatched_key_goes_to_unmatched_list():
     assert updated["only_legacy"] == ["a"]
     assert updated["native_refused"] == []
     assert updated["native_refused_unmatched"] == [
-        {"row_key": "z", "refusal_code": "OTHER_CODE"}]
+        {"row_key": "z", "refusal_code": "OTHER_CODE",
+         "ticker": "z", "reason": "OTHER_CODE"}]
 
 
 def test_apply_native_refusals_unkeyable_always_unmatched():
@@ -155,7 +158,8 @@ def test_apply_native_refusals_unkeyable_always_unmatched():
     assert updated["native_refused_unmatched"] == [
         {"row_key": {"ticker": "T", "strategy": "S",
                      "event_date": "2026-01-01", "session": "AM"},
-         "refusal_code": "INVALID_KEY_FIELD"}]
+         "refusal_code": "INVALID_KEY_FIELD",
+         "ticker": "T", "reason": "INVALID_KEY_FIELD"}]
 
 
 def test_apply_native_refusals_deterministic_order():
@@ -163,8 +167,8 @@ def test_apply_native_refusals_deterministic_order():
               "mismatches": []}
     updated = apply_native_refusals(report, {"z": "C1", "a": "C2"})
     assert updated["native_refused_unmatched"] == [
-        {"row_key": "a", "refusal_code": "C2"},
-        {"row_key": "z", "refusal_code": "C1"}]
+        {"row_key": "a", "refusal_code": "C2", "ticker": "a", "reason": "C2"},
+        {"row_key": "z", "refusal_code": "C1", "ticker": "z", "reason": "C1"}]
 
 
 def test_apply_native_refusals_default_unkeyable_empty():
