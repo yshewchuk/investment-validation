@@ -4,7 +4,7 @@
 from the paired legacy score job, ``records.json``/``refusals.json`` from
 the paired ``native_score_batch`` job), classifies every row through the
 pairing core, and writes ``native_parity_report.json``.  Fixture shapes
-mirror ``tests/test_v2_ops_native_parity_pairing.py`` and
+mirror ``tests/v2/ops/test_v2_ops_native_parity_pairing.py`` and
 ``tests/test_v2_ops_native_score_batch.py``.
 """
 from __future__ import annotations

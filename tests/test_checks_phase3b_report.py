@@ -75,23 +75,98 @@ def test_report_is_rendered_from_code_over_the_real_receipt(tmp_path, real_run):
         assert ref in text
 
 
-def test_report_lists_zero_known_red_tests_alongside_the_gate_pass(tmp_path, real_run):
+def _render_synthetic_report(tmp_path) -> str:
+    """Render the report over a minimal synthetic run, not the frozen one.
+
+    The known-red section is a property of the renderer, not of the retained
+    run, so these tests exercise `phase3b_report.sections(...)` through the
+    real `Report.write` path over the smallest receipt/evidence/gate triple
+    that a passing gate can sit on top of.
+    """
+    receipt = {
+        "source_files": {
+            "synthetic_table": {
+                "rows_in_source": 1,
+                "path": "synthetic.parquet",
+                "content_hash": "0" * 64,
+            },
+        },
+        "table_results": {
+            "synthetic_table": {
+                "rows_before": 0,
+                "no_op_rewrites": 0,
+                "no_op_committed": True,
+                "retry_idempotent": True,
+                "changed_partitions": [],
+                "rebuild_equal": True,
+                "persisted_rows_equal": True,
+                "downstream_results_equal": True,
+                "clean_rebuild_rows": 0,
+            },
+        },
+        "runtime_ms": 1,
+        "peak_rss_bytes": 1,
+    }
+    evidence = {"retained_snapshot_refs": []}
+    gate_result = {
+        "ok": True,
+        "status": "PASS",
+        "counts": {
+            "registered_subjects": 8,
+            "passed_subjects": 8,
+            "failed_subjects": 0,
+            "negative_controls_total": 0,
+            "negative_controls_passed": 0,
+        },
+        "negative_controls": {},
+        "subjects": {},
+        "findings": [],
+    }
+    context = {
+        "kind": "audit",
+        "spec": {
+            "id": "REARCH-PHASE-3B-ACCEPTANCE",
+            "title": "Rearchitecture Phase 3B — incremental EOD data acceptance",
+            "type": "descriptive",
+        },
+        "results": {},
+        "headline": {},
+        "backtest": {},
+        "checklist": [],
+        "provenance": {},
+        "survivorship_note": "",
+        "calibration": None,
+        "funnel": [],
+        "extra_sections": phase3b_report.sections(receipt, evidence, gate_result),
+    }
+    path = Report(context).write(tmp_path, filename="report.md")
+    return path.read_text()
+
+
+def test_report_lists_zero_known_red_tests_alongside_the_gate_pass(tmp_path, monkeypatch):
     # The acceptance gate passing must never be allowed to read as "the suite
     # is green" -- the report keeps the known-red section and its "not the
-    # suite" caveat. It currently lists zero entries: the three real-data
-    # candidates were verified 2026-09-18 and the former synthetic R3B-7
+    # suite" caveat even when the list is empty. The former synthetic R3B-7
     # test was rechecked 2026-10-09 and passes, so it is no longer named.
-    receipt, evidence, gate_result = real_run
-    assert gate_result["ok"] is True
-    context = phase3b_report.build_context(
-        receipt, evidence, gate_result,
-        input_files=[phase3b_report.DEFAULT_RECEIPT, phase3b_report.DEFAULT_EVIDENCE])
-    path = Report(context).write(tmp_path, filename="report.md")
-    text = path.read_text()
+    monkeypatch.setattr(phase3b_report, "KNOWN_RED_TESTS", ())
+    text = _render_synthetic_report(tmp_path)
     assert "Known red tests in the wider v2 suite at close" in text
+    assert "Not established" in text
     assert "0 known red test(s)" in text
+    assert ("the acceptance gate PASS covers only its own 8 subjects, not the "
+            "wider suite") in text
     assert ("test_action_finality_writes_a_coverage_output_from_monkeypatched_frames"
             not in text)
+
+
+def test_report_lists_a_recorded_known_red_test_by_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        phase3b_report, "KNOWN_RED_TESTS",
+        (("tests/v2/engine/test_synthetic.py::test_known_red", "known red at close"),))
+    text = _render_synthetic_report(tmp_path)
+    assert "tests/v2/engine/test_synthetic.py::test_known_red" in text
+    assert "known red at close" in text
+    assert "Not established" in text
 
 
 def test_report_reaches_its_default_location_and_the_private_mirror(real_run):

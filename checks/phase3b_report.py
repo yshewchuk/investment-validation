@@ -285,17 +285,17 @@ def sections(receipt: dict, evidence: dict, gate_result: dict) -> list[dict]:
          "columns": ["code", "detail"], "align": ["---", "---"],
          "rows": _failure_rows(gate_result)},
         {"title": "Known red tests in the wider v2 suite at close",
-         "note": "This gate checks only the 8 P3B01-P3B08 subjects above. The "
-                 "gate PASS and the row(s) below are both true at the same time "
-                 "-- the acceptance gate passing does not mean the whole test "
-                 "suite is green.",
+         "note": "The acceptance gate checks only the 8 P3B01-P3B08 subjects "
+                 "above and does not establish the status of the wider v2 test "
+                 "suite; known-red tests recorded at close are listed here "
+                 "by name.",
          "columns": ["test", "reason"], "align": ["---", "---"],
          "rows": [[cell(test), cell(reason)] for test, reason in KNOWN_RED_TESTS],
          "promote_to_verdict": True,
          "verdict_row": ("Is the wider v2 test suite green at close?",
-                         f"**No** -- {len(KNOWN_RED_TESTS)} known red test(s), listed "
-                         "here by name; the acceptance gate PASS above covers only "
-                         "its own 8 subjects, not the suite.", "")},
+                         f"**Not established** -- {len(KNOWN_RED_TESTS)} known red "
+                         "test(s), listed here by name; the acceptance gate PASS "
+                         "covers only its own 8 subjects, not the wider suite.", "")},
         {"title": "Retained snapshot refs",
          "columns": ["snapshot ref"], "align": ["---"],
          "rows": _snapshot_rows(evidence)},
