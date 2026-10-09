@@ -40,6 +40,10 @@ from engine.v2.foundation import (  # noqa: E402
     to_document,
     untag_nonfinite,
 )
+from engine.v2.foundation.market_calendar import (  # noqa: E402
+    CalendarInputError,
+    build_calendar_sessions,
+)
 
 # --------------------------------------------------------------------------
 # canonical hash continuity
@@ -719,3 +723,23 @@ def test_fast_number_layout_matches_the_decimal_path():
     values += [rng.gauss(0.0, 1.0) * 10 ** rng.randint(-8, 8) for _ in range(20000)]
     values += [float(rng.randint(-10**7, 10**7)) for _ in range(5000)]
     assert [_number(v) for v in values] == [reference(v) for v in values]
+
+
+# --------------------------------------------------------------------------
+# market calendar: MLK Day is a scheduled NYSE holiday only from 1998
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("day", ["1994-01-17", "1995-01-16", "1996-01-15", "1997-01-20"])
+def test_mlk_monday_before_1998_is_an_observed_session(day):
+    """The third Monday of January was not yet an NYSE holiday, so the real
+    factory accepts it as an observed session rather than refusing it."""
+    sessions = build_calendar_sessions((day,), event_through=day)
+    assert day in sessions.days
+    assert sessions.observed_through == day
+
+
+@pytest.mark.parametrize("day", ["1998-01-19", "2026-01-19"])
+def test_mlk_monday_from_1998_on_is_refused(day):
+    with pytest.raises(CalendarInputError):
+        build_calendar_sessions((day,), event_through=day)

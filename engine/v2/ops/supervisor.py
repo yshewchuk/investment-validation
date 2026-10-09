@@ -489,10 +489,15 @@ class Service:
         """Dedup-by-(code, message, error-type) report, identical pattern to
         _report_computed_moves_problem (Cutover PR-7a)."""
         problem = getattr(exc, "problem", None)
+        bounded_message = None
         if not isinstance(problem, Problem):
-            problem = make_problem("VALIDATION_FAILED",
-                                   "native_score_batch shadow reconciliation failed")
-        problem_key = (problem.code, problem.message, type(exc).__name__)
+            raw_message = str(exc)[:256]
+            bounded_message = raw_message
+            problem = make_problem(
+                "VALIDATION_FAILED", "native_score_batch shadow reconciliation failed",
+                details={"exception_message": "<redacted>"} if raw_message else None)
+        problem_key = (problem.code, problem.message, type(exc).__name__,
+                       bounded_message)
         if problem_key == self._last_native_score_batch_problem:
             return
         self._last_native_score_batch_problem = problem_key
