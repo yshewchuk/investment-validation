@@ -923,6 +923,7 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_forward_calendar_admission.py",
     "tests/v2/ops/test_provider_response.py",
     "tests/v2/ops/test_provider_response_boundary.py",
     "tests/test_v2_data_incremental_persistence.py",

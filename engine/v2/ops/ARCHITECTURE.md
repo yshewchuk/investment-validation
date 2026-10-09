@@ -1021,15 +1021,9 @@ waits without submitting until its paired succeeded inputs are ready.
   then `DYN-SV` last inner. No side effect, no write.
 
 **`computed_moves_refresh` and `forward_calendar_refresh` nightly wiring.**
-Both are registered `_core_kinds()` job kinds (`calendar_moves_jobs.
-computed_moves_job_kind()`/`forward_calendar_job_kind()`), dispatched by
-`worker.py::dispatch` to `run_computed_moves_worker`/`run_forward_calendar_worker`.
-Only `computed_moves_refresh` has a nightly `GRAPH`/`OPTIONAL` node and a
-submitter; `forward_calendar_refresh` has neither yet — building its
-nightly node and submitter is a separate, unbuilt piece
-([#206](https://github.com/yshewchuk/investment-validation/issues/206)),
-and until then it is reachable only through direct `ops submit`, same as
-`training`/`models_promote` above.
+Both job kinds dispatch through `worker.py` to `calendar_moves_jobs`.
+Only `computed_moves_refresh` has a nightly `GRAPH`/`OPTIONAL` node and submitter.
+`forward_calendar_refresh` is direct-submit only.
 
 `computed_moves_refresh` is submitted only by `supervisor.Service`'s own
 tick loop (`_reconcile_computed_moves_refresh`, wrapped in the same
@@ -1043,18 +1037,23 @@ tick. It is submitted alone (`submission.submit`, never `submit_graph`),
 never sharing `build_legacy_job_requests`'s graph — bundling a REQUIRED and
 an OPTIONAL job into one all-or-nothing graph submission is exactly what
 R4 below forbids. If a job already exists under that key, in any state,
-nothing is rebuilt or resubmitted. Rebuild attempts against an identity
-that keeps coming back empty are memoized with a bounded retry budget
-(`Service._computed_moves_memo`), so a full target-ticker scan is not
-repeated every tick; a changed identity (new session, or the same session
-on a new head) always gets a fresh budget. `completed_ids` on a
-`"complete"`/`"noop"` result is the full whole-market target set the
-worker itself derives at run time, not only tickers that got a written
-fragment, so a caller's coverage denominator never disagrees with the
-worker. `forward_calendar_refresh` does not share this denominator design
-— its own `expected_ids` is always `set(tickers)`, so a whole-market
-(`tickers=()`) submission is not supported as a job today, only the
-standalone runner accepts it.
+nothing is rebuilt or resubmitted. `Service._computed_moves_memo` bounds
+unsuccessful rebuild attempts; a new session or head resets that budget.
+Its `complete`/`noop` coverage is the full derived whole-market target set,
+including targets without a written fragment.
+
+**Forward-calendar admission boundary.** Direct `submission.submit` requires
+nonempty, unique `tickers` and `expected_ids` with equal sets; order can differ.
+An empty selection or mismatched coverage is `INVALID_REQUEST` before inserting
+a job row or opening the submission transaction. Only the standalone runner accepts
+whole-market `tickers=()`. Submission queues without fetching or executing.
+`plan_forward_calendar` returns separate Nasdaq and yfinance plans. The
+yfinance confirmation plan uses tickers derived from discovery claims.
+`JobSpec.provider_budget_ref` and scheduler admission/reservation
+name one account, so a single job does not reserve both source budgets.
+Native refresh `expected_ids` are unit IDs; unit `expected_keys` carry context
+tickers, not the paired score request's watchlist and horizon. These are
+current integration constraints; automatic submission remains unimplemented.
 
 Both stores validate their own staged input document and `parameters`
 up front, before the sqlite connection opens (unknown keys, wrong types,
@@ -1177,10 +1176,10 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | R4 | Catalog writes go through `catalog.transaction`. A coordinator effect's own filesystem write must be replay-safe and idempotent, not atomic with the DB commit (root doc §6) — one exception, legacy `experiment_effect`, appends a ledger CSV row inside the transaction and recovers by replay. An explicit variant ID must be a non-blank string; only `None` defaults to the resolved spec hash. A fixed-arm run validates one primary arm before runner execution and records one immutable variant identity/count in its report and durable run evidence; reuse refuses a conflicting stored identity/count or an existing `ran` ledger identity, and its ledger row carries the same registered identity. Registered runner/arm pairs without an audited fixed-arm selector are refused before runner invocation and variant-count recording. Smoke execution passes `--no-ledger`. A primary registered run is authorized in the operator and experiment-kind `primary` namespaces; it stages its wrapper, registered spec at `HERE/spec.yaml`, declared runtime sources, and declared runtime input files at their checkout-relative paths as input bindings. A binding path that resolves outside the checkout is refused with `VALIDATION_FAILED` before its bytes are published. The wrapper writes its report at the staging root for worker publication. A wrapper enters staging mode only when the adapter-only `INVESTING_PLAN_PINNED_SOURCE` is set, which `run_legacy_script` sets only for a runner with declared runtime sources (and clears otherwise); `INVESTING_PLAN_ROOT` stays the general root and never selects staging, so a direct wrapper run is unchanged. If it is set but a staged input (pinned source, spec) is missing, the wrapper fails loading it, the runner exits non-zero and the worker refuses `VALIDATION_FAILED`; it never falls back to checkout paths. |
 | R5 | Artifact publication is atomic (`ArtifactStore`): a killed process leaves the old artifact or nothing. |
 | R6 | Job identity is `job_id_for(namespace, key)`; a resubmission in the same namespace with the same key and a different digest is refused `IDEMPOTENCY_CONFLICT`, never merged. A new key scheme is checked against legacy's own keyspace, not only sibling native writers. |
-Declared exits use `economic_params.exit = {"kind": "fixed_day", "trading_days": N}`: positive integer N, explicit numeric alpha `fill` in the alpha ladder's range, and `price_source="option_chains"`. Other recipes/keys refuse `INVALID_EXPERIMENT_SPEC`; the existing immutable resolved economics and canonical plan identity retain N for the research walker. Report integration remains slice 7b.
+
 | Experiment execution condition | Outcome |
 |---|---|
-| Unknown/unused spec field, mismatched resolved plan, economics without `execution_plan`, malformed fold rows/labels/rule, numeric overflow, mismatched named columns, or mixed named/positional features | `INVALID_EXPERIMENT_SPEC`; refuse before work, return no result, and write no artifact, report, or ledger row. |
+| Unknown/unused spec field, invalid fixed-day exit recipe/source/fill, mismatched resolved plan, economics without `execution_plan`, malformed fold rows/labels/rule, numeric overflow, mismatched named columns, or mixed named/positional features | `INVALID_EXPERIMENT_SPEC`; refuse before work, return no result, and write no artifact, report, or ledger row. |
 | Plan write, later runner failure, or fold clone/fit/score/threshold failure, including absent or malformed fitted `classes_` | Typed attempt failure; candidate stays unpublished. A failed plan write may leave partial bytes in the failed attempt root. Worker exit status determines `WORKER_FAILED`; fold scoring failure is non-retryable `EXPERIMENT_VARIANT_FAILED`, with no fitted result retained, no artifact, report, or ledger row written, and the source estimator unchanged. |
 | Feature read: snapshot mismatch; no match; any post-entry match; conflicting tie at latest eligible instant<br>Successful fold helper call | `SNAPSHOT_UNRESOLVED`; `FEATURES_MISSING`; non-retryable `FEATURE_LOOKAHEAD` (no clipping, shifting, or dropping); `INVALID_EXPERIMENT_SPEC`, respectively. Refusal returns no feature value and writes no artifact or report.<br>Returns only an in-memory result; writes no artifact, report, or ledger row. |
 

@@ -78,7 +78,10 @@ that labeling.
 
 `experiment_exits.walk_fixed_day(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
-economics. It reprices the held legs on every observed trading day from entry
+economics: `exit={kind: "fixed_day", trading_days: N}` with positive integer N,
+explicit numeric `fill` in the alpha ladder's range, and `price_source="option_chains"`.
+The immutable resolved economics and canonical plan identity retain N.
+It reprices the held legs on every observed trading day from entry
 through entry plus the declared positive `trading_days`, using the pinned
 `daily_market` calendar and `option_chains` quotes with `_pricing.FillModel`'s
 existing alpha ladder; no projected calendar, replacement contract or mark source.

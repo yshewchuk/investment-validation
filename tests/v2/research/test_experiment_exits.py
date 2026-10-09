@@ -1,5 +1,6 @@
 """Declared-exit consumption over real synthetic Parquet snapshots, no mark stubs."""
 from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -18,6 +19,13 @@ from tests.data_scan_support import (
 )
 
 DATES = ("2024-05-24", "2024-05-28", "2024-05-29", "2024-05-30")
+
+
+def test_recipe_contract_table_boundary():
+    document = Path(__file__).parents[3] / "engine/v2/ops/ARCHITECTURE.md"
+    before, table = document.read_text().split("| Experiment execution condition | Outcome |", 1)
+    assert before.endswith("\n\n"), "the experiment table needs its own Markdown block"
+    assert "invalid fixed-day exit recipe/source/fill" in table
 
 
 def _spec(days=2, alpha=0.25):
