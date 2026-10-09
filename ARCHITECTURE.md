@@ -140,7 +140,7 @@ evidence. See the models and data component contracts.
     after the `ran` append and does not publish a receipt. Promotion
     independently requires the artifact, requested spec and receipt hashes to
     agree, refusing mismatches with `PROMOTION_LEDGER_RECEIPT_MISSING`.
-    caller passes the directory where that run wrote its metrics (the arm
+    The caller passes the directory where that run wrote its metrics (the arm
     directory for a grid cell). The caller completes its metrics writes before
     invoking the recorder. The recorder appends the `ran` row, finalizes the
     artifact and caller-held result as `recorded`, then publishes a receipt
