@@ -923,6 +923,7 @@ mutate = [
     # test_mutation_ci's tracked-pattern expansion.
     "engine/v2/ops/n*.py",
     "engine/v2/ops/native/*.py",
+    "engine/v2/ops/core/*.py",
     "engine/v2/ops/carried_set.py",
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",

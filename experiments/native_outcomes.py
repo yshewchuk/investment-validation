@@ -52,7 +52,7 @@ def _slot(no_ledger, ledger_path):
         raise fail("INVALID_EXPERIMENT_SPEC", "recorded ledger destination must not be empty")
     path = Path(raw)
     if path.is_symlink():
-        raise LedgerError("ledger destination must not be a symbolic link")
+        raise fail("INVALID_EXPERIMENT_SPEC", "recorded ledger destination must not be a symbolic link")
     path = path.resolve()
     if path.is_dir():
         raise fail("INVALID_EXPERIMENT_SPEC", "recorded ledger destination must name a file")

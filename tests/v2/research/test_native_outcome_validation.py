@@ -110,6 +110,31 @@ def test_empty_destination_is_r1_before_publication(
 
 
 @pytest.mark.parametrize("operation", ["publish", "replay", "export"])
+@pytest.mark.parametrize("kind", ["file_symlink", "dangling_symlink", "directory"])
+def test_invalid_destination_is_r1_without_conflict_evidence(
+        source, tmp_path, safe_default_ledger, operation, kind):
+    """Invalid caller paths refuse before ledger access or conflict publication."""
+    registration = _call(source)
+    destination, target = tmp_path / "destination", tmp_path / "target.csv"
+    fallback_before = _seed_csv(safe_default_ledger, True)
+    target_before = _seed_csv(target, kind == "file_symlink")
+    if kind == "directory":
+        destination.mkdir()
+    else:
+        destination.symlink_to(target)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(OpsError) as captured:
+        _invoke(operation, source, registration, destination)
+    assert captured.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert _catalog(source.conn) == before
+    assert _objects(source.store) == objects
+    assert _csv_state(target) == target_before
+    assert _csv_state(safe_default_ledger) == fallback_before
+    assert not destination.with_name(destination.name + ".append.lock").exists()
+    assert not list(source.store.root.rglob("REPORT.md"))
+
+
+@pytest.mark.parametrize("operation", ["publish", "replay", "export"])
 @pytest.mark.parametrize("change", ["pathlike", "falsey_pathlike", "cwd"])
 def test_one_frozen_destination_is_hashed_and_written(
         source, tmp_path, monkeypatch, safe_default_ledger, operation, change):
