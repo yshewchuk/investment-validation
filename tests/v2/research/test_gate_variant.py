@@ -21,6 +21,7 @@ from tests.test_v2_research_replay import _chain_rows, _commit, _event_rows
 
 
 def _document(alpha=0.0):
+    """Build the smallest supported single-arm synthetic specification."""
     return {"experiment_id": "synthetic-gate", "hypothesis": "synthetic fill check",
             "primary_arm_id": "candidate", "arms": ["candidate"], "folds": [],
             "seed": 0, "economic_params": {"fill": alpha},
@@ -29,6 +30,7 @@ def _document(alpha=0.0):
 
 @pytest.fixture
 def source(tmp_path):
+    """Commit real option, calendar and event fragments into a temporary catalog."""
     conn, clock, store = catalog_and_store(tmp_path)
     snapshot = _commit(conn, clock, store, chain_rows=_chain_rows(),
                        event_rows=_event_rows(), receipt_id="gate-source")
@@ -37,12 +39,14 @@ def source(tmp_path):
 
 
 def _price(source, alpha=0.0, **kwargs):
+    """Execute one independently resolved arm on the fixture's exact pin."""
     return gate.price_variant(source[3], source[4],
                               experiment_spec_from_document(_document(alpha)),
                               strategy="STR-THRU", as_of_month="2025-01", **kwargs)
 
 
 def test_changed_fill_is_consumed_by_real_native_replay(source):
+    """Both alpha arms must match independently calculated cash flows."""
     worst, best = _price(source), _price(source, 1.0)
     # Two long legs: entry bid total 3, ask total 3.8; exit bid 5, ask 5.8.
     for result, alpha, cost, exit_value, pnl in ((worst, 0.0, 3.8, 5.0, 1.2),
@@ -66,6 +70,7 @@ def test_changed_fill_is_consumed_by_real_native_replay(source):
 
 
 def test_replay_cannot_consume_prior_trade_outputs(source):
+    """A rerun rebuilds prices rather than consuming the prior result frame."""
     assert "trades" not in source[4].table_versions
     result = _price(source)
     result.replay.trades.loc[:, "entry_cost"] = 999.0
@@ -80,6 +85,7 @@ def test_replay_cannot_consume_prior_trade_outputs(source):
     {"fill": 0.0, "exit": {"kind": "fixed_day", "trading_days": 1}},
 ])
 def test_unused_or_invalid_economics_refuse_before_reads(economics):
+    """Bad declarations fail before the deliberately absent repository is touched."""
     spec = experiment_spec_from_document({**_document(), "economic_params": economics})
     with pytest.raises(OpsError) as caught:
         gate.price_variant(None, None, spec, strategy="STR-THRU", as_of_month="2025-01")
@@ -92,6 +98,7 @@ def test_unused_or_invalid_economics_refuse_before_reads(economics):
     {"input_files": ["experiments/previous/results.parquet"]},
 ])
 def test_unsupported_plan_refuses_before_reads(changed):
+    """Unsupported runner, source, arm shape and file inputs cannot reach scans."""
     spec = experiment_spec_from_document({**_document(), **changed})
     with pytest.raises(OpsError) as caught:
         gate.price_variant(None, None, spec, strategy="STR-THRU", as_of_month="2025-01")
@@ -99,6 +106,7 @@ def test_unsupported_plan_refuses_before_reads(changed):
 
 
 def test_unsupported_strategy_refuses_before_reads():
+    """An unknown strategy cannot reach population or quote access."""
     with pytest.raises(OpsError) as caught:
         gate.price_variant(None, None, experiment_spec_from_document(_document()),
                            strategy="unknown", as_of_month="2025-01")
@@ -106,6 +114,7 @@ def test_unsupported_strategy_refuses_before_reads():
 
 
 def test_missing_one_events_quotes_refuses_whole_variant(source):
+    """A successfully priced sibling must not hide missing event quotes."""
     conn, clock, store, repository, old = source
     events = _event_rows() + [{**_event_rows()[0], "event_id": "MISSING_2024-05-02",
                               "ticker": "MISSING"}]
@@ -120,6 +129,7 @@ def test_missing_one_events_quotes_refuses_whole_variant(source):
 
 
 def test_supplied_pin_does_not_follow_a_moving_head(source):
+    """Publishing changed quotes cannot retarget a caller's retained pin."""
     conn, clock, store, _, old = source
     _commit(conn, clock, store, chain_rows=_chain_rows(exit_call=(8.0, 8.4)),
             event_rows=_event_rows(), receipt_id="new-head",
@@ -128,6 +138,7 @@ def test_supplied_pin_does_not_follow_a_moving_head(source):
 
 
 def test_holdout_denied_before_any_pricing_population_is_returned(source, tmp_path):
+    """An explicit rolling-holdout request refuses without creating any output."""
     spec = experiment_spec_from_document(_document())
     before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
     with pytest.raises(DataError) as caught:
@@ -138,12 +149,14 @@ def test_holdout_denied_before_any_pricing_population_is_returned(source, tmp_pa
 
 
 def test_missing_requested_event_refuses(source):
+    """Unresolved requested membership is denied rather than silently dropped."""
     with pytest.raises(DataError) as caught:
         _price(source, event_ids=["UNKNOWN"])
     assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
 
 
 def test_holdout_refusal_precedes_even_missing_quote_tables(tmp_path):
+    """Holdout admission fails before a quote-free snapshot can reach pricing."""
     conn, clock, store = catalog_and_store(tmp_path)
     try:
         contract = contract_for("earnings_events")
@@ -162,6 +175,7 @@ def test_holdout_refusal_precedes_even_missing_quote_tables(tmp_path):
 
 
 def _cli_args(tmp_path):
+    """Prepare explicit temporary CLI paths without creating a catalog."""
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(_document()))
     return ["--catalog", str(tmp_path / "catalog.sqlite"),
@@ -170,6 +184,7 @@ def _cli_args(tmp_path):
 
 
 def test_cli_no_ledger_smoke_writes_no_rows_or_reports(source, tmp_path, capsys):
+    """The real CLI preserves all catalog counts and ledger bytes."""
     args = _cli_args(tmp_path)
     ledger = tmp_path / "experiments" / "LEDGER.csv"
     ledger.parent.mkdir()
@@ -192,6 +207,7 @@ def test_cli_no_ledger_smoke_writes_no_rows_or_reports(source, tmp_path, capsys)
 
 
 def test_cli_requires_no_ledger_before_opening_catalog(tmp_path):
+    """Missing smoke authorization refuses before a catalog can be created."""
     with pytest.raises(SystemExit) as caught:
         gate.main(_cli_args(tmp_path))
     assert caught.value.code == 2
@@ -199,6 +215,7 @@ def test_cli_requires_no_ledger_before_opening_catalog(tmp_path):
 
 
 def test_cli_missing_catalog_has_redacted_refusal(tmp_path, capsys):
+    """Storage failures expose a stable code instead of the local path."""
     assert gate.main([*_cli_args(tmp_path), "--no-ledger"]) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": "INPUT_CHANGED"}
     assert not (tmp_path / "catalog.sqlite").exists()
@@ -206,6 +223,7 @@ def test_cli_missing_catalog_has_redacted_refusal(tmp_path, capsys):
 
 @pytest.mark.parametrize("text", ["not-json", json.dumps({**_document(), "input_files": None})])
 def test_cli_malformed_spec_has_redacted_refusal(tmp_path, capsys, text):
+    """Malformed JSON and field types expose only the specification refusal."""
     args = _cli_args(tmp_path)
     (tmp_path / "spec.json").write_text(text)
     assert gate.main([*args, "--no-ledger"]) == 2
@@ -214,8 +232,14 @@ def test_cli_malformed_spec_has_redacted_refusal(tmp_path, capsys, text):
 
 
 def test_documented_pricing_boundary():
+    """The documented authority and interface declarations match this consumer."""
     root = Path(__file__).resolve().parents[3]
     doc = (root / "experiments" / "ARCHITECTURE.md").read_text()
     assert "No prepriced trade frame or previous experiment output is accepted" in doc
     assert "no gate fitting or sweep lifecycle" in doc
     assert "`EXPERIMENT_VARIANT_FAILED`; no partial result is returned" in doc
+    readme = (root / "engine/v2/research/README.md").read_text()
+    interface = readme.split("<!-- public-interface:", 1)[1].split("-->", 1)[0]
+    consumers = readme.split("## Consumers", 1)[1].split("## Usage", 1)[0]
+    assert "replay.ReplayResult" in interface
+    assert "experiments/v2_gate_variant.py" in consumers

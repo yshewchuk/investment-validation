@@ -42,6 +42,7 @@ class GateVariantPricing:
 
 
 def _plan(spec, strategy):
+    """Resolve only declarations this native pricing stage actually consumes."""
     plan = resolve_experiment_plan(spec)
     alpha = plan.economic_params.get("fill")
     try:
@@ -88,6 +89,7 @@ def price_variant(repository, snapshot, spec: ExperimentSpec, *, strategy: str,
 
 
 def main(argv=None) -> int:
+    """Print smoke evidence from the current pin without recording any result."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--store-root", type=Path, required=True)
