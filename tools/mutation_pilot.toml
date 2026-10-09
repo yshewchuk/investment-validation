@@ -658,6 +658,7 @@ mutate = [
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
+    "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/v2/ops/test_provider_requirements.py",
     "tests/test_v2_ops_catalog.py",
     "tests/test_v2_ops_checkpoint_output_names.py",
@@ -706,6 +707,7 @@ mutate = [
     "engine/v2/ops/schema_runtime.py",
 ]
 tests = [
+    "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_catalog.py",
@@ -926,6 +928,7 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/v2/ops/test_forward_calendar_admission.py",
     "tests/v2/ops/test_provider_response.py",
     "tests/v2/ops/test_provider_response_boundary.py",

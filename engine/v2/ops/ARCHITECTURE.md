@@ -65,14 +65,10 @@ one per event × native-covered strategy, plus one `DYN-SV` meta-request per eve
 `forward_calendar_refresh` has a `JobKind` (worker dispatch, loader callback, parameter validation) but no `nightly.py`
 `GRAPH`/`OPTIONAL` node and no `supervisor.Service` submitter yet — not on the nightly schedule.
 
-`forward_calendar_store.py` owns native fetching here rather than in another v2 layer.
-Its standalone, keyword-only `run_forward_calendar_refresh` validates every non-fetcher
-argument before catalog/provider access; `tickers=()` means the whole market.
-At commit, `_head_fence` runs before the per-attempt `fence_check` (the same shape as
-`computed_moves_store`), both inside `catalog.commit_snapshot`'s transaction:
-cancelled or lease-expired attempts refuse before any commit. Omitting `fence_check`
-preserves `engine/v2/data/incremental.py`'s generic refresh and
-`engine/v2/research/_trades_publish.py`. No `GRAPH` node or `Service` submitter exists yet.
+`forward_calendar_store.run_forward_calendar_refresh` is a standalone, keyword-only native fetcher in ops: non-fetcher arguments validate before catalog/provider access; empty tickers mean whole market.
+Commit fencing checks the head before the attempt within one transaction; cancelled/expired attempts refuse before commit. An omitted attempt fence preserves generic-refresh and research callers.
+The forward-calendar worker loader wraps both provider-unit fetchers with `provider_budget.budgeted_fetcher`, bound to the staged attempt/fence and each source's own account. Budget transactions/connections end before provider I/O; complete cache hits bypass charging.
+`catalog.connect(must_exist=True)` opens an existing catalog without creating a replacement; its default still permits catalog creation. Guard construction performs no I/O.
 
 `native_score_batch.py`: the batch-shaped seam between the board universe
 (`native_board_universe.BoardRequest`) and
@@ -1201,7 +1197,10 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | an unknown field, wrong type, or `bool` where `int` is declared | `INVALID_REQUEST`, before decode returns |
 | `tickers` non-empty but not equal to `expected_ids` as a set, or empty specifically for a `forward_calendar_refresh` job | `INVALID_REQUEST` at submission |
 | `attempt_id`/`fence` set inconsistently (one without the other) | `INVALID_REQUEST` before any I/O |
-| both set, but the fence is void or the lease expired | refused inside the same commit transaction, before any row is inserted or the head moves |
+| both set, but the fence is void or the lease expired | refused before publication inside the commit transaction; worker cache misses also refuse `CANCELLED`/`LEASE_LOST` before the provider is called |
+| worker source reservation absent/released/blocked, exhausted, or in backoff | `CREDENTIAL_INVALID`, `RESOURCE_UNAVAILABLE`, or `RATE_LIMITED` before that source call, respectively; no new charge or snapshot publication. Earlier source receipts may remain cached. |
+| SQLite/filesystem error opening or charging the worker budget | redacted `RESOURCE_UNAVAILABLE`, no provider call; owned guard connections close on success or failure. |
+| a charged provider-unit invocation subsequently fails | charge remains committed, including uncertainty; no refund or internal retry. Counts cover date/ticker fetcher invocations, not hidden library HTTP requests. |
 | no committed `daily_market` session on the parent snapshot | not a refusal — weekday-calendar fallback, recorded as a result warning |
 | a unit's provider response is not-final/transient (retryable) or refused/credential-invalid (not) | one of four ranked failure codes; a mixed batch reports the worst, and nothing partial is committed |
 | a cached unit exists (`response_kind="complete"`) | re-read from its receipt, never re-fetched |
