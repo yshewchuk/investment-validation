@@ -76,6 +76,29 @@ slice 2), which labels each priced grid-position step with the same
 execution-variant string `replay()` itself uses, rather than reimplementing
 that labeling.
 
+`experiment_exits.walk_fixed_day(repository, snapshot, positions, economic_params=...)`
+accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
+economics: `exit={kind: "fixed_day", trading_days: N}` with positive integer N,
+explicit numeric `fill` in the alpha ladder's range, and `price_source="option_chains"`.
+The immutable resolved economics and canonical plan identity retain N.
+It reprices the held legs on every observed trading day from entry
+through entry plus the declared positive `trading_days`, using the pinned
+`daily_market` calendar and `option_chains` quotes with `_pricing.FillModel`'s
+existing alpha ladder; no projected calendar, replacement contract or mark source.
+Results are `mark_based` per-option-unit P&L with exit decision, visited dates,
+source, alpha fill convention and snapshot identity.
+
+| Fixed-day failure condition | Outcome (design #372 R4) |
+|---|---|
+| Malformed position or leg record | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+| Missing required leg mark | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+| Unusable quote reaching pricing | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+| Insufficient calendar coverage | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+
+Other repository refusals propagate.
+No cache, retry, transaction or write: identical inputs return identical results.
+Report/ledger publication, target/stop recipes and aggregation belong to slice 7b.
+
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
 snapshot-read helpers), `_pricing.py` (except the names carved out above),
