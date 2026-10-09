@@ -965,6 +965,7 @@ tests = [
     # tests/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked
     # file caveat as the mutate list above; the glob matches it once.
     "tests/test_v2_ops_nightly*.py",
+    "tests/v2/ops/test_v2_ops_nightly_completion.py",
     "tests/v2/ops/test_v2_ops_render_parity.py",
     "tests/v2/ops/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",
