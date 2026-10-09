@@ -2,18 +2,11 @@
 
 ## Evaluation recording and promotion receipts
 
-`experiments.lib.record_evaluation` appends a `ran` row before finalizing the
-metrics artifact. Receipt publication is enabled by default: the recorder
-requires the artifact's `run_id` and embedded `spec_hash` to match the
-evaluated run and spec, recomputes the checklist against the ledger, marks the
-artifact `recorded`, and writes a receipt bound to the finalized artifact's
-exact bytes. Promotion validates the artifact, requested spec, receipt, and
-qualifying ledger row before using the metrics.
-
-The ledger append is the commit point. A later validation or receipt-write
-failure does not undo that row; the row alone cannot authorize promotion.
-With `publish_receipt=False`, the recorder uses ledger-only mode: it appends
-the `ran` row and returns without validating or finalizing metrics or
-publishing a receipt. `record_evaluation_result` records an `EvalResult` from
-its own `run_dir`, so grid arms bind the metrics artifact written in that arm
-directory.
+| Condition | Outcome |
+| --- | --- |
+| `record_evaluation_result` has no `run_dir` or its results are not a `Mapping` | Raise `LedgerError` before appending a `ran` row. |
+| `publish_receipt=False` | Append the `ran` row; skip artifact validation, finalization, and receipt publication. |
+| Receipt publication is enabled and the artifact matches the run and spec | Append the row, finalize the checklist and `recording_mode`, then publish a receipt for the exact final bytes. |
+| Validation or receipt publication fails after the append | Keep the `ran` row; the row alone cannot authorize promotion. |
+| Promotion consumes an artifact | Require matching artifact, requested spec, receipt, run ID, digest, and qualifying ledger row; otherwise refuse with `PROMOTION_LEDGER_RECEIPT_MISSING`. |
+| An `EvalResult` is recorded | Use its own `run_dir` for its metrics artifact, including for grid arms. |

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import types
 import uuid
 from pathlib import Path
 
@@ -620,3 +621,26 @@ def test_copied_foreign_metrics_artifact_is_refused(tmp_root):
         match=f"{promote.PROMOTION_LEDGER_RECEIPT_MISSING}.*carries spec_hash",
     ):
         promote.validate_recording_receipt(spec_a, a_metrics)
+
+
+def test_record_evaluation_result_without_run_dir_refuses(tmp_root):
+    """An EvalResult-like object with no run_dir cannot bind an artifact."""
+    spec = _spec(exp_id="EXP-925")
+    result = types.SimpleNamespace(run_dir=None, results={"run_id": "probe"})
+
+    with pytest.raises(lib.LedgerError, match="run_dir"):
+        lib.record_evaluation_result(result, spec)
+
+    assert not lib.LEDGER_PATH.exists() or lib.ledger_read().empty
+
+
+def test_record_evaluation_result_with_non_mapping_results_refuses(tmp_root):
+    """An object with a real run_dir but non-Mapping results cannot record."""
+    spec = _spec(exp_id="EXP-926")
+    folder = _experiment(tmp_root, spec, "EXP-926")
+    result = types.SimpleNamespace(run_dir=folder, results=["not", "a", "mapping"])
+
+    with pytest.raises(lib.LedgerError, match="results"):
+        lib.record_evaluation_result(result, spec)
+
+    assert not lib.LEDGER_PATH.exists() or lib.ledger_read().empty
