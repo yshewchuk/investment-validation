@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2 import foundation  # noqa: E402
@@ -465,6 +465,8 @@ def test_deep_nesting_round_trips_without_recursion_error():
     # Mutation-test runners add enough Python frames to make the interpreter's
     # default limit an environmental variable. This test is about the data
     # depth, so give it a fixed stack budget and restore the process setting.
+    import hashlib
+
     old_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(max(old_limit, 5000))
     try:
@@ -472,7 +474,7 @@ def test_deep_nesting_round_trips_without_recursion_error():
         assert canonical_json(value) == expected_text
         assert "".join(iter_canonical_json(value)) == expected_text
         assert content_hash(value) == (
-            "sha256:" + __import__("hashlib").sha256(expected_text.encode("utf-8")).hexdigest()
+            "sha256:" + hashlib.sha256(expected_text.encode("utf-8")).hexdigest()
         )
     finally:
         sys.setrecursionlimit(old_limit)
@@ -484,6 +486,8 @@ def test_large_row_list_matches_the_pre_refactor_oracle():
     measurement (that one runs under `tools/bounded_run.py`, not pytest), but
     large enough to catch an off-by-one in the streaming join/hash loop that
     a handful of rows would not."""
+    import hashlib
+
     rows = [
         {"id": i, "ticker": f"T{i % 500}", "px": i * 0.01 - 0.005,
          "flag": bool(i % 2), "note": "café" if i % 7 == 0 else "",
@@ -494,7 +498,7 @@ def test_large_row_list_matches_the_pre_refactor_oracle():
     assert canonical_json(rows) == expected_text
     assert "".join(iter_canonical_json(rows)) == expected_text
     assert content_hash(rows) == (
-        "sha256:" + __import__("hashlib").sha256(expected_text.encode("utf-8")).hexdigest()
+        "sha256:" + hashlib.sha256(expected_text.encode("utf-8")).hexdigest()
     )
 
 

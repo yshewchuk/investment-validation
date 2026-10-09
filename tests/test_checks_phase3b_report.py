@@ -75,10 +75,12 @@ def test_report_is_rendered_from_code_over_the_real_receipt(tmp_path, real_run):
         assert ref in text
 
 
-def test_report_discloses_the_known_red_test_alongside_the_gate_pass(tmp_path, real_run):
+def test_report_lists_zero_known_red_tests_alongside_the_gate_pass(tmp_path, real_run):
     # The acceptance gate passing must never be allowed to read as "the suite
-    # is green" -- the report must name the one test known red at close
-    # (R3B-7) in the same document as the gate PASS.
+    # is green" -- the report keeps the known-red section and its "not the
+    # suite" caveat. It currently lists zero entries: the three real-data
+    # candidates were verified 2026-09-18 and the former synthetic R3B-7
+    # test was rechecked 2026-10-09 and passes, so it is no longer named.
     receipt, evidence, gate_result = real_run
     assert gate_result["ok"] is True
     context = phase3b_report.build_context(
@@ -86,8 +88,10 @@ def test_report_discloses_the_known_red_test_alongside_the_gate_pass(tmp_path, r
         input_files=[phase3b_report.DEFAULT_RECEIPT, phase3b_report.DEFAULT_EVIDENCE])
     path = Report(context).write(tmp_path, filename="report.md")
     text = path.read_text()
-    assert "test_action_finality_writes_a_coverage_output_from_monkeypatched_frames" in text
-    assert "R3B-7" in text
+    assert "Known red tests in the wider v2 suite at close" in text
+    assert "0 known red test(s)" in text
+    assert ("test_action_finality_writes_a_coverage_output_from_monkeypatched_frames"
+            not in text)
 
 
 def test_report_reaches_its_default_location_and_the_private_mirror(real_run):

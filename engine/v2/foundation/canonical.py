@@ -23,7 +23,7 @@ Phase 0 wrote this into ``engine/v2/diagnosis`` because that was the only v2
 package allowed code. Rearchitecture phase 1 §3.2 moved it here, unchanged, so
 production ops can hash without importing diagnosis (a sink nothing may
 import). ``engine.v2.diagnosis.canonical`` re-exports these same objects, and
-``tests/test_v2_ops_foundation.py`` pins hashes computed by the phase-0 copy
+``tests/v2/foundation/test_v2_ops_foundation.py`` pins hashes computed by the phase-0 copy
 before the move, so a byte of drift fails rather than silently re-keying every
 receipt and corpus hash.
 """
@@ -227,7 +227,7 @@ def iter_canonical_json(value: Any, *, fragments: Any = None) -> Iterator[str]:
     Byte-for-byte identical to ``canonical_json(value, fragments=fragments)``
     -- trivially true now that ``canonical_json`` is defined as
     ``"".join(iter_canonical_json(...))``, and pinned in
-    ``tests/test_v2_ops_foundation.py`` against the same GOLDEN fixtures plus
+    ``tests/v2/foundation/test_v2_ops_foundation.py`` against the same GOLDEN fixtures plus
     a shared-fragment document, so a future edit that reintroduces a second
     recursion is caught the same way a hash drift would be.
     """

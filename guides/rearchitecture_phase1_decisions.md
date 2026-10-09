@@ -56,7 +56,7 @@ ceiling only shrinks.
 The RFC 8785 implementation moved from `engine/v2/diagnosis/canonical.py` to
 `engine/v2/foundation/canonical.py` byte-for-byte. Diagnosis re-exports the
 same function objects, so there is still exactly one canonicalizer.
-`tests/test_v2_ops_foundation.py` pins hashes computed by the phase-0 copy
+`tests/v2/foundation/test_v2_ops_foundation.py` pins hashes computed by the phase-0 copy
 before the move, and asserts no second definition exists anywhere in v2.
 Production ops never imports diagnosis; the layer check already enforces it.
 

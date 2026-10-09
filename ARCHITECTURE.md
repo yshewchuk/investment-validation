@@ -227,6 +227,12 @@ layer](guides/test_selection_by_layer.md). The checked-in test-layout ratchet
 packages migrate. On `pull_request`, `tests.yml` runs it against the PR base SHA before
 pytest and a nonzero result fails the `test` job; pushes to `main` keep the full-suite backstop.
 
+Fixed dependencies in verification code should use ordinary imports or lazy
+literal `importlib.import_module` calls, retaining every target and its import
+timing. Query-only package metadata names can be imported explicitly. These
+spellings let the existing selector resolve dependencies; they do not relax
+its fail-safe rules or extend its best-effort static-analysis guarantee.
+
 ## 2. Layers and allowed dependency direction
 
 The rule is **strictly less than**: a package may import a package on a

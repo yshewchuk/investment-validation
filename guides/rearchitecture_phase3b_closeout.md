@@ -40,9 +40,9 @@ through `engine.report.Report`, Convention 6, like every other phase report.
 
 ## Known test-suite state at close
 
-**The acceptance gate PASS above and one known-red test in the wider v2
-suite are both true at the same time.** The gate only checks the 8
-P3B01-P3B08 subjects; it says nothing about the rest of the suite. Verified
+**The acceptance gate PASS above and wider-suite results describe different
+scopes.** The gate only checks the 8 P3B01-P3B08 subjects; it says nothing
+about the rest of the suite. Verified
 2026-09-18 in the main checkout (real `data/` present, so this is not a
 worktree/missing-data artifact):
 
@@ -53,12 +53,14 @@ worktree/missing-data artifact):
   plain git worktree, because `data/` is gitignored and no worktree carries
   it — an environment artifact, not a defect.)
 - `tests/v2/ops/test_v2_ops_nightly_completion.py::test_action_finality_writes_a_coverage_output_from_monkeypatched_frames`
-  is **genuinely red**: `covered_tickers: []` where `['AAA']` is expected.
-  This is R3B-7 (below), assigned separately and not fixed by this record.
+  was recorded as R3B-7 after it returned `covered_tickers: []` instead of
+  `['AAA']`. It now passes on the current main implementation; the focused
+  run on 2026-10-09 passed (1 test). This synthetic, in-process test does not
+  establish real-data coverage.
 
-So: Phase 3B's acceptance-evidence slice closes with the 8/8 gate PASS
-**and** one known-red test in the wider suite, named above. Neither fact is
-omitted for the other.
+So: Phase 3B's acceptance-evidence slice closes with the 8/8 gate PASS, and
+the formerly red synthetic test now passes on current main. Neither result
+stands in for the other.
 
 ## Accepted limitation (supervisor decision, 2026-09-18)
 

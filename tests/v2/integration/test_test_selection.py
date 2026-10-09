@@ -22,6 +22,54 @@ from checks import test_layout_budget as tb  # noqa: E402
 from checks import test_selection as ts  # noqa: E402
 
 
+def test_fixed_dependency_spellings_have_no_unresolved_loads():
+    """Classify five source files in a bounded graph, not their full closure.
+
+    The adjacent regression checks fixed training targets and package inits.
+    """
+    from tools import mutation_pilot as mp
+
+    paths = [
+        "tests/v2/integration/test_computed_moves.py",
+        "tests/v2/foundation/test_v2_ops_foundation.py",
+        "tests/v2/models/test_v2_models_no_fit.py",
+        "tests/v2/models/training/test_v2_models_training_recipe_fields.py",
+        "tools/baseline_export.py",
+    ]
+    assert mp.unresolved_import_files(paths) == set()
+    graph = mp.build_import_graph(paths)
+    assert mp.dynamic_files(graph) == set()
+
+
+def test_lazy_training_imports_keep_every_fixed_target_and_package_init():
+    from tools import mutation_pilot as mp
+
+    tests = [
+        "tests/v2/models/test_v2_models_no_fit.py",
+        "tests/v2/models/training/test_v2_models_training_recipe_fields.py",
+    ]
+    targets = {f"engine/models/training/{name}.py" for name in (
+        "gate", "gate_forecast_analog", "implied_t1", "runup_move", "size_model", "iv_crush",
+    )}
+    targets |= {"engine/__init__.py", "engine/models/__init__.py",
+                "engine/models/training/__init__.py"}
+    graph = mp.build_import_graph(tests + sorted(targets))
+    for test in tests:
+        assert targets <= graph.precise[test]
+
+
+def test_phase1_coverage_keeps_relocated_foundation_file(tmp_path):
+    """A missing required test must not silently disappear from the suite."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/foundation/test_v2_ops_foundation.py"
+    assert relative in phase1_suite(tmp_path)
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    assert relative in phase1_suite(tmp_path)
+
+
 def _integration(root, name, body):
     directory = root / "tests/v2/integration"
     directory.mkdir(parents=True, exist_ok=True)
