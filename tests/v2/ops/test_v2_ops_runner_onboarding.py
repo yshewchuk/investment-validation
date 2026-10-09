@@ -44,7 +44,7 @@ def _synthetic_root(root: Path, source: str) -> Path:
 
 
 def test_runner_manifest_mixes_reviewed_inventory_with_mechanical_evidence():
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[3]
     manifest = runner_manifest(root, REGISTERED)
     assert manifest["schema_version"] == "runner_capability_manifest.v1.0"
     assert manifest["no_ledger_support"] is True
@@ -89,7 +89,7 @@ def test_leaking_runner_is_caught_by_the_write_audit(tmp_path):
 def test_exp185_wrapper_patches_here_and_results_before_main():
     import importlib.util
 
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[3]
     wrapper_dir = root / (
         "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered"
     )
@@ -121,7 +121,7 @@ def test_retired_runner_is_refused_before_any_subprocess(retired, monkeypatch):
     from engine.v2.ops import legacy_adapter
     from engine.v2.ops.experiments import RUNNER_INVENTORY
 
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[3]
     spawn_calls = []
 
     def fail_spawn(*a, **k):
@@ -144,7 +144,7 @@ def test_active_registration_keeps_its_audited_source_closure():
     from engine.v2.ops import legacy_adapter
     from engine.v2.ops.experiments import RUNNER_INVENTORY
 
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[3]
     assert set(RUNNER_INVENTORY) == {REGISTERED}
     assert legacy_adapter.REGISTERED_RUNNERS == frozenset({REGISTERED})
     manifest = runner_manifest(root, REGISTERED)

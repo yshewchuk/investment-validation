@@ -636,7 +636,7 @@ tests = [
     "tests/test_v2_ops_legacy_workflows.py",
     "tests/test_v2_ops_outcome_session_backfill_wiring.py",
     "tests/test_v2_ops_recovery_ownership.py",
-    "tests/test_v2_ops_runner_onboarding.py",
+    "tests/v2/ops/test_v2_ops_runner_onboarding.py",
     "tests/test_v2_ops_same_session_replan.py",
     "tests/test_v2_ops_worker_typed_failures.py",
 ]
@@ -861,7 +861,7 @@ tests = [
     "tests/test_v2_ops_parity.py",
     "tests/test_v2_ops_render_parity.py",
     "tests/test_v2_ops_resolved_session.py",
-    "tests/test_v2_ops_runner_onboarding.py",
+    "tests/v2/ops/test_v2_ops_runner_onboarding.py",
     "tests/test_v2_ops_same_session_replan.py",
     "tests/test_v2_ops_security_gate.py",
     "tests/test_v2_serving_publication_binding.py",
