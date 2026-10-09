@@ -104,6 +104,9 @@ consume an eligible population. It shares the trade loader's membership and
 ambiguity logic; neither source dates nor ticker names substitute for event IDs.
 Multiple IDs on one ticker/day are ambiguous even when their sessions differ:
 the prediction outcome table cannot distinguish those event identities.
+The manual `experiments.v2_gate_variant` smoke CLI consumes this population in
+sweep mode before fresh native replay; it has no supervisor or report/ledger
+publication authority. Its pricing contract lives in `experiments/ARCHITECTURE.md`.
 `prediction_inputs.load_prediction_targets` consumes this population first,
 then scans each eligible ticker/event-date pair in pinned `computed_moves`.
 It returns the signed move, binary `positive_move` target, and
