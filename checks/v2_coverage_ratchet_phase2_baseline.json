@@ -30,18 +30,18 @@
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_decision_validation_order.py",
     "tests/test_v2_ops_effects_graph.py",
-    "tests/v2/ops/test_v2_ops_engineering.py",
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/test_v2_ops_fingerprints_model_scan.py",
     "tests/test_v2_ops_ledger_history_import.py",
-    "tests/test_v2_ops_nightly_completion.py",
     "tests/test_v2_ops_parity.py",
     "tests/test_v2_ops_price_history.py",
     "tests/test_v2_ops_render_parity.py",
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_snapshot_stages.py",
-    "tests/test_v2_ops_tier4_coverage.py"
+    "tests/test_v2_ops_tier4_coverage.py",
+    "tests/v2/ops/test_v2_ops_engineering.py",
+    "tests/v2/ops/test_v2_ops_nightly_completion.py"
   ],
   "source_hash": "sha256:cb043c838db18bcf624ec91f175922fdf99aa6c30269de82640ea18937605d62",
   "packages": {
@@ -2653,347 +2653,347 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_legacy_decisions_commits_through_job_id_bindings",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_legacy_decisions_commits_through_job_id_bindings",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_job_binding_to_undeclared_dependency_fails_input_changed",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_job_binding_to_undeclared_dependency_fails_input_changed",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_job_binding_without_output_name_fails_validation",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_job_binding_without_output_name_fails_validation",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_direct_artifact_binding_outside_input_refs_fails_input_changed",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_direct_artifact_binding_outside_input_refs_fails_input_changed",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_job_binding_parent_not_succeeded_fails_resolution",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_job_binding_parent_not_succeeded_fails_resolution",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_coordinator_refuses_when_recorded_binding_disagrees_with_validation",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_coordinator_refuses_when_recorded_binding_disagrees_with_validation",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_attempt_input_bindings_are_immutable",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_attempt_input_bindings_are_immutable",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_cache_identity_changes_when_resolved_parent_output_changes",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_cache_identity_changes_when_resolved_parent_output_changes",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_attempt_input_bindings_migration_applies_once_and_checksums_hold",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_attempt_input_bindings_migration_applies_once_and_checksums_hold",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_decision_population_agrees_with_ledger_eligibility_as_a_key_set",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_decision_population_agrees_with_ledger_eligibility_as_a_key_set",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_decision_population_rejects_duplicate_keys",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_decision_population_rejects_duplicate_keys",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_decision_population_is_sorted_by_population_key",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_decision_population_is_sorted_by_population_key",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_compare_rows_identical_rows_has_no_findings",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_compare_rows_identical_rows_has_no_findings",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_compare_rows_names_a_planted_float_change_and_a_planted_flag_change",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_compare_rows_names_a_planted_float_change_and_a_planted_flag_change",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_compare_rows_ignores_only_row_id_and_strike_offset",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_compare_rows_ignores_only_row_id_and_strike_offset",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_compare_rows_now_compares_chosen_strategy_and_menu_fields",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_compare_rows_now_compares_chosen_strategy_and_menu_fields",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_compare_rows_names_missing_row_when_an_eligible_key_never_replays",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_compare_rows_names_missing_row_when_an_eligible_key_never_replays",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_decision_replay_action_scopes_context_full_and_scoring_eligible",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_decision_replay_action_scopes_context_full_and_scoring_eligible",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_decision_replay_action_empty_population_skips_scoring",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_decision_replay_action_empty_population_skips_scoring",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_decision_replay_job_depends_on_score_with_named_output_binding",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_decision_replay_job_depends_on_score_with_named_output_binding",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_legacy_decision_replay_kind_is_allowlisted_and_registered",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_legacy_decision_replay_kind_is_allowlisted_and_registered",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_legacy_decision_replay_environment_ref_matches_launch_formula",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_legacy_decision_replay_environment_ref_matches_launch_formula",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_derive_and_validator_agree_on_eligible_forward_and_ladder_rows",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_derive_and_validator_agree_on_eligible_forward_and_ladder_rows",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_finality_checkpoint_records_real_names_through_the_real_supervisor_path",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_finality_checkpoint_records_real_names_through_the_real_supervisor_path",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_decision_evidence_and_decisions_commit_through_submit_graph",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_decision_evidence_and_decisions_commit_through_submit_graph",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_planted_defect_replayed_float_change_is_refused",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_planted_defect_replayed_float_change_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_planted_defect_late_evidence_cutoff_is_refused",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_planted_defect_late_evidence_cutoff_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_planted_defect_replay_missing_an_eligible_row_is_refused",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_planted_defect_replay_missing_an_eligible_row_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_planted_defect_finality_coverage_missing_a_ticker_is_refused",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_planted_defect_finality_coverage_missing_a_ticker_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_finality_coverage_document_for_a_different_session_is_refused",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_finality_coverage_document_for_a_different_session_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_action_finality_writes_a_coverage_output_from_monkeypatched_frames",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_action_finality_writes_a_coverage_output_from_monkeypatched_frames",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_coordinator_rederivation_catches_tampered_worker_evidence_bytes",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_coordinator_rederivation_catches_tampered_worker_evidence_bytes",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_no_entry_night_commits_zero_decisions_and_still_enqueues_release",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_no_entry_night_commits_zero_decisions_and_still_enqueues_release",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_unscored_row_with_no_evidence_window_does_not_block_decisions",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_unscored_row_with_no_evidence_window_does_not_block_decisions",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_validate_causality_unit_cases",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_validate_causality_unit_cases",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_empty_plan_population_with_eligible_score_rows_is_refused",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_empty_plan_population_with_eligible_score_rows_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_empty_population_with_one_candidate_is_refused",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_empty_population_with_one_candidate_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_decision_evidence_stage_wired_with_parents_and_bindings",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_decision_evidence_stage_wired_with_parents_and_bindings",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_ledger_decisions_install_creates_tables_standalone",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_ledger_decisions_install_creates_tables_standalone",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_set_authority_requires_transaction_and_rejects_wrong_owner",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_set_authority_requires_transaction_and_rejects_wrong_owner",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_ledger_decisions_insert_conflict_paths",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_ledger_decisions_insert_conflict_paths",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_ledger_decisions_rows_filters_by_kind_and_through",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_ledger_decisions_rows_filters_by_kind_and_through",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_row_conflicts_pure",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_row_conflicts_pure",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_outcome_generation_ref_parses_and_rejects",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_outcome_generation_ref_parses_and_rejects",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_import_lines_conflict_and_diverge_paths",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_import_lines_conflict_and_diverge_paths",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_import_decision_id_outcome_requires_observation_identity",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_import_decision_id_outcome_requires_observation_identity",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_stamp_date_parses_and_rejects",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_stamp_date_parses_and_rejects",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_contract_mismatch_field_detects_each_field",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_contract_mismatch_field_detects_each_field",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_match_same_session_only_matches_recorded_generation_ref",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_match_same_session_only_matches_recorded_generation_ref",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_validate_settlement_state_paths",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_validate_settlement_state_paths",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_settlement_line_malformed_and_missing_prediction",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_settlement_line_malformed_and_missing_prediction",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_settlement_line_contract_mismatch_records_divergence",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_settlement_line_contract_mismatch_records_divergence",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_settlement_line_dedupe_and_happy_paths",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_settlement_line_dedupe_and_happy_paths",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_validate_candidates_requires_bound_evidence",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_validate_candidates_requires_bound_evidence",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_commit_decisions_in_transaction_guard_branches",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_commit_decisions_in_transaction_guard_branches",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_commit_decisions_wrapper_and_validate_candidates_seam",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_commit_decisions_wrapper_and_validate_candidates_seam",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_manifest_files_refuses_missing_or_symlinked_member",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_manifest_files_refuses_missing_or_symlinked_member",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_copy_read_set_refuses_symlinked_roots_and_verifies_copies",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_copy_read_set_refuses_symlinked_roots_and_verifies_copies",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_overlay_read_set_refuses_symlinked_source_and_existing_destination",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_overlay_read_set_refuses_symlinked_source_and_existing_destination",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_legacy_action_refuses_unallowlisted_action",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_legacy_action_refuses_unallowlisted_action",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_invoke_nightly_helper_refuses_unaudited_helper",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_invoke_nightly_helper_refuses_unaudited_helper",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_run_legacy_script_refuses_unregistered_and_args",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_run_legacy_script_refuses_unregistered_and_args",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_run_legacy_rebuild_surfaces_subprocess_failure",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_run_legacy_rebuild_surfaces_subprocess_failure",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_json_stdout_refuses_non_json_output",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_json_stdout_refuses_non_json_output",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_legacy_adapter_load_helpers_require_their_artifact",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_legacy_adapter_load_helpers_require_their_artifact",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_legacy_ledger_schema_version_is_a_real_constant",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_legacy_ledger_schema_version_is_a_real_constant",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_format_timestamp_refuses_a_naive_datetime",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_format_timestamp_refuses_a_naive_datetime",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_canonical_json_renders_large_magnitudes_in_exponential_form",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_canonical_json_renders_large_magnitudes_in_exponential_form",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_canonical_serialize_refuses_an_unnormalized_type_directly",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_canonical_serialize_refuses_an_unnormalized_type_directly",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_configure_account_refuses_a_negative_budget",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_configure_account_refuses_a_negative_budget",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_reserve_refuses_a_non_positive_call_count",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_reserve_refuses_a_non_positive_call_count",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_reserve_refuses_an_unconfigured_or_blocked_account",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_reserve_refuses_an_unconfigured_or_blocked_account",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_reserve_refuses_during_an_unexpired_backoff",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_reserve_refuses_during_an_unexpired_backoff",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_reserve_refuses_a_second_active_lease_and_an_over_budget_request",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_reserve_refuses_a_second_active_lease_and_an_over_budget_request",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_before_request_refuses_without_an_active_reservation",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_before_request_refuses_without_an_active_reservation",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_before_request_refuses_rate_limit_and_exhausted_retries_then_admits",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_before_request_refuses_rate_limit_and_exhausted_retries_then_admits",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_record_response_maps_every_status_family",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_record_response_maps_every_status_family",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_classify_maps_each_reviewed_exception_family",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_classify_maps_each_reviewed_exception_family",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_last_frame_reads_the_deepest_traceback_entry_or_none",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_last_frame_reads_the_deepest_traceback_entry_or_none",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_write_diagnostics_and_failure_details_land_in_private_files",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_write_diagnostics_and_failure_details_land_in_private_files",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_failure_result_assembles_a_typed_worker_result",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_failure_result_assembles_a_typed_worker_result",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_dispatch_refuses_an_unsupported_worker",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_dispatch_refuses_an_unsupported_worker",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_dispatch_artifact_check_reports_affinity_and_threads",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_dispatch_artifact_check_reports_affinity_and_threads",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_dispatch_artifact_check_reports_no_work_for_an_empty_expected_set",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_dispatch_artifact_check_reports_no_work_for_an_empty_expected_set",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_nightly_completion.py::test_dispatch_effect_receipt_names_its_output_with_a_receipt_suffix",
+      "nodeid": "tests/v2/ops/test_v2_ops_nightly_completion.py::test_dispatch_effect_receipt_names_its_output_with_a_receipt_suffix",
       "outcome": "passed"
     },
     {

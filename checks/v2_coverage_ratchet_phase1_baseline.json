@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v7",
+  "suite_version": "phase1_coverage_suite.v8",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -88,15 +88,12 @@
     "tests/test_v2_ops_migrations.py",
     "tests/test_v2_ops_native_board_universe.py",
     "tests/test_v2_ops_native_parity_sidecar.py",
-    "tests/test_v2_ops_native_parity_worker.py",
     "tests/test_v2_ops_native_refresh_e2e.py",
     "tests/test_v2_ops_native_refresh_nightly_e2e.py",
     "tests/test_v2_ops_native_score_batch.py",
-    "tests/test_v2_ops_native_shadow_render.py",
     "tests/test_v2_ops_nightly_calendar_inputs.py",
     "tests/test_v2_ops_nightly_decision_clock.py",
     "tests/test_v2_ops_nightly_quote_rows.py",
-    "tests/test_v2_ops_nightly_raw_row_producer.py",
     "tests/test_v2_ops_nightly_raw_rows.py",
     "tests/test_v2_ops_nightly_trigger.py",
     "tests/test_v2_ops_outcome_session_backfill_wiring.py",
@@ -141,17 +138,16 @@
     "tests/test_v2_serving_fold_loader.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_native_parity.py",
-    "tests/test_v2_serving_native_parity_api.py",
     "tests/test_v2_serving_native_render.py",
     "tests/test_v2_serving_projections.py",
     "tests/test_v2_serving_publication_binding.py",
     "tests/v2/foundation/test_v2_ops_foundation.py",
     "tests/v2/ops/test_cli_rescore.py",
+    "tests/v2/ops/test_native_parity_pairing.py",
     "tests/v2/ops/test_v2_ops_engineering.py",
-    "tests/v2/ops/test_v2_ops_native_parity_pairing.py",
     "tests/v2/ops/test_v2_ops_nightly_completion.py"
   ],
-  "source_hash": "sha256:dbae151505a25f191ec654d7be976622ceef99757fa8f38acf2b7157937205e5",
+  "source_hash": "sha256:d62ac8503cd677ba6300b07dfcc3fc152a988029fa40776827db7ded46d71f06",
   "packages": {
     "engine.v2.contracts": {
       "executed": 802,

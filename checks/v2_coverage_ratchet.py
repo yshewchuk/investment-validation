@@ -69,6 +69,11 @@ suite and leave ``engine.v2.ops`` looking less covered. As with v5/v6 this
 refreshes the declared file list (and the measurement identity it feeds);
 the package counts remain the v6 measurement's, not a fresh run.
 
+Bumped to v8: current ``origin/main`` renamed the native-parity test to
+``tests/v2/ops/test_native_parity_pairing.py``, so the fixed selector path
+-- and the measurement identity it feeds -- change again; the package
+counts remain from the v6 measurement and are not freshly measured.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -160,7 +165,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v7"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v8"
 
 
 def phase1_suite(root=ROOT):
@@ -172,7 +177,7 @@ def phase1_suite(root=ROOT):
                   + ["tests/v2/foundation/test_v2_ops_foundation.py"]
                    + ["tests/v2/ops/test_cli_rescore.py"]
                    + ["tests/v2/ops/test_v2_ops_engineering.py"]
-                   + ["tests/v2/ops/test_v2_ops_native_parity_pairing.py"]
+                   + ["tests/v2/ops/test_native_parity_pairing.py"]
                   + ["tests/v2/ops/test_v2_ops_nightly_completion.py"])
 
 
