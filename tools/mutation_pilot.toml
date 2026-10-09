@@ -619,8 +619,10 @@ mutate = [
     "engine/v2/ops/diagnostics.py",
     "engine/v2/ops/health.py",
     "engine/v2/ops/experiments.py",
+    "experiments/native_registration.py",
 ]
 tests = [
+    "tests/v2/research/test_native_registration.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_coordinator_lease.py",
