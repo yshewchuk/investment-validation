@@ -82,6 +82,18 @@ def test_phase1_coverage_keeps_relocated_rescore_file(tmp_path):
     assert relative in phase1_suite(tmp_path)
 
 
+def test_phase1_coverage_keeps_relocated_forward_calendar_store_file(tmp_path):
+    """The moved calendar-store test must stay in the phase-one fixed suite."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_forward_calendar_store.py"
+    assert relative in phase1_suite(tmp_path)
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    assert relative in phase1_suite(tmp_path)
+
+
 def test_phase1_coverage_keeps_relocated_runner_onboarding_file(tmp_path):
     """The moved runner-onboarding test must stay in the phase-one fixed suite."""
     from checks.v2_coverage_ratchet import phase1_suite

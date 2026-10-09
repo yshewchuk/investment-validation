@@ -49,6 +49,7 @@ from engine.v2.data.reference_inputs import (
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, to_document
 from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.core.snapshot_contracts import SNAPSHOT_BINDINGS
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.input_bindings import recorded_bindings, resolve_bindings
 from engine.v2.ops.snapshot_roots import (
@@ -57,7 +58,6 @@ from engine.v2.ops.snapshot_roots import (
     stat_fingerprint,
     verify_root,
 )
-from engine.v2.ops.stages import SNAPSHOT_BINDINGS
 
 __all__ = ["MATERIALIZE_KIND", "MANIFEST_OUTPUT", "SnapshotLaunch", "cache_inputs",
            "committed_manifest_ids", "confirm_attempt", "launch_mode", "materialize_effect",

@@ -239,6 +239,20 @@ def test_worker_does_not_import_the_cli_entrypoint_even_lazily():
     assert ("worker", "cli") in ops.findings(files, rules)["forbidden"]
 
 
+def test_snapshot_stages_does_not_import_the_stage_registry_even_lazily():
+    rules = json.loads((ROOT / ops.POLICY).read_bytes())
+    files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)
+             if path.startswith(ops.SOURCE) and path.endswith(".py")}
+    actual = ops.findings(files, rules)
+    assert ("snapshot_stages", "stages") not in actual["forbidden"]
+    assert ("stages", "snapshot_stages") not in actual["forbidden"]
+    assert ("snapshot_stages", "core.snapshot_contracts") not in actual["forbidden"]
+    assert ("stages", "core.snapshot_contracts") not in actual["forbidden"]
+    files[ops.SOURCE + "snapshot_stages.py"] += (
+        b"\n\ndef _planted():\n    from engine.v2.ops import stages\n")
+    assert ("snapshot_stages", "stages") in ops.findings(files, rules)["forbidden"]
+
+
 def test_layer_cli_rejects_planted_ops_violation(tmp_path):
     files = {name.replace(".", "/") + "/__init__.py": b""
              for name in [*layers.CONTAINERS, *(p.dotted for p in layers.PACKAGES)]}
