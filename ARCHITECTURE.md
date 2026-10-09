@@ -399,6 +399,14 @@ Only a tracked path absent from the worktree reads as empty.
 
 ## 4. Production entrypoints and the job graph
 
+- **Single-session shadow entrypoint (proposed; not implemented).** Extend the
+  operations trigger to own preparation, snapshot capture, bounded execution and
+  reporting after the legacy nightly; keep legacy scheduling and publication
+  authority unchanged. A durable execution generation owns its step receipts,
+  while the first committed decision for an occurrence remains authoritative.
+  Resume reuses completed steps; an explicit changed-code/input rerun creates a
+  separate generation with declared invalidations. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#single-session-entrypoint-proposed-not-implemented).
+
 - **Legacy nightly — `engine.dashboard.nightly`.** The board in production
   today. Its own module docstring states the load-bearing order: refresh →
   validate → score → ledger → render → selfcheck → publish → flags → backup,

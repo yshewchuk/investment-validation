@@ -523,21 +523,7 @@ idempotency key to recover `(session, scope_hash, snapshot_pinned)`, or
 directly via `ops plan` (not the scheduled trigger) still gets a silent
 no-op (see "Failure semantics" below).
 
-**Cutover PR-7b (implemented, #145/#150): the shadow nightly plan pins a
-snapshot before scoring.** `nightly_trigger._default_plan` runs in
-`input_mode="snapshot"`, `snapshot_scope="shadow"` (was `"legacy"`/`None`):
-legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
-`"model_evidence"` read through one pinned, frozen snapshot per session.
-`pin_snapshot_inputs` binds that snapshot to the exact `snapshot_id`
-`_ensure_shadow_snapshot` verified. Extending that shared snapshot to
-`native_score_batch` still depends on
-[#199](https://github.com/yshewchuk/investment-validation/issues/199)'s reader,
-which removes independent legacy/native store reads from the shadow comparison.
-This never touches the real legacy nightly:
-`nightly_trigger.py` runs on its own systemd timer
-(`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate
-from whatever schedules the legacy nightly, with no code path into the
-legacy process.
+**Cutover PR-7b (implemented, #145/#150): the shadow nightly plan pins a snapshot before scoring.** `nightly_trigger._default_plan` runs in `input_mode="snapshot"`, `snapshot_scope="shadow"`: legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/`"model_evidence"` read through that pinned snapshot. `pin_snapshot_inputs` binds it to the exact `snapshot_id` `_ensure_shadow_snapshot` verified. The native sidecar's raw-row producer also accepts an explicit `SnapshotRef` and enumerates its pinned forward board. This never starts the real legacy nightly: `nightly_trigger.py` runs on its own systemd timer (`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate from whatever schedules the legacy nightly.
 
 `nightly_trigger._ensure_shadow_snapshot(root, as_of, clock, attempt, ...)
 -> (status, snapshot_id | None)`, called from `_submit_plan` immediately
@@ -557,21 +543,33 @@ non-terminal row is reattached and driven to terminal directly — never resubmi
 exactly once, ever. A terminal-but-failed row raises `INPUT_CHANGED` immediately without resubmitting under the same
 key; the NEXT `_submit_plan` entry mints a genuinely new key via the bumped `snapshot_attempt`.
 
-`TriggerReceipt.snapshot_attempt: int = 0` is a single, monotonic per-`as_of` counter, carried on every receipt regardless of status (independent of
-`error_count`, which resets on several unrelated statuses), and bumped in exactly one place: a terminal `INPUT_CHANGED` refusal, never a transient
-failure. Give-up is an OR of two independent bounds: `error_count >= MAX_CONSECUTIVE_ERRORS` (unchanged) OR `snapshot_attempt >=
-MAX_CONSECUTIVE_ERRORS` (new) — an alternating `"error"`/`"timed_out"` sequence can no longer defeat the give-up bound by resetting only the old
-counter. Any status in `RESUME_STATUSES` (which includes `"snapshot_not_yet"`, a resumed `"not_yet"` outcome) resumes on the next tick regardless of
-whether `plan_ref` is set — a pre-plan timeout/error genuinely has no `plan_ref` yet, and this is what makes it resumable rather than permanently
-`"missed"`.
+`TriggerReceipt.snapshot_attempt: int = 0` is a single, monotonic per-`as_of` counter, carried on every receipt regardless of status (independent of `error_count`, which resets on several unrelated statuses), and bumped in exactly one place: a terminal `INPUT_CHANGED` refusal, never a transient failure. Give-up is an OR of two independent bounds: `error_count >= MAX_CONSECUTIVE_ERRORS` (unchanged) OR `snapshot_attempt >= MAX_CONSECUTIVE_ERRORS` (new) — an alternating `"error"`/`"timed_out"` sequence can no longer defeat the give-up bound by resetting only the old counter. Any status in `RESUME_STATUSES` (which includes `"snapshot_not_yet"`, a resumed `"not_yet"` outcome) resumes on the next tick regardless of whether `plan_ref` is set — a pre-plan timeout/error genuinely has no `plan_ref` yet, and this is what makes it resumable rather than permanently `"missed"`.
 
-Commits land directly in scope `"shadow"` (no candidate-scope-then-promote step): `"shadow"` has no downstream
-consumer needing pre-advance validation. The EXACT `snapshot_id` this call verified is threaded through
-(`expected_shadow_snapshot_id` → `_default_plan`'s `args.expected_snapshot_id` → `cli._snapshot_inputs` →
-`pin_snapshot_inputs(expected_snapshot_id=None)`). The optional guard compares the already-loaded
-`SnapshotRef.snapshot_id`, without a second head resolution. A mismatch raises `INPUT_CHANGED` before materialization
-request construction or registration; equality keeps that ref. Omitting the expected id preserves direct and legacy
-caller behavior.
+Commits land directly in scope `"shadow"` (no candidate-scope-then-promote step): `"shadow"` has no downstream consumer needing pre-advance validation. The EXACT `snapshot_id` this call verified is threaded through (`expected_shadow_snapshot_id` → `_default_plan`'s `args.expected_snapshot_id` → `cli._snapshot_inputs` → `pin_snapshot_inputs(expected_snapshot_id=None)`). The optional guard compares the already-loaded `SnapshotRef.snapshot_id`, without a second head resolution. A mismatch raises `INPUT_CHANGED` before materialization request construction or registration; equality keeps that ref. Omitting the expected id preserves direct and legacy caller behavior.
+
+### Single-session entrypoint (proposed; not implemented)
+
+The trigger would own one shadow session's preparation and execution, using existing adapters and supervised jobs; it would not start the production legacy nightly or change its publication authority. The PR design specifies rollout decisions and bounded implementation slices; none of this subsection is shipped behavior.
+Inputs would be a configured source/operations root pair, selected population and resource policy; normal invocations would derive the session, history cutoff and every key. Explicit historical selection and changed-code/input reruns would remain operator actions.
+Durable catalog state would bind session, scope/population, generation, implementation/environment, immutable step inputs, expected snapshot head/generation, plan/job/output refs, status and bounded retry budget. Generation allocation and step transitions would use compare-and-swap transactions; filesystem artifacts would be published and verified before association.
+The ordered contract would cover Tier-4 rebuild, snapshot import and completion, planned-universe price refresh, computed-moves/price-history capture, history dry-run then import through the preceding calendar day, input capture, snapshot-mode plan/submission, and bounded serving through the selected run's terminal jobs and eligible native sidecars.
+The price-refresh coverage implementation owns inclusion of every planned ticker; the entrypoint would consume that contract, retain the calendar-only ticker, and carry explicit per-ticker missing-history results without inventing prices or expanding the scoring population.
+Each snapshot writer would consume its predecessor's exact receipt and compare-and-swap expectations; planning would pin the final receipt's snapshot, never an unrelated latest head. Missing or changed evidence would stop the chain.
+Session decision identity would remain separate from execution generation: first-committed decisions stay authoritative, changed candidates append divergence, and later shadow board releases require the existing decision/export/selfcheck/publication gates.
+
+| Proposed condition | Required outcome |
+|---|---|
+| Repeat/resume with unchanged generation and inputs | Reconcile recorded effects first; reuse verified completed steps, attach to existing jobs, resume only the first incomplete step. No caller-chosen idempotency key. |
+| Same key with changed immutable request | `IDEMPOTENCY_CONFLICT`; no rewrite, new key, or silent replan within that generation. |
+| Code/input fix or deliberate second run for the same session | Explicit rerun allocates a new generation internally; preserve the old run and declare the invalidated dependency cone. Reuse only compatible completed receipts outside it; never relabel recomputation as resume. |
+| Crash after effect, before completion state | Recover by the effect's durable identity/receipt, not mutable-head inference. Unprovable completion is a typed stop for reconciliation, never blind repetition. |
+| Failed step, changed source/head, exhausted budget or deadline | Stop new dependent work; retain prior completions and diagnostics. Retry only when the registered policy and unchanged pins permit it; terminal repair needs a new generation. |
+| Legacy lock/heavy reservation unavailable | Bounded wait/no work; retain resume state. One heavy run, existing resource admission and process-ownership recovery. |
+| Legacy source session or provider readiness not established | Wait within the configured admission window, then report missed/failed. Provider date/coverage is not authoritative EOD completion evidence; positive EOD admission remains closed. |
+| Required job failure or native sidecar not terminal | No successful overall receipt; report required and native qualification outcomes separately, preserve any earlier published board. |
+| All required work terminal and verified | Emit a durable, redacted session/generation summary with snapshot, plan, release, per-step status, refusal counts and retry/reconciliation action; never infer success from an idle tick. |
+
+Scheduling would reuse the trigger's market calendar and bounded window, require verified legacy-session readiness, and leave legacy scheduling unchanged. Resource values, restart deadlines and automatic retry decisions require reviewed configuration; credentials, model deployment, source repair, scope changes and cutover remain manual.
 
 **Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`) and records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date) in the plan and `_scope_hash` exactly as a supplied file. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires every planned key to be observed under the shared score-population rule. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
 
