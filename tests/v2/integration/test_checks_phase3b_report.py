@@ -10,13 +10,14 @@ acceptance.
 """
 from __future__ import annotations
 
+# packages: engine.v2.data, engine.v2.ops
 import json
 import sys
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from checks import phase3b_report  # noqa: E402

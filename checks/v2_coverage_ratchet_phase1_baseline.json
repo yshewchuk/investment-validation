@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v3",
+  "suite_version": "phase1_coverage_suite.v4",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_browser.py",
@@ -44,14 +44,12 @@
     "tests/test_v2_ops_explain_from_logs.py",
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/test_v2_ops_fingerprints_model_scan.py",
-    "tests/test_v2_ops_foundation.py",
     "tests/test_v2_ops_generation_binding_lineage.py",
     "tests/test_v2_ops_generation_effects.py",
     "tests/test_v2_ops_health.py",
     "tests/test_v2_ops_ledger_history_import.py",
     "tests/test_v2_ops_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
-    "tests/test_v2_ops_nightly_completion.py",
     "tests/test_v2_ops_outcome_session_backfill_wiring.py",
     "tests/test_v2_ops_parity.py",
     "tests/test_v2_ops_price_history.py",
@@ -77,7 +75,9 @@
     "tests/test_v2_serving_bridge.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
-    "tests/test_v2_serving_publication_binding.py"
+    "tests/test_v2_serving_publication_binding.py",
+    "tests/v2/foundation/test_v2_ops_foundation.py",
+    "tests/v2/ops/test_v2_ops_nightly_completion.py"
   ],
   "source_hash": "sha256:b9c971a639debd464d746044d77f8dbf8e777be94cdf19ffbaeaee5afda96874",
   "packages": {

@@ -58,16 +58,22 @@ def test_lazy_training_imports_keep_every_fixed_target_and_package_init():
         assert targets <= graph.precise[test]
 
 
-def test_phase1_coverage_keeps_relocated_foundation_file(tmp_path):
+def test_phase1_coverage_keeps_relocated_foundation_file():
     """A missing required test must not silently disappear from the suite."""
     from checks.v2_coverage_ratchet import phase1_suite
 
     relative = "tests/v2/foundation/test_v2_ops_foundation.py"
-    assert relative in phase1_suite(tmp_path)
-    target = tmp_path / relative
-    target.parent.mkdir(parents=True)
-    target.write_text("")
-    assert relative in phase1_suite(tmp_path)
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
+
+
+def test_phase1_coverage_keeps_relocated_nightly_completion_file():
+    """A root glob cannot match a moved test; its new path is named explicitly."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_v2_ops_nightly_completion.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
 
 
 def _integration(root, name, body):

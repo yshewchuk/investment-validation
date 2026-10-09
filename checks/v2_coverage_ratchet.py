@@ -39,6 +39,15 @@ Bumped again to v3 by two independent same-day changes, merged together:
   would otherwise merge as permanently-uncovered ``engine.v2.serving`` source.
   ``phase1_suite()`` now also picks up ``tests/test_v2_serving_*.py``.
 
+Bumped to v4: ``tests/test_v2_ops_nightly_completion.py`` moved under
+``tests/v2/ops/``, where the flat ``test_v2_ops_*.py`` root glob no longer
+matches it. The relocated path is explicitly retained so a moved file cannot
+silently drop out of the fixed suite and make its package look less covered.
+The v4 baseline inventory also corrects the stale path recorded for
+``tests/v2/foundation/test_v2_ops_foundation.py``; that selector entry was
+already explicitly present in ``phase1_suite()`` before v4, so v4 only
+refreshed the committed file list, not the suite's composition.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -130,7 +139,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v3"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v4"
 
 
 def phase1_suite(root=ROOT):
@@ -139,7 +148,8 @@ def phase1_suite(root=ROOT):
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_dashboard_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_serving_*.py")]
                   + ["tests/test_diagnosis_comparator.py"]
-                  + ["tests/v2/foundation/test_v2_ops_foundation.py"])
+                  + ["tests/v2/foundation/test_v2_ops_foundation.py",
+                     "tests/v2/ops/test_v2_ops_nightly_completion.py"])
 
 
 def phase1_measurement_identity(root=ROOT):
