@@ -365,13 +365,13 @@ def test_submit_builds_one_shadow_batch_request_from_the_slice5_refs(tmp_path, m
     assert len(captured) == 1
     request = captured[0]
     _assert_sidecar_runtime_identity(
-        request.job.resource_class, request.job.environment_ref, "io_fetch")
+        request.job.resource_class, request.job.environment_ref, "projection")
     with pytest.raises(AssertionError):
         _assert_sidecar_runtime_identity(
-            "validation", request.job.environment_ref, "io_fetch")
+            "validation", request.job.environment_ref, "projection")
     with pytest.raises(AssertionError):
         _assert_sidecar_runtime_identity(
-            request.job.resource_class, "corrupted", "io_fetch")
+            request.job.resource_class, "corrupted", "projection")
     assert request.namespace == "shadow"
     assert request.principal == "operator"
     assert request.job.kind == "native_score_batch"
@@ -547,11 +547,13 @@ def test_service_stages_both_producer_documents_before_shadow_submission(tmp_pat
 
     assert _native_score_batch_job_count(conn) == 1
     row = conn.execute(
-        "SELECT namespace, state, spec_json FROM jobs WHERE kind = ?",
+        "SELECT namespace, state, resource_class, spec_json FROM jobs WHERE kind = ?",
         ("native_score_batch",)).fetchone()
     assert row["namespace"] == "shadow"
     assert row["state"] == "queued"
     spec = json.loads(row["spec_json"])
+    _assert_sidecar_runtime_identity(
+        row["resource_class"], spec["environment_ref"], "projection")
 
     events_ref, producer_refusals_ref = spec["input_refs"]
     assert len({events_ref, producer_refusals_ref, snapshot_id, earnings_revision,
