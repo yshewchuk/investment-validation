@@ -654,9 +654,24 @@ def _native_parity_as_of(idempotency_key: str) -> str | None:
     return as_of
 
 
+#: RFC 3986 unreserved characters plus ``/``, kept literal in a SQLite URI path.
+_URI_PATH_SAFE = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/")
+
+
 def _open_ops_catalog(catalog_path: str):
-    """A strictly read-only ``mode=ro`` connection that never migrates or writes."""
-    conn = projections.sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
+    """A strictly read-only ``mode=ro`` connection that never migrates or writes.
+
+    ``catalog_path`` is percent-encoded as the URI path component, so a ``?``
+    or ``#`` in an ops-root directory name stays a filename character instead
+    of starting the query string or a fragment (SQLite decodes it back).
+    Encoding is byte-level via ``os.fsencode``: ordinary Unicode becomes its
+    UTF-8 bytes and surrogateescape filename bytes are preserved, so any
+    directory name the filesystem itself accepts round-trips."""
+    uri_path = "".join(
+        chr(byte) if chr(byte) in _URI_PATH_SAFE
+        else f"%{byte:02X}" for byte in os.fsencode(catalog_path))
+    conn = projections.sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True)
     conn.row_factory = projections.sqlite3.Row
     return conn
 

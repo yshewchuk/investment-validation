@@ -67,17 +67,22 @@ def _key(as_of: str, scope_hash: str = "H1") -> str:
     return "nightly:" + as_of + ":" + scope_hash + ":native_parity"
 
 
+def _ops_at(root):
+    clock = FakeClock()
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    epoch_id = begin_epoch(conn, clock=clock, boot_id="boot", pid=1)
+    return SimpleNamespace(root=root, conn=conn, clock=clock,
+                           supervisor=Supervisor(epoch_id, "boot"),
+                           store=ArtifactStore(root))
+
+
 @pytest.fixture
 def ops(tmp_path):
-    clock = FakeClock()
-    conn = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
-    epoch_id = begin_epoch(conn, clock=clock, boot_id="boot", pid=1)
+    ops = _ops_at(tmp_path)
     try:
-        yield SimpleNamespace(root=tmp_path, conn=conn, clock=clock,
-                              supervisor=Supervisor(epoch_id, "boot"),
-                              store=ArtifactStore(tmp_path))
+        yield ops
     finally:
-        conn.close()
+        ops.conn.close()
 
 
 def _insert_job(ops, *, as_of, scope_hash="H1", state="succeeded", stamp=None):
@@ -176,6 +181,27 @@ def test_ops_root_selects_newest_succeeded_shadow_report(ops):
     assert catalog_path.read_bytes() == before
 
 
+def test_ops_root_path_with_uri_characters_resolves_report(tmp_path):
+    """A ``?``, ``#``, or literal ``%``, non-ASCII text, and a surrogateescape
+    byte in the ops-root directory are all filename characters -- not URI
+    query/fragment syntax, a stray percent-escape, or a decode failure: the real
+    catalog still opens read-only and the committed succeeded shadow report
+    resolves over the real API path."""
+    root = tmp_path / "ops?root#a%b-\u00e9\udcff"
+    root.mkdir()
+    ops = _ops_at(root)
+    try:
+        _seed(ops, as_of="2026-01-02", row_count=3)
+        code, headers, summary = _summary(ops)
+    finally:
+        ops.conn.close()
+    assert code == 200
+    assert headers.get("Cache-Control") == "no-store"
+    assert summary["status"] == "available"
+    assert summary["as_of"] == "2026-01-02"
+    assert summary["compared_count"] == 3
+
+
 def test_ops_root_without_succeeded_job_is_typed_no_report(ops):
     _seed(ops, as_of="2026-01-02", state="failed")
 
@@ -259,6 +285,7 @@ def test_selected_unverifiable_output_refuses_without_older_fallback(ops):
     ref = _publish_report(ops, job_id, _payload(1))
     object_path = ops.store.root / ref.storage_key
     payload = object_path.read_bytes()
+    object_path.chmod(object_path.stat().st_mode | 0o200)
     object_path.write_bytes(b"!" + payload[1:])
 
     _assert_malformed(ops)
