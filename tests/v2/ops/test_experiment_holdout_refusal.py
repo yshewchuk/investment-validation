@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,7 @@ def _spec_document(spec: ExperimentSpec) -> dict:
             "input_files": list(spec.input_files), "runner": spec.runner}
 
 
-def _refusing_runner(repository, snapshot):
+def _refusing_runner(repository, snapshot, *, as_of_month="2025-01"):
     """Partial output first, then the real loader over the real snapshot."""
     def runner(*, run_dir, no_ledger):
         run_dir = Path(run_dir)
@@ -51,12 +52,13 @@ def _refusing_runner(repository, snapshot):
         (run_dir / "results").mkdir(exist_ok=True)
         (run_dir / "results" / "metrics_probe.json").write_text('{"probe": true}\n')
         experiment_trades.load_trades(
-            repository, snapshot, "STR-THRU", as_of_month="2025-01",
+            repository, snapshot, "STR-THRU", as_of_month=as_of_month,
             event_ids=[_RANDOM[0]])
     return runner
 
 
-def _dispatch(monkeypatch, spec, root, repository, snapshot, *, mode, checkout):
+def _dispatch(monkeypatch, spec, root, repository, snapshot, *, mode, checkout,
+              as_of_month="2025-01"):
     """Drive production: write ``spec.json`` and run the real worker dispatch.
 
     The spec document's runner stays ``synthetic`` so the variant identity falls
@@ -72,7 +74,8 @@ def _dispatch(monkeypatch, spec, root, repository, snapshot, *, mode, checkout):
     (root / "spec.json").write_text(json.dumps(_spec_document(spec)))
     monkeypatch.setattr(
         worker, "_registered_experiment_runner",
-        lambda _root, _runner_id, _arm: _refusing_runner(repository, snapshot))
+        lambda _root, _runner_id, _arm: _refusing_runner(
+            repository, snapshot, as_of_month=as_of_month))
     parameters = {"runner": "registered-test-runner",
                   "expected_ids": ["experiment:" + spec.experiment_id],
                   "no_ledger": mode == "smoke",
@@ -107,10 +110,21 @@ def test_real_loader_refusal_replay_and_private_receipt(tmp_path, monkeypatch):
         assert "refusal_receipt" not in json.dumps(result)
         failure_details = json.loads(
             (root / "diagnostics" / "failure_details.json").read_text())
-        assert failure_details["refusal_receipt"] == json.loads(first_bytes)
+        assert "holdout_exclusions" not in failure_details
+        assert "holdout_exclusions" not in failure_details["refusal_receipt"]
+        private_receipt = json.loads(first_bytes)
+        assert "holdout_exclusions" in private_receipt
+        sanitized_private = dict(private_receipt)
+        sanitized_private.pop("holdout_exclusions")
+        assert failure_details["refusal_receipt"] == sanitized_private
         with pytest.raises(OpsError) as second_error:
             _dispatch(monkeypatch, spec, root, repository, snapshot,
                       mode="primary", checkout=checkout)
+        assert receipt.read_bytes() == first_bytes
+        with pytest.raises(OpsError) as conflict_error:
+            _dispatch(monkeypatch, spec, root, repository, snapshot,
+                      mode="primary", checkout=checkout, as_of_month="2025-05")
+        assert conflict_error.value.code == "IDEMPOTENCY_CONFLICT"
         assert receipt.read_bytes() == first_bytes
     finally:
         conn.close()
@@ -172,22 +186,22 @@ def test_failure_ordering_and_replay_recovery(tmp_path, monkeypatch):
     ledger.write_text(_HEADER)
     seed = ledger.read_bytes()
     spec = _spec()
-    real_write_text = Path.write_text
+    real_replace = experiments.os.replace
 
-    def guarded(self, *args, **kwargs):
-        if self.name == "holdout_refusal_receipt.json":
+    def guarded_replace(src, dst, *args, **kwargs):
+        if Path(dst).name == "holdout_refusal_receipt.json":
             raise OSError("receipt write blocked")
-        return real_write_text(self, *args, **kwargs)
+        return real_replace(src, dst, *args, **kwargs)
 
     try:
-        monkeypatch.setattr(Path, "write_text", guarded)
+        monkeypatch.setattr(experiments.os, "replace", guarded_replace)
         with pytest.raises(OSError, match="receipt write blocked"):
             _dispatch(monkeypatch, spec, root, repository, snapshot,
                       mode="primary", checkout=checkout)
         assert ledger.read_bytes() == seed
         assert not (root / "holdout_refusal_receipt.json").exists()
 
-        monkeypatch.setattr(Path, "write_text", real_write_text)
+        monkeypatch.setattr(experiments.os, "replace", real_replace)
         from experiments import lib
 
         real_append = lib.ledger_append
@@ -212,3 +226,28 @@ def test_failure_ordering_and_replay_recovery(tmp_path, monkeypatch):
         assert rows[0]["spec_hash"] == spec.spec_hash
     finally:
         conn.close()
+
+
+def test_concurrent_refusal_row_append_is_exactly_once(tmp_path):
+    ledger = tmp_path / "LEDGER.csv"
+    ledger.write_text(_HEADER)
+    spec = _spec()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [
+            pool.submit(
+                experiments._append_refusal_row, spec, spec.spec_hash, ledger)
+            for _ in range(8)]
+        for future in futures:
+            future.result()
+
+    rows = _refused_rows(ledger)
+    assert len(rows) == 1
+    assert rows[0]["id"] == spec.experiment_id
+    assert rows[0]["spec_hash"] == spec.spec_hash
+    with pytest.raises(OpsError) as conflict:
+        experiments._append_refusal_row(spec, "different-resolved-variant", ledger)
+    assert conflict.value.code == "IDEMPOTENCY_CONFLICT"
+    rows = _refused_rows(ledger)
+    assert len(rows) == 1
+    assert rows[0]["spec_hash"] == spec.spec_hash

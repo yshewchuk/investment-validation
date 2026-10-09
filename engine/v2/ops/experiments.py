@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import csv
+import fcntl
 import hashlib
 import inspect
 import json
 import math
+import os
+import tempfile
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -868,29 +872,50 @@ def _canonical_exclusions(raw):
     return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, default=str))
 
 
+@contextmanager
+def _exclusive_file_lock(path):
+    """Serialize one operation against a sidecar lock file with ``fcntl.flock``.
+
+    The lock is opened in append mode so acquiring it never truncates an
+    existing lock file, its parent directories are created on first use, and
+    the exclusive lock is released -- and the handle closed -- even when the
+    body raises.
+    """
+    lock_path = Path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
 def _append_refusal_row(spec, variant_id, ledger_path) -> None:
     from datetime import datetime, timezone
 
     from experiments.lib import LEDGER_COLUMNS, ledger_append
 
     ledger = Path(ledger_path)
-    stored = []
-    if ledger.is_file():
-        with open(ledger, newline="") as fh:
-            stored = [row.get("spec_hash") for row in csv.DictReader(fh)
-                      if row.get("id") == spec.experiment_id
-                      and row.get("stage") == "refused"]
-    if variant_id in stored:
-        return
-    if stored:
-        raise fail("IDEMPOTENCY_CONFLICT",
-                   "a refused ledger row carries a different variant identity",
-                   details={"experiment_id": spec.experiment_id})
-    row = {"id": spec.experiment_id, "spec_hash": variant_id,
-           "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
-           "stage": "refused", "oos_mean_mid": "", "sharpe_trade": "",
-           "promoted": "False"}
-    ledger_append([{name: row.get(name, "") for name in LEDGER_COLUMNS}], path=ledger)
+    with _exclusive_file_lock(ledger.with_name(ledger.name + ".lock")):
+        stored = []
+        if ledger.is_file():
+            with open(ledger, newline="") as fh:
+                stored = [row.get("spec_hash") for row in csv.DictReader(fh)
+                          if row.get("id") == spec.experiment_id
+                          and row.get("stage") == "refused"]
+        if variant_id in stored:
+            return
+        if stored:
+            raise fail("IDEMPOTENCY_CONFLICT",
+                       "a refused ledger row carries a different variant identity",
+                       details={"experiment_id": spec.experiment_id})
+        row = {"id": spec.experiment_id, "spec_hash": variant_id,
+               "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
+               "stage": "refused", "oos_mean_mid": "", "sharpe_trade": "",
+               "promoted": "False"}
+        ledger_append([{name: row.get(name, "") for name in LEDGER_COLUMNS}], path=ledger)
 
 
 def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
@@ -910,18 +935,45 @@ def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
         raise fail("VALIDATION_FAILED",
                    "holdout refusal is missing required identity pins",
                    details={"fields": missing})
+    (destination / "REPORT.md").unlink(missing_ok=True)
+    (destination / "ARMS.md").unlink(missing_ok=True)
+    for artifact in (destination / "results").glob("metrics_*.json"):
+        artifact.unlink(missing_ok=True)
     document = {"schema_version": REFUSAL_RECEIPT_SCHEMA, "status": "refused",
                 "failure_code": "HOLDOUT_ACCESS_DENIED", "variant_id": variant_id,
                 **{name: details[name] for name in REFUSAL_PIN_FIELDS}}
     exclusions = _canonical_exclusions(details.get("holdout_exclusions"))
     if exclusions is not None:
         document["holdout_exclusions"] = exclusions
-    (destination / "holdout_refusal_receipt.json").write_text(
-        json.dumps(document, indent=2, sort_keys=True))
-    (destination / "REPORT.md").unlink(missing_ok=True)
-    (destination / "ARMS.md").unlink(missing_ok=True)
-    for artifact in (destination / "results").glob("metrics_*.json"):
-        artifact.unlink(missing_ok=True)
+    path = destination / "holdout_refusal_receipt.json"
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), default=str)
+    with _exclusive_file_lock(destination / ".holdout_refusal_receipt.lock"):
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+            except (OSError, ValueError):
+                raise fail("IDEMPOTENCY_CONFLICT",
+                           "existing holdout refusal receipt is invalid",
+                           details={"experiment_id": spec.experiment_id}) from None
+            if json.dumps(existing, sort_keys=True, separators=(",", ":"),
+                          default=str) != canonical:
+                raise fail("IDEMPOTENCY_CONFLICT",
+                           "existing holdout refusal receipt differs",
+                           details={"experiment_id": spec.experiment_id})
+        else:
+            temp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination,
+                                               prefix=".holdout_refusal_receipt.",
+                                               suffix=".tmp", delete=False)
+            temp_path = Path(temp.name)
+            try:
+                temp.write(json.dumps(document, indent=2, sort_keys=True))
+                temp.flush()
+                os.fsync(temp.fileno())
+                temp.close()
+                os.replace(temp_path, path)
+            finally:
+                temp.close()
+                temp_path.unlink(missing_ok=True)
     if not no_ledger:
         if refusal_ledger_path is None:
             raise fail("INVALID_REQUEST",

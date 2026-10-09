@@ -363,16 +363,21 @@ def _experiment_failure(receipt):
     returncode's stderr tail) is carried through the receipt so it survives
     ``run_experiment``'s status capture and reaches ``worker.main``'s private
     ``failure_details.json`` -- never the public failure message. A
-    ``status="refused"`` receipt adds the fully pinned private
-    ``refusal_receipt`` on the same channel, so the typed
-    ``HOLDOUT_ACCESS_DENIED`` reaches the supervisor without becoming a
-    public attempt output.
+    ``status="refused"`` receipt adds the pinned private ``refusal_receipt``
+    on the same channel, so the typed ``HOLDOUT_ACCESS_DENIED`` reaches the
+    supervisor without becoming a public attempt output. Diagnostics carry
+    shallow copies with the evidence-bearing ``holdout_exclusions`` omitted;
+    the untouched originals live only in the private on-disk receipt.
     """
     evidence = receipt.get("evidence") or {}
     details = {"status": receipt["status"], "error_code": evidence.get("error_code")}
-    details.update(evidence.get("failure_details") or {})
+    failure_details = dict(evidence.get("failure_details") or {})
+    failure_details.pop("holdout_exclusions", None)
+    details.update(failure_details)
     if "refusal_receipt" in evidence:
-        details["refusal_receipt"] = evidence["refusal_receipt"]
+        refusal_receipt = dict(evidence["refusal_receipt"])
+        refusal_receipt.pop("holdout_exclusions", None)
+        details["refusal_receipt"] = refusal_receipt
     return fail(evidence.get("failure_code") or "VALIDATION_FAILED",
                 "experiment run did not succeed", details=details)
 
