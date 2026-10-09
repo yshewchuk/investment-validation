@@ -35,11 +35,11 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 
 - `init`, `doctor`, `health`
 - `serve` — starts the supervisor loop
-- `plan {nightly,experiment,training,promote}` — builds and saves a plan
-  document; `training`/`promote` take operator-only arguments
-  (`--training-mode`, `--recipe`, `--state`, `--alpha`, `--cutoff`,
-  `--strategy`, `--pairs`, `--ticker-chunk`, `--release-root`,
-  `--release-id`, `--expected-previous-release-id`) and are never part of the nightly DAG
+- `plan {nightly,experiment,training,promote,rollback}` — builds and saves a plan
+  document; flags apply by kind: `training` takes `--training-mode`, `--recipe`,
+  `--state`, `--alpha`, `--cutoff`, `--strategy`, `--pairs`, `--ticker-chunk`;
+  `promote` takes `--release-root`, `--release-id` and `--expected-previous-release-id`;
+  `rollback` takes `--release-root` and refuses `--release-id`. It pins the rollback target at plan time; only `NoPriorRelease` leaves the target unset. A submitted rollback with an incumbent but no pinned target is refused as typed `VALIDATION_FAILED` before pointer or history mutation. Other resolver errors become typed `VALIDATION_FAILED`.
 - `submit --plan --idempotency-key`
 - `rescore --request --native-inputs` — read-only, no provider pulls, no fitting
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
@@ -1003,15 +1003,15 @@ waits without submitting until its paired succeeded inputs are ready.
   snapshot's own rows reports `noop` rather than a spurious `complete` (the
   commit layer's own equality check decides this, never key presence in the
   parent).
-- `training`/`models_promote` are ordinary `_core_kinds()` job kinds, not
-  `supervisor._COORDINATOR_EFFECT_KINDS` members: the worker subprocess does
-  the real write itself. `run_training_worker` calls one of
-  `tools/phase5_training_job.py`'s four job functions and writes
-  `training_result.json`; `run_promote_worker` calls
-  `engine.v2.models.deployment.promote`'s release-store pointer swap and
-  writes `pointer_state.json`. Neither ever runs inside the nightly DAG —
-  both are submitted by an operator's own `ops plan training|promote` +
-  `ops submit`.
+- `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not
+  `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes.
+  `run_training_worker` calls one of four `tools/phase5_training_job.py`
+  functions and writes `training_result.json`; `run_promote_worker` calls `deployment.promote`;
+  `run_rollback_worker` uses its plan-pinned incumbent and target, then writes
+  `pointer_state.json`. Recovery recognizes that exact prior swap without
+  moving the pointer again. None run in the nightly DAG; operators submit with
+  `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
+  `operator`, namespace `shadow` and the caller idempotency key like promote.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
@@ -1215,14 +1215,14 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | a job already exists under today's session key, in any state | never rebuilt or resubmitted |
 | idempotency key | session-only, never `scope_hash`-qualified — this job's target set is the whole scoreable universe, independent of which watchlist's `"score"` job happened to trigger the tick |
 
-### Training / promotion (`training.py`, `deployment.py`)
+### Training / deployment (`training.py`, `deployment.py`)
 
 | Condition | Outcome |
 |---|---|
-| a training-tool refusal, or a `deployment.DeploymentError` (including a superseded release hash or `ConcurrentPromote` (`CONCURRENT_PROMOTE`) when a supplied incumbent is absent or no longer current and the target is not already live) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a refusal writes no successful pointer-state output |
+| a training-tool refusal, or `deployment.DeploymentError` (including a superseded release hash, `ConcurrentPromote` (`CONCURRENT_PROMOTE`) for a missing/stale expected incumbent when the target is not already live, or `NoPriorRelease` when rollback history has no earlier incumbent) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a stale rollback plan writes no successful output or pointer/history change |
 | no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset, or `ops plan promote` supplies a blank `--expected-previous-release-id` | `INVALID_REQUEST` at plan time; no empty `release_root` reaches the worker, and only an absent incumbent option means no guard |
 | a recipe job's `pairs_path` does not resolve beneath the attempt's own pinned legacy root | `INPUT_CHANGED` at execution, even after passing plan-time validation |
-| any `models_promote` claim | serialized globally by one write lease on the deployment pointer |
+| any `models_promote` or `models_rollback` claim | serialized globally by one write lease on the deployment pointer; resubmission with the same namespace and idempotency key returns the existing job |
 
 ### `native_score_batch.py`
 

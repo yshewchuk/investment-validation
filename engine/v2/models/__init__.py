@@ -40,6 +40,7 @@ from .deployment import (
     resolve_release,
     restage_semantic_hash,
     rollback,
+    rollback_target,
     stage_release,
 )
 from .inventory import (
@@ -166,6 +167,7 @@ __all__ = [
     "resolve_release",
     "restage_semantic_hash",
     "rollback",
+    "rollback_target",
     "serialize_payoff_artifact",
     "served_roles",
     "stage_release",
