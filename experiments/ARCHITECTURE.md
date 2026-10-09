@@ -1,5 +1,36 @@
 # Experiments architecture
 
+## Native preregistration
+
+`native_registration.register_native` explicitly registers one resolved arm
+before evaluation; `require_native_registration` is its read-only admission
+check. Both pin the current scope head once and read canonical event metadata
+through the shared holdout population reader, never outcomes or prior results.
+The stable registration key is experiment ID plus primary arm. Its immutable
+binding includes the full resolved plan, detached spec hash, exact snapshot,
+static source closure, numerical environment and declared single-thread policy,
+scope, eligible event IDs and versioned holdout
+context. External input files and non-Python runner paths are refused.
+The caller supplies the checkout root used for source fingerprinting.
+
+Registration publishes canonical bytes through `ArtifactStore`, then reserves
+the existing primary `hypotheses`/`experiment_runs` records in one catalog
+transaction. Re-registering identical content returns the same identity.
+The reserved arm is planned; registration does not mark a variant as tried.
+Admission verifies the stored object and compares a freshly built binding;
+returned documents are copies, not mutable views of registered bytes.
+These library entrypoints do not fit models, publish reports, write the CSV
+ledger or emit outcome/refusal receipts, and have no supervisor caller.
+
+| Condition | Outcome |
+| --- | --- |
+| Invalid plan, external inputs, unsupported runner path, or missing/malformed/indirect source | `INVALID_EXPERIMENT_SPEC` before registration. |
+| Current scope head cannot be resolved | `SNAPSHOT_UNRESOLVED`; no fallback. |
+| Invalid context or explicitly excluded/unknown event | Shared `HOLDOUT_ACCESS_DENIED`; no outcome read. |
+| Admission has no native registration | `INVALID_EXPERIMENT_SPEC`; no implicit registration. |
+| Existing key has changed code, environment, plan, snapshot, population or context, or corrupt stored evidence | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; existing catalog and artifact bytes stay unchanged. |
+| Publication or catalog commit fails | No partial registration is admitted; a complete unreferenced artifact may remain. No automatic retry. |
+
 ## Native gate-variant pricing
 
 `v2_gate_variant.price_variant(repository, snapshot, spec, *, strategy,
