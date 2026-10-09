@@ -431,10 +431,15 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--all", action="store_true", help="check every tracked file")
     mode.add_argument("--paths", nargs="+", help="check these paths explicitly")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--base-ref", help="base for the full planned-ops exception ratchet")
     args = ap.parse_args(argv)
 
     root = Path(args.repo_root).resolve()
     report = check_files(_collect(root, args))
+    if args.all:
+        from checks.ops_dependencies import check_repository
+        for problem in check_repository(root, args.base_ref):
+            report.add("ops-dependency", Edge("", "", "checks/ops_dependencies.json", 0), problem)
     gaps = missing_skeleton(root)
     for gap in gaps:
         report.add("missing-package", Edge("", "", gap, 0),
