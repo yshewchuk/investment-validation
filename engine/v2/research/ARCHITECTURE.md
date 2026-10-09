@@ -76,19 +76,34 @@ slice 2), which labels each priced grid-position step with the same
 execution-variant string `replay()` itself uses, rather than reimplementing
 that labeling.
 
-`experiment_exits.walk_fixed_day(repository, snapshot, positions, economic_params=...)`
+`experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
-economics: `exit={kind: "fixed_day", trading_days: N}` with positive integer N,
-explicit numeric `fill` in the alpha ladder's range, and `price_source="option_chains"`.
-The immutable resolved economics and canonical plan identity retain N.
-It reprices the held legs on every observed trading day from entry
-through entry plus the declared positive `trading_days`, using the pinned
-`daily_market` calendar and `option_chains` quotes with `_pricing.FillModel`'s
-existing alpha ladder; no projected calendar, replacement contract or mark source.
-Results are `mark_based` per-option-unit P&L with exit decision, visited dates,
-source, alpha fill convention and snapshot identity.
+economics with `price_source="option_chains"` and explicit numeric `fill` in
+the existing alpha ladder's range. It supports `exit={kind: "fixed_day",
+trading_days: N}` and `exit={kind: "target_stop", trading_days: N,
+target_pnl: T, stop_pnl: S}`; N is a positive integer, T is finite and positive,
+and S is finite and negative. The immutable resolved economics and canonical
+plan identity retain every recipe field, so changing a threshold changes the
+consumed plan identity. The walker aggregates net position P&L from each day's
+held-leg quotes in the pinned `option_chains` snapshot and uses the pinned
+`daily_market` calendar, `_pricing.FillModel`, and existing alpha ladder; it
+adds no projected calendar, replacement contract or mark source. A target or
+stop exits on its first observed crossing. If one day's alpha 0/1 aggregate
+position mark range spans both thresholds, the stop is selected,
+`ambiguous_exit` is true because the daily marks cannot order the two exits,
+and its exit value and P&L are priced at the worst existing alpha (0.0) so the
+ambiguous result cannot be better than the stop. No crossing by N sessions
+uses the 7a fixed-day fallback; the existing expiry bound and typed refusal
+still apply. Results are
+`mark_based` per-option-unit P&L with exit reason/date, visited dates, source,
+the declared recipe alpha, the alpha actually applied at exit
+(`exit_fill_alpha`, equal to the recipe alpha except for an ambiguous stop) and
+snapshot identity. `exit_report_frame` projects those
+decisions into one row per trade with separate `mark_based_pnl`, `exit_reason`,
+`exit_day`, ambiguity and provenance columns for report callers; it does not
+write files or blend mark-based P&L with fill-validated results.
 
-| Fixed-day failure condition | Outcome (design #372 R4) |
+| Exit-walker failure condition | Outcome (design #372 R4) |
 |---|---|
 | Malformed position or leg record | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
 | Missing required leg mark | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
@@ -97,7 +112,7 @@ source, alpha fill convention and snapshot identity.
 
 Other repository refusals propagate.
 No cache, retry, transaction or write: identical inputs return identical results.
-Report/ledger publication, target/stop recipes and aggregation belong to slice 7b.
+Other experiment report/ledger publication remains outside this library seam.
 
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent

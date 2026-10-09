@@ -89,11 +89,17 @@ to select its analog population (see `guides/str_thru_analog_provenance.md`).
 slice 2), which labels each priced grid-position step with the same
 execution-variant string `replay()` itself uses.
 
-`experiment_exits.walk_fixed_day` consumes `EnteredPosition`/`PositionLeg`
-contracts plus resolved economics and returns `ExitDecision` values; it is a
-read-only library seam for experiment callers, with publication deferred to 7b.
+`experiment_exits.walk_exit` consumes `EnteredPosition`/`PositionLeg` contracts
+plus resolved fixed-day or target/stop economics and returns `ExitDecision`
+values from one pinned snapshot. Target/stop thresholds are net mark-based
+position P&L; if one day's alpha 0/1 aggregate position mark range spans both
+thresholds, the stop is selected, marked ambiguous, and priced at the worst
+alpha (0.0) so its result cannot be better than the stop. `exit_report_frame`
+projects decisions into per-trade `exit_reason`/`exit_day` columns with P&L
+basis, mark provenance and the declared vs. applied exit alpha. Neither function
+writes results or combines mark-based P&L with fill-validated performance.
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day -->
+<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame -->
 
 ## Consumers
 
