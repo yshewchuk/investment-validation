@@ -31,8 +31,17 @@ underscore convention, and an import of a name absent from this list fails
 The operator interface is the versioned command protocol exposed by
 python3 -m engine.v2.ops. It supports immutable planning/submission, job and
 attempt inspection, cancellation, recovery planning, health and supervisor
-execution. Python modules are internal to ops; other production packages consume
-versioned artifacts instead of importing the supervisor.
+execution. Except for the narrow registration surface below, Python modules
+are internal to ops; production packages consume versioned artifacts instead
+of importing the supervisor.
+
+Native experiment registration also exposes these existing submodule APIs:
+`catalog.transaction`, `errors.OpsError`, `errors.fail`,
+`experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`,
+`experiments.register_hypothesis_in_transaction`,
+`fingerprints.environment_identity` and `fingerprints.source_closure`.
+They compose one resolved plan, source/environment binding and primary catalog
+reservation; the caller owns the transaction around the reservation helper.
 
 `native.input_decoding._load_native_score_inputs` is an internal decoder shared
 by the CLI, worker and dashboard projection tool, separate from the versioned
@@ -73,7 +82,15 @@ producer documents before calling
 `submit_native_score_batch_shadow_if_ready`. See the component architecture
 contract.
 
-<!-- public-interface: registered_artifact, verify_eod_availability -->
+`carried_set.CarriedTickerExclusion`, `carried_set.CarriedSetResolution`,
+`carried_set.resolve_carried_set`, and
+`carried_set.build_uncarried_exclusions` expose slice-1 carried-set evidence.
+The resolver returns the ticker sets held in a pinned snapshot; the exclusion
+builder returns sorted `UNCARRIED_TICKER` evidence for candidates missing from
+either required table. Their current consumer is
+`tests/v2/ops/test_carried_set.py`; this slice has no production caller.
+
+<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, environment_identity, source_closure -->
 
 ## Consumers
 
@@ -92,6 +109,10 @@ submission write path all load, and `refresh_action` writes the queued jobs to
 the catalog. What the route does NOT do is start the supervisor, execute the
 submitted jobs inline, or switch production authority: it queues the plan and
 returns the job ids, leaving execution to a separately started supervisor.
+
+The top-level `experiments/native_registration.py` library consumes the narrow
+registration surface above. Like other `experiments/` callers, it is outside
+the engine import graph; it introduces no peer-layer engine dependency.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection
