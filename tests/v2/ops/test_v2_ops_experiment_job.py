@@ -16,7 +16,7 @@ from engine.v2.ops import cli, effects_graph, experiments, legacy_adapter, stage
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact, register_artifact
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.experiments import experiment_plan
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.input_bindings import resolve_and_record
@@ -966,8 +966,10 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
         attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
                                "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
         assert attempt["state"] == "recovery_pending"
-        assert attempt["failure_json"] is None
         assert attempt["ended_at"] is None
+        assert "HOLDOUT_ACCESS_DENIED" in attempt["failure_json"]
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
         assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
                             "WHERE released_at IS NULL").fetchone()[0] == 1
@@ -979,8 +981,10 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
         attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
                                "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
         assert attempt["state"] == "recovery_pending"
-        assert attempt["failure_json"] is None
         assert attempt["ended_at"] is None
+        assert "HOLDOUT_ACCESS_DENIED" in attempt["failure_json"]
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
         assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
                             "WHERE released_at IS NULL").fetchone()[0] == 1
@@ -1048,8 +1052,10 @@ def test_permanent_refusal_receipt_validation_settles_after_proof(tmp_path, monk
         attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
                                "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
         assert attempt["state"] == "recovery_pending"
-        assert attempt["failure_json"] is None
         assert attempt["ended_at"] is None
+        assert "HOLDOUT_ACCESS_DENIED" in attempt["failure_json"]
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
         stderr = capsys.readouterr().err
         assert "attempt_left_for_recovery" in stderr
@@ -1077,6 +1083,70 @@ def test_permanent_refusal_receipt_validation_settles_after_proof(tmp_path, monk
         assert capsys.readouterr().err == ""
         service.reconcile()
         assert capsys.readouterr().err == ""
+    finally:
+        conn.close()
+
+
+def test_missing_refusal_diagnostics_settles_validation_failed_after_proof(tmp_path,
+                                                                           monkeypatch):
+    """Issue #489: the worker still emits its typed ``HOLDOUT_ACCESS_DENIED``
+    when the private failure-details write fails, so the supervisor recovers
+    the refusal with no ``failure_details.json`` at all. The initial
+    ``_commit_failure`` cannot read a missing receipt, so it fences the attempt
+    to ``recovery_pending`` -- reservation held, no refused row, only the
+    redacted ``HOLDOUT_ACCESS_DENIED`` marker in ``failure_json``. After the
+    ownership proof there is no diagnostics document to replay: reconciliation
+    settles the proven-dead attempt as ``VALIDATION_FAILED``, releases the
+    reservation, appends no refused row and registers no durable run."""
+    conn, clock, claim, _, checkout = _claimed_primary_effect(
+        tmp_path, key="primary-refusal-missing-diagnostics")
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    service = Service(conn, tmp_path / "ops", stages.registry(), TEST_POLICY, clock=clock,
+                      code_source=REPO, store_root=checkout)
+    staging = service.store.staging_dir(claim.attempt_id)
+    real_write = worker._write_failure_details
+
+    def details_write_fails(root, details):
+        raise OSError("simulated failure-details write error")
+
+    try:
+        monkeypatch.setattr(worker, "_write_failure_details", details_write_fails)
+        result = worker._failure_result(staging, OpsError(make_problem(
+            "HOLDOUT_ACCESS_DENIED", "requested events are excluded from experiment reads")))
+        monkeypatch.setattr(worker, "_write_failure_details", real_write)
+        running = types.SimpleNamespace(data=json.dumps(result).encode())
+        problem = service._worker_typed_problem(claim, running)
+        assert problem is not None
+        assert problem.code == "HOLDOUT_ACCESS_DENIED"
+        assert not (staging / "diagnostics" / "failure_details.json").exists()
+
+        service._commit_failure(claim, {"exit_code": 1}, problem)
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "recovery_pending"
+        assert attempt["ended_at"] is None
+        assert json.loads(attempt["failure_json"])["code"] == "HOLDOUT_ACCESS_DENIED"
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0] == 1
+
+        monkeypatch.setattr(supervisor, "prove_ownership_gone",
+                            lambda *args, **kwargs: types.SimpleNamespace(
+                                proven=True, known=(), alive=(), blockers=()))
+        service.reconcile()
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "failed"
+        assert "VALIDATION_FAILED" in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert attempt["ended_at"] is not None
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0] == 0
     finally:
         conn.close()
 

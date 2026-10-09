@@ -34,7 +34,7 @@ from pathlib import Path
 
 from engine.v2.contracts import Problem, ProcessIdentity
 from engine.v2.foundation import Clock, content_hash, format_timestamp
-from engine.v2.ops.catalog import load_json, transaction
+from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.errors import fail, make_problem
 from engine.v2.ops.executor_watchdog import find_owners, observe
 from engine.v2.ops.lifecycle import (
@@ -112,11 +112,17 @@ def _fence_off(conn: sqlite3.Connection, attempt_id: str, job_id: str, stamp: st
 
 
 def fence_attempt_for_recovery(conn: sqlite3.Connection, attempt_id: str, *,
-                               clock: Clock) -> bool:
+                               clock: Clock,
+                               recovery_failure: Problem | None = None) -> bool:
     """Fence one still-active attempt off for reconciliation without ending it.
 
     Its reservations stay held: stranding the coordinator's completion lets a
     later reconciliation settle the attempt against the real process tree.
+
+    When ``recovery_failure`` is given, the typed Problem is persisted to the
+    attempt's ``failure_json`` in the same transaction as the transition to
+    ``recovery_pending`` — the marker alone, so a caller that redacted it
+    carries no receipt, holdout, exception, or diagnostic content.
     """
     with transaction(conn):
         row = conn.execute("SELECT a.attempt_id, a.job_id, a.state, j.active_attempt_id "
@@ -127,6 +133,9 @@ def fence_attempt_for_recovery(conn: sqlite3.Connection, attempt_id: str, *,
         if row["active_attempt_id"] != attempt_id:
             return False
         _fence_off(conn, row["attempt_id"], row["job_id"], format_timestamp(clock.now()))
+        if recovery_failure is not None:
+            conn.execute("UPDATE attempts SET failure_json = ? WHERE attempt_id = ?",
+                         (dumps(recovery_failure), row["attempt_id"]))
     return True
 
 

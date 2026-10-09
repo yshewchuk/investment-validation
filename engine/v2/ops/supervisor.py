@@ -364,13 +364,27 @@ class Service:
         """
         path = (self.store.staging_dir(attempt_row["attempt_id"])
                 / "diagnostics" / "failure_details.json")
+        try:
+            failure = load_json(Problem, attempt_row["failure_json"])
+        except ValueError:
+            failure = None
+        known_refusal = (failure is not None
+                         and failure.code == "HOLDOUT_ACCESS_DENIED")
+        unusable = OpsError(make_problem(
+            "VALIDATION_FAILED", "the holdout refusal receipt is missing or unusable"))
         if not path.is_file():
+            if known_refusal:
+                raise unusable
             return False
         try:
             document = json.loads(path.read_text())
         except ValueError:
+            if known_refusal:
+                raise unusable
             return False
         if not isinstance(document, dict) or "refusal_receipt" not in document:
+            if known_refusal:
+                raise unusable
             return False
         job = self.conn.execute("SELECT spec_json FROM jobs WHERE job_id = ?",
                                  (attempt_row["job_id"],)).fetchone()
@@ -1621,7 +1635,11 @@ class Service:
         """
         problem = make_problem(
             "VALIDATION_FAILED", "the experiment refusal effect could not be recorded")
-        if fence_attempt_for_recovery(self.conn, claim.attempt_id, clock=self.clock):
+        if fence_attempt_for_recovery(
+                self.conn, claim.attempt_id, clock=self.clock,
+                recovery_failure=make_problem(
+                    "HOLDOUT_ACCESS_DENIED",
+                    "registered experiment loader refused holdout data")):
             _report_stranded(claim, problem)
             return None
         return problem
