@@ -285,16 +285,52 @@ def _validate_plan_fields(spec: ExperimentSpec) -> None:
                    details={"type": type(spec.economic_params).__name__})
 
 
+def _finite_number(value) -> bool:
+    """A finite JSON number, never a boolean (``type(True) is not int``).
+
+    An ``int`` past float range makes ``math.isfinite`` raise OverflowError,
+    which is refused as nonfinite rather than escaping as a raw error."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _valid_declared_exit(recipe) -> bool:
+    """The strict shape of a declared exit recipe the resolver will execute.
+
+    ``fixed_day`` keeps its 7a key set; ``target_stop`` is exactly the four
+    keys ``kind``/``trading_days``/``target_pnl``/``stop_pnl`` with a positive
+    integer horizon, finite positive target and finite negative stop. Every
+    other key set, kind, boolean, nonfinite value and wrong sign is refused.
+    """
+    if not isinstance(recipe, Mapping):
+        return False
+    days = recipe.get("trading_days")
+    if type(days) is not int or days <= 0:
+        return False
+    kind = recipe.get("kind")
+    if kind == "fixed_day":
+        return set(recipe) == {"kind", "trading_days"}
+    if kind == "target_stop":
+        if set(recipe) != {"kind", "trading_days", "target_pnl", "stop_pnl"}:
+            return False
+        return (_finite_number(recipe["target_pnl"]) and recipe["target_pnl"] > 0
+                and _finite_number(recipe["stop_pnl"]) and recipe["stop_pnl"] < 0)
+    return False
+
+
 def _validate_declared_exit(spec: ExperimentSpec) -> None:
     if "exit" not in spec.economic_params:
         return
     recipe = spec.economic_params["exit"]
     alpha = spec.economic_params.get("fill")
-    if (not isinstance(recipe, Mapping) or set(recipe) != {"kind", "trading_days"}
-            or recipe["kind"] != "fixed_day" or type(recipe["trading_days"]) is not int
-            or recipe["trading_days"] <= 0 or type(alpha) not in (int, float)
+    if (not _valid_declared_exit(recipe) or not _finite_number(alpha)
             or not 0 <= alpha <= 1 or spec.price_source != "option_chains"):
-        raise fail("INVALID_EXPERIMENT_SPEC", "invalid fixed-day exit economics or mark source")
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "invalid fixed-day or target/stop exit economics or mark source")
 
 
 def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
