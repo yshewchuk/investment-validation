@@ -16,7 +16,6 @@ outcome rows.
 """
 from __future__ import annotations
 
-import sys
 from dataclasses import asdict
 
 import pandas as pd
@@ -351,23 +350,37 @@ def test_planning_failure_two_siblings_resolve_on_shared_year_read(
     from engine import replay as replay_mod
 
     real_plan_events = replay_mod.plan_events
+    real_load_chain_index = replay_mod.load_chain_index
     scorer_plans = []
+    count_scorer_plans = False
+    index_loaded = False
 
     def failing_plan_events(structure, events, calendar=None):
         if structure.name == "CAL-P":
             raise ValueError("synthetic planning failure")
-        # ``replay`` re-plans internally, so count only the scorer's own planning
-        # loop: two entries prove both STR-THRU siblings reached the real planner.
-        if sys._getframe(1).f_code.co_name == "score_outcomes":
+        # ``replay`` re-plans internally, so count only the scorer's own
+        # planning loop, before the shared index load: two entries prove both
+        # STR-THRU siblings reached the real planner before that load.
+        if count_scorer_plans and not index_loaded:
             scorer_plans.append(structure.name)
         return real_plan_events(structure, events, calendar=calendar)
 
+    def call_through_load_chain_index(keys, **kwargs):
+        nonlocal index_loaded
+        index_loaded = True
+        return real_load_chain_index(keys, **kwargs)
+
     monkeypatch.setattr(replay_mod, "plan_events", failing_plan_events)
 
-    # Independent per-group baselines: each sibling group's full outcome must
-    # equal its own planned-and-loaded replay, not the shared one's.
+    # Independent per-group baselines, run while counting is disabled: each
+    # sibling group's full outcome must equal its own planned-and-loaded
+    # replay, not the shared one's.
     baselines = {ok_half["row_id"]: _baseline(0.5),
                  ok_quarter["row_id"]: _baseline(0.25)}
+
+    monkeypatch.setattr(replay_mod, "load_chain_index",
+                        call_through_load_chain_index)
+    count_scorer_plans = True
 
     replay_mod._AVAILABLE_KEYS = None
     reads.clear()
