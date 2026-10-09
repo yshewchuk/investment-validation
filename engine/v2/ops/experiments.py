@@ -1,6 +1,7 @@
 """Supervised legacy experiment integration for smoke and isolated runs."""
 from __future__ import annotations
 
+import csv
 import hashlib
 import inspect
 import json
@@ -826,11 +827,143 @@ def _resolved_variant_id(spec: ExperimentSpec,
     return variant_id
 
 
+#: The canonical schema a private holdout-refusal receipt declares.
+REFUSAL_RECEIPT_SCHEMA = "experiment_holdout_refusal.v1.0"
+
+#: The four loader-pin details a real holdout denial must carry, each a
+#: non-empty string; a denial missing any is refused before a receipt or row.
+REFUSAL_PIN_FIELDS = ("snapshot_id", "holdout_as_of_month",
+                      "random_membership_version", "rolling_membership_version")
+
+
+def _is_holdout_denied(exc) -> bool:
+    """Whether a caught exception is the loader's typed holdout refusal.
+
+    The real loader raises ``DataError`` and orchestration raises ``OpsError``;
+    both expose ``.code`` and ``.problem.code``. Reading either keeps this
+    handler generic over the typed exception -- importing the research layer is
+    layer-forbidden -- and never matches on a message.
+    """
+    return "HOLDOUT_ACCESS_DENIED" in (
+        getattr(exc, "code", None),
+        getattr(getattr(exc, "problem", None), "code", None))
+
+
+def _canonical_exclusions(raw):
+    """Canonical, stably-ordered ``holdout_exclusions``, or ``None``.
+
+    Replay must produce identical bytes, so each entry's keys and
+    ``memberships`` are sorted and the entries are ordered by their canonical
+    JSON, whatever order the loader or a caller built them in.
+    """
+    if raw is None:
+        return None
+    items = []
+    for entry in raw:
+        if isinstance(entry, Mapping):
+            entry = {key: (sorted(str(v) for v in entry[key])
+                           if key == "memberships" else entry[key])
+                     for key in sorted(entry, key=str)}
+        items.append(entry)
+    return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+
+
+def _append_refusal_row(spec, variant_id, ledger_path) -> None:
+    from datetime import datetime, timezone
+
+    from experiments.lib import LEDGER_COLUMNS, ledger_append
+
+    ledger = Path(ledger_path)
+    stored = []
+    if ledger.is_file():
+        with open(ledger, newline="") as fh:
+            stored = [row.get("spec_hash") for row in csv.DictReader(fh)
+                      if row.get("id") == spec.experiment_id
+                      and row.get("stage") == "refused"]
+    if variant_id in stored:
+        return
+    if stored:
+        raise fail("IDEMPOTENCY_CONFLICT",
+                   "a refused ledger row carries a different variant identity",
+                   details={"experiment_id": spec.experiment_id})
+    row = {"id": spec.experiment_id, "spec_hash": variant_id,
+           "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
+           "stage": "refused", "oos_mean_mid": "", "sharpe_trade": "",
+           "promoted": "False"}
+    ledger_append([{name: row.get(name, "") for name in LEDGER_COLUMNS}], path=ledger)
+
+
+def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
+                                no_ledger: bool, refusal_ledger_path) -> ExperimentReceipt:
+    """Capture one typed ``HOLDOUT_ACCESS_DENIED`` as the private refusal contract.
+
+    Validation precedes every write: a denial missing any of the four identity
+    pins is the typed ``VALIDATION_FAILED`` refusal, with no receipt and no row.
+    The receipt is written before the ledger is read or appended, so an append
+    failure leaves a durable receipt a replay can complete from.
+    """
+    problem = getattr(exc, "problem", None)
+    details = dict(getattr(problem, "details", None) or {})
+    missing = [name for name in REFUSAL_PIN_FIELDS
+               if not isinstance(details.get(name), str) or not details[name].strip()]
+    if missing:
+        raise fail("VALIDATION_FAILED",
+                   "holdout refusal is missing required identity pins",
+                   details={"fields": missing})
+    document = {"schema_version": REFUSAL_RECEIPT_SCHEMA, "status": "refused",
+                "failure_code": "HOLDOUT_ACCESS_DENIED", "variant_id": variant_id,
+                **{name: details[name] for name in REFUSAL_PIN_FIELDS}}
+    exclusions = _canonical_exclusions(details.get("holdout_exclusions"))
+    if exclusions is not None:
+        document["holdout_exclusions"] = exclusions
+    (destination / "holdout_refusal_receipt.json").write_text(
+        json.dumps(document, indent=2, sort_keys=True))
+    (destination / "REPORT.md").unlink(missing_ok=True)
+    (destination / "ARMS.md").unlink(missing_ok=True)
+    for artifact in (destination / "results").glob("metrics_*.json"):
+        artifact.unlink(missing_ok=True)
+    if not no_ledger:
+        if refusal_ledger_path is None:
+            raise fail("INVALID_REQUEST",
+                       "a refusal ledger path is required when ledgering is enabled")
+        _append_refusal_row(spec, variant_id, refusal_ledger_path)
+    receipt.status = "refused"
+    receipt.evidence["failure_code"] = "HOLDOUT_ACCESS_DENIED"
+    receipt.evidence["failure_details"] = details
+    receipt.evidence["refusal_receipt"] = document
+    return receipt
+
+
+def _runner_failure_receipt(spec, receipt, destination, variant_id, exc, *,
+                            no_ledger: bool, refusal_ledger_path) -> dict:
+    """Turn one caught runner exception into its terminal receipt dict.
+
+    A typed holdout denial becomes the private refusal contract; every other
+    exception keeps the plain failed-receipt behavior, including an
+    ``OpsError``'s code and copied details for the diagnostics path.
+    """
+    if _is_holdout_denied(exc):
+        return _refused_experiment_receipt(
+            spec, receipt, destination, variant_id, exc,
+            no_ledger=no_ledger,
+            refusal_ledger_path=refusal_ledger_path).as_dict()
+    receipt.status = "failed"
+    receipt.evidence["error_code"] = type(exc).__name__
+    if isinstance(exc, OpsError):
+        receipt.evidence["failure_code"] = exc.code
+        # The typed problem's details (e.g. a runner's nonzero returncode
+        # and stderr tail) survive the status capture so the worker can
+        # re-raise them into the private diagnostics path.
+        receipt.evidence["failure_details"] = dict(exc.problem.details)
+    return receipt.as_dict()
+
+
 def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                    *, runner: Callable, mode="smoke", backup: Callable | None = None,
                    synthetic=False,
                    resolved_plan: ResolvedExperimentPlan | None = None,
-                   variant_id: str | None = None) -> dict:
+                   variant_id: str | None = None,
+                   refusal_ledger_path: Path | str | None = None) -> dict:
     """Run one isolated hypothesis; retries reuse its exact spec/input identity."""
     if mode not in ("smoke", "primary"):
         raise fail("INVALID_REQUEST", "unknown experiment mode")
@@ -878,15 +1011,10 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
         receipt.evidence["synthetic"] = bool(synthetic)
         receipt.status = "succeeded"
     except Exception as exc:
-        receipt.status = "failed"
-        receipt.evidence["error_code"] = type(exc).__name__
-        if isinstance(exc, OpsError):
-            receipt.evidence["failure_code"] = exc.code
-            # The typed problem's details (e.g. a runner's nonzero returncode
-            # and stderr tail) survive the status capture so the worker can
-            # re-raise them into the private diagnostics path.
-            receipt.evidence["failure_details"] = dict(exc.problem.details)
-        return receipt.as_dict()
+        return _runner_failure_receipt(
+            spec, receipt, destination, variant_id, exc,
+            no_ledger=(mode == "smoke" or synthetic),
+            refusal_ledger_path=refusal_ledger_path)
     if mode == "primary" and backup is not None and not synthetic:
         try:
             receipt.backup_receipt = backup(receipt.as_dict())

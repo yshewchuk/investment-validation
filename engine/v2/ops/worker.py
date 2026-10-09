@@ -362,11 +362,17 @@ def _experiment_failure(receipt):
     The runner's own typed problem (code + details, e.g. a nonzero
     returncode's stderr tail) is carried through the receipt so it survives
     ``run_experiment``'s status capture and reaches ``worker.main``'s private
-    ``failure_details.json`` -- never the public failure message.
+    ``failure_details.json`` -- never the public failure message. A
+    ``status="refused"`` receipt adds the fully pinned private
+    ``refusal_receipt`` on the same channel, so the typed
+    ``HOLDOUT_ACCESS_DENIED`` reaches the supervisor without becoming a
+    public attempt output.
     """
     evidence = receipt.get("evidence") or {}
     details = {"status": receipt["status"], "error_code": evidence.get("error_code")}
     details.update(evidence.get("failure_details") or {})
+    if "refusal_receipt" in evidence:
+        details["refusal_receipt"] = evidence["refusal_receipt"]
     return fail(evidence.get("failure_code") or "VALIDATION_FAILED",
                 "experiment run did not succeed", details=details)
 
@@ -448,6 +454,7 @@ def _dispatch_experiment(parameters, root):
     from engine.v2.ops.experiments import (
         expected_variant_identity,
         experiment_spec_from_document,
+        experiments_ledger_path,
         resolve_experiment_plan,
         run_experiment,
         synthetic_fixture_runner,
@@ -476,8 +483,11 @@ def _dispatch_experiment(parameters, root):
         runner = _registered_experiment_runner(root, runner_id, spec.primary_arm_id)
         synthetic = False
     (root / "resolved_experiment_plan.json").write_bytes(plan.json_bytes())
+    refusal_ledger_path = (experiments_ledger_path(checkout_root)
+                           if mode == "primary" and checkout_root else None)
     receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
-                             resolved_plan=plan, variant_id=variant_id)
+                             resolved_plan=plan, variant_id=variant_id,
+                             refusal_ledger_path=refusal_ledger_path)
     (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
         raise _experiment_failure(receipt)
