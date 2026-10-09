@@ -8,7 +8,7 @@ from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
 def test_native_sidecar_thread_identity():
     cases = (
-        ("native_score_batch", "io_fetch"),
+        ("native_score_batch", "projection"),
         ("native_parity", "validation"),
     )
     for kind, expected_resource_class in cases:
