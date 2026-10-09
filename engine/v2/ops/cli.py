@@ -199,7 +199,7 @@ def _add_operator_plan_arguments(plan):
     plan.add_argument("--pairs", default="")
     plan.add_argument("--ticker-chunk", type=int, default=1000)
     plan.add_argument("--release-root", default="")
-    plan.add_argument("--release-id", default="")
+    plan.add_argument("--release-id", default=None)
     plan.add_argument("--expected-previous-release-id", default=argparse.SUPPRESS,
                       help="optional expected-incumbent guard for promote: the plan's "
                            "worker refuses CONCURRENT_PROMOTE when the live DEPLOYED "
@@ -534,6 +534,24 @@ def _read_refresh_plan(args):
     return json.loads(args.refresh_plan.read_text())
 
 
+def _rollback_plan_from_args(args):
+    """Build a rollback plan, rejecting the inapplicable ``--release-id`` first.
+
+    Rollback resolves its target from the release store's own history, so a
+    named release id is meaningless and refused as ``INVALID_REQUEST`` before
+    any plan is saved -- never quietly ignored.  The shared ``--release-id``
+    argument defaults to ``None``, so an explicitly supplied empty value
+    (``--release-id ""``) is still a supplied value and is refused too, while
+    promote's own missing id keeps failing ``promote_plan``'s validation.
+    """
+    from engine.v2.ops.training import rollback_plan
+    if args.release_id is not None:
+        raise fail("INVALID_REQUEST",
+                   "rollback takes no --release-id; the target is resolved from "
+                   "deployment history")
+    return rollback_plan(release_root=args.release_root)
+
+
 def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
@@ -567,8 +585,7 @@ def _plan_command(args, root, conn, clock):
         plan = promote_plan(release_root=args.release_root, release_id=args.release_id,
                             expected_previous_release_id=expected_previous)
     elif args.kind == "rollback":
-        from engine.v2.ops.training import rollback_plan
-        plan = rollback_plan(release_root=args.release_root)
+        plan = _rollback_plan_from_args(args)
     else:
         from engine.v2.ops.experiments import experiment_plan
         if args.no_ledger and args.activate_ledger:

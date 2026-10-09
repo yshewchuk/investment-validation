@@ -57,7 +57,11 @@ The full list is `README.md`'s `<!-- public-interface: ... -->` directive
   `deployment.rollback(root, *, clock) -> PointerState` — the one atomic
   pointer swap, in either direction. Rollback selects the prior incumbent
   from deployment history; an empty or single-entry undo stack raises the
-  typed `NoPriorRelease` refusal without changing the pointer.
+  typed `NoPriorRelease` refusal without changing the pointer. Operator plans
+  pin incumbent sequence and target; stale plans refuse, and recovery recognizes
+  only that plan's exact swap, even if history or receipt recording was lost.
+- `deployment.rollback_target(root) -> str` — read-only resolution of the
+  incumbent `rollback` would select; raises `NoPriorRelease` when none exists.
 - `deployment.resolve_release(root, release_id) -> ModelRelease` /
   `deployment.current_release(root) -> ModelRelease | None` — read a staged
   release by id, or by the live pointer.

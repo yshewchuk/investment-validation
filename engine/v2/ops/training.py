@@ -62,6 +62,16 @@ class PromoteParameters:
 class RollbackParameters:
     expected_ids: tuple[str, ...]        # always ("models_rollback",)
     release_root: str
+    #: The live incumbent pinned at plan time, plus the undo-stack target the
+    #: operator intended.  Execution refuses a plan whose incumbent no longer
+    #: matches the live pointer, or whose target has since changed, so a stale
+    #: plan can never undo a promotion that happened after it was made.  A store
+    #: with no prior incumbent pins ``target_release_id=None`` and is refused by
+    #: the worker's own ``deployment.rollback`` call, keeping the typed
+    #: ``VALIDATION_FAILED``/``NoPriorRelease`` path.
+    incumbent_release_id: str | None = None
+    incumbent_sequence: int | None = None
+    target_release_id: str | None = None
     input_bindings: dict[str, str] | None = None
 
 
@@ -322,14 +332,21 @@ def rollback_plan(*, release_root="") -> dict:
 
     Rollback takes no ``release_id`` and no expected-incumbent guard: the
     target is resolved by ``deployment.rollback`` from the release store's own
-    append-only pointer history. An empty ``release_root`` resolves
+    append-only pointer history. The plan pins the live incumbent release id
+    and pointer sequence, plus the undo-stack target ``deployment``'s own
+    resolver names, so execution can refuse a plan the store has moved past
+    (``run_rollback_worker``). An empty ``release_root`` resolves
     ``production_deployment_root()`` here, at plan time, exactly like
     :func:`promote_plan`; a missing key is ``INVALID_REQUEST`` and never
     reaches the worker with an empty root. The path is made absolute at plan
     time because the worker's cwd is its code snapshot (``executor.launch``).
+    A store with no prior incumbent still gets a plan (``target_release_id`` is
+    ``None``) rather than a plan-time refusal, so the job fails through the
+    existing typed ``VALIDATION_FAILED``/``NoPriorRelease`` path.
     """
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
+    from engine.v2.ops.experiments import default_checkout_root
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 
     if not release_root:
@@ -338,14 +355,23 @@ def rollback_plan(*, release_root="") -> dict:
         except deployment.MissingReleaseRoot as exc:
             raise fail("INVALID_REQUEST", "no release root given and no production "
                        "release root is configured") from exc
-    release_root = str(Path(release_root).expanduser().resolve())
+    store = Path(release_root).expanduser().resolve()
+    pointer = deployment.current_pointer(store)
+    try:
+        target = deployment.rollback_target(store)
+    except deployment.DeploymentError:
+        target = None
     profile = profile_named(DEFAULT_POLICY, "delivery")
-    params = RollbackParameters(expected_ids=("models_rollback",), release_root=release_root)
-    root3 = Path(__file__).resolve().parents[3]
+    params = RollbackParameters(
+        expected_ids=("models_rollback",), release_root=str(store),
+        incumbent_release_id=None if pointer is None else pointer.release_id,
+        incumbent_sequence=None if pointer is None else pointer.sequence,
+        target_release_id=target)
+    root = default_checkout_root()
     return {"schema_version": "operations_plan.v1.0", "kind": "rollback", "mode": "shadow",
             "effects": ["staged"], "parameters": vars(params), "input_refs": [],
             "blocked_prerequisites": [], "spec_hash": content_hash(vars(params)),
-            "implementation_ref": content_hash(worker_source_manifest(root3)),
+            "implementation_ref": content_hash(worker_source_manifest(root)),
             "environment_ref": content_hash(
                 environment_identity(profile.thread_count or profile.cpu_count)),
             "resource_class": "delivery"}
@@ -512,6 +538,74 @@ def run_promote_worker(parameters, root) -> dict:
             "completed_ids": list(parameters["expected_ids"]), "no_work": False}
 
 
+def _recorded_rollback(deployment, store, incumbent_id, incumbent_sequence, target):
+    """Return the pinned plan's own already-recorded rollback swap, if the
+    store holds it, else ``None``.
+
+    This is the recovery receipt: the original attempt swapped the pointer and
+    crashed before recording it, so a resubmission under a new idempotency key
+    must report that same swap rather than undo whatever the store has since
+    done.  The state has to be exactly the pinned plan's swap -- a rollback
+    from the pinned incumbent id to the pinned target at the pinned sequence
+    plus one -- whether it lives in the append-only history or, for a crash
+    between the pointer write and the history append, only in the live pointer.
+    """
+    if incumbent_id is None or incumbent_sequence is None or target is None:
+        return None
+    wanted = incumbent_sequence + 1
+    try:
+        history = deployment.pointer_history(store)
+    except (OSError, ValueError):
+        return None
+    for entry in history:
+        if entry.sequence == wanted:
+            if (entry.action == "rollback" and entry.release_id == target
+                    and entry.previous_release_id == incumbent_id):
+                return entry
+            return None
+    pointer = deployment.current_pointer(store)
+    if (pointer is not None and pointer.sequence == wanted
+            and pointer.action == "rollback" and pointer.release_id == target
+            and pointer.previous_release_id == incumbent_id):
+        return pointer
+    return None
+
+
+def _rollback_for_pinned_plan(deployment, store, incumbent_id, incumbent_sequence, target):
+    """Perform the plan's rollback, or recover its lost receipt, or refuse stale.
+
+    The live pointer must still name the pinned incumbent at the pinned
+    sequence, and the store's own target resolver must still name the pinned
+    target, before ``deployment.rollback`` may swap.  Otherwise a newer
+    promotion has advanced the store and the plan is stale: refuse typed
+    ``VALIDATION_FAILED`` without touching the pointer or history.  A plan made
+    against a completely empty store pins all three of incumbent id, sequence
+    and target as ``None``: while the pointer is still absent it lets
+    ``deployment.rollback`` raise its own typed ``NoPriorRelease``, but a
+    pointer that has appeared since the plan makes the plan stale and is
+    refused the same typed way, without mutation.  A store with exactly one
+    incumbent pins no target and likewise reaches ``deployment.rollback``'s own
+    ``NoPriorRelease``.
+    """
+    recorded = _recorded_rollback(deployment, store, incumbent_id, incumbent_sequence, target)
+    if recorded is not None:
+        return recorded
+    pointer = deployment.current_pointer(store)
+    if incumbent_id is None and incumbent_sequence is None and target is None:
+        if pointer is None:
+            return deployment.rollback(store)
+        raise fail("VALIDATION_FAILED",
+                   "rollback plan no longer matches the live pointer; refusing a stale swap")
+    if (incumbent_id is None or incumbent_sequence is None or pointer is None
+            or pointer.release_id != incumbent_id or pointer.sequence != incumbent_sequence):
+        raise fail("VALIDATION_FAILED",
+                   "rollback plan no longer matches the live pointer; refusing a stale swap")
+    if target is not None and deployment.rollback_target(store) != target:
+        raise fail("VALIDATION_FAILED",
+                   "rollback target changed since the plan was made; refusing a stale swap")
+    return deployment.rollback(store)
+
+
 def run_rollback_worker(parameters, root) -> dict:
     """Run one operator-submitted rollback inside its staging root.
 
@@ -520,15 +614,23 @@ def run_rollback_worker(parameters, root) -> dict:
     ``DeploymentError``) when there is nothing to roll back to. That refusal
     maps to the same typed ``VALIDATION_FAILED`` every deployment refusal uses,
     never a bare worker failure, and -- because ``rollback`` refuses before any
-    pointer/history write -- leaves no successful pointer state behind. There
-    is no other caller of this worker: no nightly stage names
-    ``"models_rollback"``, only an operator's own ``submit``.
+    pointer/history write -- leaves no successful pointer state behind.  The
+    swap runs only while the store still matches the incumbent sequence and
+    target pinned in the plan; a plan the store has moved past is refused the
+    same typed way and mutates nothing.  A plan whose swap is already recorded
+    (the original attempt's receipt was lost) reports that exact recorded state
+    without swapping again, so a later promotion is never undone.  There is no
+    other caller of this worker: no nightly stage names ``"models_rollback"``,
+    only an operator's own ``submit``.
     """
     from engine.v2.foundation import to_document
     from engine.v2.models import deployment
 
+    store = Path(parameters["release_root"])
     try:
-        state = deployment.rollback(Path(parameters["release_root"]))
+        state = _rollback_for_pinned_plan(
+            deployment, store, parameters.get("incumbent_release_id"),
+            parameters.get("incumbent_sequence"), parameters.get("target_release_id"))
     except deployment.DeploymentError as exc:
         raise fail("VALIDATION_FAILED", "rollback refused",
                    details={"exception_class": type(exc).__name__}) from exc

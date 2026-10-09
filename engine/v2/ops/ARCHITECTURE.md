@@ -36,10 +36,10 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `init`, `doctor`, `health`
 - `serve` — starts the supervisor loop
 - `plan {nightly,experiment,training,promote,rollback}` — builds and saves a plan
-  document; `training`/`promote`/`rollback` take operator-only arguments
-  (`--training-mode`, `--recipe`, `--state`, `--alpha`, `--cutoff`,
-  `--strategy`, `--pairs`, `--ticker-chunk`, `--release-root`,
-  `--release-id`, `--expected-previous-release-id`) and are never part of the nightly DAG
+  document; flags apply by kind: `training` takes `--training-mode`, `--recipe`,
+  `--state`, `--alpha`, `--cutoff`, `--strategy`, `--pairs`, `--ticker-chunk`;
+  `promote` takes `--release-root`, `--release-id` and `--expected-previous-release-id`;
+  `rollback` takes `--release-root` and refuses `--release-id`.
 - `submit --plan --idempotency-key`
 - `rescore --request --native-inputs` — read-only, no provider pulls, no fitting
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
@@ -1010,10 +1010,10 @@ waits without submitting until its paired succeeded inputs are ready.
 - `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not
   `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes.
   `run_training_worker` calls one of four `tools/phase5_training_job.py`
-  functions and writes `training_result.json`; `run_promote_worker` calls
-  `deployment.promote`'s release-store pointer swap; `run_rollback_worker`
-  calls `deployment.rollback` and writes `pointer_state.json`. None run in
-  the nightly DAG; operators submit with
+  functions and writes `training_result.json`; `run_promote_worker` calls `deployment.promote`;
+  `run_rollback_worker` uses its plan-pinned incumbent and target, then writes
+  `pointer_state.json`. Recovery recognizes that exact prior swap without
+  moving the pointer again. None run in the nightly DAG; operators submit with
   `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
   `operator`, namespace `shadow` and the caller idempotency key like promote.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
@@ -1220,7 +1220,7 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 
 | Condition | Outcome |
 |---|---|
-| a training-tool refusal, or `deployment.DeploymentError` (including a superseded release hash, `ConcurrentPromote` (`CONCURRENT_PROMOTE`) for a missing/stale expected incumbent when the target is not already live, or `NoPriorRelease` when rollback history has no earlier incumbent) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; refusal writes no successful pointer-state output or pointer/history change |
+| a training-tool refusal, or `deployment.DeploymentError` (including a superseded release hash, `ConcurrentPromote` (`CONCURRENT_PROMOTE`) for a missing/stale expected incumbent when the target is not already live, or `NoPriorRelease` when rollback history has no earlier incumbent) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a stale rollback plan writes no successful output or pointer/history change |
 | no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset, or `ops plan promote` supplies a blank `--expected-previous-release-id` | `INVALID_REQUEST` at plan time; no empty `release_root` reaches the worker, and only an absent incumbent option means no guard |
 | a recipe job's `pairs_path` does not resolve beneath the attempt's own pinned legacy root | `INPUT_CHANGED` at execution, even after passing plan-time validation |
 | any `models_promote` or `models_rollback` claim | serialized globally by one write lease on the deployment pointer; resubmission with the same namespace and idempotency key returns the existing job |
