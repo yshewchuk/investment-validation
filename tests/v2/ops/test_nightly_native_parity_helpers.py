@@ -23,7 +23,7 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit_graph
 from tests.ops_support import catalog
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 _POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 _OMIT = object()
 _RECORDS_OK = json.dumps({

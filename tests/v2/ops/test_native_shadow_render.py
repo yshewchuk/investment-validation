@@ -230,7 +230,7 @@ def test_g3_never_computed_band_stays_absent_through_the_full_path(tmp_path):
 
 def test_the_nightly_plan_records_the_shadow_serving_scorer():
     """G5: the switch is a recorded plan field, not an env var or CLI flag."""
-    repo = str(Path(__file__).resolve().parents[1])
+    repo = str(Path(__file__).resolve().parents[3])
     plan = build_nightly_plan(repo, _EVENT_DATE)
     assert plan["shadow_serving_scorer"] == "native"
     assert native_shadow_serving_mode(plan) == "native"
