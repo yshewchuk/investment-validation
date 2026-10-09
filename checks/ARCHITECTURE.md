@@ -31,8 +31,9 @@ The Phase 1 profile in `checks/v2_coverage_ratchet.py` selects root-level
 paths for relocated foundation, nightly-completion, and native-parity-pairing
 tests. `PHASE1_SUITE_VERSION` identifies this membership. The measurement
 identity hashes every `engine/v2` Python source and every selected test path
-and file content. `phase1_compare` reports `COVERAGE_SUITE_DRIFT` when the
-measurement and baseline versions differ; `phase1_validate_measurement`
+and file content. `phase1_compare` reports `COVERAGE_SUITE_DRIFT` if either
+the measurement or baseline version differs from `PHASE1_SUITE_VERSION`,
+including when both share the same stale version; `phase1_validate_measurement`
 reports `COVERAGE_TEST_INVENTORY_DRIFT` for a test list that differs from the
 active selector and `COVERAGE_SOURCE_DRIFT` when the identity differs from the
 current tree. The relocated-file membership checks are in
