@@ -25,6 +25,20 @@ The test-layout ratchet blocks new tests outside `tests/v2/<package>/` and
 `tests/v2/integration/`; the root-level unmoved test count stays the same or
 decreases.
 
+The Phase 1 profile in `checks/v2_coverage_ratchet.py` selects root-level
+`test_v2_ops_*`, `test_v2_data_*`, `test_v2_dashboard_*`, and
+`test_v2_serving_*` files, `tests/test_diagnosis_comparator.py`, and explicit
+paths for relocated foundation, nightly-completion, and native-parity-pairing
+tests. `PHASE1_SUITE_VERSION` identifies this membership. The measurement
+identity hashes every `engine/v2` Python source and every selected test path
+and file content. `phase1_compare` reports `COVERAGE_SUITE_DRIFT` when the
+measurement and baseline versions differ; `phase1_validate_measurement`
+reports `COVERAGE_TEST_INVENTORY_DRIFT` for a test list that differs from the
+active selector and `COVERAGE_SOURCE_DRIFT` when the identity differs from the
+current tree. The relocated-file membership checks are in
+`tests/v2/integration/test_test_selection.py`; suite-version drift is covered
+by `tests/test_v2_ops_engineering.py` and `tests/test_checks_phase3_gate.py`.
+
 `import_layers.py --all` also checks the planned ops ownership/direction in
 `ops_dependencies.json` against every tracked ops Python file. Static imports
 in every scope, including lazy/function imports, form the module graph.
