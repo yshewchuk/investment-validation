@@ -248,6 +248,9 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
     # scoring/replay action loads (``FeatureContext.load``); ``tickers`` stays
     # the direct watchlist actually scored. Defaults to ``tickers`` so a
     # caller that predates this parameter is unchanged.
+    if action == "legacy_score" and plan.get("candidate_exclusions"):
+        tickers = sorted({str(key).split("|")[0]
+                          for key in plan["expected_population"]})
     context = tuple(sorted(context_tickers)) if context_tickers else tuple(sorted(tickers))
     params = {"expected_ids": (action,), "session": plan["session"],
               "tickers": tuple(sorted(tickers)), "context_tickers": context,
@@ -331,8 +334,16 @@ def _legacy_resource(kind):
         return "io_fetch"
     # Native sidecars pin their own class here too, so ``_thread_count``
     # fingerprints the SAME class the job spec is submitted with.
+    # native_score_batch measurement basis (resource-profile sizing): the
+    # supervised 512 MiB (io_fetch) run was killed at 538,800,128 bytes; a
+    # standalone real-handler run with zero events peaked at 614 MiB RSS in
+    # 10.3 seconds; release loading used about 105 -> 546 MiB RSS while
+    # loading an approximately 217 MB deployment, with native_score_batch
+    # imports adding about 55 MiB on top.  This justifies routing the kind
+    # to the existing 3 GiB/2 CPU ``projection`` profile; it does not claim
+    # full-scale per-event memory is measured.
     if kind == "native_score_batch":
-        return "io_fetch"
+        return "projection"
     if kind == "native_parity":
         return "validation"
     if kind in ("legacy_score", "legacy_decision_replay"):
@@ -484,7 +495,8 @@ def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_s
     if stage == "materialize":
         return {"expected_ids": ("legacy_materialize",), "input_bindings": {},
                 "scratch_estimate_bytes": int(snapshot["scratch_estimate_bytes"])}
-    params = _legacy_params(_action_for(stage), plan, tickers, year_start, year_end, keys,
+    action = _action_for(stage)
+    params = _legacy_params(action, plan, tickers, year_start, year_end, keys,
                             effect_scope=effect_scope, prior_selfcheck_ref=prior_selfcheck_ref,
                             context_tickers=context_tickers)
     if snapshot is not None:
@@ -1153,7 +1165,7 @@ def submit_native_parity_if_ready(conn, registry, policy, store, *, catalog_path
         dependency_job_ids=(score_job_id, native_score_batch_job_id),
         output_namespace="shadow",
         retry_policy_ref="bounded",
-        checkpoint_contract_ref="native_parity_report.v1.2",
+        checkpoint_contract_ref="native_parity_report.v1.3",
         **_sidecar_runtime_identity("native_parity"))
     return submit(conn, registry, policy, SubmitRequest(
         namespace="shadow", idempotency_key=key, principal="operator", job=job),
@@ -1418,7 +1430,12 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     plan_identity = _plan_identity(plan, input_refs)
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
                              context_tickers=context_tickers, plan_identity=plan_identity)
-    effect_scope = effect_scope_for(tickers, full_universe)
+    if plan.get("candidate_exclusions"):
+        effect_tickers = sorted({str(key).split("|")[0]
+                                 for key in plan["expected_population"]})
+        effect_scope = effect_scope_for(effect_tickers)
+    else:
+        effect_scope = effect_scope_for(tickers, full_universe)
     stages = _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode)
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage
