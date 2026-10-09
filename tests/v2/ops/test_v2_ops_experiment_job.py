@@ -15,7 +15,7 @@ from engine.v2.ops import cli, effects_graph, experiments, legacy_adapter, stage
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact, register_artifact
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_plan
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.input_bindings import resolve_and_record
@@ -824,6 +824,90 @@ def test_experiment_effect_lost_fence_appends_no_ran_row(tmp_path):
         assert _ledger_rows(checkout / "experiments" / "LEDGER.csv") == [
             {"id": "x", "stage": "planned"}]
         assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_refusal_failure_effect_appends_refused_row_only_under_the_live_fence(tmp_path,
+                                                                              monkeypatch):
+    """Issue #489: the ``refused`` ledger row belongs to the FAILED attempt's
+    fenced commit. A stale fence is refused before the callback runs, so the
+    checkout keeps only its PLANNED row. On the live fence a catalog commit
+    that fails after the durable CSV append leaves exactly one refused row
+    while the rolled-back transaction keeps the attempt in its prior active
+    state; restoring the append and retrying the same failed commit under the
+    same live fence completes it, the replay-idempotent append recognizes the
+    existing row instead of duplicating it, the row carries the resolved
+    primary variant identity, no durable run is registered, and replaying the
+    callback inside a catalog transaction again appends nothing."""
+    conn, clock, claim, _, checkout = _claimed_primary_effect(tmp_path,
+                                                               key="primary-refusal")
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    spec = experiments.experiment_spec_from_document(_spec_document())
+    variant_id = experiments.expected_variant_identity(checkout, spec, "primary")
+    receipt = {"schema_version": experiments.REFUSAL_RECEIPT_SCHEMA, "status": "refused",
+               "failure_code": "HOLDOUT_ACCESS_DENIED", "experiment_id": spec.experiment_id,
+               "variant_id": variant_id, "snapshot_id": "snapshot-489",
+               "holdout_as_of_month": "2025-01",
+               "random_membership_version": "canonical-event-sha256.v1",
+               "rolling_membership_version": "calendar-months.v1"}
+    problem = fail("HOLDOUT_ACCESS_DENIED",
+                   "requested events are excluded from experiment reads",
+                   details={"refusal_receipt": receipt}).problem
+    failure_effects = effects_graph._experiment_refusal_failure_effect(
+        claim, problem, code_source=checkout)
+
+    def refused_rows():
+        with open(ledger, newline="") as fh:
+            return [row for row in csv.DictReader(fh) if row["stage"] == "refused"]
+
+    def attempt_row():
+        return conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                            "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+
+    real_append = experiments._append_refusal_row
+
+    def append_then_crash(experiment_id, refused_variant_id, ledger_path):
+        real_append(experiment_id, refused_variant_id, ledger_path)
+        raise OSError("simulated catalog commit failure after ledger append")
+
+    try:
+        with pytest.raises(OpsError) as excinfo:
+            commit_attempt(conn, claim.attempt_id, claim.fence + 1,
+                           Outcome(False, "verified_dead", 1, problem), clock=clock,
+                           failure_effects=failure_effects)
+        assert excinfo.value.code == "LEASE_LOST"
+        assert refused_rows() == []
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+
+        monkeypatch.setattr(experiments, "_append_refusal_row", append_then_crash)
+        with pytest.raises(OSError, match="simulated catalog commit failure after ledger append"):
+            commit_attempt(conn, claim.attempt_id, claim.fence,
+                           Outcome(False, "verified_dead", 1, problem), clock=clock,
+                           failure_effects=failure_effects)
+        assert len(refused_rows()) == 1
+        stale = attempt_row()
+        assert stale["state"] == "starting"
+        assert stale["failure_json"] is None
+        assert stale["ended_at"] is None
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+
+        monkeypatch.setattr(experiments, "_append_refusal_row", real_append)
+        commit_attempt(conn, claim.attempt_id, claim.fence,
+                       Outcome(False, "verified_dead", 1, problem), clock=clock,
+                       failure_effects=failure_effects)
+        rows = refused_rows()
+        assert len(rows) == 1
+        assert rows[0]["id"] == spec.experiment_id
+        assert rows[0]["spec_hash"] == variant_id
+        assert attempt_row()["state"] == "failed"
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+
+        with transaction(conn):
+            failure_effects(conn)
+        assert len(refused_rows()) == 1
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
+                                        {"id": "x", "stage": "refused"}]
     finally:
         conn.close()
 

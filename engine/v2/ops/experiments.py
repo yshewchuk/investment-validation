@@ -892,7 +892,7 @@ def _exclusive_file_lock(path):
         handle.close()
 
 
-def _append_refusal_row(spec, variant_id, ledger_path) -> None:
+def _append_refusal_row(experiment_id: str, variant_id, ledger_path) -> None:
     from datetime import datetime, timezone
 
     from experiments.lib import LEDGER_COLUMNS, ledger_append
@@ -903,15 +903,15 @@ def _append_refusal_row(spec, variant_id, ledger_path) -> None:
         if ledger.is_file():
             with open(ledger, newline="") as fh:
                 stored = [row.get("spec_hash") for row in csv.DictReader(fh)
-                          if row.get("id") == spec.experiment_id
+                          if row.get("id") == experiment_id
                           and row.get("stage") == "refused"]
         if variant_id in stored:
             return
         if stored:
             raise fail("IDEMPOTENCY_CONFLICT",
                        "a refused ledger row carries a different variant identity",
-                       details={"experiment_id": spec.experiment_id})
-        row = {"id": spec.experiment_id, "spec_hash": variant_id,
+                       details={"experiment_id": experiment_id})
+        row = {"id": experiment_id, "spec_hash": variant_id,
                "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
                "stage": "refused", "oos_mean_mid": "", "sharpe_trade": "",
                "promoted": "False"}
@@ -919,13 +919,17 @@ def _append_refusal_row(spec, variant_id, ledger_path) -> None:
 
 
 def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
-                                no_ledger: bool, refusal_ledger_path) -> ExperimentReceipt:
+                                no_ledger: bool, refusal_ledger_path,
+                                defer_refusal_ledger: bool = False) -> ExperimentReceipt:
     """Capture one typed ``HOLDOUT_ACCESS_DENIED`` as the private refusal contract.
 
     Validation precedes every write: a denial missing any of the four identity
     pins is the typed ``VALIDATION_FAILED`` refusal, with no receipt and no row.
-    The receipt is written before the ledger is read or appended, so an append
-    failure leaves a durable receipt a replay can complete from.
+    The receipt is written and durably committed to its directory before the
+    ledger is read or appended, so an append failure leaves a durable receipt a
+    replay can complete from. ``defer_refusal_ledger`` keeps ledgering enabled
+    (the ledger path is still required) while leaving the row append to the
+    caller; ``no_ledger`` always skips appending.
     """
     problem = getattr(exc, "problem", None)
     details = dict(getattr(problem, "details", None) or {})
@@ -941,6 +945,7 @@ def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
         artifact.unlink(missing_ok=True)
     document = {"schema_version": REFUSAL_RECEIPT_SCHEMA, "status": "refused",
                 "failure_code": "HOLDOUT_ACCESS_DENIED", "variant_id": variant_id,
+                "experiment_id": spec.experiment_id,
                 **{name: details[name] for name in REFUSAL_PIN_FIELDS}}
     exclusions = _canonical_exclusions(details.get("holdout_exclusions"))
     if exclusions is not None:
@@ -971,6 +976,12 @@ def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
                 os.fsync(temp.fileno())
                 temp.close()
                 os.replace(temp_path, path)
+                directory_fd = os.open(destination,
+                                       os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
             finally:
                 temp.close()
                 temp_path.unlink(missing_ok=True)
@@ -978,7 +989,8 @@ def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
         if refusal_ledger_path is None:
             raise fail("INVALID_REQUEST",
                        "a refusal ledger path is required when ledgering is enabled")
-        _append_refusal_row(spec, variant_id, refusal_ledger_path)
+        if not defer_refusal_ledger:
+            _append_refusal_row(spec.experiment_id, variant_id, refusal_ledger_path)
     receipt.status = "refused"
     receipt.evidence["failure_code"] = "HOLDOUT_ACCESS_DENIED"
     receipt.evidence["failure_details"] = details
@@ -987,7 +999,8 @@ def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
 
 
 def _runner_failure_receipt(spec, receipt, destination, variant_id, exc, *,
-                            no_ledger: bool, refusal_ledger_path) -> dict:
+                            no_ledger: bool, refusal_ledger_path,
+                            defer_refusal_ledger: bool = False) -> dict:
     """Turn one caught runner exception into its terminal receipt dict.
 
     A typed holdout denial becomes the private refusal contract; every other
@@ -998,7 +1011,8 @@ def _runner_failure_receipt(spec, receipt, destination, variant_id, exc, *,
         return _refused_experiment_receipt(
             spec, receipt, destination, variant_id, exc,
             no_ledger=no_ledger,
-            refusal_ledger_path=refusal_ledger_path).as_dict()
+            refusal_ledger_path=refusal_ledger_path,
+            defer_refusal_ledger=defer_refusal_ledger).as_dict()
     receipt.status = "failed"
     receipt.evidence["error_code"] = type(exc).__name__
     if isinstance(exc, OpsError):
@@ -1015,7 +1029,8 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                    synthetic=False,
                    resolved_plan: ResolvedExperimentPlan | None = None,
                    variant_id: str | None = None,
-                   refusal_ledger_path: Path | str | None = None) -> dict:
+                   refusal_ledger_path: Path | str | None = None,
+                   defer_refusal_ledger: bool = False) -> dict:
     """Run one isolated hypothesis; retries reuse its exact spec/input identity."""
     if mode not in ("smoke", "primary"):
         raise fail("INVALID_REQUEST", "unknown experiment mode")
@@ -1066,7 +1081,8 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
         return _runner_failure_receipt(
             spec, receipt, destination, variant_id, exc,
             no_ledger=(mode == "smoke" or synthetic),
-            refusal_ledger_path=refusal_ledger_path)
+            refusal_ledger_path=refusal_ledger_path,
+            defer_refusal_ledger=defer_refusal_ledger)
     if mode == "primary" and backup is not None and not synthetic:
         try:
             receipt.backup_receipt = backup(receipt.as_dict())

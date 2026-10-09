@@ -396,6 +396,38 @@ def _declared_experiment_sources(runner_id: str) -> tuple[str, ...]:
     return tuple(sources)
 
 
+_HOLDOUT_REFUSAL_SIGNAL_SCHEMA = "holdout_refusal_signal.v1"
+_HOLDOUT_REFUSAL_PINS = ("snapshot_id", "holdout_as_of_month",
+                         "random_membership_version", "rolling_membership_version")
+
+
+def _holdout_refusal_signal(run_dir):
+    """The validated private refusal pins from the child loader's sidecar.
+
+    ``legacy_adapter.run_legacy_script`` exports
+    ``INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL=<run_dir>/holdout_refusal_signal.json``
+    and ``experiment_trades.load_trades`` atomically writes that signal when
+    the real child loader refuses holdout data. Only the exact
+    schema/failure-code document whose four membership pins are all nonblank
+    strings is accepted; unknown keys, stderr, and event IDs never travel in
+    the typed problem. Missing, unreadable, malformed, wrong-schema or
+    wrong-code files, and invalid pins, all yield ``None`` so the generic
+    runner failure — with no sidecar values — is unchanged.
+    """
+    try:
+        document = json.loads((Path(run_dir) / "holdout_refusal_signal.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(document, dict)
+            or document.get("schema_version") != _HOLDOUT_REFUSAL_SIGNAL_SCHEMA
+            or document.get("failure_code") != "HOLDOUT_ACCESS_DENIED"):
+        return None
+    pins = {name: document.get(name) for name in _HOLDOUT_REFUSAL_PINS}
+    if not all(isinstance(value, str) and value.strip() for value in pins.values()):
+        return None
+    return pins
+
+
 def _registered_experiment_runner(root, runner_id, primary_arm_id):
     """The runner closure for a registered legacy runner (P6 slice 10).
 
@@ -404,7 +436,10 @@ def _registered_experiment_runner(root, runner_id, primary_arm_id):
     ``INVALID_EXPERIMENT_SPEC`` naming the runner and arm, raised before any
     resolved plan is written or the runner is invoked. The closure preserves
     the nonzero-return refusal (typed ``VALIDATION_FAILED`` with the stderr
-    tail) and the ledger headline.
+    tail) and the ledger headline. A nonzero exit whose staged run directory
+    carries a valid holdout refusal sidecar is instead the typed
+    ``HOLDOUT_ACCESS_DENIED`` naming only the four validated pins, which
+    ``run_experiment`` captures as the private refusal receipt.
     """
     from engine.v2.ops.experiments import RUNNER_INVENTORY
     from engine.v2.ops.legacy_adapter import run_legacy_script
@@ -422,6 +457,11 @@ def _registered_experiment_runner(root, runner_id, primary_arm_id):
         completed = run_legacy_script(run_dir, runner_id, args=selected_args,
                                       declared_runtime_sources=sources)
         if completed.returncode != 0:
+            pins = _holdout_refusal_signal(run_dir)
+            if pins is not None:
+                raise fail("HOLDOUT_ACCESS_DENIED",
+                           "registered experiment loader refused holdout data",
+                           details=pins)
             raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
                        details={"returncode": completed.returncode,
                                 "stderr_tail": (completed.stderr or "")[-2000:]})
@@ -492,7 +532,8 @@ def _dispatch_experiment(parameters, root):
                            if mode == "primary" and checkout_root else None)
     receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
                              resolved_plan=plan, variant_id=variant_id,
-                             refusal_ledger_path=refusal_ledger_path)
+                              refusal_ledger_path=refusal_ledger_path,
+                              defer_refusal_ledger=True)
     (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
         raise _experiment_failure(receipt)

@@ -36,6 +36,7 @@ from engine.v2.ops.decision_commit import (
 from engine.v2.ops.decision_evidence import derive
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.effects_graph import (
+    _experiment_refusal_failure_effect,
     backup_effect,
     effect_scope,
     engineering_gate_effect,
@@ -1500,7 +1501,10 @@ class Service:
         outcome = Outcome(False, "verified_dead", status["exit_code"], problem)
         if fence_held(self.conn, claim.attempt_id, claim.fence, clock=self.clock):
             try:
-                commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome, clock=self.clock)
+                failure_effects = _experiment_refusal_failure_effect(
+                    claim, problem, code_source=self.code_source, store_root=self.store_root)
+                commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome,
+                               clock=self.clock, failure_effects=failure_effects)
                 return
             except OpsError as exc:
                 if exc.code not in _FENCE_LOST_CODES:

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tarfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -931,6 +932,73 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
                                variant_id=variant_id)
 
     return _commit, ()
+
+
+def _experiment_refusal_failure_effect(claim, problem, *, code_source, store_root=None
+                                       ) -> Callable[[sqlite3.Connection], None] | None:
+    """The ``commit_attempt(failure_effects=...)`` callback for a refused experiment run.
+
+    A real holdout denial is a typed ``HOLDOUT_ACCESS_DENIED`` the worker
+    already captured privately (``worker._experiment_failure`` puts the pinned
+    refusal receipt on the failure's own ``details`` channel), and its
+    ``refused`` ledger row belongs to the FAILED attempt's fenced commit, not to
+    the worker subprocess: only the coordinator knows the checkout root that
+    owns ``experiments/LEDGER.csv``, and a cancelled or expired attempt must
+    never append. ``lifecycle.commit_attempt`` runs this callback only after its
+    own ``verify_fence``, inside the caller's already-open catalog transaction —
+    so this opens no transaction of its own and reaches no catalog write at all,
+    only the replay-idempotent ledger append.
+
+    ``None`` — no callback and no ledger path — for every problem that is not an
+    experiment holdout refusal, and for a ``no_ledger`` (smoke) attempt, whose
+    ledger bytes must stay untouched however the run ended.
+
+    Validation happens here, before any path or closure exists: the receipt's own
+    fields carry the identity, never text scraped off an exception, and evidence
+    that is missing, not a mapping, or carries a wrong ``schema_version`` /
+    ``status`` / ``failure_code``, or a blank or non-string identity/pin field, is
+    the typed ``VALIDATION_FAILED`` refusal naming only the offending keys (the
+    values are private evidence, never diagnostics). The closure captures the two
+    validated strings and the resolved path and mutates neither the supplied
+    Problem nor the receipt.
+
+    The checkout root follows ``experiment_effect``'s own resolution — the plan's
+    recorded ``preregistration_root`` first, else ``store_root``, else
+    ``code_source`` — so the refusal row lands in the same
+    ``<checkout_root>/experiments/LEDGER.csv`` (``experiments_ledger_path``) the
+    primary "ran" row and the plan-time pre-registration check read.
+    """
+    if claim.spec.kind != "experiment" or problem.code != "HOLDOUT_ACCESS_DENIED":
+        return None
+    from engine.v2.ops.experiments import REFUSAL_PIN_FIELDS, REFUSAL_RECEIPT_SCHEMA
+
+    receipt = problem.details.get("refusal_receipt")
+    if not isinstance(receipt, Mapping):
+        raise fail("VALIDATION_FAILED", "holdout refusal receipt evidence is missing",
+                   details={"fields": ["refusal_receipt"]})
+    constants = (("schema_version", REFUSAL_RECEIPT_SCHEMA), ("status", "refused"),
+                 ("failure_code", "HOLDOUT_ACCESS_DENIED"))
+    identity = ("experiment_id", "variant_id", *REFUSAL_PIN_FIELDS)
+    invalid = [name for name, expected in constants if receipt.get(name) != expected]
+    invalid += [name for name in identity
+                if not isinstance(receipt.get(name), str) or not receipt[name].strip()]
+    if invalid:
+        raise fail("VALIDATION_FAILED", "holdout refusal receipt evidence is invalid",
+                   details={"fields": invalid})
+    if claim.spec.parameters.get("no_ledger", True):
+        return None
+    checkout_root = (claim.spec.parameters.get("preregistration_root")
+                     or store_root or code_source)
+    ledger_path = Path(checkout_root) / "experiments" / "LEDGER.csv"
+    experiment_id = receipt["experiment_id"]
+    variant_id = receipt["variant_id"]
+
+    def _append_refusal(_conn: sqlite3.Connection) -> None:
+        from engine.v2.ops.experiments import _append_refusal_row
+
+        _append_refusal_row(experiment_id, variant_id, ledger_path)
+
+    return _append_refusal
 
 
 def _require_receipt_variant(receipt, variant_id):

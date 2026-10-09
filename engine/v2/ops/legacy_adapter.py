@@ -1206,6 +1206,9 @@ def run_legacy_script(root, script, args=(), *, declared_runtime_sources=()):
         env["INVESTING_PLAN_PINNED_SOURCE"] = str(base / declared_runtime_sources[0])
     else:
         env.pop("INVESTING_PLAN_PINNED_SOURCE", None)
+    signal_path = base / "holdout_refusal_signal.json"
+    env["INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL"] = str(signal_path)
+    signal_path.unlink(missing_ok=True)
     return subprocess.run(command, cwd=base, env=env, check=False,
                           capture_output=True, text=True, timeout=LEGACY_RUNNER_TIMEOUT_S)
 

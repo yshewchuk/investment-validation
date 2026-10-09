@@ -3,9 +3,16 @@
 This is the research entrypoint for v2 experiment reads of the committed
 ``trades`` version published by ``tools/v2_build_trades.py``. Completed
 experiment wrappers are not maintained; missing holdout context refuses.
-There is no CLI of its own or write path.
+There is no CLI of its own; loader output stays in memory except for the
+optional private holdout refusal signal written for registered subprocess
+orchestration.
 """
 from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -16,6 +23,11 @@ from engine.v2.research._trades_publish import read_event_rows, read_existing_tr
 from engine.v2.research._trades_revisions import PROVENANCE
 
 __all__ = ["PROVENANCE", "load_trades"]
+
+_HOLDOUT_REFUSAL_SIGNAL_ENV = "INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL"
+_HOLDOUT_REFUSAL_SIGNAL_SCHEMA = "holdout_refusal_signal.v1"
+_HOLDOUT_REFUSAL_PINS = ("snapshot_id", "holdout_as_of_month",
+                         "random_membership_version", "rolling_membership_version")
 
 
 def load_trades(repository, snapshot, strategy: str, *, as_of_month=None,
@@ -67,9 +79,11 @@ def load_trades(repository, snapshot, strategy: str, *, as_of_month=None,
     if event_ids is not None:
         missing = set(event_ids) - set(rows["event_id"])
         if missing:
+            details = {**context, "purpose": purpose, "holdout_exclusions": [
+                {"event_id": key, "memberships": ["ambiguous"]} for key in sorted(missing)]}
+            _emit_holdout_refusal_signal(details)
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "requested event membership cannot be resolved",
-                details={**context, "purpose": purpose, "holdout_exclusions": [
-                    {"event_id": key, "memberships": ["ambiguous"]} for key in sorted(missing)]})
+                              details=details)
         rows = rows[rows["event_id"].isin(event_ids)].copy()
     if rows.empty:
         raise errors.fail(
@@ -107,10 +121,53 @@ def _holdout_context(snapshot, as_of_month, purpose, event_ids):
         ):
             raise ValueError
     except ValueError:
+        _emit_holdout_refusal_signal({})
         raise errors.fail("HOLDOUT_ACCESS_DENIED", "explicit valid holdout context is required") from None
     return policy, {"snapshot_id": snapshot.snapshot_id, "holdout_as_of_month": as_of_month,
                     "random_membership_version": policy.random_version,
                     "rolling_membership_version": policy.rolling_version}
+
+
+def _emit_holdout_refusal_signal(details):
+    """Durable private typed denial pins for the enabled registered runner child.
+
+    ``legacy_adapter.run_legacy_script`` points
+    ``INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL`` at a staged-run file that
+    ``worker._registered_experiment_runner`` reads on child nonzero exit.
+    Without that environment variable (direct or in-process loader callers)
+    nothing is written and behavior is unchanged. Only the four nonblank
+    string identity pins travel; ``holdout_exclusions``, event IDs, messages
+    and every other denial detail never leave the typed exception. An
+    enabled write or fsync failure propagates rather than being swallowed.
+    """
+    signal_path = os.environ.get(_HOLDOUT_REFUSAL_SIGNAL_ENV)
+    if not signal_path:
+        return
+    pins = {name: (details or {}).get(name) for name in _HOLDOUT_REFUSAL_PINS}
+    if not all(isinstance(value, str) and value.strip() for value in pins.values()):
+        return
+    document = {"schema_version": _HOLDOUT_REFUSAL_SIGNAL_SCHEMA,
+                "failure_code": "HOLDOUT_ACCESS_DENIED", **pins}
+    destination = Path(signal_path)
+    temp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                       dir=destination.parent,
+                                       prefix=".holdout_refusal_signal.",
+                                       suffix=".tmp", delete=False)
+    try:
+        temp.write(json.dumps(document, indent=2, sort_keys=True))
+        temp.flush()
+        os.fsync(temp.fileno())
+        temp.close()
+        os.replace(temp.name, destination)
+        directory_fd = os.open(destination.parent,
+                               os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temp.close()
+        Path(temp.name).unlink(missing_ok=True)
 
 
 def _ambiguous(row, duplicates):
@@ -145,8 +202,10 @@ def _exclude_holdouts(rows, events, policy, context, purpose, event_ids):
               for key, value in sorted(exclusions.items(), key=lambda item: (item[0] is not None, item[0] or ""))]
     excluded = rows["event_id"].isin(exclusions) | rows["event_id"].isna()
     if exclusions and (event_ids is not None or excluded.all()):
+        details = {**context, "purpose": purpose, "holdout_exclusions": labels}
+        _emit_holdout_refusal_signal(details)
         raise errors.fail("HOLDOUT_ACCESS_DENIED", "requested events are excluded from experiment reads",
-                          details={**context, "purpose": purpose, "holdout_exclusions": labels})
+                          details=details)
     rows = rows[~excluded].drop(
         columns=["canonical_date", "canonical_ticker", "date_conflict", "event_cluster_id"]
     ).reset_index(drop=True)
