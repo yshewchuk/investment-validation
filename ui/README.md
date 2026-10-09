@@ -138,7 +138,7 @@ is owned by a separate PR.
   banner with data retained, `unavailable` error without data, zero saved
   counts and empty refusal reasons, and partial saved reports with incomplete
   refusal data. Browser tests mock the
-  documented API contract (`tests/test_v2_native_parity_browser.py`).
+  documented API contract (`tests/v2/integration/test_native_parity_browser.py`).
 
 ### Routing (`src/routes.ts`, P3-3b)
 
