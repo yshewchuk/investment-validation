@@ -495,7 +495,7 @@ class Service:
             bounded_message = raw_message
             problem = make_problem(
                 "VALIDATION_FAILED", "native_score_batch shadow reconciliation failed",
-                details={"exception_message": raw_message} if raw_message else None)
+                details={"exception_message": "<redacted>"} if raw_message else None)
         problem_key = (problem.code, problem.message, type(exc).__name__,
                        bounded_message)
         if problem_key == self._last_native_score_batch_problem:

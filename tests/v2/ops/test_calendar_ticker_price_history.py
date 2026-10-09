@@ -179,6 +179,7 @@ def test_supervisor_reports_typed_error_type_code_and_details(capsys):
     plain = json.loads(capsys.readouterr().out)
     assert plain["error_type"] == "RuntimeError"
     assert plain["problem"]["code"] == "VALIDATION_FAILED"
+    assert plain["problem"]["details"] == {"exception_message": "<redacted>"}
 
 
 def test_supervisor_report_drops_unbounded_and_nonscalar_details(capsys):
@@ -253,21 +254,32 @@ def test_supervisor_report_ignores_a_non_problem_problem_attribute(capsys):
     assert event["problem"]["message"] == "native_score_batch shadow reconciliation failed"
 
 
-def test_supervisor_report_includes_plain_exception_message_in_details(capsys):
+def test_supervisor_report_redacts_plain_exception_message_in_details(capsys):
     holder = SimpleNamespace(_last_native_score_batch_problem=None)
     Service._report_native_score_batch_problem(holder, RuntimeError("disk went sideways"))
-    event = json.loads(capsys.readouterr().out)
+    line = capsys.readouterr().out
+    event = json.loads(line)
     assert event["problem"]["code"] == "VALIDATION_FAILED"
-    assert event["problem"]["details"] == {"exception_message": "disk went sideways"}
+    assert event["problem"]["details"] == {"exception_message": "<redacted>"}
+    assert "disk went sideways" not in line
 
 
 def test_supervisor_report_bounds_a_plain_exception_message(capsys):
     holder = SimpleNamespace(_last_native_score_batch_problem=None)
-    Service._report_native_score_batch_problem(holder, RuntimeError("x" * 5000))
+    raw = "x" * 5000
+    Service._report_native_score_batch_problem(holder, RuntimeError(raw))
+    line = capsys.readouterr().out
+    event = json.loads(line)
+    assert event["problem"]["details"] == {"exception_message": "<redacted>"}
+    assert raw not in line
+
+
+def test_supervisor_report_omits_details_for_an_empty_plain_exception(capsys):
+    holder = SimpleNamespace(_last_native_score_batch_problem=None)
+    Service._report_native_score_batch_problem(holder, RuntimeError())
     event = json.loads(capsys.readouterr().out)
-    message = event["problem"]["details"].get("exception_message", "")
-    assert len(message) <= 256
-    assert message != "x" * 5000
+    assert event["problem"]["code"] == "VALIDATION_FAILED"
+    assert event["problem"]["details"] == {}
 
 
 def test_supervisor_report_dedup_keys_plain_exceptions_by_message(capsys):
@@ -275,11 +287,11 @@ def test_supervisor_report_dedup_keys_plain_exceptions_by_message(capsys):
     Service._report_native_score_batch_problem(
         holder, RuntimeError("disk went sideways"))
     first = json.loads(capsys.readouterr().out)
-    assert first["problem"]["details"] == {"exception_message": "disk went sideways"}
+    assert first["problem"]["details"] == {"exception_message": "<redacted>"}
     Service._report_native_score_batch_problem(
         holder, RuntimeError("lock table is wedged"))
     second = json.loads(capsys.readouterr().out)
-    assert second["problem"]["details"] == {"exception_message": "lock table is wedged"}
+    assert second["problem"]["details"] == {"exception_message": "<redacted>"}
     Service._report_native_score_batch_problem(
         holder, RuntimeError("lock table is wedged"))
     assert capsys.readouterr().out == ""  # same-message duplicate stays deduped
