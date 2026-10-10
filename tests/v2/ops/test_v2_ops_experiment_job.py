@@ -22,7 +22,7 @@ from engine.v2.ops import (
     worker,
 )
 from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.ops.catalog import transaction
+from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.experiments import experiment_plan
@@ -1390,6 +1390,19 @@ def test_supervisor_reports_generic_reconcile_errors_once(tmp_path, monkeypatch,
         assert fenced["state"] == "recovery_pending"
         assert fenced["failure_json"] is None
         capsys.readouterr()
+
+        with transaction(conn):
+            conn.execute("UPDATE attempts SET failure_json = ? WHERE attempt_id = ?",
+                         (dumps({
+                             "code": "RESOURCE_UNAVAILABLE",
+                             "category": "transient",
+                             "retryable": True,
+                             "message": "HOLDOUT_ACCESS_DENIED appears only in this message",
+                             "stage": None,
+                             "details": {},
+                             "retry_after_seconds": None,
+                             "dependency_refs": [],
+                         }), claim.attempt_id))
 
         service.reconcile()
         raw = capsys.readouterr().err

@@ -326,7 +326,13 @@ class Service:
                     # code and fixed text only, never exception details or the
                     # stored private receipt. Then continue, leaving the
                     # attempt recovery_pending.
-                    if "HOLDOUT_ACCESS_DENIED" not in str(row["failure_json"] or ""):
+                    try:
+                        stored_failure = load_json(Problem, row["failure_json"])
+                    except ValueError:
+                        stored_failure = None
+                    known_refusal = (stored_failure is not None
+                                     and stored_failure.code == "HOLDOUT_ACCESS_DENIED")
+                    if not known_refusal:
                         code = (exc.problem.code if isinstance(exc, OpsError)
                                 else "VALIDATION_FAILED")
                         key = (row["attempt_id"], code)
