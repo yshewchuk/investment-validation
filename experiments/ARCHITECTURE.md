@@ -49,8 +49,9 @@ smoke/recorded address only after verified completion; existing bytes never chan
 The export has an independent inode: a private copy is flushed and synced before
 create-only installation, so editing the export cannot alter stored report bytes.
 An existing export sharing the stored object's inode is an identity conflict.
-An existing conflicting export destination refuses before reconciliation effects;
-this preflight and create-only export do not form an atomic transaction with CSV.
+Report-bearing publication, replay and export preflight the fixed destination
+before new result artifacts, intent reservation, ledger append or completion.
+Existing conflicts are R6; preflight and CSV/export are not one atomic transaction.
 Recorded destinations must be nonempty and bind the exact normalized path used
 for append. Saved outcomes require the complete canonical schema, object-valued
 failure details and a nonblank UTF-8 success report before any ledger effect.
@@ -133,3 +134,37 @@ opened, and callers remain responsible for their outcome/receipt reconciliation.
 | Directory fsync fails after replacement | New complete CSV exists, durability is uncertain; no rollback. Exact keyed replay can complete directory sync without duplicating rows. |
 | Existing CSV changes before replacement outside the shared lock | Refuse the observed conflict without restoring stale bytes. Concurrent uncooperative edits are unsupported. |
 | Repeated `ledger_ensure`, or identical keyed replay | Existing CSV bytes remain unchanged. Neither operation emits a recording or promotion receipt. |
+
+## Native prediction prior baseline
+
+`prediction_report.validate_prediction_spec` admits only the Python runner
+`experiments/v2_prediction.py`, `computed_moves`, empty economics and ordered,
+unique four-digit year folds, with an integer seed in [0, 2**32).
+`prediction_result(repository, registration)`
+reads only registered eligible targets from the exact registered snapshot/month.
+Each fold fits `DummyClassifier(strategy="prior")` through the shared fold helper
+on earlier-year labels available strictly before its January 1; constant
+intercept features make no market-feature claim. Fitting limits numerical
+thread pools to one within a restoring context. Empty train/test or single-class
+training refuses `EXPERIMENT_VARIANT_FAILED`; unsupported declarations refuse
+`INVALID_EXPERIMENT_SPEC` before target reads. No final-read option exists.
+The deterministic JSON result includes OOF/per-fold Brier and clipped log-loss,
+ten fixed reliability bins with weighted ECE, and score/event-ID rank deciles.
+Empty bins use null rates. Random and rolling holdouts are separately excluded.
+`render_prediction_report(..., spec=..., no_ledger=...)` binds the supplied
+hypothesis by spec hash and renders these metrics, provenance and limitations.
+These functions have no cache, retry, writes or partial-result return; the caller
+owns admission/publication/recording. No return, P&L or promotion claim follows.
+
+`python -m experiments.v2_prediction register|run` consumes a JSON spec and an
+existing catalog/store and explicit holdout month. It fingerprints its executing checkout. Register is
+metadata-only. `read_native_registration` verifies the stored identity; run performs current
+admission before replay or evaluation; missing registration is R1. R3/R4/R5
+refusals use that admitted identity and never export a current-attempt report.
+R1/R2/R6 preserve private receipts only. `--no-ledger` isolates smoke recording;
+otherwise `--ledger` is required. Completed `REPORT.md` is exported through the
+shared immutable outcome lifecycle; retries reuse the original result/date.
+Stored spec/source/snapshot/scope/environment identity is checked before population
+admission, so a changed request cannot consume an original variant's refusal slot.
+A current holdout denial preserves R5 and its private receipt even when an earlier
+immutable completion prevents a second terminal CSV row; prior reports stay unchanged.

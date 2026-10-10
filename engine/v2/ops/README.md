@@ -42,6 +42,10 @@ Native experiment registration also exposes these existing submodule APIs:
 `fingerprints.environment_identity` and `fingerprints.source_closure`.
 They compose one resolved plan, source/environment binding and primary catalog
 reservation; the caller owns the transaction around the reservation helper.
+Native prediction reporting also consumes the public fold-local
+`experiment_folds.TrainFoldRule` and `experiment_folds.fit_walk_forward_fold`.
+Its CLI consumes `catalog.connect` and `experiments.experiment_spec_from_document`
+to open an existing catalog and decode the same strict experiment specification.
 
 `native.input_decoding._load_native_score_inputs` is an internal decoder shared
 by the CLI, worker and dashboard projection tool, separate from the versioned
@@ -92,7 +96,7 @@ either required table. Their current consumer is
 
 `nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package: no other package imports it and it has no production caller yet; `tests/v2/ops/test_nightly_session.py` is its only consumer. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is likewise internal: `nightly_trigger` does not call it yet and `tests/v2/ops/test_nightly_receipts.py` is its only consumer. `nightly_readiness` (legacy run-report readiness for a session, #564 slice 3; exports `LegacyReadiness`, `check_legacy_report`) is likewise internal, uncalled by `nightly_trigger`, with `tests/v2/ops/test_nightly_readiness.py` as its only consumer.
 
-<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, environment_identity, source_closure -->
+<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, environment_identity, source_closure, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document -->
 
 ## Consumers
 

@@ -847,3 +847,67 @@ def test_derived_provenance_requires_verified_registration(source, tmp_path, mon
     assert _catalog(source.conn) == before
     assert ledger.read_bytes() == ledger_bytes
     _assert_objects_preserved(source, objects)
+
+
+@pytest.mark.parametrize("phase", ["fresh", "pending", "completed"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("alias", [False, True], ids=["independent", "stored-hardlink"])
+def test_report_destination_identity_across_publication_states(
+        source, tmp_path, monkeypatch, phase, no_ledger, alias):
+    registration = _call(source)
+    ledger = tmp_path / "report-identity" / "ledger.csv"
+    options = {"no_ledger": no_ledger}
+    if phase == "pending":
+        real_reserve = outcomes._reserve
+
+        def interrupted_reserve(conn, registration, key, *args, **kwargs):
+            if key.endswith("_receipt"):
+                raise OSError("synthetic completion interruption")
+            return real_reserve(conn, registration, key, *args, **kwargs)
+
+        def interrupted_append(*args, **kwargs):
+            raise OSError("synthetic append interruption")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(outcomes, "_reserve", interrupted_reserve)
+            patch.setattr(outcomes, "ledger_append", interrupted_append)
+            with pytest.raises(OpsError, match="RESOURCE_UNAVAILABLE"):
+                _publish(source, registration, ledger, **options)
+    elif phase == "completed":
+        _publish(source, registration, ledger, **options)
+    ref = outcomes.foundation.artifact_reference(REPORT.encode(), "native_experiment_report.v1.0")
+    stored = source.store.root / ref.storage_key
+    path = source.store.root / "native_reports" / registration.run_id / (
+        "smoke" if no_ledger else "recorded") / "REPORT.md"
+    path.parent.mkdir(parents=True)
+    if alias:
+        source.store.publish_bytes(REPORT.encode(), schema_ref=ref.schema_ref)
+        path.hardlink_to(stored)
+    else:
+        path.write_bytes(REPORT.encode())
+        if phase == "fresh":
+            assert not stored.exists()
+    catalog, objects = _catalog(source.conn), _objects(source.store)
+    csv_bytes = ledger.read_bytes() if ledger.exists() else None
+    operation = _publish if phase == "fresh" else _replay
+    if alias:
+        with monkeypatch.context() as patch:
+            patch.setattr(outcomes, "ledger_append", _forbid)
+            patch.setattr(outcomes, "_reserve", _forbid)
+            with pytest.raises(OpsError) as captured:
+                operation(source, registration, ledger, **options)
+        _assert_conflict(source, captured, registration)
+        assert _catalog(source.conn) == catalog
+        _assert_objects_preserved(source, objects)
+        assert (ledger.read_bytes() if ledger.exists() else None) == csv_bytes
+        assert path.samefile(stored)
+    else:
+        operation(source, registration, ledger, **options)
+        assert outcomes.export_native_report(source.conn, source.store, registration,
+                                              ledger_path=ledger, **options) == path
+        assert path.read_bytes() == REPORT.encode()
+        assert not path.samefile(stored)
+        if no_ledger:
+            assert not ledger.exists()
+        else:
+            assert len(_rows(ledger)) == 1

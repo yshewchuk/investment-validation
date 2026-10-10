@@ -625,6 +625,7 @@ mutate = [
 tests = [
     "tests/v2/research/test_native_registration.py",
     "tests/v2/research/test_native_outcomes.py",
+    "tests/v2/research/test_v2_prediction_cli.py",
     "tests/v2/research/test_native_outcome_validation.py",
     "tests/test_v2_ops_authority.py",
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
@@ -648,7 +649,7 @@ tests = [
 [modules.ops_experiment_folds]
 why = "Fold-local experiment fitting: an experiment's fit must stay inside its own fold boundaries; a leaked boundary or wrong fold map contaminates the out-of-sample result."
 mutate = ["engine/v2/ops/experiment_folds.py"]
-tests = ["tests/test_v2_ops_experiment_folds.py"]
+tests = ["tests/test_v2_ops_experiment_folds.py", "tests/v2/research/test_prediction_report.py"]
 
 [modules.ops_runtime]
 why = "Supervisor, workers, executors, resources, recovery and provider budget: job execution and admission."
