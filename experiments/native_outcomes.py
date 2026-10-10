@@ -69,6 +69,18 @@ def _evidence(conn, registration):
     return evidence
 
 
+def _report_path(store, registration, key, report=None, report_ref=None):
+    mode = "smoke" if key == "native_smoke" else "recorded"
+    path = store.root / "native_reports" / registration.run_id / mode / "REPORT.md"
+    if report is not None:
+        stored = store.root / report_ref["storage_key"]
+        if (path.is_symlink() or path.resolve() != path or (path.exists()
+                and (not path.is_file() or path.read_bytes() != report
+                     or (stored.exists() and path.samefile(stored))))):
+            raise _conflict(store, registration)
+    return path
+
+
 def _reserve(conn, registration, key, ref, expected=None):
     """Only catalog reads/writes inside this transaction; preserve other evidence."""
     with transaction(conn):
@@ -135,13 +147,10 @@ def _reconcile(conn, store, registration, key, destination, ledger_path, ref_doc
         _, saved_receipt = _read(store, evidence[key + "_receipt"], receipt["schema_version"])
         if foundation.canonical_json(saved_receipt) != foundation.canonical_json(receipt):
             raise _conflict(store, registration)
-    if export_path is not None:
-        if report_ref is None:
-            raise fail("INVALID_EXPERIMENT_SPEC", "native outcome has no completed report")
-        if (export_path.resolve() != export_path or (export_path.exists()
-                and (export_path.samefile(store.root / report_ref["storage_key"])
-                     or export_path.read_bytes() != report))):
-            raise _conflict(store, registration)
+    if export_path is not None and report_ref is None:
+        raise fail("INVALID_EXPERIMENT_SPEC", "native outcome has no completed report")
+    if report_ref is not None:
+        _report_path(store, registration, key, report, report_ref)
     if key != "native_smoke":
         ledger_append([row], path=ledger_path, unique_by=("id", "spec_hash"))
     completion = _publish(store, receipt, receipt["schema_version"])
@@ -206,6 +215,7 @@ def publish_native_outcome(conn, store, registration, *, report=None, problem=No
         existing = evidence[key]
     else:
         if report:
+            _report_path(store, registration, key, report.encode(), document["report_ref"])
             store.publish_bytes(report.encode(), schema_ref=report_ref.schema_ref)
         existing = _reserve(conn, registration, key, _publish(store, document))
     _, saved = _read(store, existing)
@@ -223,7 +233,7 @@ def export_native_report(conn, store, registration, *, no_ledger=False, ledger_p
     evidence = _evidence(conn, registration)
     if key not in evidence:
         raise fail("INVALID_EXPERIMENT_SPEC", "native outcome has no completed report")
-    path = store.root / "native_reports" / registration.run_id / ("smoke" if no_ledger else "recorded") / "REPORT.md"
+    path = _report_path(store, registration, key)
     result = _reconcile(conn, store, registration, key, destination, ledger_path, evidence[key], export_path=path)
     ref = foundation.from_document(ArtifactRef, result["receipt"]["report_ref"])
     foundation.ensure_directory(path.parent)
