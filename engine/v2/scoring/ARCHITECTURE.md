@@ -499,6 +499,56 @@ resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
 
+#### Paired planned-exit residual member (issue #498, design)
+
+Legacy `Scorer._residual_pool` (`engine/score.py:3687-3718`) joins stored
+Tier-4 forecasts, panel outcomes and realized crush by `(ticker,event_date)`.
+Each paired row is `(event_date,ticker,pred_abs_move,err_move,err_crush)`, with
+`err_move=abs_move-pred_abs_move` and `err_crush=crush_pct_iv30-pred_iv_crush_30`.
+Both errors come from one event; `ResidualPool` (`engine/pnl_sim.py:102-126`)
+uses strictly earlier events, conditioned on `pred_abs_move`; ticker affects the
+source join and pool population.
+
+The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211-242`)
+builds the artifact from paired forecasts, outcomes and realized-crush inputs;
+`tools/phase5_prepare_release.py:215-232` stages its typed frozen-state
+document. Promotion uses this standard path. The artifact carries model
+identities, cutoff, lineage and content hash; no request-row fallback, per-request
+reconstruction or invented residual is allowed.
+
+Add a typed paired-artifact field to `ScoringReleaseBinding` and load the
+`paired_residual_pool` catalog member in `resolve_release_binding`. Missing or
+malformed required members, including hash, schema, identity or causal-cutoff
+failures, refuse with `ModelNotReady` naming `paired_residual_pool` and return
+no partial binding. STR-THRU requires a rebuilt release before activation;
+there is no empty-recipe compatibility path for planned-exit scoring.
+
+`SourceBundle` already has `paired_residual_artifact` and
+`paired_residual_recipe` (`engine/v2/scoring/source_inputs.py:301`);
+`native_residuals.paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`)
+validates/extracts arrays. Native batch must attach the verified release artifact
+and causal recipe.
+Synthetic real-path coverage must exercise production, staging/loading,
+attachment and planned-exit consumption together.
+
+Parity depends on population: legacy uses the tickers/rows loaded into its
+`Scorer`; a release freezes its producer's universe and cutoff. Compare under
+the same ticker/event population and cutoff; broader row-for-row parity is not
+promised when they differ. Artifact lineage and cutoff make the comparison
+auditable.
+
+Planned slices (non-test code slices each below 200 lines):
+1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
+2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
+3. Synthetic producer-to-simulation and refusal tests (~150 test lines).
+
+Decisions needed:
+- **Population:** freeze the full producer universe (one deterministic
+  artifact) or pass nightly ticker scope (closer board parity, coupled release).
+- **Cutoff:** keep the explicit exclusive paired-state cutoff (reproducible)
+  or adopt a release-wide policy (simpler consumers, broader coordination).
+- **Activation:** require rebuild before refusal (planned rollout) or accept planned-exit unavailability until rebuild.
+
 ### `nightly_source_bundle.py`
 
 `class NightlySourceBundleRefusal(ValueError)` — `__init__(code, detail)`,
