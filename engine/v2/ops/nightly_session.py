@@ -93,6 +93,14 @@ def _encode(state: SessionState) -> str:
     }, sort_keys=True)
 
 
+def _generations_valid(gens: tuple[Generation, ...], key: str) -> bool:
+    return bool(gens) and all(
+        type(g.generation) is int and g.generation == i and g.run_id == _digest(key, i)
+        and g.status in ("allocated", "started") and g.reason in ("initial", "rerun")
+        and all(isinstance(s, str) for s in g.invalidation)
+        for i, g in enumerate(gens, 1))
+
+
 def _decode(text: str, identity: SessionIdentity) -> SessionState:
     try:
         doc = json.loads(text)
@@ -104,16 +112,12 @@ def _decode(text: str, identity: SessionIdentity) -> SessionState:
         key = identity.session_key
         gens = tuple(Generation(g["generation"], g["run_id"], g["reason"], g["status"],
                                 tuple(g["invalidation"])) for g in doc["generations"])
-        ok = (doc["session_key"] == key and isinstance(doc["revision"], int)
+        ok = (doc["session_key"] == key and type(doc["revision"]) is int
               and doc["identity"] == {
                   "as_of": identity.as_of, "scope": identity.scope,
                   "selection_identity": identity.selection_identity,
                   "catalog_identity": identity.catalog_identity}
-              and doc["revision"] >= 1 and gens
-              and all(g.generation == i and g.run_id == _digest(key, i)
-                      and g.status in ("allocated", "started")
-                      and g.reason in ("initial", "rerun")
-                      for i, g in enumerate(gens, 1)))
+              and doc["revision"] >= 1 and _generations_valid(gens, key))
     except (ValueError, KeyError, TypeError) as exc:
         raise fail("INTEGRITY_FAILED", "session state is unreadable") from exc
     if not ok:
@@ -144,6 +148,7 @@ def compare_and_swap(root: Path, identity: SessionIdentity, expected_revision: i
         if (current.revision if current else 0) != expected_revision:
             return None
         state = SessionState(identity, expected_revision + 1, generations)
+        _decode(_encode(state), identity)  # the loader's own rules; raises before any write
         tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "w") as handle:
             handle.write(_encode(state))
@@ -200,11 +205,13 @@ def request_rerun(root: Path, identity: SessionIdentity,
 def mark_started(root: Path, identity: SessionIdentity, generation: int) -> SessionState:
     """Move the active generation from ``allocated`` to ``started`` (idempotent)."""
     def step(state):
+        if type(generation) is not int:
+            raise fail("INVALID_REQUEST", "generation must be an integer")
         if state is None or state.active.generation != generation:
             raise fail("CHECKPOINT_INCOMPATIBLE", "generation is not the active one")
         if state.active.status == "started":
             return state, None
-        started = Generation(generation, state.active.run_id, state.active.reason,
+        started = Generation(state.active.generation, state.active.run_id, state.active.reason,
                              "started", state.active.invalidation)
         return None, state.generations[:-1] + (started,)
     return _swap_loop(root, identity, step)

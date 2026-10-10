@@ -173,6 +173,37 @@ def test_non_utf8_state_is_integrity_failed(tmp_path):
     assert _code(exc) == "INTEGRITY_FAILED" and path.read_bytes() == b"\xff\xfe\x00bad"
 
 
+@pytest.mark.parametrize("bad", [1.0, True])
+def test_non_int_generation_is_refused_and_state_unchanged(tmp_path, bad):
+    ns.ensure_session(tmp_path, IDENT)
+    path = ns.session_path(tmp_path, IDENT)
+    before = path.read_bytes()
+    with pytest.raises(OpsError) as exc:
+        ns.mark_started(tmp_path, IDENT, bad)
+    assert _code(exc) == "INVALID_REQUEST" and path.read_bytes() == before
+    assert ns.mark_started(tmp_path, IDENT, 1).active.status == "started"
+    assert ns.request_rerun(tmp_path, IDENT).active.generation == 2
+
+
+def test_float_generation_in_stored_file_is_integrity_failed(tmp_path):
+    ns.ensure_session(tmp_path, IDENT)
+    path = ns.session_path(tmp_path, IDENT)
+    path.write_text(path.read_text().replace('"generation": 1,', '"generation": 1.0,'))
+    with pytest.raises(OpsError) as exc:
+        ns.load_session(tmp_path, IDENT)
+    assert _code(exc) == "INTEGRITY_FAILED"
+
+
+def test_cas_refuses_a_state_the_loader_would_reject_and_keeps_prior(tmp_path):
+    ns.ensure_session(tmp_path, IDENT)
+    path = ns.session_path(tmp_path, IDENT)
+    before = path.read_bytes()
+    with pytest.raises(OpsError) as exc:
+        ns.compare_and_swap(tmp_path, IDENT, 1, ())
+    assert _code(exc) == "INTEGRITY_FAILED" and path.read_bytes() == before
+    assert ns.load_session(tmp_path, IDENT).revision == 1
+
+
 def test_tampered_run_id_is_integrity_failed(tmp_path):
     ns.ensure_session(tmp_path, IDENT)
     path = ns.session_path(tmp_path, IDENT)
