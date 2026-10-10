@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openrouter/qwen/qwen3.8-flash",
+  "model": "openrouter/xiaomi/mimo-v2.6-flash",
   "permission": {
     "bash": {
       "*": "deny",
@@ -64,6 +64,12 @@
           }
         },
         "z-ai/glm-5.3-flash": {
+          "limit": {
+            "context": 160000,
+            "output": 32000
+          }
+        },
+        "xiaomi/mimo-v2.6-flash": {
           "limit": {
             "context": 160000,
             "output": 32000
