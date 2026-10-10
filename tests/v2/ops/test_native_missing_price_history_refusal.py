@@ -47,6 +47,7 @@ from engine.v2.parity.dimensions import (
 from tests.data_scan_support import (
     catalog_and_store,
     commit_tables,
+    contract_for,
     contract_ref_for,
     fake_hash,
     publish_and_inspect,
@@ -84,9 +85,9 @@ def _history_row(ticker: str, *, close_raw: float | None = 100.0) -> dict:
     }
 
 
-def _repository_with_history(tmp_path, rows: list[dict]):
-    """Build a real repository and snapshot pinning ONLY the ``price_history``
-    table built from ``rows`` (no ``option_chains`` table)."""
+def _repository_with_history(tmp_path, rows: list[dict], *, include_option_chains=True):
+    """Build a real repository and snapshot pinning ``price_history`` and, by
+    default, an empty registered ``option_chains`` table."""
     conn, clock, store = catalog_and_store(tmp_path)
     by_ticker: dict[str, list[dict]] = {}
     for row in rows:
@@ -96,13 +97,12 @@ def _repository_with_history(tmp_path, rows: list[dict]):
             store, PRICE_HISTORY_CONTRACT, _PH_REF, ticker_rows, ticker)
         for ticker, ticker_rows in sorted(by_ticker.items())
     ]
-    snapshot = commit_tables(
-        conn,
-        clock,
-        {PRICE_HISTORY_TABLE_NAME: records},
-        {PRICE_HISTORY_TABLE_NAME: PRICE_HISTORY_CONTRACT},
-        scope="test",
-    )
+    tables = {PRICE_HISTORY_TABLE_NAME: records}
+    contracts = {PRICE_HISTORY_TABLE_NAME: PRICE_HISTORY_CONTRACT}
+    if include_option_chains:
+        tables["option_chains"] = []
+        contracts["option_chains"] = contract_for("option_chains")
+    snapshot = commit_tables(conn, clock, tables, contracts, scope="test")
     return Repository(conn, store), snapshot
 
 
@@ -349,8 +349,26 @@ def test_missing_option_chains_still_fails_when_every_ticker_is_refused(
     absent ``option_chains`` table propagates as ``CONTRACT_MISMATCH``
     instead of the build returning a per-ticker refusal document."""
     repository, snapshot = _repository_with_history(
-        tmp_path, [_history_row(ticker) for ticker in _HISTORY_TICKERS])
+        tmp_path, [_history_row(ticker) for ticker in _HISTORY_TICKERS],
+        include_option_chains=False)
     _patch_context(monkeypatch, _requests((_MISSING_TICKER,)))
+
+    with pytest.raises(DataError) as caught:
+        nrp.build_native_score_batch_events(
+            repository, snapshot, as_of=_AS_OF, horizon_days=30)
+
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert caught.value.code != _CODE
+
+
+def test_missing_option_chains_still_fails_before_exact_spot_refusal(
+        tmp_path, monkeypatch):
+    """A real date-gap refusal must not hide an absent required option table."""
+    stale = _history_row("GAP")
+    stale["date"] = "2024-01-04"
+    repository, snapshot = _repository_with_history(
+        tmp_path, [stale], include_option_chains=False)
+    _patch_context(monkeypatch, _requests(("GAP",)), real_spot=True)
 
     with pytest.raises(DataError) as caught:
         nrp.build_native_score_batch_events(

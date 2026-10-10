@@ -235,12 +235,13 @@ def build_native_score_batch_events(
     composed request, plus the disjoint ``producer_refusals.v1.0`` document. An
     empty enumeration returns both empty before any calendar, panel, spot or
     quote read, and an all-intraday one returns only its refusals. A missing
-    ticker history or missing/unusable exact-session spot becomes a per-key
-    ``PRICE_HISTORY_NOT_AVAILABLE`` refusal at its original position while
-    other keys proceed. Malformed series data, missing source tables, every
-    other refusal, repository failure or caller-input failure still fails the
-    whole build; if all requests are refused before quote reads, an absent
-    ``option_chains`` table also fails the build.
+    ticker history or missing/unusable exact-session spot becomes a
+    per-key ``PRICE_HISTORY_NOT_AVAILABLE`` refusal at its original position.
+    ``NO_RESOLVABLE_EXPIRY``, ``EVENT_NOT_FOUND`` and ``IDENTITY_CONFLICT``
+    are likewise per-key refusals; other keys proceed. Malformed series data,
+    missing source tables, repository failures, caller-input failures and other
+    errors still fail the whole build. An absent ``option_chains`` table fails
+    before any non-intraday key is processed.
     """
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
@@ -256,11 +257,11 @@ def build_native_score_batch_events(
         else:
             admitted.append((position, key))
     had_non_intraday = bool(admitted)
+    if had_non_intraday and "option_chains" not in snapshot.table_versions:
+        raise fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
+                   details={"table_name": "option_chains"})
     admitted = _admit_price_history_requests(repository, snapshot, admitted, refusals)
     if not admitted:
-        if had_non_intraday and "option_chains" not in snapshot.table_versions:
-            raise fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
-                       details={"table_name": "option_chains"})
         return [], _refusals_document(ordered())
 
     decision_session = validated_as_of(as_of).normalize().date().isoformat()
