@@ -102,7 +102,7 @@ def test_unreadable_candidate_is_an_integrity_failure_never_absent(tmp_path, tex
     assert _code(exc) == "INTEGRITY_FAILED"
 
 
-@pytest.mark.parametrize("as_of", ["2026-10-1", "", None, "tomorrow"])
+@pytest.mark.parametrize("as_of", ["2026-10-1", "", None, "tomorrow", "20261001"])
 def test_invalid_session_is_invalid_request(tmp_path, as_of):
     with pytest.raises(OpsError) as exc:
         nrd.check_legacy_report(tmp_path, as_of)
@@ -132,3 +132,11 @@ def test_report_without_finality_is_source_not_final(tmp_path):
     with pytest.raises(OpsError) as exc:
         nrd.check_legacy_report(tmp_path, D)
     assert _code(exc) == "SOURCE_NOT_FINAL"
+
+
+def test_requested_date_comes_from_the_file_name_not_the_report_body(tmp_path):
+    path = _write(tmp_path, "2026-10-02")
+    doc = json.loads(path.read_text())
+    doc["requested_as_of"] = None
+    path.write_text(json.dumps(doc))
+    assert nrd.check_legacy_report(tmp_path, D).requested_as_of == "2026-10-02"

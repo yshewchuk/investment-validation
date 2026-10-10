@@ -560,7 +560,7 @@ Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `
 
 ### Nightly legacy readiness (`nightly_readiness.py`, slice 3 of #564)
 
-Leaf, not yet called by `nightly_trigger`. Admission (lock, window, default session) stays in `nightly_trigger`; wiring is slice 8. There is no rebuild step and no rebuild fallback (D2=iv): `check_legacy_report(reports_dir, as_of)` only verifies what the legacy nightly produced. It reads the legacy run reports (`nightly_<requested date>.json`, plain JSON, no `engine.dashboard` import) and returns a `LegacyReadiness` record (report name, requested and resolved date) for the latest-requested report whose session (`resolved_as_of`, else `as_of`) is D. File names only locate candidates (requested dates D..D+4); content decides, never mtime, locks or elapsed time. Read-only, nothing written.
+Leaf, not yet called by `nightly_trigger`. Admission (lock, window, default session) stays in `nightly_trigger`; wiring is slice 8. There is no rebuild step and no rebuild fallback (D2=iv): `check_legacy_report(reports_dir, as_of)` only verifies what the legacy nightly produced. It reads the legacy run reports (`nightly_<requested date>.json`, plain JSON, no `engine.dashboard` import) and returns a `LegacyReadiness` record (report name, requested date taken from the file name, resolved date) for the latest-requested report whose session (`resolved_as_of`, else `as_of`) is D. File names only locate candidates (requested dates D..D+4); content decides, never mtime, locks or elapsed time. Read-only, nothing written. A session that is not canonical `YYYY-MM-DD` is `INVALID_REQUEST`.
 
 | Condition | Outcome |
 |---|---|

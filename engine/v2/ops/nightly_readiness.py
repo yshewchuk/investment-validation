@@ -66,14 +66,17 @@ def check_legacy_report(reports_dir: Path, as_of: str) -> LegacyReadiness:
         day = date.fromisoformat(as_of)
     except (TypeError, ValueError):
         raise fail("INVALID_REQUEST", "as_of must be an ISO date") from None
+    if day.isoformat() != as_of:  # compact forms parse but would never equal a report's text
+        raise fail("INVALID_REQUEST", "as_of must be a YYYY-MM-DD date")
     matches = []
     for offset in range(CANDIDATE_DAYS):
-        path = Path(reports_dir) / REPORT_NAME.format((day + timedelta(days=offset)).isoformat())
+        requested = (day + timedelta(days=offset)).isoformat()
+        path = Path(reports_dir) / REPORT_NAME.format(requested)
         doc = _load(path)
         if doc is not None and _session(doc) == as_of:
-            matches.append((path, doc))
+            matches.append((path, doc, requested))
     if not matches:
         raise fail("SOURCE_NOT_FOUND", "no legacy nightly report resolves to this session")
-    path, doc = matches[-1]  # the latest requested date is the latest run
+    path, doc, requested = matches[-1]  # the latest requested date is the latest run
     _require_ready(doc, as_of)
-    return LegacyReadiness(path.name, str(doc.get("requested_as_of") or ""), as_of)
+    return LegacyReadiness(path.name, requested, as_of)
