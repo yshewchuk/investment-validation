@@ -473,6 +473,7 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
 
     producer_calls = []
     producer_started = threading.Event()
+    producer_returned = threading.Event()
     release_producer = threading.Event()
 
     def _producer(repository, resolved_snapshot, *, as_of, horizon_days, tickers):
@@ -481,6 +482,7 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
             "horizon_days": horizon_days, "tickers": tickers})
         producer_started.set()
         release_producer.wait(timeout=5)
+        producer_returned.set()
         return [], {"schema_version": "native_score_batch_producer_refusals.v1.0",
                     "refusals": []}
 
@@ -561,6 +563,7 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
         # tick returned while the producer was still blocked (never released,
         # worker still alive, no result yet).
         assert not release_producer.is_set()
+        assert not producer_returned.is_set()
         assert worker.is_alive()
         assert worker_results == []
         assert ("other-attempt", 120) in heartbeat_calls
