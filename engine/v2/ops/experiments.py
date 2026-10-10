@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Callable
 
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, fsync_directory
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import (
@@ -948,6 +948,7 @@ def _append_refusal_row(experiment_id: str, variant_id, ledger_path, *,
             identity = _refusal_pin_sidecar_identity(experiment_id, variant_id, refusal_pins)
             _persist_refusal_pin_sidecar(ledger, experiment_id, identity)
         if variant_id in stored:
+            fsync_directory(ledger.parent)
             return
         row = {"id": experiment_id, "spec_hash": variant_id,
                "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),

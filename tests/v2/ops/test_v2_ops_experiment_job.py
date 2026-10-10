@@ -936,11 +936,17 @@ def test_refusal_failure_effect_appends_refused_row_only_under_the_live_fence(tm
 
 
 def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypatch, capsys):
-    """Issue #489: a holdout refusal whose fenced ledger append fails must not
-    crash the supervisor or commit a failed attempt with no refused row. The
-    supervisor's ``_commit_failure`` fences the attempt off to recovery -- its
-    reservation stays held and nothing is committed -- so a later reconcile can
-    settle it against the real process tree."""
+    """Issue #489: a holdout refusal whose real ledger directory sync fails
+    after the fenced CSV replacement lands must not crash the supervisor or
+    commit a failed attempt with no refused row. ``os.replace`` publishes the
+    refused row before the sync error, so the checkout CSV visibly holds it;
+    the supervisor's ``_commit_failure`` fences the attempt off to recovery --
+    its reservation stays held and nothing is committed -- so a later reconcile
+    settles it against the real process tree, replaying the idempotent append
+    and syncing the directory before catalog settlement."""
+    import os
+    import stat
+
     conn, clock, claim, _, checkout = _claimed_primary_effect(
         tmp_path, key="primary-refusal-append-fails")
     ledger = checkout / "experiments" / "LEDGER.csv"
@@ -963,13 +969,41 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
     problem = service._worker_typed_problem(claim, running)
     assert problem is not None
 
-    real_append = experiments._append_refusal_row
+    real_replace = experiments.os.replace
+    real_fsync = experiments.os.fsync
+    replaced = False
+    sync_failure_injected = False
+    successful_directory_syncs = []
 
-    def append_fails(experiment_id, refused_variant_id, ledger_path, *,
-                     refusal_pins=None):
-        raise OSError("simulated ledger append failure")
+    def wrapping_replace(src, dst, *args, **kwargs):
+        nonlocal replaced
+        result = real_replace(src, dst, *args, **kwargs)
+        if Path(dst) == ledger:
+            replaced = True
+        return result
 
-    monkeypatch.setattr(experiments, "_append_refusal_row", append_fails)
+    def wrapping_fsync(fd):
+        nonlocal sync_failure_injected
+        try:
+            info = os.fstat(fd)
+            directory = os.stat(ledger.parent)
+            matches = (stat.S_ISDIR(info.st_mode)
+                       and info.st_dev == directory.st_dev
+                       and info.st_ino == directory.st_ino)
+        except OSError:
+            matches = False
+        if matches and replaced and not sync_failure_injected:
+            sync_failure_injected = True
+            raise OSError("simulated ledger directory sync failure")
+        if matches and sync_failure_injected:
+            result = real_fsync(fd)
+            successful_directory_syncs.append(fd)
+            return result
+        return real_fsync(fd)
+
+    monkeypatch.setattr(experiments.os, "replace", wrapping_replace)
+    monkeypatch.setattr(experiments.os, "fsync", wrapping_fsync)
+
     try:
         service._commit_failure(claim, {"exit_code": 1}, problem)
         stderr = capsys.readouterr().err
@@ -983,27 +1017,34 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
         assert "HOLDOUT_ACCESS_DENIED" in attempt["failure_json"]
         assert "snapshot-489" not in attempt["failure_json"]
         assert "refusal_receipt" not in attempt["failure_json"]
-        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
+                                        {"id": "x", "stage": "refused"}]
         assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
                             "WHERE released_at IS NULL").fetchone()[0] == 1
 
         monkeypatch.setattr(supervisor, "prove_ownership_gone",
                             lambda *args, **kwargs: types.SimpleNamespace(
                                 proven=True, known=(), alive=(), blockers=()))
-        service.reconcile()
-        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
-                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
-        assert attempt["state"] == "recovery_pending"
-        assert attempt["ended_at"] is None
-        assert "HOLDOUT_ACCESS_DENIED" in attempt["failure_json"]
-        assert "snapshot-489" not in attempt["failure_json"]
-        assert "refusal_receipt" not in attempt["failure_json"]
-        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
-        assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
-                            "WHERE released_at IS NULL").fetchone()[0] == 1
-        assert capsys.readouterr().err == ""
+        real_reconcile_attempt = supervisor.reconcile_attempt
 
-        monkeypatch.setattr(experiments, "_append_refusal_row", real_append)
+        def wrapping_reconcile_attempt(conn, attempt_id, *, process_state, clock,
+                                       failure=None, recovery_effect=None):
+            def observed_recovery_effect(effect_conn):
+                result = recovery_effect(effect_conn)
+                assert successful_directory_syncs, (
+                    "the recovery effect must sync the ledger directory before "
+                    "catalog settlement")
+                return result
+
+            return real_reconcile_attempt(
+                conn, attempt_id, process_state=process_state, clock=clock,
+                failure=failure,
+                recovery_effect=(observed_recovery_effect
+                                 if recovery_effect is not None else None))
+
+        monkeypatch.setattr(supervisor, "reconcile_attempt",
+                            wrapping_reconcile_attempt)
+
         service.reconcile()
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
                                         {"id": "x", "stage": "refused"}]
