@@ -46,9 +46,15 @@ catalog table or supervisor coordinator is introduced. File/CSV effects stay out
 short catalog transactions; completion follows durable append and never authorizes promotion.
 `export_native_report` creates `REPORT.md` at the registration's fixed store-local
 smoke/recorded address only after verified completion; existing bytes never change.
+An existing conflicting export destination refuses before reconciliation effects;
+this preflight and create-only export do not form an atomic transaction with CSV.
 Recorded destinations must be nonempty and bind the exact normalized path used
 for append. Saved outcomes require the complete canonical schema, object-valued
 failure details and a nonblank UTF-8 success report before any ledger effect.
+Saved completion payloads must match canonical expected metadata, preserving JSON
+scalar types, before any append or completion publication.
+Outcome, report and completion references must match the exact identity rederived
+from verified bytes; malformed metadata refuses before ledger or catalog effects.
 
 | Condition | Outcome |
 | --- | --- |

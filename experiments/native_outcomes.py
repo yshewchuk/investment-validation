@@ -82,18 +82,27 @@ def _reserve(conn, registration, key, ref, expected=None):
         return evidence[key]
 
 
-def _read(store, document, schema=SCHEMA):
+def _verified(store, document, schema):
+    """Verify bytes and their exact native publication reference without writing."""
     ref = foundation.from_document(ArtifactRef, document)
     if ref.schema_ref != schema:
         raise ValueError("unexpected native artifact schema")
     payload = store.read_verified(ref)
+    expected = foundation.to_document(foundation.artifact_reference(payload, schema))
+    if foundation.canonical_json(document) != foundation.canonical_json(expected):
+        raise ValueError("native artifact reference differs from its content identity")
+    return ref, payload
+
+
+def _read(store, document, schema=SCHEMA):
+    ref, payload = _verified(store, document, schema)
     value = json.loads(payload)
     if foundation.canonical_json(value).encode() != payload:
         raise ValueError("native evidence is not canonical JSON")
     return ref, value
 
 
-def _reconcile(conn, store, registration, key, destination, ledger_path, ref_document):
+def _reconcile(conn, store, registration, key, destination, ledger_path, ref_document, export_path=None):
     ref, outcome = _read(store, ref_document)
     if (not isinstance(outcome, dict) or set(outcome) != OUTCOME_FIELDS
             or outcome["schema_version"] != SCHEMA or outcome["variant_id"] != registration.variant_id
@@ -113,18 +122,23 @@ def _reconcile(conn, store, registration, key, destination, ledger_path, ref_doc
     if (report_ref is not None) != (stage == "ran") or (stage == "ran" and outcome["attempted_variants"] != 1):
         raise _conflict(store, registration)
     if report_ref is not None:
-        report = foundation.from_document(ArtifactRef, report_ref)
-        if report.schema_ref != "native_experiment_report.v1.0":
-            raise _conflict(store, registration)
-        if not store.read_verified(report).decode("utf-8").strip():
+        _, report = _verified(store, report_ref, "native_experiment_report.v1.0")
+        if not report.decode("utf-8").strip():
             raise _conflict(store, registration)
     receipt = {"schema_version": "native_experiment_completion.v1.0", "outcome_ref": foundation.to_document(ref),
                "recording_mode": "smoke" if key == "native_smoke" else "recorded",
                "report_ref": report_ref, "ledger_destination": destination,
                "ledger_row_hash": None if key == "native_smoke" else foundation.content_hash(row)}
     evidence = _evidence(conn, registration)
-    if key + "_receipt" in evidence and _read(store, evidence[key + "_receipt"], receipt["schema_version"])[1] != receipt:
-        raise _conflict(store, registration)
+    if key + "_receipt" in evidence:
+        _, saved_receipt = _read(store, evidence[key + "_receipt"], receipt["schema_version"])
+        if foundation.canonical_json(saved_receipt) != foundation.canonical_json(receipt):
+            raise _conflict(store, registration)
+    if export_path is not None:
+        if report_ref is None:
+            raise fail("INVALID_EXPERIMENT_SPEC", "native outcome has no completed report")
+        if export_path.resolve() != export_path or (export_path.exists() and export_path.read_bytes() != report):
+            raise _conflict(store, registration)
     if key != "native_smoke":
         ledger_append([row], path=ledger_path, unique_by=("id", "spec_hash"))
     completion = _publish(store, receipt, receipt["schema_version"])
@@ -201,13 +215,14 @@ def publish_native_outcome(conn, store, registration, *, report=None, problem=No
 @_typed
 def export_native_report(conn, store, registration, *, no_ledger=False, ledger_path=None):
     """Materialize a verified completed report at its fixed store-local address."""
-    result = replay_native_outcome(conn, store, registration, no_ledger=no_ledger, ledger_path=ledger_path)
-    if result is None or result["receipt"]["report_ref"] is None:
+    key, destination, ledger_path = _slot(no_ledger, ledger_path)
+    verify_native_registration(conn, store, registration)
+    evidence = _evidence(conn, registration)
+    if key not in evidence:
         raise fail("INVALID_EXPERIMENT_SPEC", "native outcome has no completed report")
-    ref = foundation.from_document(ArtifactRef, result["receipt"]["report_ref"])
     path = store.root / "native_reports" / registration.run_id / ("smoke" if no_ledger else "recorded") / "REPORT.md"
-    if path.resolve() != path or (path.exists() and path.read_bytes() != store.read_verified(ref)):
-        raise _conflict(store, registration)
+    result = _reconcile(conn, store, registration, key, destination, ledger_path, evidence[key], export_path=path)
+    ref = foundation.from_document(ArtifactRef, result["receipt"]["report_ref"])
     foundation.ensure_directory(path.parent)
     try:
         os.link(store.verify(ref), path)

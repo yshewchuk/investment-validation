@@ -667,3 +667,448 @@ def test_canonical_refusal_republish_still_validates_original_pending_date(
     _assert_objects_preserved(source, objects)
     assert len(_objects(source.store).keys() - objects.keys()) == 1
     assert not list(tmp_path.rglob("REPORT.md"))
+
+
+def _pending_one_byte_completion(source, registration, ledger, monkeypatch, no_ledger):
+    """Build the expected completion from a real committed one-byte report intent."""
+    key, outcome = _pending(source, registration, ledger, monkeypatch,
+                            no_ledger=no_ledger, report="x")
+    assert type(outcome["report_ref"]["byte_size"]) is int
+    assert outcome["report_ref"]["byte_size"] == 1
+    receipt = {
+        "schema_version": "native_experiment_completion.v1.0",
+        "outcome_ref": _evidence(source, registration.run_id)[key],
+        "recording_mode": "smoke" if no_ledger else "recorded",
+        "report_ref": outcome["report_ref"],
+        "ledger_destination": outcome["ledger_destination"],
+        "ledger_row_hash": None if no_ledger else content_hash(outcome["ledger_row"]),
+    }
+    return key, outcome, receipt
+
+
+def _save_completion(source, registration, key, document):
+    """Commit a well-hashed completion without changing its genuine saved intent."""
+    payload = canonical_json(document).encode()
+    ref = source.store.publish_bytes(payload, schema_ref="native_experiment_completion.v1.0")
+    assert source.store.read_verified(ref) == payload
+    assert canonical_json(_document(source, to_document(ref))) == canonical_json(document)
+    evidence = _evidence(source, registration.run_id)
+    evidence[key + "_receipt"] = to_document(ref)
+    source.conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                        (canonical_json(evidence), registration.run_id))
+    return to_document(ref)
+
+
+def _invoke_one_byte_completion(operation, source, registration, ledger, no_ledger):
+    if operation == "publish":
+        return _publish(source, registration, ledger, no_ledger=no_ledger, report="x")
+    return _invoke(operation, source, registration, ledger, no_ledger=no_ledger)
+
+
+def _assert_completion_refusal(source, registration, ledger, fallback, root,
+                                monkeypatch, operation, no_ledger, label):
+    """Observe real helpers so an eventual R6 cannot hide earlier durable effects."""
+    before, objects = _catalog(source.conn), _objects(source.store)
+    effects = _transaction_effects(source, root, ledger, fallback)
+    parent_existed = ledger.parent.exists()
+    real_append, real_publish, real_reserve = outcomes.ledger_append, source.store.publish_bytes, outcomes._reserve
+    calls = {"append": [], "publish": [], "reserve": []}
+
+    def append(*args, **kwargs):
+        calls["append"].append(kwargs)
+        return real_append(*args, **kwargs)
+
+    def publish(data, *, schema_ref):
+        calls["publish"].append(schema_ref)
+        return real_publish(data, schema_ref=schema_ref)
+
+    def reserve(*args, **kwargs):
+        calls["reserve"].append(args[2])
+        return real_reserve(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes, "ledger_append", append)
+        patch.setattr(source.store, "publish_bytes", publish)
+        patch.setattr(outcomes, "_reserve", reserve)
+        with pytest.raises(OpsError) as captured:
+            _invoke_one_byte_completion(operation, source, registration,
+                                        PoisonLedger() if no_ledger else ledger, no_ledger)
+    _assert_conflict(source, captured, registration)
+    assert _csv_state(ledger) == effects["target_csv"], label
+    assert _csv_state(fallback) == effects["default_csv"], label
+    assert _catalog(source.conn) == before, label
+    after = _transaction_effects(source, root, ledger, fallback)
+    assert after["locks"] == effects["locks"], label
+    assert after["reports"] == effects["reports"] == {}, label
+    assert ledger.parent.exists() == parent_existed, label
+    assert calls == {"append": [], "publish": ["native_experiment_refusal.v1.0"], "reserve": []}, label
+    _assert_objects_preserved(source, objects)
+    assert len(_objects(source.store).keys() - objects.keys()) <= 1, label
+    assert {path: after["store_files"][path] for path in effects["store_files"]} == effects["store_files"]
+
+
+@pytest.mark.parametrize("operation", ["publish", "replay", "export"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+def test_saved_completion_boolean_report_size_is_r6_before_effects(
+        source, tmp_path, monkeypatch, safe_default_ledger, operation, no_ledger, existing):
+    """Python's True == 1 must not authorize a malformed saved completion."""
+    registration = _call(source)
+    ledger = tmp_path / "completion-boolean-size" / "ledger.csv"
+    _seed_csv(ledger, existing)
+    _seed_csv(safe_default_ledger, True)
+    key, _, receipt = _pending_one_byte_completion(
+        source, registration, PoisonLedger() if no_ledger else ledger, monkeypatch, no_ledger)
+    malformed = deepcopy(receipt)
+    malformed["report_ref"]["byte_size"] = True
+    assert malformed == receipt  # Precisely the unsafe native Python comparison.
+    assert canonical_json(malformed) != canonical_json(receipt)
+    malformed_ref = _save_completion(source, registration, key, malformed)
+    assert _document(source, malformed_ref)["report_ref"]["byte_size"] is True
+    _assert_completion_refusal(source, registration, ledger, safe_default_ledger, tmp_path,
+                                monkeypatch, operation, no_ledger, "boolean report byte_size")
+    assert _evidence(source, registration.run_id)[key + "_receipt"] == malformed_ref
+
+
+def _completion_mutations(receipt, group):
+    """Independently vary completion shape, identity fields, and nested references."""
+    if group == "fields":
+        for field in receipt:
+            altered = deepcopy(receipt)
+            del altered[field]
+            yield "missing-" + field, altered
+            yield "wrong-type-" + field, {**receipt, field: []}
+        yield "extra-field", {**receipt, "unexpected": True}
+        for value in (None, [], "completion", True, 1):
+            yield "non-object-" + repr(value), value
+    elif group == "values":
+        for field in ("schema_version", "recording_mode", "ledger_destination", "ledger_row_hash"):
+            yield "different-" + field, {**receipt, field: "different-identity"}
+        for field in ("outcome_ref", "report_ref", "ledger_destination", "ledger_row_hash"):
+            yield "boolean-" + field, {**receipt, field: False}
+        yield "other-mode", {**receipt, "recording_mode": (
+            "recorded" if receipt["recording_mode"] == "smoke" else "smoke")}
+    elif group == "references":
+        for name in ("outcome_ref", "report_ref"):
+            for field in receipt[name]:
+                altered = deepcopy(receipt)
+                del altered[name][field]
+                yield name + "-missing-" + field, altered
+                altered = deepcopy(receipt)
+                altered[name][field] = []
+                yield name + "-wrong-type-" + field, altered
+            altered = deepcopy(receipt)
+            altered[name]["unexpected"] = True
+            yield name + "-extra-field", altered
+            altered = deepcopy(receipt)
+            altered[name]["artifact_id"] = "art_wrong"
+            yield name + "-different-artifact-id", altered
+            altered = deepcopy(receipt)
+            altered[name]["byte_size"] = str(altered[name]["byte_size"])
+            yield name + "-string-byte-size", altered
+
+
+@pytest.mark.parametrize("operation", ["publish", "replay", "export"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+@pytest.mark.parametrize("group", ["fields", "values", "references"])
+def test_malformed_saved_completion_is_r6_before_effects(
+        source, tmp_path, monkeypatch, safe_default_ledger, operation, no_ledger, existing, group):
+    """Valid hashes never substitute for complete, correctly typed completion identity."""
+    registration = _call(source)
+    ledger = tmp_path / "malformed-completion" / "ledger.csv"
+    _seed_csv(ledger, existing)
+    _seed_csv(safe_default_ledger, True)
+    key, _, receipt = _pending_one_byte_completion(
+        source, registration, PoisonLedger() if no_ledger else ledger, monkeypatch, no_ledger)
+    for label, malformed in _completion_mutations(receipt, group):
+        assert canonical_json(malformed) != canonical_json(receipt), label
+        malformed_ref = _save_completion(source, registration, key, malformed)
+        _assert_completion_refusal(source, registration, ledger, safe_default_ledger, tmp_path,
+                                    monkeypatch, operation, no_ledger, label)
+        assert _evidence(source, registration.run_id)[key + "_receipt"] == malformed_ref
+
+
+@pytest.mark.parametrize("operation", ["publish", "replay", "export"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+def test_saved_one_byte_completion_replays_exactly(
+        source, tmp_path, monkeypatch, safe_default_ledger, operation, no_ledger, existing):
+    """A genuine integer byte_size remains valid, including missing-ledger recovery."""
+    from tests.v2.research.test_native_outcomes import _clock
+
+    registration = _call(source)
+    ledger = tmp_path / "valid-one-byte-completion" / "ledger.csv"
+    ledger_before = _seed_csv(ledger, existing)
+    fallback_before = _seed_csv(safe_default_ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    _clock(monkeypatch, "2026-01-02")
+    key, outcome, receipt = _pending_one_byte_completion(
+        source, registration, destination, monkeypatch, no_ledger)
+    receipt_ref = _save_completion(source, registration, key, receipt)
+    expected = {"outcome": outcome, "receipt": receipt, "receipt_ref": receipt_ref}
+    before, objects = _catalog(source.conn), _objects(source.store)
+    _clock(monkeypatch, "2026-02-10")
+    first = _invoke_one_byte_completion(operation, source, registration, destination, no_ledger)
+    if operation == "export":
+        assert first.read_bytes() == b"x"
+    else:
+        assert first == expected
+    assert _replay(source, registration, destination, no_ledger=no_ledger) == expected
+    assert _catalog(source.conn) == before
+    assert _objects(source.store) == objects
+    assert _evidence(source, registration.run_id)[key + "_receipt"] == receipt_ref
+    assert type(_document(source, receipt_ref)["report_ref"]["byte_size"]) is int
+    assert outcome["ledger_row"]["date"] == "2026-01-02"
+    if no_ledger:
+        assert _csv_state(ledger) == ledger_before
+    else:
+        assert _rows(ledger) == ([UNRELATED_ROW] if existing else []) + [outcome["ledger_row"]]
+    assert _csv_state(safe_default_ledger) == fallback_before
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    assert _invoke_one_byte_completion(operation, source, registration, destination, no_ledger) == first
+    assert _transaction_effects(source, tmp_path, ledger, safe_default_ledger) == effects
+    assert _catalog(source.conn) == before
+
+
+@pytest.mark.parametrize("operation", ["publish", "replay", "export"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+@pytest.mark.parametrize("field,value", [("artifact_id", "art_wrong"),
+                                         ("schema_version", "artifact_ref.v01.0")])
+def test_saved_completion_outer_artifact_identity_is_r6_before_effects(
+        source, tmp_path, monkeypatch, safe_default_ledger, operation, no_ledger, existing, field, value):
+    """A valid payload cannot conceal a different outer completion artifact identity."""
+    registration = _call(source)
+    ledger = tmp_path / "completion-outer-identity" / "ledger.csv"
+    _seed_csv(ledger, existing)
+    _seed_csv(safe_default_ledger, True)
+    key, _, receipt = _pending_one_byte_completion(
+        source, registration, PoisonLedger() if no_ledger else ledger, monkeypatch, no_ledger)
+    receipt_ref = _save_completion(source, registration, key, receipt)
+    malformed_ref = {**receipt_ref, field: value}
+    assert _document(source, malformed_ref) == receipt  # Genuine content and hash still verify.
+    evidence = _evidence(source, registration.run_id)
+    evidence[key + "_receipt"] = malformed_ref
+    source.conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                        (canonical_json(evidence), registration.run_id))
+    _assert_completion_refusal(source, registration, ledger, safe_default_ledger, tmp_path,
+                                monkeypatch, operation, no_ledger, "outer completion " + field)
+    assert _evidence(source, registration.run_id)[key + "_receipt"] == malformed_ref
+
+
+@pytest.mark.parametrize("operation", ["publish", "replay", "export"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+@pytest.mark.parametrize("location", ["outcome", "report"])
+@pytest.mark.parametrize("field,value", [("artifact_id", "art_wrong"),
+                                         ("schema_version", "artifact_ref.v01.0")])
+def test_pending_artifact_reference_identity_is_r6_before_effects(
+        source, tmp_path, monkeypatch, safe_default_ledger, operation, no_ledger,
+        existing, location, field, value):
+    """Verified pending bytes cannot authorize noncanonical report or intent references."""
+    from engine.v2.contracts import ArtifactRef
+    from engine.v2.foundation import from_document
+
+    registration = _call(source)
+    ledger = tmp_path / "pending-artifact-identity" / "ledger.csv"
+    _seed_csv(ledger, existing)
+    _seed_csv(safe_default_ledger, True)
+    key, outcome, _ = _pending_one_byte_completion(
+        source, registration, PoisonLedger() if no_ledger else ledger, monkeypatch, no_ledger)
+    if location == "outcome":
+        evidence = _evidence(source, registration.run_id)
+        evidence[key] = {**evidence[key], field: value}
+        assert _document(source, evidence[key]) == outcome
+        source.conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                            (canonical_json(evidence), registration.run_id))
+    else:
+        outcome["report_ref"][field] = value
+        assert source.store.read_verified(from_document(ArtifactRef, outcome["report_ref"])) == b"x"
+        _save_intent(source, registration, key, outcome)
+    assert key + "_receipt" not in _evidence(source, registration.run_id)
+    _assert_completion_refusal(source, registration, ledger, safe_default_ledger, tmp_path,
+                                monkeypatch, operation, no_ledger, location + " " + field)
+    assert key + "_receipt" not in _evidence(source, registration.run_id)
+
+
+@pytest.mark.parametrize("state", ["pending", "completed"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+@pytest.mark.parametrize("obstruction", ["foreign-file", "matching-symlink"])
+def test_export_path_conflict_is_r6_before_reconciliation_effects(
+        source, tmp_path, monkeypatch, safe_default_ledger, state, no_ledger, existing, obstruction):
+    """A blocked export cannot complete an intent or repair its CSV before refusing."""
+    registration = _call(source)
+    ledger = tmp_path / "export-conflict-ledger" / "ledger.csv"
+    _seed_csv(ledger, existing)
+    _seed_csv(safe_default_ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    key, _, receipt = _pending_one_byte_completion(
+        source, registration, destination, monkeypatch, no_ledger)
+    if state == "completed":
+        _save_completion(source, registration, key, receipt)
+    export_path = (source.store.root / "native_reports" / registration.run_id /
+                   ("smoke" if no_ledger else "recorded") / "REPORT.md")
+    export_path.parent.mkdir(parents=True)
+    target = tmp_path / "external-report.md"
+    target.write_bytes(b"x")
+    if obstruction == "matching-symlink":
+        export_path.symlink_to(target)
+    else:
+        export_path.write_bytes(b"foreign immutable report")
+    before, objects = _catalog(source.conn), _objects(source.store)
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    parent_existed = ledger.parent.exists()
+    real_append, real_publish, real_reserve = outcomes.ledger_append, source.store.publish_bytes, outcomes._reserve
+    calls = []
+
+    def append(*args, **kwargs):
+        calls.append("ledger-append")
+        return real_append(*args, **kwargs)
+
+    def publish(data, *, schema_ref):
+        calls.append(schema_ref)
+        return real_publish(data, schema_ref=schema_ref)
+
+    def reserve(*args, **kwargs):
+        calls.append(args[2])
+        return real_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(outcomes, "ledger_append", append)
+    monkeypatch.setattr(source.store, "publish_bytes", publish)
+    monkeypatch.setattr(outcomes, "_reserve", reserve)
+    with pytest.raises(OpsError) as captured:
+        outcomes.export_native_report(source.conn, source.store, registration,
+                                      ledger_path=destination, no_ledger=no_ledger)
+    _assert_conflict(source, captured, registration)
+    assert _csv_state(ledger) == effects["target_csv"]
+    assert _catalog(source.conn) == before
+    after = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    for field in ("default_csv", "locks", "reports"):
+        assert after[field] == effects[field], field
+    assert ledger.parent.exists() == parent_existed
+    assert calls == ["native_experiment_refusal.v1.0"]
+    assert target.read_bytes() == b"x"
+    assert export_path.is_symlink() == (obstruction == "matching-symlink")
+    if export_path.is_symlink():
+        assert export_path.readlink() == target
+    _assert_objects_preserved(source, objects)
+    assert len(_objects(source.store).keys() - objects.keys()) == 1
+    assert {path: after["store_files"][path] for path in effects["store_files"]} == effects["store_files"]
+
+
+@pytest.mark.parametrize("state", ["pending", "completed"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+def test_matching_regular_export_still_reconciles_once(
+        source, tmp_path, monkeypatch, safe_default_ledger, state, no_ledger, existing):
+    """An exact existing regular report remains recoverable under the early export check."""
+    registration = _call(source)
+    ledger = tmp_path / "matching-export-ledger" / "ledger.csv"
+    ledger_before = _seed_csv(ledger, existing)
+    fallback_before = _seed_csv(safe_default_ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    key, outcome, receipt = _pending_one_byte_completion(
+        source, registration, destination, monkeypatch, no_ledger)
+    if state == "completed":
+        _save_completion(source, registration, key, receipt)
+    path = (source.store.root / "native_reports" / registration.run_id /
+            ("smoke" if no_ledger else "recorded") / "REPORT.md")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"x")
+    inode = path.stat().st_ino
+    assert outcomes.export_native_report(source.conn, source.store, registration,
+                                         ledger_path=destination, no_ledger=no_ledger) == path
+    assert path.read_bytes() == b"x" and path.stat().st_ino == inode
+    assert _document(source, _evidence(source, registration.run_id)[key + "_receipt"]) == receipt
+    if no_ledger:
+        assert _csv_state(ledger) == ledger_before
+    else:
+        assert _rows(ledger) == ([UNRELATED_ROW] if existing else []) + [outcome["ledger_row"]]
+    assert _csv_state(safe_default_ledger) == fallback_before
+    before = _catalog(source.conn)
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    assert outcomes.export_native_report(source.conn, source.store, registration,
+                                         ledger_path=destination, no_ledger=no_ledger) == path
+    assert _catalog(source.conn) == before
+    assert _transaction_effects(source, tmp_path, ledger, safe_default_ledger) == effects
+
+
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+def test_invalid_completion_refuses_before_obstructed_export_path_read(
+        source, tmp_path, monkeypatch, safe_default_ledger, no_ledger, existing):
+    """A conflicting report path cannot move export checks ahead of metadata validation."""
+    registration = _call(source)
+    ledger = tmp_path / "metadata-first-export" / "ledger.csv"
+    _seed_csv(ledger, existing)
+    _seed_csv(safe_default_ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    key, _, receipt = _pending_one_byte_completion(
+        source, registration, destination, monkeypatch, no_ledger)
+    malformed = deepcopy(receipt)
+    malformed["report_ref"]["byte_size"] = True
+    _save_completion(source, registration, key, malformed)
+    path = (source.store.root / "native_reports" / registration.run_id /
+            ("smoke" if no_ledger else "recorded") / "REPORT.md")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"foreign report")
+    before, objects = _catalog(source.conn), _objects(source.store)
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    read_bytes, real_publish = type(path).read_bytes, source.store.publish_bytes
+    publications = []
+
+    def read(other):
+        assert other != path, "export path was read before malformed completion was refused"
+        return read_bytes(other)
+
+    def publish(data, *, schema_ref):
+        publications.append(schema_ref)
+        return real_publish(data, schema_ref=schema_ref)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(path), "read_bytes", read)
+        patch.setattr(outcomes, "ledger_append", _forbid)
+        patch.setattr(outcomes, "_reserve", _forbid)
+        patch.setattr(source.store, "publish_bytes", publish)
+        with pytest.raises(OpsError) as captured:
+            outcomes.export_native_report(source.conn, source.store, registration,
+                                          ledger_path=destination, no_ledger=no_ledger)
+    _assert_conflict(source, captured, registration)
+    assert publications == ["native_experiment_refusal.v1.0"]
+    assert _catalog(source.conn) == before
+    after = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    for field in ("target_csv", "default_csv", "locks", "reports"):
+        assert after[field] == effects[field], field
+    _assert_objects_preserved(source, objects)
+    assert len(_objects(source.store).keys() - objects.keys()) == 1
+
+
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+def test_export_pending_refusal_without_report_is_r1_before_effects(
+        source, tmp_path, monkeypatch, safe_default_ledger, no_ledger, existing):
+    """Requesting an absent report must not complete or record a pending refusal."""
+    registration = _call(source)
+    ledger = tmp_path / "no-report-export" / "ledger.csv"
+    _seed_csv(ledger, existing)
+    _seed_csv(safe_default_ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    key, outcome = _pending(source, registration, destination, monkeypatch,
+                            no_ledger=no_ledger, report=None, attempted=False,
+                            problem=make_problem("FEATURE_LOOKAHEAD", "synthetic refusal"))
+    assert outcome["report_ref"] is None
+    before = _catalog(source.conn)
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    monkeypatch.setattr(outcomes, "ledger_append", _forbid)
+    monkeypatch.setattr(outcomes, "_reserve", _forbid)
+    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
+    with pytest.raises(OpsError) as captured:
+        outcomes.export_native_report(source.conn, source.store, registration,
+                                      ledger_path=destination, no_ledger=no_ledger)
+    assert captured.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert captured.value.problem.retryable is False
+    assert _catalog(source.conn) == before
+    assert _transaction_effects(source, tmp_path, ledger, safe_default_ledger) == effects
+    assert key + "_receipt" not in _evidence(source, registration.run_id)
