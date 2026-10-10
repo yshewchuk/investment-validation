@@ -78,7 +78,7 @@
     },
     "D15": {
       "tier": 2,
-      "tests": ["tests/test_v2_ops_parity.py", "tests/test_checks_phase2_parity.py"],
+      "tests": ["tests/v2/ops/test_v2_ops_parity.py", "tests/v2/integration/test_checks_phase2_parity.py"],
       "evidence_fields": ["comparison_receipt_ref", "expected_population",
                           "supported_population", "compared_population"]
     },
@@ -89,20 +89,20 @@
     },
     "D17": {
       "tier": 0,
-      "tests": ["tests/test_v2_ops_engineering.py"],
+      "tests": ["tests/v2/ops/test_v2_ops_engineering.py"],
       "reuse_phase1_structural_engineering": true
     },
     "D18": {
       "tier": 1,
-      "tests": ["tests/test_v2_ops_nightly_completion.py",
-                "tests/test_v2_ops_resolved_session.py",
+      "tests": ["tests/v2/ops/test_v2_ops_nightly_completion.py",
+                "tests/v2/ops/test_v2_ops_resolved_session.py",
                 "tests/v2/ops/test_v2_ops_scope_separation.py",
                 "tests/test_v2_ops_decision_validation_order.py",
                 "tests/test_v2_ops_ledger_history_import.py"]
     },
     "D19": {
       "tier": 2,
-      "tests": ["tests/test_v2_ops_render_parity.py",
+      "tests": ["tests/v2/ops/test_v2_ops_render_parity.py",
                 "tests/test_checks_phase2_render_parity.py",
                 "tests/test_checks_phase2_render_parity_compare.py",
                 "tests/test_checks_phase2_render_parity_bounded.py",
@@ -111,8 +111,8 @@
     },
     "D20": {
       "tier": 1,
-      "tests": ["tests/test_v2_ops_effects_graph.py",
-                "tests/test_v2_ops_resolved_session.py",
+      "tests": ["tests/v2/ops/test_v2_ops_effects_graph.py",
+                "tests/v2/ops/test_v2_ops_resolved_session.py",
                 "tests/v2/ops/test_v2_ops_scope_separation.py"]
     }
   }

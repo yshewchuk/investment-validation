@@ -58,6 +58,42 @@ def test_lazy_training_imports_keep_every_fixed_target_and_package_init():
         assert targets <= graph.precise[test]
 
 
+def test_phase1_coverage_keeps_relocated_foundation_file():
+    """A missing required test must not silently disappear from the suite."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/foundation/test_v2_ops_foundation.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
+
+
+def test_phase1_coverage_keeps_relocated_nightly_completion_file():
+    """A root glob cannot match a moved test; its new path is named explicitly."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_v2_ops_nightly_completion.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
+
+
+def test_phase1_coverage_keeps_relocated_native_parity_pairing_file():
+    """A root glob cannot match a moved test; its new path is named explicitly."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_native_parity_pairing.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
+
+
+def test_phase1_coverage_keeps_relocated_legacy_defects_file():
+    """The baseline-derived inventory cannot catch a rename mapping being dropped."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_legacy_defects.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
+
+
 def _phase1_root(tmp_path, listed, present, extra=()):
     import json
 
@@ -98,6 +134,69 @@ def test_phase1_suite_keeps_a_baseline_test_that_did_not_move(tmp_path):
     root = _phase1_root(tmp_path, ["tests/test_still_root.py"],
                         ["tests/test_still_root.py"], _PHASE1_EXTRA)
     assert "tests/test_still_root.py" in phase1_suite(root)
+
+
+def test_phase1_baseline_inventory_matches_active_suite():
+    """Every baseline-listed test is retained in the active Phase 1 suite.
+
+    The stored baseline keeps historical paths; each path is resolved to where
+    the test lives now before checking it is still in the suite.
+    """
+    from checks.v2_coverage_ratchet import (
+        PHASE1_BASELINE,
+        PHASE1_SUITE_VERSION,
+        _phase1_resolve,
+        phase1_suite,
+    )
+
+    baseline = json.loads(PHASE1_BASELINE.read_text())
+    assert baseline["suite_version"] == PHASE1_SUITE_VERSION
+    resolved = {_phase1_resolve(ROOT, rel) for rel in baseline["test_files"]}
+    assert resolved <= set(phase1_suite(ROOT))
+
+
+def test_phase1_measurement_identity_is_checked_on_measurement_evidence():
+    """Current-source identity applies to measurement evidence, not the baseline."""
+    from checks.layer_map import PACKAGES
+    from checks.v2_coverage_ratchet import (
+        phase1_measurement_identity,
+        phase1_suite,
+        phase1_validate_measurement,
+    )
+
+    measured = {
+        "schema_version": "phase1_coverage.v1.0",
+        "test_files": phase1_suite(ROOT),
+        "packages": {p.dotted: {} for p in PACKAGES},
+        "source_hash": phase1_measurement_identity(ROOT),
+    }
+    assert phase1_validate_measurement(measured, root=ROOT) == []
+
+
+def test_phase1_validation_reports_inventory_and_source_drift():
+    """A measurement with the wrong suite and source must report both drifts."""
+    from checks.layer_map import PACKAGES
+    from checks.v2_coverage_ratchet import phase1_validate_measurement
+
+    measured = {
+        "schema_version": "phase1_coverage.v1.0",
+        "test_files": ["tests/test_deliberately_wrong.py"],
+        "packages": {p.dotted: {} for p in PACKAGES},
+        "source_hash": "sha256:definitely-not-the-real-source",
+    }
+    findings = phase1_validate_measurement(measured, root=ROOT)
+    codes = {finding["code"] for finding in findings}
+    assert "COVERAGE_TEST_INVENTORY_DRIFT" in codes
+    assert "COVERAGE_SOURCE_DRIFT" in codes
+
+
+def test_phase1_coverage_keeps_relocated_forward_calendar_store_file():
+    """The moved calendar-store test must stay in the phase-one fixed suite."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_forward_calendar_store.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
 
 
 def test_phase1_suite_resolves_the_explicit_rename(tmp_path):

@@ -9,7 +9,7 @@ from engine.v2.ops.effects_graph import backup_effect
 from engine.v2.ops.errors import fail
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from tests.ops_support import catalog
-from tests.test_v2_ops_effects_graph import (
+from tests.v2.ops.test_v2_ops_effects_graph import (
     SESSION, _commit, _open, _params, _row, _seed_decisions, _submit_and_claim,
 )
 
@@ -162,7 +162,7 @@ def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(
         def crash(*args, **kwargs):
             raise RuntimeError("crash before commit_attempt")
 
-        monkeypatch.setattr("tests.test_v2_ops_effects_graph.commit_attempt", crash)
+        monkeypatch.setattr("tests.v2.ops.test_v2_ops_effects_graph.commit_attempt", crash)
         with pytest.raises(RuntimeError, match="crash before commit_attempt"):
             _commit(conn, clock, first, result)
         monkeypatch.undo()

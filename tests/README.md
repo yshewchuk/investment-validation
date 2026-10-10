@@ -151,7 +151,7 @@ The four markers, and which tests carry them, are:
 |---|---|---|
 | `needs_data` | reads the real `data/` root (gitignored, absent in CI and worktrees) | tests/test_calendar.py (10), TestChainRefreshCoversTheGap, TestPanelStalenessGuard, TestPanelFeaturesStaleMarketBlock, TestLiveFeaturesBoundedByTheDecision, test_checks_phase3b_real.py::test_table_run_reopens_persisted_clean_rebuild_and_downstream_scan, 3 incremental tests |
 | `needs_corpus` | reads `fixtures/tier0` or another untracked fixture tree | tests/test_phase4_completion_review.py (whole file) |
-| `heavy_host` | launches real multi-GB workers; run alone on a quiet box | tests/test_v2_ops_supervised_legacy.py, tests/test_v2_ops_nightly_completion.py (whole files) |
+| `heavy_host` | launches real multi-GB workers; run alone on a quiet box | tests/test_v2_ops_supervised_legacy.py, tests/v2/ops/test_v2_ops_nightly_completion.py (whole files) |
 | `browser` | drives a real Playwright browser or needs node/npm (`ui/` build) | tests/test_v2_dashboard_browser.py, test_v2_dashboard_integration.py, test_v2_ops_serving_browser.py (whole files), test_l02_browser_frame_pins_r1_then_reload_shows_r2 in test_v2_dashboard_preview.py |
 
 CI runs everything except these four categories:

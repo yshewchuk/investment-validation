@@ -177,7 +177,7 @@ walk; runtime parity submission already binds both jobs directly. No
 submission path reads either edge (the rule Part 4 established for
 `computed_moves_refresh`'s own node).
 
-- **`native.parity_inputs.legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]`** (new, this package). Keys the legacy `score.json` document's own `"rows"` array by `engine.v2.ops.decision_validation.population_key`'s `"ticker|strategy|event_date"` format — REUSED, not re-derived and not re-added: this public function already exists (`decision_replay.py`'s own population comparison already imports it), and it is the identical three-field format `engine.v2.serving.native_render.native_row_key` already derives for a native `ScoreRecord` (that module's own docstring: `"the native twin of bridge._population_key"`; both bridge and legacy adapter now use `foundation.score_population.population_key`, while parity retains `decision_validation`'s existing public helper). Pure: no filesystem, no clock, and — the point of putting this here rather than in the composing script below — no import of `engine.v2.serving` (a layer-7.0 peer of `engine.v2.ops`, per the root doc's layer table; `checks/import_layers.py` would refuse that edge). A `score_document`
+- **`native.parity_inputs.legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]`** (new, this package). Keys legacy `score.json` rows by complete `ticker|strategy|event_date` identity using the shared `engine.v2.foundation.score_population.population_key`, also used by bridge, adapter, and replay. The native `native_row_key` derives its corresponding identity from event reference and resolved request. Pure: no filesystem, clock, or `engine.v2.serving` import (a peer layer). A `score_document`
   with no `"rows"` key returns `{}` (not a refusal —
   `native_parity_handler`'s existing `_refuse_empty_inputs` already turns
   an empty `legacy_rows` into `VALIDATION_FAILED` downstream, so this
@@ -362,7 +362,7 @@ submission path reads either edge (the rule Part 4 established for
   `f"{ticker}|{strategy}|{event_date.isoformat()}|{session}"`) down to the
   3-field `population_key` format `legacy_parity_rows` already uses, by
   splitting on `"|"` into exactly 4 parts and calling
-  `engine.v2.ops.decision_validation.population_key({"ticker": ticker,
+  `engine.v2.foundation.score_population.population_key({"ticker": ticker,
   "strategy": strategy, "event_date": event_date})` — REUSING
   `population_key`'s own join format rather than string-concatenating a
   fourth time, so the two sides can never silently drift onto two

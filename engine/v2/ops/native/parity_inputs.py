@@ -2,21 +2,21 @@
 
 Holds :func:`legacy_parity_rows`, which keys a legacy ``score.json``
 document's own ``rows`` array by
-``engine.v2.ops.decision_validation.population_key``.  It depends only on
-``engine.v2.ops.decision_validation`` and ``engine.v2.ops.errors``, never on
-``engine.v2.ops.nightly`` or ``engine.v2.ops.native_parity_report``.
+``engine.v2.foundation.score_population.population_key``.  It depends only on
+``engine.v2.foundation.score_population`` and ``engine.v2.ops.errors``, never
+on ``engine.v2.ops.nightly`` or ``engine.v2.ops.native_parity_report``.
 """
 from __future__ import annotations
 
 from typing import Any, Mapping
 
-from engine.v2.ops.decision_validation import population_key
+from engine.v2.foundation.score_population import population_key
 from engine.v2.ops.errors import fail
 
 
 def legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]:
     """Key a legacy ``score.json`` document's own ``rows`` array by
-    ``engine.v2.ops.decision_validation.population_key``'s
+    ``engine.v2.foundation.score_population.population_key``'s
     ``"ticker|strategy|event_date"`` format.
 
     Pure: no filesystem, no clock. A ``score_document`` with no ``"rows"``

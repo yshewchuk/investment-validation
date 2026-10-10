@@ -5,10 +5,10 @@
 serving.py``; ``engine/v2/serving/api.py`` (P3-2) is the real FastAPI server.
 This module wires a real synthetic release all the way through the real
 pipeline -- ``engine.v2.serving.projections.build_candidate`` (same
-technique ``tests/test_v2_serving_projections.py`` and ``tests/
+technique ``tests/test_v2_serving_projections.py`` and ``tests/v2/serving/
 test_v2_serving_publication_binding.py`` use), a real fenced ops publish
 (``engine.v2.ops.publication.stage_release``/``publish_local``, same
-technique as ``tests/test_v2_serving_publication_binding.py``), and a real
+technique as ``tests/v2/serving/test_v2_serving_publication_binding.py``), and a real
 ``uvicorn.Server`` running ``engine.v2.serving.api.create_app(...)`` -- then
 drives a real Playwright browser against ``ui/dist`` served same-origin.
 
@@ -34,7 +34,8 @@ import pytest
 from fastapi.staticfiles import StaticFiles
 from playwright.sync_api import expect
 
-ROOT = Path(__file__).resolve().parents[1]
+from engine.paths import ROOT
+
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import PreviewRelease  # noqa: E402
@@ -43,7 +44,7 @@ from engine.v2.foundation import ArtifactStore  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
 from engine.v2.serving.api import create_app  # noqa: E402
 from tests.ops_support import catalog, enqueue_claim  # noqa: E402
-from tests.test_v2_serving_api import _get, _start, _stop  # noqa: E402
+from tests.v2.serving.test_v2_serving_api import _get, _start, _stop  # noqa: E402
 from tests.test_v2_serving_projections import (  # noqa: E402
     _bundle,
     _compact,
@@ -54,7 +55,7 @@ from tests.test_v2_serving_projections import (  # noqa: E402
     _score_doc,
     _serving,
 )
-from tests.test_v2_serving_publication_binding import (  # noqa: E402
+from tests.v2.serving.test_v2_serving_publication_binding import (  # noqa: E402
     _stage_and_publish,
     _stage_files,
 )
@@ -77,7 +78,7 @@ _PAYOFF_CURVE = {
 # --------------------------------------------------------------------------
 # a real, 55-event synthetic release ("release A") plus a small second one
 # ("release B", generation 2) -- built the same way
-# tests/test_v2_serving_publication_binding.py does
+# tests/v2/serving/test_v2_serving_publication_binding.py does
 # --------------------------------------------------------------------------
 
 
@@ -131,7 +132,7 @@ def _build_releases(tmp_path):
     """One shared Phase-2 snapshot (55 events for release A, 2 more for
     release B), a real synthetic serving index, and two committed
     candidates over disjoint score subsets -- ``release_a``/``release_b``,
-    reused by ``tests/test_v2_serving_publication_binding.py``'s own
+    reused by ``tests/v2/serving/test_v2_serving_publication_binding.py``'s own
     ``_releases`` for the same reason: two distinct generations from one
     snapshot, without needing two Phase-2 catalogs."""
     (tmp_path / "phase2").mkdir()

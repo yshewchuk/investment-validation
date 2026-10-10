@@ -5,13 +5,10 @@ import math
 from datetime import datetime, timezone
 
 from engine.v2.foundation import canonical_json, content_hash
+from engine.v2.foundation.score_population import population_key as _population_key
 from engine.v2.ops.errors import fail
 
 REQUIRED = frozenset({"causality", "coverage", "finality", "selection", "replay"})
-
-
-def population_key(row):
-    return "|".join(str(row.get(key, "")) for key in ("ticker", "strategy", "event_date"))
 
 
 def _same(left, right):
@@ -129,14 +126,14 @@ def _validate_rows(candidates, score, finality, plan, expected, findings):
     if not isinstance(score_rows, list) or not all(isinstance(row, dict) for row in score_rows):
         _add(findings, "score.rows", "missing_or_malformed")
         score_rows = []
-    source = {population_key(row): row for row in score_rows}
-    actual = [population_key(row) for row in candidates]
+    source = {_population_key(row): row for row in score_rows}
+    actual = [_population_key(row) for row in candidates]
     if len(source) != len(score_rows) or set(actual) != set(expected) or len(actual) != len(set(actual)):
         _add(findings, "candidates.population", "expected_population_mismatch")
     if not expected:
         _validate_no_eligible_rows(score, plan, findings)
     for index, row in enumerate(candidates):
-        _validate_candidate(row, index, source.get(population_key(row)), finality, plan, findings)
+        _validate_candidate(row, index, source.get(_population_key(row)), finality, plan, findings)
     return source, actual
 
 

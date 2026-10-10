@@ -31,6 +31,10 @@ decreases, and a root-level test cannot be modified in place (move it first).
 `phase1_suite()` in `v2_coverage_ratchet.py` resolves baseline tests where they
 now live and raises `FileNotFoundError` if one is missing.
 
+The Phase 1 check binds the active test inventory to source and test
+contents. It reports suite-version, inventory, or source drift when the
+measurement differs from the active profile.
+
 `import_layers.py --all` also checks the planned ops ownership/direction in
 `ops_dependencies.json` against every tracked ops Python file. Static imports
 in every scope, including lazy/function imports, form the module graph.

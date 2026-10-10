@@ -14,7 +14,7 @@ Tier 0: no private data, no real scoring/legacy rebuild. Pure helpers and
 in-process legacy actions are exercised with synthetic docs and
 monkeypatched ``Scorer``/``FeatureContext.load``/``score_calendar``/
 ``score_outcomes``; the decision-commit chain uses the real ``Service``
-and ``TEST_POLICY``, the same pattern ``tests/test_v2_ops_nightly_completion.py``
+and ``TEST_POLICY``, the same pattern ``tests/v2/ops/test_v2_ops_nightly_completion.py``
 and ``tests/test_v2_ops_effects_graph.py`` use.
 """
 from __future__ import annotations
@@ -54,7 +54,7 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY, sample
-from tests.test_v2_ops_effects_graph import (
+from tests.v2.ops.test_v2_ops_effects_graph import (
     FAKE_STORE_ROOT,
     _open as _effects_open,
     _params as _effects_params,
@@ -62,7 +62,7 @@ from tests.test_v2_ops_effects_graph import (
     _seed_decisions,
     _submit_and_claim as _effects_submit_and_claim,
 )
-from tests.test_v2_ops_nightly_completion import (
+from tests.v2.ops.test_v2_ops_nightly_completion import (
     _manifest_ref,
     _publish,
     _run_until_terminal,
@@ -71,7 +71,7 @@ from tests.test_v2_ops_nightly_completion import (
     _succeed_parent,
 )
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 REQUESTED = "2026-09-14"
 RESOLVED = "2026-09-11"

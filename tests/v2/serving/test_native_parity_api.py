@@ -5,8 +5,8 @@ The report fixture is built by calling the REAL production functions in
 ``_stamp_report_identity`` -> ``write_parity_report``) against independent
 legacy/native synthetic rows; this module never hand-writes a report literal.
 Served over REAL HTTP (a real ``uvicorn.Server`` in a background thread),
-reusing ``tests/test_v2_serving_api.py``'s own ``_start``/``_stop``/``_get``
-helpers exactly like ``tests/test_v2_serving_publication_binding.py`` does.
+reusing ``tests/v2/serving/test_v2_serving_api.py``'s own ``_start``/``_stop``/``_get``
+helpers exactly like ``tests/v2/serving/test_v2_serving_publication_binding.py`` does.
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ from engine.v2.serving.native_parity_projection import (  # noqa: E402
     NATIVE_PARITY_REPORT_MALFORMED,
     native_parity_summary,
 )
-from tests.test_v2_serving_api import (  # noqa: E402
+from tests.v2.serving.test_v2_serving_api import (  # noqa: E402
     _bundle,
     _compact,
     _event_row,
