@@ -197,6 +197,9 @@ def ensure_session(root: Path, identity: SessionIdentity) -> SessionState:
 def request_rerun(root: Path, identity: SessionIdentity,
                   invalidation: tuple[str, ...] = ()) -> SessionState:
     """Explicit rerun: allocate the next generation, or reattach to one still ``allocated``."""
+    if not isinstance(invalidation, (tuple, list)) or not all(
+            isinstance(s, str) for s in invalidation):
+        raise fail("INVALID_REQUEST", "invalidation must be a sequence of step-name strings")
     def step(state):
         if state is None:
             raise fail("INVALID_REQUEST", "no session exists to rerun")

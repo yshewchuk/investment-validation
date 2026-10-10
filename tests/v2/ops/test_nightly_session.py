@@ -227,6 +227,17 @@ def test_stored_invalidation_must_be_a_list_of_strings(tmp_path):
         assert _code(exc) == "INTEGRITY_FAILED"
 
 
+@pytest.mark.parametrize("bad", ["step_a", ("step_a", 1), 7])
+def test_malformed_invalidation_is_refused_and_state_unchanged(tmp_path, bad):
+    ns.ensure_session(tmp_path, IDENT)
+    ns.mark_started(tmp_path, IDENT, 1)
+    path = ns.session_path(tmp_path, IDENT)
+    before = path.read_bytes()
+    with pytest.raises(OpsError) as exc:
+        ns.request_rerun(tmp_path, IDENT, bad)
+    assert _code(exc) == "INVALID_REQUEST" and path.read_bytes() == before
+
+
 def test_tampered_run_id_is_integrity_failed(tmp_path):
     ns.ensure_session(tmp_path, IDENT)
     path = ns.session_path(tmp_path, IDENT)

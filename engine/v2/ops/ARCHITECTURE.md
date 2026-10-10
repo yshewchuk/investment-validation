@@ -558,7 +558,7 @@ Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` re
 |---|---|
 | First ordinary call | Creates generation 1 `allocated`; later calls return that state and never allocate. |
 | Explicit rerun | Appends generation n+1 and its invalidation cone in one swap: the intent is the allocated generation. A crash before the swap records nothing and the request repeats; after it, a repeated rerun reattaches to that still-`allocated` generation. Once started, a rerun allocates the next. The caller's lock decides when the older owner is gone. |
-| Concurrent callers | One swap wins. A loser re-reads: ordinary calls return the winner's state, reruns reattach to the winner's generation. Three lost swaps raise retryable `LEASE_LOST`. A returned state is the revision read; a later swap makes it stale. |
+| Concurrent callers | One swap wins. A loser re-reads: ordinary calls return the winner's state, reruns reattach to the winner's generation. Exhausting the bounded swap retries raises retryable `LEASE_LOST`. A returned state is the revision read; a later swap makes it stale. |
 | Superseded generation marks itself started | `CHECKPOINT_INCOMPATIBLE`. |
 | Unparseable JSON, wrong key, run_id or numbering | `INTEGRITY_FAILED`; never treated as absent, since that would restart numbering. |
 | Session file in another schema (an old-format receipt) | `CHECKPOINT_INCOMPATIBLE`; the operator moves it aside. |
