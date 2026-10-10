@@ -302,5 +302,10 @@ def test_mutation_owners_include_authority_and_shared_registration_verification(
     if not (mutation_pilot.REPO / ".git").exists():
         pytest.skip("mutation work copy has no git index")
     config = mutation_pilot.load_config()
-    for name in ("ops_catalog_store", "ops_catalog_state", "ops_cli"):
+    for name in ("ops_final_holdout", "ops_catalog_store", "ops_catalog_state", "ops_cli"):
         assert "tests/v2/ops/test_final_holdout_authority.py" in mutation_pilot.test_files(config, name)
+    owned = mutation_pilot.mutate_files(config, "ops_final_holdout")
+    assert set(owned) == {"engine/v2/ops/final_holdout.py", "engine/v2/ops/native_registration.py"}
+    for name in config["modules"]:
+        if name != "ops_final_holdout":
+            assert set(owned).isdisjoint(mutation_pilot.mutate_files(config, name))

@@ -718,7 +718,6 @@ mutate = [
     "engine/v2/ops/migrations.py",
     "engine/v2/ops/schema.py",
     "engine/v2/ops/schema_runtime.py",
-    "engine/v2/ops/native_registration.py",
 ]
 tests = [
     "tests/v2/ops/test_final_holdout_authority.py",
@@ -753,7 +752,6 @@ why = "The job/attempt state machine and the Problem envelope of every refusal: 
 mutate = [
     "engine/v2/ops/lifecycle.py",
     "engine/v2/ops/errors.py",
-    "engine/v2/ops/final_holdout.py",
 ]
 tests = [
     "tests/v2/ops/test_final_holdout_authority.py",
@@ -779,6 +777,15 @@ tests = [
     "tests/v2/ops/test_v2_ops_same_session_replan.py",
     "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
+]
+
+[modules.ops_final_holdout]
+why = "Catalog-bound native registration verification and immutable user-only final-read spend: forged metadata or a duplicate act must never create authority."
+mutate = ["engine/v2/ops/native_registration.py", "engine/v2/ops/final_holdout.py"]
+tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
+    "tests/v2/research/test_final_holdout_requests.py",
+    "tests/v2/research/test_native_registration.py",
 ]
 
 [modules.ops_catalog_sched]
@@ -928,6 +935,7 @@ tests = [
 
 [modules.ops_nightly]
 why = "Nightly DAG, stage map, plans, fingerprints and incremental data wiring."
+skip = ["engine/v2/ops/native_registration.py"]
 mutate = [
     # ``n*.py`` keeps nightly.py and nightly_trigger.py (phase 6 slice 12)
     # owned and lands native_shadow_render.py (the spec_ns_b ops half of the
@@ -965,6 +973,7 @@ tests = [
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",
     "tests/test_v2_ops_computed_moves_store.py",
+    "tests/v2/ops/test_computed_moves_event_fragments.py",
     "tests/test_v2_ops_partition_consumer.py",
     "tests/test_v2_ops_coordinator_lease.py",
     "tests/test_v2_ops_effect_receipt_collision.py",
