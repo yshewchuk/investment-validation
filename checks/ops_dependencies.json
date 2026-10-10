@@ -21,11 +21,6 @@
   },
   "exceptions": {
     "forbidden": [],
-    "cycles": [
-      ["computed_moves_store", "incremental_data"],
-      ["forward_calendar_store", "incremental_data"],
-      ["incremental_data", "computed_moves_store"],
-      ["incremental_data", "forward_calendar_store"]
-    ]
+    "cycles": []
   }
 }
