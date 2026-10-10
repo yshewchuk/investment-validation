@@ -693,6 +693,9 @@ def test_native_registration_tests_use_the_supported_engine_mutation_matrix():
     """Top-level consumers run in the matrix; the pilot mutates engine paths only."""
     from tools import mutation_pilot
 
+    if not (mutation_pilot.REPO / ".git").exists():
+        # The mutation work copy is a clone minus .git; test_files() shells out to git ls-files.
+        pytest.skip("needs a git checkout (the mutation work copy has no .git)")
     config = mutation_pilot.load_config()
     assert "tests/v2/research/test_native_registration.py" in mutation_pilot.test_files(
         config, "ops_cli")

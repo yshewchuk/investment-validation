@@ -183,8 +183,8 @@ resolved plan/source/evaluation-recipe and applicable frozen-model hashes, exact
 `snapshot_id`, `holdout_as_of_month`, `random_membership_version` and
 `rolling_membership_version`. No latest-head resolution, caller population override,
 alternate arm, fitting, threshold search or evaluator callback is accepted.
-Membership stays in `foundation.experiment_holdouts`: random plus the as-of month
-and prior five calendar months, with ambiguous identities refused, never admitted.
+Membership stays in `foundation.experiment_holdouts`: random and rolling sets under
+its versioned as-of-month contract, with ambiguous identities refused, never admitted.
 Both sets are bound together; changing month, version, snapshot or winner cannot reset a decision's spend. The request digest identifies bytes, not a new decision.
 
 **Authority/ownership.** A proposed `tools/v2_final_holdout.py` leaf composes ops'
