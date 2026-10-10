@@ -92,7 +92,7 @@ either required table. Their current consumer is
 
 `nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package: no other package imports it and it has no production caller yet; `tests/v2/ops/test_nightly_session.py` is its only consumer. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is likewise internal: `nightly_trigger` does not call it yet and `tests/v2/ops/test_nightly_receipts.py` is its only consumer. `nightly_readiness` (legacy run-report readiness for a session, #564 slice 3; exports `LegacyReadiness`, `check_legacy_report`) is likewise internal, uncalled by `nightly_trigger`, with `tests/v2/ops/test_nightly_readiness.py` as its only consumer.
 
-<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, environment_identity, source_closure -->
+<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, environment_identity, source_closure, READ_ONCE, reclaim -->
 
 ## Consumers
 
