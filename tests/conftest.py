@@ -209,7 +209,7 @@ def pytest_runtest_teardown(item, nextitem):
 # subprocess through `Service`/`tests.ops_support.TEST_POLICY` (in
 # test_v2_data_import.py, test_v2_data_rebuild_rollback.py,
 # test_v2_ops_store_barrier.py, test_v2_ops_supervised_legacy.py,
-# test_v2_ops_nightly_completion.py, and the rest of test_v2_ops_runtime.py
+# tests/v2/ops/test_v2_ops_nightly_completion.py, and the rest of test_v2_ops_runtime.py
 # and test_v2_ops_executor_faults.py already covered above) each use their
 # own `tmp_path` catalog and their own short-lived child process with no
 # fixed path, port, or process-table assertion against another test's

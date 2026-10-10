@@ -14,9 +14,7 @@ This doc also covers `native_board_universe.py`: a pure, answer-free enumerator 
 
 **Planned package split.**
 The `design/ops-package-split` PR records the proposed module homes and move slices.
-The planned dependency direction is entrypoints → runtime → workflows → stores →
-{legacy, native, providers} → core, with no upward or peer-package imports.
-Before implementation, remove prerequisite cycles and migrate all callers per move; no compatibility modules or re-export shims.
+The planned dependency direction is entrypoints → runtime → workflows → stores → {legacy, native, providers} → core, with no upward or peer-package imports. Before implementation, remove prerequisite cycles and migrate all callers per move; no compatibility modules or re-export shims.
 
 ## Primary contracts and public interfaces
 `publication.publish_local` refuses an ineligible release with `PUBLICATION_REFUSED` and sorted `details.failed_gates` names from the manifest's `gates` whose `ok` value is `false`.
@@ -73,10 +71,7 @@ The forward-calendar worker loader wraps both provider-unit fetchers with `provi
 `native_score_batch.py`: the batch-shaped seam between the board universe
 (`native_board_universe.BoardRequest`) and
 `engine.v2.scoring.application.score_batch`. `assemble_score_batch_inputs`
-turns one release binding (`ScoringReleaseBinding`) plus a sequence of
-already-staged `NightlyEventInputs` into `dict[BoardRequest,
-tuple[ScoreRequest, NativeScoreInputs]]` plus a tuple of typed per-row
-refusals — a pure function; an empty `events` sequence is a legitimate no-op.
+turns one release binding (`ScoringReleaseBinding`) plus a sequence of already-staged `NightlyEventInputs` into `dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]]` plus a tuple of typed per-row refusals — a pure function; an empty `events` sequence is a legitimate no-op.
 `run_native_score_batch_worker(parameters, root)` resolves the release, builds
 `events.json` and `producer_refusals.json` from the pinned snapshot in the
 `projection` worker, then assembles, scores under `no_fit_guard()`, and writes
@@ -86,9 +81,7 @@ new eligible snapshot-pinned identity (`producer_mode="snapshot"`); direct
 worker callers default to staged `events.json`; snapshot mode derives `calendar_revision` from pinned earnings data, while staged mode uses its parameter.
 The production-default `legacy`/unpinned path stays a no-op; production uses `projection` (3 GiB, 2 CPUs). A producer exception fails the native attempt
 before writing that attempt's event/refusal or score outputs; reused-root files
-may remain as untrusted residue. The worker job has five bounded attempts,
-with delays of 30s, 2m, 10m and 30m. Worker production cannot stall
-supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.
+may remain as untrusted residue. The worker job has five bounded attempts, with delays of 30s, 2m, 10m and 30m. Worker production cannot stall supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.
 Snapshot parameters raise `VALIDATION_FAILED` for an unsupported `producer_mode` or, in snapshot mode, a missing or incomplete `catalog_path`/`objects_root` pair.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
@@ -184,22 +177,7 @@ walk; runtime parity submission already binds both jobs directly. No
 submission path reads either edge (the rule Part 4 established for
 `computed_moves_refresh`'s own node).
 
-- **`native.parity_inputs.legacy_parity_rows(score_document: Mapping[str, Any]) ->
-  dict[str, dict]`** (new, this package). Keys the legacy `score.json`
-  document's own `"rows"` array by
-  `engine.v2.ops.decision_validation.population_key`'s `"ticker|strategy|
-  event_date"` format — REUSED, not re-derived and not re-added: this
-  public function already exists (`decision_replay.py`'s own population
-  comparison already imports it), and it is the identical three-field
-  format `engine.v2.serving.native_render.native_row_key` already derives
-  for a native `ScoreRecord` (that module's own docstring: `"the native
-  twin of bridge._population_key"`; both bridge and legacy adapter now use
-  `foundation.score_population.population_key`, while parity retains
-  `decision_validation`'s existing public helper). Pure: no
-  filesystem, no clock, and — the point of putting this here rather than
-  in the composing script below — no import of `engine.v2.serving` (a
-  layer-7.0 peer of `engine.v2.ops`, per the root doc's layer table;
-  `checks/import_layers.py` would refuse that edge). A `score_document`
+- **`native.parity_inputs.legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]`** (new, this package). Keys legacy `score.json` rows by complete `ticker|strategy|event_date` identity using the shared `engine.v2.foundation.score_population.population_key`, also used by bridge, adapter, and replay. The native `native_row_key` derives its corresponding identity from event reference and resolved request. Pure: no filesystem, clock, or `engine.v2.serving` import (a peer layer). A `score_document`
   with no `"rows"` key returns `{}` (not a refusal —
   `native_parity_handler`'s existing `_refuse_empty_inputs` already turns
   an empty `legacy_rows` into `VALIDATION_FAILED` downstream, so this
@@ -384,7 +362,7 @@ submission path reads either edge (the rule Part 4 established for
   `f"{ticker}|{strategy}|{event_date.isoformat()}|{session}"`) down to the
   3-field `population_key` format `legacy_parity_rows` already uses, by
   splitting on `"|"` into exactly 4 parts and calling
-  `engine.v2.ops.decision_validation.population_key({"ticker": ticker,
+  `engine.v2.foundation.score_population.population_key({"ticker": ticker,
   "strategy": strategy, "event_date": event_date})` — REUSING
   `population_key`'s own join format rather than string-concatenating a
   fourth time, so the two sides can never silently drift onto two
@@ -565,6 +543,32 @@ The report is replaced atomically after capture; a report-write failure leaves t
 | `serve --once` reaches idle | Returns; this is not a success receipt. The trigger checks its submitted DAG jobs, while native batch/parity remain separate sidecar jobs. |
 | Source availability preflight receives readable evidence | Still refuses: no registered positive EOD verifier exists. Scheduling readiness does not grant EOD admission. |
 
+### Nightly session identity (`nightly_session.py`, slice 1 of #564)
+
+Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` receipts keep their meaning. `session_key = H(version, as_of, scope, selection_identity, catalog_identity)` and `run_id = H(session_key, generation)`. Callers cannot supply the session key or choose the generation an ordinary call or rerun allocates. An ordinary call resumes the one derived session; only an explicit rerun allocates a generation, so a deployed-code change alone never does. State is one per-session document under the supplied root: `revision`, plus per generation `run_id`, `reason` (`initial`/`rerun`), `status` (`allocated`/`started`) and the rerun's `invalidation` step names. Updates use revision-based compare-and-swap, serialize per session, and publish the document atomically.
+
+| Condition | Outcome |
+|---|---|
+| First ordinary call | Creates generation 1 `allocated`; later calls return that state and never allocate. |
+| Explicit rerun | Appends generation n+1 and its invalidation cone in one swap: the intent is the allocated generation. A crash before the swap records nothing and the request repeats; after it, a repeated rerun reattaches to that still-`allocated` generation. Once started, a rerun allocates the next. The caller's lock decides when the older owner is gone. |
+| Concurrent callers | One swap wins. A loser re-reads: ordinary calls return the winner's state, reruns reattach to the winner's generation. Exhausting the bounded swap retries raises retryable `LEASE_LOST`. A returned state is the revision read; a later swap makes it stale. |
+| Superseded generation marks itself started | `CHECKPOINT_INCOMPATIBLE`. |
+| Unparseable JSON, wrong key, run_id or numbering | `INTEGRITY_FAILED`, never treated as absent (that would restart numbering). Another schema is `CHECKPOINT_INCOMPATIBLE`; the operator moves it aside. Old per-date `<as_of>.json` receipts (another path) are never read: no migration, no completed step inferred. |
+| Empty or malformed identity field, or a rerun of a session with no state | `INVALID_REQUEST`; nothing is written. |
+
+### Nightly step receipts (`nightly_receipts.py`, slice 2 of #564)
+
+Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `run_id` beside the session state, usable only for the active `started` generation (else `CHECKPOINT_INCOMPATIBLE`). Before an effect a step records an `intent`: its request digest and the effect it will produce, a `catalog_job` (deterministic job id), an `artifact` (absolute path and sha256, published atomically) or an `external` effect that cannot be probed. `complete_step` proves a `catalog_job` or `artifact` effect itself (an `external` effect cannot be probed, so the caller's assertion alone marks it) and then marks the step `succeeded`; a succeeded step is never reset, so resume skips it. Reconciliation probes the effect itself, never the clock or the mutable head. Contract: updates are serialized with session transitions, so a rerun cannot interleave; receipts are never cached; a receipt write is atomic, so a crash before it leaves the previous document (the step stays at its earlier state; `begin_step`/`complete_step` are idempotent and reconciliation re-proves the effect) and a crash after it leaves the new one.
+
+| Condition (crash points included) | Outcome |
+|---|---|
+| No receipt, or intent with the job row or artifact file absent (submits and publishes are atomic, so a crash left nothing) | `not_started`; the caller repeats the effect under the same deterministic identity. |
+| Intent and the effect proven (job `succeeded`, artifact hash matches): the crash fell between effect and receipt | `completed`; the receipt is adopted. |
+| Intent and the effect unproven: job live, failed, cancelled or blocked, artifact with other bytes, or any `external` effect | Uncertain: `CHECKPOINT_INCOMPATIBLE`, nothing written. It never auto-repeats an external effect; a live job is reattached by its owner, anything else needs a rerun generation. |
+| Succeeded receipt whose effect no longer holds | `INTEGRITY_FAILED`. |
+| Same step with another request digest or effect (changed inputs) | `IDEMPOTENCY_CONFLICT`; a rerun generation is the way forward. |
+| `complete_step` with no intent or an incomplete effect; malformed step, request digest (also in `reconcile_step`) or effect (an artifact needs a 64-hex sha256; no ref may contain NUL; a stored effect failing this is `INTEGRITY_FAILED`); a `catalog_job` probe (`complete_step`, `reconcile_step`) without the catalog connection | `INVALID_REQUEST`. Unparseable or foreign receipt files: `INTEGRITY_FAILED` / `CHECKPOINT_INCOMPATIBLE`. |
+
 **Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`), resolves the carried set from that same pinned snapshot, and filters uncarried event tickers before expanding the legacy population across every `STRATEGY_IDS` member. Each excluded candidate ticker is recorded in sorted `candidate_exclusions` evidence with `reason_code: UNCARRIED_TICKER` and sorted `missing_tables`; that evidence is stored in the plan and contributes to `plan_hash`. The filtered population records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date). `_legacy_params` derives the supervised `legacy_score` ticker parameter from those keys when exclusions exist; the native score-batch sidecar uses that score job's ticker parameter for `scan_forward_board_requests` and `board_requests`, so both candidate enumerators see the same eligible event tickers. Missing or unreadable carried-set tables refuse planning with `INPUT_CHANGED` and the source reader's code in `details.data_code`. The ordinary live legacy board remains unchanged. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires every planned key to be observed under the shared score-population rule. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
 
 | Condition | Outcome |
@@ -576,17 +580,12 @@ The report is replaced atomically after capture; a report-write failure leaves t
 | same snapshot and `as_of` | identical population and scope hash; no provider or network call |
 
 A generated population comes from the same snapshot that is scored, so it checks coverage (every upcoming event in the data got scored or refused) but cannot detect a hole in the events themselves; qualification runs keep the file override for an independent expectation.
-`nightly_raw_rows.scan_forward_board_requests` enumerates pinned forward events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_version`.
-`nightly_raw_rows.scan_calendar_row(repository, snapshot, key, **staged)` returns `CalendarRowInputs(calendar_revision, calendar_row)` with the matched event row ID and the pinned earnings-events dataset version, not the snapshot calendar placeholder.
+`nightly_raw_rows.scan_forward_board_requests` enumerates pinned forward events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_version`. `nightly_raw_rows.scan_calendar_row(repository, snapshot, key, **staged)` returns `CalendarRowInputs(calendar_revision, calendar_row)` with the matched event row ID and the pinned earnings-events dataset version, not the snapshot calendar placeholder.
 These two earnings-event reads take their result bound from the pinned manifest's selected-population bound for the exact selection — the one shared bound the scan enforces before any row streams — so the broad forward enumeration carries no result ceiling of its own, and an empty selection is simply a zero-row query with a positive batch limit; this module's exact-key calendar read now takes that same shared population bound instead of its own result-row cap, and explicit local ceilings stay only where they encode the caller's own operational requirement: `nightly_calendar_inputs`, `nightly_quote_rows`, `computed_moves_store` and `forward_calendar_store`, each keeping its own batch limit and every other retained guard, deadline and invariant unchanged. Both native readers publish catalog refresh output only at the final catalog commit. A source-scan refusal in either reader or a forward-calendar provider refusal before that commit prevents partial catalog publication; successful forward-calendar provider receipts may remain cached.
-Ordinary repository scan validation and failure behavior still apply.
-Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validation covers shape, not strategy or sourcing.
-No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged/key/identity input → `INVALID_REQUEST`; repository failures propagate.
-`source_availability.verify_eod_availability(conn, store, repository, snapshot, *, table_name, session_date, decision_at)` validates canonical clocks, exact pinned identity and catalog-bound candidate receipt bytes, then always refuses; no source/finality validator is installed, so positive EOD admission remains unavailable.
-Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
-Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
+Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validation covers shape, not strategy or sourcing. No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged/key/identity input → `INVALID_REQUEST`; repository failures propagate.
+`source_availability.verify_eod_availability(conn, store, repository, snapshot, *, table_name, session_date, decision_at)` validates canonical clocks, exact pinned identity and catalog-bound candidate receipt bytes, then always refuses; no source/finality validator is installed, so positive EOD admission remains unavailable. Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify. Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
 
-**Cutover PR-6: 4a.2 helpers and 4b producer.** `nightly_raw_row_producer.build_native_score_batch_events` runs in the `native_score_batch` worker over its pinned snapshot, never in `Service.tick()`. Snapshot reads remain SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
+**Cutover PR-6: 4a.2 helpers and 4b producer.** `nightly_raw_row_producer.build_native_score_batch_events` runs in the `native_score_batch` worker over its pinned snapshot, never in `Service.tick()`. Snapshot reads remain SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260). The raw SPY history is reused across rows only within one producer build, keyed by snapshot ID, pinned `daily_market` version and scan window; only the existing bounded query result is retained, and the cache is released when the build returns.
 
 `nightly_calendar_inputs.py` exposes `scan_decision_calendar(repository, snapshot, *, decision_session, event_through) -> CalendarSessions`, `scan_candidate_expiries(repository, snapshot, key, *, decision_session) -> tuple[str, ...]`, and `scan_calendar_row_inputs(repository, snapshot, key, *, decision_session, calendar) -> CalendarRowInputs`. The calendar source is the pinned SPY price series through the decision session; its observed maximum stays distinct from projected sessions. Candidate scans use one exact option-chain session, and `generation.resolve_expiry` applies the native strategy policy. Spot is the finite positive raw close on the exact decision session. The helper passes the independent planned exit and resolved expiry into `scan_calendar_row`; the returned calendar revision is the matched pinned earnings-events dataset revision.
 
@@ -916,7 +915,7 @@ waits without submitting until its paired succeeded inputs are ready.
   Classification validates unique nonempty requested keys, returned/empty/
   unsupported subsets and nonnegative observed quota before returning an outcome;
   invalid values retain `INVALID_REQUEST`. No I/O, cache, transaction, partial
-  write or retry occurs in the leaf; equal inputs give equal outcomes; retry/coverage policy remains in `incremental_data`.
+  write or retry occurs in the leaf; equal inputs give equal outcomes; retry/coverage policy remains in `incremental_data`, which imports neither refresh store: `calendar_moves_jobs` owns their callback loaders.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).

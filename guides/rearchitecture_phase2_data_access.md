@@ -917,8 +917,8 @@ Suggested test files:
 - `tests/test_v2_data_repository.py` — D05–D10;
 - `tests/test_v2_data_atomicity.py` — D11, D12, D16 synthetic controls;
 - `tests/test_v2_data_legacy_adapter.py` — D02, D13–D15;
-- `tests/test_v2_ops_nightly_completion.py` — D18–D20 (ops-owned; the Phase 1
-  coverage suite picks it up by its `test_v2_ops_` prefix);
+- `tests/v2/ops/test_v2_ops_nightly_completion.py` — D18–D20 (ops-owned; the Phase 1
+  coverage suite includes this relocated test explicitly);
 - `checks/v2_coverage_ratchet.py` (`--profile phase2`) and its committed baseline —
   run the fixed Phase 2 suite, bind results to the exact code hash, and enforce
   the per-package coverage ratchet;

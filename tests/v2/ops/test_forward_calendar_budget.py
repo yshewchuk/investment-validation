@@ -17,8 +17,8 @@ from engine.v2.ops import (
     catalog as catalog_module,
 )
 from engine.v2.ops import (
+    calendar_moves_jobs,
     forward_calendar_store,
-    incremental_data,
     provider_budget,
     providers,
     worker,
@@ -82,7 +82,7 @@ def harness(tmp_path, monkeypatch):
         root=tmp_path, catalog_path=tmp_path / "ops.sqlite", calls=[], connections=[],
         session="time-after-hours", fail_source=None, claims=0,
     )
-    monkeypatch.setattr(incremental_data, "SystemClock", lambda: clock)
+    monkeypatch.setattr(calendar_moves_jobs, "SystemClock", lambda: clock)
     monkeypatch.setattr(forward_calendar_store, "SystemClock", lambda: clock)
 
     def guard_connect(path, **kwargs):

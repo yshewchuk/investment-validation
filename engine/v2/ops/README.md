@@ -90,6 +90,8 @@ builder returns sorted `UNCARRIED_TICKER` evidence for candidates missing from
 either required table. Their current consumer is
 `tests/v2/ops/test_carried_set.py`; this slice has no production caller.
 
+`nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package: no other package imports it and it has no production caller yet; `tests/v2/ops/test_nightly_session.py` is its only consumer. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is likewise internal: `nightly_trigger` does not call it yet and `tests/v2/ops/test_nightly_receipts.py` is its only consumer.
+
 <!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, environment_identity, source_closure -->
 
 ## Consumers
@@ -171,7 +173,7 @@ because that file is gated byte-for-byte against a frozen Phase 0 baseline)
 is installed:
 
 ```text
-python3 -m pytest -q -p no:cacheprovider -n auto --dist loadgroup tests/test_v2_*.py tests/test_checks_phase2_gate.py
+python3 -m pytest -q -p no:cacheprovider -n auto --dist loadgroup tests/v2/ops/ tests/v2/integration/test_checks_phase2_gate.py
 ```
 
 Measured on this host (12 cores, shared with other agents -- times vary with
@@ -181,8 +183,8 @@ skipped, every time, no parallel-only failures. Re-run three times after any
 change to the grouping in tests/conftest.py to catch a new parallel-safety
 bug before it lands.
 
-`-n auto --dist loadgroup` is recommended ONLY for `tests/test_v2_*.py
-tests/test_checks_phase2_gate.py` above. The LEGACY suite
+`-n auto --dist loadgroup` is recommended ONLY for `tests/v2/ops/
+tests/v2/integration/test_checks_phase2_gate.py` above. The LEGACY suite
 (`tests/test_calendar.py`, `tests/test_dashboard.py`, `tests/test_features.py`;
 274 tests, ~100s serial, per main's committed data) runs SERIALLY, full
 stop -- it is not part of the v2 command above, needs the real data trees
@@ -215,7 +217,7 @@ Playwright browser) and are marked `@pytest.mark.xdist_group("serial")` (or
 worker instead of letting two copies collide on the same host resource. See
 `tests/conftest.py` for the exact grouped files and the reason for each.
 Without `pytest-xdist` installed, the plain serial command still works
-unchanged: `python3 -m pytest -q tests/test_v2_*.py tests/test_checks_phase2_gate.py`.
+unchanged: `python3 -m pytest -q tests/v2/ops/ tests/v2/integration/test_checks_phase2_gate.py`.
 
 The one real end-to-end Phase 2 check — a fresh coverage measurement of the
 REAL registered suite against the REAL tree, fed into the REAL gate, proving
@@ -230,7 +232,7 @@ python3 checks/rearchitecture_phase2_gate.py --coverage /tmp/p2cov.json --json
 
 Today this is red with `MISSING_EVIDENCE` for D13/D14 (no real test file yet)
 and D15/D16/D19 (tier-2 rows still needing a real receipt), and clean for
-every other registered row. `tests/test_checks_phase2_gate.py`'s own smoke
+every other registered row. `tests/v2/integration/test_checks_phase2_gate.py`'s own smoke
 test only checks the registry against the real tree cheaply (file existence
 plus one `pytest --collect-only`, a few seconds) — it does not run this
 measurement.
@@ -314,7 +316,7 @@ name refuses cleanly with `VALIDATION_FAILED`
 `sqlite3.IntegrityError`. `tests/test_v2_ops_effect_receipt_collision.py`
 proves this end to end through a real `Service` with real subprocess
 workers — the gap every direct-call test of the coordinator effect functions
-leaves open — and `tests/test_v2_ops_render_parity.py`'s
+leaves open — and `tests/v2/ops/test_v2_ops_render_parity.py`'s
 `test_every_output_binding_names_an_output_its_producer_actually_registers`
 checks every `#output_name` binding against the set its producer kind
 actually registers.

@@ -3,7 +3,7 @@ committed ``legacy_score`` jobs (no subprocess, no legacy tree, no provider
 calls: every job is driven straight through the real submit/claim/
 ``commit_attempt`` machinery with a synthetic ``score.json`` artifact
 registered as its output, mirroring
-``tests/test_v2_ops_nightly_completion.py``'s ``_succeed_parent`` pattern),
+``tests/v2/ops/test_v2_ops_nightly_completion.py``'s ``_succeed_parent`` pattern),
 read back as plain rows plus the snapshot binding.
 
 The comparison itself (``compare_records``, tolerances, ``ComparisonReceipt``)
@@ -29,7 +29,7 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from tests.ops_support import catalog as ops_catalog
 from tests.ops_support import sample
-from tests.test_checks_phase2_gate import _snapshot_ref
+from tests.v2.integration.test_checks_phase2_gate import _snapshot_ref
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 

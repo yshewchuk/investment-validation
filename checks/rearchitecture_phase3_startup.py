@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """L09 evidence producer -- guide §9 row L09.
 
-Real subprocess (mirroring ``tests/test_v2_serving_api.py``'s own
+Real subprocess (mirroring ``tests/v2/serving/test_v2_serving_api.py``'s own
 ``test_no_scoring_or_provider_import_after_startup_and_after_a_request``
 convention -- a separate process is the only way this check is meaningful,
 since ``sys.modules`` in THIS process is already polluted by everything the
@@ -51,7 +51,7 @@ from engine.v2.foundation import to_document  # noqa: E402
 
 KIND = "no_scoring_startup_negative_control"
 
-#: Same list ``tests/test_v2_serving_api.py`` already established as the
+#: Same list ``tests/v2/serving/test_v2_serving_api.py`` already established as the
 #: real forbidden surface for this read path.
 _FORBIDDEN_MODULE_SUBSTRINGS = ("engine.score", "engine.v2.ops", "engine.data.pulls",
                                 "engine.data.sources", "yfinance")

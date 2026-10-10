@@ -39,10 +39,57 @@ Bumped again to v3 by two independent same-day changes, merged together:
   would otherwise merge as permanently-uncovered ``engine.v2.serving`` source.
   ``phase1_suite()`` now also picks up ``tests/test_v2_serving_*.py``.
 
+Bumped to v4: ``tests/test_v2_ops_nightly_completion.py`` moved under
+``tests/v2/ops/``, where the flat ``test_v2_ops_*.py`` root glob no longer
+matches it. The relocated path is explicitly retained so a moved file cannot
+silently drop out of the fixed suite and make its package look less covered.
+The v4 baseline inventory also corrects the stale path recorded for
+``tests/v2/foundation/test_v2_ops_foundation.py``; that selector entry was
+already explicitly present in ``phase1_suite()`` before v4, so v4 only
+refreshed the committed file list, not the suite's composition.
+
+Bumped to v5: ``tests/v2/ops/test_v2_ops_native_parity_pairing.py`` moved under
+``tests/v2/ops/`` exactly as ``test_v2_ops_nightly_completion.py`` did before
+it, so the flat ``test_v2_ops_*.py`` root glob no longer matches it. The
+relocated path is named explicitly for the same reason: a moved file must not
+silently drop out of the fixed suite and leave ``engine.v2.ops`` looking less
+covered. As with v4 this refreshes the declared file list (and the measurement
+identity it feeds); the package coverage counts stay the v4 measurement's, not
+a fresh run.
+
+Bumped to v6 (merge with main): ``tests/v2/ops/test_cli_rescore.py`` joined
+the fixed suite from main, so the declared file list and measurement identity
+refresh again; the package counts remain the v5 measurement's.
+
+Bumped to v7: ``tests/test_v2_ops_engineering.py`` moved under
+``tests/v2/ops/``, where the flat ``test_v2_ops_*.py`` root glob no longer
+finds it. The relocated path remains explicitly selected for the same reason
+as the earlier moves: a moved file must not silently drop out of the fixed
+suite and leave ``engine.v2.ops`` looking less covered. As with v5/v6 this
+refreshes the declared file list (and the measurement identity it feeds);
+the package counts remain the v6 measurement's, not a fresh run.
+
+Bumped to v8: current ``origin/main`` renamed the native-parity test to
+``tests/v2/ops/test_native_parity_pairing.py``, so the fixed selector path
+-- and the measurement identity it feeds -- change again; the package
+counts remain from the v6 measurement and are not freshly measured.
+
+Bumped to v9 (merge with main): ``origin/main`` added the relocated
+``tests/v2/ops/test_forward_calendar_store.py`` to the fixed selector list,
+changing the selected inventory and the measurement identity it feeds; as
+with v5-v8 the package counts remain the historical measurement's, not a
+fresh run.
+
+Bumped to v10 (merge with main): ``origin/main`` added the relocated
+``tests/v2/ops/test_v2_ops_runner_onboarding.py`` to the fixed selector list,
+which this merge keeps alongside the PR's existing relocated-ops paths; as
+with v5-v9 the inventory and measurement identity refresh while the package
+counts remain historical, not a fresh run.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
-that currently exists on disk, plus ``tests/test_v2_ops_engineering.py``
+that currently exists on disk, plus ``tests/v2/ops/test_v2_ops_engineering.py``
 (phase-2 guide §12.1). ``suite_version`` is a hash of that exact file list, so
 a registry change that adds or removes a covered file invalidates the
 committed baseline (``SUITE_DRIFT``) rather than silently comparing two
@@ -130,7 +177,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v3"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v10"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
@@ -336,7 +383,7 @@ def phase2_suite(root=ROOT, registry=None):
     """The fixed, existing test files: every registry test that exists, plus engineering."""
     registry = phase2_load_registry() if registry is None else registry
     declared = {t for row in registry.values() for t in row.get("tests", [])}
-    declared.add("tests/test_v2_ops_engineering.py")
+    declared.add("tests/v2/ops/test_v2_ops_engineering.py")
     return sorted(rel for rel in declared if (root / rel).is_file())
 
 
@@ -532,16 +579,16 @@ PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.0"
 #: exercises the Phase 3 read API / bridge / projections / UI-facing server
 #: code, kept only if it exists on disk.
 PHASE3_FIXED_SUITE = (
-    "tests/test_v2_serving_api.py",
+    "tests/v2/serving/test_v2_serving_api.py",
     "tests/test_v2_serving_bridge.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
-    "tests/test_v2_serving_publication_binding.py",
+    "tests/v2/serving/test_v2_serving_publication_binding.py",
     "tests/test_v2_dashboard_preview.py",
     "tests/test_v2_dashboard_browser.py",
-    "tests/test_v2_dashboard_integration.py",
+    "tests/v2/dashboard/test_v2_dashboard_integration.py",
     "tests/test_checks_phase3_gate.py",
-    "tests/test_v2_dashboard_publish.py",
+    "tests/v2/dashboard/test_v2_dashboard_publish.py",
 )
 
 

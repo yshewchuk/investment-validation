@@ -56,7 +56,7 @@ can turn green. Do not substitute historical receipt ids or hand-written logs.
   `tests/test_v2_dashboard_preview.py`); never run against a real accepted
   release by this task.
 - `python3 -m engine.v2.serving.api` — the read API (P3-2). **Exists,
-  verified against a synthetic `serving.sqlite`** (`tests/test_v2_serving_api.py`);
+  verified against a synthetic `serving.sqlite`** (`tests/v2/serving/test_v2_serving_api.py`);
   not run against a real projected release by this task.
 - `tools/v2_dashboard_project.py --bundle-format legacy` — the offline
   projection coordinator, including the REAL legacy render-bundle adapter
@@ -78,7 +78,7 @@ can turn green. Do not substitute historical receipt ids or hand-written logs.
   verify_projection_binding` refuses a tampered or stale one. Proven end to
   end (real synthetic serving candidates, a real synthetic ops catalog, a
   real `engine.v2.serving.api` app over real HTTP) by
-  `tests/test_v2_serving_publication_binding.py`. See step 3 for what an
+  `tests/v2/serving/test_v2_serving_publication_binding.py`. See step 3 for what an
   operator actually runs — there is still no single CLI flag for it, only
   the `engine.v2.ops` job-graph primitives the test exercises.
 
@@ -141,7 +141,7 @@ automatically").
 ## 3. Publish through the existing fenced workflow (shadow target)
 
 **Status: EXISTS (P3-1c, merged at `3037387`), verified synthetically by
-`tests/test_v2_serving_publication_binding.py`; UNVERIFIED against a real
+`tests/v2/serving/test_v2_serving_publication_binding.py`; UNVERIFIED against a real
 accepted release by this task.** The fenced publish mechanism itself is real
 and proven end to end over real HTTP. What is still missing is a convenience
 CLI flag — today an operator (or the coordinator script that will replace
@@ -164,7 +164,7 @@ job's `input_bindings` under the name `"projection_binding.json"` — the same
 mechanism `bundle.tar`/`finality.json`/`selfcheck.json`/`engineering_gate.json`
 already use (`engine.v2.ops.input_bindings.resolve_and_record`,
 `engine.v2.ops.effects_graph.publication_effect`; see
-`tests/test_v2_serving_publication_binding.py::
+`tests/v2/serving/test_v2_serving_publication_binding.py::
 test_publication_effect_binds_the_operator_supplied_projection_and_publishes`
 for the exact call sequence — a parent job producing a named
 `"projection_binding"` output, then a `publication` job whose
@@ -206,7 +206,7 @@ V2_DASHBOARD_TOKEN=$V2_DASHBOARD_TOKEN /usr/bin/python3 -m engine.v2.serving.api
 Both refuse a non-loopback `--host` without `--allow-non-loopback`, and both
 refuse to start with no `V2_DASHBOARD_TOKEN` set. Neither command's output
 ever includes the token (`engine/v2/dashboard/preview.py`,
-`engine/v2/serving/api.py`, `tests/test_v2_serving_api.py`).
+`engine/v2/serving/api.py`, `tests/v2/serving/test_v2_serving_api.py`).
 
 The launcher also takes two explicitly named roots, each distinct from
 `--release-root` and never inferred from it: `--model-release-root` backs
@@ -279,7 +279,7 @@ independently servable); UNVERIFIED against a real release by this task.**
   newer one (`newest = MAX(occurrence) WHERE published_at IS NOT NULL`), so
   a rollback is NOT literally republishing the prior release id at its old
   occurrence. It is the same restage-under-a-fresh-id path guide §5.5 names
-  and `tests/test_v2_ops_same_session_replan.py`/`tests/test_v2_serving_
+  and `tests/v2/ops/test_v2_ops_same_session_replan.py`/`tests/test_v2_serving_
   publication_binding.py`'s R1/R2 tests prove: re-run step 3's publish with
   a FRESH occurrence whose staged content (files, and its own
   `projection_binding.json`) equals the prior release's — the prior
