@@ -137,7 +137,9 @@ history identities before any outcome access. Candidates are the same ticker's
 events in `[history_start, min(target day, decision_session))`.
 
 Every candidate query is planned before any outcome scan, using the same
-fragment planner as Repository. Its entire surviving membership must be one
+fragment planner as Repository. Preflight loads fragment metadata once and
+reuses each planned bound for query construction, avoiding a second bound lookup.
+Its entire surviving membership must be one
 inspected singleton with the exact ticker/day key, partition and time bounds.
 The resolved committed catalog/manifest identity is the metadata trust anchor;
 this trusts native producer inspection, not adversarially forged metadata.

@@ -8,7 +8,7 @@ from engine.v2.features.panel_math import history_features
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.experiment_holdouts import _calendar_date
 from engine.v2.research.experiment_population import load_population
-from engine.v2.research.prediction_inputs import _parse_target, _target_query
+from engine.v2.research.prediction_inputs import _parse_target, _target_filters, _target_query
 
 _CONTEXT = ("snapshot_id", "holdout_as_of_month", "random_membership_version",
             "rolling_membership_version", "population_use")
@@ -30,9 +30,9 @@ def _plans(repository, snapshot, candidates, contract):
     records = repository.fragment_records(snapshot, "computed_moves")
     plans = []
     for event in candidates.itertuples(index=False):
-        request = _target_query(repository, snapshot, contract, event)
+        keys, interval = _target_filters(event)
         population = query_planner.plan_scan_population(
-            contract, records, key_filter=request.key_filter, time_interval=request.time_interval)
+            contract, records, key_filter=keys, time_interval=interval)
         day = event.event_date.date().isoformat()
         key = (event.ticker, day)
         if len(population.records) != 1 or population.row_count != 1:
@@ -42,6 +42,8 @@ def _plans(repository, snapshot, candidates, contract):
                 or record.partition_key != event.ticker
                 or record.time_min != day or record.time_max != day):
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "history outcome isolation cannot be proven")
+        request = _target_query(repository, snapshot, contract, event,
+                                population_bound=population.row_count)
         plans.append((event, request, record))
     return plans
 

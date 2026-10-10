@@ -9,15 +9,23 @@ from engine.v2.data import errors
 from engine.v2.research.experiment_population import load_population
 
 
-def _target_query(repository, snapshot, contract, event):
-    """The shared exact ticker/day query; predicates alone do not isolate bytes."""
+def _target_filters(event):
+    """Shared exact ticker/day selection for planning and query construction."""
     day = event.event_date.date()
-    version = snapshot.table_versions["computed_moves"]
     keys = (KeyPredicate(column="ticker", operator="eq", values=(event.ticker,)),)
     interval = TimeInterval(column="event_date", start_inclusive=day.isoformat(),
                             end_exclusive=(day + timedelta(days=1)).isoformat())
-    bound = repository.scan_population_bound(snapshot.snapshot_id, table_name="computed_moves",
-        table_contract_ref=version.table_contract_ref, key_filter=keys, time_interval=interval)
+    return keys, interval
+
+
+def _target_query(repository, snapshot, contract, event, *, population_bound=None):
+    """The shared exact ticker/day query; predicates alone do not isolate bytes."""
+    version = snapshot.table_versions["computed_moves"]
+    keys, interval = _target_filters(event)
+    bound = population_bound
+    if bound is None:
+        bound = repository.scan_population_bound(snapshot.snapshot_id, table_name="computed_moves",
+            table_contract_ref=version.table_contract_ref, key_filter=keys, time_interval=interval)
     return DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
         columns=("event_date", "realized_move_pct", "available_as_of_date", "skipped"), key_filter=keys,
         time_interval=interval, order_by=contract.primary_key,

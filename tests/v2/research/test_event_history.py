@@ -9,6 +9,7 @@ from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research.event_history import load_event_history
+from engine.v2.research.prediction_inputs import _target_query, load_prediction_targets
 from tests.data_scan_support import (
     catalog_and_store,
     commit_tables,
@@ -274,5 +275,57 @@ def test_exact_snapshot_is_required_and_late_failure_is_not_retried(tmp_path, mo
         with pytest.raises(DataError, match="OBJECT_CORRUPT"):
             _read(repository, snapshot, target)
         assert len(calls) == 2
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("reader", ["history", "prediction"])
+def test_history_reuses_preflight_bound_and_prediction_keeps_lookup(tmp_path, monkeypatch, reader):
+    first, second, target = _event("2023-01-02"), _event("2023-02-02"), _event("2024-06-20")
+    conn, repository, snapshot = _commit(tmp_path, [first, second, target], [_move(first), _move(second)])
+    bounds, metadata = [], []
+    original_bound, original_records = repository.scan_population_bound, repository.fragment_records
+
+    def bound(snapshot_id, **kwargs):
+        if kwargs["table_name"] == "computed_moves":
+            bounds.append(kwargs)
+            assert reader == "prediction", "history repeated its planned population lookup"
+        return original_bound(snapshot_id, **kwargs)
+
+    def records(snapshot_ref, table_name):
+        if table_name == "computed_moves":
+            metadata.append(table_name)
+        return original_records(snapshot_ref, table_name)
+
+    monkeypatch.setattr(repository, "scan_population_bound", bound)
+    monkeypatch.setattr(repository, "fragment_records", records)
+    try:
+        if reader == "history":
+            assert _read(repository, snapshot, target)["features"]["n_prior"] == 2
+            assert bounds == [] and metadata == ["computed_moves"]
+        else:
+            result = load_prediction_targets(repository, snapshot, as_of_month=MONTH,
+                event_ids=[first["event_id"], second["event_id"]])
+            assert len(result) == len(bounds) == 2
+        assert all(q.max_result_rows == 1 for name, q in repository.scans if name == "computed_moves")
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("bound", [0, 1, 3])
+def test_supplied_target_bound_preserves_query_limits_without_lookup(tmp_path, monkeypatch, bound):
+    target = _event("2024-06-20")
+    conn, repository, snapshot = _commit(tmp_path, [target], [_move(target)])
+
+    def forbidden_lookup(*args, **kwargs):
+        pytest.fail("supplied population bound must not trigger another lookup")
+
+    monkeypatch.setattr(repository, "scan_population_bound", forbidden_lookup)
+    try:
+        query = _target_query(repository, snapshot, COMPUTED_MOVES_CONTRACT,
+                              pd.Series(target), population_bound=bound)
+        assert query.max_result_rows == min(bound, 2)
+        assert query.max_batch_rows == max(1, min(bound, 2))
+        assert repository.scans == []
     finally:
         conn.close()
