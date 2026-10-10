@@ -159,7 +159,7 @@ triple (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6") is valid and
 reused unchanged across every strategy sharing that triple; a strategy
 that does not name a superset-only key in its `feature_names` simply
 never selects it (`../scoring/ARCHITECTURE.md` "Inputs"). Its
-pinned-snapshot dependencies, every one always made: `scan_daily_state_inputs`
+pinned-snapshot inputs are `scan_daily_state_inputs`
 (`key.ticker`); `computed_moves` (`key.ticker`, restricted to rows where
 `event_date < min(key.event_date, decision_session)` and
 `available_as_of_date <= decision_session`, feeding `panel_math`;
@@ -174,9 +174,13 @@ as a zero move; the bounds are on data dates only, never on
 `computed_at`, the row's own calculation timestamp: a backfilled or
 corrected row remains eligible when its outcome was available by the decision,
 even if it was written later);
-a new bounded
-`daily_market` read for the fixed ticker `"SPY"` (feeding `regime`, not
-reused from `scan_daily_state_inputs` — a different, derived shape);
+the bounded `daily_market` history for fixed ticker `"SPY"` (feeding `regime`,
+not reused from `scan_daily_state_inputs` — a different, derived shape). A
+direct `scan_panel_row` call without a cache reads this history for that call;
+the producer may pass a cache to reuse it across rows only when snapshot ID,
+pinned `daily_market` version, and scan window match. `_shared_panel_rows`
+creates this cache for one producer build, retains only the bounded result, and
+releases it when the build returns;
 `price_history_query.get_price_series`, as of `decision_session` — its
 selected source date sets `runup_asof`, one of the four `panel_anchor`
 contributors above; when no `STR-RUNUP` history resolves, `runup_asof`
@@ -209,7 +213,7 @@ scan validation and failures propagate.
 | `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
 | `price_history` has no row for this ticker | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
-| retry with the same pinned snapshot/key/`decision_session`/`history_start` | identical result; no cache beyond the pinned reads themselves, no write, nothing to roll back |
+| retry with the same pinned snapshot/key/`decision_session`/`history_start` | identical result; optional SPY reuse is limited to a caller-supplied build-local cache with the same snapshot/version/window key; no write, nothing to roll back |
 
 `regime.add_regime_features(events, market, *, as_of_column="date")` is
 pure regime arithmetic over explicit DataFrames. `market` supplies normalized,
@@ -221,7 +225,8 @@ provided. A fresh event frame preserves index/order and adds the nine legacy
 `spy_*` return/drawdown/volatility fields plus the actual source `regime_asof`.
 Returns/drawdown and annualized simple-return volatility retain percent units;
 volatility uses sample standard deviation (`ddof=1`), and relative volatility
-is a unitless ratio minus one. No market read, implicit clock or cache exists.
+is a unitless ratio minus one. This arithmetic function performs no market read,
+uses no implicit clock, and owns no cache.
 
 | Regime input condition | Outcome |
 |---|---|
