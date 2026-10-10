@@ -43,8 +43,8 @@ fan-out budget (§4.3, 8 distinct modules) is otherwise exactly spent on
 ``fastapi``, ``engine.v2.foundation``, this package's own ``projections``,
 plus ``hmac``/``os``/``json``/``argparse``/``uvicorn`` for auth, cursor
 signing, the CURRENT/health files and the launcher. The shape is pinned by
- ``tests/test_v2_serving_api.py`` against the real dataclass's own field
- names, so the two cannot drift silently.
+ ``tests/v2/serving/test_v2_serving_api.py`` against the real
+ dataclass's own field names, so the two cannot drift silently.
 
 **A serving index that opens but cannot be read is one typed 503** (#342):
 every connection-owning read block -- the publication resolver's binding
