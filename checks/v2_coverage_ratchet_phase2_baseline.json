@@ -4,7 +4,7 @@
   "test_files": [
     "tests/test_checks_phase2_corpus_parity.py",
     "tests/test_checks_phase2_fault_matrix.py",
-    "tests/test_checks_phase2_parity.py",
+    "tests/v2/integration/test_checks_phase2_parity.py",
     "tests/test_checks_phase2_render_memory.py",
     "tests/test_checks_phase2_render_parity.py",
     "tests/test_checks_phase2_render_parity_bounded.py",
@@ -453,35 +453,35 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_parity.py::test_identical_rows_agree_with_correct_populations",
+      "nodeid": "tests/v2/integration/test_checks_phase2_parity.py::test_identical_rows_agree_with_correct_populations",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_parity.py::test_float_beyond_tolerance_disagrees_naming_row_and_field",
+      "nodeid": "tests/v2/integration/test_checks_phase2_parity.py::test_float_beyond_tolerance_disagrees_naming_row_and_field",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_parity.py::test_within_tolerance_agrees",
+      "nodeid": "tests/v2/integration/test_checks_phase2_parity.py::test_within_tolerance_agrees",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_parity.py::test_null_mask_difference_disagrees",
+      "nodeid": "tests/v2/integration/test_checks_phase2_parity.py::test_null_mask_difference_disagrees",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_parity.py::test_missing_row_on_either_side_disagrees",
+      "nodeid": "tests/v2/integration/test_checks_phase2_parity.py::test_missing_row_on_either_side_disagrees",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_parity.py::test_receipt_binds_snapshot_and_passes_evidence_binding_checks",
+      "nodeid": "tests/v2/integration/test_checks_phase2_parity.py::test_receipt_binds_snapshot_and_passes_evidence_binding_checks",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_parity.py::test_cli_agree_exits_zero_and_prints_verdict",
+      "nodeid": "tests/v2/integration/test_checks_phase2_parity.py::test_cli_agree_exits_zero_and_prints_verdict",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_parity.py::test_cli_refused_session_mismatch_exits_nonzero",
+      "nodeid": "tests/v2/integration/test_checks_phase2_parity.py::test_cli_refused_session_mismatch_exits_nonzero",
       "outcome": "passed"
     },
     {

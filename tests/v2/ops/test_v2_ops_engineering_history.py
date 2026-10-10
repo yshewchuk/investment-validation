@@ -54,7 +54,7 @@ from engine.v2.ops.catalog import dumps as _dumps
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY, catalog, sample
-from tests.test_v2_ops_effects_graph import (
+from tests.v2.ops.test_v2_ops_effects_graph import (
     FAKE_STORE_ROOT,
     POLICY,
     REPO,
@@ -66,9 +66,9 @@ from tests.test_v2_ops_effects_graph import (
     _submit_and_claim,
     _succeed_parent,
 )
-from tests.test_v2_ops_effects_graph import _commit as _ops_commit
-from tests.test_v2_ops_effects_graph import _open as _ops_open
-from tests.test_v2_ops_effects_graph import _row as _decision_row
+from tests.v2.ops.test_v2_ops_effects_graph import _commit as _ops_commit
+from tests.v2.ops.test_v2_ops_effects_graph import _open as _ops_open
+from tests.v2.ops.test_v2_ops_effects_graph import _row as _decision_row
 
 SCOPE = "shadow"
 SESSION = "2026-09-12"

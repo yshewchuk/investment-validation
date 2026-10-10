@@ -78,7 +78,7 @@
     },
     "D15": {
       "tier": 2,
-      "tests": ["tests/v2/ops/test_v2_ops_parity.py", "tests/test_checks_phase2_parity.py"],
+      "tests": ["tests/v2/ops/test_v2_ops_parity.py", "tests/v2/integration/test_checks_phase2_parity.py"],
       "evidence_fields": ["comparison_receipt_ref", "expected_population",
                           "supported_population", "compared_population"]
     },

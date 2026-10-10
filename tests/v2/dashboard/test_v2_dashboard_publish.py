@@ -15,7 +15,7 @@ from engine.v2.ops.catalog import transaction
 from engine.v2.ops.publication_submit import submit_retained_publication
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, get_job
-from tests.test_v2_ops_effects_graph import _params as _ops_params, _submit_and_claim
+from tests.v2.ops.test_v2_ops_effects_graph import _params as _ops_params, _submit_and_claim
 from tests.ops_support import TEST_POLICY, catalog, sample
 from engine.v2.ops.profiles import DEFAULT_POLICY
 from engine.v2.ops.scheduler import claim_next
@@ -99,7 +99,7 @@ def test_retained_submit_refuses_unsucceeded_source(tmp_path):
 
 
 def test_retained_publication_runs_through_real_service(tmp_path):
-    from tests.test_v2_ops_effects_graph import FAKE_STORE_ROOT, REPO, _bundle_tar, _seed_decisions
+    from tests.v2.ops.test_v2_ops_effects_graph import FAKE_STORE_ROOT, REPO, _bundle_tar, _seed_decisions
     from engine.v2.contracts import JobSpec, SubmitRequest
     from engine.v2.ops.checkpoints import register_artifact
     from engine.v2.ops.lifecycle import Outcome, commit_attempt

@@ -29,7 +29,7 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from tests.ops_support import catalog as ops_catalog
 from tests.ops_support import sample
-from tests.test_checks_phase2_gate import _snapshot_ref
+from tests.v2.integration.test_checks_phase2_gate import _snapshot_ref
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 

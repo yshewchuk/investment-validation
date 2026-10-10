@@ -72,7 +72,7 @@ from tests.ops_support import (
     sample,
 )
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-12"
 
@@ -1410,7 +1410,7 @@ def _finish(tmp_path, monkeypatch, raise_error):
     conn, clock, supervisor = catalog(tmp_path)
     claim = enqueue_claim(conn, clock, supervisor)
     service = Service(conn, tmp_path, REGISTRY, TEST_POLICY, clock=clock,
-                      code_source=Path(__file__).resolve().parents[1])
+                      code_source=Path(__file__).resolve().parents[3])
     monkeypatch.setattr(service, "_commit_success", raise_error)
     service._progress_state[claim.attempt_id] = object()
     service._finish(SimpleNamespace(claim=claim), {"exit_code": 0})

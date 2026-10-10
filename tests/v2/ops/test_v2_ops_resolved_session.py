@@ -54,7 +54,7 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY, sample
-from tests.test_v2_ops_effects_graph import (
+from tests.v2.ops.test_v2_ops_effects_graph import (
     FAKE_STORE_ROOT,
     _open as _effects_open,
     _params as _effects_params,
@@ -71,7 +71,7 @@ from tests.v2.ops.test_v2_ops_nightly_completion import (
     _succeed_parent,
 )
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 REQUESTED = "2026-09-14"
 RESOLVED = "2026-09-11"

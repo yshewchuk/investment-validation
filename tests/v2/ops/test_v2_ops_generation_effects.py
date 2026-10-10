@@ -31,11 +31,11 @@ from engine.v2.ops.effects_graph import backup_effect, engineering_gate_effect, 
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.outbox import watermark, watermark_would_conflict
 from tests.ops_support import catalog
-from tests.test_v2_ops_effects_graph import _commit, _open, _params, _row, _seed_decisions
-from tests.test_v2_ops_effects_graph import _submit_and_claim as _claim
-from tests.test_v2_ops_engineering_history import stub_gate  # noqa: F401 (fixture)
+from tests.v2.ops.test_v2_ops_effects_graph import _commit, _open, _params, _row, _seed_decisions
+from tests.v2.ops.test_v2_ops_effects_graph import _submit_and_claim as _claim
+from tests.v2.ops.test_v2_ops_engineering_history import stub_gate  # noqa: F401 (fixture)
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 SESSION = "2026-09-12"
 
 

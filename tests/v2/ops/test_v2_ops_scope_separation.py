@@ -55,7 +55,7 @@ from tests.v2.ops.test_v2_ops_nightly_completion import (
 )
 from tests.test_v2_ops_snapshot_stages import case  # noqa: F401 -- pytest fixture
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-12"
 

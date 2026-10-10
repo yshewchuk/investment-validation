@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import Problem, PreviewRelease  # noqa: E402
@@ -35,17 +35,17 @@ from engine.v2.ops.publication import publish_local, stage_release  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
 from engine.v2.serving.api import create_app  # noqa: E402
 from tests.ops_support import catalog, enqueue_claim  # noqa: E402
-from tests.test_v2_ops_effects_graph import FAKE_STORE_ROOT  # noqa: E402
-from tests.test_v2_ops_effects_graph import REPO  # noqa: E402
-from tests.test_v2_ops_effects_graph import _bundle_tar  # noqa: E402
-from tests.test_v2_ops_effects_graph import _commit as _ops_commit  # noqa: E402
-from tests.test_v2_ops_effects_graph import _open as _ops_open  # noqa: E402
-from tests.test_v2_ops_effects_graph import _params as _ops_params  # noqa: E402
-from tests.test_v2_ops_effects_graph import _publish as _ops_publish_json  # noqa: E402
-from tests.test_v2_ops_effects_graph import _publish_raw as _ops_publish_raw  # noqa: E402
-from tests.test_v2_ops_effects_graph import _seed_decisions  # noqa: E402
-from tests.test_v2_ops_effects_graph import _submit_and_claim  # noqa: E402
-from tests.test_v2_ops_effects_graph import _succeed_parent  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import FAKE_STORE_ROOT  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import REPO  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import _bundle_tar  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import _commit as _ops_commit  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import _open as _ops_open  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import _params as _ops_params  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import _publish as _ops_publish_json  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import _publish_raw as _ops_publish_raw  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import _seed_decisions  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import _submit_and_claim  # noqa: E402
+from tests.v2.ops.test_v2_ops_effects_graph import _succeed_parent  # noqa: E402
 from tests.test_v2_serving_api import _FORBIDDEN_MODULE_SUBSTRINGS, _get, _start, _stop  # noqa: E402
 from tests.test_v2_serving_projections import (  # noqa: E402
     _bundle,
