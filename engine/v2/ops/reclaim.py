@@ -28,12 +28,14 @@ def _eligible(conn):
     return [row[0] for row in conn.execute(sql, _STATES + _PROCESSES)]
 
 
-def _size(path):
+def _size(path, keepalive):
     if path.is_symlink():
         return 0
     total = 0
     for dirpath, _dirs, files in os.walk(path):
+        keepalive()
         for name in files:
+            keepalive()
             try:
                 total += os.lstat(os.path.join(dirpath, name)).st_size
             except OSError:
@@ -65,7 +67,7 @@ def _entry(kind, path, attempt_id, apply, out, keepalive):
     if not os.path.lexists(path):
         return
     record = {"kind": kind, "attempt_id": attempt_id, "path": str(path),
-              "bytes": _size(path), "removed": False}
+              "bytes": _size(path, keepalive), "removed": False}
     if apply:
         try:
             _remove(path, keepalive)

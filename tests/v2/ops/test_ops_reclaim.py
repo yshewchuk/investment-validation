@@ -11,7 +11,8 @@ import engine.v2.ops.supervisor as supervisor_module
 from engine.v2.ops import cli
 from engine.v2.ops.errors import make_problem
 from engine.v2.ops.legacy_adapter import overlay_read_set
-from engine.v2.ops.lifecycle import Outcome, commit_attempt
+from engine.v2.ops.lifecycle import Outcome, commit_attempt, heartbeat
+from engine.v2.ops.recovery import expire_leases
 from engine.v2.ops.reclaim import reclaim
 from engine.v2.ops.snapshot_roots import default_materialization_base
 from engine.v2.ops.supervisor import Service
@@ -240,3 +241,32 @@ def test_symlinked_roots_are_unlinked_never_traversed_or_sized(world, tmp_path):
     reclaim(world.conn, world.root, apply=True)
     assert not legacy.is_symlink() and not partial.is_symlink()
     assert (outside / "big.bin").read_bytes() == b"y" * 500
+
+
+def _slow_reclaim(world, renew):
+    (_legacy(world, "succeeded") / "data").chmod(0o755)
+    for index in range(10):
+        (_legacy(world, "succeeded") / "data" / f"extra{index}.csv").write_bytes(b"1")
+    live = world.ids["starting"]
+    fence = world.conn.execute("SELECT fence FROM attempts WHERE attempt_id = ?",
+                               (live,)).fetchone()[0]
+    world.clock.advance(60)
+    heartbeat(world.conn, live, fence, clock=world.clock, lease_seconds=120)
+
+    def keepalive():
+        world.clock.advance(30)
+        if renew:
+            heartbeat(world.conn, live, fence, clock=world.clock, lease_seconds=120)
+
+    reclaim(world.conn, world.root, apply=True, keepalive=keepalive)
+    return expire_leases(world.conn, clock=world.clock), live
+
+
+def test_a_slow_reclaim_with_renewal_keeps_a_running_attempts_lease_alive(world):
+    expired, live = _slow_reclaim(world, renew=True)
+    assert live not in expired
+
+
+def test_the_same_slow_reclaim_without_renewal_would_expire_that_lease(world):
+    expired, live = _slow_reclaim(world, renew=False)
+    assert live in expired
