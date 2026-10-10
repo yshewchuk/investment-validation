@@ -12,6 +12,7 @@ row idempotency are covered by ``test_v2_ops_experiment_job.py``.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -236,6 +237,49 @@ def test_signal_directory_sync_failure_removes_signal_before_worker_accepts(
     assert worker._holdout_refusal_signal(tmp_path) is None
 
 
+def test_signal_directory_sync_and_rollback_unlink_failure_is_rejected(
+        tmp_path, monkeypatch):
+    """A failed sync whose rollback unlink also fails leaves an unverifiable signal."""
+    import stat
+
+    signal = tmp_path / "holdout_refusal_signal.json"
+    monkeypatch.setenv("INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL", str(signal))
+    directory = tmp_path.stat()
+    real_fsync = experiment_trades.os.fsync
+    real_unlink = Path.unlink
+    sync_failed = False
+    unlink_failed = False
+
+    def fail_signal_directory_sync(fd):
+        nonlocal sync_failed
+        info = os.fstat(fd)
+        if (stat.S_ISDIR(info.st_mode) and info.st_dev == directory.st_dev
+                and info.st_ino == directory.st_ino and not sync_failed):
+            sync_failed = True
+            raise OSError("simulated signal directory sync failure")
+        return real_fsync(fd)
+
+    def fail_signal_unlink(self, *args, **kwargs):
+        nonlocal unlink_failed
+        if self == signal and not unlink_failed:
+            unlink_failed = True
+            raise OSError("simulated signal rollback unlink failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(experiment_trades.os, "fsync", fail_signal_directory_sync)
+    monkeypatch.setattr(Path, "unlink", fail_signal_unlink)
+    pins = {"snapshot_id": "snapshot-489", "holdout_as_of_month": "2025-01",
+            "random_membership_version": "canonical-event-sha256.v1",
+            "rolling_membership_version": "calendar-months.v1"}
+    with pytest.raises(OSError, match="simulated signal directory sync failure"):
+        experiment_trades._emit_holdout_refusal_signal(pins)
+    assert sync_failed
+    assert unlink_failed
+    assert signal.exists()
+    assert not Path(str(signal) + ".sha256").exists()
+    assert worker._holdout_refusal_signal(tmp_path) is None
+
+
 def test_signal_directory_open_failure_removes_signal_before_worker_accepts(
         tmp_path, monkeypatch):
     """A failed parent-directory open after replacement cannot leave a signal."""
@@ -439,8 +483,11 @@ def test_registered_runner_consumer_validates_signal_and_falls_back(
     def stub_adapter(staging_root, called_runner_id, *, args,
                      declared_runtime_sources):
         if transport is not None:
-            (Path(staging_root) / "holdout_refusal_signal.json").write_text(
-                json.dumps(transport))
+            signal_bytes = json.dumps(transport).encode("utf-8")
+            signal_path = Path(staging_root) / "holdout_refusal_signal.json"
+            signal_path.write_bytes(signal_bytes)
+            signal_path.with_name(signal_path.name + ".sha256").write_text(
+                hashlib.sha256(signal_bytes).hexdigest(), encoding="ascii")
         return SimpleNamespace(returncode=1, stderr="private loader traceback")
 
     monkeypatch.setattr(legacy_adapter, "run_legacy_script", stub_adapter)

@@ -97,11 +97,14 @@ Final holdout reads are unavailable. For a pinned population denial (valid
 context and a refused explicit or bulk population), experiment orchestration
 configures `INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL`; the loader writes a private,
 atomically replaced signal containing the refusal code and four holdout pins
-before raising `HOLDOUT_ACCESS_DENIED`. The loader writes no ledger row or
-report. Signal write, sync, or replacement errors propagate instead of
+before raising `HOLDOUT_ACCESS_DENIED`, then writes a digest sidecar only after
+the signal directory sync succeeds. The worker accepts the signal only when
+the sidecar matches its exact bytes. The loader writes no ledger row or report.
+Signal write, sync, replacement, or sidecar errors propagate instead of
 returning the typed refusal. If directory sync fails after replacement, the
-loader removes the signal before propagating the error, so the worker cannot
-accept that failed publication as a refusal.
+loader tries to remove the signal before propagating the error; even if that
+unlink fails, the missing or mismatched digest sidecar makes the worker reject
+the visible signal.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout

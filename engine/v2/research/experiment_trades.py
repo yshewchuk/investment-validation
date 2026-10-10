@@ -9,6 +9,7 @@ orchestration.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -137,7 +138,9 @@ def _emit_holdout_refusal_signal(details):
     nothing is written and behavior is unchanged. Only the four nonblank
     string identity pins travel; ``holdout_exclusions``, event IDs, messages
     and every other denial detail never leave the typed exception. An
-    enabled write or fsync failure propagates rather than being swallowed.
+    enabled write or fsync failure propagates rather than being swallowed. Once
+    the signal itself is durable, its exact-byte SHA-256 digest is published
+    the same way to the sibling ``.sha256`` file the worker reader requires.
     """
     signal_path = os.environ.get(_HOLDOUT_REFUSAL_SIGNAL_ENV)
     if not signal_path:
@@ -147,13 +150,15 @@ def _emit_holdout_refusal_signal(details):
         return
     document = {"schema_version": _HOLDOUT_REFUSAL_SIGNAL_SCHEMA,
                 "failure_code": "HOLDOUT_ACCESS_DENIED", **pins}
+    payload = json.dumps(document, indent=2, sort_keys=True)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     destination = Path(signal_path)
     temp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
                                        dir=destination.parent,
                                        prefix=".holdout_refusal_signal.",
                                        suffix=".tmp", delete=False)
     try:
-        temp.write(json.dumps(document, indent=2, sort_keys=True))
+        temp.write(payload)
         temp.flush()
         os.fsync(temp.fileno())
         temp.close()
@@ -168,6 +173,37 @@ def _emit_holdout_refusal_signal(details):
         except OSError:
             _rollback_replaced_signal(destination)
             raise
+        _publish_holdout_refusal_digest(destination, digest)
+    finally:
+        temp.close()
+        Path(temp.name).unlink(missing_ok=True)
+
+
+def _publish_holdout_refusal_digest(destination, digest):
+    """Atomically write the signal's exact-byte SHA-256 digest to the sibling sidecar.
+
+    Only reached after the replaced signal's parent-directory sync succeeded,
+    so a failed first sync never publishes or updates a digest. Same-directory
+    temp file, flush and file fsync, atomic replace, then parent-directory
+    fsync; the temp is always cleaned up. Failures propagate.
+    """
+    sidecar = Path(str(destination) + ".sha256")
+    temp = tempfile.NamedTemporaryFile(mode="w", encoding="ascii",
+                                       dir=sidecar.parent,
+                                       prefix=".holdout_refusal_signal.sha256.",
+                                       suffix=".tmp", delete=False)
+    try:
+        temp.write(digest)
+        temp.flush()
+        os.fsync(temp.fileno())
+        temp.close()
+        os.replace(temp.name, sidecar)
+        directory_fd = os.open(sidecar.parent,
+                               os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temp.close()
         Path(temp.name).unlink(missing_ok=True)

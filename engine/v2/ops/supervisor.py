@@ -1597,6 +1597,16 @@ class Service:
         private ``staging/diagnostics/failure_details.json``, which this
         publishes as a verified artifact and references, never inlines
         (§5.2: ``details`` must stay out of ``failure_json``).
+
+        Publishing that private document can itself raise. For a typed
+        ``HOLDOUT_ACCESS_DENIED`` the reference is not what carries the
+        refusal: the effect is recorded from the still-staged
+        ``failure_details.json`` via ``_commit_failure`` → ``_refusal_receipt``,
+        so a publication failure returns the typed problem without a
+        ``diagnostic_ref`` and leaves the staged receipt untouched rather than
+        letting ``_finish`` overwrite it with a generic completion failure.
+        Every other code re-raises unchanged, preserving the existing
+        ``_finish``/``_completion_problem`` behavior.
         """
         try:
             result = json.loads(bytes(running.data))
@@ -1611,7 +1621,12 @@ class Service:
             problem = make_problem(code, message)
         except (ValueError, TypeError, AttributeError):
             return None
-        return self._publish_failure_details(claim, problem)
+        try:
+            return self._publish_failure_details(claim, problem)
+        except Exception:
+            if problem.code == "HOLDOUT_ACCESS_DENIED":
+                return problem
+            raise
 
     def _publish_failure_details(self, claim, problem):
         details_path = (self.store.staging_dir(claim.attempt_id)

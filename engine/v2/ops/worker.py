@@ -5,6 +5,7 @@ message on an inherited pipe; payloads stay in the assigned staging directory.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import resource
@@ -413,9 +414,26 @@ def _holdout_refusal_signal(run_dir):
     the typed problem. Missing, unreadable, malformed, wrong-schema or
     wrong-code files, and invalid pins, all yield ``None`` so the generic
     runner failure — with no sidecar values — is unchanged.
+
+    The signal is confirmed against its sibling ``.sha256`` sidecar: the
+    producer writes that file with the SHA-256 hex digest of the exact signal
+    bytes only after the signal's parent directory was successfully fsynced,
+    so a signal left visible by a failed rollback that never reached that
+    fsync is rejected. The digest must equal
+    ``hashlib.sha256(signal_bytes).hexdigest()``; a missing, malformed or
+    mismatched digest yields ``None`` like every other invalid shape.
     """
+    signal_path = Path(run_dir) / "holdout_refusal_signal.json"
     try:
-        document = json.loads((Path(run_dir) / "holdout_refusal_signal.json").read_text())
+        signal_bytes = signal_path.read_bytes()
+        digest = (Path(run_dir) / "holdout_refusal_signal.json.sha256").read_text(
+            encoding="ascii").strip()
+    except (OSError, ValueError):
+        return None
+    if digest != hashlib.sha256(signal_bytes).hexdigest():
+        return None
+    try:
+        document = json.loads(signal_bytes)
     except (OSError, ValueError):
         return None
     if (not isinstance(document, dict)

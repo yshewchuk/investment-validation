@@ -1071,6 +1071,87 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
         conn.close()
 
 
+def test_finish_preserves_refusal_when_diagnostic_publication_fails(tmp_path, monkeypatch):
+    """Issue #489: a typed holdout refusal whose private ``failure_details.json``
+    publication fails must still settle through ``_finish`` as the worker's
+    ``HOLDOUT_ACCESS_DENIED``. The refusal effect is recorded from the
+    still-staged receipt, so exactly one refused ledger row carrying the
+    resolved experiment/variant is appended, no durable run or attempt output
+    exists, the reservation is released, the staged diagnostics bytes are
+    unchanged, and the public failure JSON carries neither the receipt/pins nor
+    a diagnostic artifact reference."""
+    conn, clock, claim, _, checkout = _claimed_primary_effect(
+        tmp_path, key="primary-refusal-diagnostic-publication-fails")
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    spec = experiments.experiment_spec_from_document(_spec_document())
+    variant_id = experiments.expected_variant_identity(checkout, spec, "primary")
+    receipt = {"schema_version": experiments.REFUSAL_RECEIPT_SCHEMA, "status": "refused",
+               "failure_code": "HOLDOUT_ACCESS_DENIED", "experiment_id": spec.experiment_id,
+               "variant_id": variant_id, "snapshot_id": "snapshot-489",
+               "holdout_as_of_month": "2025-01",
+               "random_membership_version": "canonical-event-sha256.v1",
+               "rolling_membership_version": "calendar-months.v1"}
+    service = Service(conn, tmp_path / "ops", stages.registry(), TEST_POLICY, clock=clock,
+                      code_source=REPO, store_root=checkout)
+    staging = service.store.staging_dir(claim.attempt_id)
+    details_path = staging / "diagnostics" / "failure_details.json"
+    result = worker._failure_result(staging, OpsError(make_problem(
+        "HOLDOUT_ACCESS_DENIED", "requested events are excluded from experiment reads",
+        details={"refusal_receipt": receipt})))
+    details_bytes = details_path.read_bytes()
+
+    real_publish = service.store.publish_candidate
+    injections = []
+
+    def failing_publish(attempt_id, rel, *, schema_ref, max_bytes=None):
+        if rel == "diagnostics/failure_details.json" and not injections:
+            injections.append(rel)
+            raise OSError("simulated diagnostic publication failure")
+        return real_publish(attempt_id, rel, schema_ref=schema_ref, max_bytes=max_bytes)
+
+    monkeypatch.setattr(service.store, "publish_candidate", failing_publish)
+    running = types.SimpleNamespace(claim=claim, failure=None,
+                                    data=json.dumps(result).encode(), peak=0,
+                                    started=clock.monotonic(), stop_at=None)
+
+    def refused_rows():
+        with open(ledger, newline="") as fh:
+            return [row for row in csv.DictReader(fh) if row["stage"] == "refused"]
+
+    try:
+        service._finish(running, {"exit_code": 1})
+        assert injections == ["diagnostics/failure_details.json"]
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "failed"
+        assert attempt["ended_at"] is not None
+        attempt_failure = json.loads(attempt["failure_json"])
+        assert attempt_failure["code"] == "HOLDOUT_ACCESS_DENIED"
+        assert attempt_failure["diagnostic_ref"] is None
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
+        job = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
+                           (claim.job_id,)).fetchone()
+        assert job["state"] == "failed"
+        job_failure = json.loads(job["failure_json"])
+        assert job_failure["code"] == "HOLDOUT_ACCESS_DENIED"
+        assert job_failure["diagnostic_ref"] is None
+        assert "snapshot-489" not in job["failure_json"]
+        assert "refusal_receipt" not in job["failure_json"]
+        rows = refused_rows()
+        assert len(rows) == 1
+        assert rows[0]["id"] == spec.experiment_id
+        assert rows[0]["spec_hash"] == variant_id
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM attempt_outputs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0] == 0
+        assert details_path.read_bytes() == details_bytes
+    finally:
+        service.close()
+        conn.close()
+
+
 def test_refusal_crash_after_durable_append_settles_once(tmp_path, monkeypatch, capsys):
     """Issue #489 crash window: the supervisor dies with a ``BaseException`` --
     bypassing ``_commit_failure``'s ordinary ``Exception`` handler -- after the
