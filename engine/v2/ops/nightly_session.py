@@ -127,7 +127,7 @@ def load_session(root: Path, identity: SessionIdentity) -> SessionState | None:
         text = session_path(root, identity).read_text()
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise fail("INTEGRITY_FAILED", "session state is unreadable") from exc
     return _decode(text, identity)
 

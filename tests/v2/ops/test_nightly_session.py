@@ -164,6 +164,15 @@ def test_impossible_calendar_date_is_invalid_request():
     assert _code(exc) == "INVALID_REQUEST"
 
 
+def test_non_utf8_state_is_integrity_failed(tmp_path):
+    path = ns.session_path(tmp_path, IDENT)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff\xfe\x00bad")
+    with pytest.raises(OpsError) as exc:
+        ns.ensure_session(tmp_path, IDENT)
+    assert _code(exc) == "INTEGRITY_FAILED" and path.read_bytes() == b"\xff\xfe\x00bad"
+
+
 def test_tampered_run_id_is_integrity_failed(tmp_path):
     ns.ensure_session(tmp_path, IDENT)
     path = ns.session_path(tmp_path, IDENT)
