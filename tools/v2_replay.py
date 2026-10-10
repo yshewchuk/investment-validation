@@ -38,6 +38,8 @@ def _parser() -> argparse.ArgumentParser:
                         default=None, help="repeatable; default is every strategy")
     parser.add_argument("--years", nargs="*", type=int, default=None,
                         help="restrict events to these event_date years")
+    parser.add_argument("--alpha", action="append", type=float, default=None,
+                        help="repeatable fill alpha; default is the core alpha grid")
     return parser
 
 
@@ -57,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome = _replay_run.run(
             repository, strategies=strategies, events=events,
             reports_dir=args.reports_dir, scope=scope,
-            snapshot_id=snapshot.snapshot_id,
+            snapshot_id=snapshot.snapshot_id, alphas=args.alpha,
         )
     except DataError as exc:
         print(

@@ -278,6 +278,11 @@ This bounds retained unmatched rows, not total process RSS.
 - `--since`, `--min-date`, `--years`, `--strategy` (repeatable, from
   `_pricing.STRUCTURES`): per-tool read/filter narrowing; never widen a read
   past the resolved snapshot.
+- `tools/v2_replay.py --alpha A` is repeatable. When supplied, the ordered
+  values replace replay's default `ALPHA_GRID`; each priced event produces
+  one row per requested fill alpha. When omitted, the core default remains
+  in effect. The CLI continues to derive its calendar from the pinned
+  snapshot rather than accepting an external calendar.
 - `--dry-run` (build-trades, reconcile-trades): compute the candidate
   changeset, skip `commit_generic_table_candidate`.
 
