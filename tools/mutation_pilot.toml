@@ -224,6 +224,7 @@ skip = [
     "*/canonical.py",
 ]
 tests = [
+    "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/serving/test_score_population.py",
     "tests/v2/foundation/test_experiment_holdouts.py",
     "tests/test_phase4_analog_recipe_cache.py",
@@ -623,6 +624,7 @@ mutate = [
     "engine/v2/ops/experiments.py",
 ]
 tests = [
+    "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
     "tests/v2/research/test_native_outcomes.py",
     "tests/v2/research/test_v2_prediction_cli.py",
