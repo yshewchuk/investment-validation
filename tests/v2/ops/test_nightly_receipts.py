@@ -65,7 +65,8 @@ def test_begin_is_idempotent_and_refuses_a_changed_request(root, tmp_path):
     ("", DIGEST, nr.Effect("external")), ("s", " ", nr.Effect("external")),
     ("s", DIGEST, nr.Effect("bogus", "x")), ("s", DIGEST, nr.Effect("catalog_job")),
     ("s", DIGEST, nr.Effect("artifact", "/x")), ("s", DIGEST, "not-an-effect"),
-     ("s", DIGEST, nr.Effect("external", "x", "abc"))])
+     ("s", DIGEST, nr.Effect("external", "x", "abc")),
+    ("s", DIGEST, nr.Effect("artifact", "relative/out.bin", "abc"))])
 def test_malformed_step_or_effect_is_invalid_request(root, step, digest, effect):
     with pytest.raises(OpsError) as exc:
         nr.begin_step(root, IDENT, 1, step, digest, effect)

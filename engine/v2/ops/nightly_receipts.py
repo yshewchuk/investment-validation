@@ -55,7 +55,7 @@ def _valid(step: str, digest: str, effect: Effect) -> bool:
                 and digest.strip() and isinstance(effect, Effect) and effect.kind in KINDS
                 and isinstance(effect.ref, str) and isinstance(effect.sha256, str)
                 and (effect.kind == "external" or effect.ref)
-                and (effect.kind != "artifact" or effect.sha256)
+                and (effect.kind != "artifact" or (effect.sha256 and Path(effect.ref).is_absolute()))
                 and (effect.kind == "artifact" or not effect.sha256))
 
 

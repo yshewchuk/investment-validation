@@ -558,7 +558,7 @@ Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` re
 
 ### Nightly step receipts (`nightly_receipts.py`, slice 2 of #564)
 
-Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `run_id` beside the session state, usable only for the active `started` generation (else `CHECKPOINT_INCOMPATIBLE`). Before an effect a step records an `intent`: its request digest and the effect it will produce, a `catalog_job` (deterministic job id), an `artifact` (path and sha256, published atomically) or an `external` effect that cannot be probed. `complete_step` proves the effect, then marks the step `succeeded`; a succeeded step is never reset, so resume skips it. Reconciliation reads the receipt and probes the effect itself, never the clock or the mutable head.
+Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `run_id` beside the session state, usable only for the active `started` generation (else `CHECKPOINT_INCOMPATIBLE`). Before an effect a step records an `intent`: its request digest and the effect it will produce, a `catalog_job` (deterministic job id), an `artifact` (absolute path and sha256, published atomically) or an `external` effect that cannot be probed. `complete_step` proves the effect, then marks the step `succeeded`; a succeeded step is never reset, so resume skips it. Reconciliation reads the receipt and probes the effect itself, never the clock or the mutable head.
 
 | Condition (crash points included) | Outcome |
 |---|---|
