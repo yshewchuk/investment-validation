@@ -31,6 +31,48 @@ ledger or emit outcome/refusal receipts, and have no supervisor caller.
 | Existing key has changed code, environment, plan, snapshot, population or context, or corrupt stored evidence | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; existing catalog and artifact bytes stay unchanged. |
 | Publication or catalog commit fails | No partial registration is admitted; a complete unreferenced artifact may remain. No automatic retry. |
 
+## Native outcome publication
+
+`native_outcomes.publish_native_outcome` records one admitted success or typed
+refusal; `replay_native_outcome` completes its interrupted publication without
+evaluation. Both verify the supplied native registration. Callers must also
+perform current-request admission before replay or fitting. A success requires
+an actual attempt; registration alone never counts as an attempted variant.
+Immutable report and outcome objects use `ArtifactStore`; existing catalog evidence
+owns separate smoke and recorded outcome slots, globally binding the
+registration, result, original row date and hashed ledger destination. Snapshot
+and holdout provenance derive from the verified registration, never duplicate fields. No new
+catalog table or supervisor coordinator is introduced. File/CSV effects stay outside
+short catalog transactions; completion follows durable append and never authorizes promotion.
+`export_native_report` creates `REPORT.md` at the registration's fixed store-local
+smoke/recorded address only after verified completion; existing bytes never change.
+The export has an independent inode: a private copy is flushed and synced before
+create-only installation, so editing the export cannot alter stored report bytes.
+An existing export sharing the stored object's inode is an identity conflict.
+An existing conflicting export destination refuses before reconciliation effects;
+this preflight and create-only export do not form an atomic transaction with CSV.
+Recorded destinations must be nonempty and bind the exact normalized path used
+for append. Saved outcomes require the complete canonical schema, object-valued
+failure details and a nonblank UTF-8 success report before any ledger effect.
+Saved completion payloads must match canonical expected metadata, preserving JSON
+scalar types, before any append or completion publication.
+Outcome, report and completion references must match the exact identity rederived
+from verified bytes; malformed metadata refuses before ledger or catalog effects.
+
+| Condition | Outcome |
+| --- | --- |
+| R1 invalid specification, R2 unresolved snapshot, or R6 identity conflict | `publish_native_refusal` publishes private evidence only; no result or ledger row. |
+| Empty, directory or symlinked recorded ledger destination | R1 before outcome reservation or ledger access; no default-ledger fallback or conflict evidence. |
+| Publish, replay or export called within an active caller transaction | R1 before path access or artifact/CSV effects; leave the caller transaction unchanged. |
+| Admitted R3 look-ahead or R5 holdout denial | Immutable refusal and `refused` row, unless smoke; no current-attempt report. |
+| Admitted R4 variant failure | Immutable refusal and `failed` row, unless smoke; no current-attempt report. |
+| Same canonical registration/result/destination repeated, including tuple/list-equivalent refusal details | Reuse the first outcome and date; reconcile one terminal CSV row per experiment/variant identity without refitting. |
+| Changed result, status, binding or recording destination; corrupt, incomplete or semantically invalid saved evidence | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private conflict evidence before ledger effects; preserve prior report, catalog slot and CSV bytes. |
+| Publication/append/commit interruption | Keep complete published objects and any committed intent/row; no rollback or automatic retry. Explicit replay reconciles the same intent. |
+| `no_ledger=True` | Do not resolve, read, create, lock or append any ledger path. The smoke slot cannot consume the recorded slot. |
+
+Pre-admission receipts cannot invent admission; rejected-request ledger identities belong to the runner.
+
 ## Native gate-variant pricing
 
 `v2_gate_variant.price_variant(repository, snapshot, spec, *, strategy,
