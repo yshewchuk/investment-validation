@@ -194,7 +194,11 @@ class Repository:
         cached = self._pinned_snapshots.get(snapshot_id)
         if cached is None:
             cached = self._pinned_snapshots[snapshot_id] = self._resolve_uncached(snapshot_id)
-        return cached
+        # The cache owns its ref: every caller gets an independent copy, so mutating
+        # a returned ref's nested mappings can never change a later scan.
+        return type(cached)(**{
+            **cached.__dict__, "table_versions": dict(cached.table_versions),
+            "knowledge_mode_by_table": dict(cached.knowledge_mode_by_table)})
 
     def _resolve_uncached(self, snapshot_id: str) -> SnapshotRef:
         with _read_only(self._conn) as conn:
@@ -326,12 +330,14 @@ class Repository:
                       details={"table_name": table_name})
         pin_key = (dvr.dataset_version_id, dvr.table_contract_ref.contract_id)
         if self._pin_snapshots and pin_key in self._pinned_tables:
-            return self._pinned_tables[pin_key]
+            pinned_contract, pinned_records = self._pinned_tables[pin_key]
+            return pinned_contract, list(pinned_records)
         with _read_only(self._conn) as conn:
             contract = self._full_contract(conn, dvr.table_contract_ref.contract_id)
             records = self._records(conn, dvr.dataset_version_id, dvr.table_contract_ref)
         if self._pin_snapshots:
             self._pinned_tables[pin_key] = (contract, records)
+            return contract, list(records)
         return contract, records
 
     def _full_contract(self, conn: sqlite3.Connection, contract_id: str) -> TableContract:

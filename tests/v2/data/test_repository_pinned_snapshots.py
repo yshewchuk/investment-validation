@@ -96,3 +96,20 @@ def test_pinned_repository_never_caches_an_unknown_snapshot(tmp_path):
         assert repository.resolve(snapshot.snapshot_id) == snapshot
     finally:
         conn.close()
+
+
+def test_mutating_a_returned_ref_cannot_change_later_scans(tmp_path):
+    conn, store, ref, snapshot = _build(tmp_path)
+    try:
+        repository = Repository(conn, store, pin_snapshots=True)
+        returned = repository.resolve(snapshot.snapshot_id)
+        try:
+            returned.table_versions.clear()
+        except (TypeError, AttributeError):
+            pass  # an immutable mapping is equally safe
+        again = repository.resolve(snapshot.snapshot_id)
+        assert again == snapshot
+        assert again is not returned
+        assert _scan_and_bound(repository, snapshot, ref) == (1, ["B"])
+    finally:
+        conn.close()
