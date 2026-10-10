@@ -85,6 +85,15 @@ def test_phase1_coverage_keeps_relocated_native_parity_pairing_file():
     assert relative in phase1_suite(ROOT)
 
 
+def test_phase1_coverage_keeps_relocated_legacy_defects_file():
+    """The baseline-derived inventory cannot catch a rename mapping being dropped."""
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_legacy_defects.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
+
+
 def _phase1_root(tmp_path, listed, present, extra=()):
     import json
 

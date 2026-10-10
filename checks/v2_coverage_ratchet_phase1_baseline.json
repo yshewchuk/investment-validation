@@ -121,6 +121,7 @@
     "tests/v2/foundation/test_v2_ops_foundation.py",
     "tests/v2/ops/test_cli_rescore.py",
     "tests/v2/ops/test_forward_calendar_store.py",
+    "tests/v2/ops/test_legacy_defects.py",
     "tests/v2/ops/test_native_parity_pairing.py",
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
     "tests/v2/ops/test_v2_ops_checkpoint_output_names.py",
