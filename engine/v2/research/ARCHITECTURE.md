@@ -214,12 +214,12 @@ States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or 
 | Receipt/diagnostic/ledger publication failure | Preserve the original refusal and durable state; no success output. Retry storage reconciliation only. Missing/malformed evidence is `VALIDATION_FAILED`, conflicting identities `IDEMPOTENCY_CONFLICT`, transient storage `RESOURCE_UNAVAILABLE`; a visible file alone, including failed sync/rollback residue, is not committed evidence. |
 | Missing/mismatched snapshot or failed bounded scan | `SNAPSHOT_UNRESOLVED` or the existing repository refusal; no fallback, cache, partial report or scan retry. Failure after `read_started` keeps the spend. |
 
-Results remain private until completion binds the request, authorizing act, spend,
-both memberships, per-set counts/metrics and overlap count; never average the sets.
-Random-set temporal-neighbour correlation and post-release-selection provenance remain disclosed (#373). Reopening a verified completed report is artifact retrieval,
-not permission to scan/recompute/tune. No `--no-ledger` final read is available.
-Completion is the release point: later revocation is appended to the audit history
-and accompanies retrieval; it cannot erase the completed report or renew access.
+Results remain private until completion binds the request, authorizing act, spend, both memberships, per-set counts/metrics and overlap count; never average the sets.
+Random-set temporal-neighbour correlation and post-release-selection provenance remain disclosed (#373).
+Proposed retrieval default: only the dedicated leaf serves a completed report to its recorded authorizing user, using the same procedural actor/interactive checks plus fresh explicit view confirmation. Other callers refuse `HOLDOUT_ACCESS_DENIED` before report output.
+Ops durably audits the viewing actor, UTC when, verified request/report references and checked revocation-history revision before output; failed checks/audit publication release nothing. Retrieval returns unchanged verified artifacts with that history alongside them; it never scans, recomputes, tunes, reauthorizes or spends again.
+Agent reconciliation may verify private artifacts but cannot return their metrics/report. No loader, training, selection or sweep report interface or `--no-ledger` final read is available.
+Completion is the release point: later revocation appends audit history and accompanies retrieval; it cannot erase the completed report or renew read access.
 
 ## Inputs
 
