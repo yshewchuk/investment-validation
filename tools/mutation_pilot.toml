@@ -622,6 +622,8 @@ mutate = [
 ]
 tests = [
     "tests/v2/research/test_native_registration.py",
+    "tests/v2/research/test_native_outcomes.py",
+    "tests/v2/research/test_native_outcome_validation.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_coordinator_lease.py",
