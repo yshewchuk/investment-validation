@@ -499,6 +499,45 @@ resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
 
+#### Proposed paired residual contract (issue #498; not implemented)
+
+Legacy `Scorer._residual_pool` (`engine/score.py:3687`) joins Tier-4
+forecasts, panel outcomes and realized crush on `(ticker,event_date)`.
+Each paired row is `(event_date,ticker,pred_abs_move,err_move,err_crush)`:
+`err_move=abs_move-pred_abs_move`, `err_crush=crush_pct_iv30-pred_iv_crush_30`.
+Both errors travel together. `ResidualPool` (`engine/pnl_sim.py:102`)
+draws only earlier events; it uses the `pred_abs_move` bucket if large enough,
+otherwise the full pre-cutoff pool. Join and population use `(ticker,event_date)`.
+
+The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211`) builds the paired
+artifact; `tools/phase5_prepare_release.py:215` stages its typed document.
+Use standard promotion. It records schema, model IDs, exclusive cutoff,
+lineage and hash; no request fallback, rebuild or invented residuals.
+
+The proposed `resolve_release_binding` path in `engine/v2/scoring/release_bindings.py`
+loads the typed member into `ScoringReleaseBinding` with its artifact and derived
+recipe. Derive the recipe only from the verified artifact key/hash; requests
+cannot override it or reintroduce per-row pools. Missing or malformed paired
+state raises `ModelNotReady` (`MODEL_NOT_READY`) atomically for the release;
+model-role gaps retain their existing per-row refusals. A valid zero-row artifact is not a
+refusal and preserves the legacy thin-pool/undetermined outcome. Changed
+releases use the standard rebuild and promotion path; old releases have no fallback.
+The loader verifies hash, schema, identities, lineage, cutoff and row/array
+structure before returning the binding and before bundle assembly or scoring.
+
+`SourceBundle.paired_residual_artifact` and `.paired_residual_recipe` already exist (`engine/v2/scoring/source_inputs.py:301`);
+`paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`) can
+return `MODEL_NOT_READY` when `residuals` is also declared or its artifact is
+missing or mismatches the expected key/hash. The proposed release loader
+validates before constructing `NativeScoreInputs` and owns the atomic release-wide
+refusal before row scoring; direct blocks that bypass it can still reach this
+helper's defensive refusal.
+
+Parity requires identical joined ticker/event rows and the exact exclusive
+cutoff value. Legacy scope is its `Scorer`'s loaded tickers; mismatched full and
+nightly scopes or cutoffs can change results. The chosen population and cutoff
+must be recorded in lineage.
+
 ### `nightly_source_bundle.py`
 
 `class NightlySourceBundleRefusal(ValueError)` — `__init__(code, detail)`,

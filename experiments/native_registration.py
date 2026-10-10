@@ -42,7 +42,7 @@ class NativeRegistration:
         return content_hash(self.document)
 
 
-def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids):
+def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids, expected=None):
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
@@ -70,17 +70,21 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids):
         snapshot = repository.resolve_pinned(scope)
     except (DataError, ValueError, TypeError, KeyError):
         raise fail("SNAPSHOT_UNRESOLVED", "native registration requires a current committed snapshot") from None
-    events = load_population(repository, snapshot, as_of_month=as_of_month,
-                             purpose="selection", event_ids=event_ids)
     document = {
         "schema_version": "native_experiment_registration.v1.0",
         "spec_hash": spec.spec_hash, "execution_plan": plan.as_document(),
         "snapshot": to_document(snapshot), "scope": scope,
         "source_closure": sources, "environment": environment_identity(1),
+    }
+    if expected is not None and any(expected.document[name] != value for name, value in document.items()):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native execution inputs changed before population admission")
+    events = load_population(repository, snapshot, as_of_month=as_of_month,
+                             purpose="selection", event_ids=event_ids)
+    document.update({
         "event_ids": sorted(events["event_id"]),
         "holdouts": {name: events.iloc[0][name] for name in (
             "holdout_as_of_month", "random_membership_version", "rolling_membership_version")},
-    }
+    })
     key = content_hash({"experiment_id": plan.experiment_id, "arm": plan.arms[0]})
     return NativeRegistration("native_" + key.removeprefix("sha256:"),
                               canonical_json(document).encode("utf-8")), spec
@@ -144,10 +148,10 @@ def register_native(conn, store, repository, spec, *, code_root, as_of_month,
 
 
 def require_native_registration(conn, store, repository, spec, *, code_root,
-                                as_of_month, scope="shadow", event_ids=None):
+                                as_of_month, scope="shadow", event_ids=None, expected=None):
     """Read-only admission; never create registration, ledger, or result rows."""
     registration, _ = _binding(repository, spec, code_root=code_root, as_of_month=as_of_month,
-                               scope=scope, event_ids=event_ids)
+                               scope=scope, event_ids=event_ids, expected=expected)
     if not _existing(conn, store, registration):
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     return registration
@@ -157,3 +161,21 @@ def verify_native_registration(conn, store, registration):
     """Verify stored admission without claiming current-request revalidation."""
     if not isinstance(registration, NativeRegistration) or not _existing(conn, store, registration):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native outcome requires an intact registration")
+
+
+def read_native_registration(conn, store, spec):
+    """Load the stable reservation before validating the current execution request."""
+    key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
+    run_id = "native_" + key.removeprefix("sha256:")
+    row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?", (run_id,)).fetchone()
+    if row is None:
+        raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
+    try:
+        ref = from_document(ArtifactRef, json.loads(row[0])["native_registration"])
+        registration = NativeRegistration(run_id, store.read_verified(ref))
+        verify_native_registration(conn, store, registration)
+        if registration.document["spec_hash"] != spec.spec_hash:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "requested specification differs from registration")
+        return registration
+    except (ArtifactError, ValueError, KeyError, TypeError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None
