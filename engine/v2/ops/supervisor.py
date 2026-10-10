@@ -397,11 +397,18 @@ class Service:
         append is idempotent, so replaying one that did land costs nothing.
 
         ``False`` -- nothing to replay, let the generic ``reconcile_attempt``
-        settle the row as usual -- only when there is no staging diagnostics
-        mapping document or no ``refusal_receipt`` key in it. A present key
-        is a recognized receipt even with a malformed value: the job's
-        ``JobSpec`` is reloaded, a minimal claim (the effect reads only
-        ``spec.kind``/``spec.parameters``) carries it, and a redacted
+        settle the row as usual -- only when there is no holdout refusal
+        marker. Marked receipt evidence that is missing or malformed -- the
+        diagnostics file absent, undecodable JSON, a non-dict document, or
+        no ``refusal_receipt`` key -- raises the typed ``VALIDATION_FAILED``
+        and settles permanently, while transient receipt I/O (any other
+        ``OSError`` reading the file; ``Path.is_file()`` is never consulted
+        because it would mask those as a missing file) propagates unchanged
+        so the attempt stays ``recovery_pending``, reservations held, for a
+        later replay. A present key is a recognized receipt even with a
+        malformed value: the job's ``JobSpec`` is reloaded, a minimal claim
+        (the effect reads only ``spec.kind``/``spec.parameters``) carries
+        it, and a redacted
         ``HOLDOUT_ACCESS_DENIED`` Problem -- the worker's own stable text,
         the receipt never entering ``details`` or ``failure_json`` -- drives
         ``_experiment_refusal_failure_effect``; a raise propagates to the
@@ -425,10 +432,8 @@ class Service:
         unusable = OpsError(make_problem(
             "VALIDATION_FAILED", "the holdout refusal receipt is missing or unusable"))
         try:
-            if not path.is_file():
-                raise unusable
             document = json.loads(path.read_text())
-        except (OSError, ValueError):
+        except (FileNotFoundError, ValueError):
             raise unusable
         if not isinstance(document, dict) or "refusal_receipt" not in document:
             raise unusable
