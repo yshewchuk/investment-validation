@@ -574,9 +574,9 @@ def _insert_price_captures(conn: sqlite3.Connection, receipt_id: str, attempts: 
 
 def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: str, *,
                        prior_manifest, updated_records: dict, attempts: list[dict],
-                       clock: Clock):
-    head = conn.execute("SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
-                        (scope,)).fetchone()
+                       clock: Clock, expected_snapshot_id: str | None = None):
+    """Commit captured fragments against the fenced head and preserve its references."""
+    head = _check_expected_head(conn, scope, expected_snapshot_id)
     if head is None:
         raise fail("SNAPSHOT_NOT_READY",
                   "scope has no existing head snapshot to add price_history to",
@@ -650,7 +650,7 @@ def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: st
 
 def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
            root: Path, dry_run: bool = False, clock: Clock | None = None,
-           required_tickers: Iterable[str] = ()) -> dict:
+           required_tickers: Iterable[str] = (), expected_snapshot_id: str | None = None) -> dict:
     """Read both legacy sources (read-only), capture EVERY not-yet-captured
     retrieval per ticker as its own row-version event -- the px file (if any)
     AND every dated/undated Tier-1 ``history`` entry, merged into one
@@ -662,6 +662,9 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     ``required_tickers`` refuse ``SOURCE_NOT_FOUND``, before writing any
     fragment, when neither the source (with at least one live (non-tombstoned)
     row) nor the prior dataset version holds them.
+    ``expected_snapshot_id`` optionally fences the scope's head both before
+    source processing and before generation commit; a changed head refuses
+    ``INPUT_CHANGED`` without adopting an unrelated base.
 
     ``root`` (SEND-BACK 2026-09-14 item 4) is the operations root holding
     ``supervisor.lock`` -- held for the whole run, exactly as
@@ -673,12 +676,24 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     """
     lock = SupervisorLock(Path(root) / "supervisor.lock")
     if not lock.acquire():
-        raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
+        raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog",
+                   details={"resource": "supervisor.lock"})
     try:
+        _check_expected_head(conn, scope, expected_snapshot_id)
         return _capture(conn, store, source_root, scope=scope, dry_run=dry_run, clock=clock,
-                        required_tickers=required_tickers)
+                        required_tickers=required_tickers, expected_snapshot_id=expected_snapshot_id)
     finally:
         lock.release()
+
+
+def _check_expected_head(conn, scope: str, expected_snapshot_id: str | None):
+    """Read the current head and refuse an explicitly mismatched snapshot."""
+    head = conn.execute("SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
+                        (scope,)).fetchone()
+    if expected_snapshot_id is not None and (
+            head is None or head["snapshot_id"] != expected_snapshot_id):
+        raise fail("INPUT_CHANGED", "the shadow snapshot head moved since it was verified")
+    return head
 
 
 def _usable_tickers(required_tickers: frozenset[str], listed: list[str],
@@ -697,7 +712,9 @@ def _usable_tickers(required_tickers: frozenset[str], listed: list[str],
 
 
 def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
-            dry_run: bool, clock: Clock | None, required_tickers: Iterable[str]) -> dict:
+            dry_run: bool, clock: Clock | None, required_tickers: Iterable[str],
+            expected_snapshot_id: str | None = None) -> dict:
+    """Read rooted price sources, check required history, and capture one generation."""
     required = frozenset(required_tickers)
     clock = clock or SystemClock()
     source_root = Path(source_root)
@@ -752,7 +769,8 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
     if dry_run:
         return report
     receipt = _commit_generation(conn, store, scope, prior_manifest=prior_manifest,
-                                 updated_records=updated_records, attempts=all_attempts, clock=clock)
+                                 updated_records=updated_records, attempts=all_attempts, clock=clock,
+                                 expected_snapshot_id=expected_snapshot_id)
     report["receipt_id"] = receipt.receipt_id
     report["result_snapshot_id"] = receipt.resulting_head_snapshot_id
     return report
