@@ -319,35 +319,26 @@ class Service:
                     # leaves the attempt recovery_pending too, reservations held
                     # (ARCHITECTURE.md "pinned experiment trade loader"):
                     # never settle it as a plain LEASE_LOST with the ledger
-                    # row unappended. An attempt whose stored failure carries
-                    # the holdout marker stays silent -- ``_commit_failure``
-                    # already emitted the one redacted stranded event when it
-                    # was fenced off. Every other proven-dead failure reports
-                    # one redacted event per (attempt_id, error code): stable
-                    # code and fixed text only, never exception details or the
-                    # stored private receipt. Then continue, leaving the
-                    # attempt recovery_pending.
-                    try:
-                        stored_failure = load_json(Problem, row["failure_json"])
-                    except ValueError:
-                        stored_failure = None
-                    known_refusal = (stored_failure is not None
-                                     and stored_failure.code == "HOLDOUT_ACCESS_DENIED")
-                    if not known_refusal:
-                        code = (exc.problem.code if isinstance(exc, OpsError)
-                                else "VALIDATION_FAILED")
-                        key = (row["attempt_id"], code)
-                        reported = getattr(self, "_reported_reconcile_failures", None)
-                        if reported is None:
-                            reported = set()
-                            self._reported_reconcile_failures = reported
-                        if key not in reported:
-                            reported.add(key)
-                            _report_stranded(
-                                SimpleNamespace(job_id=row["job_id"],
-                                                attempt_id=row["attempt_id"]),
-                                make_problem(code,
-                                             "proven-dead reconciliation failed"))
+                    # row unappended. A replay failure is reported once per
+                    # attempt and error code, including marked refusals,
+                    # whether or not an earlier stranded event was emitted:
+                    # stable code and fixed text only, never exception details
+                    # or the stored private receipt. Then continue, leaving
+                    # the attempt recovery_pending.
+                    code = (exc.problem.code if isinstance(exc, OpsError)
+                            else "VALIDATION_FAILED")
+                    key = (row["attempt_id"], code)
+                    reported = getattr(self, "_reported_reconcile_failures", None)
+                    if reported is None:
+                        reported = set()
+                        self._reported_reconcile_failures = reported
+                    if key not in reported:
+                        reported.add(key)
+                        _report_stranded(
+                            SimpleNamespace(job_id=row["job_id"],
+                                            attempt_id=row["attempt_id"]),
+                            make_problem(code,
+                                         "proven-dead reconciliation failed"))
                     continue
                 continue
             reconcile_attempt(self.conn, row["attempt_id"],
