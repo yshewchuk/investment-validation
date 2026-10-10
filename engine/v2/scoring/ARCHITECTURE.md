@@ -519,7 +519,7 @@ Load the typed `paired_residual_pool` member in `resolve_release_binding` and
 carry both its artifact and a derived recipe in `ScoringReleaseBinding`. Derive
 the recipe only from the verified artifact key and hash; requests cannot supply
 it. Missing/malformed schema, recomputed hash, identities, lineage, cutoff,
-rows or arrays raise `ModelNotReady` (`MODEL_NOT_READY`) for the release-wide
+missing rows field or malformed row/array values raise `ModelNotReady` (`MODEL_NOT_READY`) for the release-wide
 member, returning no partial binding. Unlike request-scoped model-role gaps,
 this shared artifact invalidates the binding before row scoring. Rebuild and
 promote before activation; old releases intentionally have no fallback.
@@ -540,9 +540,9 @@ change output. Lineage records frozen scope.
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. Real-path tests (~230 lines): rebuild/no-empty-recipe; zero rows; each
-   schema/hash/identity/lineage/cutoff/row refusal has no partial binding;
-   recipe integrity and matched/mismatched scope/cutoff parity.
+3. Real-path tests (~250 lines): rebuild recipe; recipe integrity/request override;
+   zero rows; schema/hash/identity/lineage/cutoff/missing-row atomic refusals;
+   matched/mismatched scope and cutoff parity.
 
 Decisions needed before implementing these slices:
 - **Population:** full producer universe (deterministic) or nightly ticker scope (closer parity, coupled release).
