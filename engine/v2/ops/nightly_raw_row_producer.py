@@ -139,12 +139,13 @@ def _shared_panel_rows(repository: Repository, snapshot: SnapshotRef,
                        history_start: Any) -> dict[tuple[str, str, str], PanelRowInputs]:
     """One ``scan_panel_row`` read per distinct ``(ticker, event day, session)``."""
     panels: dict[tuple[str, str, str], PanelRowInputs] = {}
+    spy_market_cache: dict[tuple[str, str, str, str], list[dict[str, object]]] = {}
     for key in keys:
         marker = _panel_marker(key)
         if marker not in panels:
             panels[marker] = scan_panel_row(
                 repository, snapshot, key, decision_session=decision_session,
-                history_start=history_start)
+                history_start=history_start, spy_market_cache=spy_market_cache)
     return panels
 
 

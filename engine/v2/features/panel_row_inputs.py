@@ -22,9 +22,10 @@ The four always-made pinned-snapshot dependencies:
   ``decision_session``), feeding ``panel_math.history_features`` with the
   non-skipped rows only (``skipped=true`` rows are excluded before that call,
   never treated as a zero move);
-* a new bounded ``daily_market`` read for the fixed ticker ``"SPY"``, feeding
+* the bounded ``daily_market`` read for the fixed ticker ``"SPY"``, feeding
   ``regime.add_regime_features`` (a different, raw chronological shape than the
-  derived/lagged ``scan_daily_state_inputs`` mapping, so not reused from it);
+  derived/lagged ``scan_daily_state_inputs`` mapping, so not reused from it); a
+  caller may supply a build-scoped cache to share this raw series across rows;
 * ``price_history_query.get_price_series`` as of ``decision_session``, feeding
   ``runup_math.add_runup_features``.
 
@@ -365,6 +366,7 @@ def scan_panel_row(
     *,
     decision_session: object,
     history_start: object,
+    spy_market_cache: dict[tuple[str, str, str, str], list[dict[str, object]]] | None = None,
 ) -> PanelRowInputs:
     """One ``BoardRequest`` key's full-superset raw panel row and latest anchor.
 
@@ -388,7 +390,20 @@ def scan_panel_row(
     history = _history_from_kept_moves(kept_moves)
     history_asof = _anchor(*(row["available_as_of_date"] for row in kept_moves))
 
-    spy_rows = _read_spy_market(repository, snapshot, start, decision)
+    spy_rows: list[dict[str, object]] | None
+    if spy_market_cache is None:
+        spy_rows = _read_spy_market(repository, snapshot, start, decision)
+    else:
+        spy_key = (
+            snapshot.snapshot_id,
+            _pinned_version(snapshot, _DAILY_MARKET_TABLE).dataset_version_id,
+            start.isoformat(),
+            decision.isoformat(),
+        )
+        spy_rows = spy_market_cache.get(spy_key)
+        if spy_rows is None:
+            spy_rows = _read_spy_market(repository, snapshot, start, decision)
+            spy_market_cache[spy_key] = spy_rows
     regime_features, regime_asof = _regime_from_spy(spy_rows, event_day, decision)
 
     runup_features, runup_asof = _runup_from_prices(
