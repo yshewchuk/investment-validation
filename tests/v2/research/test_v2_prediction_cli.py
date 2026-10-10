@@ -677,6 +677,18 @@ def test_sklearn_seed_boundaries_complete_real_cli_smoke(tmp_path, capsys, seed)
         source.conn.close()
 
 
+def test_sklearn_maximum_valid_seed_registers(tmp_path, capsys):
+    seed = 2**32 - 1
+    source = _source(tmp_path, spec=_spec(seed=seed))
+    try:
+        _invoke(source, capsys, "register")
+        registration = native.read_native_registration(
+            source.conn, source.store, _spec(seed=seed))
+        assert registration.document["execution_plan"]["seed"] == seed
+    finally:
+        source.conn.close()
+
+
 @pytest.mark.parametrize("phase", ["fresh", "pending", "completed"])
 @pytest.mark.parametrize("smoke", [False, True])
 @pytest.mark.parametrize("obstruction", ["foreign", "symlink", "directory", "ancestor0", "ancestor1", "ancestor2"])
