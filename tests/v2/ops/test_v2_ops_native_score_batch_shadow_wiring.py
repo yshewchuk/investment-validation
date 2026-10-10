@@ -104,8 +104,12 @@ def test_native_score_batch_key_shape():
 
 
 def test_graph_and_optional_include_native_score_batch():
+    from engine.v2.ops.submission import RetryPolicy
+
     assert nightly.GRAPH["native_score_batch"] == ("score",)
     assert "native_score_batch" in nightly.OPTIONAL
+    assert registry().get("native_score_batch").retry == RetryPolicy(
+        "bounded", 5, (30, 120, 600, 1800, 3600))
 
 
 def test_stage_sequence_excludes_native_score_batch():

@@ -87,9 +87,9 @@ worker callers default to staged `events.json`. Snapshot mode derives
 `calendar_revision` from pinned earnings data; staged mode uses its parameter.
 The production-default `legacy`/unpinned path stays a no-op; production uses `projection` (3 GiB, 2 CPUs). A producer exception fails the native attempt
 before writing that attempt's event/refusal or score outputs; reused-root files
-may remain as untrusted residue. The job follows bounded retries; worker
-production cannot stall supervisor ticks or renewals, and native failure leaves
-legacy jobs unaffected.
+may remain as untrusted residue. The worker job has five bounded attempts,
+with delays of 30s, 2m, 10m, 30m and 1h. Worker production cannot stall
+supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
