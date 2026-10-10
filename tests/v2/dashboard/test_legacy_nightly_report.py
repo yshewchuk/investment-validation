@@ -49,26 +49,21 @@ def test_cli_reports_standard_report_write_failure(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(nightly, "single_run_lock", lambda: contextlib.nullcontext())
     monkeypatch.setattr(nightly, "run_nightly", lambda *args, **kwargs: report)
 
+    optional_path = tmp_path / "optional.json"
+    writer_calls = []
+
     def fail_write(path, text):
+        writer_calls.append(Path(path))
         raise OSError("disk full")
 
     monkeypatch.setattr(nightly, "_write_report_atomic", fail_write)
-    optional_path = tmp_path / "optional.json"
-    optional_writes = []
-    original_write_text = Path.write_text
-
-    def track_optional_write(path, *args, **kwargs):
-        optional_writes.append(path)
-        return original_write_text(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", track_optional_write)
     result = nightly.main([
         "--as-of", requested_date,
         "--json", str(optional_path),
     ])
 
     assert result == 1
-    assert optional_writes == []
+    assert writer_calls == [tmp_path / "reports" / f"nightly_{requested_date}.json"]
     assert "Failed to write standard nightly report: disk full" in capsys.readouterr().err
 
 
@@ -88,19 +83,19 @@ def test_cli_keeps_explicit_json_destination(tmp_path, monkeypatch):
     assert (tmp_path / "reports" / f"nightly_{requested_date}.json").is_file()
 
     monkeypatch.chdir(tmp_path)
-    direct_writes = []
-    original_write_text = Path.write_text
+    atomic_calls = []
+    original_atomic_write = nightly._write_report_atomic
 
-    def track_write_text(path, *args, **kwargs):
-        direct_writes.append(path.resolve())
-        return original_write_text(path, *args, **kwargs)
+    def track_atomic_write(path, text):
+        atomic_calls.append(Path(path).resolve())
+        return original_atomic_write(path, text)
 
-    monkeypatch.setattr(Path, "write_text", track_write_text)
+    monkeypatch.setattr(nightly, "_write_report_atomic", track_atomic_write)
     relative_standard = Path("reports") / f"nightly_{requested_date}.json"
     result = nightly.main(["--as-of", requested_date, "--json", str(relative_standard)])
 
     assert result == 0
-    assert direct_writes == []
+    assert atomic_calls == [relative_standard.resolve()]
 
 
 def test_atomic_report_writer_replaces_and_cleans_temporary_file(tmp_path):
@@ -137,12 +132,39 @@ def test_cli_reports_optional_json_write_failure_after_standard_report(tmp_path,
     monkeypatch.setattr(nightly.paths, "ROOT", tmp_path)
     monkeypatch.setattr(nightly, "single_run_lock", lambda: contextlib.nullcontext())
     monkeypatch.setattr(nightly, "run_nightly", lambda *args, **kwargs: report)
+    optional_path = tmp_path / "optional.json"
+    optional_path.write_text("old optional report", encoding="utf-8")
+    original_replace = nightly.os.replace
 
+    def fail_optional_replace(source, destination):
+        if Path(destination) == optional_path:
+            raise OSError("replace failed")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(nightly.os, "replace", fail_optional_replace)
     result = nightly.main([
         "--as-of", requested_date,
-        "--json", str(tmp_path / "reports"),
+        "--json", str(optional_path),
     ])
 
     assert result == 1
     assert (tmp_path / "reports" / f"nightly_{requested_date}.json").is_file()
+    assert optional_path.read_text(encoding="utf-8") == "old optional report"
+    assert list(tmp_path.glob(f".{optional_path.name}.*.tmp")) == []
+    assert "Failed to write --json report: replace failed" in capsys.readouterr().err
+
+
+def test_cli_reports_optional_json_missing_parent(tmp_path, monkeypatch, capsys):
+    requested_date = "2026-10-09"
+    report = nightly.NightlyReport(as_of=requested_date, requested_as_of=requested_date)
+    monkeypatch.setattr(nightly.paths, "ROOT", tmp_path)
+    monkeypatch.setattr(nightly, "single_run_lock", lambda: contextlib.nullcontext())
+    monkeypatch.setattr(nightly, "run_nightly", lambda *args, **kwargs: report)
+    optional_path = tmp_path / "missing" / "report.json"
+
+    result = nightly.main(["--as-of", requested_date, "--json", str(optional_path)])
+
+    assert result == 1
+    assert (tmp_path / "reports" / f"nightly_{requested_date}.json").is_file()
+    assert not optional_path.parent.exists()
     assert "Failed to write --json report:" in capsys.readouterr().err

@@ -1875,7 +1875,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if args.json and Path(args.json).resolve() != standard_report.resolve():
         try:
-            Path(args.json).write_text(text, encoding="utf-8")
+            optional_path = Path(args.json)
+            if not optional_path.parent.is_dir():
+                raise FileNotFoundError(optional_path.parent)
+            _write_report_atomic(optional_path, text)
         except OSError as exc:
             print(f"Failed to write --json report: {exc}", file=sys.stderr)
             return 1

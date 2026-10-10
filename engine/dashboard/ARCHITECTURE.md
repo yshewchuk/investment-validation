@@ -127,10 +127,10 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
 - **CLI report** — after `run_nightly` returns a report, the CLI atomically
   writes `reports/nightly_<requested date>.json`; a distinct `--json`
-  destination is still written when requested. A standard-report write
-  failure is logged to stderr and returns exit code 1 before the optional
-  destination is attempted; optional-write failure is also logged and returns
-  1 after the standard report has been saved.
+  destination is also written atomically when requested. A standard-report
+  write failure is logged to stderr and returns exit code 1 before the
+  optional destination is attempted; optional-write failure is also logged
+  and returns 1 after the standard report has been saved.
 - **Missing input / refresh failure** — degrades to cached data (staleness
   stays visible in `meta.json`) — except a rotated credential, which stops
   the run rather than burning retries against a dead key.
