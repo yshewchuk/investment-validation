@@ -21,6 +21,7 @@ from engine.v2.ops import cli, nightly
 from engine.v2.ops import snapshot_planning as planning
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly_raw_rows import scan_forward_board_requests
+from engine.v2.ops.workflows import commands
 from tests.data_scan_support import (
     RECEIPT,
     commit_tables,
@@ -281,7 +282,7 @@ def _plan(env, monkeypatch, *extra, mode="snapshot", tickers="AAA,BBB,EEE"):
         argv += ["--tickers", tickers]
     if mode == "snapshot":
         argv += ["--snapshot-scope", "shadow"]
-    plan = cli._plan_command(cli.parser().parse_args([*argv, *extra]), root, conn, clock)["plan"]
+    plan = commands._plan_command(cli.parser().parse_args([*argv, *extra]), root, conn, clock)["plan"]
     return plan, pin
 
 

@@ -75,12 +75,12 @@ strategy-eligible expiries and calendar-row inputs; this slice adds no
 production caller. See the component architecture contract.
 
 `nightly_raw_row_producer.build_native_score_batch_events` is an internal
-staging API that composes native raw-row event and refusal documents from
-pinned inputs. `Service._reconcile_native_score_batch_shadow` is its production
-caller: for an eligible pinned-snapshot identity it stages/registers both
-producer documents before calling
-`submit_native_score_batch_shadow_if_ready`. See the component architecture
-contract.
+producer that composes native raw-row event and refusal documents from pinned
+inputs. `native_score_batch.run_native_score_batch_worker` is its production
+caller: it resolves the pinned snapshot and invokes the producer in the worker
+process. `Service._reconcile_native_score_batch_shadow` only submits producer
+parameters for an eligible pinned-snapshot identity. See the component
+architecture contract.
 
 `carried_set.CarriedTickerExclusion`, `carried_set.CarriedSetResolution`,
 `carried_set.resolve_carried_set`, and
@@ -407,7 +407,7 @@ serving caches, chooser analog pool, calendar) from the newest committed import
 receipt for that snapshot (`engine.v2.data.reference_catalog`), refusing when
 there is none;
 the default `--input-mode legacy` graph is byte-identical to before. Tested in
-`tests/test_v2_ops_snapshot_stages.py`.
+`tests/v2/ops/test_v2_ops_snapshot_stages.py`.
 
 The phase-1 engineering gate needs a coverage measurement passed in; run bare
 it fails the coverage row with `COVERAGE_EVIDENCE_MISSING` by design (a missing

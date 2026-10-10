@@ -99,6 +99,18 @@ def test_reader_keeps_legacy_gzip_fallback(tmp_path, monkeypatch):
     with gzip.open(path, "wt") as stream:
         stream.write("value,text\n1,a\n2,b\n")
     monkeypatch.setattr(legacy_store, "HAVE_PARQUET", False)
-    expected = legacy_store._read_part(path, ["text", "missing", "value"])
+    opened = []
+    opener = legacy_adapter.legacy_materialization.open_legacy_part
+
+    def tracked_open(part_path):
+        source = opener(part_path)
+        opened.append(source)
+        return source
+
+    monkeypatch.setattr(legacy_adapter.legacy_materialization, "open_legacy_part", tracked_open)
+    expected = pd.DataFrame({
+        "text": ["a", "b"], "missing": [float("nan")] * 2, "value": [1, 2],
+    })
     actual = legacy_adapter.read_legacy_part(path, ["text", "missing", "value"])
     pd.testing.assert_frame_equal(actual, expected)
+    assert len(opened) == 1 and opened[0].closed

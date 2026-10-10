@@ -1274,8 +1274,7 @@ def _native_score_batch_identity(conn):
 
 def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, release_root, *,
                                               catalog_path, objects_root, code_source, clock,
-                                              events_ref=None, producer_refusals_ref=None,
-                                              calendar_revision=None, snapshot_id=None):
+                                              snapshot_id=None, horizon_days=35, tickers=None):
     """Cutover PR-7a: the ONLY place ``native_score_batch`` is ever
     submitted -- called every ``supervisor.Service.tick()``
     (``Service._reconcile_native_score_batch_shadow``), never by
@@ -1285,16 +1284,11 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
     ``release_root`` is the caller's ALREADY verified production release
     root; a release-unavailable outcome never reaches here (R2).
 
-    The Slice 5 refs are the caller-gathered producer-staged artifacts for
-    this session's ``events.json``/``producer_refusals.json``, the pinned
-    earnings calendar revision, and the exact pinned ``snapshot_id``; "the
-    builder only builds" -- it never calls the producer, never re-reads a
-    source, and never resolves the release binding. All four are required
-    before anything is built or submitted: the snapshot-pinned path is
-    REACHABLE today, so a missing ref raises the typed ops error rather
-    than returning nothing, letting the caller's problem-reporting/backoff
-    surface it. Both staged refs appear in ``input_refs`` (a direct artifact
-    binding is admitted only through ``spec.input_refs``, ``input_bindings.py:66``).
+    The tick supplies the pinned ``snapshot_id`` and the producer scope
+    (``horizon_days``/``tickers``) for this session. The builder submits
+    without reading any snapshot object and without staging event artifacts;
+    the worker produces the ``records``/``refusals`` documents from that
+    pinned snapshot itself.
 
     Returns ``None`` when there is nothing to do yet (no catalog, no
     succeeded "score" job, that job pinning no snapshot, or a job already
@@ -1321,28 +1315,23 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
                           (job_id_for("shadow", key),)).fetchone()
     if exists is not None:
         return None
-    missing = tuple(name for name, ref in (("events_ref", events_ref),
-                                           ("producer_refusals_ref", producer_refusals_ref),
-                                           ("calendar_revision", calendar_revision),
-                                           ("snapshot_id", snapshot_id))
-                    if not ref)
-    if missing:
+    if not snapshot_id:
         raise fail(
             "VALIDATION_FAILED",
-            "native_score_batch cannot be built without its staged producer "
-            "refs, the pinned earnings calendar revision, and the pinned snapshot id",
-            details={"missing": missing, "session": session, "scope_hash": scope_hash})
-    parameters = NativeScoreBatchParameters(expected_ids=(session + "|" + scope_hash,),
-        release_root=str(release_root), as_of=session, snapshot_id=snapshot_id,
-        calendar_revision=str(calendar_revision), feature_names=(),
-        input_bindings={"events.json": events_ref,
-                        "producer_refusals.json": producer_refusals_ref})
+            "native_score_batch cannot be built without its pinned snapshot id",
+            details={"missing": ("snapshot_id",), "session": session, "scope_hash": scope_hash})
+    parameters = NativeScoreBatchParameters(
+        expected_ids=(session + "|" + scope_hash,), release_root=str(release_root),
+        as_of=session, snapshot_id=snapshot_id, calendar_revision="",
+        feature_names=(), catalog_path=str(catalog_path), objects_root=str(objects_root),
+        horizon_days=int(horizon_days), tickers=tuple(tickers or ()),
+        producer_mode="snapshot")
     job = JobSpec(
         kind="native_score_batch",
         implementation_ref=content_hash(worker_source_manifest(code_source)),
         spec_hash=None,
         parameters=to_document(parameters),
-        input_refs=(events_ref, producer_refusals_ref),
+        input_refs=(),
         dependency_job_ids=(),
         output_namespace="shadow",
         retry_policy_ref="bounded",

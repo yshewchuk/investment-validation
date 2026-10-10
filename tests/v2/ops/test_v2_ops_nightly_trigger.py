@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.ops import nightly_trigger  # noqa: E402
@@ -781,11 +781,12 @@ def test_three_consecutive_timeouts_become_failed(tmp_path):
 
 
 def test_default_serve_passes_todays_et_cutoff(tmp_path, monkeypatch):
-    from engine.v2.ops import bootstrap, cli, supervisor
+    from engine.v2.ops import bootstrap, supervisor
+    from engine.v2.ops.workflows import commands
 
     monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
-    monkeypatch.setattr(cli, "_submit_command",
-                        lambda args, root, conn, clock: {"jobs": [{"job_id": "job_1"}]})
+    monkeypatch.setattr(commands, "_submit_command",
+                        lambda args, root, conn, clock, host_policy: {"jobs": [{"job_id": "job_1"}]})
     monkeypatch.setattr(supervisor, "Service", lambda *a, **k: object())
     captured = {}
 
@@ -820,12 +821,13 @@ def test_a_late_evening_resume_times_out_on_its_first_tick_not_after_a_fresh_bud
     # test_default_serve_passes_todays_et_cutoff) rather than a FakeServe, so this proves the
     # actual deadline check stops it on the first tick, not just that _serve_deadline's own
     # return value looks right in isolation.
-    from engine.v2.ops import bootstrap, cli, supervisor
+    from engine.v2.ops import bootstrap, supervisor
+    from engine.v2.ops.workflows import commands
 
     late_moment = datetime(2026, 9, 26, 20, 30, tzinfo=ET)
     monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
-    monkeypatch.setattr(cli, "_submit_command",
-                        lambda args, root, conn, clock: {"jobs": [{"job_id": "job_1"}]})
+    monkeypatch.setattr(commands, "_submit_command",
+                        lambda args, root, conn, clock, host_policy: {"jobs": [{"job_id": "job_1"}]})
     monkeypatch.setattr(supervisor, "Service", lambda *a, **k: object())
     tick_calls = []
 
@@ -908,7 +910,8 @@ def test_default_plan_passes_full_run_and_the_full_population(tmp_path, monkeypa
     document = _write_population(
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
     captured = {}
-    from engine.v2.ops import bootstrap, cli
+    from engine.v2.ops import bootstrap
+    from engine.v2.ops.workflows import commands
 
     monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
     manifest_path = tmp_path / "captured_manifest.json"
@@ -919,7 +922,7 @@ def test_default_plan_passes_full_run_and_the_full_population(tmp_path, monkeypa
         captured["args"] = args
         return {"plan_ref": "plan_full", "plan": {}}
 
-    monkeypatch.setattr(cli, "_plan_command", fake_plan)
+    monkeypatch.setattr(commands, "_plan_command", fake_plan)
     plan_ref = nightly_trigger._default_plan(
         tmp_path, AS_OF, (), (), None, expected_shadow_snapshot_id="snap_verified")
     assert plan_ref == "plan_full"
@@ -1063,7 +1066,8 @@ def test_capture_input_manifest_refuses_a_selected_session_mismatch(tmp_path, mo
 
 def test_default_plan_has_no_input_manifest_when_there_is_no_population(tmp_path, monkeypatch):
     captured = {}
-    from engine.v2.ops import bootstrap, cli
+    from engine.v2.ops import bootstrap
+    from engine.v2.ops.workflows import commands
 
     monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
 
@@ -1076,7 +1080,7 @@ def test_default_plan_has_no_input_manifest_when_there_is_no_population(tmp_path
         captured["args"] = args
         return {"plan_ref": "plan_no_pop", "plan": {}}
 
-    monkeypatch.setattr(cli, "_plan_command", fake_plan)
+    monkeypatch.setattr(commands, "_plan_command", fake_plan)
     assert nightly_trigger._default_plan(tmp_path, AS_OF, (), (), None) == "plan_no_pop"
     args = captured["args"]
     assert args.input_manifest is None
