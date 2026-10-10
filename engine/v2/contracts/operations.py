@@ -110,6 +110,7 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # module, so ``make_problem`` is an OpsError in every import order.
     "INVALID_EXPERIMENT_SPEC": ("validation", False),
     "EXPERIMENT_IDENTITY_CONFLICT": ("validation", False),
+    "HOLDOUT_ACCESS_DENIED": ("validation", False),
     # Phase-6 slice 3 experiment feature context (ops/experiments.py, ops
     # ARCHITECTURE.md R1): a preloaded snapshot observation dated after the
     # event's entry instant is refused outright -- never clipped, shifted or

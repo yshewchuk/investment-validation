@@ -215,7 +215,7 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
         assert profile.memory_bytes >= measured_peak_bytes
         assert profile.measured is False
     assert POLICY_VERSION == DEFAULT_POLICY.version
-    assert "2026-10-08" in POLICY_VERSION
+    assert "2026-10-10" in POLICY_VERSION
 
 
 # --------------------------------------------------------------------------
@@ -229,8 +229,9 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
 MEASURED_READ_SET_BYTES = 1796916876
 
 
-def test_policy_version_is_v9():
-    assert POLICY_VERSION == "ops_resources.2026-10-08.v9"
+def test_policy_version_is_v10():
+    """The added single-thread native experiment profile has a new policy identity."""
+    assert POLICY_VERSION == "ops_resources.2026-10-10.v10"
     assert POLICY_VERSION == DEFAULT_POLICY.version
 
 

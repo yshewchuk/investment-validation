@@ -31,7 +31,7 @@ SPEC_FIELDS = frozenset({"experiment_id", "hypothesis", "primary_arm_id", "arms"
 
 #: Economic declarations with a defined execution meaning;
 #: any other key is an unused declaration, refused before the runner.
-SUPPORTED_ECONOMIC_KEYS = frozenset({"fill", "exit"})
+SUPPORTED_ECONOMIC_KEYS = frozenset({"fill", "exit", "strategy"})
 
 
 def default_checkout_root() -> Path:

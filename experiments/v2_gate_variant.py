@@ -49,10 +49,12 @@ def _plan(spec, strategy):
         valid_alpha = type(alpha) in (int, float) and isfinite(alpha) and 0 <= alpha <= 1
     except OverflowError:
         valid_alpha = False
-    if (plan.runner != "native-gate-replay" or plan.price_source != "option_chains"
+    if (plan.runner not in ("native-gate-replay", "experiments/native_gate_worker.py")
+            or plan.price_source != "option_chains"
             or not isinstance(strategy, str) or strategy not in STRUCTURES
+            or plan.economic_params.get("strategy", strategy) != strategy
             or spec.input_files
-            or set(plan.economic_params) != {"fill"} or not valid_alpha):
+            or set(plan.economic_params) not in ({"fill"}, {"fill", "strategy"}) or not valid_alpha):
         raise fail("INVALID_EXPERIMENT_SPEC", "unsupported native gate pricing declaration")
     return plan
 

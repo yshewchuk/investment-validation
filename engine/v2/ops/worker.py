@@ -171,6 +171,9 @@ def dispatch(worker, parameters, root, *, envelope=None):
                              "threads": os.environ["OMP_NUM_THREADS"]}}
     if worker == "experiment":
         return _dispatch_experiment(parameters, root)
+    if worker == "native_gate_pricing":
+        from experiments.native_gate_worker import run
+        return run(parameters, root)
     if worker in ("training", "models_promote", "models_rollback"):
         return _dispatch_model_worker(worker, parameters, root)
     raise ValueError("unsupported worker")

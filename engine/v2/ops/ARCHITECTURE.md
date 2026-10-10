@@ -60,8 +60,7 @@ coordinator-effect functions in `effects_graph.py`; `training.py`'s `training_jo
 native-covered strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
 `computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
 `calendar_moves_job_spec`, and `run_computed_moves_worker`/`run_forward_calendar_worker` (dispatched by `worker.py`).
-`forward_calendar_refresh` has a `JobKind` (worker dispatch, loader callback, parameter validation) but no `nightly.py`
-`GRAPH`/`OPTIONAL` node and no `supervisor.Service` submitter yet — not on the nightly schedule.
+`forward_calendar_refresh` has a `JobKind` but no nightly submitter. `native_gate_pricing` is a smoke-only, single-thread staged kind: `worker.dispatch` calls `experiments.native_gate_worker.run`; registration/spec/code/environment checks precede pinned pricing. It has no coordinator ledger effect or cache reuse; see `experiments/ARCHITECTURE.md` for its refusal and consumption-receipt contract.
 
 `forward_calendar_store.run_forward_calendar_refresh` is a standalone, keyword-only native fetcher in ops: non-fetcher arguments validate before catalog/provider access; empty tickers mean whole market.
 Commit fencing checks the head before the attempt within one transaction; cancelled/expired attempts refuse before commit. An omitted attempt fence preserves generic-refresh and research callers.
@@ -1122,7 +1121,7 @@ assertion paid once at import time, no I/O, no legacy dependency).
 **Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops.
 The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
 `experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, and `fingerprints.environment_identity`/`source_closure`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
-`experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Other modules stay internal.
+`experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Other modules stay internal. `experiments.native_gate_worker` also consumes `executor.THREAD_VARIABLES`; its required immutable `economic_params.strategy` is independent of arm IDs. Ops registers the data holdout refusal code so R5 survives the supervisor result pipe.
 
 ### Proposed final-holdout authority (#490)
 
