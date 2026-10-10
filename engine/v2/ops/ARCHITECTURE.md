@@ -896,17 +896,17 @@ waits without submitting until its paired succeeded inputs are ready.
 
 ## Outputs
 
-- **ORATS rows** (`providers/orats_daily_market.py`): `fetcher(unit)` returns `daily_market` ticker rows. Out-of-range scaled fields and nonpositive `implied_move` become `None` without raising; `PLAUSIBLE_RANGES` mirrors the legacy normalizer under tests. Missing mcap remains null; backward carry belongs to `data.incremental.merge_daily_market`.
-  Summaries/cores retry once for nonempty 2xx missing tickers (four reserved calls). Remaining gaps retain partial coverage, session/attempt metadata and raw receipts, never complete; empty/404 remains not_final. Credential, rate-limit and not-final outcomes precede partial.
-  `provider_response` owns pure `classify_response`, `OutcomeKind`, `AcquisitionOutcome`; `incremental_data` re-exports them and owns retry/coverage, importing neither refresh store. `calendar_moves_jobs` owns callback loaders. ORATS imports the leaf directly (stdlib and `ops.errors.fail` only), so provider imports never reach orchestration.
+- **ORATS rows** (`providers/orats_daily_market.py`): `fetcher(unit)` returns `(raw_bytes, response_kind, response_meta, ticker_rows)`; `ticker_rows` supplies the `daily_market` rows. Out-of-range scaled fields and nonpositive `implied_move` become `None` without raising; `PLAUSIBLE_RANGES` mirrors the legacy normalizer under tests. Missing mcap remains null; backward carry belongs to `data.incremental.merge_daily_market`.
+  `orats_daily_market._fetch_attempts` and `_should_retry` own the bounded summaries/cores retry for nonempty 2xx missing tickers. Remaining gaps retain partial coverage, session/attempt metadata and raw receipts, never complete; empty/404 remains not_final. Credential, rate-limit and not-final outcomes precede partial.
+  `data.incremental._fetch_unit` validates returned coverage and records raw receipts. `provider_response` owns pure `classify_response`, `OutcomeKind`, `AcquisitionOutcome`; `ops.incremental_data` re-exports them, importing neither refresh store. `calendar_moves_jobs` owns callback loaders. ORATS imports the leaf directly (stdlib and `ops.errors.fail` only), so provider imports never reach orchestration.
   Classification validates unique nonempty requested keys, returned/empty/unsupported subsets and nonnegative quota; invalid values remain `INVALID_REQUEST`. Equal inputs produce equal outcomes, without I/O, cache, retry, transaction, writes or partial return.
 - **Massive Basic planning**: `python -m tools.v2_massive_plan` calls `massive_plan.plan` over an existing read-only catalog and verified raw objects. No credentials, provider I/O, migration, acquisition, normalization, research read or snapshot publication occurs.
-  The explicit `as_of` selects versioned `massive_stocks_basic.2026-10-10`: daily REST OHLCV, splits/dividends, two calendar years (February 29 clamps), previous calendar day maximum, five requests/minute. This conservative planning policy is not account entitlement or EOD-finality evidence.
+  Daily REST OHLCV and splits/dividends use an explicit `as_of` under a versioned Basic capability policy. The plan reports the policy identity, supported date bounds and request rate; these are planning constraints, not account entitlement or EOD-finality evidence.
   Dates are never clipped; S3, unsupported datasets and out-of-policy history refuse `INVALID_REQUEST` with a typed capability reason before catalog access. Tickers and per-unit HTTP-attempt caps are bounded; the cap includes pagination/retries, whose actual count remains unknown.
   Request identity preserves ticker case, dataset, endpoint, dates, params and explicit raw/split-only adjustment. No key contains credentials. Other providers and the legacy `price_history` quantity mapping are never substituted.
   R1: malformed requests or evidence refuse without partial return; corrupt objects retain their typed integrity refusal. R2: exact-request reuse only, over the latest receipt (received_at then rowid), with request/receipt/object identities reverified; empty, non-complete or paginated responses remain missing.
   A verified raw hit proves stored bytes for that request, not normalized coverage, historical availability or permitted use. Oversized receipts refuse before allocation. R3: no retries or provider calls. R4: the CLI owns one SQLite read transaction; library callers own their connection/transaction. R5: no writes or partial result. R6: identical request/catalog/object inputs produce identical plans.
-  Only missing units contribute to minimum initial calls and the maximum attempt budget; these are bounds, not an asserted page count. Interval/superset reuse, acquisition and new adjustment-aware table contracts remain later slices.
+  Only missing units contribute to minimum initial calls and the maximum attempt budget; these are bounds, not an asserted page count.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
@@ -933,12 +933,12 @@ waits without submitting until its paired succeeded inputs are ready.
   (the full event-date instant is in the key, so distinct instants remain distinct),
   the worker raises before either output file is written, rather than silently
   dropping one row.
-- `computed_moves_store.py` commits only changed content, one fragment per ticker, carrying other tables and parent pins forward. New job parameters
-  pin the parent receipt before execution; commits use it for reference inputs
-  and lineage. Legacy unpinned jobs resolve a receipt at commit for compatibility.
-  Lineage uses `price_history_capture`; captures are append-only and deduped by
-  `capture_id`; no-fragment runs persist attempts only after fence and parent receipt validation, without a generation.
-  `computed_at` derives from `as_of`; identical same-`as_of` inputs resolve to the parent without a generation.
+- `computed_moves_store.py` publishes one object/fragment per event inside each rewritten ticker partition; inspected singleton key/time bounds bind its identity. Shared streamed partition hashes preserve logical content independently of layout.
+  Other tables and untouched ticker fragments/hashes remain pinned; existing snapshots are never rewritten. A refreshed old whole-ticker partition gains a new physical version even when its logical rows agree.
+  Parameters pin the parent receipt for reference inputs/lineage; legacy unpinned jobs resolve it at commit. Lineage uses `price_history_capture`; append-only captures dedupe by `capture_id`.
+  All event objects and hashes are prepared before the atomic catalog/head/capture-log commit. A failed preparation leaves no partial generation; immutable objects and completed raw receipts may remain for retry.
+  No-fragment runs persist attempts only after fence and parent receipt validation. `computed_at` derives from `as_of`; unchanged same-layout, same-`as_of` retries resolve to the parent without a generation.
+  This is #629's storage prerequisite, not holdout admission: the subsequent research reader must validate canonical membership, singleton fragment provenance and cutoffs before opening outcomes; inherited mixed fragments are not retroactively safe.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
   here since the list can drift) — catalog/outbox/filesystem writes

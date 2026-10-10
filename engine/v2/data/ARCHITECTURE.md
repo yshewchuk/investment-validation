@@ -207,13 +207,20 @@ global primary-key order; typed results (`EarningsEvent`, `ChainSnapshot`,
 (new manifest, changeset, receipt, coverage/revision rows — one transaction
 with the head CAS; a reused fragment's changeset is reconciled against the
 truly-stored dataset-version row — Invariants); a `computed_moves`/
-`price_history` fragment per ticker (whole-partition rewrite — Invariants),
+`price_history` ticker partition (whole-partition rewrite — Invariants),
 committed by `engine.v2.ops.computed_moves_store.py`/
 `.price_history_store.py` (this package supplies only the math and the
 `TableContract`); refusals created through `errors.fail` use a
 `DataError`/`Problem` from `DATA_FAILURE_CODES`, intended to carry no local
 path or row value — not fully enforced today (Invariants). Strict document
 decoding can instead raise `DocumentError` directly.
+
+New native `computed_moves` captures publish singleton event objects within each
+ticker partition, with inspected key/time bounds and the existing streamed
+logical-partition hash. Row values and table contracts are unchanged; object
+layout changes physical version identity. Old pinned fragments remain unchanged.
+Repository predicates filter decoded rows, not arbitrary bytes within a surviving
+object: research must prove object isolation from metadata before reading labels.
 
 **`computed_moves.v3` — point-in-time availability.** `available_as_of_date`
 is the calendar day following the close that made `realized_move_pct`
@@ -492,9 +499,11 @@ Root doc §5 invariants this package is responsible for:
 - **Native vs. legacy provenance** — this package never mints a "native"
   answer from a legacy-derived value; a native verdict is computed at
   `engine/v2/scoring` (layer 5), not here.
-- **Whole-partition rewrite, no legacy append order** — `price_history_table.py`/
-  `computed_moves_table.py` each cover one ticker's whole history in one
-  fragment, so a correction rewrites it rather than appending a byte.
+- **Whole-partition rewrite, no legacy append order** — a correction rewrites
+  the entire ticker partition: `price_history` uses one fragment, while new
+  `computed_moves` captures use ordered, non-overlapping singleton event fragments.
+  Older snapshots may retain one whole-ticker fragment; neither layout appends
+  corrections to the existing fragment membership.
 - **The calendar ticker is a declared `price_history` dependency.** The native
   nightly derives its session calendar from the pinned `price_history` series of
   `price_history_table.CALENDAR_TICKER` (`SPY`), independent of any scoring
