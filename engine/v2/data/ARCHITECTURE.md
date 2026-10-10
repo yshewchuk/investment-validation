@@ -323,6 +323,14 @@ pre-existing root alone). A missing or unreadable part raises the reader's own
 error, never a match; that error is not a `DataError`, so it skips that cleanup
 and leaves an unlocked, unreturned partial tree (pre-existing behaviour).
 
+The v2 legacy-part adapter supplies an Arrow-owned, read-only file handle to
+the unchanged legacy reader. It preserves that reader's projection, missing
+columns, pandas metadata and coercion; no Python-owned file object is retained
+by Arrow's asynchronous Parquet machinery during interpreter shutdown.
+The handle closes on success or error. Opening a missing/unreadable part
+raises the file reader's error; this adds no cache, retry, transaction or write,
+and repeated reads retain the same row and materialization identities.
+
 **`daily_market` missing-ticker outcome (R1–R6).** A non-empty 2xx ORATS
 response that remains incomplete after the provider's single paired retry is
 committable as partial coverage. It does not turn an absent ticker into a
