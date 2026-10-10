@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from engine.data import finality as legacy_finality
-from engine.v2.ops import finality
+from engine.v2.ops import finality, legacy_adapter
 
 
 def test_disjoint_daily_and_chain_tickers_are_not_final():
@@ -15,7 +15,7 @@ def test_disjoint_daily_and_chain_tickers_are_not_final():
         "option_chains": pd.DataFrame({"ticker": ["B"], "obs_date": [day]}),
     }
 
-    result = finality.session_finality(
+    result = legacy_adapter.session_finality(
         day, ["A", "B"], frames=frames, market_wide=True)
 
     assert not result.is_final
@@ -34,7 +34,7 @@ def test_tickers_absent_from_both_tables_do_not_veto_finality():
         "option_chains": pd.DataFrame({"ticker": ["A"], "obs_date": [day]}),
     }
 
-    result = finality.session_finality(
+    result = legacy_adapter.session_finality(
         day, ["A", "GHOST"], frames=frames, market_wide=True)
 
     assert result.is_final
@@ -65,7 +65,7 @@ def test_covered_tickers_honors_the_legacy_seam_and_is_not_an_echo(monkeypatch):
         legacy_finality, "_coverage_frame",
         lambda table, column, stamp: daily if table == "daily_market" else chains)
 
-    result = finality.covered_tickers(day, ["A", "B", "C"])
+    result = legacy_adapter.covered_tickers(day, ["A", "B", "C"])
 
     assert result == ["A"]
     # The whole point: a genuine per-ticker computation differs from the
@@ -73,3 +73,21 @@ def test_covered_tickers_honors_the_legacy_seam_and_is_not_an_echo(monkeypatch):
     # echo the request back, and it must not empty out to nothing either.
     assert result != sorted(["A", "B", "C"])
     assert result != []
+
+
+def test_finality_uses_only_the_supplied_reads_callbacks():
+    """The native computation takes every legacy read from FinalityReads, no adapter."""
+    day = "2026-09-10"
+    asked = []
+
+    def frame(table, column, stamp):
+        asked.append(table)
+        return pd.DataFrame({"ticker": ["A"], column: [day]})
+
+    reads = finality.FinalityReads(
+        compatibility=lambda name, native: native,
+        market_wide_complete=lambda stamp: True,
+        coverage_frame=frame)
+
+    assert finality.covered_tickers(day, ["A", "Z"], reads=reads) == ["A"]
+    assert set(asked) == {"daily_market", "option_chains"}

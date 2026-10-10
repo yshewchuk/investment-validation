@@ -477,3 +477,193 @@ def test_active_caller_transaction_refuses_before_dependency_access(
     source.conn.rollback()
     assert not source.conn.in_transaction
     assert _catalog(source.conn) == committed
+
+
+NESTED_REFUSAL_DETAILS = {
+    "reason": "synthetic refusal",
+    "path": ["features", ["candidate", {"seen": ["early", "late"]}]],
+    "checks": [{"window": [1, 2]}, ["first", "second"]],
+}
+
+
+def _nested_refusal_problem(code, tuples):
+    """Use real typed problems with independently specified JSON-list expectations."""
+    details = {
+        "reason": "synthetic refusal",
+        "path": ("features", ("candidate", {"seen": ("early", "late")})),
+        "checks": [{"window": (1, 2)}, ("first", "second")],
+    } if tuples else deepcopy(NESTED_REFUSAL_DETAILS)
+    factory = make_data_problem if code == "HOLDOUT_ACCESS_DENIED" else make_problem
+    return factory(code, "synthetic nested refusal", details=details)
+
+
+@pytest.mark.parametrize("code,stage", [("FEATURE_LOOKAHEAD", "refused"),
+    ("HOLDOUT_ACCESS_DENIED", "refused"), ("EXPERIMENT_VARIANT_FAILED", "failed")])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("attempted", [False, True])
+@pytest.mark.parametrize("tuples_first", [True, False], ids=["tuple-first", "list-first"])
+def test_canonical_refusal_publish_repeat_and_replay_keep_original_bytes(
+        source, tmp_path, monkeypatch, code, stage, no_ledger, attempted, tuples_first):
+    """Nested tuple/list equivalents complete once and retain their first date."""
+    from tests.v2.research.test_native_outcomes import _clock
+
+    registration = _call(source)
+    ledger = tmp_path / "canonical-refusal" / "ledger.csv"
+    ledger_before = _seed_csv(ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    objects_before = _objects(source.store)
+    problem = _nested_refusal_problem(code, tuples_first)
+    _clock(monkeypatch, "2026-01-02")
+    first = _publish(source, registration, destination, no_ledger=no_ledger,
+                     report=None, attempted=attempted, problem=problem)
+    outcome = first["outcome"]
+    assert outcome["failure_code"] == code
+    assert outcome["failure_details"] == NESTED_REFUSAL_DETAILS
+    assert outcome["attempted_variants"] == int(attempted)
+    assert outcome["ledger_row"]["stage"] == stage
+    assert outcome["ledger_row"]["date"] == "2026-01-02"
+    assert outcome["report_ref"] is first["receipt"]["report_ref"] is None
+    key = "native_smoke" if no_ledger else "native_outcome"
+    evidence = _evidence(source, registration.run_id)
+    assert _document(source, evidence[key])["failure_details"] == NESTED_REFUSAL_DETAILS
+    assert evidence[key + "_receipt"] == first["receipt_ref"]
+    before, objects, ledger_bytes = _catalog(source.conn), _objects(source.store), _csv_state(ledger)
+    assert len(objects.keys() - objects_before.keys()) == 2  # Outcome and completion only.
+    if no_ledger:
+        assert ledger_bytes == ledger_before
+    else:
+        assert _rows(ledger) == [UNRELATED_ROW, outcome["ledger_row"]]
+
+    _clock(monkeypatch, "2026-02-10")
+    for repeated in (problem, _nested_refusal_problem(code, not tuples_first)):
+        assert _publish(source, registration, destination, no_ledger=no_ledger,
+                        report=None, attempted=attempted, problem=repeated) == first
+        assert _replay(source, registration, destination, no_ledger=no_ledger) == first
+        assert _catalog(source.conn) == before
+        assert _objects(source.store) == objects
+        assert _csv_state(ledger) == ledger_bytes
+    with pytest.raises(OpsError) as captured:
+        outcomes.export_native_report(source.conn, source.store, registration,
+                                      ledger_path=destination, no_ledger=no_ledger)
+    assert captured.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert _catalog(source.conn) == before
+    assert _objects(source.store) == objects
+    assert _csv_state(ledger) == ledger_bytes
+    assert not list(tmp_path.rglob("REPORT.md"))
+
+
+@pytest.mark.parametrize("code", ["FEATURE_LOOKAHEAD", "HOLDOUT_ACCESS_DENIED",
+                                  "EXPERIMENT_VARIANT_FAILED"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("change", ["nested-value", "nested-order", "boolean-for-integer"])
+def test_canonical_refusal_changed_nested_details_are_r6_without_replacement(
+        source, tmp_path, monkeypatch, code, no_ledger, change):
+    """Canonical equality preserves nested values and order as immutable identity."""
+    registration = _call(source)
+    ledger = tmp_path / "canonical-conflict" / "ledger.csv"
+    _seed_csv(ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    first = _publish(source, registration, destination, no_ledger=no_ledger,
+                     report=None, problem=_nested_refusal_problem(code, True))
+    before, objects, ledger_bytes = _catalog(source.conn), _objects(source.store), _csv_state(ledger)
+    altered = deepcopy(NESTED_REFUSAL_DETAILS)
+    if change == "nested-value":
+        altered["path"][1][1]["seen"][1] = "different"
+    elif change == "nested-order":
+        altered["checks"][1].reverse()
+    else:
+        altered["checks"][0]["window"][0] = True
+    factory = make_data_problem if code == "HOLDOUT_ACCESS_DENIED" else make_problem
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes, "ledger_append", _forbid)
+        with pytest.raises(OpsError) as captured:
+            _publish(source, registration, destination, no_ledger=no_ledger, report=None,
+                     problem=factory(code, "synthetic changed refusal", details=altered))
+    _assert_conflict(source, captured, registration)
+    assert _catalog(source.conn) == before
+    assert _csv_state(ledger) == ledger_bytes
+    _assert_objects_preserved(source, objects)
+    assert len(_objects(source.store).keys() - objects.keys()) == 1  # Private R6 only.
+    assert _replay(source, registration, destination, no_ledger=no_ledger) == first
+    assert _catalog(source.conn) == before
+    assert _csv_state(ledger) == ledger_bytes
+    assert not list(tmp_path.rglob("REPORT.md"))
+
+
+@pytest.mark.parametrize("code", ["FEATURE_LOOKAHEAD", "HOLDOUT_ACCESS_DENIED",
+                                  "EXPERIMENT_VARIANT_FAILED"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("operation", ["publish", "replay"])
+def test_canonical_refusal_pending_tuple_intent_recovers_without_rewriting(
+        source, tmp_path, monkeypatch, code, no_ledger, operation):
+    """A committed pre-completion tuple intent remains recoverable across dates."""
+    from tests.v2.research.test_native_outcomes import _clock
+
+    registration = _call(source)
+    ledger = tmp_path / "canonical-pending" / "ledger.csv"
+    ledger_before = _seed_csv(ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    problem = _nested_refusal_problem(code, True)
+    _clock(monkeypatch, "2026-01-02")
+    key, saved = _pending(source, registration, destination, monkeypatch,
+                          no_ledger=no_ledger, report=None, problem=problem, attempted=False)
+    assert saved["failure_details"] == NESTED_REFUSAL_DETAILS
+    assert _csv_state(ledger) == ledger_before
+    intent_ref = _evidence(source, registration.run_id)[key]
+    objects = _objects(source.store)
+    _clock(monkeypatch, "2026-02-10")
+    if operation == "publish":
+        result = _publish(source, registration, destination, no_ledger=no_ledger,
+                          report=None, problem=problem, attempted=False)
+    else:
+        result = _replay(source, registration, destination, no_ledger=no_ledger)
+    assert result["outcome"] == saved
+    assert result["outcome"]["failure_details"] == NESTED_REFUSAL_DETAILS
+    assert result["outcome"]["ledger_row"]["date"] == "2026-01-02"
+    assert result["outcome"]["attempted_variants"] == 0
+    assert result["outcome"]["report_ref"] is result["receipt"]["report_ref"] is None
+    evidence = _evidence(source, registration.run_id)
+    assert evidence[key] == intent_ref
+    assert evidence[key + "_receipt"] == result["receipt_ref"]
+    assert result["receipt"]["outcome_ref"] == intent_ref
+    _assert_objects_preserved(source, objects)
+    assert len(_objects(source.store).keys() - objects.keys()) == 1  # Completion only.
+    if no_ledger:
+        assert _csv_state(ledger) == ledger_before
+    else:
+        assert _rows(ledger) == [UNRELATED_ROW, saved["ledger_row"]]
+    before, objects, ledger_bytes = _catalog(source.conn), _objects(source.store), _csv_state(ledger)
+    assert _publish(source, registration, destination, no_ledger=no_ledger,
+                    report=None, problem=problem, attempted=False) == result
+    assert _replay(source, registration, destination, no_ledger=no_ledger) == result
+    assert _catalog(source.conn) == before
+    assert _objects(source.store) == objects
+    assert _csv_state(ledger) == ledger_bytes
+    assert not list(tmp_path.rglob("REPORT.md"))
+
+
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+def test_canonical_refusal_republish_still_validates_original_pending_date(
+        source, tmp_path, monkeypatch, no_ledger):
+    """Date masking for identity cannot bless an invalid saved publication date."""
+    registration = _call(source)
+    ledger = tmp_path / "canonical-invalid-date" / "ledger.csv"
+    ledger_bytes = _seed_csv(ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    problem = _nested_refusal_problem("FEATURE_LOOKAHEAD", True)
+    key, saved = _pending(source, registration, destination, monkeypatch,
+                          no_ledger=no_ledger, report=None, problem=problem, attempted=False)
+    saved["ledger_row"]["date"] = "2026-02-30"
+    _save_intent(source, registration, key, saved)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(outcomes, "ledger_append", _forbid)
+    with pytest.raises(OpsError) as captured:
+        _publish(source, registration, destination, no_ledger=no_ledger,
+                 report=None, problem=problem, attempted=False)
+    _assert_conflict(source, captured, registration)
+    assert _catalog(source.conn) == before
+    assert _csv_state(ledger) == ledger_bytes
+    assert key + "_receipt" not in _evidence(source, registration.run_id)
+    _assert_objects_preserved(source, objects)
+    assert len(_objects(source.store).keys() - objects.keys()) == 1
+    assert not list(tmp_path.rglob("REPORT.md"))

@@ -151,6 +151,7 @@ def test_authenticated_summary_and_bounded_detail_pages(parity):
     assert summary["native_refused_count"] == 0
     assert summary["native_refused_unmatched_count"] == 0
     assert summary["native_refused_reasons"] == {}
+    assert summary["native_refused_tickers"] == []
     assert headers.get("Cache-Control") == "no-store"
     assert headers.get("ETag") is None
 
@@ -200,6 +201,77 @@ def test_authenticated_summary_and_bounded_detail_pages(parity):
         assert seen == expected
 
 
+def test_summary_projects_keyed_refusal_ticker_and_reason(parity):
+    report = apply_native_refusals(
+        _build_report(), {"DDD|S|2026-01-04": "PRICE_HISTORY_NOT_AVAILABLE"})
+    write_parity_report(report, parity.report_path)
+
+    code, body, _ = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    summary = json.loads(body)
+    assert summary["native_refused_tickers"] == [
+        {"ticker": "DDD", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
+    assert summary["native_refused_count"] == 1
+
+
+def test_summary_projects_unmatched_refusal_ticker_and_count(parity):
+    report = apply_native_refusals(
+        _build_report(), {"HHH|S|2026-01-08": "PRICE_HISTORY_NOT_AVAILABLE"})
+    assert report["native_refused_unmatched"] == [
+        {"row_key": "HHH|S|2026-01-08", "refusal_code": "PRICE_HISTORY_NOT_AVAILABLE",
+         "ticker": "HHH", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
+    write_parity_report(report, parity.report_path)
+
+    code, body, _ = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    summary = json.loads(body)
+    assert summary["native_refused_tickers"] == [
+        {"ticker": "HHH", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
+    assert summary["native_refused_unmatched_count"] == 1
+
+
+def test_v12_compat_report_projects_row_key_prefix_and_refusal_code(parity):
+    report = apply_native_refusals(
+        _build_report(), {"DDD|S|2026-01-04": "PRICE_HISTORY_NOT_AVAILABLE"})
+    report["schema_version"] = "native_parity_report.v1.2"
+    entry = report["native_refused"][0]
+    del entry["ticker"]
+    del entry["reason"]
+    parity.report_path.write_text(json.dumps(report))
+
+    code, body, _ = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    summary = json.loads(body)
+    assert summary["native_refused_tickers"] == [
+        {"ticker": "DDD", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
+
+
+def test_v12_compat_unmatched_report_projects_structured_row_key_and_refusal_code(parity):
+    report = apply_native_refusals(
+        _build_report(), {"HHH|S|2026-01-08": "PRICE_HISTORY_NOT_AVAILABLE"})
+    report["schema_version"] = "native_parity_report.v1.2"
+    entry = report["native_refused_unmatched"][0]
+    entry["key"] = {"ticker": "HHH", "strategy": "S",
+                    "event_date": "2026-01-08", "session": "AMC"}
+    entry["row_key"] = entry.pop("key")
+    del entry["ticker"]
+    del entry["reason"]
+    write_parity_report(report, parity.report_path)
+
+    code, body, _ = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    summary = json.loads(body)
+    assert summary["native_refused_tickers"] == [
+        {"ticker": "HHH", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}]
+    assert summary["native_refused_unmatched_count"] == 1
+
+    for path in _PARITY_ROUTES:
+        params = {"side": "legacy"} if path.endswith("unpaired") else None
+        code, body, headers = _get(parity.base, path, token=parity.token, params=params)
+        assert code == 200, path
+        _assert_no_store(headers)
+
+
 _PARITY_ROUTES = ("/api/v1/native_parity", "/api/v1/native_parity/mismatches",
                   "/api/v1/native_parity/unpaired")
 
@@ -236,7 +308,7 @@ def test_no_report(parity, tmp_path):
 
 
 _MALFORMED_CASES = ("not_json", "missing_identity_keys", "missing_both_identity_keys",
-                    "malformed_as_of", "missing_value_pair")
+                    "malformed_as_of", "missing_value_pair", "empty_refusal_code")
 
 
 def _corrupt_report(parity, case):
@@ -255,6 +327,10 @@ def _corrupt_report(parity, case):
         mismatch = next(entry for entry in document["mismatches"]
                         if entry["finding_fields"])
         mismatch["values"][mismatch["finding_fields"][0]].pop("native")
+    elif case == "empty_refusal_code":
+        document["native_refused"] = [{"row_key": "AAA|S|2026-01-01",
+                                       "refusal_code": "", "ticker": "AAA"}]
+        document["native_refused_unmatched"] = []
     else:
         raise AssertionError(case)
     parity.report_path.write_text(json.dumps(document))

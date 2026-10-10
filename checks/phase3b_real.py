@@ -64,6 +64,7 @@ from engine.v2.foundation import (  # noqa: E402
     to_document,
 )
 from engine.v2.ops import finality as v2_finality  # noqa: E402
+from engine.v2.ops import legacy_adapter  # noqa: E402
 from engine.v2.ops import incremental_data as ops_data  # noqa: E402
 from engine.v2.ops import provider_budget  # noqa: E402
 from engine.v2.ops.incremental_data import RefreshParameters  # noqa: E402
@@ -654,7 +655,7 @@ def _finality_metrics(session_date):
     chain_only = "PHASE3B_CHAIN_ONLY"
     matched_daily = pd.DataFrame(({"ticker": daily_only, "date": session_date},))
     matched_chain = pd.DataFrame(({"ticker": daily_only, "obs_date": session_date},))
-    matched = v2_finality.session_finality(
+    matched = legacy_adapter.session_finality(
         session_date, (daily_only,),
         frames={"daily_market": matched_daily, "option_chains": matched_chain})
     expected_matched_final = bool(
@@ -667,7 +668,7 @@ def _finality_metrics(session_date):
         and matched.covered == 1
         and matched.is_final == expected_matched_final)
 
-    split = v2_finality.session_finality(
+    split = legacy_adapter.session_finality(
         session_date, (daily_only, chain_only),
         frames={
             "daily_market": matched_daily,

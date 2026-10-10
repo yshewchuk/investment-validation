@@ -193,7 +193,7 @@ def publish_native_outcome(conn, store, registration, *, report=None, problem=No
         existing = _reserve(conn, registration, key, _publish(store, document))
     _, saved = _read(store, existing)
     saved["ledger_row"]["date"] = row["date"]  # Compare result identity; reconciliation retains the first date.
-    if saved != document:
+    if foundation.canonical_json(saved) != foundation.canonical_json(document):
         raise _conflict(store, registration)
     return _reconcile(conn, store, registration, key, destination, ledger_path, existing)
 

@@ -593,7 +593,7 @@ old = ["nightly:legacy finality"]
 new = ["nightly:v2 finality", "action:legacy_finality", "py:engine/v2/ops/finality.py::resolve_final_session"]
 producer = "native engine/v2/ops/finality.py inside the legacy_finality job kind"
 identity = "finality receipt bound to the materialization root"
-tests = ["tests/test_v2_ops_finality.py", "tests/test_finality.py"]
+tests = ["tests/v2/ops/test_v2_ops_finality.py", "tests/test_finality.py"]
 disposition = "native"
 owner = "P6-2"
 
@@ -662,7 +662,7 @@ old = []
 new = ["py:engine/v2/serving/native_parity_projection.py::native_parity_summary", "route:v2-api GET /api/v1/native_parity", "route:v2-api GET /api/v1/native_parity/mismatches", "route:v2-api GET /api/v1/native_parity/unpaired", "view:ui #nativeParity"]
 producer = "projection reads the configured saved native_parity_report.v1.3 output; the serving projection remains compatible with v1.2 reports; no automatic selection of outputs; run_shadow_nightly's supplied output path is separate from the native_parity worker's native_parity_report.json job output"
 identity = "the API takes an optional --native-parity-report-path independent of --publication-root"
-tests = ["tests/test_v2_serving_native_parity.py", "tests/test_v2_route_probe.py", "tests/v2/serving/test_native_parity_api.py", "tests/test_v2_native_parity_browser.py"]
+tests = ["tests/test_v2_serving_native_parity.py", "tests/test_v2_route_probe.py", "tests/v2/serving/test_native_parity_api.py", "tests/v2/integration/test_native_parity_browser.py"]
 disposition = "native"
 owner = "P6-4"
 notes = "No legacy equivalent (old = []): the React screen displays report identity, aggregate counts, and refusal reasons. Per-row mismatch/unpaired details are deferred; future mismatch detail follows the design's mismatched-fields-only rule. The operations HTML/JSON preview is retired."
