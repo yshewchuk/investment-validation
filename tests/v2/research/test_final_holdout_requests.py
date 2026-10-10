@@ -145,6 +145,51 @@ def test_declaration_is_preregistered_and_cannot_be_replaced_afterward(source):
         as_of_month="2025-01", final_read=source.declaration) == registration
 
 
+@pytest.mark.parametrize("declared", [False, True])
+def test_stored_read_and_expected_admission_preserve_both_registration_versions(source, declared):
+    declaration = source.declaration if declared else None
+    registration = _register(source, final_read=declaration)
+    assert native.read_native_registration(source.conn, source.store, source.spec) == registration
+    before = source.conn.total_changes
+    assert native.require_native_registration(
+        source.conn, source.store, source.repository, source.spec, code_root=source.root,
+        as_of_month="2025-01", final_read=declaration, expected=registration) == registration
+    assert source.conn.total_changes == before
+
+
+@pytest.mark.parametrize("declared", [False, True])
+@pytest.mark.parametrize("changed", ["spec", "source", "snapshot", "scope", "environment", "declaration"])
+def test_expected_identity_refuses_drift_before_population(source, monkeypatch, declared, changed):
+    declaration = source.declaration if declared else None
+    registration = _register(source, final_read=declaration)
+    arguments = {"code_root": source.root, "as_of_month": "2025-01",
+                 "final_read": declaration, "expected": registration}
+    spec = source.spec
+    if changed == "spec":
+        spec = replace(spec, seed=2)
+    elif changed == "source":
+        monkeypatch.setattr(native, "source_closure", lambda *a: {"runner.py": content_hash("changed")})
+    elif changed == "snapshot":
+        monkeypatch.setattr(source.repository, "resolve_pinned",
+                            lambda scope: replace(source.snapshot, snapshot_id="changed"))
+    elif changed == "scope":
+        arguments["scope"] = "changed"
+    elif changed == "environment":
+        monkeypatch.setattr(native, "environment_identity", lambda *a: {"changed": True})
+    else:
+        arguments["final_read"] = replace(source.declaration, frozen_model_refs=())
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("changed identity reached population or publication")
+
+    monkeypatch.setattr(native, "load_population", forbidden)
+    monkeypatch.setattr(source.store, "publish_bytes", forbidden)
+    before = source.conn.total_changes
+    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+        native.require_native_registration(source.conn, source.store, source.repository, spec, **arguments)
+    assert source.conn.total_changes == before
+
+
 @pytest.mark.parametrize("field", ["evaluation_recipe_ref", "completeness_bar_ref", "frozen_model_refs"])
 def test_every_final_read_commitment_changes_request_identity(source, field):
     _, request = _prepared(source)
