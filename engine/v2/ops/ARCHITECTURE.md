@@ -523,21 +523,7 @@ idempotency key to recover `(session, scope_hash, snapshot_pinned)`, or
 directly via `ops plan` (not the scheduled trigger) still gets a silent
 no-op (see "Failure semantics" below).
 
-**Cutover PR-7b (implemented, #145/#150): the shadow nightly plan pins a
-snapshot before scoring.** `nightly_trigger._default_plan` runs in
-`input_mode="snapshot"`, `snapshot_scope="shadow"` (was `"legacy"`/`None`):
-legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
-`"model_evidence"` read through one pinned, frozen snapshot per session.
-`pin_snapshot_inputs` binds that snapshot to the exact `snapshot_id`
-`_ensure_shadow_snapshot` verified; its three required bindings are `core/snapshot_contracts.py::SNAPSHOT_BINDINGS`.
-Extending that shared snapshot to `native_score_batch` still depends on
-[#199](https://github.com/yshewchuk/investment-validation/issues/199)'s reader,
-which removes independent legacy/native store reads from the shadow comparison.
-This never touches the real legacy nightly:
-`nightly_trigger.py` runs on its own systemd timer
-(`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate
-from whatever schedules the legacy nightly, with no code path into the
-legacy process.
+**Cutover PR-7b (implemented, #145/#150): the shadow nightly plan pins a snapshot before scoring.** `nightly_trigger._default_plan` runs in `input_mode="snapshot"`, `snapshot_scope="shadow"`: legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/`"model_evidence"` read through that pinned snapshot. `pin_snapshot_inputs` binds it to the exact `snapshot_id` `_ensure_shadow_snapshot` verified; its three required bindings are `core/snapshot_contracts.py::SNAPSHOT_BINDINGS`. The native sidecar's raw-row producer also accepts an explicit `SnapshotRef` and enumerates its pinned forward board. This never starts the real legacy nightly: `nightly_trigger.py` runs on its own systemd timer (`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate from whatever schedules the legacy nightly.
 
 `nightly_trigger._ensure_shadow_snapshot(root, as_of, clock, attempt, ...)
 -> (status, snapshot_id | None)`, called from `_submit_plan` immediately
@@ -557,21 +543,23 @@ non-terminal row is reattached and driven to terminal directly — never resubmi
 exactly once, ever. A terminal-but-failed row raises `INPUT_CHANGED` immediately without resubmitting under the same
 key; the NEXT `_submit_plan` entry mints a genuinely new key via the bumped `snapshot_attempt`.
 
-`TriggerReceipt.snapshot_attempt: int = 0` is a single, monotonic per-`as_of` counter, carried on every receipt regardless of status (independent of
-`error_count`, which resets on several unrelated statuses), and bumped in exactly one place: a terminal `INPUT_CHANGED` refusal, never a transient
-failure. Give-up is an OR of two independent bounds: `error_count >= MAX_CONSECUTIVE_ERRORS` (unchanged) OR `snapshot_attempt >=
-MAX_CONSECUTIVE_ERRORS` (new) — an alternating `"error"`/`"timed_out"` sequence can no longer defeat the give-up bound by resetting only the old
-counter. Any status in `RESUME_STATUSES` (which includes `"snapshot_not_yet"`, a resumed `"not_yet"` outcome) resumes on the next tick regardless of
-whether `plan_ref` is set — a pre-plan timeout/error genuinely has no `plan_ref` yet, and this is what makes it resumable rather than permanently
-`"missed"`.
+`TriggerReceipt.snapshot_attempt: int = 0` is a single, monotonic per-`as_of` counter, carried on every receipt regardless of status (independent of `error_count`, which resets on several unrelated statuses), and bumped in exactly one place: a terminal `INPUT_CHANGED` refusal, never a transient failure. Give-up is an OR of two independent bounds: `error_count >= MAX_CONSECUTIVE_ERRORS` (unchanged) OR `snapshot_attempt >= MAX_CONSECUTIVE_ERRORS` (new) — an alternating `"error"`/`"timed_out"` sequence can no longer defeat the give-up bound by resetting only the old counter. Any status in `RESUME_STATUSES` (which includes `"snapshot_not_yet"`, a resumed `"not_yet"` outcome) resumes on the next tick regardless of whether `plan_ref` is set — a pre-plan timeout/error genuinely has no `plan_ref` yet, and this is what makes it resumable rather than permanently `"missed"`.
 
-Commits land directly in scope `"shadow"` (no candidate-scope-then-promote step): `"shadow"` has no downstream
-consumer needing pre-advance validation. The EXACT `snapshot_id` this call verified is threaded through
-(`expected_shadow_snapshot_id` → `_default_plan`'s `args.expected_snapshot_id` → `cli._snapshot_inputs` →
-`pin_snapshot_inputs(expected_snapshot_id=None)`). The optional guard compares the already-loaded
-`SnapshotRef.snapshot_id`, without a second head resolution. A mismatch raises `INPUT_CHANGED` before materialization
-request construction or registration; equality keeps that ref. Omitting the expected id preserves direct and legacy
-caller behavior.
+Commits land directly in scope `"shadow"` (no candidate-scope-then-promote step): `"shadow"` has no downstream consumer needing pre-advance validation. The verified `snapshot_id` is forwarded as `expected_shadow_snapshot_id` → `_default_plan`'s `args.expected_snapshot_id` → `cli._snapshot_inputs` → `pin_snapshot_inputs`'s `expected_snapshot_id` argument. When population generation supplies a scanned snapshot ID, `_snapshot_inputs` uses that ID instead; the population scan checks the caller's expected ID first. The guard compares the already-loaded `SnapshotRef.snapshot_id`, without a second head resolution. A mismatch raises `INPUT_CHANGED` before materialization request construction or registration; equality keeps that ref. Omitting the expected id preserves direct and legacy caller behavior.
+
+### Current nightly orchestration boundary
+
+`nightly_trigger` coordinates import, plan, submit and serve; Tier-4 rebuild, computed-moves/price capture and history bootstrap remain separate commands. It has no complete-chain step journal or explicit same-session rerun interface. The proposed replacement contract, failure table and implementation slices are in [PR #564](https://github.com/yshewchuk/investment-validation/pull/564), not implemented here.
+
+| Current condition | Outcome |
+|---|---|
+| Saved nightly plan submitted again | Stage keys derive from that plan; the caller's submission key does not distinguish a retry. |
+| Same namespace/key, changed request digest | `IDEMPOTENCY_CONFLICT`; existing job content is not replaced. |
+| Trigger's recorded session is terminal | Returns idle, without re-planning; diagnostic `resume --dry-run` does not reset a failed job. |
+| Prior matching snapshot-import job exists | Reattach while nonterminal; success supplies its committed snapshot receipt rather than a mutable-head guess; terminal failure raises `INPUT_CHANGED`. |
+| Same-session candidate differs from an authoritative decision | Record divergence, preserving the first decision; OPS-5 may withhold the decisions watermark. Later release publication still requires the matching-session decision gate. |
+| `serve --once` reaches idle | Returns; this is not a success receipt. The trigger checks its submitted DAG jobs, while native batch/parity remain separate sidecar jobs. |
+| Source availability preflight receives readable evidence | Still refuses: no registered positive EOD verifier exists. Scheduling readiness does not grant EOD admission. |
 
 **Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`), resolves the carried set from that same pinned snapshot, and filters uncarried event tickers before expanding the legacy population across every `STRATEGY_IDS` member. Each excluded candidate ticker is recorded in sorted `candidate_exclusions` evidence with `reason_code: UNCARRIED_TICKER` and sorted `missing_tables`; that evidence is stored in the plan and contributes to `plan_hash`. The filtered population records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date). `_legacy_params` derives the supervised `legacy_score` ticker parameter from those keys when exclusions exist; the native score-batch sidecar uses that score job's ticker parameter for `scan_forward_board_requests` and `board_requests`, so both candidate enumerators see the same eligible event tickers. Missing or unreadable carried-set tables refuse planning with `INPUT_CHANGED` and the source reader's code in `details.data_code`. The ordinary live legacy board remains unchanged. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires every planned key to be observed under the shared score-population rule. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
 
