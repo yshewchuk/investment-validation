@@ -75,12 +75,12 @@ strategy-eligible expiries and calendar-row inputs; this slice adds no
 production caller. See the component architecture contract.
 
 `nightly_raw_row_producer.build_native_score_batch_events` is an internal
-staging API that composes native raw-row event and refusal documents from
-pinned inputs. `Service._reconcile_native_score_batch_shadow` is its production
-caller: for an eligible pinned-snapshot identity it stages/registers both
-producer documents before calling
-`submit_native_score_batch_shadow_if_ready`. See the component architecture
-contract.
+producer that composes native raw-row event and refusal documents from pinned
+inputs. `native_score_batch.run_native_score_batch_worker` is its production
+caller: it resolves the pinned snapshot and invokes the producer in the worker
+process. `Service._reconcile_native_score_batch_shadow` only submits producer
+parameters for an eligible pinned-snapshot identity. See the component
+architecture contract.
 
 `carried_set.CarriedTickerExclusion`, `carried_set.CarriedSetResolution`,
 `carried_set.resolve_carried_set`, and

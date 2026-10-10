@@ -315,6 +315,95 @@ def test_shared_panel_reads_with_per_request_calendar_and_quotes(tmp_path, monke
     assert json.dumps(events_document)
 
 
+def test_panel_reader_called_once_per_ticker(
+        tmp_path, monkeypatch):
+    from collections import Counter
+    from types import SimpleNamespace
+
+    import tests.test_v2_features_panel_row_inputs as fixture
+    from engine.v2.ops.native_board_universe import BoardRequest
+
+    history = pd.bdate_range(end=fixture._DECISION, periods=300)
+    batches = fixture._default_batches()
+    batches[("daily_market", "SPY")] = fixture._spy_rows(periods=300)
+    for ticker in ("AAA", "BBB"):
+        batches[(fixture.COMPUTED_MOVES_TABLE_NAME, ticker)] = \
+            fixture._computed_rows([(history[20].date().isoformat(), 4.0, False)])
+    price_history_table, price_history_rows = next(
+        (table, rows) for (table, _ticker), rows in batches.items()
+        if table == "price_history" and rows)
+    batches[(price_history_table, "BBB")] = price_history_rows
+    snapshot = fixture._snapshot()
+    reads = []
+
+    class CountingRepository(fixture._FakeRepository):
+        def scan(self, query, *, table_name):
+            ticker = (query.key_filter[0].values[0]
+                      if query.key_filter else "*")
+            reads.append((table_name, ticker))
+            if query.time_interval is not None:
+                rows = self._batches.get((table_name, ticker), [])
+                selected = [row for row in rows
+                            if fixture._bound_row_selected(
+                                row, query.key_filter, query.time_interval)]
+                yield fixture._Batch(selected)
+            else:
+                yield from super().scan(query, table_name=table_name)
+
+        def fragment_records(self, snapshot_ref, table_name):
+            return tuple(
+                SimpleNamespace(partition_key=ticker, row_count=len(rows))
+                for (candidate_table, ticker), rows in self._batches.items()
+                if candidate_table == table_name)
+
+    repository = CountingRepository(snapshot, fixture._contracts(), batches)
+    keys = [BoardRequest(ticker=ticker, strategy="STR-THRU",
+                         event_date=fixture._EVENT, session="BMO")
+            for ticker in ("AAA", "BBB")]
+
+    def enumerate_keys(repo, snap, *, as_of, horizon_days, tickers=None):
+        return keys
+
+    def decision_calendar(repo, snap, *, decision_session, event_through):
+        days = tuple(day.date().isoformat() for day in history) + (
+            fixture._EVENT.date().isoformat(),)
+        return CalendarSessions(days=days, observed_through=decision_session)
+
+    def calendar_row(repo, snap, key, *, decision_session, calendar):
+        day = key.event_date.date().isoformat()
+        return CalendarRowInputs(calendar_revision="events-rev", calendar_row={
+            "event_id": f"{key.ticker}-{key.strategy}", "ticker": key.ticker,
+            "event_date": day, "session": key.session,
+            "entry_date": decision_session, "exit_date": day,
+            "expiry": day, "spot": 10.0,
+            "calendar_observed_through": decision_session})
+
+    def quote_rows(repo, snap, key, *, expiry, decision_session):
+        return QuoteRowInputs(quote_rows=({
+            "ticker": key.ticker, "right": "C", "strike": 100.0,
+            "expiry": expiry, "bid": 1.0, "ask": 1.2,
+            "observed_at": decision_session},), quote_status="recorded")
+
+    _patch_reader(monkeypatch, nightly_raw_rows,
+                  "scan_forward_board_requests", enumerate_keys)
+    _patch_reader(monkeypatch, nightly_calendar_inputs,
+                  "scan_decision_calendar", decision_calendar)
+    _patch_reader(monkeypatch, nightly_calendar_inputs,
+                  "scan_calendar_row_inputs", calendar_row)
+    _patch_reader(monkeypatch, nightly_quote_rows, "scan_quote_rows", quote_rows)
+
+    events, refusals = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
+        horizon_days=_HORIZON_DAYS)
+
+    assert refusals["refusals"] == []
+    assert {event["key"]["ticker"] for event in events} == {"AAA", "BBB"}
+    counts = Counter(reads)
+    assert counts[("daily_market", "SPY")] == 2
+    assert counts[(fixture.COMPUTED_MOVES_TABLE_NAME, "AAA")] == 1
+    assert counts[(fixture.COMPUTED_MOVES_TABLE_NAME, "BBB")] == 1
+
+
 def test_earlier_success_does_not_hide_a_later_failure(tmp_path, monkeypatch):
     repository, snapshot = _snapshot(tmp_path, [
         _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-bmo"),
