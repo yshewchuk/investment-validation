@@ -245,16 +245,9 @@ submission path reads either edge (the rule Part 4 established for
   `native_rows` share any key (below, `_empty_native_report`) before
   calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
-  This is the real (only) production caller `tools/native_parity_run.py`
-  was originally designed to be. **That script is dropped from this redo
-  entirely — no code for it was ever written** (`tools/native_parity_run.py`
-  and `row_explanations` never existed and still don't; `legacy_parity_rows`
-  now exists on `main` as of Phase 1, `#132`, but only as the pure function
-  this section documents — nothing calls it in production yet, so nothing
-  needs migrating away from the dropped script), never built as a parallel
-  manual path alongside the job. There is exactly one way a real
-  `native_parity_report.json` gets produced in this codebase once Phase 2
-  lands, not two.
+  This is the only production producer of `native_parity_report.json`;
+  `tools/native_parity_run.py` and `row_explanations` never existed and no
+  parallel manual path is built.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
   dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
   gap in `compare_native_vs_legacy`: its unchanged guards reject an empty
@@ -524,8 +517,7 @@ The report is replaced atomically after capture; a report-write failure leaves t
 
 | Current condition | Outcome |
 |---|---|
-| Saved nightly plan submitted again | Stage keys derive from that plan; the caller's submission key does not distinguish a retry. |
-| Same namespace/key, changed request digest | `IDEMPOTENCY_CONFLICT`; existing job content is not replaced. |
+| Saved nightly plan submitted again; same namespace/key with a changed request digest | Stage keys derive from the plan, so the caller's key does not distinguish a retry; a changed digest is `IDEMPOTENCY_CONFLICT` and existing job content is not replaced. |
 | Trigger's recorded session is terminal | Returns idle, without re-planning; diagnostic `resume --dry-run` does not reset a failed job. |
 | Prior matching snapshot-import job exists | Reattach while nonterminal; success supplies its committed snapshot receipt rather than a mutable-head guess; terminal failure raises `INPUT_CHANGED`. |
 | Same-session candidate differs from an authoritative decision | Record divergence, preserving the first decision; OPS-5 may withhold the decisions watermark. Later release publication still requires the matching-session decision gate. |
@@ -540,8 +532,7 @@ Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` re
 |---|---|
 | First ordinary call | Creates generation 1 `allocated`; later calls return that state and never allocate. |
 | Explicit rerun | Appends generation n+1 and its invalidation cone in one swap: the intent is the allocated generation. A crash before the swap records nothing and the request repeats; after it, a repeated rerun reattaches to that still-`allocated` generation. Once started, a rerun allocates the next. The caller's lock decides when the older owner is gone. |
-| Concurrent callers | One swap wins. A loser re-reads: ordinary calls return the winner's state, reruns reattach to the winner's generation. Exhausting the bounded swap retries raises retryable `LEASE_LOST`. A returned state is the revision read; a later swap makes it stale. |
-| Superseded generation marks itself started | `CHECKPOINT_INCOMPATIBLE`. |
+| Concurrent callers | One swap wins. A loser re-reads: ordinary calls return the winner's state, reruns reattach to the winner's generation. Exhausting the bounded swap retries raises retryable `LEASE_LOST`. A returned state is the revision read; a later swap makes it stale. A superseded generation marking itself started is `CHECKPOINT_INCOMPATIBLE`. |
 | Unparseable JSON, wrong key, run_id or numbering | `INTEGRITY_FAILED`, never treated as absent (that would restart numbering). Another schema is `CHECKPOINT_INCOMPATIBLE`; the operator moves it aside. Old per-date `<as_of>.json` receipts (another path) are never read: no migration, no completed step inferred. |
 | Empty or malformed identity field, or a rerun of a session with no state | `INVALID_REQUEST`; nothing is written. |
 
@@ -554,9 +545,18 @@ Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `
 | No receipt, or intent with the job row or artifact file absent (submits and publishes are atomic, so a crash left nothing) | `not_started`; the caller repeats the effect under the same deterministic identity. |
 | Intent and the effect proven (job `succeeded`, artifact hash matches): the crash fell between effect and receipt | `completed`; the receipt is adopted. |
 | Intent and the effect unproven: job live, failed, cancelled or blocked, artifact with other bytes, or any `external` effect | Uncertain: `CHECKPOINT_INCOMPATIBLE`, nothing written. It never auto-repeats an external effect; a live job is reattached by its owner, anything else needs a rerun generation. |
-| Succeeded receipt whose effect no longer holds | `INTEGRITY_FAILED`. |
-| Same step with another request digest or effect (changed inputs) | `IDEMPOTENCY_CONFLICT`; a rerun generation is the way forward. |
+| Same step with another request digest or effect (changed inputs) | `IDEMPOTENCY_CONFLICT`; a rerun generation is the way forward. A succeeded receipt whose effect no longer holds is `INTEGRITY_FAILED`. |
 | `complete_step` with no intent or an incomplete effect; malformed step, request digest (also in `reconcile_step`) or effect (an artifact needs a 64-hex sha256; no ref may contain NUL; a stored effect failing this is `INTEGRITY_FAILED`); a `catalog_job` probe (`complete_step`, `reconcile_step`) without the catalog connection | `INVALID_REQUEST`. Unparseable or foreign receipt files: `INTEGRITY_FAILED` / `CHECKPOINT_INCOMPATIBLE`. |
+
+### Nightly snapshot chain (`nightly_chain.py`, slice 4 of #564)
+
+Leaf, not yet called by `nightly_trigger`; it imports no CLI or store. `run_snapshot_chain` walks caller-supplied `ChainStep`s serially (planned order: import, planned-price refresh, computed moves, price-history capture). Each step gets the exact snapshot id its predecessor committed, never the mutable head, and a step receipt (`request_digest = H(name, predecessor)`). A step supplies `effect(pred)` (the receipt effect), `run(pred)` (atomic; idempotent under its deterministic job id) and `successor(pred)` (the snapshot it committed, else `None`). Refresh commits no snapshot: the caller's `successor` must return the predecessor, proven by the refresh's own atomic report (not enforced here).
+
+| Condition | Outcome |
+|---|---|
+| Successor already committed (finished step, or crash between commit and receipt) | Receipt completed, `run` not called, step `skipped`. No successor: `run` once, re-read, complete; still none is `DEPENDENCY_FAILED`. A succeeded receipt with no successor is `INTEGRITY_FAILED`. A `catalog_job` effect not yet `succeeded` is `INVALID_REQUEST` from completion: `run` returns only once its job is terminal, and a rerun reattaches. |
+| Recorded step with another predecessor or effect | `IDEMPOTENCY_CONFLICT`; a rerun generation is the way forward. |
+| A callback raises | Propagates; later steps do not run. `effect` runs before `begin_step`, so a raise leaves no receipt; `successor` or `run` raise after it, leaving a new step's receipt `intent` and a `succeeded` one `succeeded`. A malformed `successor` value is `INTEGRITY_FAILED`. |
 
 ### Nightly legacy readiness (`nightly_readiness.py`)
 
@@ -565,8 +565,8 @@ Leaf, not yet called by `nightly_trigger`. Admission (lock, window, default sess
 | Condition | Outcome |
 |---|---|
 | No candidate resolves to D | `SOURCE_NOT_FOUND`; retried only within the caller's admission window. |
-| Report `stopped`, or `finality` not final for D | `DEPENDENCY_FAILED` / `SOURCE_NOT_FINAL`. |
-| `steps.tiers` absent, `degraded` or carrying `error` | `DEPENDENCY_FAILED` with `details.step="tiers"`: the native chain stops; no rebuild. |
+| Report `stopped`, or `steps.tiers` absent, `degraded` or carrying `error` | `DEPENDENCY_FAILED` (`details.step="tiers"` for tiers): the native chain stops; no rebuild. |
+| `finality` not final for D | `SOURCE_NOT_FINAL`. |
 | Any candidate file unparseable or not the expected shape | `INTEGRITY_FAILED`, never treated as absent. |
 
 **Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`), resolves the carried set from that same pinned snapshot, and filters uncarried event tickers before expanding the legacy population across every `STRATEGY_IDS` member. Each excluded candidate ticker is recorded in sorted `candidate_exclusions` evidence with `reason_code: UNCARRIED_TICKER` and sorted `missing_tables`; that evidence is stored in the plan and contributes to `plan_hash`. The filtered population records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date). `_legacy_params` derives the supervised `legacy_score` ticker parameter from those keys when exclusions exist; the native score-batch sidecar uses that score job's ticker parameter for `scan_forward_board_requests` and `board_requests`, so both candidate enumerators see the same eligible event tickers. Missing or unreadable carried-set tables refuse planning with `INPUT_CHANGED` and the source reader's code in `details.data_code`. The ordinary live legacy board remains unchanged. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires every planned key to be observed under the shared score-population rule. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
