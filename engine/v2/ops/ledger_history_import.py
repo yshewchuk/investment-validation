@@ -42,7 +42,7 @@ from engine.v2.ledger.decisions import DecisionConflict, import_lines, set_autho
 from engine.v2.ops.errors import fail
 from engine.v2.ops.recovery import SupervisorLock
 
-__all__ = ["import_history"]
+__all__ = ["import_history", "discover_history_files"]
 
 #: (family name, directory under source_root, decisions.kind, row date field).
 #: The date field is read from the row itself, never inferred from the
@@ -277,11 +277,17 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
     return committed_owner, low, high
 
 
-def _discover_history_files(source_root):
-    return {
+def discover_history_files(source_root):
+    if any((source_root / subdir).is_symlink()
+           for _, subdir, _, _ in _FAMILIES):
+        raise fail("INPUT_CHANGED", "ledger history directory is a symlink")
+    discovered = {
         path.relative_to(source_root).as_posix(): path
         for _, subdir, _, _ in _FAMILIES
         for path in (source_root / subdir).glob("*.jsonl")}
+    if any(path.is_symlink() or not path.is_file() for path in discovered.values()):
+        raise fail("INPUT_CHANGED", "ledger history file is not a regular file")
+    return discovered
 
 
 def _validate_history_pins(pinned_files, discovered):
@@ -306,7 +312,7 @@ def _validate_history_pins(pinned_files, discovered):
 
 
 def _history_files_by_family(source_root, pinned_files):
-    discovered = _discover_history_files(source_root)
+    discovered = discover_history_files(source_root)
     groups = {family: [] for family, _, _, _ in _FAMILIES}
     if pinned_files is None:
         for family, subdir, _, _ in _FAMILIES:
