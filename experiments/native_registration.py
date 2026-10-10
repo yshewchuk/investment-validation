@@ -151,3 +151,9 @@ def require_native_registration(conn, store, repository, spec, *, code_root,
     if not _existing(conn, store, registration):
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     return registration
+
+
+def verify_native_registration(conn, store, registration):
+    """Verify stored admission without claiming current-request revalidation."""
+    if not isinstance(registration, NativeRegistration) or not _existing(conn, store, registration):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native outcome requires an intact registration")

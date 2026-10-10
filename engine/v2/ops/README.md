@@ -113,6 +113,9 @@ returns the job ids, leaving execution to a separately started supervisor.
 The top-level `experiments/native_registration.py` library consumes the narrow
 registration surface above. Like other `experiments/` callers, it is outside
 the engine import graph; it introduces no peer-layer engine dependency.
+`experiments/native_outcomes.py` consumes `catalog.transaction` and
+`errors.OpsError`/`fail` for catalog-owned publication and typed refusal.
+It owns short catalog transactions; artifact and CSV effects stay outside them.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection

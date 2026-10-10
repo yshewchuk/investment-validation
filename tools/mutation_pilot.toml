@@ -622,6 +622,8 @@ mutate = [
 ]
 tests = [
     "tests/v2/research/test_native_registration.py",
+    "tests/v2/research/test_native_outcomes.py",
+    "tests/v2/research/test_native_outcome_validation.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_coordinator_lease.py",
@@ -847,6 +849,8 @@ mutate = [
     "engine/v2/ops/decision_replay.py",
 ]
 tests = [
+    "tests/v2/ops/test_planned_price_refresh.py",
+    "tests/v2/ops/test_planned_price_recovery.py",
     "tests/v2/serving/test_score_population.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
@@ -936,6 +940,8 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_planned_price_refresh.py",
+    "tests/v2/ops/test_planned_price_recovery.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/v2/ops/test_forward_calendar_admission.py",
     "tests/v2/ops/test_provider_response.py",
@@ -987,6 +993,8 @@ mutate = [
     "engine/v2/ops/materialization_worker.py",
 ]
 tests = [
+    "tests/v2/ops/test_planned_price_refresh.py",
+    "tests/v2/ops/test_planned_price_recovery.py",
     "tests/test_v2_data_legacy_materialization.py",
     "tests/test_v2_data_rebuild_rollback.py",
     "tests/test_v2_data_repository.py",
