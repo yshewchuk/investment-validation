@@ -202,7 +202,7 @@ one transaction records who, UTC when, explicit confirmation, request digest and
 the permanent decision spend. An interactive terminal and fresh explicit user
 confirmation of the displayed binding are required; flags/piped input/agents cannot assent.
 Unique `decision_id` plus compare-and-swap state serialize authorization and reads.
-States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or terminal `revoked`/`indeterminate`; every transition appends evidence, never refunds. Proposed default: `authorized_unread` has no automatic expiry; explicit revocation or a changed winner ends eligibility with `HOLDOUT_ACCESS_DENIED`, retaining the spend. An expiry policy remains a user decision in the PR; no renewal can reset the spend.
+States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or terminal `revoked`/`indeterminate`; every transition appends evidence, never refunds. Proposed default: `authorized_unread` has no automatic expiry; explicit revocation or a changed winner ends eligibility with `HOLDOUT_ACCESS_DENIED`, retaining the spend. No renewal can reset the spend.
 
 | Proposed condition | Required outcome before any returned metric/report |
 |---|---|
