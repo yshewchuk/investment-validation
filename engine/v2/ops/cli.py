@@ -30,6 +30,7 @@ from engine.v2.ops.fingerprints import environment_identity, worker_source_manif
 from engine.v2.ops.health import health, write_health
 from engine.v2.ops.lifecycle import attempt_receipts, request_cancel
 from engine.v2.ops.profiles import DEFAULT_POLICY
+from engine.v2.ops.reclaim import reclaim
 from engine.v2.ops.recovery import (
     SupervisorLock,
     prove_ownership_gone,
@@ -229,6 +230,15 @@ def _add_reconcile_command(commands):
     reconcile.add_argument("--expected-attempt", required=True)
 
 
+def _add_reclaim_command(commands):
+    """``ops reclaim [--apply]``: list (default) or remove the read-once staging of
+    terminal attempts and their orphan partial materialization roots (#609, #467)."""
+    reclaim_p = commands.add_parser("reclaim")
+    reclaim_p.add_argument("--root", default=argparse.SUPPRESS)
+    reclaim_p.add_argument("--apply", action="store_true",
+                           help="remove the listed entries (default: dry run)")
+
+
 def _add_provider_account_command(commands):
     """S4B2: ``ops provider-account``, the one production writer of the
     ``provider_accounts`` row the scheduler reserves against
@@ -348,6 +358,7 @@ def parser():
     capture.add_argument("--source-root", required=True, type=Path)
     capture.add_argument("--output", required=True, type=Path)
     _add_reconcile_command(commands)
+    _add_reclaim_command(commands)
     _add_provider_account_command(commands)
     _add_snapshot_commands(commands)
     _add_ledger_commands(commands)
@@ -475,18 +486,12 @@ def dispatch(args, root, conn, clock):
         return _plan_command(args, root, conn, clock)
     if args.command == "submit":
         return _submit_command(args, root, conn, clock, DEFAULT_POLICY)
-    if args.command == "reconcile":
-        return reconcile_command(args, root, conn, clock)
-    if args.command == "snapshot":
-        return snapshot_command(args, root, conn, clock)
-    if args.command == "ledger":
-        return ledger_command(args, root, conn, clock)
-    if args.command == "decisions":
-        return decisions_command(args, root, conn, clock)
-    if args.command == "price-history":
-        return price_history_command(args, root, conn, clock)
-    if args.command == "computed-moves":
-        return computed_moves_command(args, root, conn, clock)
+    handlers = {"reconcile": reconcile_command, "reclaim": reclaim_command,
+                "snapshot": snapshot_command, "ledger": ledger_command,
+                "decisions": decisions_command, "price-history": price_history_command,
+                "computed-moves": computed_moves_command}
+    if args.command in handlers:
+        return handlers[args.command](args, root, conn, clock)
     if args.command == "provider-account":
         return provider_account_command(args, conn)
     return job_command(args, conn, clock, root)
@@ -910,6 +915,15 @@ def provider_account_command(args, conn):
                 "WHERE account = ?",
                 (args.remaining, args.live_reserve, args.account))
     return dict(_provider_account_row(conn, args.account))
+
+
+def reclaim_command(args, root, conn, clock):
+    """Same eligibility rule as the supervisor's per-tick pass; a failed entry is
+    reported in its own ``error`` field and never raises."""
+    entries = reclaim(conn, root, apply=args.apply)
+    return {"dry_run": not args.apply, "count": len(entries),
+            "bytes": sum(entry["bytes"] for entry in entries),
+            "removed": sum(entry["removed"] for entry in entries), "entries": entries}
 
 
 def reconcile_command(args, root, conn, clock):
