@@ -115,6 +115,76 @@ def _assert_sync_precedes_append(events):
                 "directory sync")
 
 
+def test_digest_directory_sync_failure_removes_signal_before_worker_accepts(
+        tmp_path, monkeypatch):
+    """A failed digest sync and signal unlink cannot leave accepted evidence."""
+    import stat
+
+    signal = tmp_path / "holdout_refusal_signal.json"
+    digest = Path(str(signal) + ".sha256")
+    monkeypatch.setenv("INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL", str(signal))
+    directory = tmp_path.stat()
+    real_fsync = experiment_trades.os.fsync
+    real_unlink = Path.unlink
+    directory_syncs = 0
+    failed_digest_sync = False
+    failed_signal_unlink = False
+
+    def fail_digest_directory_sync(fd):
+        nonlocal directory_syncs, failed_digest_sync
+        info = os.fstat(fd)
+        if (stat.S_ISDIR(info.st_mode) and info.st_dev == directory.st_dev
+                and info.st_ino == directory.st_ino):
+            directory_syncs += 1
+            if directory_syncs == 2:
+                failed_digest_sync = True
+                raise OSError("simulated digest directory sync failure")
+        return real_fsync(fd)
+
+    def fail_signal_unlink(self, *args, **kwargs):
+        nonlocal failed_signal_unlink
+        if self == signal and not failed_signal_unlink:
+            failed_signal_unlink = True
+            raise OSError("simulated signal rollback unlink failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(experiment_trades.os, "fsync", fail_digest_directory_sync)
+    monkeypatch.setattr(Path, "unlink", fail_signal_unlink)
+    pins = {"snapshot_id": "snapshot-digest-sync", "holdout_as_of_month": "2025-01",
+            "random_membership_version": "canonical-event-sha256.v1",
+            "rolling_membership_version": "calendar-months.v1"}
+    with pytest.raises(OSError, match="simulated digest directory sync failure"):
+        experiment_trades._emit_holdout_refusal_signal(pins)
+
+    assert failed_digest_sync
+    assert failed_signal_unlink
+    assert signal.exists()
+    assert not digest.exists()
+    assert worker._holdout_refusal_signal(tmp_path) is None
+
+
+def test_success_outcome_rejects_failure_effects_before_mutation(tmp_path):
+    conn, clock, claim, _, _ = _claimed_primary_effect(
+        tmp_path, key="success-with-failure-effects")
+    callback_calls = []
+    before = conn.execute(
+        "SELECT state, process_state, ended_at FROM attempts WHERE attempt_id=?",
+        (claim.attempt_id,)).fetchone()
+    try:
+        with pytest.raises(ValueError, match="failure_effects requires a failed outcome"):
+            commit_attempt(
+                conn, claim.attempt_id, claim.fence,
+                Outcome(True, "verified_dead", 0), clock=clock,
+                failure_effects=lambda conn_: callback_calls.append("called"))
+        after = conn.execute(
+            "SELECT state, process_state, ended_at FROM attempts WHERE attempt_id=?",
+            (claim.attempt_id,)).fetchone()
+        assert after == before
+        assert callback_calls == []
+    finally:
+        conn.close()
+
+
 def test_real_loader_refusal_replay_and_private_receipt(tmp_path, monkeypatch):
     conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM])
     root = tmp_path / "run"

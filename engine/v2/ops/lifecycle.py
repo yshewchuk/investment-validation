@@ -258,6 +258,8 @@ def commit_attempt(conn: sqlite3.Connection, attempt_id: str, fence: int, outcom
         raise ValueError("a success carries no failure, and a failure must carry one")
     if effects is not None and failure_effects is not None:
         raise ValueError("effects and failure_effects are mutually exclusive")
+    if outcome.succeeded and failure_effects is not None:
+        raise ValueError("failure_effects requires a failed outcome")
     if outcome.process_state not in RELEASABLE_PROCESS_STATES:
         raise fail("STALE_EXPECTATION", "completion requires a reconciled process tree")
     now = clock.now()

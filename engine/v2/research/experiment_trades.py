@@ -173,7 +173,11 @@ def _emit_holdout_refusal_signal(details):
         except OSError:
             _rollback_replaced_signal(destination)
             raise
-        _publish_holdout_refusal_digest(destination, digest)
+        try:
+            _publish_holdout_refusal_digest(destination, digest)
+        except OSError:
+            _rollback_replaced_signal(destination)
+            raise
     finally:
         temp.close()
         Path(temp.name).unlink(missing_ok=True)
@@ -214,13 +218,15 @@ def _rollback_replaced_signal(destination):
 
     Only called once ``os.replace`` has succeeded for this invocation, so the
     destination holds this invocation's document and is not durable. Best-effort
-    remove it and resync the parent, swallowing every failure so the original
-    post-replacement directory-open/sync ``OSError`` still propagates unmasked.
+    remove both evidence files: if one unlink fails, removing the other still
+    prevents the worker from accepting their pair. Resync the parent and swallow
+    cleanup failures so the original directory-open/sync ``OSError`` propagates.
     """
-    try:
-        Path(destination).unlink(missing_ok=True)
-    except OSError:
-        return
+    for evidence in (Path(destination), Path(str(destination) + ".sha256")):
+        try:
+            evidence.unlink(missing_ok=True)
+        except OSError:
+            continue
     try:
         directory_fd = os.open(Path(destination).parent,
                                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
