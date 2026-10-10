@@ -126,8 +126,9 @@ def legacy_source_priority():
 
 
 def read_legacy_part(path, columns):
-    """``engine.data.store._read_part`` — the unchanged legacy single-path reader."""
-    return _legacy_read_part(path, columns)
+    """Use the unchanged legacy reader with a native-owned input lifetime."""
+    with legacy_materialization.open_legacy_part(path) as source:
+        return _legacy_read_part(source, columns)
 
 
 def coerce_legacy(frame, name: str):
