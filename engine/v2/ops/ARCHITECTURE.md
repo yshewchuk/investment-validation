@@ -184,22 +184,7 @@ walk; runtime parity submission already binds both jobs directly. No
 submission path reads either edge (the rule Part 4 established for
 `computed_moves_refresh`'s own node).
 
-- **`native.parity_inputs.legacy_parity_rows(score_document: Mapping[str, Any]) ->
-  dict[str, dict]`** (new, this package). Keys the legacy `score.json`
-  document's own `"rows"` array by
-  `engine.v2.ops.decision_validation.population_key`'s `"ticker|strategy|
-  event_date"` format — REUSED, not re-derived and not re-added: this
-  public function already exists (`decision_replay.py`'s own population
-  comparison already imports it), and it is the identical three-field
-  format `engine.v2.serving.native_render.native_row_key` already derives
-  for a native `ScoreRecord` (that module's own docstring: `"the native
-  twin of bridge._population_key"`; both bridge and legacy adapter now use
-  `foundation.score_population.population_key`, while parity retains
-  `decision_validation`'s existing public helper). Pure: no
-  filesystem, no clock, and — the point of putting this here rather than
-  in the composing script below — no import of `engine.v2.serving` (a
-  layer-7.0 peer of `engine.v2.ops`, per the root doc's layer table;
-  `checks/import_layers.py` would refuse that edge). A `score_document`
+- **`native.parity_inputs.legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]`** (new, this package). Keys the legacy `score.json` document's own `"rows"` array by `engine.v2.ops.decision_validation.population_key`'s `"ticker|strategy|event_date"` format — REUSED, not re-derived and not re-added: this public function already exists (`decision_replay.py`'s own population comparison already imports it), and it is the identical three-field format `engine.v2.serving.native_render.native_row_key` already derives for a native `ScoreRecord` (that module's own docstring: `"the native twin of bridge._population_key"`; both bridge and legacy adapter now use `foundation.score_population.population_key`, while parity retains `decision_validation`'s existing public helper). Pure: no filesystem, no clock, and — the point of putting this here rather than in the composing script below — no import of `engine.v2.serving` (a layer-7.0 peer of `engine.v2.ops`, per the root doc's layer table; `checks/import_layers.py` would refuse that edge). A `score_document`
   with no `"rows"` key returns `{}` (not a refusal —
   `native_parity_handler`'s existing `_refuse_empty_inputs` already turns
   an empty `legacy_rows` into `VALIDATION_FAILED` downstream, so this
@@ -565,6 +550,21 @@ The report is replaced atomically after capture; a report-write failure leaves t
 | `serve --once` reaches idle | Returns; this is not a success receipt. The trigger checks its submitted DAG jobs, while native batch/parity remain separate sidecar jobs. |
 | Source availability preflight receives readable evidence | Still refuses: no registered positive EOD verifier exists. Scheduling readiness does not grant EOD admission. |
 
+### Nightly session identity (`nightly_session.py`, slice 1 of #564)
+
+Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` receipts keep their meaning. `session_key = H(version, as_of, scope, selection_identity, catalog_identity)` and `run_id = H(session_key, generation)`. Callers cannot supply the session key or choose the generation an ordinary call or rerun allocates. An ordinary call resumes the one derived session; only an explicit rerun allocates a generation, so a deployed-code change alone never does. State is one per-session document under the supplied root: `revision`, plus per generation `run_id`, `reason` (`initial`/`rerun`), `status` (`allocated`/`started`) and the rerun's `invalidation` step names. Updates use revision-based compare-and-swap, serialize per session, and publish the document atomically.
+
+| Condition | Outcome |
+|---|---|
+| First ordinary call | Creates generation 1 `allocated`; later calls return that state and never allocate. |
+| Explicit rerun | Appends generation n+1 and its invalidation cone in one swap: the intent is the allocated generation. A crash before the swap records nothing and the request repeats; after it, a repeated rerun reattaches to that still-`allocated` generation. Once started, a rerun allocates the next. The caller's lock decides when the older owner is gone. |
+| Concurrent callers | One swap wins. A loser re-reads: ordinary calls return the winner's state, reruns reattach to the winner's generation. Exhausting the bounded swap retries raises retryable `LEASE_LOST`. A returned state is the revision read; a later swap makes it stale. |
+| Superseded generation marks itself started | `CHECKPOINT_INCOMPATIBLE`. |
+| Unparseable JSON, wrong key, run_id or numbering | `INTEGRITY_FAILED`; never treated as absent, since that would restart numbering. |
+| Session file in another schema (an old-format receipt) | `CHECKPOINT_INCOMPATIBLE`; the operator moves it aside. |
+| Old per-date `<as_of>.json` receipts | Never read by this module (another path): treated as absent, no migration, no completed step inferred. |
+| Empty or malformed identity field, or a rerun of a session with no state | `INVALID_REQUEST`; nothing is written. |
+
 **Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`), resolves the carried set from that same pinned snapshot, and filters uncarried event tickers before expanding the legacy population across every `STRATEGY_IDS` member. Each excluded candidate ticker is recorded in sorted `candidate_exclusions` evidence with `reason_code: UNCARRIED_TICKER` and sorted `missing_tables`; that evidence is stored in the plan and contributes to `plan_hash`. The filtered population records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date). `_legacy_params` derives the supervised `legacy_score` ticker parameter from those keys when exclusions exist; the native score-batch sidecar uses that score job's ticker parameter for `scan_forward_board_requests` and `board_requests`, so both candidate enumerators see the same eligible event tickers. Missing or unreadable carried-set tables refuse planning with `INPUT_CHANGED` and the source reader's code in `details.data_code`. The ordinary live legacy board remains unchanged. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires every planned key to be observed under the shared score-population rule. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
 
 | Condition | Outcome |
@@ -586,7 +586,7 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
 
-**Cutover PR-6: 4a.2 helpers and 4b producer.** `nightly_raw_row_producer.build_native_score_batch_events` runs in the `native_score_batch` worker over its pinned snapshot, never in `Service.tick()`. Snapshot reads remain SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
+**Cutover PR-6: 4a.2 helpers and 4b producer.** `nightly_raw_row_producer.build_native_score_batch_events` runs in the `native_score_batch` worker over its pinned snapshot, never in `Service.tick()`. Snapshot reads remain SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260). The raw SPY history is reused across rows only within one producer build, keyed by snapshot ID, pinned `daily_market` version and scan window; only the existing bounded query result is retained, and the cache is released when the build returns.
 
 `nightly_calendar_inputs.py` exposes `scan_decision_calendar(repository, snapshot, *, decision_session, event_through) -> CalendarSessions`, `scan_candidate_expiries(repository, snapshot, key, *, decision_session) -> tuple[str, ...]`, and `scan_calendar_row_inputs(repository, snapshot, key, *, decision_session, calendar) -> CalendarRowInputs`. The calendar source is the pinned SPY price series through the decision session; its observed maximum stays distinct from projected sessions. Candidate scans use one exact option-chain session, and `generation.resolve_expiry` applies the native strategy policy. Spot is the finite positive raw close on the exact decision session. The helper passes the independent planned exit and resolved expiry into `scan_calendar_row`; the returned calendar revision is the matched pinned earnings-events dataset revision.
 
