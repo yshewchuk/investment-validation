@@ -1230,12 +1230,13 @@ def run_legacy_script(root, script, args=(), *, declared_runtime_sources=()):
     """Run a registered legacy runner in a private root with smoke protection."""
     import os
 
+    relative = posixpath.normpath(str(script))
+    disabled_reason = DISABLED_RUNNERS.get(relative)
+    if disabled_reason is not None:
+        raise fail("INVALID_REQUEST", disabled_reason)
     _rooted_import(root)
     base = Path(root).resolve()
-    relative = posixpath.normpath(str(script))
     script_path = (base / relative).resolve()
-    if relative in DISABLED_RUNNERS:
-        raise fail("INVALID_REQUEST", DISABLED_RUNNERS[relative])
     if relative not in REGISTERED_RUNNERS or not script_path.is_relative_to(base):
         raise fail("INVALID_REQUEST", "legacy experiment runner is unaudited")
     arguments = tuple(args)

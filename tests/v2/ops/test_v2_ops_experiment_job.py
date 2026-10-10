@@ -116,6 +116,13 @@ def test_primary_cli_refuses_disabled_exp182_before_job(tmp_path, capsys):
     assert problem["code"] == "INVALID_REQUEST"
     assert "EXP-182 disabled" in problem["message"]
 
+    conn, _clock, _ = catalog(ops)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
+    finally:
+        conn.close()
+
 
 @pytest.mark.parametrize(("entrypoint", "code"), (
     ("plan", "INVALID_REQUEST"),
@@ -905,6 +912,29 @@ def test_primary_plan_refuses_disabled_exp182_before_start(tmp_path):
         experiment_id="EXP-182", runner=REGISTERED_RUNNER)))
     with pytest.raises(OpsError) as excinfo:
         experiment_plan(spec_path, smoke=False, root=checkout)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert "EXP-182 disabled" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("runner", (
+    REGISTERED_RUNNER,
+    "./experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+    "experiments/unused/../EXP-182_d_1_gated_execution_parity_registered/run.py",
+))
+def test_stale_exp182_primary_bindings_refuse_before_source_publication(tmp_path, runner):
+    plan = {
+        "spec_document": _spec_document(
+            experiment_id="EXP-182", runner=runner),
+        "preregistration_root": str(tmp_path),
+    }
+
+    class Store:
+        def publish_bytes(self, *args, **kwargs):
+            raise AssertionError("disabled runner source was published")
+
+    with pytest.raises(OpsError) as excinfo:
+        commands._primary_runner_bindings(plan, Store())
+
     assert excinfo.value.code == "INVALID_REQUEST"
     assert "EXP-182 disabled" in str(excinfo.value)
 

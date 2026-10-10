@@ -337,18 +337,18 @@ shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
 
 Callers: no `engine/` modules import this package (checked by `checks/import_layers.py`).
-Consumers are `tools/v2_*.py` CLI leaves and `experiments/common_v2.py`;
-its trade, calendar, and chain readers use pinned v2 data. The archived
+Consumers are `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
+trade, calendar, and chain inputs from pinned v2 data. The archived
 trade-read caller omits required holdout context and is refused.
 Historical EXP-147 reads its native replay tag from `experiment_trades.PROVENANCE`.
 `experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266
-slice 2) is a fourth: it reads
+slice 2) reads
 `_chains.filter_plan_by_availability`/`read_chain_keys_for`, `_plan.plan_events`,
 `_pricing.STRUCTURES`/`execution_variant_label`/`trading_calendar_from_snapshot`,
 and `replay.ALPHA_GRID`/`replay_one` to price one strategy family across a
 grid-position sweep on one pinned snapshot. `experiments/EXP-186_.../run.py`
-is a fifth, reading `_replay_run.events_frame` for its known-session event
-universe before handing it to `price_candidate_grid`. None of the five are
+reads `_replay_run.events_frame` for its known-session event universe before
+handing it to `price_candidate_grid`. None of these research callers are
 parsed by the layering hook (it only parses `engine*` importers, and
 `experiments/` is outside it too).
 

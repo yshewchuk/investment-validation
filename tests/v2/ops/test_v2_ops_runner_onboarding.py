@@ -97,7 +97,6 @@ def test_registered_runner_executes_no_ledger_only_in_its_synthetic_root(
     assert (tmp_path / "REPORT.md").is_file()
     with pytest.raises(OpsError, match="arguments are not audited"):
         run_legacy_script(tmp_path, REGISTERED, args=("--record",))
-    script.unlink()
 
 
 def test_leaking_runner_is_caught_by_the_write_audit(tmp_path, monkeypatch):
@@ -190,6 +189,11 @@ def test_exp182_disabled_runner_refuses_before_any_subprocess(tmp_path, monkeypa
     # Prove the explicit disabled status wins over accidental re-registration.
     monkeypatch.setitem(experiments.RUNNER_INVENTORY, runner, {})
     monkeypatch.setattr(legacy_adapter, "REGISTERED_RUNNERS", frozenset({runner}))
+
+    def fail_rooted_import(*args, **kwargs):
+        raise AssertionError("disabled runner reached rooted import setup")
+
+    monkeypatch.setattr(legacy_adapter, "_rooted_import", fail_rooted_import)
 
     for attempt in (
             lambda: experiment_plan(spec_path),
