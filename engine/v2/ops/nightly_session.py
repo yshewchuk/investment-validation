@@ -18,7 +18,7 @@ from pathlib import Path
 
 from engine.v2.ops.errors import fail
 
-__all__ = ["Generation", "SessionIdentity", "SessionState", "compare_and_swap",
+__all__ = ["Generation", "SessionIdentity", "SessionState", "atomic_write", "compare_and_swap",
            "ensure_session", "load_session", "mark_started", "request_rerun",
            "session_path"]
 
@@ -142,6 +142,21 @@ def load_session(root: Path, identity: SessionIdentity) -> SessionState | None:
     return _decode(text, identity)
 
 
+def atomic_write(path: Path, text: str) -> None:
+    """Durably replace ``path`` with ``text``: temp file, fsync, rename, directory fsync."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def compare_and_swap(root: Path, identity: SessionIdentity, expected_revision: int,
                      generations: tuple[Generation, ...]) -> SessionState | None:
     """Write ``generations`` at ``expected_revision + 1`` iff the stored revision is
@@ -155,17 +170,7 @@ def compare_and_swap(root: Path, identity: SessionIdentity, expected_revision: i
             return None
         state = SessionState(identity, expected_revision + 1, generations)
         _decode(_encode(state), identity)  # the loader's own rules; raises before any write
-        tmp = path.with_name(path.name + ".tmp")
-        with open(tmp, "w") as handle:
-            handle.write(_encode(state))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        dir_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        atomic_write(path, _encode(state))
         return state
 
 
