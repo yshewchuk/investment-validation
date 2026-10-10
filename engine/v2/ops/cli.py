@@ -34,7 +34,6 @@ from engine.v2.ops.recovery import (
     SupervisorLock,
     prove_ownership_gone,
     read_boot_id,
-    reconcile_attempt,
 )
 from engine.v2.ops.session_backfill import backfill_outcome_sessions
 from engine.v2.ops.stages import registry
@@ -942,8 +941,13 @@ def reconcile_command(args, root, conn, clock):
             raise fail("RESOURCE_UNAVAILABLE", "the process tree is not verified gone",
                       details={"blocking": [{"pid": pid, "start_ticks": ticks}
                                              for pid, ticks in proof.blockers]})
-        state = reconcile_attempt(conn, args.expected_attempt, process_state="verified_dead",
-                                  clock=clock)
+        attempt_row = conn.execute("SELECT * FROM attempts WHERE attempt_id = ?",
+                                   (args.expected_attempt,)).fetchone()
+        service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
+                          code_source=Path(__file__).resolve().parents[3], store_root=None)
+        service.reconcile_proven_attempt(attempt_row)
+        state = conn.execute("SELECT state FROM attempts WHERE attempt_id = ?",
+                             (args.expected_attempt,)).fetchone()["state"]
         return {"attempt_id": args.expected_attempt, "settled": True, "state": state}
     finally:
         lock.release()

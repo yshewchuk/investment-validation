@@ -116,6 +116,9 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # dropped for an older value -- and a retry re-reads the same leak, so it
     # is non-retryable for that spec and snapshot.
     "FEATURE_LOOKAHEAD": ("validation", False),
+    # Mirrors the experiment loader's typed refusal in data.DATA_FAILURE_CODES;
+    # a holdout denial is deterministic and cannot be retried in the same sweep.
+    "HOLDOUT_ACCESS_DENIED": ("validation", False),
     # An observation row whose snapshot ID is not the one the feature context
     # binds: the row has no resolved snapshot behind it, and the same preload
     # can never resolve on a retry.

@@ -9,8 +9,15 @@ import re
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
-from engine.v2.contracts import CheckpointCandidate, OutputCandidate, Problem, ProgressEvent
+from engine.v2.contracts import (
+    CheckpointCandidate,
+    JobSpec,
+    OutputCandidate,
+    Problem,
+    ProgressEvent,
+)
 from engine.v2.foundation import (
     ArtifactStore,
     artifact_reference,
@@ -19,7 +26,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops import executor
-from engine.v2.ops.catalog import transaction
+from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.checkpoints import (
     artifact,
     cache_identity,
@@ -36,6 +43,7 @@ from engine.v2.ops.decision_commit import (
 from engine.v2.ops.decision_evidence import derive
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.effects_graph import (
+    _experiment_refusal_failure_effect,
     backup_effect,
     effect_scope,
     engineering_gate_effect,
@@ -64,11 +72,13 @@ from engine.v2.ops.lifecycle import (
     record_measurement,
     record_progress,
     renew_after_resume,
+    verify_fence,
 )
 from engine.v2.ops.recovery import (
     SupervisorLock,
     begin_epoch,
     expire_leases,
+    fence_attempt_for_recovery,
     fence_foreign_epochs,
     prove_ownership_gone,
     read_boot_id,
@@ -132,6 +142,14 @@ HEARTBEAT_EVENT_SECONDS = 10.0
 #: A commit refused with one of these can never succeed under this fence:
 #: nothing more may be written under it, not even the attempt's own failure.
 _FENCE_LOST_CODES = frozenset({"LEASE_LOST", "CANCELLED"})
+
+#: A recovery replay of a holdout refusal that raises one of these can never
+#: succeed on a later tick either: the receipt failed its own validation, or
+#: the ledger already carries a refused row for a different variant identity.
+#: Both are permanent, already typed and redacted, so ``reconcile`` settles a
+#: proven-dead attempt with that problem as its recorded failure instead of
+#: replaying the same refusal forever.
+_PERMANENT_REFUSAL_REPLAY_CODES = frozenset({"VALIDATION_FAILED", "IDEMPOTENCY_CONFLICT"})
 
 #: A pre-fix catalog named checkpoint outputs by their enumeration index
 #: ('0', '1', ...) instead of the worker's declared name. Such a name is
@@ -285,8 +303,144 @@ class Service:
             signal_owned(proof.alive, self.boot, hard=True)
             if proof.known:
                 executor.persist_members(self.conn, row["attempt_id"], proof.known)
-            state = "verified_dead" if proof.proven else "quarantined"
-            reconcile_attempt(self.conn, row["attempt_id"], process_state=state, clock=self.clock)
+            if proof.proven:
+                # Replay the refusal effect only AFTER the ownership proof; a
+                # quarantined (unproven) attempt keeps the generic path. The
+                # callback runs inside reconcile_attempt's own settlement
+                # transaction, so a permanent refusal failure and its
+                # settlement commit or roll back together.
+                try:
+                    self.reconcile_proven_attempt(row)
+                except Exception as exc:
+                    # Any typed failure the callback does not convert to a
+                    # permanent evidence/conflict settlement is transient here
+                    # (an unavailable resource, a stale expectation), and a
+                    # recognized receipt whose effect could not be recorded
+                    # leaves the attempt recovery_pending too, reservations held
+                    # (ARCHITECTURE.md "pinned experiment trade loader"):
+                    # never settle it as a plain LEASE_LOST with the ledger
+                    # row unappended. A replay failure is reported once per
+                    # attempt and error code, including marked refusals,
+                    # whether or not an earlier stranded event was emitted:
+                    # stable code and fixed text only, never exception details
+                    # or the stored private receipt. Then continue, leaving
+                    # the attempt recovery_pending.
+                    code = (exc.problem.code if isinstance(exc, OpsError)
+                            else "VALIDATION_FAILED")
+                    key = (row["attempt_id"], code)
+                    reported = getattr(self, "_reported_reconcile_failures", None)
+                    if reported is None:
+                        reported = set()
+                        self._reported_reconcile_failures = reported
+                    if key not in reported:
+                        reported.add(key)
+                        _report_stranded(
+                            SimpleNamespace(job_id=row["job_id"],
+                                            attempt_id=row["attempt_id"]),
+                            make_problem(code,
+                                         "proven-dead reconciliation failed"))
+                    continue
+                continue
+            reconcile_attempt(self.conn, row["attempt_id"],
+                              process_state="quarantined", clock=self.clock)
+
+    def reconcile_proven_attempt(self, attempt_row):
+        """Settle an already-proven-dead attempt, replaying its holdout refusal
+        effect inside the settlement transaction.
+
+        ``_replay_recovery_refusal`` runs through ``reconcile_attempt``'s
+        ``recovery_effect`` callback, so the replay and the settlement share
+        one immediate catalog transaction and either both commit or the
+        transaction rolls back. No marker returns ``None``, preserving the
+        generic proven-dead settlement; a successful refusal replay returns a
+        redacted ``HOLDOUT_ACCESS_DENIED``, settling the attempt as the same
+        non-retryable refusal the worker recorded rather than retryable
+        ``LEASE_LOST``; a caller-visible permanent
+        ``VALIDATION_FAILED``/``IDEMPOTENCY_CONFLICT`` returns its typed
+        problem as the recorded failure; every other exception escapes so the
+        attempt stays ``recovery_pending``, reservations held.
+        """
+        def recovery_effect(conn):
+            try:
+                replayed = self._replay_recovery_refusal(attempt_row)
+            except OpsError as exc:
+                if exc.code in _PERMANENT_REFUSAL_REPLAY_CODES:
+                    return exc.problem
+                raise
+            if replayed:
+                return make_problem("HOLDOUT_ACCESS_DENIED",
+                                    "registered experiment loader refused holdout data")
+            return None
+
+        reconcile_attempt(self.conn, attempt_row["attempt_id"],
+                          process_state="verified_dead", clock=self.clock,
+                          recovery_effect=recovery_effect)
+
+    def _replay_recovery_refusal(self, attempt_row) -> bool:
+        """Re-append a dead attempt's holdout refusal ledger row before settling it.
+
+        ``_commit_failure`` appends the refusal row inside the failed
+        attempt's fenced commit; when that commit strands the attempt in
+        ``recovery_pending`` instead, the row would otherwise never exist.
+        Only a proven-gone attempt is replayed here (the old fence is
+        already revoked by ``fence_attempt_for_recovery``, so the effect runs
+        against this connection directly, never under the stale fence); the
+        append is idempotent, so replaying one that did land costs nothing.
+
+        ``False`` -- nothing to replay, let the generic ``reconcile_attempt``
+        settle the row as usual -- only when there is no holdout refusal
+        marker. Marked receipt evidence that is missing or malformed -- the
+        diagnostics file absent, undecodable JSON, a non-dict document, or
+        no ``refusal_receipt`` key -- raises the typed ``VALIDATION_FAILED``
+        and settles permanently, while transient receipt I/O (any other
+        ``OSError`` reading the file; ``Path.is_file()`` is never consulted
+        because it would mask those as a missing file) propagates unchanged
+        so the attempt stays ``recovery_pending``, reservations held, for a
+        later replay. A present key is a recognized receipt even with a
+        malformed value: the job's ``JobSpec`` is reloaded, a minimal claim
+        (the effect reads only ``spec.kind``/``spec.parameters``) carries
+        it, and a redacted
+        ``HOLDOUT_ACCESS_DENIED`` Problem -- the worker's own stable text,
+        the receipt never entering ``details`` or ``failure_json`` -- drives
+        ``_experiment_refusal_failure_effect``; a raise propagates to the
+        caller, which settles the proven-dead row with that typed
+        ``VALIDATION_FAILED``/``IDEMPOTENCY_CONFLICT`` problem -- permanent
+        evidence/conflict failures a later tick could only replay the same way
+        -- and keeps the attempt ``recovery_pending``, reservations held, for
+        any other (transient) OpsError or exception, rather than losing the
+        refusal.
+        """
+        path = (self.store.staging_dir(attempt_row["attempt_id"])
+                / "diagnostics" / "failure_details.json")
+        try:
+            failure = load_json(Problem, attempt_row["failure_json"])
+        except ValueError:
+            failure = None
+        known_refusal = (failure is not None
+                         and failure.code == "HOLDOUT_ACCESS_DENIED")
+        if not known_refusal:
+            return False
+        unusable = OpsError(make_problem(
+            "VALIDATION_FAILED", "the holdout refusal receipt is missing or unusable"))
+        try:
+            document = json.loads(path.read_text())
+        except (FileNotFoundError, ValueError):
+            raise unusable
+        if not isinstance(document, dict) or "refusal_receipt" not in document:
+            raise unusable
+        job = self.conn.execute("SELECT spec_json FROM jobs WHERE job_id = ?",
+                                 (attempt_row["job_id"],)).fetchone()
+        claim = SimpleNamespace(spec=load_json(JobSpec, job["spec_json"]),
+                                job_id=attempt_row["job_id"],
+                                attempt_id=attempt_row["attempt_id"])
+        problem = make_problem("HOLDOUT_ACCESS_DENIED",
+                               "registered experiment loader refused holdout data")
+        effect = _experiment_refusal_failure_effect(
+            claim, problem, code_source=self.code_source, store_root=self.store_root,
+            refusal_receipt=document["refusal_receipt"])
+        if effect is not None:
+            effect(self.conn)
+        return True
 
     def tick(self):
         self._clock_check()
@@ -1443,6 +1597,16 @@ class Service:
         private ``staging/diagnostics/failure_details.json``, which this
         publishes as a verified artifact and references, never inlines
         (§5.2: ``details`` must stay out of ``failure_json``).
+
+        Publishing that private document can itself raise. For a typed
+        ``HOLDOUT_ACCESS_DENIED`` the reference is not what carries the
+        refusal: the effect is recorded from the still-staged
+        ``failure_details.json`` via ``_commit_failure`` → ``_refusal_receipt``,
+        so a publication failure returns the typed problem without a
+        ``diagnostic_ref`` and leaves the staged receipt untouched rather than
+        letting ``_finish`` overwrite it with a generic completion failure.
+        Every other code re-raises unchanged, preserving the existing
+        ``_finish``/``_completion_problem`` behavior.
         """
         try:
             result = json.loads(bytes(running.data))
@@ -1457,7 +1621,12 @@ class Service:
             problem = make_problem(code, message)
         except (ValueError, TypeError, AttributeError):
             return None
-        return self._publish_failure_details(claim, problem)
+        try:
+            return self._publish_failure_details(claim, problem)
+        except Exception:
+            if problem.code == "HOLDOUT_ACCESS_DENIED":
+                return problem
+            raise
 
     def _publish_failure_details(self, claim, problem):
         details_path = (self.store.staging_dir(claim.attempt_id)
@@ -1471,17 +1640,99 @@ class Service:
             problem = dataclasses.replace(problem, diagnostic_ref=ref.artifact_id)
         return problem
 
+    def _refusal_receipt(self, claim, problem):
+        """The worker's private holdout refusal receipt, or ``None``.
+
+        Read only for a typed ``HOLDOUT_ACCESS_DENIED`` problem, from the same
+        private diagnostics document ``_publish_failure_details`` publishes:
+        its ``refusal_receipt`` field when the decoded document is a mapping,
+        otherwise nothing. Never added to ``Problem.details`` or ``failure_json``.
+        """
+        if problem.code != "HOLDOUT_ACCESS_DENIED":
+            return None
+        path = (self.store.staging_dir(claim.attempt_id)
+                / "diagnostics" / "failure_details.json")
+        document = json.loads(path.read_text())
+        if not isinstance(document, dict):
+            return None
+        return document.get("refusal_receipt")
+
+    def _refusal_effect_failed(self, claim):
+        """Fence an attempt whose holdout refusal effect could not be recorded.
+
+        The refusal ledger row belongs to the failed attempt's fenced commit,
+        so without that effect the attempt must not be marked failed. Returns a
+        redacted ``VALIDATION_FAILED`` problem for the caller to fall through to
+        ``_strand`` with, or ``None`` after fencing the attempt for recovery and
+        reporting it -- stable text only, never exception text or private evidence.
+        """
+        problem = make_problem(
+            "VALIDATION_FAILED", "the experiment refusal effect could not be recorded")
+        if fence_attempt_for_recovery(
+                self.conn, claim.attempt_id, clock=self.clock,
+                recovery_failure=make_problem(
+                    "HOLDOUT_ACCESS_DENIED",
+                    "registered experiment loader refused holdout data")):
+            _report_stranded(claim, problem)
+            return None
+        return problem
+
+    def _persist_refusal_intent(self, claim, fence):
+        """Persist a minimal, redacted refusal marker before the refusal effect.
+
+        ``_commit_failure`` appends the refusal ledger row inside the failed
+        attempt's fenced commit; a process crash after that file append but
+        before the catalog transaction commits would roll the failure marker
+        back, and a later ``expire_leases`` would leave only attempt state, so
+        ``_replay_recovery_refusal`` could not recognize the refusal and would
+        settle ``LEASE_LOST``. Committing just this marker first — in its own
+        transaction, still under the live fence — makes recovery able to see
+        the refusal and replay an append that reached the CSV before a crash.
+
+        The stored ``Problem`` is the stable redacted text only: no receipt,
+        pins, diagnostics, or other private details. Only the attempt's own
+        ``failure_json`` is updated; state and fence are untouched so
+        ``commit_attempt`` can still settle under the original fence. The
+        verifier is the existing :func:`lifecycle.verify_fence`, so a lost
+        fence or a won cancellation raises the same typed refusal the caller's
+        existing fence-loss/cancel path already handles.
+        """
+        marker = make_problem(
+            "HOLDOUT_ACCESS_DENIED",
+            "registered experiment loader refused holdout data")
+        with transaction(self.conn):
+            verify_fence(self.conn, claim.attempt_id, fence, self.clock.now())
+            self.conn.execute("UPDATE attempts SET failure_json = ? WHERE attempt_id = ?",
+                              (dumps(marker), claim.attempt_id))
+
     def _commit_failure(self, claim, status, problem):
         """Record the failure under the fence — only while the fence is still held (B)."""
         outcome = Outcome(False, "verified_dead", status["exit_code"], problem)
         if fence_held(self.conn, claim.attempt_id, claim.fence, clock=self.clock):
             try:
-                commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome, clock=self.clock)
+                if problem.code == "HOLDOUT_ACCESS_DENIED":
+                    self._persist_refusal_intent(claim, claim.fence)
+                failure_effects = _experiment_refusal_failure_effect(
+                    claim, problem, code_source=self.code_source, store_root=self.store_root,
+                    refusal_receipt=self._refusal_receipt(claim, problem))
+                commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome,
+                               clock=self.clock, failure_effects=failure_effects)
                 return
             except OpsError as exc:
                 if exc.code not in _FENCE_LOST_CODES:
+                    if problem.code != "HOLDOUT_ACCESS_DENIED":
+                        raise
+                    problem = self._refusal_effect_failed(claim)
+                    if problem is None:
+                        return
+                else:
+                    problem = exc.problem
+            except Exception:
+                if problem.code != "HOLDOUT_ACCESS_DENIED":
                     raise
-                problem = exc.problem
+                problem = self._refusal_effect_failed(claim)
+                if problem is None:
+                    return
         self._strand(claim, problem)
 
     def _strand(self, claim, problem):

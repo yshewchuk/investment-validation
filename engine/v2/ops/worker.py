@@ -5,6 +5,7 @@ message on an inherited pipe; payloads stay in the assigned staging directory.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import resource
@@ -362,11 +363,22 @@ def _experiment_failure(receipt):
     The runner's own typed problem (code + details, e.g. a nonzero
     returncode's stderr tail) is carried through the receipt so it survives
     ``run_experiment``'s status capture and reaches ``worker.main``'s private
-    ``failure_details.json`` -- never the public failure message.
+    ``failure_details.json`` -- never the public failure message. A
+    ``status="refused"`` receipt adds the pinned private ``refusal_receipt``
+    on the same channel, so the typed ``HOLDOUT_ACCESS_DENIED`` reaches the
+    supervisor without becoming a public attempt output. Diagnostics carry
+    shallow copies with the evidence-bearing ``holdout_exclusions`` omitted;
+    the untouched originals live only in the private on-disk receipt.
     """
     evidence = receipt.get("evidence") or {}
     details = {"status": receipt["status"], "error_code": evidence.get("error_code")}
-    details.update(evidence.get("failure_details") or {})
+    failure_details = dict(evidence.get("failure_details") or {})
+    failure_details.pop("holdout_exclusions", None)
+    details.update(failure_details)
+    if "refusal_receipt" in evidence:
+        refusal_receipt = dict(evidence["refusal_receipt"])
+        refusal_receipt.pop("holdout_exclusions", None)
+        details["refusal_receipt"] = refusal_receipt
     return fail(evidence.get("failure_code") or "VALIDATION_FAILED",
                 "experiment run did not succeed", details=details)
 
@@ -385,6 +397,55 @@ def _declared_experiment_sources(runner_id: str) -> tuple[str, ...]:
     return tuple(sources)
 
 
+_HOLDOUT_REFUSAL_SIGNAL_SCHEMA = "holdout_refusal_signal.v1"
+_HOLDOUT_REFUSAL_PINS = ("snapshot_id", "holdout_as_of_month",
+                         "random_membership_version", "rolling_membership_version")
+
+
+def _holdout_refusal_signal(run_dir):
+    """The validated private refusal pins from the child loader's sidecar.
+
+    ``legacy_adapter.run_legacy_script`` exports
+    ``INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL=<run_dir>/holdout_refusal_signal.json``
+    and ``experiment_trades.load_trades`` atomically writes that signal when
+    the real child loader refuses holdout data. Only the exact
+    schema/failure-code document whose four membership pins are all nonblank
+    strings is accepted; unknown keys, stderr, and event IDs never travel in
+    the typed problem. Missing, unreadable, malformed, wrong-schema or
+    wrong-code files, and invalid pins, all yield ``None`` so the generic
+    runner failure — with no sidecar values — is unchanged.
+
+    The signal is confirmed against its sibling ``.sha256`` sidecar: the
+    producer writes that file with the SHA-256 hex digest of the exact signal
+    bytes only after the signal's parent directory was successfully fsynced,
+    so a signal left visible by a failed rollback that never reached that
+    fsync is rejected. The digest must equal
+    ``hashlib.sha256(signal_bytes).hexdigest()``; a missing, malformed or
+    mismatched digest yields ``None`` like every other invalid shape.
+    """
+    signal_path = Path(run_dir) / "holdout_refusal_signal.json"
+    try:
+        signal_bytes = signal_path.read_bytes()
+        digest = (Path(run_dir) / "holdout_refusal_signal.json.sha256").read_text(
+            encoding="ascii").strip()
+    except (OSError, ValueError):
+        return None
+    if digest != hashlib.sha256(signal_bytes).hexdigest():
+        return None
+    try:
+        document = json.loads(signal_bytes)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(document, dict)
+            or document.get("schema_version") != _HOLDOUT_REFUSAL_SIGNAL_SCHEMA
+            or document.get("failure_code") != "HOLDOUT_ACCESS_DENIED"):
+        return None
+    pins = {name: document.get(name) for name in _HOLDOUT_REFUSAL_PINS}
+    if not all(isinstance(value, str) and value.strip() for value in pins.values()):
+        return None
+    return pins
+
+
 def _registered_experiment_runner(root, runner_id, primary_arm_id):
     """The runner closure for a registered legacy runner (P6 slice 10).
 
@@ -393,7 +454,10 @@ def _registered_experiment_runner(root, runner_id, primary_arm_id):
     ``INVALID_EXPERIMENT_SPEC`` naming the runner and arm, raised before any
     resolved plan is written or the runner is invoked. The closure preserves
     the nonzero-return refusal (typed ``VALIDATION_FAILED`` with the stderr
-    tail) and the ledger headline.
+    tail) and the ledger headline. A nonzero exit whose staged run directory
+    carries a valid holdout refusal sidecar is instead the typed
+    ``HOLDOUT_ACCESS_DENIED`` naming only the four validated pins, which
+    ``run_experiment`` captures as the private refusal receipt.
     """
     from engine.v2.ops.experiments import RUNNER_INVENTORY
     from engine.v2.ops.legacy_adapter import run_legacy_script
@@ -411,6 +475,11 @@ def _registered_experiment_runner(root, runner_id, primary_arm_id):
         completed = run_legacy_script(run_dir, runner_id, args=selected_args,
                                       declared_runtime_sources=sources)
         if completed.returncode != 0:
+            pins = _holdout_refusal_signal(run_dir)
+            if pins is not None:
+                raise fail("HOLDOUT_ACCESS_DENIED",
+                           "registered experiment loader refused holdout data",
+                           details=pins)
             raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
                        details={"returncode": completed.returncode,
                                 "stderr_tail": (completed.stderr or "")[-2000:]})
@@ -448,6 +517,7 @@ def _dispatch_experiment(parameters, root):
     from engine.v2.ops.experiments import (
         expected_variant_identity,
         experiment_spec_from_document,
+        experiments_ledger_path,
         resolve_experiment_plan,
         run_experiment,
         synthetic_fixture_runner,
@@ -476,8 +546,12 @@ def _dispatch_experiment(parameters, root):
         runner = _registered_experiment_runner(root, runner_id, spec.primary_arm_id)
         synthetic = False
     (root / "resolved_experiment_plan.json").write_bytes(plan.json_bytes())
+    refusal_ledger_path = (experiments_ledger_path(checkout_root)
+                           if mode == "primary" and checkout_root else None)
     receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
-                             resolved_plan=plan, variant_id=variant_id)
+                             resolved_plan=plan, variant_id=variant_id,
+                              refusal_ledger_path=refusal_ledger_path,
+                              defer_refusal_ledger=True)
     (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
         raise _experiment_failure(receipt)

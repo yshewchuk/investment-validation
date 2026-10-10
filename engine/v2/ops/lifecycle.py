@@ -245,14 +245,19 @@ def record_measurement(conn: sqlite3.Connection, attempt_id: str, *, current_byt
 
 def commit_attempt(conn: sqlite3.Connection, attempt_id: str, fence: int, outcome: Outcome, *,
                    clock: Clock,
-                   effects: Callable[[sqlite3.Connection], None] | None = None) -> str:
-    """Close an attempt under its fence; run ``effects`` in the same transaction.
+                   effects: Callable[[sqlite3.Connection], None] | None = None,
+                   failure_effects: Callable[[sqlite3.Connection], None] | None = None) -> str:
+    """Close an attempt under its fence; run the matching callback in the same transaction.
 
-    Returns the job's new state. Any refusal or effect error rolls back
-    everything, including the effects.
+    ``effects`` runs only on success, ``failure_effects`` only on failure, and
+    both only after fence validation. Returns the job's new state. Any refusal
+    or callback error rolls back everything, including the callback's DB state;
+    file appends made by a callback still require replay-idempotency.
     """
     if outcome.succeeded == (outcome.failure is not None):
         raise ValueError("a success carries no failure, and a failure must carry one")
+    if effects is not None and failure_effects is not None:
+        raise ValueError("effects and failure_effects are mutually exclusive")
     if outcome.process_state not in RELEASABLE_PROCESS_STATES:
         raise fail("STALE_EXPECTATION", "completion requires a reconciled process tree")
     now = clock.now()
@@ -260,6 +265,8 @@ def commit_attempt(conn: sqlite3.Connection, attempt_id: str, fence: int, outcom
         job, _ = verify_fence(conn, attempt_id, fence, now)
         if effects is not None and outcome.succeeded:
             effects(conn)
+        if failure_effects is not None and not outcome.succeeded:
+            failure_effects(conn)
         end_attempt(conn, attempt_id, "succeeded" if outcome.succeeded else "failed",
                     outcome, now)
         return advance_job(conn, job, outcome, now)

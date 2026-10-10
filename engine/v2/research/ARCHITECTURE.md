@@ -93,8 +93,18 @@ before returning a frame to metric/report writers. Missing/invalid context,
 an as-of month later than the current UTC month,
 unknown purposes and an entirely excluded population receive the same refusal.
 There is no date fallback, partial returned frame, report write or retry here.
-Final holdout reads are unavailable. This read-only interface does not write
-durable refusal receipts or ledger rows.
+Final holdout reads are unavailable. For a pinned population denial (valid
+context and a refused explicit or bulk population), experiment orchestration
+configures `INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL`; the loader writes a private,
+atomically replaced signal containing the refusal code and four holdout pins
+before raising `HOLDOUT_ACCESS_DENIED`, then writes a digest sidecar only after
+the signal directory sync succeeds. The worker accepts the signal only when
+the sidecar matches its exact bytes. The loader writes no ledger row or report.
+Signal write, sync, replacement, or sidecar errors propagate instead of
+returning the typed refusal. If directory sync fails after replacement, the
+loader tries to remove the signal before propagating the error; even if that
+unlink fails, the missing or mismatched digest sidecar makes the worker reject
+the visible signal.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout
@@ -123,10 +133,11 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
-| Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
+| Cache, retry, transaction, partial write, replay | No cache or automatic retry; no ledger or report writes; complete scans precede return; identical pinned inputs return identical rows (R6). The configured refusal signal is the sole durable write on `HOLDOUT_ACCESS_DENIED`; its I/O errors propagate. |
 
-These readers preserve no durable refusal receipt or economic variant identity
-and cannot authorize the separate user-only final holdout read.
+These readers preserve no ledger receipt or economic variant identity and
+cannot authorize the separate user-only final holdout read. The refusal signal
+is orchestration input, not authorization for a final holdout read.
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
@@ -432,7 +443,7 @@ uncaught traceback instead.
   an operator may rerun after the missing head appears or a conflicting
   writer finishes. Limit and integrity refusals, including
   `RESULT_LIMIT_EXCEEDED` and `MANIFEST_CORRUPT`, are not retried.
-- **R4, transaction.** Build-trades and reconcile-trades are the only
+- **R4, transaction.** Build-trades and reconcile-trades are the only table
   writers here; both go through the one shared path,
   `_trades_publish.publish` → `engine.v2.data.generic_incremental.
   build_generic_table_candidate` / `commit_generic_table_candidate`. The
@@ -442,7 +453,9 @@ uncaught traceback instead.
   `SNAPSHOT_CONFLICT` (`category="dependency"`, retryable) rather than
   silently overwriting or merging. `--dry-run` builds the same candidate
   and stops before the commit call, so the changeset can be inspected with
-  no write at all.
+  no table write. The configured `INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL` is
+  `experiment_trades.load_trades`'s only non-table write; its write, sync, or
+  replacement errors propagate.
 - **R5, partial result/write.** Read batches stay provisional until scan
   exhaustion; a later failure returns no partial frame. A smaller explicit
   caller limit raises `RESULT_LIMIT_EXCEEDED`. Writes use the atomic

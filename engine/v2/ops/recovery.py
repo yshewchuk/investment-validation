@@ -29,12 +29,13 @@ from __future__ import annotations
 import fcntl
 import os
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from engine.v2.contracts import ProcessIdentity
+from engine.v2.contracts import Problem, ProcessIdentity
 from engine.v2.foundation import Clock, content_hash, format_timestamp
-from engine.v2.ops.catalog import load_json, transaction
+from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.errors import fail, make_problem
 from engine.v2.ops.executor_watchdog import find_owners, observe
 from engine.v2.ops.lifecycle import (
@@ -50,6 +51,7 @@ __all__ = [
     "SupervisorLock",
     "begin_epoch",
     "expire_leases",
+    "fence_attempt_for_recovery",
     "fence_foreign_epochs",
     "prove_ownership_gone",
     "read_boot_id",
@@ -108,6 +110,34 @@ def _fence_off(conn: sqlite3.Connection, attempt_id: str, job_id: str, stamp: st
                  (attempt_id,))
     conn.execute("UPDATE jobs SET fence = fence + 1, updated_at = ? "
                  "WHERE job_id = ? AND active_attempt_id = ?", (stamp, job_id, attempt_id))
+
+
+def fence_attempt_for_recovery(conn: sqlite3.Connection, attempt_id: str, *,
+                               clock: Clock,
+                               recovery_failure: Problem | None = None) -> bool:
+    """Fence one still-active attempt off for reconciliation without ending it.
+
+    Its reservations stay held: stranding the coordinator's completion lets a
+    later reconciliation settle the attempt against the real process tree.
+
+    When ``recovery_failure`` is given, the typed Problem is persisted to the
+    attempt's ``failure_json`` in the same transaction as the transition to
+    ``recovery_pending`` — the marker alone, so a caller that redacted it
+    carries no receipt, holdout, exception, or diagnostic content.
+    """
+    with transaction(conn):
+        row = conn.execute("SELECT a.attempt_id, a.job_id, a.state, j.active_attempt_id "
+                           "FROM attempts AS a JOIN jobs AS j ON j.job_id = a.job_id "
+                           "WHERE a.attempt_id = ?", (attempt_id,)).fetchone()
+        if row is None or row["state"] not in ("starting", "running", "cancelling"):
+            return False
+        if row["active_attempt_id"] != attempt_id:
+            return False
+        _fence_off(conn, row["attempt_id"], row["job_id"], format_timestamp(clock.now()))
+        if recovery_failure is not None:
+            conn.execute("UPDATE attempts SET failure_json = ? WHERE attempt_id = ?",
+                         (dumps(recovery_failure), row["attempt_id"]))
+    return True
 
 
 def expire_leases(conn: sqlite3.Connection, *, clock: Clock) -> list[str]:
@@ -183,8 +213,21 @@ def prove_ownership_gone(conn: sqlite3.Connection, attempt_id: str, *,
 
 
 def reconcile_attempt(conn: sqlite3.Connection, attempt_id: str, *, process_state: str,
-                      clock: Clock) -> str:
+                      clock: Clock, failure: Problem | None = None,
+                      recovery_effect: Callable[[sqlite3.Connection],
+                                                 Problem | None] | None = None) -> str:
     """Resolve a ``recovery_pending`` attempt from the executor's process verdict.
+
+    When ``recovery_effect`` is given, it runs inside the same immediate catalog
+    transaction as the settlement — on cancellation-atomic refusal replay, the
+    effect and its typed outcome settle or roll back with the attempt, never in
+    between. It is called only after the current job and attempt states are
+    read: a job already ``cancelling`` skips the callback and settles through
+    the existing cancellation path; otherwise the callback runs while the
+    transaction is held, and a returned Problem becomes the terminal failure of
+    the existing settlement while ``None`` preserves the generic proven-dead
+    settlement. Callback exceptions propagate, so the transaction rolls back
+    and the attempt remains ``recovery_pending``.
 
     Returns the attempt's state afterwards: still ``recovery_pending`` unless the
     tree is verified gone.
@@ -200,11 +243,15 @@ def reconcile_attempt(conn: sqlite3.Connection, attempt_id: str, *, process_stat
                          (process_state, attempt_id))
             return "recovery_pending"
         job = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (attempt["job_id"],)).fetchone()
-        return _settle(conn, job, attempt_id, process_state, now)
+        if recovery_effect is not None and job["state"] != "cancelling":
+            effect_failure = recovery_effect(conn)
+            if effect_failure is not None:
+                failure = effect_failure
+        return _settle(conn, job, attempt_id, process_state, now, failure=failure)
 
 
 def _settle(conn: sqlite3.Connection, job: sqlite3.Row, attempt_id: str, process_state: str,
-            now) -> str:
+            now, failure: Problem | None = None) -> str:
     if job["state"] == "cancelling":
         failure = make_problem("CANCELLED", "cancelled; the worker was reconciled after "
                                "losing its lease")
@@ -215,8 +262,9 @@ def _settle(conn: sqlite3.Connection, job: sqlite3.Row, attempt_id: str, process
                      (format_timestamp(now), job["job_id"]))
         block_descendants(conn, job["job_id"], now)
         return "cancelled"
-    failure = make_problem("LEASE_LOST", "the attempt lost its lease; its process tree was "
-                           "verified gone before resources were released")
+    if failure is None:
+        failure = make_problem("LEASE_LOST", "the attempt lost its lease; its process tree was "
+                               "verified gone before resources were released")
     outcome = Outcome(succeeded=False, process_state=process_state, failure=failure)
     end_attempt(conn, attempt_id, "failed", outcome, now)
     if job["active_attempt_id"] == attempt_id:
