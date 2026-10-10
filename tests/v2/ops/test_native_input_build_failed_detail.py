@@ -30,3 +30,16 @@ def test_answer_field_in_source_publishes_class_and_field_names_only(
     assert refusal.detail == "native input build failed: AnswerFieldsInSource ['gate_pass']"
     assert "SECRETKEY" not in refusal.detail
     assert "987654" not in refusal.detail
+
+
+def test_plain_value_error_publishes_class_name_only(tmp_path, monkeypatch):
+    def _raise_plain(bundle):
+        raise ValueError("SECRETKEY=987654 staged shape")
+
+    monkeypatch.setattr(native_score_batch, "build_native_score_inputs", _raise_plain)
+    binding = _stage_release(tmp_path)
+    assembled, refusals = _assemble(binding, [_event_inputs()])
+    assert assembled == {}
+    assert len(refusals) == 1
+    assert refusals[0].code == "NATIVE_INPUT_BUILD_FAILED"
+    assert refusals[0].detail == "native input build failed: ValueError"
