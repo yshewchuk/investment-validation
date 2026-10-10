@@ -65,7 +65,7 @@ document (added 2026-09-14, after P3-1c merged the real fenced-publish
 binding -- ``engine.v2.serving.projections.projection_binding``,
 ``engine.v2.ops.effects_graph.publication_effect``'s ``projection_binding.
 json`` input, and the API's current-resolution through it,
-``tests/test_v2_serving_publication_binding.py``).** A ``PreviewRelease``
+``tests/v2/serving/test_v2_serving_publication_binding.py``).** A ``PreviewRelease``
 document alone only ASSERTS its own ``release_id``/``source_release_id``;
 the real binding document is what a live publish actually produced and the
 read API actually resolved through. Every entry of ``accepted_release_refs``

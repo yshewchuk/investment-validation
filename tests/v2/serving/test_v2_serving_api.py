@@ -30,7 +30,8 @@ from urllib.request import urlopen
 import pytest
 import uvicorn
 
-ROOT = Path(__file__).resolve().parents[1]
+from engine.paths import ROOT
+
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import Problem  # noqa: E402
@@ -159,7 +160,7 @@ def _write_publication(serving_root: Path, ops_release_id: str, binding: dict | 
     effect`` binds -- §5.4/P3-1c) and move the ops ``CURRENT`` pointer to
     it. Real gate/staging machinery is ops-side coverage
     (``tests/test_v2_ops_effects_graph.py``,
-    ``tests/test_v2_serving_publication_binding.py``); this helper only
+    ``tests/v2/serving/test_v2_serving_publication_binding.py``); this helper only
     reproduces the on-disk SHAPE the API's own resolver reads. ``binding``
     of ``None`` writes an ops release with no bound projection at all (the
     plain P3-0 compatibility-preview case)."""
@@ -795,7 +796,7 @@ def test_score_detail_scopes_a_shared_score_id_to_the_requested_release(live):
 #: ``engine.v2.ops.effects_graph.publication_effect`` actually writes
 #: (``engine.v2.contracts.OperationsStatus``); constructed here rather than
 #: run through a real publication so these tests stay serving-only (real
-#: production of one is `tests/test_v2_ops_engineering_history.py`'s job).
+#: production of one is `tests/v2/ops/test_v2_ops_engineering_history.py`'s job).
 def _operations_status_document(**overrides) -> dict:
     document = {
         "schema_version": "operations_status.v1.0", "scope": "shadow",

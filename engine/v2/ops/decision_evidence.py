@@ -34,10 +34,10 @@ from __future__ import annotations
 
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.foundation.artifacts import artifact_reference
+from engine.v2.foundation.score_population import population_key as _population_key
 from engine.v2.ops.decision_replay import (
     compare_rows,
     decision_population,
-    population_key,
     score_row_id,
 )
 from engine.v2.ops.errors import fail
@@ -159,7 +159,7 @@ def derive(score_doc, score_ref, finality_doc, finality_ref, replay_doc, coverag
     session = resolve_effective_session(finality_doc, requested_session)
     score_rows = _score_rows(score_doc)
     population = decision_population(score_doc, session)
-    expected = [population_key(row) for row in population]
+    expected = [_population_key(row) for row in population]
 
     plan = {"schema_version": "decision_plan.v1.0", "session": session,
             "requested_session": requested_session,
@@ -171,7 +171,7 @@ def derive(score_doc, score_ref, finality_doc, finality_ref, replay_doc, coverag
     common = _common_bindings(score_ref, finality_ref, plan_ref, session=session,
                               deployment=deployment, decision_clock=decision_clock,
                               expected=expected)
-    cutoffs = {population_key(row): row.get("evidence_cutoff") for row in score_rows}
+    cutoffs = {_population_key(row): row.get("evidence_cutoff") for row in score_rows}
     receipts = {
         "causality": _receipt("causality", common, observed_cutoffs=cutoffs),
         "coverage": _receipt("coverage", common, observed_population=expected),

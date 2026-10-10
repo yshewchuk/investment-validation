@@ -5,7 +5,7 @@ A real ops catalog at the production ``<ops_root>/catalog.sqlite`` path
 back the discovery; the report bytes are built by the REAL production
 comparison functions (``compare_native_vs_legacy`` -> ``_stamp_report_identity``)
 and served over REAL HTTP (the ``_start``/``_stop``/``_get`` harness from
-``tests/test_v2_serving_api.py``). Only the nightly producer's own job/attempt/
+``tests/v2/serving/test_v2_serving_api.py``). Only the nightly producer's own job/attempt/
 output rows are written directly, mirroring
 ``tests/test_v2_ops_nightly_native_parity_helpers.py``.
 """
@@ -34,7 +34,7 @@ from engine.v2.ops.submission import job_id_for
 from engine.v2.parity.dimensions import FORECAST_FIELDS, SIMULATION_FIELDS
 from engine.v2.serving.api import create_app
 from tests.ops_support import FakeClock
-from tests.test_v2_serving_api import _get, _start, _stop
+from tests.v2.serving.test_v2_serving_api import _get, _start, _stop
 
 TOKEN = "test-token-ops-root-5b0e"
 AS_OF = "2026-01-02"

@@ -153,9 +153,9 @@ each returned event's attached `scores` to those same matching rows.
 api (P3-2): `create_app(*, serving_db, store_root, serving_root, token,
 resolver=None, ops_root=None, native_parity_report_path=None) -> FastAPI` wires §6's six routes over `projections`' route-specific
 read helpers only — no route or app-startup path imports or initiates
-scoring, a provider, `engine.v2.ops` or legacy `engine.*` (`tests/
-test_v2_serving_api.py` proves this with a real subprocess and two
-`sys.modules` snapshots). Auth is bearer-or-cookie, mirroring
+scoring, a provider, `engine.v2.ops` or legacy `engine.*`. The relocated API
+test `tests/v2/serving/test_v2_serving_api.py` proves this with a real
+subprocess and two `sys.modules` snapshots. Auth is bearer-or-cookie, mirroring
 `operations.py`'s own rule (reimplemented here, not imported — a peer
 module this task does not touch); the token never appears in an error body.
 Errors are one `Problem`-shaped envelope everywhere — see "Problem field
@@ -302,7 +302,7 @@ the mock disagree, §6 wins":**
   all-releases scan is accordingly a UI-side gap flagged for the
   coordinator (who owns reconciling `ui/` for this review), not fixed here.
 - Auth was already cookie-and-bearer (`_authorized` checks both
-  independently); `tests/test_v2_serving_api.py`'s
+  independently); `tests/v2/serving/test_v2_serving_api.py`'s
   `test_cookie_only_auth_works_on_every_route` now pins that a
   cookie-only request (no `Authorization` header at all, exactly what `ui/
   src/api/client.ts` sends) succeeds on every route, not just proves the
@@ -321,7 +321,7 @@ preview launcher (`engine/v2/dashboard/preview.py`) composes only this
 surface, per its layer-8 "7 only" import rule.
 
 `api.py` is launched directly (`python3 -m engine.v2.serving.api`) and read
-by `tests/test_v2_serving_api.py`; neither is a v2 package import, so
+by `tests/v2/serving/test_v2_serving_api.py`; neither is a v2 package import, so
 neither appears in this directive (`checks/package_readmes.py` only tracks
 `engine/v2/**` packages as consumers). No v2 package imports `api` yet.
 
@@ -395,7 +395,7 @@ duplicate ticker, malformed `.js` wrapper):
 
     python3 -m pytest -q tests/test_v2_serving_bridge.py tests/test_v2_serving_projections.py tests/test_v2_serving_legacy_bundle.py
 
-`tests/test_v2_serving_api.py` (P3-2) builds a real `serving.sqlite` the
+`tests/v2/serving/test_v2_serving_api.py` (P3-2) builds a real `serving.sqlite` the
 same way and serves it over REAL HTTP — a real `uvicorn.Server` bound to an
 ephemeral loopback port in a background thread (`TestClient` alone is not
 enough for the release-switch-mid-request and real-socket cases this needs).
@@ -405,4 +405,4 @@ pagination-and-mid-detail, typed errors, and the no-scoring/provider guard
 launcher's own refusals run as real `python3 -m engine.v2.serving.api`
 subprocesses:
 
-    python3 -m pytest -q tests/test_v2_serving_api.py
+    python3 -m pytest -q tests/v2/serving/test_v2_serving_api.py

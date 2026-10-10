@@ -380,7 +380,7 @@ bound `projection_binding.json`) under a fresh release id and publish it —
 means a second-generation publish, and a rollback after it, never collide.
 Both generations stay independently readable via `/api/v1/releases/{id}`.
 
-Tests: `tests/test_v2_serving_publication_binding.py`.
+Tests: `tests/v2/serving/test_v2_serving_publication_binding.py`.
 
 ### 5.5 Review follow-through for repeatable updates and live health
 
@@ -391,7 +391,7 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
 
 1. **Separate a retry from a new same-session plan.** **Done**, commit
    56d8709; see
-   `tests/test_v2_ops_same_session_replan.py`, which reproduces the Sep-14
+   `tests/v2/ops/test_v2_ops_same_session_replan.py`, which reproduces the Sep-14
    operator trace (plan -> submit -> cancel all -> re-plan after a code/
    manifest change -> submit) and proves it now succeeds with fresh job ids
    while the cancelled rows are untouched.
@@ -448,7 +448,7 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    unchanged (`tests/test_v2_ops_authority.py`). A newer generation may now
    become the published release; the prior release stays on disk and
    readable, and rollback is the same restage-under-a-fresh-id path proven
-   in `tests/test_v2_ops_same_session_replan.py`.
+   in `tests/v2/ops/test_v2_ops_same_session_replan.py`.
 
    Decisions/predictions stay intentionally generation-INDEPENDENT: the
    first committed record for a scheduled occurrence is authoritative
@@ -457,8 +457,8 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    failing the job or silently duplicating. See
    `engine.v2.ledger.decisions.record_divergence`,
    `engine.v2.ops.decision_commit.commit_decisions_in_transaction`, and
-   `tests/test_v2_ops_same_session_replan.py`/
-   `tests/test_v2_ops_generation_effects.py` for the full test coverage
+   `tests/v2/ops/test_v2_ops_same_session_replan.py`/
+   `tests/v2/ops/test_v2_ops_generation_effects.py` for the full test coverage
    (two generations of engineering_gate/ledger_export/backup/publication;
    identical-retry idempotency; same-generation conflict; divergence
    recording; settlement reading generation 1's prediction; the
@@ -492,13 +492,13 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    carries, so the two fields of one document can never disagree — the
    review found `budget_streak`'s unbounded scan could report more
    consecutive failures than the visible window ever shows.
-   `tests/test_v2_ops_engineering_history.py::test_engineering_streak_is_
+   `tests/v2/ops/test_v2_ops_engineering_history.py::test_engineering_streak_is_
    windowed_not_budget_streaks_unbounded_scan` asserts the two intentionally
    disagree on a fixture built to show it. See also
-   `tests/test_v2_ops_engineering_history.py` (three nights: pass,
+   `tests/v2/ops/test_v2_ops_engineering_history.py` (three nights: pass,
    retry-then-pass, unobserved; two generations in one night count as one
    night; trading-session window excludes weekends/holidays; a broken
-   calendar refuses) and `tests/test_v2_ops_generation_effects.py`'s own
+   calendar refuses) and `tests/v2/ops/test_v2_ops_generation_effects.py`'s own
    health/streak hook test.
 3. **Consume semantic status without reconstructing it.** **Done
    (2026-09-14).** `publication_effect` now writes a versioned
@@ -524,10 +524,10 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    is missing or malformed; missing engineering history renders as
    `unknown`, never green. `/health.json` (`engine/v2/serving/operations.py`)
    is untouched and keeps its existing `operations_health.v1.0` fields. See
-   `tests/test_v2_ops_engineering_history.py` (conflicts/degraded evidence/
+   `tests/v2/ops/test_v2_ops_engineering_history.py` (conflicts/degraded evidence/
    selfcheck carried; requested vs. resolved session; failed update keeps the
    old release and shows the reason; an unobserved window renders as
-   `unknown` throughout) and `tests/test_v2_serving_api.py` (the route
+   `unknown` throughout) and `tests/v2/serving/test_v2_serving_api.py` (the route
    itself, including the no-history-is-not-green case). Response fields are
    documented for a future health/flags screen in `ui/README.md`; the
    dedicated screen itself remains Phase 6 work, unchanged.
@@ -554,7 +554,7 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    self-healing via a strict `generated_at > updated_at` comparison against
    the existing sidecar, so it can run every tick without ever clobbering a
    LATER successful publish's own fresher document. See
-   `tests/test_v2_ops_engineering_history.py`
+   `tests/v2/ops/test_v2_ops_engineering_history.py`
    (`test_upstream_engineering_gate_failure_blocks_publication_and_status_
    shows_it`, `test_cancelled_upstream_job_blocks_publication_and_status_
    shows_it`, `test_reconcile_does_not_clobber_a_later_successful_publish`),
@@ -568,7 +568,7 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    since the sidecar always describes the SCOPE's current state and a
    client that pinned an earlier release must never silently be handed a
    different one's status; omitted, behavior is unchanged. See
-   `tests/test_v2_serving_api.py`'s `test_operations_route_release_id_
+   `tests/v2/serving/test_v2_serving_api.py`'s `test_operations_route_release_id_
    param_*` (match/mismatch/absent). Documented in `ui/README.md`; `ui/src`
    untouched.
 
@@ -590,7 +590,7 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    (PARTITION BY scope ORDER BY updated_at DESC, job_id DESC)`, keeping only
    rank 1) rather than a scan plus per-row reads; a scope's latest job that
    already succeeded, or is still queued/running, gets no sidecar write at
-   all. See `tests/test_v2_ops_engineering_history.py`'s
+   all. See `tests/v2/ops/test_v2_ops_engineering_history.py`'s
    `test_reconcile_names_the_newest_of_several_blocked_jobs_in_one_scope`
    (three blocked jobs, insertion order deliberately different from time
    order), `test_reconcile_skips_an_older_blocked_job_behind_a_newer_
@@ -749,7 +749,7 @@ Exit: `/usr/bin/python3 -m pytest -q tests/test_v2_serving_bridge.py`
 3. Use real SQLite/files and HTTP in tests, including release switches during
    open pagination/detail sequences.
 
-Exit: `/usr/bin/python3 -m pytest -q tests/test_v2_serving_api.py`
+Exit: `/usr/bin/python3 -m pytest -q tests/v2/serving/test_v2_serving_api.py`
 
 ### P3-3 — Board and detail
 

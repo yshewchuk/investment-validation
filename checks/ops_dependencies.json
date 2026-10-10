@@ -21,9 +21,6 @@
   },
   "exceptions": {
     "forbidden": [],
-    "cycles": [
-      ["decision_replay", "decision_validation"],
-      ["decision_validation", "decision_replay"]
-    ]
+    "cycles": []
   }
 }

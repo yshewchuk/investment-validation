@@ -17,7 +17,7 @@ generation stays idempotent; and a same-generation content change still
 conflicts (the invariant this fix must not weaken). It also proves the
 health/streak hook (§5.5 item 2, now implemented in
 ``engineering_gate_effect`` via ``health.record_check`` -- see
-``tests/test_v2_ops_engineering_history.py``) cannot double-count a night
+``tests/v2/ops/test_v2_ops_engineering_history.py``) cannot double-count a night
 just because two generations both observed it.
 """
 from __future__ import annotations
@@ -31,11 +31,11 @@ from engine.v2.ops.effects_graph import backup_effect, engineering_gate_effect, 
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.outbox import watermark, watermark_would_conflict
 from tests.ops_support import catalog
-from tests.test_v2_ops_effects_graph import _commit, _open, _params, _row, _seed_decisions
-from tests.test_v2_ops_effects_graph import _submit_and_claim as _claim
-from tests.test_v2_ops_engineering_history import stub_gate  # noqa: F401 (fixture)
+from tests.v2.ops.test_v2_ops_effects_graph import _commit, _open, _params, _row, _seed_decisions
+from tests.v2.ops.test_v2_ops_effects_graph import _submit_and_claim as _claim
+from tests.v2.ops.test_v2_ops_engineering_history import stub_gate  # noqa: F401 (fixture)
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 SESSION = "2026-09-12"
 
 
@@ -198,7 +198,7 @@ def test_backup_two_generations_each_deliver_their_own_effect(tmp_path):
 
 # --------------------------------------------------------------------------
 # health/streak hook: §5.5 item 2 is now implemented (engineering_gate_effect
-# calls health.record_check -- tests/test_v2_ops_engineering_history.py
+# calls health.record_check -- tests/v2/ops/test_v2_ops_engineering_history.py
 # exercises the effect itself); this test stays here as the underlying-table
 # proof that recording counts by occurrence, never by generation or retry.
 # --------------------------------------------------------------------------
@@ -208,7 +208,7 @@ def test_health_streak_counts_one_occurrence_per_night_not_per_generation(tmp_pa
     """``health_observations`` is keyed ``PRIMARY KEY(occurrence, kind)`` --
     recording an engineering observation for the SAME night under two
     different generations still counts as one scheduled occurrence, never
-    two. ``tests/test_v2_ops_engineering_history.py`` proves the real
+    two. ``tests/v2/ops/test_v2_ops_engineering_history.py`` proves the real
     ``engineering_gate_effect`` wiring on top of this table."""
     from engine.v2.ops.health import budget_streak, record_check
 

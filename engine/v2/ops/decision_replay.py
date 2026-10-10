@@ -18,10 +18,10 @@ it pick again. That step needs the legacy engine and lives in
 """
 from __future__ import annotations
 
-from engine.v2.ops.decision_validation import population_key
+from engine.v2.foundation.score_population import population_key as _population_key
 from engine.v2.ops.errors import fail
 
-__all__ = ["compare_rows", "decision_population", "population_key", "score_row_id"]
+__all__ = ["compare_rows", "decision_population", "score_row_id"]
 
 
 def score_row_id(row):
@@ -88,12 +88,12 @@ def decision_population(score_doc, session):
         if decision_date is None or _date_only(decision_date) != session_date:
             continue
         eligible.append(row)
-    keys = [population_key(row) for row in eligible]
+    keys = [_population_key(row) for row in eligible]
     if len(set(keys)) != len(keys):
         duplicated = sorted({key for key in keys if keys.count(key) > 1})
         raise fail("VALIDATION_FAILED", "decision population has duplicate keys",
                    details={"keys": duplicated})
-    return sorted(eligible, key=population_key)
+    return sorted(eligible, key=_population_key)
 
 
 def compare_rows(source_rows, replayed_rows):
@@ -109,8 +109,8 @@ def compare_rows(source_rows, replayed_rows):
     """
     from engine.v2.foundation import canonical_json
 
-    source = {population_key(row): row for row in source_rows}
-    replayed = {population_key(row): row for row in replayed_rows}
+    source = {_population_key(row): row for row in source_rows}
+    replayed = {_population_key(row): row for row in replayed_rows}
     findings = []
     for key in sorted(set(source) | set(replayed)):
         left, right = source.get(key), replayed.get(key)
