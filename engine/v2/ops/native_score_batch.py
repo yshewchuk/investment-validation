@@ -37,7 +37,11 @@ from engine.v2.scoring.nightly_source_bundle import (
     validated_as_of,
 )
 from engine.v2.scoring.release_bindings import ScoringReleaseBinding
-from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
+from engine.v2.scoring.source_inputs import (
+    AnswerFieldsInSource,
+    SourceBundle,
+    build_native_score_inputs,
+)
 from engine.v2.scoring.stages import NativeScoreInputs
 
 __all__ = [
@@ -436,12 +440,15 @@ def _assemble_one_event(
         return bundle
     try:
         native_inputs = build_native_score_inputs(bundle)
-    except ValueError:
-        # CodeRabbit round 4 (PR #66, CWE-209): a fixed message, not str(exc)
-        # -- build_native_score_inputs' own ValueError text can name staged
-        # recipe/field shapes, and refusals.json is a published output.
-        return NativeScoreBatchRowRefusal(
-            key, "NATIVE_INPUT_BUILD_FAILED", "native input build failed")
+    except ValueError as exc:
+        # CodeRabbit round 4 (PR #66, CWE-209): never str(exc) -- its text can
+        # name staged recipe/field shapes, and refusals.json is a published
+        # output. Only the exception class and, for AnswerFieldsInSource, its
+        # field PATHS (names, never values) are published.
+        detail = f"native input build failed: {type(exc).__name__}"
+        if isinstance(exc, AnswerFieldsInSource):
+            detail += f" {sorted(exc.paths)}"
+        return NativeScoreBatchRowRefusal(key, "NATIVE_INPUT_BUILD_FAILED", detail)
     request = ScoreRequest(
         event_id=str(event_id), calendar_revision=str(calendar_revision),
         strategy_version=strategy, deployment_id=binding.model_release.deployment_id,
