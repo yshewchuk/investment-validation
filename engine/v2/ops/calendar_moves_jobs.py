@@ -28,18 +28,22 @@ supervisor submitter: that wiring is a separate, later PR.
 """
 from __future__ import annotations
 
+import functools
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Mapping
 
 from engine.v2.contracts import JobSpec
 from engine.v2.foundation import (
     DocumentError,
+    SystemClock,
     canonical_json,
     from_document,
     to_document,
 )
 from engine.v2.ops.errors import fail
-from engine.v2.ops.incremental_data import REFRESH_RESULT_SCHEMA
+from engine.v2.ops.incremental_data import REFRESH_RESULT_SCHEMA, RefreshCallback
 from engine.v2.ops.submission import JobKind, RetryPolicy
 from engine.v2.ops.unit_receipts import (
     NATIVE_COMPUTED_MOVES_ACCOUNT,
@@ -285,6 +289,119 @@ def calendar_moves_job_spec(kind: str, plan, parameters: CalendarMovesParameters
 # --------------------------------------------------------------------------
 
 
+def _load_computed_moves_refresh_callback(as_of: str | None) -> RefreshCallback:
+    """S4C Part 3: resolve the computed_moves callback and its yfinance edge.
+
+    ``as_of`` cannot be pre-bound the way the fetcher is: it varies per job
+    dispatch (a session date), never a constant of the deployment the way
+    the injected fetcher is. Same lazy shape as ``_load_data_refresh_callback``:
+    constructing the fetcher reads nothing and touches no network, and the
+    data-owning store is imported only when the worker actually dispatches
+    this kind.
+    """
+    from engine.v2.ops.computed_moves_store import run_computed_moves_refresh
+    from engine.v2.ops.providers import yfinance_history_fetcher
+    return functools.partial(run_computed_moves_refresh, as_of=as_of,
+                             fetcher=yfinance_history_fetcher())
+
+
+def _load_forward_calendar_refresh_callback() -> RefreshCallback:
+    """S4C follow-up: resolve the forward_calendar callback and its two network edges.
+
+    ``forward_calendar_store.run_forward_calendar_refresh`` takes no
+    ``(parameters, root)`` pair at all -- it is a standalone runner with an
+    explicit, fully keyword-only signature -- so a bare ``functools.partial``
+    cannot make it ``RefreshCallback``-shaped the way
+    ``_load_data_refresh_callback`` does for ``run_daily_market_refresh``; this
+    closure reads every keyword argument off the decoded
+    ``CalendarMovesParameters`` except ``attempt_id``/``fence``, which vary per
+    attempt (a retried attempt gets a new fence) and so cannot be pre-bound the
+    way the fetchers are: they come from ``forward_calendar_refresh``'s own
+    small staged document
+    (``refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]``),
+    read from ``root`` at call time. Before that file read, or any other I/O,
+    ``parameters.expected_head_snapshot_id`` is format-checked with the same
+    bounded-1..128-char-or-``None`` one-line shape check
+    ``computed_moves_store._validate_document_head`` uses for the same field
+    (mirrored, not imported: that name is private, matching this codebase's
+    existing convention of mirroring rather than importing another module's
+    private validators); constructing the fetchers reads nothing and touches no
+    network, the same lazy shape ``_load_computed_moves_refresh_callback``
+    already has.
+    """
+    from engine.v2.ops.forward_calendar_store import (
+        NATIVE_NASDAQ_ACCOUNT,
+        NATIVE_YFINANCE_ACCOUNT,
+        run_forward_calendar_refresh,
+    )
+    from engine.v2.ops.provider_budget import budgeted_fetcher
+    from engine.v2.ops.providers import nasdaq_calendar_fetcher, yfinance_earnings_fetcher
+    from engine.v2.ops.stores.refresh_contracts import REFRESH_INPUT_DOCUMENT_NAMES
+
+    nasdaq_fetcher = nasdaq_calendar_fetcher()
+    earnings_fetcher = yfinance_earnings_fetcher()
+    document_name = REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]
+
+    def _callback(parameters, root):
+        head = parameters.expected_head_snapshot_id
+        if head is not None and (not isinstance(head, str) or not head or len(head) > 128):
+            raise fail("INVALID_REQUEST",
+                       "expected_head_snapshot_id must be a bounded nonempty string")
+        attempt_id, fence = _staged_forward_calendar_attempt(Path(root), document_name)
+        budget = dict(catalog_path=parameters.catalog_path, attempt_id=attempt_id,
+                      fence=fence, clock=SystemClock())
+        return run_forward_calendar_refresh(
+            catalog_path=parameters.catalog_path,
+            objects_root=parameters.objects_root,
+            parent_snapshot_id=parameters.parent_snapshot_id,
+            refresh_plan_hash=parameters.refresh_plan_hash,
+            as_of=parameters.as_of,
+            tickers=parameters.tickers,
+            horizon_days=parameters.horizon_days,
+            scope=parameters.scope,
+            expected_head_generation=parameters.expected_head_generation,
+            expected_head_snapshot_id=parameters.expected_head_snapshot_id,
+            attempt_id=attempt_id, fence=fence,
+            nasdaq_fetcher=budgeted_fetcher(nasdaq_fetcher, account=NATIVE_NASDAQ_ACCOUNT, **budget),
+            earnings_fetcher=budgeted_fetcher(earnings_fetcher, account=NATIVE_YFINANCE_ACCOUNT, **budget))
+
+    return _callback
+
+
+def _staged_forward_calendar_attempt(root: Path, document_name: str) \
+        -> tuple[str | None, int | None]:
+    """Read forward_calendar_refresh's tiny staged document (``attempt_id``/
+    ``fence`` only -- see ``refresh_staging._forward_calendar_document``) and
+    format-check both fields before returning them. A missing or malformed
+    document is a typed ``INVALID_REQUEST``, never a bare ``KeyError``/
+    ``JSONDecodeError``: this runner is always dispatched through the
+    job-submission pipeline once registered, so the document is always
+    expected to exist.
+    """
+    path = root / document_name
+    try:
+        document = json.loads(path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise fail("INVALID_REQUEST",
+                   "forward calendar refresh staged input document is missing or malformed") \
+            from exc
+    if not isinstance(document, Mapping):
+        raise fail("INVALID_REQUEST",
+                   "forward calendar refresh staged input document is malformed")
+    if "attempt_id" not in document or document["attempt_id"] is None \
+            or "fence" not in document or document["fence"] is None:
+        raise fail("INVALID_REQUEST",
+                   "the staged document must include both attempt_id and fence for a "
+                   "job-scheduled forward calendar refresh")
+    attempt_id = document["attempt_id"]
+    if not isinstance(attempt_id, str) or not attempt_id:
+        raise fail("INVALID_REQUEST", "attempt_id must be a non-empty string")
+    fence = document["fence"]
+    if isinstance(fence, bool) or not isinstance(fence, int) or fence < 1:
+        raise fail("INVALID_REQUEST", "fence must be an int of at least 1")
+    return attempt_id, fence
+
+
 def _decode(parameters) -> CalendarMovesParameters:
     try:
         return from_document(CalendarMovesParameters, dict(parameters))
@@ -294,10 +411,8 @@ def _decode(parameters) -> CalendarMovesParameters:
 
 
 def run_computed_moves_worker(parameters, root, *, refresh_callback=None) -> dict:
-    from engine.v2.ops import incremental_data
-
     params = _decode(parameters)
-    callback = refresh_callback or incremental_data._load_computed_moves_refresh_callback(
+    callback = refresh_callback or _load_computed_moves_refresh_callback(
         params.as_of)
     return _run_calendar_moves_worker(
         params, root, kind=COMPUTED_MOVES_REFRESH_ACTION,
@@ -309,10 +424,8 @@ def run_computed_moves_worker(parameters, root, *, refresh_callback=None) -> dic
 def run_forward_calendar_worker(parameters, root, *, refresh_callback=None) -> dict:
     """Decode the job's parameters, resolve the forward_calendar callback and
     run the shared calendar/moves worker for the forward_calendar kind."""
-    from engine.v2.ops import incremental_data
-
     params = _decode(parameters)
-    callback = refresh_callback or incremental_data._load_forward_calendar_refresh_callback()
+    callback = refresh_callback or _load_forward_calendar_refresh_callback()
     return _run_calendar_moves_worker(
         params, root, kind=FORWARD_CALENDAR_REFRESH_ACTION,
         result_path=FORWARD_CALENDAR_RESULT_PATH, schema=FORWARD_CALENDAR_RESULT_SCHEMA,

@@ -100,6 +100,6 @@ def _forward_calendar_document(claim) -> dict:
     claim time, the same as ``_computed_moves_document`` writes them; every
     other value this runner needs is read directly off the decoded
     ``CalendarMovesParameters`` by
-    ``incremental_data._load_forward_calendar_refresh_callback``.
+    ``calendar_moves_jobs._load_forward_calendar_refresh_callback``.
     """
     return {"attempt_id": claim.attempt_id, "fence": claim.fence}

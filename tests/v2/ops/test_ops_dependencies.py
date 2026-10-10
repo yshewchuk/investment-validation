@@ -289,6 +289,8 @@ def test_unit_receipts_does_not_import_incremental_data_even_lazily():
     assert ("unit_receipts", "incremental_data") not in ops.findings(files, rules)["cycles"]
     files[ops.SOURCE + "unit_receipts.py"] += (
         b"\n\ndef _planted():\n    from engine.v2.ops import incremental_data\n")
+    files[ops.SOURCE + "incremental_data.py"] += (
+        b"\n\ndef _planted():\n    from engine.v2.ops import unit_receipts\n")
     assert ("unit_receipts", "incremental_data") in ops.findings(files, rules)["cycles"]
 
 
@@ -307,6 +309,20 @@ def test_incremental_data_does_not_import_refresh_staging_even_lazily():
     files[ops.SOURCE + "stores/refresh_contracts.py"] += (
         b"\n\ndef _planted():\n    from engine.v2.ops import nightly\n")
     assert ("stores.refresh_contracts", "nightly") in ops.findings(files, rules)["forbidden"]
+
+
+def test_incremental_data_does_not_import_the_refresh_stores_even_lazily():
+    rules = json.loads((ROOT / ops.POLICY).read_bytes())
+    files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)
+             if path.startswith(ops.SOURCE) and path.endswith(".py")}
+    actual = ops.findings(files, rules)["cycles"]
+    assert not [edge for edge in actual if "incremental_data" in edge]
+    assert not [edge for edge in rules["exceptions"]["cycles"] if "incremental_data" in edge]
+    for store in ("computed_moves_store", "forward_calendar_store"):
+        planted = dict(files)
+        planted[ops.SOURCE + "incremental_data.py"] += (
+            f"\n\ndef _planted():\n    from engine.v2.ops import {store}\n".encode())
+        assert ("incremental_data", store) in ops.findings(planted, rules)["cycles"]
 
 
 def test_layer_cli_rejects_planted_ops_violation(tmp_path):

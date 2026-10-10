@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.foundation import to_document
-from engine.v2.ops import calendar_moves_jobs, forward_calendar_store, incremental_data
+from engine.v2.ops import calendar_moves_jobs, forward_calendar_store
 from engine.v2.ops.calendar_moves_jobs import (
     COMPUTED_MOVES_REFRESH_ACTION,
     COMPUTED_MOVES_RESULT_PATH,
@@ -478,7 +478,7 @@ def _write_attempt_document(root, document):
 @pytest.mark.parametrize("head", ["", "s" * 129], ids=["empty", "overlong"])
 def test_forward_calendar_callback_refuses_a_bad_head_before_reading_root(
         tmp_path, monkeypatch, head):
-    callback = incremental_data._load_forward_calendar_refresh_callback()
+    callback = calendar_moves_jobs._load_forward_calendar_refresh_callback()
     params = _params(tickers=("AAPL",), expected_head_snapshot_id=head)
 
     def _explode(self):
@@ -492,7 +492,7 @@ def test_forward_calendar_callback_refuses_a_bad_head_before_reading_root(
 
 def test_staged_forward_calendar_attempt_reads_a_real_document(tmp_path):
     _write_attempt_document(tmp_path, {"attempt_id": "att-1", "fence": 3})
-    assert incremental_data._staged_forward_calendar_attempt(
+    assert calendar_moves_jobs._staged_forward_calendar_attempt(
         tmp_path, REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]) == ("att-1", 3)
 
 
@@ -520,7 +520,7 @@ def test_staged_forward_calendar_attempt_refuses_a_malformed_document(tmp_path, 
     if raw is not None:
         (tmp_path / name).write_text(raw)
     with pytest.raises(OpsError) as exc_info:
-        incremental_data._staged_forward_calendar_attempt(tmp_path, name)
+        calendar_moves_jobs._staged_forward_calendar_attempt(tmp_path, name)
     assert exc_info.value.code == "INVALID_REQUEST"
 
 
@@ -536,7 +536,7 @@ def test_forward_calendar_callback_passes_parameters_plus_staged_attempt(tmp_pat
     _write_attempt_document(tmp_path, {"attempt_id": "att-9", "fence": 7})
     params = _params(expected_ids=("AAPL", "MSFT"), tickers=("AAPL", "MSFT"),
                      horizon_days=30)
-    callback = incremental_data._load_forward_calendar_refresh_callback()
+    callback = calendar_moves_jobs._load_forward_calendar_refresh_callback()
 
     assert callback(params, tmp_path) is sentinel
     assert set(captured) == {
