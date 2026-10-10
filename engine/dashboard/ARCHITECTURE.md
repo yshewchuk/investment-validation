@@ -130,9 +130,9 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   the run rather than burning retries against a dead key.
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.
-- **Selfcheck mismatch** — stops the publish; `scrub_mismatches` persists a
-  sanitised row/field/reason mismatch list to a diagnostics file instead of
-  only a bare traceback.
+- **Selfcheck mismatch** — stops the publish (`scrub_mismatches`: sanitised
+  row/field/reason). Board and selfcheck use the same chains: no entry-date
+  chain prices off the newest older one within 5 sessions, shown as `STALE_QUOTE` + `quote_date`.
 - **Publish** — `LocalPublisher` (the default target, a directory) is
   atomic: it stages the full bundle under `releases/{stamp}/`, then flips
   `current` with one `os.replace`, so a process killed mid-copy leaves the
