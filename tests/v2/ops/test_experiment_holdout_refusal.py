@@ -19,10 +19,12 @@ from pathlib import Path
 
 import pytest
 
-from engine.v2.ops import experiments, legacy_adapter, worker
+from engine.v2.ops import effects_graph, experiments, legacy_adapter, worker
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.experiments import ExperimentSpec
+from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from engine.v2.research import experiment_trades
+from tests.v2.ops.test_v2_ops_experiment_job import _claimed_primary_effect
 from tests.v2.research.test_experiment_trades import _RANDOM, _holdout_snapshot
 
 _HEADER = "id,spec_hash,date,stage,oos_mean_mid,sharpe_trade,promoted\n"
@@ -98,6 +100,18 @@ def _assert_cleaned(run_dir):
     assert not (run_dir / "REPORT.md").exists()
     assert not (run_dir / "ARMS.md").exists()
     assert not list((run_dir / "results").glob("metrics_*.json"))
+
+
+def _assert_sync_precedes_append(events):
+    """Reject a refused-row append observed before the receipt dir sync."""
+    synced = False
+    for event in events:
+        if event == "sync":
+            synced = True
+        elif event == "append":
+            assert synced, (
+                "the refused ledger row was appended before the receipt "
+                "directory sync")
 
 
 def test_real_loader_refusal_replay_and_private_receipt(tmp_path, monkeypatch):
@@ -222,9 +236,43 @@ def test_signal_directory_sync_failure_removes_signal_before_worker_accepts(
     assert worker._holdout_refusal_signal(tmp_path) is None
 
 
+def test_signal_directory_open_failure_removes_signal_before_worker_accepts(
+        tmp_path, monkeypatch):
+    """A failed parent-directory open after replacement cannot leave a signal."""
+    signal = tmp_path / "holdout_refusal_signal.json"
+    monkeypatch.setenv("INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL", str(signal))
+    real_open = experiment_trades.os.open
+    failed = False
+
+    def fail_signal_directory_open(path, *args, **kwargs):
+        nonlocal failed
+        if Path(path) == tmp_path and not failed:
+            failed = True
+            raise OSError("simulated signal directory open failure")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(experiment_trades.os, "open", fail_signal_directory_open)
+    pins = {"snapshot_id": "snapshot-489", "holdout_as_of_month": "2025-01",
+            "random_membership_version": "canonical-event-sha256.v1",
+            "rolling_membership_version": "calendar-months.v1"}
+    with pytest.raises(OSError, match="simulated signal directory open failure"):
+        experiment_trades._emit_holdout_refusal_signal(pins)
+    assert failed
+    assert not signal.exists()
+    assert worker._holdout_refusal_signal(tmp_path) is None
+
+
 def test_real_loader_receipt_sync_failure_replays_before_ledger_append(
         tmp_path, monkeypatch):
-    """The real loader retries a visible receipt only after syncing its directory."""
+    """The real loader retries a visible receipt only after syncing its directory.
+
+    The refused row's production path is exercised, not a direct helper call:
+    a real claimed primary attempt runs the refusal callback through
+    ``commit_attempt`` so the coordinator's own fenced append writes the row,
+    and a spy on ``_append_refusal_row`` records its place in the observed
+    order. A planted-defect replay that skips the receipt directory sync must
+    be rejected by the same ordering assertion.
+    """
     import stat
 
     conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM])
@@ -239,10 +287,12 @@ def test_real_loader_receipt_sync_failure_replays_before_ledger_append(
     real_fsync = experiments.os.fsync
     real_replace = experiments.os.replace
     real_fsync_directory = experiments.fsync_directory
+    real_append = experiments._append_refusal_row
     run_dir_fds = []
     receipt_replaced = False
     receipt_sync_failed = False
-    receipt_replay_syncs = []
+    skip_receipt_sync = False
+    events = []
 
     def spy_open(path, *args, **kwargs):
         fd = real_open(path, *args, **kwargs)
@@ -265,15 +315,22 @@ def test_real_loader_receipt_sync_failure_replays_before_ledger_append(
         return real_fsync(fd)
 
     def spy_fsync_directory(path):
+        if skip_receipt_sync:
+            return
         result = real_fsync_directory(path)
         if Path(path) == root:
-            receipt_replay_syncs.append(path)
+            events.append("sync")
         return result
+
+    def spy_append(*args, **kwargs):
+        events.append("append")
+        return real_append(*args, **kwargs)
 
     monkeypatch.setattr(experiments.os, "open", spy_open)
     monkeypatch.setattr(experiments.os, "replace", spy_replace)
     monkeypatch.setattr(experiments.os, "fsync", spy_fsync)
     monkeypatch.setattr(experiments, "fsync_directory", spy_fsync_directory)
+    monkeypatch.setattr(experiments, "_append_refusal_row", spy_append)
     monkeypatch.setenv("INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL",
                        str(root / "holdout_refusal_signal.json"))
     try:
@@ -289,23 +346,62 @@ def test_real_loader_receipt_sync_failure_replays_before_ledger_append(
             _dispatch(monkeypatch, spec, root, repository, snapshot,
                       mode="primary", checkout=checkout)
         assert denied.value.code == "HOLDOUT_ACCESS_DENIED"
-        assert receipt_replay_syncs, (
+        assert events == ["sync"], (
             "matching receipt replay must sync its directory before returning refusal")
         assert receipt.read_bytes() == first_bytes
 
-        real_append = experiments._append_refusal_row
+        refusal_receipt = dict(denied.value.problem.details["refusal_receipt"])
+        conn_, clock_, claim, _, _ = _claimed_primary_effect(
+            tmp_path, key="refusal-order", document=_spec_document(spec),
+            checkout=checkout)
+        try:
+            failure_effects = effects_graph._experiment_refusal_failure_effect(
+                claim, denied.value.problem, code_source=checkout,
+                refusal_receipt=refusal_receipt)
+            assert failure_effects is not None
+            commit_attempt(conn_, claim.attempt_id, claim.fence,
+                           Outcome(False, "verified_dead", 1, denied.value.problem),
+                           clock=clock_, failure_effects=failure_effects)
+        finally:
+            conn_.close()
+        assert events == ["sync", "append"], (
+            "the coordinator append must follow the receipt directory sync")
+        _assert_sync_precedes_append(events)
+        assert len(_refused_rows(ledger)) == 1
 
-        def append_after_receipt_sync(*args, **kwargs):
-            assert receipt_replay_syncs, (
-                "ledger append must follow successful receipt directory sync")
-            return real_append(*args, **kwargs)
-
-        monkeypatch.setattr(experiments, "_append_refusal_row", append_after_receipt_sync)
-        details = denied.value.problem.details
-        pins = {name: details[name] for name in experiments.REFUSAL_PIN_FIELDS}
-        variant_id = experiments.expected_variant_identity(checkout, spec, "primary")
-        experiments._append_refusal_row(spec.experiment_id, variant_id, ledger,
-                                        refusal_pins=pins)
+        events.clear()
+        skip_receipt_sync = True
+        with pytest.raises(OpsError) as defect_denied:
+            _dispatch(monkeypatch, spec, root, repository, snapshot,
+                      mode="primary", checkout=checkout)
+        assert defect_denied.value.code == "HOLDOUT_ACCESS_DENIED"
+        assert events == [], "the planted-defect replay recorded a receipt sync"
+        defect_checkout = tmp_path / "defect" / "checkout"
+        defect_ledger = defect_checkout / "experiments" / "LEDGER.csv"
+        defect_ledger.parent.mkdir(parents=True)
+        defect_ledger.write_text(
+            _HEADER + f"{spec.experiment_id},planned,2025-01-01,planned,,,False\n")
+        defect_receipt = dict(
+            defect_denied.value.problem.details["refusal_receipt"])
+        conn_def, clock_def, defect_claim, _, _ = _claimed_primary_effect(
+            tmp_path / "defect", key="refusal-order-defect",
+            document=_spec_document(spec), checkout=defect_checkout)
+        try:
+            defect_effects = effects_graph._experiment_refusal_failure_effect(
+                defect_claim, defect_denied.value.problem,
+                code_source=defect_checkout, refusal_receipt=defect_receipt)
+            assert defect_effects is not None
+            commit_attempt(conn_def, defect_claim.attempt_id, defect_claim.fence,
+                           Outcome(False, "verified_dead", 1,
+                                   defect_denied.value.problem),
+                           clock=clock_def, failure_effects=defect_effects)
+        finally:
+            conn_def.close()
+        assert events == ["append"], (
+            "the planted defect must yield an append with no preceding sync")
+        with pytest.raises(AssertionError):
+            _assert_sync_precedes_append(events)
+        assert len(_refused_rows(defect_ledger)) == 1
         assert len(_refused_rows(ledger)) == 1
         _assert_cleaned(root)
     finally:
