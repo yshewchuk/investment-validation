@@ -1009,6 +1009,7 @@ def _refused_experiment_receipt(spec, receipt, destination, variant_id, exc, *,
                 raise fail("IDEMPOTENCY_CONFLICT",
                            "existing holdout refusal receipt differs",
                            details={"experiment_id": spec.experiment_id})
+            fsync_directory(destination)
         else:
             temp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination,
                                                prefix=".holdout_refusal_receipt.",

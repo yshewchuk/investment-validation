@@ -26,7 +26,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops import executor
-from engine.v2.ops.catalog import load_json, transaction
+from engine.v2.ops.catalog import dumps, load_json, transaction
 from engine.v2.ops.checkpoints import (
     artifact,
     cache_identity,
@@ -72,6 +72,7 @@ from engine.v2.ops.lifecycle import (
     record_measurement,
     record_progress,
     renew_after_resume,
+    verify_fence,
 )
 from engine.v2.ops.recovery import (
     SupervisorLock,
@@ -1689,11 +1690,41 @@ class Service:
             return None
         return problem
 
+    def _persist_refusal_intent(self, claim, fence):
+        """Persist a minimal, redacted refusal marker before the refusal effect.
+
+        ``_commit_failure`` appends the refusal ledger row inside the failed
+        attempt's fenced commit; a process crash after that file append but
+        before the catalog transaction commits would roll the failure marker
+        back, and a later ``expire_leases`` would leave only attempt state, so
+        ``_replay_recovery_refusal`` could not recognize the refusal and would
+        settle ``LEASE_LOST``. Committing just this marker first — in its own
+        transaction, still under the live fence — makes recovery able to see
+        the refusal and replay an append that reached the CSV before a crash.
+
+        The stored ``Problem`` is the stable redacted text only: no receipt,
+        pins, diagnostics, or other private details. Only the attempt's own
+        ``failure_json`` is updated; state and fence are untouched so
+        ``commit_attempt`` can still settle under the original fence. The
+        verifier is the existing :func:`lifecycle.verify_fence`, so a lost
+        fence or a won cancellation raises the same typed refusal the caller's
+        existing fence-loss/cancel path already handles.
+        """
+        marker = make_problem(
+            "HOLDOUT_ACCESS_DENIED",
+            "registered experiment loader refused holdout data")
+        with transaction(self.conn):
+            verify_fence(self.conn, claim.attempt_id, fence, self.clock.now())
+            self.conn.execute("UPDATE attempts SET failure_json = ? WHERE attempt_id = ?",
+                              (dumps(marker), claim.attempt_id))
+
     def _commit_failure(self, claim, status, problem):
         """Record the failure under the fence — only while the fence is still held (B)."""
         outcome = Outcome(False, "verified_dead", status["exit_code"], problem)
         if fence_held(self.conn, claim.attempt_id, claim.fence, clock=self.clock):
             try:
+                if problem.code == "HOLDOUT_ACCESS_DENIED":
+                    self._persist_refusal_intent(claim, claim.fence)
                 failure_effects = _experiment_refusal_failure_effect(
                     claim, problem, code_source=self.code_source, store_root=self.store_root,
                     refusal_receipt=self._refusal_receipt(claim, problem))

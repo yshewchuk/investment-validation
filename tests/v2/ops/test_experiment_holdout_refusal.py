@@ -157,9 +157,12 @@ def test_real_loader_refusal_replay_and_private_receipt(tmp_path, monkeypatch):
         assert "holdout_exclusions" not in signal_text
         assert _RANDOM[0] not in signal_text
         assert worker._holdout_refusal_signal(root) == signal_pins
+        fsynced_dir_fds.clear()
         with pytest.raises(OpsError) as second_error:
             _dispatch(monkeypatch, spec, root, repository, snapshot,
                       mode="primary", checkout=checkout)
+        assert fsynced_dir_fds, \
+            "the matching receipt replay must sync its directory"
         assert receipt.read_bytes() == first_bytes
         with pytest.raises(OpsError) as conflict_error:
             _dispatch(monkeypatch, spec, root, repository, snapshot,
@@ -186,6 +189,127 @@ def test_real_loader_refusal_replay_and_private_receipt(tmp_path, monkeypatch):
     assert stored["evidence"]["failure_code"] == "HOLDOUT_ACCESS_DENIED"
     _assert_cleaned(root)
     assert _refused_rows(checkout / "experiments" / "LEDGER.csv") == []
+
+
+def test_signal_directory_sync_failure_removes_signal_before_worker_accepts(
+        tmp_path, monkeypatch):
+    """A failed publication cannot leave a signal the worker accepts."""
+    import stat
+
+    signal = tmp_path / "holdout_refusal_signal.json"
+    monkeypatch.setenv("INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL", str(signal))
+    directory = tmp_path.stat()
+    real_fsync = experiment_trades.os.fsync
+    failed = False
+
+    def fail_signal_directory_sync(fd):
+        nonlocal failed
+        info = os.fstat(fd)
+        if (stat.S_ISDIR(info.st_mode) and info.st_dev == directory.st_dev
+                and info.st_ino == directory.st_ino and not failed):
+            failed = True
+            raise OSError("simulated signal directory sync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(experiment_trades.os, "fsync", fail_signal_directory_sync)
+    pins = {"snapshot_id": "snapshot-489", "holdout_as_of_month": "2025-01",
+            "random_membership_version": "canonical-event-sha256.v1",
+            "rolling_membership_version": "calendar-months.v1"}
+    with pytest.raises(OSError, match="simulated signal directory sync failure"):
+        experiment_trades._emit_holdout_refusal_signal(pins)
+    assert failed
+    assert not signal.exists()
+    assert worker._holdout_refusal_signal(tmp_path) is None
+
+
+def test_real_loader_receipt_sync_failure_replays_before_ledger_append(
+        tmp_path, monkeypatch):
+    """The real loader retries a visible receipt only after syncing its directory."""
+    import stat
+
+    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM])
+    root = tmp_path / "run"
+    checkout = tmp_path / "checkout"
+    spec = _spec()
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(_HEADER + f"{spec.experiment_id},planned,2025-01-01,planned,,,False\n")
+    root.mkdir()
+    real_open = experiments.os.open
+    real_fsync = experiments.os.fsync
+    real_replace = experiments.os.replace
+    real_fsync_directory = experiments.fsync_directory
+    run_dir_fds = []
+    receipt_replaced = False
+    receipt_sync_failed = False
+    receipt_replay_syncs = []
+
+    def spy_open(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        if isinstance(path, (str, os.PathLike)) and Path(path) == root:
+            run_dir_fds.append(fd)
+        return fd
+
+    def spy_replace(src, dst, *args, **kwargs):
+        nonlocal receipt_replaced
+        result = real_replace(src, dst, *args, **kwargs)
+        if Path(dst).name == "holdout_refusal_receipt.json":
+            receipt_replaced = True
+        return result
+
+    def spy_fsync(fd):
+        nonlocal receipt_sync_failed
+        if fd in run_dir_fds and receipt_replaced and not receipt_sync_failed:
+            receipt_sync_failed = True
+            raise OSError("simulated receipt directory sync failure")
+        return real_fsync(fd)
+
+    def spy_fsync_directory(path):
+        result = real_fsync_directory(path)
+        if Path(path) == root:
+            receipt_replay_syncs.append(path)
+        return result
+
+    monkeypatch.setattr(experiments.os, "open", spy_open)
+    monkeypatch.setattr(experiments.os, "replace", spy_replace)
+    monkeypatch.setattr(experiments.os, "fsync", spy_fsync)
+    monkeypatch.setattr(experiments, "fsync_directory", spy_fsync_directory)
+    monkeypatch.setenv("INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL",
+                       str(root / "holdout_refusal_signal.json"))
+    try:
+        with pytest.raises(OSError, match="simulated receipt directory sync failure"):
+            _dispatch(monkeypatch, spec, root, repository, snapshot,
+                      mode="primary", checkout=checkout)
+        receipt = root / "holdout_refusal_receipt.json"
+        first_bytes = receipt.read_bytes()
+        assert receipt_sync_failed
+        assert _refused_rows(ledger) == []
+
+        with pytest.raises(OpsError) as denied:
+            _dispatch(monkeypatch, spec, root, repository, snapshot,
+                      mode="primary", checkout=checkout)
+        assert denied.value.code == "HOLDOUT_ACCESS_DENIED"
+        assert receipt_replay_syncs, (
+            "matching receipt replay must sync its directory before returning refusal")
+        assert receipt.read_bytes() == first_bytes
+
+        real_append = experiments._append_refusal_row
+
+        def append_after_receipt_sync(*args, **kwargs):
+            assert receipt_replay_syncs, (
+                "ledger append must follow successful receipt directory sync")
+            return real_append(*args, **kwargs)
+
+        monkeypatch.setattr(experiments, "_append_refusal_row", append_after_receipt_sync)
+        details = denied.value.problem.details
+        pins = {name: details[name] for name in experiments.REFUSAL_PIN_FIELDS}
+        variant_id = experiments.expected_variant_identity(checkout, spec, "primary")
+        experiments._append_refusal_row(spec.experiment_id, variant_id, ledger,
+                                        refusal_pins=pins)
+        assert len(_refused_rows(ledger)) == 1
+        _assert_cleaned(root)
+    finally:
+        conn.close()
 
 
 def test_registered_runner_consumer_validates_signal_and_falls_back(

@@ -1071,6 +1071,103 @@ def test_supervisor_strands_refusal_when_ledger_append_fails(tmp_path, monkeypat
         conn.close()
 
 
+def test_refusal_crash_after_durable_append_settles_once(tmp_path, monkeypatch):
+    """Issue #489 crash window: the supervisor dies with a ``BaseException`` --
+    bypassing ``_commit_failure``'s ordinary ``Exception`` handler -- after the
+    real refused ledger row landed. The redacted ``HOLDOUT_ACCESS_DENIED``
+    intent marker commits in its own transaction before the effect runs, so it
+    stays durable while the rolled-back settlement leaves the attempt
+    uncommitted. Restoring the append, fencing the still-live attempt and
+    proving ownership gone lets ``reconcile`` replay the idempotent append and
+    settle the attempt and job failed with ``HOLDOUT_ACCESS_DENIED``: exactly
+    one refused row, and no committed experiment run, metric or report."""
+    conn, clock, claim, _, checkout = _claimed_primary_effect(
+        tmp_path, key="primary-refusal-crash-window")
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    spec = experiments.experiment_spec_from_document(_spec_document())
+    variant_id = experiments.expected_variant_identity(checkout, spec, "primary")
+    receipt = {"schema_version": experiments.REFUSAL_RECEIPT_SCHEMA, "status": "refused",
+               "failure_code": "HOLDOUT_ACCESS_DENIED", "experiment_id": spec.experiment_id,
+               "variant_id": variant_id, "snapshot_id": "snapshot-489",
+               "holdout_as_of_month": "2025-01",
+               "random_membership_version": "canonical-event-sha256.v1",
+               "rolling_membership_version": "calendar-months.v1"}
+    service = Service(conn, tmp_path / "ops", stages.registry(), TEST_POLICY, clock=clock,
+                      code_source=REPO, store_root=checkout)
+    worker._write_failure_details(service.store.staging_dir(claim.attempt_id),
+                                  {"refusal_receipt": receipt})
+    running = types.SimpleNamespace(data=json.dumps(
+        {"problem": {"code": "HOLDOUT_ACCESS_DENIED",
+                     "message": "requested events are excluded from experiment reads",
+                     "category": "validation", "retryable": False}}).encode())
+    problem = service._worker_typed_problem(claim, running)
+    assert problem is not None
+
+    def refused_rows():
+        with open(ledger, newline="") as fh:
+            return [row for row in csv.DictReader(fh) if row["stage"] == "refused"]
+
+    real_append = experiments._append_refusal_row
+
+    class ProcessDeath(BaseException):
+        pass
+
+    def append_then_crash(experiment_id, refused_variant_id, ledger_path, *,
+                          refusal_pins=None):
+        real_append(experiment_id, refused_variant_id, ledger_path,
+                    refusal_pins=refusal_pins)
+        raise ProcessDeath("simulated process death after the refused row landed")
+
+    try:
+        monkeypatch.setattr(experiments, "_append_refusal_row", append_then_crash)
+        with pytest.raises(ProcessDeath):
+            service._commit_failure(claim, {"exit_code": 1}, problem)
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "starting"
+        assert attempt["ended_at"] is None
+        assert json.loads(attempt["failure_json"])["code"] == "HOLDOUT_ACCESS_DENIED"
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
+        rows = refused_rows()
+        assert len(rows) == 1
+        assert rows[0]["id"] == spec.experiment_id
+        assert rows[0]["spec_hash"] == variant_id
+
+        monkeypatch.setattr(experiments, "_append_refusal_row", real_append)
+        assert supervisor.fence_attempt_for_recovery(conn, claim.attempt_id, clock=clock)
+        monkeypatch.setattr(supervisor, "prove_ownership_gone",
+                            lambda *args, **kwargs: types.SimpleNamespace(
+                                proven=True, known=(), alive=(), blockers=()))
+        service.reconcile()
+        rows = refused_rows()
+        assert len(rows) == 1
+        assert rows[0]["id"] == spec.experiment_id
+        assert rows[0]["spec_hash"] == variant_id
+        attempt = conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                               "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        assert attempt["state"] == "failed"
+        assert json.loads(attempt["failure_json"])["code"] == "HOLDOUT_ACCESS_DENIED"
+        assert "LEASE_LOST" not in attempt["failure_json"]
+        assert "snapshot-489" not in attempt["failure_json"]
+        assert "refusal_receipt" not in attempt["failure_json"]
+        assert attempt["ended_at"] is not None
+        job = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
+                           (claim.job_id,)).fetchone()
+        assert job["state"] == "failed"
+        assert "HOLDOUT_ACCESS_DENIED" in job["failure_json"]
+        assert "LEASE_LOST" not in job["failure_json"]
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
+                                        {"id": "x", "stage": "refused"}]
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM attempt_outputs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0] == 0
+    finally:
+        service.close()
+        conn.close()
+
+
 def test_real_dispatch_refusal_pin_conflict_across_run_directories(tmp_path, monkeypatch):
     """Issue #489: the pin-only identity sidecar beside the shared checkout
     ledger carries a holdout refusal's identity across separate attempt

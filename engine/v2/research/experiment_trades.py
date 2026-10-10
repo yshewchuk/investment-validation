@@ -152,21 +152,51 @@ def _emit_holdout_refusal_signal(details):
                                        dir=destination.parent,
                                        prefix=".holdout_refusal_signal.",
                                        suffix=".tmp", delete=False)
+    replaced = False
     try:
         temp.write(json.dumps(document, indent=2, sort_keys=True))
         temp.flush()
         os.fsync(temp.fileno())
         temp.close()
         os.replace(temp.name, destination)
+        replaced = True
         directory_fd = os.open(destination.parent,
                                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
-            os.fsync(directory_fd)
+            try:
+                os.fsync(directory_fd)
+            except OSError:
+                if replaced:
+                    _rollback_replaced_signal(destination)
+                raise
         finally:
             os.close(directory_fd)
     finally:
         temp.close()
         Path(temp.name).unlink(missing_ok=True)
+
+
+def _rollback_replaced_signal(destination):
+    """Undo a non-durable replacement after the parent-directory fsync failed.
+
+    Only called once ``os.replace`` has succeeded for this invocation, so the
+    destination holds this invocation's document and is not durable. Best-effort
+    remove it and resync the parent, swallowing every failure so the original
+    sync ``OSError`` still propagates unmasked.
+    """
+    try:
+        Path(destination).unlink(missing_ok=True)
+    except OSError:
+        return
+    try:
+        directory_fd = os.open(Path(destination).parent,
+                               os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        pass
 
 
 def _ambiguous(row, duplicates):
