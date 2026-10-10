@@ -15,7 +15,10 @@
     "question": "deny",
     "skill": "deny",
     "doom_loop": "deny",
-    "external_directory": "deny",
+    "external_directory": {
+      "*": "deny",
+      "/tmp/opencode-specs/*": "allow"
+    },
     "read": {
       "*": "allow",
       "*.env": "deny",
@@ -35,7 +38,10 @@
       "tools/oc_check.py": "deny",
       "tools/opencode_config.json": "deny",
       "*/tools/oc_check.py": "deny",
-      "*/tools/opencode_config.json": "deny"
+      "*/tools/opencode_config.json": "deny",
+      "*opencode-specs*": "deny",
+      "/tmp/*": "deny",
+      "../*": "deny"
     },
     "glob": "allow",
     "grep": "allow",
