@@ -400,6 +400,7 @@ mutate = [
     "engine/v2/data/price_*.py",
 ]
 tests = [
+    "tests/v2/data/test_legacy_reader_lifetime.py",
     "tests/test_v2_data_legacy_adapter.py",
     "tests/test_v2_data_legacy_materialization.py",
     "tests/test_v2_data_price_downloads.py",
