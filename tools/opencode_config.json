@@ -39,8 +39,6 @@
       "tools/opencode_config.json": "deny",
       "*/tools/oc_check.py": "deny",
       "*/tools/opencode_config.json": "deny",
-      "*opencode-specs*": "deny",
-      "/tmp/*": "deny",
       "../*": "deny"
     },
     "glob": "allow",
