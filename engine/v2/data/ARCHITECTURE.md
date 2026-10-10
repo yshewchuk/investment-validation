@@ -50,9 +50,7 @@ interface section; this names only the load-bearing entry points.
   planned-unit key validation, `normalizer_id` versioning, coverage
   completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
-  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`), a bounded
-  Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/
-  `get_close`, and `explain_dependencies`.
+  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached, each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
   fragments of the supplied snapshot, with no head fallback or object reads,
   through the same membership-bound planner behind `scan` and
@@ -393,7 +391,7 @@ the prior receipt even if the head moved since).
 
 **`repository.py` reads (summary).** Missing input maps to the codes above;
 a corrupt id is `MANIFEST_CORRUPT`; a re-hash mismatch is `OBJECT_CORRUPT`.
-`resolve` rebuilds from catalog rows every call (no cache). `objects.verify_object_path`
+`resolve` rebuilds from catalog rows every call by default; `pin_snapshots=True` reuses per instance, with defensive copies, never caching failures. `objects.verify_object_path`
 fully re-hashes an object on its first open in a process and skips the re-hash
 on a later open only while the file's stat tuple (device, inode, size, mtime
 and ctime, in nanoseconds) equals the one recorded when its hash last matched

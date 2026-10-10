@@ -700,9 +700,10 @@ def test_native_worker_produces_events_from_its_pinned_snapshot(tmp_path, monkey
             dataset_version_id="earnings-revision-worker-test")})
 
     class Repository:
-        def __init__(self, connection, store):
+        def __init__(self, connection, store, *, pin_snapshots=False):
             assert connection is conn
             assert isinstance(store, ArtifactStore)
+            assert pin_snapshots is True  # the worker pins its one snapshot's catalog reads
 
         def resolve(self, requested_snapshot_id):
             assert requested_snapshot_id == snapshot_id

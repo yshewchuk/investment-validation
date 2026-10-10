@@ -858,7 +858,10 @@ def _worker_event_documents(parameters: Mapping[str, Any], root: Path):
 
     conn = connect(parameters["catalog_path"], must_exist=True)
     try:
-        repository = Repository(conn, ArtifactStore(parameters["objects_root"]))
+        # One snapshot is pinned for the whole build: memoise its resolution and
+        # table membership instead of re-reading the catalog on every scan.
+        repository = Repository(
+            conn, ArtifactStore(parameters["objects_root"]), pin_snapshots=True)
         snapshot = repository.resolve(parameters["snapshot_id"])
         events_doc, producer_doc = build_native_score_batch_events(
             repository, snapshot, as_of=parameters["as_of"],
