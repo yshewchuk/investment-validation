@@ -516,8 +516,8 @@ lineage and hash; no request fallback, rebuild or invented residuals.
 
 `resolve_release_binding` in `engine/v2/scoring/release_bindings.py` loads the
 typed member into `ScoringReleaseBinding` with artifact and derived recipe. Derive it only from the validated
-artifact key/hash; requests have no recipe input, and batch sets internal
-`SourceBundle` fields after assembly. Before return, recompute content hash and
+artifact key/hash; requests cannot override it or reintroduce per-row pools.
+Batch sets internal `SourceBundle` fields after assembly. Before return, hash and
 validate schema, identities, lineage, cutoff and row/array structure. A missing
 required paired residual member or failed check raises `ModelNotReady` (`MODEL_NOT_READY`);
 the shared release member fails atomically before row scoring, unlike
@@ -527,20 +527,20 @@ before rollout; old releases intentionally have no fallback.
 
 `SourceBundle.paired_residual_artifact` and `.paired_residual_recipe` already exist (`engine/v2/scoring/source_inputs.py:301`);
 `paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`) is
-defense-in-depth. Load-time validation is authoritative; bindings must pass
-this check before scoring. Small synthetic inputs run the real producer,
+defense-in-depth: a load-validated binding must pass it before scoring; it
+cannot be the first failure surface or raise a per-row refusal. Synthetic inputs run the real producer,
 staging, loader, bundle and simulation; CI does not run full training.
 
-Matched parity uses identical joined ticker/event rows at the same exclusive
-cutoff recorded on the artifact. The cutoff source/value and population remain
-open decisions below. Legacy scope is its `Scorer`'s loaded tickers. Test
+Matched parity uses identical joined ticker/event rows and the exact exclusive
+cutoff value recorded under the selected paired-state or release-wide policy.
+The cutoff policy and population remain open decisions below. Legacy scope is its `Scorer`'s loaded tickers. Test
 mismatched full/nightly scopes and cutoffs too; output can differ, and lineage records frozen scope.
 
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
 3. `tests/v2/scoring/` (~300 lines): missing member/old-release no-fallback,
-   recipe derivation/injection rejection, zero rows, malformed-member atomicity,
+   derived recipe and explicit request-isolation, zero rows, malformed-member atomicity,
    no row scoring, and matched/mismatched scope/cutoff parity.
 
 Decisions needed before implementing these slices:
