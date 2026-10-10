@@ -96,9 +96,15 @@ def _encode(state: SessionState) -> str:
 def _generations_valid(gens: tuple[Generation, ...], key: str) -> bool:
     return bool(gens) and all(
         type(g.generation) is int and g.generation == i and g.run_id == _digest(key, i)
-        and g.status in ("allocated", "started") and g.reason in ("initial", "rerun")
+        and g.status in ("allocated", "started") and g.reason == ("initial" if i == 1 else "rerun")
         and all(isinstance(s, str) for s in g.invalidation)
         for i, g in enumerate(gens, 1))
+
+
+def _parse_generation(g: dict) -> Generation:
+    raw = g["invalidation"]
+    return Generation(g["generation"], g["run_id"], g["reason"], g["status"],
+                      tuple(raw) if isinstance(raw, list) else (None,))
 
 
 def _decode(text: str, identity: SessionIdentity) -> SessionState:
@@ -110,8 +116,7 @@ def _decode(text: str, identity: SessionIdentity) -> SessionState:
             raise fail("CHECKPOINT_INCOMPATIBLE",
                        "session state has another schema; move the file aside")
         key = identity.session_key
-        gens = tuple(Generation(g["generation"], g["run_id"], g["reason"], g["status"],
-                                tuple(g["invalidation"])) for g in doc["generations"])
+        gens = tuple(_parse_generation(g) for g in doc["generations"])
         ok = (doc["session_key"] == key and type(doc["revision"]) is int
               and doc["identity"] == {
                   "as_of": identity.as_of, "scope": identity.scope,

@@ -204,6 +204,29 @@ def test_cas_refuses_a_state_the_loader_would_reject_and_keeps_prior(tmp_path):
     assert ns.load_session(tmp_path, IDENT).revision == 1
 
 
+def test_reason_must_match_generation_position(tmp_path):
+    ns.ensure_session(tmp_path, IDENT)
+    path = ns.session_path(tmp_path, IDENT)
+    doc = json.loads(path.read_text())
+    doc["generations"][0]["reason"] = "rerun"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(OpsError) as exc:
+        ns.load_session(tmp_path, IDENT)
+    assert _code(exc) == "INTEGRITY_FAILED"
+
+
+def test_stored_invalidation_must_be_a_list_of_strings(tmp_path):
+    ns.ensure_session(tmp_path, IDENT)
+    path = ns.session_path(tmp_path, IDENT)
+    for bad in ("abc", [1]):
+        doc = json.loads(path.read_text())
+        doc["generations"][0]["invalidation"] = bad
+        path.write_text(json.dumps(doc))
+        with pytest.raises(OpsError) as exc:
+            ns.load_session(tmp_path, IDENT)
+        assert _code(exc) == "INTEGRITY_FAILED"
+
+
 def test_tampered_run_id_is_integrity_failed(tmp_path):
     ns.ensure_session(tmp_path, IDENT)
     path = ns.session_path(tmp_path, IDENT)
