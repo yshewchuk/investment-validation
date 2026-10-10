@@ -78,7 +78,7 @@ turns one release binding (`ScoringReleaseBinding`) plus a sequence of already-s
 `records.json`/`refusals.json`. **Supports `STR-THRU` only** — any other
 strategy refuses per-row. The tick sidecar only submits the shadow job for a
 new eligible snapshot-pinned identity (`producer_mode="snapshot"`); direct
-worker callers default to staged `events.json`; snapshot mode derives `calendar_revision` from pinned earnings data, while staged mode uses its parameter.
+worker callers default to staged `events.json`; snapshot mode derives `calendar_revision` from pinned earnings data, while staged mode uses its parameter. The snapshot producer's `Repository` is opened with `pin_snapshots=True` (catalog membership read once per build) and each admitted row runs inside a `compose_event_<done>_of_<total>` progress step.
 The production-default `legacy`/unpinned path stays a no-op; production uses `projection` (3 GiB, 2 CPUs). A producer exception fails the native attempt
 before writing that attempt's event/refusal or score outputs; reused-root files
 may remain as untrusted residue. The worker job has five bounded attempts, with delays of 30s, 2m, 10m and 30m. Worker production cannot stall supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.

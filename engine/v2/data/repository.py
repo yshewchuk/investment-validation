@@ -175,11 +175,28 @@ def _read_only(conn: sqlite3.Connection):
 class Repository:
     """Read-only access to one already-migrated data catalog connection."""
 
-    def __init__(self, conn: sqlite3.Connection, store: ArtifactStore | None = None) -> None:
+    def __init__(self, conn: sqlite3.Connection, store: ArtifactStore | None = None,
+                 *, pin_snapshots: bool = False) -> None:
+        """``pin_snapshots=True`` memoises, for this instance only, each
+        ``resolve`` result by snapshot id and each table's contract and
+        fragment membership by ``(dataset_version_id, contract_id)``. Both are
+        immutable catalog identities, so a hit is exact; the default off
+        re-verifies the catalog on every call."""
         self._conn = conn
         self._store = store
+        self._pin_snapshots = pin_snapshots
+        self._pinned_snapshots: dict[str, SnapshotRef] = {}
+        self._pinned_tables: dict[tuple[str, str], tuple] = {}
 
     def resolve(self, snapshot_id: str) -> SnapshotRef:
+        if not self._pin_snapshots:
+            return self._resolve_uncached(snapshot_id)
+        cached = self._pinned_snapshots.get(snapshot_id)
+        if cached is None:
+            cached = self._pinned_snapshots[snapshot_id] = self._resolve_uncached(snapshot_id)
+        return cached
+
+    def _resolve_uncached(self, snapshot_id: str) -> SnapshotRef:
         with _read_only(self._conn) as conn:
             snap_row = conn.execute(
                 "SELECT * FROM data_snapshots WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
@@ -307,9 +324,14 @@ class Repository:
             raise errors.fail("CONTRACT_MISMATCH",
                       "table_contract_ref does not match the version pinned under this table name",
                       details={"table_name": table_name})
+        pin_key = (dvr.dataset_version_id, dvr.table_contract_ref.contract_id)
+        if self._pin_snapshots and pin_key in self._pinned_tables:
+            return self._pinned_tables[pin_key]
         with _read_only(self._conn) as conn:
             contract = self._full_contract(conn, dvr.table_contract_ref.contract_id)
             records = self._records(conn, dvr.dataset_version_id, dvr.table_contract_ref)
+        if self._pin_snapshots:
+            self._pinned_tables[pin_key] = (contract, records)
         return contract, records
 
     def _full_contract(self, conn: sqlite3.Connection, contract_id: str) -> TableContract:
