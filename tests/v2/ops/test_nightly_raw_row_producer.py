@@ -187,7 +187,8 @@ class _ReaderRig:
                 return self.calendar_row_hook(key)
             return _calendar_inputs(key)
 
-        def panel_row(repository, snapshot, key, *, decision_session, history_start):
+        def panel_row(repository, snapshot, key, *, decision_session, history_start,
+                      spy_market_cache=None):
             self.panel_calls.append(key)
             return _panel_inputs(key)
 
@@ -319,6 +320,7 @@ def test_panel_reader_called_once_per_ticker(
         tmp_path, monkeypatch):
     from collections import Counter
     from types import SimpleNamespace
+    import hashlib
 
     import tests.test_v2_features_panel_row_inputs as fixture
     from engine.v2.ops.native_board_universe import BoardRequest
@@ -399,9 +401,190 @@ def test_panel_reader_called_once_per_ticker(
     assert refusals["refusals"] == []
     assert {event["key"]["ticker"] for event in events} == {"AAA", "BBB"}
     counts = Counter(reads)
-    assert counts[("daily_market", "SPY")] == 2
-    assert counts[(fixture.COMPUTED_MOVES_TABLE_NAME, "AAA")] == 1
-    assert counts[(fixture.COMPUTED_MOVES_TABLE_NAME, "BBB")] == 1
+    first_build_pairs = (
+        ("daily_market", "SPY"),
+        (fixture.COMPUTED_MOVES_TABLE_NAME, "AAA"),
+        (fixture.COMPUTED_MOVES_TABLE_NAME, "BBB"),
+        (fixture.PRICE_HISTORY_TABLE_NAME, "AAA"),
+        (fixture.PRICE_HISTORY_TABLE_NAME, "BBB"),
+        ("daily_market", "AAA"),
+        ("daily_market", "BBB"),
+    )
+    assert counts[("daily_market", "SPY")] == 1
+    for pair in first_build_pairs[1:]:
+        assert counts[pair] == 1, pair
+    assert batches[("daily_market", "SPY")] == fixture._spy_rows(periods=300)
+    event_bytes = json.dumps(
+        events, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # Captured by the first fixture run, before the implementation cache edit.
+    # Pin the pre-optimization event bytes so the shared read cannot change output.
+    assert hashlib.sha256(event_bytes).hexdigest() == (
+        "43e9c8530d6600ba49ead8aa61c24dda4175af38fcd47d8f00e6c73ceac69b74"), (
+        "if fixture inputs change, deliberately recapture the baseline digest")
+
+    again_events, again_refusals = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
+        horizon_days=_HORIZON_DAYS)
+    assert again_events == events
+    assert again_refusals == refusals
+    for pair in first_build_pairs:
+        assert Counter(reads)[pair] == 2, pair
+
+
+def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+
+    import tests.test_v2_features_panel_row_inputs as fixture
+    from engine.v2.ops.native_board_universe import BoardRequest
+
+    history = pd.bdate_range(end=fixture._DECISION, periods=300)
+    batches = fixture._default_batches()
+    spy_rows = fixture._spy_rows(periods=300)
+    batches[("daily_market", "SPY")] = spy_rows
+    batches[(fixture.COMPUTED_MOVES_TABLE_NAME, "AAA")] = fixture._computed_rows([
+        (history[20].date().isoformat(), 4.0, False)])
+    price_table, price_rows = next(
+        (table, rows) for (table, _ticker), rows in batches.items()
+        if table == fixture.PRICE_HISTORY_TABLE_NAME and rows)
+    batches[(price_table, "AAA")] = price_rows
+    snapshot = fixture._snapshot()
+    event_key = BoardRequest(
+        ticker="AAA", strategy="STR-THRU", event_date=fixture._EVENT, session="BMO")
+
+    class CountingRepository(fixture._FakeRepository):
+        def __init__(self, batches_by_key):
+            super().__init__(snapshot, fixture._contracts(), batches_by_key)
+            self.spy_reads = 0
+
+        def scan(self, query, *, table_name):
+            if (table_name == "daily_market" and query.key_filter
+                    and query.key_filter[0].values == ("SPY",)):
+                self.spy_reads += 1
+            yield from super().scan(query, table_name=table_name)
+
+        def fragment_records(self, snapshot_ref, table_name):
+            return tuple(
+                SimpleNamespace(partition_key=ticker, row_count=len(rows))
+                for (candidate_table, ticker), rows in self._batches.items()
+                if candidate_table == table_name)
+
+    def enumerate_keys(repo, snap, *, as_of, horizon_days, tickers=None):
+        return [event_key]
+
+    def decision_calendar(repo, snap, *, decision_session, event_through):
+        days = tuple(day.date().isoformat() for day in history) + (
+            fixture._EVENT.date().isoformat(),)
+        return CalendarSessions(days=days, observed_through=decision_session)
+
+    def calendar_row(repo, snap, key, *, decision_session, calendar):
+        day = key.event_date.date().isoformat()
+        return CalendarRowInputs(calendar_revision="events-rev", calendar_row={
+            "event_id": f"{key.ticker}-{key.strategy}", "ticker": key.ticker,
+            "event_date": day, "session": key.session, "entry_date": decision_session,
+            "exit_date": day, "expiry": day, "spot": 10.0,
+            "calendar_observed_through": decision_session})
+
+    def quote_rows(repo, snap, key, *, expiry, decision_session):
+        return QuoteRowInputs(quote_rows=({
+            "ticker": key.ticker, "right": "C", "strike": 100.0,
+            "expiry": expiry, "bid": 1.0, "ask": 1.2,
+            "observed_at": decision_session},), quote_status="recorded")
+
+    _patch_reader(monkeypatch, nightly_raw_rows,
+                  "scan_forward_board_requests", enumerate_keys)
+    _patch_reader(monkeypatch, nightly_calendar_inputs,
+                  "scan_decision_calendar", decision_calendar)
+    _patch_reader(monkeypatch, nightly_calendar_inputs,
+                  "scan_calendar_row_inputs", calendar_row)
+    _patch_reader(monkeypatch, nightly_quote_rows, "scan_quote_rows", quote_rows)
+
+    repository = CountingRepository(batches)
+    events, refusals = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
+        horizon_days=_HORIZON_DAYS)
+    assert refusals["refusals"] == []
+    assert len(events) == 1
+    event_bytes = json.dumps(
+        events, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    assert hashlib.sha256(event_bytes).hexdigest() == (
+        "8e88994b0301a9a213394b8377065f356562a5caf226aaf549f22eff854f56a5")
+    assert repository.spy_reads == 1
+
+    changed_batches = {
+        **batches,
+        ("daily_market", "SPY"): [dict(row) for row in spy_rows],
+    }
+    changed_batches[("daily_market", "SPY")][-1]["spot"] = (
+        float(changed_batches[("daily_market", "SPY")][-1]["spot"]) + 100.0)
+    changed_repository = CountingRepository(changed_batches)
+    changed_events, changed_refusals = nrp.build_native_score_batch_events(
+        changed_repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
+        horizon_days=_HORIZON_DAYS)
+    assert changed_refusals["refusals"] == []
+    assert changed_events[0]["panel_row"]["spy_ret252"] != (
+        events[0]["panel_row"]["spy_ret252"]), (
+        "the mutated final SPY value must reach the real regime calculation")
+    changed_bytes = json.dumps(
+        changed_events, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    assert hashlib.sha256(changed_bytes).hexdigest() != (
+        "8e88994b0301a9a213394b8377065f356562a5caf226aaf549f22eff854f56a5"), (
+        "changing a consumed SPY value must break the pinned event digest")
+    assert changed_repository.spy_reads == 1
+
+
+def test_panel_spy_cache_key_includes_snapshot_version_and_window():
+    """The build-scoped SPY cache separates by snapshot identity, pinned daily_market
+    dataset version and read window -- and never stubs the real panel path."""
+    import dataclasses
+
+    import tests.test_v2_features_panel_row_inputs as fixture
+
+    class CountingRepository(fixture._FakeRepository):
+        def __init__(self, snapshot, contracts, batches_by_key) -> None:
+            super().__init__(snapshot, contracts, batches_by_key)
+            self.spy_scans = 0
+
+        def scan(self, query, *, table_name):
+            if (table_name == "daily_market"
+                    and query.key_filter
+                    and query.key_filter[0].values == ("SPY",)):
+                self.spy_scans += 1
+            yield from super().scan(query, table_name=table_name)
+
+    def _run(repository, snapshot, *, history_start):
+        return panel_row_inputs.scan_panel_row(
+            repository, snapshot, fixture._key(), decision_session=fixture._DECISION,
+            history_start=history_start, spy_market_cache=shared)
+
+    batches = fixture._default_batches()
+    batches[("daily_market", "SPY")] = fixture._spy_rows(periods=300)
+    original = fixture._snapshot()
+    version_changed = dataclasses.replace(
+        original,
+        table_versions={
+            **original.table_versions,
+            "daily_market": dataclasses.replace(
+                original.table_versions["daily_market"],
+                dataset_version_id="dsv-dm-next"),
+        })
+    snapshot_changed = dataclasses.replace(original, snapshot_id="snap-panel-next")
+
+    shared: dict = {}
+    original_repo = CountingRepository(original, fixture._contracts(), batches)
+    version_repo = CountingRepository(version_changed, fixture._contracts(), batches)
+    snapshot_repo = CountingRepository(snapshot_changed, fixture._contracts(), batches)
+
+    _run(original_repo, original, history_start=fixture._HISTORY_START)
+    _run(original_repo, original,
+         history_start=fixture._HISTORY_START + pd.Timedelta(days=1))
+    _run(version_repo, version_changed, history_start=fixture._HISTORY_START)
+    _run(snapshot_repo, snapshot_changed, history_start=fixture._HISTORY_START)
+
+    assert original_repo.spy_scans == 2
+    assert version_repo.spy_scans == 1
+    assert snapshot_repo.spy_scans == 1
+    assert len(shared) == 4
 
 
 def test_earlier_success_does_not_hide_a_later_failure(tmp_path, monkeypatch):
