@@ -185,6 +185,12 @@ construction and the
 `PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
 contract — see the PR body.
 
+The fixed tickers read this way are named once, in
+`panel_row_inputs.CONTEXT_TICKERS` (currently `("SPY",)`). The nightly's
+per-ticker history backfill includes every context ticker (see the dashboard
+doc; its legacy mirror constant is test-pinned to this one), because such a ticker has no earnings event and would otherwise hold only
+the market-wide daily pull's short history, too short for `regime`.
+
 Both bounded reads (`computed_moves` for `key.ticker`, `"SPY"`
 `daily_market`) keep their explicit caller-side result limits, which express
 real caller requirements, and the shared pinned-manifest population bound of

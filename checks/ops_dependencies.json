@@ -2,7 +2,8 @@
   "levels": {"entry": 5, "runtime": 4, "workflows": 3, "stores": 2, "legacy": 1, "native": 1, "providers": 1, "core": 0},
   "packages": {
     "entry": ["", "__main__", "cli"],
-    "core": ["bootstrap", "catalog", "checkpoints", "decision_replay", "decision_validation", "diagnostics", "discovery", "errors",
+    "core": ["bootstrap", "catalog", "checkpoints", "core", "core.snapshot_contracts",
+      "decision_replay", "decision_validation", "diagnostics", "discovery", "errors",
       "executor_cgroup", "executor_watchdog", "fingerprints", "input_bindings", "lifecycle", "migrations", "outbox", "parity", "plans",
       "profiles", "provider_budget", "provider_requirements", "provider_response", "recovery", "resources", "scheduler", "schema", "schema_runtime",
       "session_backfill", "session_resolution", "store_barrier", "submission", "worker_progress"],
@@ -19,8 +20,7 @@
   },
   "exceptions": {
     "forbidden": [
-      ["nightly_trigger", "cli"],
-      ["snapshot_stages", "stages"]
+      ["nightly_trigger", "cli"]
     ],
     "cycles": [
       ["calendar_moves_jobs", "forward_calendar_store"],
@@ -30,13 +30,11 @@
       ["computed_moves_store", "unit_receipts"],
       ["decision_replay", "decision_validation"],
       ["decision_validation", "decision_replay"],
-      ["finality", "legacy_adapter"],
       ["forward_calendar_store", "incremental_data"],
       ["forward_calendar_store", "unit_receipts"],
       ["incremental_data", "computed_moves_store"],
       ["incremental_data", "forward_calendar_store"],
       ["incremental_data", "refresh_staging"],
-      ["legacy_adapter", "finality"],
       ["refresh_staging", "calendar_moves_jobs"],
       ["refresh_staging", "incremental_data"],
       ["unit_receipts", "incremental_data"]

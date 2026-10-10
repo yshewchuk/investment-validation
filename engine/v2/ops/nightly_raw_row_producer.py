@@ -26,7 +26,9 @@ from typing import Any
 import pandas as pd
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.data.errors import DataError
+from engine.v2.data.errors import DataError, fail
+from engine.v2.data.price_history_query import tickers_with_price_history
+from engine.v2.data.price_history_table import PRICE_HISTORY_TABLE_NAME
 from engine.v2.data.repository import Repository
 from engine.v2.features.panel_row_inputs import PanelRowInputs, scan_panel_row
 from engine.v2.ops.errors import OpsError
@@ -48,6 +50,8 @@ _INTRADAY_CODE = "INTRADAY_EVENT_NOT_ADMITTED"
 #: Fixed public-safe detail text (CWE-209): never exception text or a key value.
 _INTRADAY_DETAIL = "the board request carries an intraday event timestamp"
 _PANEL_HISTORY_DETAIL = "the pinned snapshot lacks required earlier panel sessions"
+_PRICE_HISTORY_CODE = "PRICE_HISTORY_NOT_AVAILABLE"
+_PRICE_HISTORY_DETAIL = "the pinned snapshot has no price history for this ticker"
 _ROW_REFUSAL_DETAILS = {
     "NO_RESOLVABLE_EXPIRY": "no strategy-eligible listed expiry for the board request",
     "EVENT_NOT_FOUND": "no exact calendar event for the board request in the snapshot",
@@ -152,6 +156,62 @@ def _regime_history_available(panel: PanelRowInputs) -> bool:
         return False
 
 
+def _admit_price_history_requests(
+    repository: Repository,
+    snapshot: SnapshotRef,
+    admitted: list[tuple[int, BoardRequest]],
+    refusals: dict[int, dict[str, Any]],
+) -> list[tuple[int, BoardRequest]]:
+    """Drop each admitted request whose ticker the pinned table lacks, refusing it in place."""
+    if not admitted or PRICE_HISTORY_TABLE_NAME not in snapshot.table_versions:
+        return admitted
+    present = tickers_with_price_history(
+        repository, snapshot, {key.ticker for _, key in admitted})
+    for position, key in admitted:
+        if key.ticker not in present:
+            refusals[position] = _refusal(
+                key, _PRICE_HISTORY_CODE, _PRICE_HISTORY_DETAIL)
+    return [(position, key) for position, key in admitted if key.ticker in present]
+
+
+def _compose_event(
+    repository: Repository,
+    snapshot: SnapshotRef,
+    key: BoardRequest,
+    *,
+    decision_session: str,
+    calendar: Any,
+    panel: PanelRowInputs,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """One admitted request's event document, or its in-place refusal document."""
+    if not _regime_history_available(panel):
+        return None, _refusal(key, "PANEL_HISTORY_NOT_AVAILABLE", _PANEL_HISTORY_DETAIL)
+    try:
+        calendar_row = scan_calendar_row_inputs(
+            repository, snapshot, key, decision_session=decision_session,
+            calendar=calendar).calendar_row
+        quotes = scan_quote_rows(
+            repository, snapshot, key, expiry=calendar_row["expiry"],
+            decision_session=decision_session)
+    except NativeScoreBatchRowRefusal as refusal:
+        detail = _ROW_REFUSAL_DETAILS.get(refusal.code)
+        if detail is None:
+            raise
+        return None, _refusal(key, refusal.code, detail)
+    except (OpsError, DataError) as error:
+        if error.code not in _EVENT_ERROR_CODES:
+            raise
+        return None, _refusal(key, error.code, _ROW_REFUSAL_DETAILS[error.code])
+    event = _document({
+        "key": {"ticker": key.ticker, "strategy": key.strategy,
+                "event_date": _event_day(key.event_date), "session": key.session},
+        "calendar_row": calendar_row, "panel_row": panel.panel_row,
+        "panel_anchor": panel.panel_anchor, "tier4_row": {},
+        "quote_rows": quotes.quote_rows, "quote_status": quotes.quote_status,
+    })
+    return event, None
+
+
 def build_native_score_batch_events(
     repository: Repository,
     snapshot: SnapshotRef,
@@ -169,8 +229,13 @@ def build_native_score_batch_events(
     empty enumeration returns both empty before any calendar, panel, spot or
     quote read, and an all-intraday one returns only its refusals. Only
     ``NO_RESOLVABLE_EXPIRY``/``EVENT_NOT_FOUND``/``IDENTITY_CONFLICT`` become
-    per-key refusals; every other refusal, repository or caller-input failure
-    propagates and the whole build fails.
+    per-key refusals, plus ``PRICE_HISTORY_NOT_AVAILABLE`` as a per-key absence
+    from pinned table membership, refused at its original position while the
+    rest of the build proceeds; a malformed series, an absent ``price_history``
+    table, and an exact-session spot failure propagate, as does every other
+    refusal, repository or caller-input failure, and an absent
+    ``option_chains`` table once price-history admission refuses every
+    non-intraday request, and the whole build fails.
     """
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
@@ -185,7 +250,12 @@ def build_native_score_batch_events(
             refusals[position] = _refusal(key, _INTRADAY_CODE, _INTRADAY_DETAIL)
         else:
             admitted.append((position, key))
+    had_non_intraday = bool(admitted)
+    admitted = _admit_price_history_requests(repository, snapshot, admitted, refusals)
     if not admitted:
+        if had_non_intraday and "option_chains" not in snapshot.table_versions:
+            raise fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
+                       details={"table_name": "option_chains"})
         return [], _refusals_document(ordered())
 
     decision_session = validated_as_of(as_of).normalize().date().isoformat()
@@ -202,33 +272,11 @@ def build_native_score_batch_events(
                                 history_start=history_start)
     events: list[dict[str, Any]] = []
     for position, key in admitted:
-        panel = panels[_panel_marker(key)]
-        if not _regime_history_available(panel):
-            refusals[position] = _refusal(key, "PANEL_HISTORY_NOT_AVAILABLE", _PANEL_HISTORY_DETAIL)
-            continue
-        try:
-            calendar_row = scan_calendar_row_inputs(
-                repository, snapshot, key, decision_session=decision_session,
-                calendar=calendar).calendar_row
-            quotes = scan_quote_rows(
-                repository, snapshot, key, expiry=calendar_row["expiry"],
-                decision_session=decision_session)
-        except NativeScoreBatchRowRefusal as refusal:
-            detail = _ROW_REFUSAL_DETAILS.get(refusal.code)
-            if detail is None:
-                raise
-            refusals[position] = _refusal(key, refusal.code, detail)
-            continue
-        except (OpsError, DataError) as error:
-            if error.code not in _EVENT_ERROR_CODES:
-                raise
-            refusals[position] = _refusal(key, error.code, _ROW_REFUSAL_DETAILS[error.code])
-            continue
-        events.append(_document({
-            "key": {"ticker": key.ticker, "strategy": key.strategy,
-                    "event_date": _event_day(key.event_date), "session": key.session},
-            "calendar_row": calendar_row, "panel_row": panel.panel_row,
-            "panel_anchor": panel.panel_anchor, "tier4_row": {},
-            "quote_rows": quotes.quote_rows, "quote_status": quotes.quote_status,
-        }))
+        event, refusal = _compose_event(
+            repository, snapshot, key, decision_session=decision_session,
+            calendar=calendar, panel=panels[_panel_marker(key)])
+        if refusal is None:
+            events.append(event)
+        else:
+            refusals[position] = refusal
     return events, _refusals_document(ordered())

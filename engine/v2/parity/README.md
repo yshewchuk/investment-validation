@@ -105,7 +105,7 @@ Tier 0. The comparator itself is proved by the Phase 4 negative controls
 (`tests/test_phase4_planted_defect_control.py`,
 `tests/test_phase4_numeric_negative_control_states.py`,
 `tests/test_phase4_acceptance_independence.py`) and by the nightly report's
-tests (`tests/test_v2_ops_native_shadow_render.py`), all through the real
+tests (`tests/v2/ops/test_native_shadow_render.py`), all through the real
 `compare_records` path: a planted corruption must disagree, and a blind
 comparator must be caught. The comparator core keeps its own tests
 (`tests/test_diagnosis_comparator.py`), run through the diagnosis re-exports.

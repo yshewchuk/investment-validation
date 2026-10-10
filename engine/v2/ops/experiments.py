@@ -646,47 +646,6 @@ RUNNER_INVENTORY = {
         "backup_behavior": "none internal; the coordinator performs the single final private backup",
         "removal_phase": "phase-5 model extraction",
     },
-    "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py": {
-        "spec_source": "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/spec.yaml",
-        "declared_runtime_sources": (
-            "experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py",
-        ),
-        "fixed_arm_args": {"gate_midfill_str_thru_forecast_analog": ()},
-        "ledger_write_behavior": ("appends experiments/LEDGER.csv rows via main()'s "
-                                  "--no-ledger gate unless disabled; the adapter always "
-                                  "passes --no-ledger"),
-        "registry_effects": ("promotion candidate: gate_midfill_str_thru_forecast_analog "
-                             "vs champion gate_midfill_str_thru, per promotion_target"),
-        "report_path": "REPORT.md",
-        "resumable_units": "none_declared",
-        "backup_behavior": "none internal; the coordinator performs the single final private backup",
-        "removal_phase": "phase-5 model extraction",
-    },
-    "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py": {
-        "spec_source": "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/spec.yaml",
-        "declared_runtime_sources": (
-            "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/run.py",
-            "experiments/EXP-142_str_runup_t14_factor_simulation_pnl_gate/simulation.py",
-        ),
-        "fixed_arm_args": {"native_nan": ()},
-        "declared_runtime_inputs": (
-            "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/results/oos_scores.parquet",
-        ),
-        "ledger_write_behavior": (
-            "appends experiments/LEDGER.csv rows via main()'s --no-ledger gate unless "
-            "disabled -- both the candidate's own ungated/arms/primary rows and the "
-            "champion grid cell's PLANNED row -- the adapter always passes --no-ledger"
-        ),
-        "registry_effects": (
-            "challenger evaluation only: native_nan vs champion gate_midfill_str_runup "
-            "(stored threshold 0.0725137593996064) re-scored on the identical v2 trades, "
-            "per promotion_target; no registry write here"
-        ),
-        "report_path": "REPORT.md",
-        "resumable_units": "none_declared",
-        "backup_behavior": "none internal; the coordinator performs the single final private backup",
-        "removal_phase": "phase-5 model extraction",
-    },
 }
 
 

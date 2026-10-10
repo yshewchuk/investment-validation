@@ -12,9 +12,13 @@ Wire shapes and shipped views are detailed in the [README](README.md).
 ## Inputs
 Saved JSON release metadata, paginated events, score details and operations data
 from [serving](../engine/v2/serving/ARCHITECTURE.md), plus route/filter state.
-Native parity renders the summary from `/api/v1/native_parity`. The typed
-client also exposes `/mismatches` and `/unpaired` under that prefix; the
-summary component does not request those pages.
+Native parity renders the summary from `/api/v1/native_parity`, including its
+saved refused-ticker list (`native_refused_tickers`: ticker and reason code)
+separately from field mismatches. A nonempty list has its own refused-ticker
+section and count; an empty list adds no refused-ticker section. The typed client also
+exposes `/mismatches` and `/unpaired` under that prefix; the summary component
+does not request those pages. The retired `/native_parity.json` HTML paths are
+not part of this React screen.
 
 ## Outputs
 React DOM and chart pixels, navigation/deep links, loading/error/refusal states

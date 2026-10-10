@@ -10,10 +10,11 @@ from playwright.sync_api import expect
 
 from tests.fixtures.v2_ui_mock_api import build_default_state, serve_in_thread
 
+# packages: engine.v2.serving, engine.v2.dashboard
 pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]
 TOKEN = "browser-secret"
 PROBLEM = {"code": "NO_CURRENT_RELEASE", "category": "unavailable", "retryable": True, "message": "no release"}
-SUMMARY = {"schema_version": "native_parity_summary.v1.0", "status": "available", "partial": False, "source_schema_version": "native_parity_report.v1.2", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1", "compared_count": 12, "matched_row_count": 10, "mismatched_row_count": 2, "only_legacy_count": 1, "only_native_count": 1, "native_refused_count": 3, "native_refused_unmatched_count": 1, "native_refused_reasons": {"unknown_ticker": 2, "missing_field": 1}}
+SUMMARY = {"schema_version": "native_parity_summary.v1.0", "status": "available", "partial": False, "source_schema_version": "native_parity_report.v1.2", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1", "compared_count": 12, "matched_row_count": 10, "mismatched_row_count": 2, "only_legacy_count": 1, "only_native_count": 1, "native_refused_count": 3, "native_refused_unmatched_count": 1, "native_refused_tickers": [], "native_refused_reasons": {"unknown_ticker": 2, "missing_field": 1}}
 NO_REPORT = {"status": "no_report"}
 
 @pytest.fixture(scope="module")
@@ -134,6 +135,7 @@ def test_zero_saved_counts_render_actual_zero(browser, server):
     expect(page.get_by_test_id("parity-tolerance")).to_have_text(ZERO["tolerance_policy_id"])
     expect(page.get_by_test_id("parity-refusal-reasons-empty")).to_have_text("No refusal reasons.")
     expect(page.get_by_test_id("parity-refusal-reason")).to_have_count(0)
+    expect(page.get_by_test_id("parity-refused-tickers-heading")).to_have_count(0)
     expect(page.get_by_test_id("parity-no-report")).to_have_count(0)
     expect(page.get_by_test_id("parity-unavailable")).to_have_count(0)
     expect(page.get_by_test_id("parity-stale")).to_have_count(0)
@@ -148,6 +150,17 @@ def test_partial_saved_summary_shows_incomplete_refusals_banner(browser, server)
     expect(page.get_by_test_id("parity-partial")).to_contain_text("refusal counts below are incomplete")
     expect(page.get_by_test_id("parity-native-refused")).to_have_text("0")
     expect(page.get_by_test_id("parity-refusal-reasons-empty")).to_have_text("No refusal reasons.")
+    assert len(parity) == 1
+    context.close()
+
+def test_refused_tickers_render_in_saved_summary(browser, server):
+    body = dict(SUMMARY, native_refused_tickers=[{"ticker": "XYZ", "reason": "PRICE_HISTORY_NOT_AVAILABLE"}])
+    base, context, page, parity, _ = _open_parity(browser, server, body=body)
+    page.goto(base + "/#/native-parity")
+    expect(page.get_by_test_id("parity-refused-tickers-heading")).to_be_visible()
+    expect(page.get_by_test_id("parity-refused-tickers-heading")).to_have_text("Refused tickers (1)")
+    expect(page.get_by_test_id("parity-refused-ticker")).to_have_count(1)
+    expect(page.get_by_test_id("parity-refused-ticker")).to_have_text("XYZ: PRICE_HISTORY_NOT_AVAILABLE")
     assert len(parity) == 1
     context.close()
 
@@ -166,7 +179,7 @@ def test_shared_board_link_reaches_parity_after_no_release(browser, server):
     finally:
         context.close()
 
-UI_ROOT = Path(__file__).resolve().parents[1] / "ui"
+UI_ROOT = Path(__file__).resolve().parents[3] / "ui"
 HARNESS_PATH = "/__data_client__/harness.html"
 CLIENT_PATH = "/__data_client__/client.js"
 MISMATCH_PAGE = {"status": "available", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1",

@@ -53,7 +53,8 @@ def _cached(unit):
                              cache_hit=True)
 
 
-def _seeded_parent(conn, store, clock, *, scope: str, daily_market_rows=None):
+def _seeded_parent(conn, store, clock, *, scope: str, daily_market_rows=None,
+                   extra_event_rows=()):
     """A minimal, synthetic ``earnings_events`` base snapshot (no real
     ``data/`` dependency -- built the same way
     ``tests/test_v2_data_generic_incremental.py``'s
@@ -61,7 +62,9 @@ def _seeded_parent(conn, store, clock, *, scope: str, daily_market_rows=None):
     committed at generation 0 -> 1, for exercising ``_commit_claims``
     directly against a real resolvable parent snapshot. ``daily_market_rows``,
     when provided (an empty sequence seeds a zero-row table), additionally
-    seeds a real ``daily_market`` table pinned in the same snapshot."""
+    seeds a real ``daily_market`` table pinned in the same snapshot.
+    ``extra_event_rows``: additional ``earnings_events`` rows (year 2025) in
+    the same fragment."""
     receipt_ref = content_hash({"fixture": "forward_calendar_fence_" + scope})
 
     def _seeded_table(contract, rows, partition):
@@ -94,7 +97,7 @@ def _seeded_parent(conn, store, clock, *, scope: str, daily_market_rows=None):
         "date_agree": True, "date_conflict": False, "updated_at": None,
         "event_cluster_id": None, "claim_count": None, "reconciliation": None,
     }
-    tables = [_seeded_table(contract, (base_row,), "2025")]
+    tables = [_seeded_table(contract, (base_row, *extra_event_rows), "2025")]
     if daily_market_rows is not None:
         daily_contract = from_document(TableContract,
                                        build_legacy_mapping()["tables"]["daily_market"])
@@ -265,7 +268,7 @@ def test_unit_ids_carry_the_as_of_date():
 
 def test_native_calendar_fallback_is_recorded_as_a_warning(monkeypatch):
     """Spec s4c: the weekday fallback is job-result evidence, not only a log line."""
-    monkeypatch.setattr(forward_calendar_store, "daily_by_ticker",
+    monkeypatch.setattr(forward_calendar_store, "daily_sessions",
                         lambda repository, snapshot: {})
     parent = type("Parent", (), {"snapshot": object()})()
     calendar, warnings = forward_calendar_store._native_calendar(
@@ -282,7 +285,7 @@ def test_native_calendar_extends_through_the_requested_horizon(monkeypatch):
     when that crosses last + 400 days."""
     old_last = pd.Timestamp("2020-01-02")
     frame = pd.DataFrame({"date": [old_last]})
-    monkeypatch.setattr(forward_calendar_store, "daily_by_ticker",
+    monkeypatch.setattr(forward_calendar_store, "daily_sessions",
                         lambda repository, snapshot: {"AAPL": frame})
     parent = type("Parent", (), {"snapshot": object()})()
     calendar, warnings = forward_calendar_store._native_calendar(

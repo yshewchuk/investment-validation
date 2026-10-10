@@ -10,7 +10,8 @@ from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests, reference_catalog
 from engine.v2.data.repository import Repository
 from engine.v2.ops import nightly_trigger, price_history_store
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.recovery import SupervisorLock
 from tests.data_scan_support import RECEIPT, fake_hash, publish_and_inspect
 from tests.test_v2_ops_price_history import _SEC, _SEC_REF, _securities_row
 from tests.test_v2_ops_snapshot_stages import (
@@ -39,6 +40,7 @@ from tests.v2.ops.test_planned_price_refresh import (
 
 
 def _new_import(state, label, *, ticker="OTHER"):
+    """Commit a synthetic shadow import while retaining the calendar reference."""
     record = publish_and_inspect(
         state.store, _SEC, _SEC_REF, [_securities_row(ticker, 2024)], "2024")
     manifest = manifests.dataset_manifest(
@@ -61,6 +63,7 @@ def _new_import(state, label, *, ticker="OTHER"):
 
 
 def test_stale_base_refuses_before_fetch_or_capture(shadow_root, install_fetcher):
+    """A stale plan base refuses without fetching or recording a capture."""
     state = shadow_root
     calls = install_fetcher(state.root)
     newer = _new_import(state, "other-import")
@@ -77,12 +80,14 @@ def test_stale_base_refuses_before_fetch_or_capture(shadow_root, install_fetcher
 
 
 def test_capture_fence_rechecks_head_before_commit(shadow_root, install_fetcher, monkeypatch):
+    """A concurrent import wins without recording capture rows or a report."""
     state = shadow_root
     install_fetcher(state.root)
     write = price_history_store._write_ticker_fragment
     changed = []
 
     def concurrent_import(*args, **kwargs):
+        """Advance the head after the first synthetic fragment is written."""
         record = write(*args, **kwargs)
         if not changed:
             changed.append(_new_import(state, "during-capture"))
@@ -102,12 +107,14 @@ def test_capture_fence_rechecks_head_before_commit(shadow_root, install_fetcher,
 
 def test_real_capture_cas_failure_becomes_recordable_input_changed(
         shadow_root, install_fetcher, monkeypatch):
+    """A lost capture CAS is translated into the trigger's retryable refusal."""
     state = shadow_root
     install_fetcher(state.root)
     commit = data_catalog.commit_snapshot
     changed = []
 
     def race_commit(*args, **kwargs):
+        """Move the shadow head immediately before capture's real commit."""
         if kwargs["receipt_id"].startswith("receipt_ph_") and not changed:
             changed.append("changing")
             _new_import(state, "during-cas")
@@ -125,16 +132,19 @@ def test_real_capture_cas_failure_becomes_recordable_input_changed(
 
 def test_capture_then_crash_reimports_under_new_attempt_and_reuses_prices(
         shadow_root, install_fetcher, monkeypatch):
+    """A crash after capture retries with a fresh import and cached prices."""
     state = shadow_root
     calls = install_fetcher(state.root)
     imports, plans = [], []
 
     def ensure(root, as_of, clock, attempt):
+        """Return the original pin until the trigger advances its import attempt."""
         imports.append(attempt)
         snapshot = state.base if attempt == 0 else _new_import(state, "retry-import")
         return "ready", snapshot.snapshot_id
 
     def plan(root, as_of, tickers, context, clock, **kwargs):
+        """Interrupt the first plan only after its captured prices are verified."""
         snapshot = kwargs["expected_shadow_snapshot_id"]
         _assert_prices(state, snapshot, "NEW")
         plans.append(snapshot)
@@ -145,6 +155,7 @@ def test_capture_then_crash_reimports_under_new_attempt_and_reuses_prices(
     monkeypatch.setattr(nightly_trigger, "_default_plan", plan)
 
     def attempt(prior=None, plan_ref=None):
+        """Enter production price preparation with isolated terminal boundaries."""
         return nightly_trigger._submit_plan(
             state.root, SESSION, tickers=("NEW",), context_tickers=("NEW",),
             clock=state.clock, plan_fn=None, submit_fn=lambda *a: None,
@@ -174,8 +185,172 @@ def test_capture_then_crash_reimports_under_new_attempt_and_reuses_prices(
     assert calls == ["NEW", "SPY"]
 
 
+@pytest.mark.parametrize("error_count,snapshot_attempt", [
+    (0, 0),
+    (nightly_trigger.MAX_CONSECUTIVE_ERRORS - 1, nightly_trigger.MAX_CONSECUTIVE_ERRORS - 1),
+])
+def test_capture_lock_contention_resumes_without_spending_retry_budget(
+        shadow_root, install_fetcher, monkeypatch, error_count, snapshot_attempt):
+    """Real lock contention stays resumable past both the error budget and window."""
+    state = shadow_root
+    calls = install_fetcher(state.root)
+    state.clock.advance(6 * 3600)  # 02:00 ET, inside the initial retry window.
+    imports, plans, submissions, probes = [], [], [], []
+    if error_count:
+        nightly_trigger.write_state(state.root, nightly_trigger.TriggerReceipt(
+            as_of=SESSION, status="error", error_count=error_count,
+            snapshot_attempt=snapshot_attempt))
+
+    def ensure(root, as_of, clock, attempt):
+        """Reuse the synthetic import pin and record its unchanged attempt key."""
+        imports.append(attempt)
+        return "ready", state.base.snapshot_id
+
+    def plan(root, as_of, tickers, context, clock, **kwargs):
+        """Accept the plan only after real capture makes both price series readable."""
+        snapshot = kwargs["expected_shadow_snapshot_id"]
+        for ticker in ("NEW", "SPY"):
+            _assert_prices(state, snapshot, ticker)
+        plans.append(snapshot)
+        return "resumed-plan"
+
+    def probe(as_of, tickers):
+        """Record finality checks without contacting a provider."""
+        probes.append((as_of, tuple(tickers)))
+        return True, "final"
+
+    def tick():
+        """Run a trigger tick while preserving the real price-preparation path."""
+        return nightly_trigger.run_trigger(
+            state.root, SESSION, tickers=("NEW",), context_tickers=("NEW",),
+            clock=state.clock, provider=probe,
+            ensure_snapshot_fn=ensure, submit_fn=lambda *args: submissions.append(args),
+            serve_fn=lambda *args: "completed")
+
+    monkeypatch.setattr(nightly_trigger, "_default_plan", plan)
+    lock = SupervisorLock(state.root / "data" / "operations" / "supervisor.lock")
+    assert lock.acquire()
+    retries = nightly_trigger.MAX_CONSECUTIVE_ERRORS + 1
+    try:
+        for index in range(retries):
+            if index == 1:
+                state.clock.advance(6 * 3600)  # 08:00 ET, after the window closes.
+            busy = tick()
+            assert busy.status == "busy_supervisor" and busy.plan_ref is None
+            assert busy.error_count == error_count
+            assert busy.snapshot_attempt == snapshot_attempt
+            assert nightly_trigger.load_state(state.root, SESSION) == busy
+            assert lock.held and plans == [] and submissions == []
+        assert calls == ["NEW", "SPY"]
+        assert state.conn.execute("SELECT COUNT(*) FROM data_price_captures").fetchone()[0] == 0
+        assert state.conn.execute("SELECT snapshot_id FROM data_snapshot_heads WHERE scope='shadow'"
+                                  ).fetchone()[0] == state.base.snapshot_id
+        assert not state.root.joinpath(*nightly_trigger.STATE_DIR,
+                                       SESSION + ".price_refresh.json").exists()
+    finally:
+        lock.release()
+
+    recovered = tick()
+    assert recovered.status == "completed" and recovered.plan_ref == "resumed-plan"
+    assert recovered.snapshot_attempt == snapshot_attempt
+    assert nightly_trigger.load_state(state.root, SESSION) == recovered
+    assert imports == [snapshot_attempt] * (retries + 1)
+    assert len(plans) == len(submissions) == 1
+    assert probes == ([] if error_count else [(SESSION, ("NEW",))])
+    assert calls == ["NEW", "SPY"]
+    assert _read_report(state.root)["capture"]["result_snapshot_id"] == plans[0]
+    assert plans[0] != state.base.snapshot_id
+
+
+def test_completed_import_clears_timeout_budget_before_capture_lock_retry(
+        shadow_root, install_fetcher, monkeypatch):
+    """Capture busy preserves setup errors, not a completed import's timeout streak."""
+    state = shadow_root
+    calls = install_fetcher(state.root)
+    state.clock.advance(12 * 3600)  # Resume at 08:00 ET, after the retry window.
+    nightly_trigger.write_state(state.root, nightly_trigger.TriggerReceipt(
+        as_of=SESSION, status="timed_out",
+        error_count=nightly_trigger.MAX_CONSECUTIVE_ERRORS - 1, snapshot_attempt=1))
+    imports, plans = [], []
+
+    def ensure(root, as_of, clock, attempt):
+        """Finish the previously timed-out import under the same attempt key."""
+        imports.append(attempt)
+        return "ready", state.base.snapshot_id
+
+    def refused_plan(root, as_of, tickers, context, clock, **kwargs):
+        """Raise the first setup error only after real capture succeeds."""
+        snapshot = kwargs["expected_shadow_snapshot_id"]
+        _assert_prices(state, snapshot, "NEW")
+        plans.append(snapshot)
+        raise OSError("synthetic plan write failure")
+
+    def tick():
+        """Resume through real price preparation without probing or submitting."""
+        return nightly_trigger.run_trigger(
+            state.root, SESSION, tickers=("NEW",), context_tickers=("NEW",),
+            clock=state.clock, provider=lambda *args: pytest.fail("a resume re-probed"),
+            ensure_snapshot_fn=ensure,
+            submit_fn=lambda *args: pytest.fail("a refused plan submitted"),
+            serve_fn=lambda *args: pytest.fail("a refused plan served"))
+
+    monkeypatch.setattr(nightly_trigger, "_default_plan", refused_plan)
+    lock = SupervisorLock(state.root / "data" / "operations" / "supervisor.lock")
+    assert lock.acquire()
+    try:
+        busy = tick()
+        assert busy.status == "busy_supervisor" and busy.error_count == 0
+        assert busy.snapshot_attempt == 1 and busy.plan_ref is None
+        assert nightly_trigger.load_state(state.root, SESSION) == busy
+        assert plans == []
+    finally:
+        lock.release()
+
+    error = tick()
+    assert error.status == "error" and error.error_count == 1
+    assert error.snapshot_attempt == 1 and error.plan_ref is None
+    assert nightly_trigger.load_state(state.root, SESSION) == error
+    assert imports == [1, 1] and len(plans) == 1
+    assert calls == ["NEW", "SPY"]
+
+
+@pytest.mark.parametrize("error_count", [0, nightly_trigger.MAX_CONSECUTIVE_ERRORS - 1])
+@pytest.mark.parametrize("error,attempt_bump", [
+    (fail("RESOURCE_UNAVAILABLE", "unclassified resource contention"), 0),
+    (fail("RESOURCE_UNAVAILABLE", "another resource is unavailable",
+          details={"resource": "another.lock"}), 0),
+    (fail("INPUT_CHANGED", "the input changed", details={"resource": "supervisor.lock"}), 1),
+    (OSError("synthetic catalog failure"), 0),
+])
+def test_other_setup_errors_consume_budget_after_capture_contention(
+        tmp_path, error_count, error, attempt_bump):
+    """Unrelated failures still spend retry budget without a busy receipt resetting it."""
+    from tests.ops_support import FakeClock
+
+    prior = nightly_trigger.TriggerReceipt(
+        as_of=SESSION, status="busy_supervisor", error_count=error_count, snapshot_attempt=1)
+
+    def refused_plan(*args, **kwargs):
+        """Raise a specific non-contention setup failure through the real handler."""
+        raise error
+
+    receipt = nightly_trigger._submit_plan(
+        tmp_path, SESSION, tickers=("NEW",), context_tickers=("NEW",), clock=FakeClock(),
+        plan_fn=refused_plan, submit_fn=lambda *args: pytest.fail("a refused plan submitted"),
+        serve_fn=lambda *args: pytest.fail("a refused plan served"),
+        ensure_snapshot_fn=lambda *args: ("ready", "synthetic-snapshot"),
+        full_run=True, prior=prior, plan_ref=None)
+
+    assert receipt.status == ("error" if error_count == 0 else "failed_setup")
+    assert receipt.error_count == error_count + 1
+    assert receipt.snapshot_attempt == 1 + attempt_bump
+    assert receipt.plan_ref is None
+    assert nightly_trigger.load_state(tmp_path, SESSION) == receipt
+
+
 def test_report_replace_failure_leaves_capture_and_prior_report(
         shadow_root, install_fetcher, monkeypatch):
+    """A failed report replace leaves committed prices and the prior report intact."""
     state = shadow_root
     install_fetcher(state.root)
     report_path = state.root.joinpath(*nightly_trigger.STATE_DIR, SESSION + ".price_refresh.json")
@@ -184,6 +359,7 @@ def test_report_replace_failure_leaves_capture_and_prior_report(
     replace = nightly_trigger.os.replace
 
     def fail_report(source, destination):
+        """Fail only the price report replacement after successful capture."""
         if Path(destination) == report_path:
             raise OSError("injected report replacement failure")
         return replace(source, destination)
@@ -201,6 +377,7 @@ def test_report_replace_failure_leaves_capture_and_prior_report(
 
 
 def test_missing_calendar_dependency_keeps_existing_refusal(shadow_root, install_fetcher):
+    """Missing required calendar prices refuse without advancing the shadow head."""
     state = shadow_root
     calls = install_fetcher(state.root, failures={"SPY": 404})
     with pytest.raises(OpsError) as error:
@@ -214,6 +391,7 @@ def test_missing_calendar_dependency_keeps_existing_refusal(shadow_root, install
 
 def test_real_nightly_planner_pins_refreshed_capture_before_input_manifest(
         case, install_fetcher, monkeypatch):
+    """The real planner pins captured watchlist prices before reading its manifest."""
     from engine.v2.ops import bootstrap, cli
 
     args = cli.parser().parse_args(_plan_files(case))
@@ -228,6 +406,7 @@ def test_real_nightly_planner_pins_refreshed_capture_before_input_manifest(
     captured = []
 
     def barrier_manifest(*args, **kwargs):
+        """Verify the price report already exists at the input-manifest boundary."""
         report_path = case.tmp.joinpath(*nightly_trigger.STATE_DIR,
                                         PLAN_SESSION + ".price_refresh.json")
         report = json.loads(report_path.read_text())

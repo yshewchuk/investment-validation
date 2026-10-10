@@ -17,10 +17,10 @@ from engine.data.finality import session_finality as _legacy_session_finality
 from engine.v2.foundation import safe_relative_path
 from engine.v2.foundation.score_population import population_difference
 from engine.v2.foundation.score_population import population_key as _population_key
+from engine.v2.ops import finality as _finality
 from engine.v2.ops import worker_progress
 from engine.v2.ops.decision_replay import score_row_id as _score_row_id
 from engine.v2.ops.errors import fail
-from engine.v2.ops.finality import covered_tickers, resolve_final_session, session_finality
 
 _LEGACY_FINALITY_ORIGINALS = {
     "session_finality": _legacy_session_finality,
@@ -112,6 +112,30 @@ def finality_coverage_frame(table: str, column: str, stamp):
                           columns=["ticker", column])
     except (FileNotFoundError, KeyError, OSError, ValueError):
         return None
+
+
+_FINALITY_READS = _finality.FinalityReads(
+    compatibility=finality_compatibility,
+    market_wide_complete=finality_market_wide_complete,
+    coverage_frame=finality_coverage_frame)
+
+
+def session_finality(value, tickers, *, frames=None, market_wide=None):
+    """Native session finality bound to the legacy reads and seams above."""
+    return _finality.session_finality(
+        value, tickers, reads=_FINALITY_READS, frames=frames, market_wide=market_wide)
+
+
+def resolve_final_session(requested, tickers, *, calendar, max_sessions=15):
+    """Native final-session walk-back bound to the legacy reads and seams above."""
+    return _finality.resolve_final_session(
+        requested, tickers, calendar=calendar, reads=_FINALITY_READS,
+        max_sessions=max_sessions)
+
+
+def covered_tickers(value, tickers):
+    """Native per-ticker finality bound to the legacy reads and seams above."""
+    return _finality.covered_tickers(value, tickers, reads=_FINALITY_READS)
 
 
 def _digest(path: Path, *, keepalive: Callable[[], None] | None = None) -> str:
@@ -1179,8 +1203,6 @@ def invoke_evaluate(root, spec, trades, *, run_dir, **kwargs):
 
 REGISTERED_RUNNERS = frozenset({
     "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
-    "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
-    "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py",
 })
 
 _FIXED_ARM_RUNNER = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"

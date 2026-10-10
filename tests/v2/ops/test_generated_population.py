@@ -1,11 +1,13 @@
 """``ops plan nightly`` generates its expected population from the pinned snapshot.
 
-Synthetic ``earnings_events`` only, built the way ``test_v2_ops_nightly_raw_rows`` builds
-them (a real catalog + ArtifactStore snapshot). The pin step is stubbed where a test only
-needs the plan wiring: its own reference-input catalog is covered elsewhere.
+Synthetic ``earnings_events`` plus the real synthetic ``daily_market``/``option_chains``
+rows the carried-set resolution reads, built the way ``test_v2_ops_nightly_raw_rows``
+builds them (a real catalog + ArtifactStore snapshot). The pin step is stubbed where a
+test only needs the plan wiring: its own reference-input catalog is covered elsewhere.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 
 import pandas as pd
@@ -18,6 +20,7 @@ from engine.v2.foundation import ArtifactStore
 from engine.v2.ops import cli, nightly
 from engine.v2.ops import snapshot_planning as planning
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.nightly_raw_rows import scan_forward_board_requests
 from tests.data_scan_support import (
     RECEIPT,
     commit_tables,
@@ -31,7 +34,9 @@ from tests.ops_support import catalog
 _EVENTS = contract_for("earnings_events")
 _EVENTS_REF = contract_ref_for(_EVENTS)
 _DAILY = contract_for("daily_market")
+_CHAINS = contract_for("option_chains")
 _AS_OF = "2026-12-20"  # window 2026-12-20 .. 2027-01-24 crosses a partition year
+_CARRY_DAY = dt.date(2026, 12, 15)  # inside 2025-01-01 .. 2026-12-20, the carried window
 _STRATEGIES = ("BFLY-P", "BFLY-P5", "CAL-P", "CND-P", "CND-PS", "CTR5", "RAMP7", "STR-RUNUP",
                "STR-THRU", "TWIN-P", "TWIN-P5")  # what the legacy score stage emits per event
 
@@ -46,15 +51,52 @@ def _event_row(ticker, event_date, session="BMO", suffix=""):
         reconciliation=None)
 
 
-def _build(conn, clock, store, rows, *, with_events=True):
+def _daily(ticker, day):
+    """A schema-complete ``daily_market`` row (adapted from ``test_carried_set``)."""
+    if isinstance(day, dt.date) and not isinstance(day, dt.datetime):
+        day = dt.datetime(day.year, day.month, day.day)
+    return dict(
+        ticker=ticker, date=day, year=day.year, spot=100.0, iv10=30.0, iv30=32.0,
+        exern_iv10=29.0, exern_iv30=31.0, implied_move=5.0, implied_reconstructed=False,
+        rvol30=28.0, skew=1.1, contango=0.5, fwd90_30=33.0, fexern90_30=34.0, iee=0.2,
+        mcap_usd=1e9, mcap_log=20.7, mcap_asof=dt.datetime(day.year, 1, 2), mcap_age_days=0.0,
+        src_spot="orats", src_iv="orats", src_mcap="orats")
+
+
+def _chain(ticker, obs_date):
+    """A schema-complete ``option_chains`` row (adapted from ``test_carried_set``)."""
+    if isinstance(obs_date, dt.date) and not isinstance(obs_date, dt.datetime):
+        obs_date = dt.datetime(obs_date.year, obs_date.month, obs_date.day)
+    return dict(
+        ticker=ticker, obs_date=obs_date, year=obs_date.year,
+        expiry=obs_date + dt.timedelta(days=30), dte=30, strike=100.0, right="C", bid=1.0,
+        ask=1.2, mid=1.1, iv=30.0, delta=0.5, spot=100.0, src="orats", src_file="f.parquet",
+        chain_kind="entry", volume=None, open_interest=None, bid_size=None, ask_size=None,
+        quote_repaired=False)
+
+
+def _fragments(store, contract, rows):
+    """One published, inspected fragment per year, in ascending partition-key order."""
+    ref = contract_ref_for(contract)
     by_year: dict[str, list[dict]] = {}
     for row in rows:
         by_year.setdefault(str(row["year"]), []).append(row)
-    tables, contracts = {"daily_market": []}, {"daily_market": _DAILY}
+    return [publish_and_inspect(
+                store, contract, ref,
+                sorted(part, key=lambda row: tuple(row[c] for c in contract.primary_key)), year)
+            for year, part in sorted(by_year.items())]
+
+
+def _build(conn, clock, store, rows, *, with_events=True, with_chains=True):
+    tables = {"daily_market": _fragments(
+        store, _DAILY, [_daily("AAA", _CARRY_DAY), _daily("BBB", _CARRY_DAY)])}
+    contracts = {"daily_market": _DAILY}
+    if with_chains:
+        tables["option_chains"] = _fragments(
+            store, _CHAINS, [_chain("AAA", _CARRY_DAY), _chain("BBB", _CARRY_DAY)])
+        contracts["option_chains"] = _CHAINS
     if with_events:
-        tables["earnings_events"] = [publish_and_inspect(store, _EVENTS, _EVENTS_REF,
-                                                       sorted(part, key=lambda r: r["event_id"]), year)
-                                     for year, part in sorted(by_year.items())]
+        tables["earnings_events"] = _fragments(store, _EVENTS, list(rows))
         contracts["earnings_events"] = _EVENTS
     commit_tables(conn, clock, tables, contracts, store=store)
 
@@ -70,10 +112,10 @@ def _advance_head(conn, clock, store):
                         "WHERE scope = 'shadow'").fetchone()
     parent = Repository(conn, store).resolve(head["snapshot_id"])
     records = {name: list(Repository(conn, store).fragment_records(parent, name))
-               for name in ("daily_market", "earnings_events")}
+               for name in ("daily_market", "option_chains", "earnings_events")}
     records["earnings_events"].append(publish_and_inspect(
         store, _EVENTS, _EVENTS_REF, [_event_row("EEE", "2028-01-05")], "2028"))
-    contracts = {"daily_market": _DAILY, "earnings_events": _EVENTS}
+    contracts = {"daily_market": _DAILY, "option_chains": _CHAINS, "earnings_events": _EVENTS}
     table_manifests = {name: manifests.dataset_manifest(
         contract_ref_for(contracts[name]), recs, knowledge_mode="reconstructed",
         coverage_receipt_refs=(RECEIPT,), availability_evidence_refs=())
@@ -96,6 +138,7 @@ def _keys(ticker, day):
 
 _ROWS = [
     _event_row("BBB", "2027-01-24"),            # last day of the window: included
+    _event_row("EEE", "2027-01-03"),            # in-window event, absent from carried tables
     _event_row("AAA", "2026-12-30"),
     _event_row("AAA", "2026-12-30", "AMC", "-dup"),  # same key twice: de-duplicated
     _event_row("AAA", "2026-12-20"),            # as_of day: included
@@ -115,23 +158,34 @@ def env(tmp_path):
     return conn, clock, store, tmp_path
 
 
-def _generate(env, tickers=("AAA", "BBB", "CCC", "DDD"), as_of=_AS_OF, **kwargs):
+def _generate(env, tickers=("AAA", "BBB", "CCC", "DDD", "EEE"), as_of=_AS_OF, **kwargs):
     conn, clock, store, _ = env
     return planning.generated_population(conn, store, "shadow", as_of=as_of, tickers=tickers,
                                          clock=clock, **kwargs)
 
 
 def test_generated_population_is_the_sorted_deduplicated_window_keys(env):
-    population, snapshot_id = _generate(env)
+    population, snapshot_id, _ = _generate(env)
 
     assert list(population) == _EXPECTED  # (a) edges in, outside out, sorted, no duplicates
     assert snapshot_id == _head_id(env[0])
 
 
 def test_generation_is_restricted_to_the_planned_tickers(env):
-    population, _ = _generate(env, tickers=("BBB",))
+    population, _, _ = _generate(env, tickers=("BBB",))
 
     assert list(population) == sorted(_keys("BBB", "2027-01-24"))
+
+
+def test_all_uncarried_candidates_are_in_refusal_evidence(env):
+    with pytest.raises(OpsError) as raised:
+        _generate(env, tickers=("EEE",))
+
+    assert raised.value.code == "INVALID_REQUEST"
+    assert raised.value.problem.details["candidate_exclusions"] == [{
+        "ticker": "EEE", "reason_code": "UNCARRIED_TICKER",
+        "missing_tables": ["daily_market", "option_chains"],
+    }]
 
 
 def test_an_empty_window_is_a_typed_refusal_not_an_empty_plan(env):
@@ -139,7 +193,7 @@ def test_an_empty_window_is_a_typed_refusal_not_an_empty_plan(env):
         _generate(env, as_of="2026-06-01")  # the window holds no event
 
     assert raised.value.code == "INVALID_REQUEST"
-    assert "no earnings events" in raised.value.problem.message
+    assert "no eligible earnings events" in raised.value.problem.message
 
 
 def test_no_planned_tickers_is_refused(env):
@@ -161,6 +215,18 @@ def test_a_snapshot_without_an_events_table_refuses_with_the_contract_error(tmp_
     assert raised.value.problem.details["data_code"] == "CONTRACT_MISMATCH"
 
 
+def test_missing_eligibility_table_uses_existing_snapshot_refusal(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _build(conn, clock, store, [_event_row("AAA", "2026-12-22")], with_chains=False)
+
+    with pytest.raises(OpsError) as raised:
+        _generate((conn, clock, store, tmp_path), tickers=("AAA",))
+
+    assert raised.value.code == "INPUT_CHANGED"
+    assert raised.value.problem.details["data_code"] == "CONTRACT_MISMATCH"
+
+
 def test_a_scope_without_a_head_refuses_with_the_not_ready_error(tmp_path):
     conn, clock, _ = catalog(tmp_path)  # nothing committed: the scope has no head
 
@@ -173,7 +239,7 @@ def test_a_scope_without_a_head_refuses_with_the_not_ready_error(tmp_path):
 
 def test_a_head_that_moves_after_the_scan_is_refused_by_the_pin(env):
     conn, clock, store, _ = env
-    population, scanned = _generate(env)
+    population, scanned, _ = _generate(env)
     _advance_head(conn, clock, store)
     assert _head_id(conn) != scanned
 
@@ -206,7 +272,7 @@ class _Pin:
                 "materialization_request_ref": "request-1"}
 
 
-def _plan(env, monkeypatch, *extra, mode="snapshot", tickers="AAA,BBB"):
+def _plan(env, monkeypatch, *extra, mode="snapshot", tickers="AAA,BBB,EEE"):
     conn, clock, _, root = env
     pin = _Pin()
     monkeypatch.setattr(planning, "pin_snapshot_inputs", pin)
@@ -225,6 +291,10 @@ def test_a_plan_without_a_file_records_the_generated_population(env, monkeypatch
     expected = sorted(_keys("AAA", "2026-12-20") + _keys("AAA", "2026-12-30")
                       + _keys("BBB", "2027-01-24"))
     assert plan["expected_population"] == expected
+    assert plan["candidate_exclusions"] == [{
+        "ticker": "EEE", "reason_code": "UNCARRIED_TICKER",
+        "missing_tables": ["daily_market", "option_chains"],
+    }]
     assert pin.calls[0]["expected_population"] == tuple(expected)
     assert pin.calls[0]["expected_snapshot_id"] == _head_id(env[0])  # the snapshot that was scanned
 
@@ -233,6 +303,48 @@ def test_generation_follows_the_watchlist_not_the_wider_context(env, monkeypatch
     plan, _ = _plan(env, monkeypatch, "--context-tickers", "AAA,BBB,CCC,DDD", tickers="AAA")
 
     assert plan["expected_population"] == sorted(_keys("AAA", "2026-12-20") + _keys("AAA", "2026-12-30"))
+
+
+def test_plan_filters_legacy_and_native_enumerators_to_the_same_carried_events(env, monkeypatch):
+    plan, _ = _plan(env, monkeypatch)
+    score_parameters = nightly._legacy_params(
+        "legacy_score", plan, plan["tickers"], plan["year_start"], plan["year_end"],
+        {"finality": "job-finality", "features": "job-features"},
+        context_tickers=plan["context_tickers"])
+    eligible_tickers = tuple(sorted({key.split("|")[0] for key in plan["expected_population"]}))
+
+    assert score_parameters["tickers"] == eligible_tickers == ("AAA", "BBB")
+    assert score_parameters["context_tickers"] == tuple(plan["context_tickers"])
+    conn, clock, store, _ = env
+    snapshot = Repository(conn, store).resolve(_head_id(conn))
+    native_requests = scan_forward_board_requests(
+        Repository(conn, store), snapshot, as_of=_AS_OF,
+        horizon_days=planning.GENERATED_HORIZON_DAYS, tickers=score_parameters["tickers"])
+    native_events = {(request.ticker, request.event_date.date().isoformat())
+                     for request in native_requests}
+    planned_events = {(key.split("|")[0], key.split("|")[2])
+                      for key in plan["expected_population"]}
+
+    assert native_events == planned_events
+    assert all(ticker != "EEE" for ticker, _ in native_events)
+
+
+def test_filtered_full_run_uses_subset_effect_scope(env, monkeypatch):
+    plan, _ = _plan(env, monkeypatch, "--full-run")
+    assert plan["full_run"] is True
+    eligible_tickers = tuple(sorted({key.split("|")[0] for key in plan["expected_population"]}))
+
+    requests = nightly.build_legacy_job_requests(
+        plan, tickers=tuple(plan["tickers"]), context_tickers=tuple(plan["context_tickers"]),
+        year_start=plan["year_start"], year_end=plan["year_end"],
+        full_universe=tuple(plan["context_tickers"]), input_mode="legacy")
+    score_request = next(request for request in requests
+                         if request.job.parameters["expected_ids"] == ("legacy_score",))
+
+    assert score_request.job.parameters["tickers"] == eligible_tickers == ("AAA", "BBB")
+    assert score_request.job.parameters["context_tickers"] == tuple(plan["context_tickers"])
+    assert score_request.job.parameters["effect_scope"] == nightly.effect_scope_for(eligible_tickers)
+    assert score_request.job.parameters["effect_scope"] != "shadow"
 
 
 def test_a_plan_without_a_watchlist_is_refused_not_widened_to_the_context(env, monkeypatch):
@@ -303,6 +415,7 @@ def test_the_same_snapshot_and_as_of_give_the_same_population_and_scope_hash(env
                                    plan["expected_population"], snapshot)
 
     assert first["expected_population"] == second["expected_population"]
+    assert first["candidate_exclusions"] == second["candidate_exclusions"]
     assert first["plan_hash"] == second["plan_hash"]
     assert scope(first) == scope(second)
     assert pin_one.calls[0]["expected_snapshot_id"] == pin_two.calls[0]["expected_snapshot_id"]
@@ -364,7 +477,7 @@ def _score_stage(monkeypatch, tmp_path, population, *, events=None):
 
 
 def test_the_generated_population_is_what_the_score_stage_emits(env, monkeypatch, tmp_path):
-    population, _ = _generate(env)
+    population, _, _ = _generate(env)
 
     document = _score_stage(monkeypatch, tmp_path, population)  # raises if the check fails
 
@@ -378,7 +491,7 @@ def test_a_native_board_population_would_have_failed_the_score_stage(env, monkey
     from engine.v2.ops.errors import OpsError
     from engine.v2.ops.native_board_universe import _COVERED_STRATEGIES
 
-    population, _ = _generate(env)
+    population, _, _ = _generate(env)
     native = [key for key in population if key.split("|")[1] in _COVERED_STRATEGIES]
     assert len(native) < len(population)  # the legacy set has CAL-P and CND-P on top
 
@@ -390,7 +503,7 @@ def test_the_score_stage_still_refuses_chooser_rows_it_cannot_tie_to_a_planned_e
         env, monkeypatch, tmp_path):
     from engine.v2.ops.errors import OpsError
 
-    population, _ = _generate(env)
+    population, _, _ = _generate(env)
     without_one_event = [key for key in population if not key.startswith("BBB|")]
 
     with pytest.raises(OpsError, match="differs from planned") as raised:
@@ -402,7 +515,7 @@ def test_the_score_stage_still_refuses_chooser_rows_it_cannot_tie_to_a_planned_e
 def test_a_planned_chooser_key_must_still_be_observed(env, monkeypatch, tmp_path):
     from engine.v2.ops.errors import OpsError
 
-    population, _ = _generate(env)
+    population, _, _ = _generate(env)
 
     with pytest.raises(OpsError, match="differs from planned") as raised:
         _score_stage(monkeypatch, tmp_path, [*population, "ZZZ|DYN-SV|2026-12-22"])

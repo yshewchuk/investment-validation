@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The test-layout ratchet (R1-R6): root tests move into ``tests/v2``, never back.
+"""The test-layout ratchet (R1-R7): root tests move into ``tests/v2``, never back.
 
 ``checks/test_layout_budget.txt`` records the exact root-level ``tests/test_*.py``
 count. Run directly as a CLI. See ``guides/test_selection_by_layer.md``.
@@ -53,8 +53,13 @@ def _owned(path):
     return None if path.startswith(ts.INTEGRATION) else ts.package_for(path, V2)
 
 
-def check_layout(base_paths, head_paths, base_budget, head_budget, root=ROOT):
-    """The pure ratchet core: R1-R6 over base/head path sets and budgets."""
+def check_layout(base_paths, head_paths, base_budget, head_budget, root=ROOT,
+                 modified_paths=()):
+    """The pure ratchet core: R1-R7 over base/head path sets and budgets.
+
+    ``modified_paths`` are tracked paths whose content changed in place (git
+    status M, renames disabled); a move or deletion never appears there.
+    """
     base, head = set(base_paths), set(head_paths)
     total = sum(1 for path in head if _rooted(path))
     base_total = sum(1 for path in base if _rooted(path))
@@ -62,6 +67,11 @@ def check_layout(base_paths, head_paths, base_budget, head_budget, root=ROOT):
     for path in sorted(head - base):  # R1: a new test outside the layout
         if is_test(path) and not (path.startswith(ts.INTEGRATION) or _owned(path)):
             found.append(f"{path}: new test outside tests/v2/<package>/ or {ts.INTEGRATION}")
+    for path in sorted(set(modified_paths)):  # R7: a root test edited in place
+        if _rooted(path) and path in head:
+            found.append(f"{path}: root-level test modified in place; git mv it to "
+                         "tests/v2/<package>/ (or the package test dir) and decrease "
+                         f"{BUDGET_PATH} by one")
     if total > base_total:  # R2: the unmoved set grew
         found.append(f"root test set grew from {base_total} to {total}")
     if head_budget != total:  # R3: stale budget
@@ -115,7 +125,13 @@ def main(argv=None):
         return 1
     head = _paths(root, "ls-files", "-z") + _paths(
         root, "ls-files", "--others", "--exclude-standard", "-z")
-    report = check_layout(base, head, base_budget, budget, root)
+    try:
+        modified = _paths(root, "diff", "--name-only", "--no-renames",
+                          "--diff-filter=M", "-z", args.base_ref, "--")
+    except RuntimeError as exc:
+        print(f"test-layout ratchet: cannot diff against base: {exc}", file=sys.stderr)
+        return 1
+    report = check_layout(base, head, base_budget, budget, root, modified)
     if report.ok:
         if not args.quiet:
             print("TEST LAYOUT OK")

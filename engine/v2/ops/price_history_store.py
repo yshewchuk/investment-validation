@@ -575,6 +575,7 @@ def _insert_price_captures(conn: sqlite3.Connection, receipt_id: str, attempts: 
 def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: str, *,
                        prior_manifest, updated_records: dict, attempts: list[dict],
                        clock: Clock, expected_snapshot_id: str | None = None):
+    """Commit captured fragments against the fenced head and preserve its references."""
     head = _check_expected_head(conn, scope, expected_snapshot_id)
     if head is None:
         raise fail("SNAPSHOT_NOT_READY",
@@ -675,7 +676,8 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     """
     lock = SupervisorLock(Path(root) / "supervisor.lock")
     if not lock.acquire():
-        raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
+        raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog",
+                   details={"resource": "supervisor.lock"})
     try:
         _check_expected_head(conn, scope, expected_snapshot_id)
         return _capture(conn, store, source_root, scope=scope, dry_run=dry_run, clock=clock,
@@ -685,6 +687,7 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
 
 
 def _check_expected_head(conn, scope: str, expected_snapshot_id: str | None):
+    """Read the current head and refuse an explicitly mismatched snapshot."""
     head = conn.execute("SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
                         (scope,)).fetchone()
     if expected_snapshot_id is not None and (
@@ -711,6 +714,7 @@ def _usable_tickers(required_tickers: frozenset[str], listed: list[str],
 def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
             dry_run: bool, clock: Clock | None, required_tickers: Iterable[str],
             expected_snapshot_id: str | None = None) -> dict:
+    """Read rooted price sources, check required history, and capture one generation."""
     required = frozenset(required_tickers)
     clock = clock or SystemClock()
     source_root = Path(source_root)

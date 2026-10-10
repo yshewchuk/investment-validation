@@ -61,7 +61,7 @@
     "tests/test_v2_ops_render_parity.py",
     "tests/test_v2_ops_replay_scope.py",
     "tests/test_v2_ops_resolved_session.py",
-    "tests/test_v2_ops_runner_onboarding.py",
+    "tests/v2/ops/test_v2_ops_runner_onboarding.py",
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_same_session_replan.py",
     "tests/test_v2_ops_scope_separation.py",

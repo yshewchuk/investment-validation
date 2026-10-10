@@ -492,12 +492,13 @@ def _ticker_list(value):
 
 
 def _planned_population(args, root, conn, clock, tickers):
-    """``(population, snapshot_id)``: a supplied ``--expected-population`` file always wins,
-    unchanged. Otherwise ``--input-mode snapshot`` generates it
-    (:func:`~engine.v2.ops.snapshot_planning.generated_population`) for the ``--tickers`` watchlist and
-    returns the snapshot id it read; any other mode has no snapshot and yields ``()``."""
+    """``(population, snapshot_id, candidate_exclusions)``: a supplied
+    ``--expected-population`` file always wins, unchanged. Otherwise ``--input-mode snapshot``
+    generates it (:func:`~engine.v2.ops.snapshot_planning.generated_population`) for the ``--tickers``
+    watchlist and forwards the snapshot id it read plus the uncarried-ticker exclusions it built;
+    any other mode has no snapshot and yields ``()`` and empty exclusions."""
     if args.expected_population or args.input_mode != "snapshot":
-        return _read_expected_population(args), None
+        return _read_expected_population(args), None, ()
     if not args.snapshot_scope:
         raise fail("INVALID_REQUEST", "snapshot input mode needs --snapshot-scope")
     from engine.v2.ops.snapshot_planning import generated_population
@@ -571,7 +572,8 @@ def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
         context_tickers = _ticker_list(args.context_tickers) or tickers
-        population, snapshot_id = _planned_population(args, root, conn, clock, tickers)
+        population, snapshot_id, candidate_exclusions = _planned_population(
+            args, root, conn, clock, tickers)
         from engine.v2.ops.snapshot_stages import _catalog_path
         plan = nightly_plan(Path(__file__).resolve().parents[3], args.as_of,
                             mode=args.mode, manifest_ref=_read_input_manifest_ref(args, root, conn, clock),
@@ -579,6 +581,7 @@ def _plan_command(args, root, conn, clock):
                             year_start=args.year_start, year_end=args.year_end,
                             expected_population=population, clock=clock,
                             input_mode=args.input_mode, full_run=args.full_run,
+                            candidate_exclusions=candidate_exclusions,
                             snapshot_inputs=_snapshot_inputs(args, root, conn, clock, context_tickers,
                                                              population, snapshot_id),
                             refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args),

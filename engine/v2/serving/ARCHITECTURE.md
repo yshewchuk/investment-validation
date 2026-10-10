@@ -100,7 +100,13 @@ unrecognized publication identity is unknown to clients; failed reads do not
 change a release pin. Serving never retries. Reads have no write or partial
 artifact.
 
-`GET /api/v1/native_parity` exposes report identity and the existing aggregate.
+`GET /api/v1/native_parity` exposes report identity and the existing aggregate,
+plus `native_refused_tickers`, the saved refusal entries from both refusal
+collections projected as `{ticker, reason}` records. Older refusal rows
+without a top-level `ticker` use `row_key.ticker` when `row_key` is a
+structured key object, or the ticker prefix when `row_key` is a string; the
+reason comes from the saved `refusal_code`. The list is empty when the report
+has no refusals.
 `/native_parity/mismatches` pages row-key/dimension entries with known fields
 marked agree/differ and stored values only for differing fields;
 `/native_parity/unpaired?side=legacy|native` pages unpaired row keys.
@@ -114,7 +120,8 @@ malformed-report refusal. Legacy summaries still ignore saved mismatch values;
 legacy details validate the values they return.
 Finite numbers, large integers, nulls and string markers remain valid values.
 Pre-v1.2 reports and unstamped diagnostic comparisons retain their legacy
-summary behavior; the API requires complete run identity for v1.2 reports.
+summary behavior; v1.2 and v1.3 report inputs require both `as_of` and
+`generated_at` as complete run identity.
 The API takes an optional configured report path. `no_report` is the default
 only when neither an explicit report path nor an ops root is configured; with
 an ops root and no explicit path, the API discovers the report from the catalog.
@@ -136,9 +143,9 @@ shadow parity job returns `no_report` with typed reason
 `NATIVE_PARITY_JOB_NOT_FOUND`. If the selected job's output is missing,
 unreadable, or schema-invalid, the API returns a typed
 `NATIVE_PARITY_REPORT_MALFORMED` refusal and does not silently show an empty
-table or fall back to an older job. For schema v1.2, the API preserves the
-report's run identity and as-of session so the dashboard can label the run it
-displays.
+table or fall back to an older job. For schemas v1.2 and v1.3, the API
+preserves the report's run identity and as-of session so the dashboard can
+label the run it displays.
 
 | Native parity condition | Outcome |
 |---|---|

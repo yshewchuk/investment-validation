@@ -85,7 +85,7 @@ QUALIFICATION_POPULATION = "expected_population.json"
 
 STATUSES = ("submitted", "not_yet", "snapshot_not_yet", "missed", "already_submitted",
             "busy_legacy", "error", "submitting", "completed", "failed", "failed_setup", "idle",
-            "timed_out")
+            "timed_out", "busy_supervisor")
 #: A terminal as-of never probes, never writes and never submits again.
 TERMINAL_STATUSES = frozenset({"already_submitted", "completed", "failed", "missed",
                                "failed_setup"})
@@ -101,7 +101,7 @@ TERMINAL_STATUSES = frozenset({"already_submitted", "completed", "failed", "miss
 #: not caught up) is exactly as resumable as one that timed out or errored --
 #: _decide already gated this as_of once.
 RESUME_STATUSES = frozenset({"submitting", "submitted", "error", "timed_out",
-                             "snapshot_not_yet"})
+                             "snapshot_not_yet", "busy_supervisor"})
 FAILURE_STATUSES = frozenset({"error", "failed", "failed_setup", "missed", "timed_out"})
 SUCCESS_JOB_STATES = frozenset({"succeeded"})
 TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "cancelled", "blocked"})
@@ -378,12 +378,18 @@ def _problem_detail(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _setup_error_count(prior: TriggerReceipt | None) -> int:
+    """Carry setup errors across lock waits, never reinterpret a timeout streak."""
+    return (prior.error_count if prior is not None
+            and prior.status in {"error", "busy_supervisor"} else 0)
+
+
 def _failure(root: Path, clock, as_of: str, plan_ref: str | None,
              exc: BaseException, prior: TriggerReceipt | None, *,
              snapshot_attempt: int | None = None) -> TriggerReceipt:
+    """Record a setup failure without letting intervening lock waits erase its budget."""
     detail = _problem_detail(exc)
-    previous = prior.error_count if prior is not None and prior.status == "error" else 0
-    count = previous + 1
+    count = _setup_error_count(prior) + 1
     resolved_snapshot_attempt = (
         snapshot_attempt if snapshot_attempt is not None
         else (prior.snapshot_attempt if prior is not None else 0))
@@ -570,6 +576,12 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
         plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
                            full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
     except _HANDLED_FAILURES as exc:
+        if (isinstance(exc, OpsError) and exc.code == "RESOURCE_UNAVAILABLE"
+                and exc.problem.details.get("resource") == "supervisor.lock"):
+            return None, _record(root, _receipt(
+                clock, as_of, "busy_supervisor", _problem_detail(exc),
+                error_count=_setup_error_count(prior),
+                snapshot_attempt=snapshot_attempt))
         return None, _failure(root, clock, as_of, None, exc, prior,
                               snapshot_attempt=snapshot_attempt + _snapshot_attempt_bump(exc))
     _record(root, _receipt(clock, as_of, "submitting",

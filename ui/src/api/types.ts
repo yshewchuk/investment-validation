@@ -194,6 +194,7 @@ export interface NativeParityReportSummary {
   native_refused_count: number | null;
   native_refused_unmatched_count: number | null;
   native_refused_reasons: Record<string, number>;
+  native_refused_tickers: Array<{ ticker: string; reason: string }>;
   schema_version: SchemaVersion;
 }
 export type NativeParitySummary = NativeParityReportSummary | { status: "no_report" };
