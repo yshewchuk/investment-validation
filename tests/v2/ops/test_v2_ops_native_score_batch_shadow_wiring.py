@@ -798,6 +798,8 @@ def test_worker_without_producer_parameters_requires_staged_events(tmp_path):
         "catalog_path": str(tmp_path / "catalog.sqlite"),
     }, tmp_path) == ([], None, "earnings-rev")
     with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+        _worker_event_documents({"producer_mode": "unknown"}, tmp_path)
+    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
         _worker_event_documents({"producer_mode": "snapshot"}, tmp_path)
     with pytest.raises(OpsError, match="VALIDATION_FAILED"):
         _worker_event_documents({

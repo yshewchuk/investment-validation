@@ -83,13 +83,13 @@ refusals — a pure function; an empty `events` sequence is a legitimate no-op.
 `records.json`/`refusals.json`. **Supports `STR-THRU` only** — any other
 strategy refuses per-row. The tick sidecar only submits the shadow job for a
 new eligible snapshot-pinned identity (`producer_mode="snapshot"`); direct
-worker callers default to staged `events.json`. Snapshot mode derives
-`calendar_revision` from pinned earnings data; staged mode uses its parameter.
+worker callers default to staged `events.json`; snapshot mode derives `calendar_revision` from pinned earnings data, while staged mode uses its parameter.
 The production-default `legacy`/unpinned path stays a no-op; production uses `projection` (3 GiB, 2 CPUs). A producer exception fails the native attempt
 before writing that attempt's event/refusal or score outputs; reused-root files
 may remain as untrusted residue. The worker job has five bounded attempts,
 with delays of 30s, 2m, 10m and 30m. Worker production cannot stall
 supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.
+Snapshot parameters raise `VALIDATION_FAILED` for an unsupported `producer_mode` or, in snapshot mode, a missing or incomplete `catalog_path`/`objects_root` pair.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
