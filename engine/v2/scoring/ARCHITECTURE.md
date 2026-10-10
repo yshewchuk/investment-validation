@@ -540,9 +540,9 @@ auditable.
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. Synthetic producer-to-simulation and refusal tests (~150 test lines).
+3. End-to-end producer, simulation, refusal and matched/mismatched population tests (~150 test lines).
 
-Decisions needed:
+Decisions needed before implementing these slices:
 - **Population:** freeze the full producer universe (one deterministic
   artifact) or pass nightly ticker scope (closer board parity, coupled release).
 - **Cutoff:** keep the explicit exclusive paired-state cutoff (reproducible)
