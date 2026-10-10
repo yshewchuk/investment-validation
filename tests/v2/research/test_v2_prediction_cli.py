@@ -662,7 +662,7 @@ def test_sklearn_seed_boundaries_complete_real_cli_smoke(tmp_path, capsys, seed)
 
 @pytest.mark.parametrize("phase", ["fresh", "pending", "completed"])
 @pytest.mark.parametrize("smoke", [False, True])
-@pytest.mark.parametrize("obstruction", ["foreign", "symlink", "directory"])
+@pytest.mark.parametrize("obstruction", ["foreign", "symlink", "directory", "ancestor0", "ancestor1", "ancestor2"])
 def test_report_destination_conflict_precedes_cli_publication_effects(
         source, monkeypatch, capsys, phase, smoke, obstruction):
     _invoke(source, capsys, "register")
@@ -692,12 +692,20 @@ def test_report_destination_conflict_precedes_cli_publication_effects(
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         path.unlink()
-    if obstruction == "foreign":
-        path.write_bytes(b"unrelated report")
+    blocked = path
+    if obstruction.startswith("ancestor"):
+        blocked = path.parents[int(obstruction[-1])]
+        parent = path.parent
+        while parent != blocked:
+            parent.rmdir()
+            parent = parent.parent
+        blocked.rmdir()
+    if obstruction == "foreign" or obstruction.startswith("ancestor"):
+        blocked.write_bytes(b"unrelated report")
     elif obstruction == "directory":
-        path.mkdir()
+        blocked.mkdir()
     else:
-        path.symlink_to(source.root / "missing-foreign-report")
+        blocked.symlink_to(source.root / "missing-foreign-report")
     before, objects = _catalog(source.conn), _objects(source.store)
     ledger_before = ledger.read_bytes() if ledger.exists() else None
     with monkeypatch.context() as patch:
@@ -711,9 +719,9 @@ def test_report_destination_conflict_precedes_cli_publication_effects(
     after = _objects(source.store)
     for key in set(after) - set(objects):
         assert json.loads(after[key])["schema_version"] == "native_experiment_refusal.v1.0"
-    assert path.is_symlink() if obstruction == "symlink" else (
-        path.is_dir() if obstruction == "directory" else path.read_bytes() == b"unrelated report")
-    path.rmdir() if obstruction == "directory" else path.unlink()
+    assert blocked.is_symlink() if obstruction == "symlink" else (
+        blocked.is_dir() if obstruction == "directory" else blocked.read_bytes() == b"unrelated report")
+    blocked.rmdir() if obstruction == "directory" else blocked.unlink()
     result = _invoke(source, capsys, "run", *args)
     assert Path(result["report"]) == path
     assert "# Native prediction report" in path.read_text()

@@ -74,7 +74,8 @@ def _report_path(store, registration, key, report=None, report_ref=None):
     path = store.root / "native_reports" / registration.run_id / mode / "REPORT.md"
     if report is not None:
         stored = store.root / report_ref["storage_key"]
-        if (path.is_symlink() or path.resolve() != path or (path.exists()
+        if (any(parent.exists() and not parent.is_dir() for parent in path.parents)
+                or path.is_symlink() or path.resolve() != path or (path.exists()
                 and (not path.is_file() or path.read_bytes() != report
                      or (stored.exists() and path.samefile(stored))))):
             raise _conflict(store, registration)

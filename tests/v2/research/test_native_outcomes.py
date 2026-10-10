@@ -911,3 +911,66 @@ def test_report_destination_identity_across_publication_states(
             assert not ledger.exists()
         else:
             assert len(_rows(ledger)) == 1
+
+
+@pytest.mark.parametrize("phase,operation", [
+    ("fresh", "publish"), ("pending", "publish"), ("pending", "replay"),
+    ("pending", "export"), ("completed", "publish"), ("completed", "replay"),
+    ("completed", "export"),
+])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("ancestor", [0, 1, 2], ids=["mode", "run", "native-reports"])
+def test_non_directory_report_ancestor_refuses_before_any_publication_effect(
+        source, tmp_path, monkeypatch, phase, operation, no_ledger, ancestor):
+    registration = _call(source)
+    ledger = tmp_path / "ancestor-collision" / "ledger.csv"
+    options = {"no_ledger": no_ledger}
+    if phase == "pending":
+        real_reserve = outcomes._reserve
+
+        def interrupt_completion(conn, registration, key, *args, **kwargs):
+            if key.endswith("_receipt"):
+                raise OSError("synthetic completion interruption")
+            return real_reserve(conn, registration, key, *args, **kwargs)
+
+        def interrupt_append(*args, **kwargs):
+            raise OSError("synthetic append interruption")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(outcomes, "_reserve", interrupt_completion)
+            patch.setattr(outcomes, "ledger_append", interrupt_append)
+            with pytest.raises(OpsError, match="RESOURCE_UNAVAILABLE"):
+                _publish(source, registration, ledger, **options)
+    elif phase == "completed":
+        _publish(source, registration, ledger, **options)
+    path = source.store.root / "native_reports" / registration.run_id / (
+        "smoke" if no_ledger else "recorded") / "REPORT.md"
+    blocked = path.parents[ancestor]
+    blocked.parent.mkdir(parents=True, exist_ok=True)
+    blocked.write_bytes(b"preserve unrelated ancestor bytes")
+    before, objects = _catalog(source.conn), _objects(source.store)
+    csv_bytes = ledger.read_bytes() if ledger.exists() else None
+    call = {"publish": _publish, "replay": _replay}.get(operation)
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes, "ledger_append", _forbid)
+        patch.setattr(outcomes, "_reserve", _forbid)
+        with pytest.raises(OpsError) as captured:
+            if call:
+                call(source, registration, ledger, **options)
+            else:
+                outcomes.export_native_report(source.conn, source.store, registration,
+                                              ledger_path=ledger, **options)
+    _assert_conflict(source, captured, registration)
+    assert _catalog(source.conn) == before
+    _assert_objects_preserved(source, objects)
+    assert (ledger.read_bytes() if ledger.exists() else None) == csv_bytes
+    assert blocked.read_bytes() == b"preserve unrelated ancestor bytes"
+    after = _objects(source.store)
+    for key in set(after) - set(objects):
+        assert json.loads(after[key])["schema_version"] == "native_experiment_refusal.v1.0"
+    blocked.unlink()
+    (_publish if phase == "fresh" else _replay)(source, registration, ledger, **options)
+    assert outcomes.export_native_report(source.conn, source.store, registration,
+                                         ledger_path=ledger, **options) == path
+    assert path.read_text() == REPORT
+    assert not ledger.exists() if no_ledger else len(_rows(ledger)) == 1

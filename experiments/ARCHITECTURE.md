@@ -51,7 +51,8 @@ create-only installation, so editing the export cannot alter stored report bytes
 An existing export sharing the stored object's inode is an identity conflict.
 Report-bearing publication, replay and export preflight the fixed destination
 before new result artifacts, intent reservation, ledger append or completion.
-Existing conflicts are R6; preflight and CSV/export are not one atomic transaction.
+Existing non-directory ancestors and other destination conflicts are R6 before
+effects; preflight and CSV/export are not one atomic transaction.
 Recorded destinations must be nonempty and bind the exact normalized path used
 for append. Saved outcomes require the complete canonical schema, object-valued
 failure details and a nonblank UTF-8 success report before any ledger effect.
