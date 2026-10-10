@@ -8,7 +8,7 @@ and shared panel rows/anchors per ``(ticker, event_date, session)``,
 per-``BoardRequest`` calendar/quote composition, empty-window short circuit and
 deterministic public-safe refusal documents. The producer is the unit under
 test; its 4a readers are faked, over a real catalog/ArtifactStore snapshot
-carrying only ``earnings_events``.
+carrying ``earnings_events`` and an empty ``option_chains`` table.
 """
 from __future__ import annotations
 
@@ -39,6 +39,8 @@ from tests.data_scan_support import (
 _EVENTS_NAME = "earnings_events"
 _EVENTS = contract_for(_EVENTS_NAME)
 _EVENTS_REF = contract_ref_for(_EVENTS)
+_OPTIONS_NAME = "option_chains"
+_OPTIONS = contract_for(_OPTIONS_NAME)
 
 _AS_OF = "2024-01-05"
 _HORIZON_DAYS = 30
@@ -82,9 +84,37 @@ def _snapshot(tmp_path, events: list[dict], *, partition: str = "2024"):
     conn, clock, store = catalog_and_store(tmp_path)
     rows = sorted(events, key=lambda row: tuple(row[f] for f in _EVENTS.primary_key))
     fragment = publish_and_inspect(store, _EVENTS, _EVENTS_REF, rows, partition)
-    snapshot = commit_tables(conn, clock, {_EVENTS_NAME: [fragment]},
-                             {_EVENTS_NAME: _EVENTS}, scope="test")
+    snapshot = commit_tables(
+        conn,
+        clock,
+        {_EVENTS_NAME: [fragment], _OPTIONS_NAME: []},
+        {_EVENTS_NAME: _EVENTS, _OPTIONS_NAME: _OPTIONS},
+        scope="test",
+    )
     return Repository(conn, store), snapshot
+
+
+def _panel_snapshot_with_option_chains(fixture):
+    from dataclasses import replace
+
+    from engine.v2.contracts.data import DatasetVersionRef
+    from tests.data_scan_support import fake_hash
+
+    snapshot = fixture._snapshot()
+    version = DatasetVersionRef(
+        dataset_version_id="dsv-option-chains-empty",
+        table_contract_ref=contract_ref_for(_OPTIONS),
+        manifest_hash=fake_hash("option-chains-empty"),
+    )
+    snapshot = replace(
+        snapshot,
+        table_versions={**snapshot.table_versions, _OPTIONS_NAME: version},
+        knowledge_mode_by_table={
+            **snapshot.knowledge_mode_by_table,
+            _OPTIONS_NAME: "observed",
+        },
+    )
+    return snapshot, {**fixture._contracts(), _OPTIONS_NAME: _OPTIONS}
 
 
 def _wire_event_date(value) -> str:
@@ -335,7 +365,7 @@ def test_panel_reader_called_once_per_ticker(
         (table, rows) for (table, _ticker), rows in batches.items()
         if table == "price_history" and rows)
     batches[(price_history_table, "BBB")] = price_history_rows
-    snapshot = fixture._snapshot()
+    snapshot, contracts = _panel_snapshot_with_option_chains(fixture)
     reads = []
 
     class CountingRepository(fixture._FakeRepository):
@@ -358,7 +388,7 @@ def test_panel_reader_called_once_per_ticker(
                 for (candidate_table, ticker), rows in self._batches.items()
                 if candidate_table == table_name)
 
-    repository = CountingRepository(snapshot, fixture._contracts(), batches)
+    repository = CountingRepository(snapshot, contracts, batches)
     keys = [BoardRequest(ticker=ticker, strategy="STR-THRU",
                          event_date=fixture._EVENT, session="BMO")
             for ticker in ("AAA", "BBB")]
@@ -448,13 +478,13 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
         (table, rows) for (table, _ticker), rows in batches.items()
         if table == fixture.PRICE_HISTORY_TABLE_NAME and rows)
     batches[(price_table, "AAA")] = price_rows
-    snapshot = fixture._snapshot()
+    snapshot, contracts = _panel_snapshot_with_option_chains(fixture)
     event_key = BoardRequest(
         ticker="AAA", strategy="STR-THRU", event_date=fixture._EVENT, session="BMO")
 
     class CountingRepository(fixture._FakeRepository):
         def __init__(self, batches_by_key):
-            super().__init__(snapshot, fixture._contracts(), batches_by_key)
+            super().__init__(snapshot, contracts, batches_by_key)
             self.spy_reads = 0
 
         def scan(self, query, *, table_name):
@@ -868,8 +898,8 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
     batches[("daily_market", "SPY")] = fixture._spy_rows(periods=300)
     batches[(fixture.COMPUTED_MOVES_TABLE_NAME, "AAA")] = \
         fixture._computed_rows([(old_day, 4.0, False)])
-    snapshot = fixture._snapshot()
-    
+    snapshot, contracts = _panel_snapshot_with_option_chains(fixture)
+
     # Create an interval-aware repository subclass
     class IntervalAwareRepository(fixture._FakeRepository):
         def scan(self, query, *, table_name):
@@ -897,7 +927,7 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
                 for (candidate_table, ticker), rows in self._batches.items()
                 if candidate_table == table_name)
 
-    repository = IntervalAwareRepository(snapshot, fixture._contracts(), batches)
+    repository = IntervalAwareRepository(snapshot, contracts, batches)
 
     def enumerate_one(repo, snap, *, as_of, horizon_days, tickers=None):
         from engine.v2.ops.native_board_universe import BoardRequest

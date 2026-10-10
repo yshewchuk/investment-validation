@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from datetime import datetime
@@ -1597,3 +1598,13 @@ def test_alternating_terminal_failure_and_timeout_still_reaches_failed_setup_aft
     assert third.status == "failed_setup"
     assert "3 consecutive times" in third.detail  # reports snapshot_attempt (3), not error_count
     assert third.snapshot_attempt == 3
+
+
+def test_module_launcher_runs_main_in_a_subprocess():
+    """The systemd unit starts this as python -m: the __main__ guard must call main()."""
+    done = subprocess.run(
+        [sys.executable, "-m", "engine.v2.ops.nightly_trigger", "--help"],
+        cwd=ROOT, capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "--as-of" in done.stdout and "--root" in done.stdout

@@ -30,7 +30,10 @@ from engine.v2.foundation.market_calendar import (
 )
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_board_universe import BoardRequest
-from engine.v2.ops.native_score_batch_types import NativeScoreBatchRowRefusal
+from engine.v2.ops.native_score_batch_types import (
+    PRICE_HISTORY_NOT_AVAILABLE_DETAIL,
+    NativeScoreBatchRowRefusal,
+)
 from engine.v2.ops.nightly_raw_rows import CalendarRowInputs, scan_calendar_row
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
@@ -192,8 +195,9 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
 def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key: BoardRequest, *,
                              decision_session: Any, calendar: CalendarSessions) -> CalendarRowInputs:
     """One row's pinned spot, resolved strategy expiry and independent planned
-    exit staged into ``scan_calendar_row``. A missing/unusable exact-session
-    spot or a repository failure fails the whole call; the key's strategy and
+    exit staged into ``scan_calendar_row``. A missing or unusable exact-session
+    spot raises the per-key ``PRICE_HISTORY_NOT_AVAILABLE`` refusal; a
+    repository failure still fails the whole call. The key's strategy and
     session domains are checked first, so an unsupported value is
     ``INVALID_REQUEST`` rather than a masked expiry refusal; an empty eligible
     expiry domain, or the native no-expiry geometry refusals, are the one
@@ -210,10 +214,12 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
         lookback_sessions=0), snapshot)
     spot_row = next((row for row in series if row.date == session_day), None)
     if spot_row is None:
-        raise data_fail("CONTRACT_MISMATCH", "no exact-session pinned spot for this ticker")
+        raise NativeScoreBatchRowRefusal(
+            key, "PRICE_HISTORY_NOT_AVAILABLE", PRICE_HISTORY_NOT_AVAILABLE_DETAIL)
     spot = spot_row.close_raw
     if spot is None or not math.isfinite(spot) or spot <= 0:
-        raise data_fail("CONTRACT_MISMATCH", "exact-session pinned spot close is unusable")
+        raise NativeScoreBatchRowRefusal(
+            key, "PRICE_HISTORY_NOT_AVAILABLE", PRICE_HISTORY_NOT_AVAILABLE_DETAIL)
     candidates = scan_candidate_expiries(repository, snapshot, key, decision_session=session_day)
     if not candidates:
         raise _no_resolvable(key)

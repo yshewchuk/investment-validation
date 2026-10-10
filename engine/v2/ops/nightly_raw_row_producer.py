@@ -8,9 +8,10 @@ one build-scoped decision calendar plus one panel row/anchor per distinct
 ``(ticker, event_date, session)``, then composes calendar and quote rows per
 request. The calendar helper still refuses an intraday event date, so this
 producer is the admission boundary #243 requires: such a key is refused under
-its exact, never-normalized identity. Nothing scores, publishes or writes; only
-a complete calendar-and-quote composition becomes an event, and a failure
-propagates instead of returning a partial tuple. Like ``native_board_universe``,
+its exact, never-normalized identity. Nothing scores, publishes or writes; a
+complete calendar-and-quote composition becomes an event, a typed per-key
+refusal remains in the refusal output, and other failures abort instead of
+returning a partial tuple. Like ``native_board_universe``,
 this module never imports ``engine.score``/``engine.structures``/
 ``engine.replay``/``engine.fills``.
 """
@@ -33,7 +34,10 @@ from engine.v2.data.repository import Repository
 from engine.v2.features.panel_row_inputs import PanelRowInputs, scan_panel_row
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_board_universe import BoardRequest
-from engine.v2.ops.native_score_batch_types import NativeScoreBatchRowRefusal
+from engine.v2.ops.native_score_batch_types import (
+    PRICE_HISTORY_NOT_AVAILABLE_DETAIL,
+    NativeScoreBatchRowRefusal,
+)
 from engine.v2.ops.nightly_calendar_inputs import (
     scan_calendar_row_inputs,
     scan_decision_calendar,
@@ -52,10 +56,12 @@ _INTRADAY_DETAIL = "the board request carries an intraday event timestamp"
 _PANEL_HISTORY_DETAIL = "the pinned snapshot lacks required earlier panel sessions"
 _PRICE_HISTORY_CODE = "PRICE_HISTORY_NOT_AVAILABLE"
 _PRICE_HISTORY_DETAIL = "the pinned snapshot has no price history for this ticker"
+_SPOT_HISTORY_DETAIL = PRICE_HISTORY_NOT_AVAILABLE_DETAIL
 _ROW_REFUSAL_DETAILS = {
     "NO_RESOLVABLE_EXPIRY": "no strategy-eligible listed expiry for the board request",
     "EVENT_NOT_FOUND": "no exact calendar event for the board request in the snapshot",
     "IDENTITY_CONFLICT": "multiple exact calendar events for the board request",
+    "PRICE_HISTORY_NOT_AVAILABLE": _SPOT_HISTORY_DETAIL,
 }
 #: The only event refusals the calendar helper may expose as a typed error.
 _EVENT_ERROR_CODES = ("EVENT_NOT_FOUND", "IDENTITY_CONFLICT")
@@ -228,15 +234,14 @@ def build_native_score_batch_events(
     ``tier4_row`` -- always ``{}`` -- ``quote_rows``, ``quote_status``) per fully
     composed request, plus the disjoint ``producer_refusals.v1.0`` document. An
     empty enumeration returns both empty before any calendar, panel, spot or
-    quote read, and an all-intraday one returns only its refusals. Only
-    ``NO_RESOLVABLE_EXPIRY``/``EVENT_NOT_FOUND``/``IDENTITY_CONFLICT`` become
-    per-key refusals, plus ``PRICE_HISTORY_NOT_AVAILABLE`` as a per-key absence
-    from pinned table membership, refused at its original position while the
-    rest of the build proceeds; a malformed series, an absent ``price_history``
-    table, and an exact-session spot failure propagate, as does every other
-    refusal, repository or caller-input failure, and an absent
-    ``option_chains`` table once price-history admission refuses every
-    non-intraday request, and the whole build fails.
+    quote read, and an all-intraday one returns only its refusals. A missing
+    ticker history or missing/unusable exact-session spot becomes a
+    per-key ``PRICE_HISTORY_NOT_AVAILABLE`` refusal at its original position.
+    ``NO_RESOLVABLE_EXPIRY``, ``EVENT_NOT_FOUND`` and ``IDENTITY_CONFLICT``
+    are likewise per-key refusals; other keys proceed. Malformed series data,
+    missing source tables, repository failures, caller-input failures and other
+    errors still fail the whole build. An absent ``option_chains`` table fails
+    before any non-intraday key is processed.
     """
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
@@ -252,11 +257,11 @@ def build_native_score_batch_events(
         else:
             admitted.append((position, key))
     had_non_intraday = bool(admitted)
+    if had_non_intraday and "option_chains" not in snapshot.table_versions:
+        raise fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
+                   details={"table_name": "option_chains"})
     admitted = _admit_price_history_requests(repository, snapshot, admitted, refusals)
     if not admitted:
-        if had_non_intraday and "option_chains" not in snapshot.table_versions:
-            raise fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
-                       details={"table_name": "option_chains"})
         return [], _refusals_document(ordered())
 
     decision_session = validated_as_of(as_of).normalize().date().isoformat()

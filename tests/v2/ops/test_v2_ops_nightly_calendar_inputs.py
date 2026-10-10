@@ -440,36 +440,36 @@ def test_calendar_row_inputs_missing_ticker_is_contract_mismatch(tmp_path):
     assert exc.value.code == "CONTRACT_MISMATCH"
 
 
-def test_calendar_row_inputs_stale_only_series_is_contract_mismatch(tmp_path):
+def test_calendar_row_inputs_stale_only_series_is_price_history_not_available(tmp_path):
     repository, snapshot = _snapshot(
         tmp_path, price={"AAA": [_price_row("AAA", "2024-01-04", close_raw=11.0)]})
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(NativeScoreBatchRowRefusal) as exc:
         scan_calendar_row_inputs(repository, snapshot, _STRADDLE_KEY,
                                  decision_session=_SESSION, calendar=_CALENDAR)
-    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code == "PRICE_HISTORY_NOT_AVAILABLE"
 
 
-def test_calendar_row_inputs_empty_eligible_series_is_contract_mismatch(tmp_path):
+def test_calendar_row_inputs_empty_eligible_series_is_price_history_not_available(tmp_path):
     repository, snapshot = _snapshot(
         tmp_path, price={"AAA": [_price_row("AAA", "2024-01-08", close_raw=11.0)]})
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(NativeScoreBatchRowRefusal) as exc:
         scan_calendar_row_inputs(repository, snapshot, _STRADDLE_KEY,
                                  decision_session=_SESSION, calendar=_CALENDAR)
-    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code == "PRICE_HISTORY_NOT_AVAILABLE"
 
 
 @pytest.mark.parametrize("bad", [None, 0.0, -3.0, float("nan")])
-def test_calendar_row_inputs_unusable_raw_close_is_contract_mismatch(tmp_path, bad):
+def test_calendar_row_inputs_unusable_raw_close_is_price_history_not_available(tmp_path, bad):
     repository, snapshot = _snapshot(
         tmp_path,
         price={"AAA": [_price_row("AAA", "2024-01-04", close_raw=11.0, close_adj=11.0),
                        _price_row("AAA", _SESSION, close_raw=bad, close_adj=50.0)]},
         chains=_common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 1, 16), 100.0),
         events=[_event_row("AAA", _EVENT, "BMO")])
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(NativeScoreBatchRowRefusal) as exc:
         scan_calendar_row_inputs(repository, snapshot, _STRADDLE_KEY,
                                  decision_session=_SESSION, calendar=_CALENDAR)
-    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code == "PRICE_HISTORY_NOT_AVAILABLE"
 
 
 def test_calendar_row_inputs_option_scan_failure_propagates(tmp_path, monkeypatch):

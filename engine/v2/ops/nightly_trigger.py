@@ -1184,5 +1184,5 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if receipt.status in FAILURE_STATUSES else 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # gremlin: pardon[untestable] flipping this guard runs main() at import under the gremlins lightweight runner (argparse SystemExit(2) on the runner's argv, an ERROR not a kill), so no in-process test can see it; covered by test_module_launcher_runs_main_in_a_subprocess
     raise SystemExit(main())
