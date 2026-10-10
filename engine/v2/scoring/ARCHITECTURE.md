@@ -523,6 +523,7 @@ causal-cutoff failures, raise `ModelNotReady` (`MODEL_NOT_READY`) naming
 `paired_residual_pool` and return no partial binding. STR-THRU requires a
 rebuilt release before activation;
 there is no empty-recipe compatibility path for planned-exit scoring.
+Valid empty artifacts preserve legacy's early-history thin-pool/undetermined outcome.
 
 `SourceBundle` already has `paired_residual_artifact` and
 `paired_residual_recipe` (`engine/v2/scoring/source_inputs.py:301`);
@@ -531,16 +532,15 @@ validates/extracts arrays. Native batch must attach the verified release artifac
 and causal recipe. Tests use synthetic source rows with the real producer,
 staging/loader, bundle attachment and planned-exit consumer end to end.
 
-Parity depends on population: legacy uses the tickers/rows loaded into its
-`Scorer`; a release freezes its producer's universe and cutoff. Compare under
-the same ticker/event population and cutoff; broader row-for-row parity is not
-promised when they differ. Artifact lineage and cutoff make the comparison
-auditable.
+Parity depends on population: legacy uses the tickers loaded into its `Scorer`;
+freeze whichever producer universe and cutoff the decision below selects.
+Compare under matching ticker/event scope and cutoff; mismatches can change
+output. Artifact lineage records the frozen scope for audit.
 
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. Production-path tests on synthetic artifacts for refusals and matched/mismatched population parity (~150 test lines).
+3. Real-path tests for refusals, zero rows and matched/mismatched parity (~150 test lines).
 
 Decisions needed before implementing these slices:
 - **Population:** freeze the full producer universe (one deterministic
