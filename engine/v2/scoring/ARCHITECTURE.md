@@ -509,14 +509,13 @@ Both errors travel together. `ResidualPool` (`engine/pnl_sim.py:102-126`)
 draws only earlier events, conditioned on `pred_abs_move`; ticker defines the
 join and population.
 
-The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211-242`)
-builds from paired forecasts, outcomes and crush; `tools/phase5_prepare_release.py:215-232`
-stages the typed document. Promote through this standard path. Freeze schema,
-model IDs, cutoff, lineage and hash; never reconstruct per request or use/invent
-request residual rows.
+The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211-242`) builds the paired
+artifact; `tools/phase5_prepare_release.py:215-232` stages its typed document.
+Use standard promotion. It records schema, model IDs, exclusive cutoff,
+lineage and hash; no request fallback, rebuild or invented residuals.
 
-`resolve_release_binding` loads the typed member and carries artifact plus
-derived recipe in `ScoringReleaseBinding`. Derive it only from the validated
+`resolve_release_binding` in `engine/v2/scoring/release_bindings.py` loads the
+typed member into `ScoringReleaseBinding` with artifact and derived recipe. Derive it only from the validated
 artifact key/hash; requests have no recipe input, and batch sets internal
 `SourceBundle` fields after assembly. Before return, recompute content hash and
 validate schema, identities, lineage, cutoff and row/array structure. A missing
@@ -526,15 +525,16 @@ request-scoped model-role gaps. Valid zero-row artifacts are not refusals;
 simulation preserves legacy's thin-pool/undetermined outcome. Rebuild/promote
 before rollout; old releases intentionally have no fallback.
 
-`SourceBundle` already has `paired_residual_artifact` and `paired_residual_recipe`
-(`engine/v2/scoring/source_inputs.py:301`); `native_residuals.paired_arrays_from_artifact`
-(`engine/v2/scoring/native_residuals.py:73`) checks at consumption too. Small
-synthetic inputs exercise real producer/staging/loader/bundle/simulation paths; CI must not run full training.
+`SourceBundle.paired_residual_artifact` and `.paired_residual_recipe` already exist (`engine/v2/scoring/source_inputs.py:301`);
+`paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`) is
+defense-in-depth. Load-time validation is authoritative; bindings must pass
+this check before scoring. Small synthetic inputs run the real producer,
+staging, loader, bundle and simulation; CI does not run full training.
 
-Matched parity uses identical joined ticker/event rows at whichever cutoff is
-selected below; population/cutoff remain open. Legacy scope is its `Scorer`'s
-loaded tickers. Test mismatched full/nightly scopes and cutoffs too; output can
-differ, and lineage records frozen scope.
+Matched parity uses identical joined ticker/event rows at the same exclusive
+cutoff recorded on the artifact. The cutoff source/value and population remain
+open decisions below. Legacy scope is its `Scorer`'s loaded tickers. Test
+mismatched full/nightly scopes and cutoffs too; output can differ, and lineage records frozen scope.
 
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
