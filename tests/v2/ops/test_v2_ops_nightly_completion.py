@@ -48,8 +48,9 @@ from engine.v2.ops.decision_commit import (
     validate_candidates,
     validated_decision_candidate,
 )
+from engine.v2.foundation.score_population import population_key
 from engine.v2.ops.decision_evidence import derive
-from engine.v2.ops.decision_replay import compare_rows, decision_population, population_key
+from engine.v2.ops.decision_replay import compare_rows, decision_population
 from engine.v2.ops.decision_validation import _validate_causality, validate
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, file_hash, worker_source_manifest
@@ -88,7 +89,7 @@ from tests.ops_support import TEST_POLICY, run_until, sample
 
 pytestmark = pytest.mark.heavy_host  # launches real multi-GB workers; run alone on a quiet box
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-12"
 

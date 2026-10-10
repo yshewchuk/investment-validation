@@ -12,8 +12,9 @@ import json
 import pytest
 
 from engine.v2.foundation import artifact_reference, content_hash
+from engine.v2.foundation.score_population import population_key
 from engine.v2.ops.decision_evidence import derive
-from engine.v2.ops.decision_validation import population_key, validate
+from engine.v2.ops.decision_validation import validate
 from engine.v2.ops.errors import OpsError
 from tests.v2.ops.test_generated_population import _AS_OF, _keys, _plan, env  # noqa: F401  (env is a fixture)
 

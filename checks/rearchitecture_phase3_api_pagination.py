@@ -2,7 +2,7 @@
 """L07 evidence producer -- guide §9 row L07 (§6 read API pagination/cursors).
 
 Runs the real ``engine.v2.serving.api`` FastAPI app over a real ``uvicorn``
-socket (mirroring ``tests/test_v2_serving_api.py``'s own "never TestClient
+socket (mirroring ``tests/v2/serving/test_v2_serving_api.py``'s own "never TestClient
 alone" convention) against an already-committed ``serving.sqlite`` -- a real
 ``PreviewRelease`` some other process (``tools/v2_dashboard_project.py``)
 already indexed. This module makes no scoring/provider calls and writes

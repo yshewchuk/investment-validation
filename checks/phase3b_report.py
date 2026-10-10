@@ -64,17 +64,12 @@ ACCEPTED_LIMITATION = (
 #: Hand-written disposition, not a measurement (same discipline as
 #: rearchitecture_phase0_report.py's CARRIED_FORWARD/PRE_EXISTING): the
 #: acceptance gate above only checks the 8 P3B01-P3B08 subjects, not the
-#: wider v2 test suite. Verified 2026-09-18 by the supervisor in the main
-#: checkout (real data present): 3 of 4 candidate real-data tests pass and
-#: fail only as a worktree/missing-data artifact elsewhere; exactly one test
-#: is genuinely red.
-KNOWN_RED_TESTS = (
-    ("tests/test_v2_ops_nightly_completion.py::"
-     "test_action_finality_writes_a_coverage_output_from_monkeypatched_frames",
-     "R3B-7 (open, not part of this closeout): `covered_tickers: []` where "
-     "`['AAA']` is expected -- a per-ticker finality coverage regression. "
-     "Assigned separately; not fixed here."),
-)
+#: wider v2 test suite. The three real-data candidate tests were verified
+#: 2026-09-18 by the supervisor in the main checkout (real data present); the
+#: former synthetic R3B-7 candidate was rechecked on 2026-10-09 and passes.
+#: This list currently has zero known-red entries; no wider suite is claimed
+#: green here.
+KNOWN_RED_TESTS = ()
 
 R3B2_FINDING = (
     "**Finding (R3B-2): the `__whole__` rewrite on `feature_panel` and "
@@ -290,17 +285,17 @@ def sections(receipt: dict, evidence: dict, gate_result: dict) -> list[dict]:
          "columns": ["code", "detail"], "align": ["---", "---"],
          "rows": _failure_rows(gate_result)},
         {"title": "Known red tests in the wider v2 suite at close",
-         "note": "This gate checks only the 8 P3B01-P3B08 subjects above. The "
-                 "gate PASS and the row(s) below are both true at the same time "
-                 "-- the acceptance gate passing does not mean the whole test "
-                 "suite is green.",
+         "note": "The acceptance gate checks only the 8 P3B01-P3B08 subjects "
+                 "above and does not establish the status of the wider v2 test "
+                 "suite; known-red tests recorded at close are listed here "
+                 "by name.",
          "columns": ["test", "reason"], "align": ["---", "---"],
          "rows": [[cell(test), cell(reason)] for test, reason in KNOWN_RED_TESTS],
          "promote_to_verdict": True,
          "verdict_row": ("Is the wider v2 test suite green at close?",
-                         f"**No** -- {len(KNOWN_RED_TESTS)} known red test(s), listed "
-                         "here by name; the acceptance gate PASS above covers only "
-                         "its own 8 subjects, not the suite.", "")},
+                         f"**Not established** -- {len(KNOWN_RED_TESTS)} known red "
+                         "test(s), listed here by name; the acceptance gate PASS "
+                         "covers only its own 8 subjects, not the wider suite.", "")},
         {"title": "Retained snapshot refs",
          "columns": ["snapshot ref"], "align": ["---"],
          "rows": _snapshot_rows(evidence)},

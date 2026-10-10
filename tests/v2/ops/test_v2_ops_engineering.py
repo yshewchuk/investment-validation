@@ -106,6 +106,17 @@ def test_empty_inventory_or_impossible_counts_cannot_pass_coverage():
     assert compare(changed, old)[0]["code"] == "COVERAGE_SUITE_DRIFT"
 
 
+def test_matching_stale_suite_versions_still_drift():
+    """Both sides agreeing on a stale suite_version is not enough: the
+    comparison is against the current SUITE_VERSION, so two documents
+    carrying the same outdated value still report drift."""
+    measured = coverage_document()
+    baseline = coverage_document()
+    measured["suite_version"] = "stale"
+    baseline["suite_version"] = "stale"
+    assert compare(measured, baseline)[0]["code"] == "COVERAGE_SUITE_DRIFT"
+
+
 def test_clean_clone_missing_outdated_and_nonexecutable_hook(tmp_path):
     git(tmp_path, "init", "-q")
     source = tmp_path / "checks/hooks/pre-commit"

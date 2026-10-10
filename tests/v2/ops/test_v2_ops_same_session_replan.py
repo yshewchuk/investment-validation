@@ -80,7 +80,7 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit, submit_graph
 from tests.ops_support import DEFAULT_POLICY, TEST_POLICY, sample
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-10"
 
@@ -581,7 +581,7 @@ def _commit_one_prediction(conn, store, clock, supervisor, *, key, deployment, d
     _ensure_authority(conn, clock)
     score, finality = _score_and_finality()
     # ``expected_population``/``candidates.population`` key off
-    # ticker|strategy|event_date (``decision_validation.population_key``) --
+    # ticker|strategy|event_date (``foundation.score_population.population_key``) --
     # narrower than ``row_id`` (``decision_replay.score_row_id``, which also
     # carries strike/expiry and is the candidate's own generation-independent
     # decision identity).

@@ -7,6 +7,7 @@ needed for the comparison scenarios themselves. The CLI tests at the bottom
 still drive the full ``load_score_parity_inputs`` -> ``build_receipt`` ->
 ``publish`` pipeline end to end.
 """
+# packages: engine.v2.contracts, engine.v2.diagnosis, engine.v2.foundation, engine.v2.ops
 from __future__ import annotations
 
 import hashlib
@@ -29,7 +30,7 @@ from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from tests.ops_support import FakeClock, sample
-from tests.test_checks_phase2_gate import _snapshot_ref
+from tests.v2.integration.test_checks_phase2_gate import _snapshot_ref
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 CODE_HASH = "sha256:" + "1" * 64

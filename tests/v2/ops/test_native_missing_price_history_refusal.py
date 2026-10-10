@@ -27,7 +27,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.features.panel_row_inputs import PanelRowInputs
 from engine.v2.foundation.market_calendar import CalendarSessions
 from engine.v2.ops import nightly_raw_row_producer as nrp
-from engine.v2.ops.decision_validation import population_key
+from engine.v2.foundation.score_population import population_key
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_parity_report import run_native_parity_worker
 from engine.v2.ops.native_score_batch import (
