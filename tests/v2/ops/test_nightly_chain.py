@@ -172,3 +172,12 @@ def test_a_refresh_step_passes_its_predecessor_through_and_is_not_repeated(root,
     again = nc.run_snapshot_chain(root, IDENT, 1, "s0", [refresh])
     assert first.final_snapshot == again.final_snapshot == "s0"
     assert calls == ["s0"] and first.executed == ("refresh",) and again.skipped == ("refresh",)
+
+
+def test_a_malformed_successor_is_integrity_failed(root, tmp_path):
+    store = Store(tmp_path)
+    bad = nc.ChainStep("import", lambda pred: Effect("external", "import"),
+                       lambda pred: None, lambda pred: " ")
+    with pytest.raises(OpsError) as exc:
+        nc.run_snapshot_chain(root, IDENT, 1, "s0", [bad])
+    assert _code(exc) == "INTEGRITY_FAILED" and store.calls == []

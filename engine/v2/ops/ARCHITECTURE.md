@@ -550,13 +550,13 @@ Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `
 
 ### Nightly snapshot chain (`nightly_chain.py`, slice 4 of #564)
 
-Leaf, not yet called by `nightly_trigger`; it imports no CLI or store. `run_snapshot_chain` walks caller-supplied `ChainStep`s serially (planned order: import, planned-price refresh, computed moves, price-history capture). Each step gets the exact snapshot id its predecessor committed, never the mutable head, and a step receipt (`request_digest = H(name, predecessor)`). A step supplies `effect(pred)` (the receipt effect), `run(pred)` (atomic; idempotent under its deterministic job id) and `successor(pred)` (the snapshot it committed, else `None`). Refresh commits no snapshot: its successor is its predecessor, proven by its own atomic report.
+Leaf, not yet called by `nightly_trigger`; it imports no CLI or store. `run_snapshot_chain` walks caller-supplied `ChainStep`s serially (planned order: import, planned-price refresh, computed moves, price-history capture). Each step gets the exact snapshot id its predecessor committed, never the mutable head, and a step receipt (`request_digest = H(name, predecessor)`). A step supplies `effect(pred)` (the receipt effect), `run(pred)` (atomic; idempotent under its deterministic job id) and `successor(pred)` (the snapshot it committed, else `None`). Refresh commits no snapshot: the caller's `successor` must return the predecessor, proven by the refresh's own atomic report (not enforced here).
 
 | Condition | Outcome |
 |---|---|
 | Successor already committed (finished step, or crash between commit and receipt) | Receipt completed, `run` not called, step `skipped`. No successor: `run` once, re-read, complete; still none is `DEPENDENCY_FAILED`. A succeeded receipt with no successor is `INTEGRITY_FAILED`. A `catalog_job` effect not yet `succeeded` is `INVALID_REQUEST` from completion: `run` returns only once its job is terminal, and a rerun reattaches. |
 | Recorded step with another predecessor or effect | `IDEMPOTENCY_CONFLICT`; a rerun generation is the way forward. |
-| A step raises | Propagates; later steps do not run; the receipt stays `intent`. |
+| A callback raises | Propagates; later steps do not run. `effect` runs before `begin_step`, so a raise leaves no receipt; `successor` or `run` raise after it, leaving a new step's receipt `intent` and a `succeeded` one `succeeded`. A malformed `successor` value is `INTEGRITY_FAILED`. |
 
 ### Nightly legacy readiness (`nightly_readiness.py`)
 
