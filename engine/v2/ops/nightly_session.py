@@ -13,6 +13,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from engine.v2.ops.errors import fail
@@ -44,6 +45,10 @@ class SessionIdentity:
         if not all(isinstance(f, str) and f.strip() for f in fields) or not _DATE.fullmatch(
                 self.as_of):
             raise fail("INVALID_REQUEST", "session identity fields must be non-empty")
+        try:
+            date.fromisoformat(self.as_of)
+        except ValueError as exc:
+            raise fail("INVALID_REQUEST", "as_of is not a calendar date") from exc
 
     @property
     def session_key(self) -> str:
@@ -100,6 +105,10 @@ def _decode(text: str, identity: SessionIdentity) -> SessionState:
         gens = tuple(Generation(g["generation"], g["run_id"], g["reason"], g["status"],
                                 tuple(g["invalidation"])) for g in doc["generations"])
         ok = (doc["session_key"] == key and isinstance(doc["revision"], int)
+              and doc["identity"] == {
+                  "as_of": identity.as_of, "scope": identity.scope,
+                  "selection_identity": identity.selection_identity,
+                  "catalog_identity": identity.catalog_identity}
               and doc["revision"] >= 1 and gens
               and all(g.generation == i and g.run_id == _digest(key, i)
                       and g.status in ("allocated", "started")

@@ -147,6 +147,23 @@ def test_rerun_without_a_session_and_non_string_identity_are_invalid_request(tmp
     assert _code(exc) == "INVALID_REQUEST"
 
 
+def test_changed_stored_identity_is_integrity_failed(tmp_path):
+    ns.ensure_session(tmp_path, IDENT)
+    path = ns.session_path(tmp_path, IDENT)
+    doc = json.loads(path.read_text())
+    doc["identity"]["scope"] = "other"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(OpsError) as exc:
+        ns.load_session(tmp_path, IDENT)
+    assert _code(exc) == "INTEGRITY_FAILED"
+
+
+def test_impossible_calendar_date_is_invalid_request():
+    with pytest.raises(OpsError) as exc:
+        ns.SessionIdentity("2026-02-30", "s", "a", "b")
+    assert _code(exc) == "INVALID_REQUEST"
+
+
 def test_tampered_run_id_is_integrity_failed(tmp_path):
     ns.ensure_session(tmp_path, IDENT)
     path = ns.session_path(tmp_path, IDENT)
