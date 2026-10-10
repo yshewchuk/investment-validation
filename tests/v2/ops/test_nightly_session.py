@@ -238,6 +238,19 @@ def test_malformed_invalidation_is_refused_and_state_unchanged(tmp_path, bad):
     assert _code(exc) == "INVALID_REQUEST" and path.read_bytes() == before
 
 
+def test_unstarted_earlier_generation_is_integrity_failed(tmp_path):
+    ns.ensure_session(tmp_path, IDENT)
+    ns.mark_started(tmp_path, IDENT, 1)
+    ns.request_rerun(tmp_path, IDENT)
+    path = ns.session_path(tmp_path, IDENT)
+    doc = json.loads(path.read_text())
+    doc["generations"][0]["status"] = "allocated"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(OpsError) as exc:
+        ns.load_session(tmp_path, IDENT)
+    assert _code(exc) == "INTEGRITY_FAILED"
+
+
 def test_tampered_run_id_is_integrity_failed(tmp_path):
     ns.ensure_session(tmp_path, IDENT)
     path = ns.session_path(tmp_path, IDENT)

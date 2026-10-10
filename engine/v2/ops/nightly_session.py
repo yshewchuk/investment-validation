@@ -98,6 +98,7 @@ def _generations_valid(gens: tuple[Generation, ...], key: str) -> bool:
         type(g.generation) is int and g.generation == i and g.run_id == _digest(key, i)
         and g.status in ("allocated", "started") and g.reason == ("initial" if i == 1 else "rerun")
         and all(isinstance(s, str) for s in g.invalidation)
+        and (g.status == "started" or i == len(gens))
         for i, g in enumerate(gens, 1))
 
 
