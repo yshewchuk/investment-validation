@@ -622,10 +622,10 @@ def test_cli_rejects_alternative_fingerprint_root(source, capsys):
     assert _objects(source.store) == objects
 
 
-@pytest.mark.parametrize("seed", [-1, 2**32])
+@pytest.mark.parametrize("seed", [-1, 1, 2**32])
 @pytest.mark.parametrize("action", ["register", "run"])
 @pytest.mark.parametrize("smoke", [False, True])
-def test_invalid_sklearn_seed_refuses_before_admission_or_reads(tmp_path, monkeypatch, capsys, seed, action, smoke):
+def test_unsupported_prior_seed_refuses_before_admission_or_reads(tmp_path, monkeypatch, capsys, seed, action, smoke):
     spec = _spec(seed=seed)
     source = _source(tmp_path, spec=spec)
     try:
@@ -648,7 +648,7 @@ def test_invalid_sklearn_seed_refuses_before_admission_or_reads(tmp_path, monkey
         source.conn.close()
 
 
-@pytest.mark.parametrize("seed", [0, 2**32 - 1])
+@pytest.mark.parametrize("seed", [0])
 def test_sklearn_seed_boundaries_complete_real_cli_smoke(tmp_path, capsys, seed):
     source = _source(tmp_path, spec=_spec(seed=seed))
     try:

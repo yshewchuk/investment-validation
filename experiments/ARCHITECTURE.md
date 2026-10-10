@@ -140,7 +140,10 @@ opened, and callers remain responsible for their outcome/receipt reconciliation.
 
 `prediction_report.validate_prediction_spec` admits only the Python runner
 `experiments/v2_prediction.py`, `computed_moves`, empty economics and ordered,
-unique four-digit year folds, with an integer seed in [0, 2**32).
+unique four-digit year folds, with seed exactly `0`. The prior estimator is
+deterministic and does not consume randomness; nonzero seed declarations are
+therefore refused as unsupported rather than recorded as if they changed the
+computation.
 `prediction_result(repository, registration)`
 reads only registered eligible targets from the exact registered snapshot/month.
 Each fold fits `DummyClassifier(strategy="prior")` through the shared fold helper
