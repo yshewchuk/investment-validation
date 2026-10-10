@@ -132,7 +132,8 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   stays published and a flag is raised.
 - **Selfcheck mismatch** — stops the publish (`scrub_mismatches`: sanitised
   row/field/reason). Board and selfcheck use the same chains: no entry-date
-  chain prices off the newest older one within 5 sessions, shown as `STALE_QUOTE` + `quote_date`.
+  chain prices off the newest older one within 5 sessions (`STALE_QUOTE` +
+  `quote_date`); if that one postdates the board night it is `NO_CHAIN`.
 - **Publish** — `LocalPublisher` (the default target, a directory) is
   atomic: it stages the full bundle under `releases/{stamp}/`, then flips
   `current` with one `os.replace`, so a process killed mid-copy leaves the
