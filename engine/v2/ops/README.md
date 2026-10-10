@@ -90,6 +90,8 @@ builder returns sorted `UNCARRIED_TICKER` evidence for candidates missing from
 either required table. Their current consumer is
 `tests/v2/ops/test_carried_set.py`; this slice has no production caller.
 
+`nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package: no other package imports it and it has no production caller yet; `tests/v2/ops/test_nightly_session.py` is its only consumer.
+
 <!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, environment_identity, source_closure -->
 
 ## Consumers
