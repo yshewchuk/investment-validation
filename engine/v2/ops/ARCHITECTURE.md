@@ -104,18 +104,7 @@ The `native_parity` job kind -- `stages.py::_native_parity_kind`,
 its tick-loop caller, `supervisor.Service._reconcile_native_parity`, are
 both real too: `Service.tick()` calls it every tick the way
 `_reconcile_native_score_batch_shadow` (`#88`) already does (its failures print `native_score_batch_reconcile_failed` with `error_type` and the typed problem's code and bounded details: short scalars and short string lists). For non-`Problem` failures, at most the first 256 characters of `str(exc)` are kept only in the in-memory dedup key; nonempty text emits the fixed `<redacted>` `details.exception_message`, while empty text emits no `exception_message` (the details mapping is empty). `_bounded_problem_details` omits string values longer than 120 characters; these size limits do not sanitize exception text or make raw text safe to publish. The
-`nightly.GRAPH` node width is doc-only (`run_shadow_nightly`'s test-only
-graph walk; no submission path reads it). Cutover
-PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`)
-and shadow-submission code (`#126`) are all already merged; PR-7a's code
-(`#126`) implemented the tick-loop submission sidecar only, not the `v2.0`
-schema this redo's design always said was `native_parity`'s own PR to
-build (see "the row-key/join gap is not designed here" below) — `#185`
-is that build. One piece is
-untouched by this redo, real code already on `main`, independent of
-everything `#66`/`#88`/`#126` supply: `native_parity_report.py`'s
-tolerance policy is already pluggable — see "the tolerance policy is now
-pluggable" below, unchanged.**
+`nightly.GRAPH` node width is doc-only (`run_shadow_nightly`'s test-only graph walk; no submission path reads it). Cutover PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`) and shadow-submission code (`#126`) are all already merged; PR-7a's code (`#126`) implemented the tick-loop submission sidecar only, not the `v2.0` schema this redo's design always said was `native_parity`'s own PR to build (see "the row-key/join gap is not designed here" below) — `#185` is that build. One piece is untouched by this redo, real code already on `main`, independent of everything `#66`/`#88`/`#126` supply: `native_parity_report.py`'s tolerance policy is already pluggable — see "the tolerance policy is now pluggable" below, unchanged.**
 
 `native_parity` closes the gap the root doc §4 and this doc's own
 "Diagrams" section both name: `run_shadow_nightly` "has no production
@@ -568,6 +557,17 @@ Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `
 | Succeeded receipt whose effect no longer holds | `INTEGRITY_FAILED`. |
 | Same step with another request digest or effect (changed inputs) | `IDEMPOTENCY_CONFLICT`; a rerun generation is the way forward. |
 | `complete_step` with no intent or an incomplete effect; malformed step, request digest (also in `reconcile_step`) or effect (an artifact needs a 64-hex sha256; no ref may contain NUL; a stored effect failing this is `INTEGRITY_FAILED`); a `catalog_job` probe (`complete_step`, `reconcile_step`) without the catalog connection | `INVALID_REQUEST`. Unparseable or foreign receipt files: `INTEGRITY_FAILED` / `CHECKPOINT_INCOMPATIBLE`. |
+
+### Nightly legacy readiness (`nightly_readiness.py`)
+
+Leaf, not yet called by `nightly_trigger`. Admission (lock, window, default session) stays in `nightly_trigger`. There is no rebuild step and no rebuild fallback: `check_legacy_report(reports_dir, as_of)` only verifies what the legacy nightly produced. It reads the legacy run reports as plain JSON (no `engine.dashboard` import) and returns a `LegacyReadiness` record for the most recent report whose recorded session is D. A report's content decides, never its name beyond locating it, nor mtime, locks or elapsed time. Read-only, nothing written. A session that is not canonical `YYYY-MM-DD` is `INVALID_REQUEST`.
+
+| Condition | Outcome |
+|---|---|
+| No candidate resolves to D | `SOURCE_NOT_FOUND`; retried only within the caller's admission window. |
+| Report `stopped`, or `finality` not final for D | `DEPENDENCY_FAILED` / `SOURCE_NOT_FINAL`. |
+| `steps.tiers` absent, `degraded` or carrying `error` | `DEPENDENCY_FAILED` with `details.step="tiers"`: the native chain stops; no rebuild. |
+| Any candidate file unparseable or not the expected shape | `INTEGRITY_FAILED`, never treated as absent. |
 
 **Generated expected population (`ops plan nightly`).** With `--input-mode snapshot` and no `--expected-population`, `snapshot_planning.generated_population` derives the population from the pinned snapshot; a supplied file always wins and keeps today's reading and refusals (symlink, non-list); a supplied empty list is refused by `pin_snapshot_inputs` (`INVALID_REQUEST`) in snapshot mode and leaves `planned_population` blocked in `legacy` mode. It reuses `nightly_raw_rows.scan_forward_board_requests` (no second enumeration) for `as_of..as_of+GENERATED_HORIZON_DAYS` (35, mirroring the legacy board's `HORIZON_DAYS`), resolves the carried set from that same pinned snapshot, and filters uncarried event tickers before expanding the legacy population across every `STRATEGY_IDS` member. Each excluded candidate ticker is recorded in sorted `candidate_exclusions` evidence with `reason_code: UNCARRIED_TICKER` and sorted `missing_tables`; that evidence is stored in the plan and contributes to `plan_hash`. The filtered population records sorted, de-duplicated `ticker|strategy|event_date` keys (ISO date). `_legacy_params` derives the supervised `legacy_score` ticker parameter from those keys when exclusions exist; the native score-batch sidecar uses that score job's ticker parameter for `scan_forward_board_requests` and `board_requests`, so both candidate enumerators see the same eligible event tickers. Missing or unreadable carried-set tables refuse planning with `INPUT_CHANGED` and the source reader's code in `details.data_code`. The ordinary live legacy board remains unchanged. The scanned events are crossed with every `STRATEGY_IDS` member: the rows the legacy `score` stage's `score_calendar` emits per event (disabled CAL-P and CND-P included), because `_action_score` requires every planned key to be observed under the shared score-population rule. Never `DYN-SV`, which `score_calendar` appends only for events its chooser ranked: `_action_score` accepts a `DYN-SV` row for a planned event, while a planned key still has to be observed and a row for an unplanned event is still refused (`VALIDATION_FAILED`). The window is anchored on `as_of`, so a run whose finality walked back to an earlier session with different events in its window is refused by that check, never scored on a different population.
 
