@@ -950,7 +950,7 @@ def _append_refusal_row(experiment_id: str, variant_id, ledger_path, *,
                 stored = [row.get("spec_hash") for row in csv.DictReader(fh)
                           if row.get("id") == experiment_id
                           and row.get("stage") == "refused"]
-        if stored and variant_id not in stored:
+        if stored and any(stored_variant != variant_id for stored_variant in stored):
             raise fail("IDEMPOTENCY_CONFLICT",
                        "a refused ledger row carries a different variant identity",
                        details={"experiment_id": experiment_id})

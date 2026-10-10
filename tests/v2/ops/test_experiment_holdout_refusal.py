@@ -115,6 +115,36 @@ def _assert_sync_precedes_append(events):
                 "directory sync")
 
 
+def test_mixed_refusal_variant_replay_conflicts_without_mutation(tmp_path):
+    experiment_id = "EXP-489-mixed-variant"
+    variant_a = "variant-a"
+    variant_b = "variant-b"
+    ledger = tmp_path / "checkout" / "experiments" / "LEDGER.csv"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(_HEADER)
+    pins = {"snapshot_id": "snapshot-mixed", "holdout_as_of_month": "2025-01",
+            "random_membership_version": "canonical-event-sha256.v1",
+            "rolling_membership_version": "calendar-months.v1"}
+
+    experiments._append_refusal_row(experiment_id, variant_a, ledger,
+                                    refusal_pins=pins)
+    with ledger.open("a", newline="") as fh:
+        fh.write(f"{experiment_id},{variant_b},2025-01-02,refused,,,False\n")
+    sidecar_path = ledger.parent / (
+        ".refusal_pin." + hashlib.sha256(experiment_id.encode("utf-8")).hexdigest()
+        + ".json")
+    ledger_before = ledger.read_bytes()
+    sidecar_before = sidecar_path.read_bytes()
+
+    with pytest.raises(OpsError) as conflict:
+        experiments._append_refusal_row(experiment_id, variant_a, ledger,
+                                        refusal_pins=pins)
+
+    assert conflict.value.code == "IDEMPOTENCY_CONFLICT"
+    assert ledger.read_bytes() == ledger_before
+    assert sidecar_path.read_bytes() == sidecar_before
+
+
 def test_digest_directory_sync_failure_removes_signal_before_worker_accepts(
         tmp_path, monkeypatch):
     """A failed digest sync and signal unlink cannot leave accepted evidence."""
