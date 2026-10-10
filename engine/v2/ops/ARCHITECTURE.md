@@ -1232,7 +1232,7 @@ Per row (collected as a refusal, never sinks the batch):
 | re-wrapped | any other source-bundle refusal, or an input-assembly `ValueError` |
 
 Re-wrapped/malformed codes carry a fixed `detail`; `NATIVE_INPUT_BUILD_FAILED`
-adds the exception class and, for `AnswerFieldsInSource`, answer-field names,
+adds the exception class and, for `AnswerFieldsInSource` (bundle or assembly: refuses only that row), answer-field names,
 never staged keys, values or messages (`refusals.json` is published). The release is resolved once per attempt and reused for
 every row. Assembly is a pure function of its inputs (no clock, no RNG) —
 a newly promoted release genuinely changing the output is by design.
