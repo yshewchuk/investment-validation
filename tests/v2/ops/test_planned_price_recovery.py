@@ -14,13 +14,13 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.recovery import SupervisorLock
 from tests.data_scan_support import RECEIPT, fake_hash, publish_and_inspect
 from tests.test_v2_ops_price_history import _SEC, _SEC_REF, _securities_row
-from tests.test_v2_ops_snapshot_stages import (
+from tests.v2.ops.test_v2_ops_snapshot_stages import (
     SESSION as PLAN_SESSION,
 )
-from tests.test_v2_ops_snapshot_stages import (
+from tests.v2.ops.test_v2_ops_snapshot_stages import (
     _plan_files,
 )
-from tests.test_v2_ops_snapshot_stages import (
+from tests.v2.ops.test_v2_ops_snapshot_stages import (
     case as case,
 )
 from tests.v2.ops.test_planned_price_refresh import (

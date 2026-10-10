@@ -52,6 +52,7 @@ from engine.v2.ops.snapshots import resolve_snapshot_head
 from engine.v2.ops.stages import BARRIER_ONLY_REASONS, SNAPSHOT_BACKED_KINDS, registry
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
+from engine.v2.ops.workflows import commands
 from tests.data_scan_support import RECEIPT, contract_for, fake_hash, publish_and_inspect
 from tests.ops_support import TEST_POLICY, run_until
 from tests.test_v2_data_legacy_materialization import (
@@ -64,7 +65,7 @@ from tests.test_v2_data_legacy_materialization import (
     _snapshot_object_ref,
 )
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-12"
 MANIFEST = "materialization_manifest"
@@ -1288,8 +1289,8 @@ def test_trigger_real_cli_plan_checks_verified_snapshot(case, monkeypatch, move_
         _advance_head(case)
     resolve = Mock(wraps=planning.resolve_snapshot_head)
     monkeypatch.setattr(planning, "resolve_snapshot_head", resolve)
-    save = Mock(wraps=cli.save_plan)
-    monkeypatch.setattr(cli, "save_plan", save)
+    save = Mock(wraps=commands.save_plan)
+    monkeypatch.setattr(commands, "save_plan", save)
 
     def plan():
         return nightly_trigger._default_plan(
@@ -1317,6 +1318,6 @@ def test_legacy_plan_needs_no_expected_snapshot_attribute(case, monkeypatch):
     assert not hasattr(args, "expected_snapshot_id")
     pin = Mock(side_effect=AssertionError("legacy mode must not pin a snapshot"))
     monkeypatch.setattr(planning, "pin_snapshot_inputs", pin)
-    planned = cli._plan_command(args, case.root, case.conn, case.clock)
+    planned = commands._plan_command(args, case.root, case.conn, case.clock)
     assert "snapshot_inputs" not in planned["plan"]
     pin.assert_not_called()

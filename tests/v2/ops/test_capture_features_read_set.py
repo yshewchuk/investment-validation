@@ -20,7 +20,7 @@ from engine.v2.foundation import to_document
 from engine.v2.ops.capture_inputs import capture
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.legacy_adapter import copy_read_set
-from tests.test_v2_ops_capture_inputs import SESSION, TICKER, _build_fixture, _write_px_csv
+from tests.v2.ops.test_v2_ops_capture_inputs import SESSION, TICKER, _build_fixture, _write_px_csv
 
 OQUANTS = "earnings_predictions/data/raw/oquants/moves"
 COMPUTED = "data/raw/computed_moves"

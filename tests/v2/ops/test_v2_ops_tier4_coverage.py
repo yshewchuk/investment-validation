@@ -1,7 +1,7 @@
 """P2-C02 (Phase 2 review closeout): launch refusal for missing Tier-4
 serving-cache coverage, and same-generation binding for barrier-only stages.
 
-The coverage half reuses ``tests/test_v2_ops_snapshot_stages.py``'s ``Case``
+The coverage half reuses ``tests/v2/ops/test_v2_ops_snapshot_stages.py``'s ``Case``
 fixture (real SQLite catalog + ``ArtifactStore`` + a real committed synthetic
 snapshot) and runs the REAL ``legacy_materialize`` worker subprocess, exactly
 as that file does, so the pinned Tier-4 cache files this task's check reads
@@ -23,7 +23,7 @@ from pathlib import Path
 import joblib
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.data import legacy_materialization as lm  # noqa: E402
@@ -37,7 +37,7 @@ from engine.v2.ops.scheduler import Claim  # noqa: E402
 from engine.v2.ops.stages import BARRIER_ONLY_REASONS  # noqa: E402
 from engine.v2.ops.supervisor import Service  # noqa: E402
 from tests.test_v2_data_legacy_materialization import CALENDAR_PATH, DIRECT_SCOPE, EVIDENCE_SCOPE  # noqa: E402
-from tests.test_v2_ops_snapshot_stages import MANIFEST, SESSION, Case, case  # noqa: E402,F401
+from tests.v2.ops.test_v2_ops_snapshot_stages import MANIFEST, SESSION, Case, case  # noqa: E402,F401
 
 EXPECTED_POPULATION = {"earnings_events": 2, "daily_market": 3, "trades": 2,
                        "option_chains": 2, "feature_panel": 2, "tier4_forecasts": 2}
