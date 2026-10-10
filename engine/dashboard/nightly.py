@@ -35,6 +35,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1781,6 +1782,27 @@ def _backup_sync(flags: list) -> dict:
     return out
 
 
+def _write_report_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically via a sibling temp file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    fd_open = True
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd_open = False
+            handle.write(text)
+
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, path)
+    finally:
+        if fd_open:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
@@ -1844,8 +1866,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     text = json.dumps(report.as_dict(), indent=1, default=str)
     print(text)
-    if args.json:
-        Path(args.json).write_text(text)
+    requested_date = report.requested_as_of or report.as_of
+    standard_report = paths.ROOT / "reports" / f"nightly_{requested_date}.json"
+    try:
+        _write_report_atomic(standard_report, text)
+    except OSError as exc:
+        print(f"Failed to write standard nightly report: {exc}", file=sys.stderr)
+        return 1
+    if args.json and Path(args.json).resolve() != standard_report.resolve():
+        try:
+            Path(args.json).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            print(f"Failed to write --json report: {exc}", file=sys.stderr)
+            return 1
     return 0
 
 
