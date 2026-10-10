@@ -18,10 +18,8 @@ from types import SimpleNamespace
 from engine.v2.foundation import to_document
 from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
 from engine.v2.ops.incremental_data import RefreshParameters
-from engine.v2.ops.refresh_staging import (
-    REFRESH_INPUT_DOCUMENT_NAMES,
-    stage_refresh_input,
-)
+from engine.v2.ops.refresh_staging import stage_refresh_input
+from engine.v2.ops.stores.refresh_contracts import REFRESH_INPUT_DOCUMENT_NAMES
 
 
 def _parameters():

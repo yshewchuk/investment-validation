@@ -292,6 +292,23 @@ def test_unit_receipts_does_not_import_incremental_data_even_lazily():
     assert ("unit_receipts", "incremental_data") in ops.findings(files, rules)["cycles"]
 
 
+def test_incremental_data_does_not_import_refresh_staging_even_lazily():
+    rules = json.loads((ROOT / ops.POLICY).read_bytes())
+    files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)
+             if path.startswith(ops.SOURCE) and path.endswith(".py")}
+    actual = ops.findings(files, rules)["cycles"]
+    assert not [edge for edge in actual if "refresh_staging" in edge]
+    assert not [edge for edge in rules["exceptions"]["cycles"] if "refresh_staging" in edge]
+    assert not [edge for edge in ops.findings(files, rules)["forbidden"]
+                if edge[0] == "stores.refresh_contracts"]
+    files[ops.SOURCE + "incremental_data.py"] += (
+        b"\n\ndef _planted():\n    from engine.v2.ops import refresh_staging\n")
+    assert ("incremental_data", "refresh_staging") in ops.findings(files, rules)["cycles"]
+    files[ops.SOURCE + "stores/refresh_contracts.py"] += (
+        b"\n\ndef _planted():\n    from engine.v2.ops import nightly\n")
+    assert ("stores.refresh_contracts", "nightly") in ops.findings(files, rules)["forbidden"]
+
+
 def test_layer_cli_rejects_planted_ops_violation(tmp_path):
     files = {name.replace(".", "/") + "/__init__.py": b""
              for name in [*layers.CONTAINERS, *(p.dotted for p in layers.PACKAGES)]}

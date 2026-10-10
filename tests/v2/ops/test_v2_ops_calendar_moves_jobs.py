@@ -31,7 +31,7 @@ from engine.v2.ops.calendar_moves_jobs import (
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.incremental_data import RefreshCallbackResult
 from engine.v2.ops.nightly import COMPUTED_MOVES_REFRESH_ACTION as NIGHTLY_COMPUTED_MOVES
-from engine.v2.ops.refresh_staging import REFRESH_INPUT_DOCUMENT_NAMES
+from engine.v2.ops.stores.refresh_contracts import REFRESH_INPUT_DOCUMENT_NAMES
 from engine.v2.ops.stages import registry
 
 
