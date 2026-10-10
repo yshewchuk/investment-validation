@@ -422,12 +422,8 @@ def test_service_tick_submits_without_running_pinned_producer(tmp_path, monkeypa
     monkeypatch.setattr(service, "_native_release_root_or_none",
                         lambda: str(tmp_path / "verified-release-root"))
 
-    import time
-    started = time.perf_counter()
     service.tick()
-    elapsed = time.perf_counter() - started
 
-    assert elapsed < 3.0
     assert resolved == []
     assert producer_calls == []
     assert _native_score_batch_job_count(conn) == 1
@@ -444,7 +440,6 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
     shadow job and renews every OTHER running attempt's lease.
     """
     import threading
-    import time
 
     from engine.v2.ops import native_score_batch
 
@@ -478,6 +473,7 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
 
     producer_calls = []
     producer_started = threading.Event()
+    producer_returned = threading.Event()
     release_producer = threading.Event()
 
     def _producer(repository, resolved_snapshot, *, as_of, horizon_days, tickers):
@@ -485,7 +481,10 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
             "snapshot": resolved_snapshot, "as_of": as_of,
             "horizon_days": horizon_days, "tickers": tickers})
         producer_started.set()
-        release_producer.wait(timeout=5)
+        # Released only by the test's finally block; the generous timeout is a
+        # hang guard far beyond any test runtime, not a timing assertion.
+        release_producer.wait(timeout=300)
+        producer_returned.set()
         return [], {"schema_version": "native_score_batch_producer_refusals.v1.0",
                     "refusals": []}
 
@@ -560,12 +559,15 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
     try:
         assert producer_started.wait(timeout=1)
         clock.advance(1)
-        started = time.perf_counter()
         service.tick()
-        elapsed = time.perf_counter() - started
 
-        assert elapsed < 3.0
+        # Deterministic form of "the tick never waits on the producer": the
+        # tick returned while the producer was still blocked (never released,
+        # worker still alive, no result yet).
+        assert not release_producer.is_set()
+        assert not producer_returned.is_set()
         assert worker.is_alive()
+        assert worker_results == []
         assert ("other-attempt", 120) in heartbeat_calls
         assert resolved == [snapshot_id]
         assert producer_calls == [{
@@ -581,7 +583,7 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
             "SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == 0
     finally:
         release_producer.set()
-        worker.join(timeout=2)
+        worker.join(timeout=30)
 
     assert not worker.is_alive()
     assert worker_results
