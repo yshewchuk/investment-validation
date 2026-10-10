@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 from pathlib import Path
 
 from engine.v2.ops.snapshot_roots import default_materialization_base
@@ -30,6 +29,8 @@ def _eligible(conn):
 
 
 def _size(path):
+    if path.is_symlink():
+        return 0
     total = 0
     for dirpath, _dirs, files in os.walk(path):
         for name in files:
@@ -40,36 +41,49 @@ def _size(path):
     return total
 
 
-def _remove(path):
+def _remove(path, keepalive):
+    """Remove one entry without ever following a link; ``keepalive`` runs per
+    directory and per file so a slow removal cannot starve a running attempt's lease."""
     if path.is_symlink() or not path.is_dir():
         path.unlink()
         return
     for dirpath, _dirs, _files in os.walk(path):
         os.chmod(dirpath, 0o700)
-    shutil.rmtree(path)
+        keepalive()
+    for dirpath, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            os.unlink(os.path.join(dirpath, name))
+            keepalive()
+        for name in dirs:
+            child = os.path.join(dirpath, name)
+            (os.unlink if os.path.islink(child) else os.rmdir)(child)
+            keepalive()
+    path.rmdir()
 
 
-def _entry(kind, path, attempt_id, apply, out):
+def _entry(kind, path, attempt_id, apply, out, keepalive):
     if not os.path.lexists(path):
         return
     record = {"kind": kind, "attempt_id": attempt_id, "path": str(path),
               "bytes": _size(path), "removed": False}
     if apply:
         try:
-            _remove(path)
+            _remove(path, keepalive)
             record["removed"] = True
         except OSError as exc:
             record["error"] = type(exc).__name__
     out.append(record)
 
 
-def reclaim(conn, root, *, apply=False, limit=None, materialization_base=None):
+def reclaim(conn, root, *, apply=False, limit=None, materialization_base=None,
+            keepalive=None):
     """List (default) or remove every eligible read-once entry.
 
     ``limit`` stops after that many successful removals; a failed removal is
     reported in its record (``error``) and never raises or counts toward it.
     """
     root, out = Path(root), []
+    keepalive = keepalive or (lambda: None)
 
     def full():
         return limit is not None and sum(r["removed"] for r in out) >= limit
@@ -82,7 +96,7 @@ def reclaim(conn, root, *, apply=False, limit=None, materialization_base=None):
             continue
         for name in READ_ONCE:
             _entry("staging", root / "attempts" / attempt_id / "staging" / name,
-                   attempt_id, apply, out)
+                   attempt_id, apply, out, keepalive)
     base = (Path(materialization_base) if materialization_base
             else default_materialization_base(root))
     if base.is_dir():
@@ -92,5 +106,6 @@ def reclaim(conn, root, *, apply=False, limit=None, materialization_base=None):
             if match and match["attempt"] in eligible:
                 if full():
                     break
-                _entry("partial_materialization", entry, match["attempt"], apply, out)
+                _entry("partial_materialization", entry, match["attempt"], apply, out,
+                       keepalive)
     return out

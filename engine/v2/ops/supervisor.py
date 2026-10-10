@@ -332,7 +332,8 @@ class Service:
                 return
             self._reclaim_ended = ended
             done = reclaim(self.conn, self.root, apply=True, limit=1,
-                           materialization_base=self.materialization_base)
+                           materialization_base=self.materialization_base,
+                           keepalive=self._renew_other_leases)
         except Exception:
             done = [{"kind": "reclaim", "attempt_id": "", "error": "ReclaimFailed"}]
         for entry in done:

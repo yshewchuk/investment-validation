@@ -136,10 +136,10 @@ def test_orphan_partial_roots_follow_the_same_rule(world):
 def test_a_failed_removal_is_reported_and_the_rest_still_run(world, monkeypatch):
     real = reclaim_module._remove
 
-    def flaky(path):
+    def flaky(path, keepalive):
         if world.ids["succeeded"] in str(path):
             raise PermissionError("denied")
-        real(path)
+        real(path, keepalive)
 
     monkeypatch.setattr(reclaim_module, "_remove", flaky)
     entries = reclaim(world.conn, world.root, apply=True)
@@ -150,7 +150,9 @@ def test_a_failed_removal_is_reported_and_the_rest_still_run(world, monkeypatch)
 
 
 def _service(world):
+    renewals = []
     return types.SimpleNamespace(
+        renewals=renewals, _renew_other_leases=lambda: renewals.append(1),
         conn=world.conn, root=world.root, clock=world.clock,
         materialization_base=default_materialization_base(world.root),
         _reclaim_next_at=0.0, _reclaim_reported=set(),
@@ -205,3 +207,36 @@ def test_cli_is_a_dry_run_unless_apply_is_given(world):
         True, 2, 200, 0)
     applied = cli.reclaim_command(Namespace(apply=True), world.root, world.conn, world.clock)
     assert (applied["dry_run"], applied["removed"]) == (False, 2)
+
+
+def test_removal_renews_leases_per_file_so_slow_cleanup_cannot_starve_them(world):
+    (_legacy(world, "succeeded") / "data").chmod(0o755)
+    for index in range(20):
+        (_legacy(world, "succeeded") / "data" / f"extra{index}.csv").write_bytes(b"1")
+    calls = []
+    reclaim(world.conn, world.root, apply=True, keepalive=lambda: calls.append(1))
+    assert len(calls) >= 21
+
+
+def test_the_tick_pass_passes_the_lease_renewal_into_reclaim(world):
+    service = _service(world)
+    Service._reclaim_terminal_staging(service)
+    assert len(service.renewals) >= 2
+
+
+def test_symlinked_roots_are_unlinked_never_traversed_or_sized(world, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "big.bin").write_bytes(b"y" * 500)
+    reclaim(world.conn, world.root, apply=True)
+    legacy = _legacy(world, "succeeded")
+    legacy.symlink_to(outside, target_is_directory=True)
+    base = default_materialization_base(world.root)
+    base.mkdir()
+    partial = base / f".{HEX}.partial-{world.ids['failed']}"
+    partial.symlink_to(outside, target_is_directory=True)
+    listed = reclaim(world.conn, world.root)
+    assert len(listed) == 2 and all(entry["bytes"] == 0 for entry in listed)
+    reclaim(world.conn, world.root, apply=True)
+    assert not legacy.is_symlink() and not partial.is_symlink()
+    assert (outside / "big.bin").read_bytes() == b"y" * 500
