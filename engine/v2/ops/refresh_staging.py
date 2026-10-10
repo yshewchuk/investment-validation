@@ -28,13 +28,7 @@ from pathlib import Path
 
 from engine.v2.foundation import canonical_json, from_document
 from engine.v2.ops.incremental_data import RefreshParameters
-
-#: One entry per refresh kind that needs a staged identity document.
-REFRESH_INPUT_DOCUMENT_NAMES = {
-    "incremental_refresh": "incremental_refresh_input.json",
-    "computed_moves_refresh": "computed_moves_refresh_input.json",
-    "forward_calendar_refresh": "forward_calendar_refresh_input.json",
-}
+from engine.v2.ops.stores.refresh_contracts import REFRESH_INPUT_DOCUMENT_NAMES
 
 
 def stage_refresh_input(claim, staging: Path) -> None:

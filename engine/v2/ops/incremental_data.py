@@ -526,7 +526,7 @@ def _load_forward_calendar_refresh_callback() -> RefreshCallback:
     )
     from engine.v2.ops.provider_budget import budgeted_fetcher
     from engine.v2.ops.providers import nasdaq_calendar_fetcher, yfinance_earnings_fetcher
-    from engine.v2.ops.refresh_staging import REFRESH_INPUT_DOCUMENT_NAMES
+    from engine.v2.ops.stores.refresh_contracts import REFRESH_INPUT_DOCUMENT_NAMES
 
     nasdaq_fetcher = nasdaq_calendar_fetcher()
     earnings_fetcher = yfinance_earnings_fetcher()
