@@ -32,6 +32,7 @@ from engine.v2.data.price_history_query import tickers_with_price_history
 from engine.v2.data.price_history_table import PRICE_HISTORY_TABLE_NAME
 from engine.v2.data.repository import Repository
 from engine.v2.features.panel_row_inputs import PanelRowInputs, scan_panel_row
+from engine.v2.ops import worker_progress
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_score_batch_types import (
@@ -277,10 +278,12 @@ def build_native_score_batch_events(
                                 decision_session=decision_session,
                                 history_start=history_start)
     events: list[dict[str, Any]] = []
-    for position, key in admitted:
-        event, refusal = _compose_event(
-            repository, snapshot, key, decision_session=decision_session,
-            calendar=calendar, panel=panels[_panel_marker(key)])
+    for done, (position, key) in enumerate(admitted, 1):
+        # Live progress: one step per row, "done_of_total" in its name (no-op outside a worker).
+        with worker_progress.step(f"compose_event_{done}_of_{len(admitted)}", units=1):
+            event, refusal = _compose_event(
+                repository, snapshot, key, decision_session=decision_session,
+                calendar=calendar, panel=panels[_panel_marker(key)])
         if refusal is None:
             events.append(event)
         else:

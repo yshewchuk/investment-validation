@@ -78,7 +78,7 @@ turns one release binding (`ScoringReleaseBinding`) plus a sequence of already-s
 `records.json`/`refusals.json`. **Supports `STR-THRU` only** — any other
 strategy refuses per-row. The tick sidecar only submits the shadow job for a
 new eligible snapshot-pinned identity (`producer_mode="snapshot"`); direct
-worker callers default to staged `events.json`; snapshot mode derives `calendar_revision` from pinned earnings data, while staged mode uses its parameter.
+worker callers default to staged `events.json`; snapshot mode derives `calendar_revision` from pinned earnings data, while staged mode uses its parameter. The snapshot producer's `Repository` is opened with `pin_snapshots=True` (resolution and scan/bound membership are memoized per instance; `fragment_records` is not) and each admitted row runs inside a `compose_event_<done>_of_<total>` progress step.
 The production-default `legacy`/unpinned path stays a no-op; production uses `projection` (3 GiB, 2 CPUs). A producer exception fails the native attempt
 before writing that attempt's event/refusal or score outputs; reused-root files
 may remain as untrusted residue. The worker job has five bounded attempts, with delays of 30s, 2m, 10m and 30m. Worker production cannot stall supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.
@@ -1122,7 +1122,7 @@ assertion paid once at import time, no I/O, no legacy dependency).
 **Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops.
 The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
 `experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, and `fingerprints.environment_identity`/`source_closure`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
-`experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Other modules stay internal.
+`experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Prediction reporting consumes public `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Other modules stay internal.
 
 ### Proposed final-holdout authority (#490)
 
