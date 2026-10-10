@@ -552,7 +552,7 @@ The report is replaced atomically after capture; a report-write failure leaves t
 
 ### Nightly session identity (`nightly_session.py`, slice 1 of #564)
 
-Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` receipts keep their meaning. `session_key = H(version, as_of, scope, selection_identity, catalog_identity)` and `run_id = H(session_key, generation)`. Callers cannot supply the session key or choose the generation an ordinary call or rerun allocates. An ordinary call resumes the one derived session; only an explicit rerun allocates a generation, so a deployed-code change alone never does. State is one per-session document under the supplied root: `revision`, plus per generation `run_id`, `reason` (`initial`/`rerun`), `status` (`allocated`/`started`) and the rerun's `invalidation` step names. Writes are compare-and-swap on `revision` under a per-session `flock`, then tmp, fsync and `os.replace`.
+Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` receipts keep their meaning. `session_key = H(version, as_of, scope, selection_identity, catalog_identity)` and `run_id = H(session_key, generation)`. Callers cannot supply the session key or choose the generation an ordinary call or rerun allocates. An ordinary call resumes the one derived session; only an explicit rerun allocates a generation, so a deployed-code change alone never does. State is one per-session document under the supplied root: `revision`, plus per generation `run_id`, `reason` (`initial`/`rerun`), `status` (`allocated`/`started`) and the rerun's `invalidation` step names. Updates use revision-based compare-and-swap, serialize per session, and publish the document atomically.
 
 | Condition | Outcome |
 |---|---|
