@@ -5,6 +5,7 @@ state, set with SQL because driving a worker to completion is not what is under 
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 
@@ -234,3 +235,16 @@ def test_malformed_step_is_refused_by_complete_and_reconcile_without_a_receipt(r
             call()
         assert _code(exc) == "INVALID_REQUEST"
     assert not _receipts_file(root).exists()
+
+
+def test_session_lock_is_held_while_a_receipt_update_runs(root):
+    lock_path = ns.session_path(root, IDENT)
+    lock_path = lock_path.with_name(lock_path.name + ".lock")
+
+    def change(steps):
+        with open(lock_path, "a") as other:
+            with pytest.raises(BlockingIOError):  # a rerun/start swap would have to wait
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return "held", None
+
+    assert nr._update(root, IDENT, 1, change) == "held"

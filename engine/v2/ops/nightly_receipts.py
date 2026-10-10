@@ -20,6 +20,7 @@ from engine.v2.ops.nightly_session import (
     SessionIdentity,
     atomic_write,
     load_session,
+    session_path,
 )
 
 __all__ = ["Effect", "Reconciliation", "StepReceipt", "begin_step", "complete_step",
@@ -101,22 +102,27 @@ def _decode(text: str, run_id: str) -> dict[str, StepReceipt]:
 
 
 def _update(root: Path, identity: SessionIdentity, generation: int, change):
-    """``change(steps) -> (result, new steps | None)`` under the per-run file lock."""
-    gen = _active(root, identity, generation)
-    path = Path(root).joinpath(*STATE_DIR, f"{gen.run_id}.receipts.json")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.with_name(path.name + ".lock"), "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            steps = _decode(path.read_text(), gen.run_id)
-        except FileNotFoundError:
-            steps = {}
-        except (OSError, UnicodeDecodeError) as exc:
-            raise fail("INTEGRITY_FAILED", "step receipts are unreadable") from exc
-        result, new = change(steps)
-        if new is not None:
-            atomic_write(path, _encode(gen.run_id, new))
-        return result
+    """``change(steps) -> (result, new steps | None)``. The session lock is held across the
+    active-generation check and the receipt write, so a rerun cannot slip in between;
+    locks are taken session first, then receipts."""
+    sp = session_path(root, identity)
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    with open(sp.with_name(sp.name + ".lock"), "a") as session_lock:
+        fcntl.flock(session_lock, fcntl.LOCK_EX)
+        gen = _active(root, identity, generation)
+        path = Path(root).joinpath(*STATE_DIR, f"{gen.run_id}.receipts.json")
+        with open(path.with_name(path.name + ".lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                steps = _decode(path.read_text(), gen.run_id)
+            except FileNotFoundError:
+                steps = {}
+            except (OSError, UnicodeDecodeError) as exc:
+                raise fail("INTEGRITY_FAILED", "step receipts are unreadable") from exc
+            result, new = change(steps)
+            if new is not None:
+                atomic_write(path, _encode(gen.run_id, new))
+            return result
 
 
 def _probe(effect: Effect, conn: sqlite3.Connection | None) -> str:
