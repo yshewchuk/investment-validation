@@ -67,7 +67,11 @@ def test_begin_is_idempotent_and_refuses_a_changed_request(root, tmp_path):
     ("s", DIGEST, nr.Effect("bogus", "x")), ("s", DIGEST, nr.Effect("catalog_job")),
     ("s", DIGEST, nr.Effect("artifact", "/x")), ("s", DIGEST, "not-an-effect"),
      ("s", DIGEST, nr.Effect("external", "x", "abc")),
-    ("s", DIGEST, nr.Effect("artifact", "relative/out.bin", "abc"))])
+    ("s", DIGEST, nr.Effect("artifact", "relative/out.bin", "abc")),
+    ("s", DIGEST, nr.Effect("artifact", "/tmp/x", "abc")),
+    ("s", DIGEST, nr.Effect("artifact", "/tmp/x", "G" * 64)),
+    ("s", DIGEST, nr.Effect("artifact", "/tmp/x\0y", "a" * 64)),
+    ("s", DIGEST, nr.Effect("external", "a\0b"))])
 def test_malformed_step_or_effect_is_invalid_request(root, step, digest, effect):
     with pytest.raises(OpsError) as exc:
         nr.begin_step(root, IDENT, 1, step, digest, effect)
@@ -248,3 +252,29 @@ def test_session_lock_is_held_while_a_receipt_update_runs(root):
         return "held", None
 
     assert nr._update(root, IDENT, 1, change) == "held"
+
+
+@pytest.mark.parametrize("digest", ["", " ", None, 7])
+def test_reconcile_refuses_a_malformed_request_digest_before_any_lookup(root, tmp_path, digest):
+    with pytest.raises(OpsError) as exc:
+        nr.reconcile_step(root, IDENT, 1, "s", digest)
+    assert _code(exc) == "INVALID_REQUEST"
+    _, effect = _artifact(tmp_path)
+    nr.begin_step(root, IDENT, 1, "capture", DIGEST, effect)
+    with pytest.raises(OpsError) as exc:
+        nr.reconcile_step(root, IDENT, 1, "capture", digest)
+    assert _code(exc) == "INVALID_REQUEST"
+
+
+def test_receipt_file_with_an_unusable_artifact_effect_is_an_integrity_failure(root, tmp_path):
+    _, effect = _artifact(tmp_path)
+    nr.begin_step(root, IDENT, 1, "capture", DIGEST, effect)
+    path = _receipts_file(root)
+    doc = json.loads(path.read_text())
+    for bad in ({"ref": str(tmp_path / "a\0b"), "sha256": effect.sha256},
+                {"ref": effect.ref, "sha256": "not-a-hash"}):
+        doc["steps"]["capture"]["effect"] = {"kind": "artifact", **bad}
+        path.write_text(json.dumps(doc))
+        with pytest.raises(OpsError) as exc:
+            nr.reconcile_step(root, IDENT, 1, "capture", DIGEST)
+        assert _code(exc) == "INTEGRITY_FAILED"

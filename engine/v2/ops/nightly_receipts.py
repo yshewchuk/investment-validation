@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -28,6 +29,7 @@ __all__ = ["Effect", "Reconciliation", "StepReceipt", "begin_step", "complete_st
 
 SCHEMA = "nightly_receipts.v1"
 KINDS = ("catalog_job", "artifact", "external")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -51,18 +53,30 @@ class Reconciliation:
     receipt: StepReceipt | None
 
 
+def _valid_effect(effect: Effect) -> bool:
+    if not (isinstance(effect, Effect) and effect.kind in KINDS
+            and isinstance(effect.ref, str) and isinstance(effect.sha256, str)):
+        return False
+    if "\0" in effect.ref or (effect.kind != "external" and not effect.ref):
+        return False
+    if effect.kind == "artifact":
+        return bool(_SHA256.fullmatch(effect.sha256) and Path(effect.ref).is_absolute())
+    return not effect.sha256
+
+
 def _valid(step: str, digest: str, effect: Effect) -> bool:
     return bool(isinstance(step, str) and step.strip() and isinstance(digest, str)
-                and digest.strip() and isinstance(effect, Effect) and effect.kind in KINDS
-                and isinstance(effect.ref, str) and isinstance(effect.sha256, str)
-                and (effect.kind == "external" or effect.ref)
-                and (effect.kind != "artifact" or (effect.sha256 and Path(effect.ref).is_absolute()))
-                and (effect.kind == "artifact" or not effect.sha256))
+                and digest.strip() and _valid_effect(effect))
 
 
 def _check_step(step: object) -> None:
     if not isinstance(step, str) or not step.strip():
         raise fail("INVALID_REQUEST", "step is malformed")
+
+
+def _check_digest(digest: object) -> None:
+    if not isinstance(digest, str) or not digest.strip():
+        raise fail("INVALID_REQUEST", "request digest is malformed")
 
 
 def _active(root: Path, identity: SessionIdentity, generation: int) -> Generation:
@@ -185,6 +199,7 @@ def reconcile_step(root: Path, identity: SessionIdentity, generation: int, step:
     """Decide ``completed`` / ``not_started``; an effect that cannot be proven is uncertain
     and raises ``CHECKPOINT_INCOMPATIBLE`` without writing, so it is never repeated."""
     _check_step(step)
+    _check_digest(request_digest)
     def change(steps):
         cur = steps.get(step)
         if cur is None:
