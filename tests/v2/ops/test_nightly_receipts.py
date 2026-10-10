@@ -224,3 +224,13 @@ def test_begin_refuses_a_changed_effect_under_the_same_digest(root, tmp_path):
     with pytest.raises(OpsError) as exc:
         nr.begin_step(root, IDENT, 1, "capture", DIGEST, other)
     assert _code(exc) == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.parametrize("step", ["", " ", None, ["x"]])
+def test_malformed_step_is_refused_by_complete_and_reconcile_without_a_receipt(root, step):
+    for call in (lambda: nr.complete_step(root, IDENT, 1, step),
+                 lambda: nr.reconcile_step(root, IDENT, 1, step, DIGEST)):
+        with pytest.raises(OpsError) as exc:
+            call()
+        assert _code(exc) == "INVALID_REQUEST"
+    assert not _receipts_file(root).exists()

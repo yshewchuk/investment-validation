@@ -59,6 +59,11 @@ def _valid(step: str, digest: str, effect: Effect) -> bool:
                 and (effect.kind == "artifact" or not effect.sha256))
 
 
+def _check_step(step: object) -> None:
+    if not isinstance(step, str) or not step.strip():
+        raise fail("INVALID_REQUEST", "step is malformed")
+
+
 def _active(root: Path, identity: SessionIdentity, generation: int) -> Generation:
     state = load_session(root, identity)
     if (type(generation) is not int or state is None or state.active.generation != generation
@@ -154,6 +159,7 @@ def complete_step(root: Path, identity: SessionIdentity, generation: int, step: 
                   conn: sqlite3.Connection | None = None) -> StepReceipt:
     """Bind a finished effect to its step: prove it (an ``external`` effect is the caller's
     assertion), then mark the step ``succeeded``. Idempotent."""
+    _check_step(step)
     def change(steps):
         cur = steps.get(step)
         if cur is None:
@@ -172,6 +178,7 @@ def reconcile_step(root: Path, identity: SessionIdentity, generation: int, step:
                    ) -> Reconciliation:
     """Decide ``completed`` / ``not_started``; an effect that cannot be proven is uncertain
     and raises ``CHECKPOINT_INCOMPATIBLE`` without writing, so it is never repeated."""
+    _check_step(step)
     def change(steps):
         cur = steps.get(step)
         if cur is None:
