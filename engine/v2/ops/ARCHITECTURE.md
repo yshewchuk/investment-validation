@@ -1119,17 +1119,16 @@ strategies by construction, so no legacy read is needed; it is instead
 checked against `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset
 assertion paid once at import time, no I/O, no legacy dependency).
 
-**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4);
-top-level `tools/v2_*.py` operator CLIs and `experiments/*` plan submitters;
-`checks/rearchitecture_*.py`; and `tests/test_v2_ops_*.py`. Top-level tools are
-unlayered (§1); no other layered or legacy engine caller imports ops.
-The raw-row producer consumes `board_requests`; its sole production caller is
-`native_score_batch.run_native_score_batch_worker` in the worker process.
-`experiments/native_registration.py` may also import the public submodule APIs
-`catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`,
-`experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`,
-and `fingerprints.environment_identity`/`source_closure`. Registration owns the
-`catalog.transaction` around `register_hypothesis_in_transaction`. `experiments/native_outcomes.py` also consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact and CSV effects stay outside SQL. Other modules stay internal.
+**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), unlayered `tools/v2_*.py`/`experiments/*` plan submitters, `checks/rearchitecture_*.py`, and `tests/test_v2_ops_*.py`; no other layered or legacy engine caller imports ops.
+The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
+`experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, and `fingerprints.environment_identity`/`source_closure`; it owns the registration transaction.
+`experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Other modules stay internal.
+
+### Proposed final-holdout authority (#490)
+
+Design only: ops will own the private durable user-authorization/spend ledger and fenced lifecycle in the [research final-read contract](../research/ARCHITECTURE.md#proposed-authorized-final-read-490). Only an interactive user act can create authorization; agents and the supervisor may prepare a request or reconcile saved evidence, never authorize it. The dedicated tool leaf composes the peer packages; ops gains no research import or generic final-read job/bypass.
+Authorization facts and the unique decision spend commit together in the catalog before reading. Filesystem receipts/results publish outside SQL; a later transaction binds their verified references. Reconciliation never repeats a started read. Revocation and winner changes serialize with read start and completion; spend survives both.
+Final-read records use their own versioned decision/request namespace, not #555's `(experiment_id, refused)` slot or #565's existing experiment/variant outcome slot. Reuse #555's private pin-bound refusal evidence, fenced reconciliation, redaction and fail-closed publication rules without treating a refusal receipt as authorization; ordinary experiment `--no-ledger` semantics remain unchanged. `HOLDOUT_ACCESS_DENIED` depends on #555's ops-code registration; other named refusals already exist. No new refusal code is proposed.
 
 ## External systems and libraries
 
