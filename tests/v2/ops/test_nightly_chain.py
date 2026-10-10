@@ -181,3 +181,36 @@ def test_a_malformed_successor_is_integrity_failed(root, tmp_path):
     with pytest.raises(OpsError) as exc:
         nc.run_snapshot_chain(root, IDENT, 1, "s0", [bad])
     assert _code(exc) == "INTEGRITY_FAILED" and ran == []
+
+
+def test_a_succeeded_artifact_with_changed_bytes_stops_the_chain(root, tmp_path):
+    store = Store(tmp_path)
+    nc.run_snapshot_chain(root, IDENT, 1, "s0", _steps(store))
+    store.calls.clear()
+    store.marker("import", "s0").write_text("tampered")  # successor() is still non-empty
+    with pytest.raises(OpsError) as exc:
+        nc.run_snapshot_chain(root, IDENT, 1, "s0", _steps(store))
+    assert _code(exc) == "INTEGRITY_FAILED" and store.calls == []
+
+
+def test_a_succeeded_catalog_job_that_is_no_longer_succeeded_stops_the_chain(root, tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    job_id = job_id_for("shadow", "import-1")
+    ran = []
+
+    def run(pred):
+        ran.append(pred)
+        submit(conn, REGISTRY, POLICY, request("import-1"), clock=clock)
+
+    step = nc.ChainStep("import", lambda pred: Effect("catalog_job", job_id), run,
+                        lambda pred: "imported" if ran else None)
+    with pytest.raises(OpsError):  # submitted, still live
+        nc.run_snapshot_chain(root, IDENT, 1, "s0", [step], conn=conn)
+    conn.execute("UPDATE jobs SET state = 'succeeded' WHERE job_id = ?", (job_id,))
+    nc.run_snapshot_chain(root, IDENT, 1, "s0", [step], conn=conn)
+    conn.execute("UPDATE jobs SET state = 'failed' WHERE job_id = ?", (job_id,))
+    ran.clear()
+    with pytest.raises(OpsError) as exc:
+        nc.run_snapshot_chain(root, IDENT, 1, "s0", [step], conn=conn)
+    assert _code(exc) == "INTEGRITY_FAILED" and ran == []
+    conn.close()

@@ -554,7 +554,7 @@ Leaf, not yet called by `nightly_trigger`; it imports no CLI or store. `run_snap
 
 | Condition | Outcome |
 |---|---|
-| Successor already committed (finished step, or crash between commit and receipt) | Receipt completed, `run` not called, step `skipped`. No successor: `run` once, re-read, complete; still none is `DEPENDENCY_FAILED`. A succeeded receipt with no successor is `INTEGRITY_FAILED`. A `catalog_job` effect not yet `succeeded` is `INVALID_REQUEST` from completion: `run` returns only once its job is terminal, and a rerun reattaches. |
+| Successor already committed (finished step, or crash between commit and receipt) | Receipt completed, `run` not called, step `skipped`. No successor: `run` once, re-read, complete; still none is `DEPENDENCY_FAILED`. A succeeded receipt is re-proved first (`reconcile_step`): with its effect no longer holding, or no successor, it is `INTEGRITY_FAILED` and nothing downstream runs. A `catalog_job` effect not yet `succeeded` is `INVALID_REQUEST` from completion: `run` returns only once its job is terminal, and a rerun reattaches. |
 | Recorded step with another predecessor or effect | `IDEMPOTENCY_CONFLICT`; a rerun generation is the way forward. |
 | A callback raises | Propagates; later steps do not run. `effect` runs before `begin_step`, so a raise leaves no receipt; `successor` or `run` raise after it, leaving a new step's receipt `intent` and a `succeeded` one `succeeded`. A malformed `successor` value is `INTEGRITY_FAILED`. |
 

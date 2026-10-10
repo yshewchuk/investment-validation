@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from engine.v2.ops.errors import fail
-from engine.v2.ops.nightly_receipts import Effect, begin_step, complete_step
+from engine.v2.ops.nightly_receipts import Effect, begin_step, complete_step, reconcile_step
 from engine.v2.ops.nightly_session import SessionIdentity
 
 __all__ = ["ChainResult", "ChainStep", "run_snapshot_chain"]
@@ -59,8 +59,11 @@ def run_snapshot_chain(root: Path, identity: SessionIdentity, generation: int,
     executed: list[str] = []
     skipped: list[str] = []
     for step in steps:
-        receipt = begin_step(root, identity, generation, step.name,
-                             _digest(step.name, predecessor), step.effect(predecessor))
+        digest = _digest(step.name, predecessor)
+        receipt = begin_step(root, identity, generation, step.name, digest,
+                             step.effect(predecessor))
+        if receipt.state == "succeeded":  # re-prove the recorded effect before trusting it
+            reconcile_step(root, identity, generation, step.name, digest, conn=conn)
         found = _committed(step, predecessor)
         if found is None:
             if receipt.state == "succeeded":
