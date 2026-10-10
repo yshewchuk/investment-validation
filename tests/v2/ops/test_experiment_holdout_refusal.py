@@ -551,11 +551,14 @@ def test_run_legacy_script_sets_private_signal_path_and_clears_stale_file(
     run_dir = tmp_path.resolve()
     signal = run_dir / "holdout_refusal_signal.json"
     signal.write_bytes(b'{"schema_version": "stale-previous-attempt"}\n')
+    digest = signal.with_name(signal.name + ".sha256")
+    digest.write_text("stale-digest", encoding="ascii")
 
     captured = {}
 
     def fake_run(command, *, cwd, env, check, capture_output, text, timeout):
-        captured.update(cwd=cwd, env=env, stale_present_at_launch=signal.exists())
+        captured.update(cwd=cwd, env=env, stale_present_at_launch=signal.exists(),
+                        stale_digest_present_at_launch=digest.exists())
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -571,6 +574,8 @@ def test_run_legacy_script_sets_private_signal_path_and_clears_stale_file(
     assert not captured["stale_present_at_launch"], \
         "the stale signal file survived until the subprocess launch"
     assert not signal.exists()
+    assert not captured["stale_digest_present_at_launch"]
+    assert not digest.exists()
 
 
 def test_real_subprocess_refusal_signal_round_trip(tmp_path, monkeypatch):
@@ -588,8 +593,10 @@ def test_real_subprocess_refusal_signal_round_trip(tmp_path, monkeypatch):
     loader call-site stays covered by
     ``test_real_loader_refusal_replay_and_private_receipt``.
     """
+    probe_runner = "experiments/_holdout_refusal_signal_probe.py"
+    monkeypatch.setattr(legacy_adapter, "_FIXED_ARM_RUNNER", probe_runner)
     monkeypatch.setattr(legacy_adapter, "REGISTERED_RUNNERS",
-                        frozenset({legacy_adapter._FIXED_ARM_RUNNER}))
+                        frozenset({probe_runner}))
     repo_root = Path(__file__).resolve().parents[3]
     monkeypatch.setenv("PYTHONPATH", str(repo_root))
     pins = {"snapshot_id": "snap-subprocess", "holdout_as_of_month": "2025-01",

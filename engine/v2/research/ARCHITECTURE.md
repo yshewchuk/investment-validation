@@ -133,7 +133,7 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
-| Cache, retry, transaction, partial write, replay | No cache or automatic retry; no ledger or report writes; complete scans precede return; identical pinned inputs return identical rows (R6). The configured refusal signal is the sole durable write on `HOLDOUT_ACCESS_DENIED`; its I/O errors propagate. |
+| Cache, retry, transaction, partial write, replay | No cache or automatic retry; no ledger or report writes; complete scans precede return; identical pinned inputs return identical rows (R6). The configured refusal signal and its digest sidecar are the only durable writes on `HOLDOUT_ACCESS_DENIED`; their I/O errors propagate. |
 
 These readers preserve no ledger receipt or economic variant identity and
 cannot authorize the separate user-only final holdout read. The refusal signal
@@ -453,9 +453,9 @@ uncaught traceback instead.
   `SNAPSHOT_CONFLICT` (`category="dependency"`, retryable) rather than
   silently overwriting or merging. `--dry-run` builds the same candidate
   and stops before the commit call, so the changeset can be inspected with
-  no table write. The configured `INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL` is
-  `experiment_trades.load_trades`'s only non-table write; its write, sync, or
-  replacement errors propagate.
+  no table write. The configured `INVESTMENT_PLAN_HOLDOUT_REFUSAL_SIGNAL` and
+  its `.sha256` digest sidecar are `experiment_trades.load_trades`'s only
+  non-table writes; their write, sync, or replacement errors propagate.
 - **R5, partial result/write.** Read batches stay provisional until scan
   exhaustion; a later failure returns no partial frame. A smaller explicit
   caller limit raises `RESULT_LIMIT_EXCEEDED`. Writes use the atomic
