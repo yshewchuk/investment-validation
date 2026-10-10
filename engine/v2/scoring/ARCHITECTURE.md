@@ -527,26 +527,12 @@ structure before returning the binding and before bundle assembly or scoring.
 
 `SourceBundle.paired_residual_artifact` and `.paired_residual_recipe` already exist (`engine/v2/scoring/source_inputs.py:301`);
 `paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`) is
-an invariant assertion, never the first failure or a per-row refusal. Planned
-synthetic tests use small fixtures; CI does not run full training.
+an invariant assertion, never the first failure or a per-row refusal.
 
 Parity requires identical joined ticker/event rows and the exact exclusive
 cutoff value. Legacy scope is its `Scorer`'s loaded tickers; mismatched full and
 nightly scopes or cutoffs can change results. The chosen population and cutoff
-must be recorded in lineage. Policy choices are below.
-
-Planned slices (each non-test code slice below 200 lines; detailed split estimates are in PR #619):
-1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
-2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. `tests/v2/scoring/` (~300 lines) for validation before bind/assembly/score;
-   real producer→staging→loader→bundle→simulation; refusal, zero-row,
-   request-isolation and matched/mismatched scope/cutoff cases.
-
-Decisions needed before implementing these slices:
-- **Population:** full producer universe (deterministic) or nightly ticker scope (closer parity, coupled release).
-- **Cutoff:** exclusive paired-state cutoff (reproducible) or release-wide policy (simpler consumers, broader coordination).
-- **Activation:** gate rollout on standard promotion or ship the required-member
-  refusal first and accept planned-exit unavailability until promotion.
+must be recorded in lineage.
 
 ### `nightly_source_bundle.py`
 
