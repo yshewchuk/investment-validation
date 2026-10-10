@@ -270,3 +270,20 @@ def test_a_slow_reclaim_with_renewal_keeps_a_running_attempts_lease_alive(world)
 def test_the_same_slow_reclaim_without_renewal_would_expire_that_lease(world):
     expired, live = _slow_reclaim(world, renew=False)
     assert live in expired
+
+
+def test_an_inaccessible_materialization_base_raises_but_a_missing_one_is_absent(
+        world, monkeypatch):
+    base = default_materialization_base(world.root)
+    assert all(entry["kind"] == "staging" for entry in reclaim(world.conn, world.root))
+    base.mkdir()
+    real = type(base).iterdir
+
+    def denied(path):
+        if path == base:
+            raise PermissionError("denied")
+        return real(path)
+
+    monkeypatch.setattr(type(base), "iterdir", denied)
+    with pytest.raises(PermissionError):
+        reclaim(world.conn, world.root)

@@ -101,13 +101,15 @@ def reclaim(conn, root, *, apply=False, limit=None, materialization_base=None,
                    attempt_id, apply, out, keepalive)
     base = (Path(materialization_base) if materialization_base
             else default_materialization_base(root))
-    if base.is_dir():
-        eligible = set(attempts)
-        for entry in sorted(base.iterdir()):
-            match = _PARTIAL.match(entry.name)
-            if match and match["attempt"] in eligible:
-                if full():
-                    break
-                _entry("partial_materialization", entry, match["attempt"], apply, out,
-                       keepalive)
+    try:
+        entries = sorted(base.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        entries = []  # a genuinely absent base; any other OSError (e.g. permission) propagates
+    eligible = set(attempts)
+    for entry in entries:
+        match = _PARTIAL.match(entry.name)
+        if match and match["attempt"] in eligible:
+            if full():
+                break
+            _entry("partial_materialization", entry, match["attempt"], apply, out, keepalive)
     return out
