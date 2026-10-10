@@ -46,6 +46,9 @@ catalog table or supervisor coordinator is introduced. File/CSV effects stay out
 short catalog transactions; completion follows durable append and never authorizes promotion.
 `export_native_report` creates `REPORT.md` at the registration's fixed store-local
 smoke/recorded address only after verified completion; existing bytes never change.
+The export has an independent inode: a private copy is flushed and synced before
+create-only installation, so editing the export cannot alter stored report bytes.
+An existing export sharing the stored object's inode is an identity conflict.
 An existing conflicting export destination refuses before reconciliation effects;
 this preflight and create-only export do not form an atomic transaction with CSV.
 Recorded destinations must be nonempty and bind the exact normalized path used

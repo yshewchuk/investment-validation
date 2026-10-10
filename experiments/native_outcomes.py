@@ -2,6 +2,7 @@
 import json
 import os
 import sqlite3
+import tempfile
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -137,7 +138,9 @@ def _reconcile(conn, store, registration, key, destination, ledger_path, ref_doc
     if export_path is not None:
         if report_ref is None:
             raise fail("INVALID_EXPERIMENT_SPEC", "native outcome has no completed report")
-        if export_path.resolve() != export_path or (export_path.exists() and export_path.read_bytes() != report):
+        if (export_path.resolve() != export_path or (export_path.exists()
+                and (export_path.samefile(store.root / report_ref["storage_key"])
+                     or export_path.read_bytes() != report))):
             raise _conflict(store, registration)
     if key != "native_smoke":
         ledger_append([row], path=ledger_path, unique_by=("id", "spec_hash"))
@@ -224,10 +227,17 @@ def export_native_report(conn, store, registration, *, no_ledger=False, ledger_p
     result = _reconcile(conn, store, registration, key, destination, ledger_path, evidence[key], export_path=path)
     ref = foundation.from_document(ArtifactRef, result["receipt"]["report_ref"])
     foundation.ensure_directory(path.parent)
-    try:
-        os.link(store.verify(ref), path)
-    except FileExistsError:
-        if path.is_symlink() or path.read_bytes() != store.read_verified(ref):
-            raise _conflict(store, registration)
+    data = store.read_verified(ref)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".REPORT.", mode="wb") as staged:
+        staged.write(data)
+        staged.flush()
+        os.fchmod(staged.fileno(), 0o444)
+        os.fsync(staged.fileno())
+        try:
+            os.link(staged.name, path)
+        except FileExistsError:
+            if (path.is_symlink() or path.samefile(store.root / ref.storage_key)
+                    or path.read_bytes() != data):
+                raise _conflict(store, registration)
     foundation.fsync_directory(path.parent)
     return path

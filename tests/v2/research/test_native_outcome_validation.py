@@ -1112,3 +1112,348 @@ def test_export_pending_refusal_without_report_is_r1_before_effects(
     assert _catalog(source.conn) == before
     assert _transaction_effects(source, tmp_path, ledger, safe_default_ledger) == effects
     assert key + "_receipt" not in _evidence(source, registration.run_id)
+
+
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+def test_export_is_independent_copy_and_edits_cannot_corrupt_report(
+        source, tmp_path, safe_default_ledger, no_ledger):
+    """An editable export must never share the content-addressed object's inode."""
+    from engine.v2.contracts import ArtifactRef
+    from engine.v2.foundation import ArtifactError, from_document
+
+    registration = _call(source)
+    ledger = tmp_path / "copy-isolation" / "ledger.csv"
+    _seed_csv(ledger, True)
+    fallback_before = _seed_csv(safe_default_ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    result = _publish(source, registration, destination, no_ledger=no_ledger)
+    ref = from_document(ArtifactRef, result["outcome"]["report_ref"])
+    object_path = source.store.verify(ref)
+    before, objects, ledger_before = _catalog(source.conn), _objects(source.store), _csv_state(ledger)
+    path = outcomes.export_native_report(source.conn, source.store, registration,
+                                         ledger_path=destination, no_ledger=no_ledger)
+    independent = (path.stat().st_dev, path.stat().st_ino) != (
+        object_path.stat().st_dev, object_path.stat().st_ino)
+    assert path.read_bytes() == REPORT.encode()
+    assert path.stat().st_mode & 0o222 == 0
+    path.chmod(0o644)
+    path.write_bytes(b"caller-edited exported report")
+    verified, corruption = None, None
+    try:
+        verified = source.store.read_verified(ref)
+    except ArtifactError as error:
+        corruption = error.code
+    assert (independent, corruption, verified) == (True, None, REPORT.encode())
+    assert object_path.stat().st_mode & 0o222 == 0
+    assert _objects(source.store) == objects
+    assert _catalog(source.conn) == before
+    assert _csv_state(ledger) == ledger_before
+    assert _csv_state(safe_default_ledger) == fallback_before
+
+
+def _prepared_copy_export(source, tmp_path, fallback, no_ledger):
+    """Complete a real report before narrowly faulting only its exported copy."""
+    from engine.v2.contracts import ArtifactRef
+    from engine.v2.foundation import from_document
+
+    registration = _call(source)
+    ledger = tmp_path / "staged-export" / "ledger.csv"
+    _seed_csv(ledger, True)
+    _seed_csv(fallback, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    result = _publish(source, registration, destination, no_ledger=no_ledger)
+    ref = from_document(ArtifactRef, result["outcome"]["report_ref"])
+    path = (source.store.root / "native_reports" / registration.run_id /
+            ("smoke" if no_ledger else "recorded") / "REPORT.md")
+    return registration, ledger, destination, ref, path
+
+
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("phase", ["partial-write", "file-fsync"])
+def test_interrupted_export_copy_never_exposes_partial_report_and_recovers(
+        source, tmp_path, monkeypatch, safe_default_ledger, no_ledger, phase):
+    """Only a complete, fsynced private copy may acquire the fixed report name."""
+    registration, ledger, destination, ref, path = _prepared_copy_export(
+        source, tmp_path, safe_default_ledger, no_ledger)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    real_temp, real_sync = outcomes.tempfile.NamedTemporaryFile, outcomes.os.fsync
+    active, faults = [], []
+
+    class InterruptedCopy:
+        def __init__(self, temporary):
+            self.temporary = temporary
+
+        def __getattr__(self, name):
+            return getattr(self.temporary, name)
+
+        def __enter__(self):
+            self.temporary.__enter__()
+            active.append(self.temporary)
+            return self
+
+        def __exit__(self, *args):
+            try:
+                return self.temporary.__exit__(*args)
+            finally:
+                active.clear()
+
+        def write(self, data):
+            assert not path.exists()
+            if phase == "partial-write":
+                self.temporary.write(data[:5])
+                self.temporary.flush()
+                assert type(path)(self.temporary.name).read_bytes() == data[:5]
+                faults.append(phase)
+                raise OSError("synthetic interrupted export copy write")
+            return self.temporary.write(data)
+
+    def temporary(*args, **kwargs):
+        staged = real_temp(*args, **kwargs)
+        return InterruptedCopy(staged) if kwargs.get("dir") == path.parent else staged
+
+    def sync(fd):
+        if active and fd == active[0].fileno() and phase == "file-fsync":
+            assert not path.exists()
+            assert type(path)(active[0].name).read_bytes() == REPORT.encode()
+            real_sync(fd)
+            faults.append(phase)
+            raise OSError("synthetic interrupted export copy fsync")
+        return real_sync(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes.tempfile, "NamedTemporaryFile", temporary)
+        patch.setattr(outcomes.os, "fsync", sync)
+        with pytest.raises(OpsError) as captured:
+            outcomes.export_native_report(source.conn, source.store, registration,
+                                          ledger_path=destination, no_ledger=no_ledger)
+    assert captured.value.code == "RESOURCE_UNAVAILABLE"
+    assert faults == [phase]
+    assert not path.exists()
+    assert list(path.parent.iterdir()) == []
+    assert source.store.read_verified(ref) == REPORT.encode()
+    assert _objects(source.store) == objects
+    assert _catalog(source.conn) == before
+    after = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    for field in ("target_csv", "default_csv", "locks", "store_files", "reports"):
+        assert after[field] == effects[field], field
+    assert outcomes.export_native_report(source.conn, source.store, registration,
+                                         ledger_path=destination, no_ledger=no_ledger) == path
+    assert path.read_bytes() == REPORT.encode()
+    assert not path.samefile(source.store.verify(ref))
+    assert path.stat().st_mode & 0o222 == 0
+    assert list(path.parent.iterdir()) == [path]
+    recovered = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    inode = path.stat().st_ino
+    assert outcomes.export_native_report(source.conn, source.store, registration,
+                                         ledger_path=destination, no_ledger=no_ledger) == path
+    assert path.stat().st_ino == inode
+    assert _transaction_effects(source, tmp_path, ledger, safe_default_ledger) == recovered
+    assert _catalog(source.conn) == before
+
+
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+def test_export_parent_sync_failure_keeps_complete_copy_for_exact_retry(
+        source, tmp_path, monkeypatch, safe_default_ledger, no_ledger):
+    """A failure after atomic installation cannot strand partial bytes or duplicate rows."""
+    registration, ledger, destination, ref, path = _prepared_copy_export(
+        source, tmp_path, safe_default_ledger, no_ledger)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    ledger_before, fallback_before = _csv_state(ledger), _csv_state(safe_default_ledger)
+    real_sync, faults = outcomes.foundation.fsync_directory, []
+
+    def sync(directory):
+        if directory == path.parent and path.exists():
+            assert path.read_bytes() == REPORT.encode()
+            assert not path.samefile(source.store.verify(ref))
+            assert list(path.parent.iterdir()) == [path]
+            real_sync(directory)
+            faults.append("parent-sync")
+            raise OSError("synthetic interrupted export parent fsync")
+        return real_sync(directory)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes.foundation, "fsync_directory", sync)
+        with pytest.raises(OpsError) as captured:
+            outcomes.export_native_report(source.conn, source.store, registration,
+                                          ledger_path=destination, no_ledger=no_ledger)
+    assert captured.value.code == "RESOURCE_UNAVAILABLE"
+    assert faults == ["parent-sync"]
+    inode = path.stat().st_ino
+    assert path.read_bytes() == source.store.read_verified(ref) == REPORT.encode()
+    assert _objects(source.store) == objects
+    assert _catalog(source.conn) == before
+    assert _csv_state(ledger) == ledger_before
+    assert _csv_state(safe_default_ledger) == fallback_before
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    assert outcomes.export_native_report(source.conn, source.store, registration,
+                                         ledger_path=destination, no_ledger=no_ledger) == path
+    assert path.stat().st_ino == inode
+    assert _catalog(source.conn) == before
+    assert _transaction_effects(source, tmp_path, ledger, safe_default_ledger) == effects
+
+
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("racer", ["matching-file", "foreign-file", "matching-symlink", "store-alias"])
+def test_export_copy_install_is_create_only_when_target_appears(
+        source, tmp_path, monkeypatch, safe_default_ledger, no_ledger, racer):
+    """A target racing after preflight is preserved; the staged copy never replaces it."""
+    registration, ledger, destination, ref, path = _prepared_copy_export(
+        source, tmp_path, safe_default_ledger, no_ledger)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    ledger_before, fallback_before = _csv_state(ledger), _csv_state(safe_default_ledger)
+    external = tmp_path / "race-external.md"
+    external.write_bytes(REPORT.encode())
+    real_link, installed = outcomes.os.link, []
+
+    def link(src, dst, *args, **kwargs):
+        if dst == path:
+            staged = type(path)(src)
+            assert staged.parent == path.parent
+            assert staged.read_bytes() == REPORT.encode()
+            assert not staged.samefile(source.store.verify(ref))
+            assert staged.stat().st_mode & 0o222 == 0
+            if racer == "matching-symlink":
+                path.symlink_to(external)
+            elif racer == "store-alias":
+                real_link(source.store.verify(ref), path)
+            else:
+                path.write_bytes(REPORT.encode() if racer == "matching-file" else b"foreign report")
+            installed.append(path.lstat().st_ino)
+        return real_link(src, dst, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes.os, "link", link)
+        if racer == "matching-file":
+            assert outcomes.export_native_report(source.conn, source.store, registration,
+                                                 ledger_path=destination, no_ledger=no_ledger) == path
+        else:
+            with pytest.raises(OpsError) as captured:
+                outcomes.export_native_report(source.conn, source.store, registration,
+                                              ledger_path=destination, no_ledger=no_ledger)
+            _assert_conflict(source, captured, registration)
+    assert installed == [path.lstat().st_ino]
+    assert list(path.parent.iterdir()) == [path]
+    assert path.read_bytes() == (b"foreign report" if racer == "foreign-file" else REPORT.encode())
+    assert path.is_symlink() == (racer == "matching-symlink")
+    assert external.read_bytes() == source.store.read_verified(ref) == REPORT.encode()
+    assert _catalog(source.conn) == before
+    assert _csv_state(ledger) == ledger_before
+    assert _csv_state(safe_default_ledger) == fallback_before
+    _assert_objects_preserved(source, objects)
+    assert len(_objects(source.store).keys() - objects.keys()) == (racer != "matching-file")
+
+
+@pytest.mark.parametrize("state", ["pending", "completed"])
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+@pytest.mark.parametrize("existing", [False, True], ids=["missing-csv", "existing-csv"])
+def test_export_existing_store_alias_is_r6_before_reconciliation_effects(
+        source, tmp_path, monkeypatch, safe_default_ledger, state, no_ledger, existing):
+    """Matching export bytes cannot bless a preexisting hardlink into immutable storage."""
+    from engine.v2.contracts import ArtifactRef
+    from engine.v2.foundation import from_document
+
+    registration = _call(source)
+    ledger = tmp_path / "store-alias-export" / "ledger.csv"
+    _seed_csv(ledger, existing)
+    _seed_csv(safe_default_ledger, True)
+    destination = PoisonLedger() if no_ledger else ledger
+    key, outcome, receipt = _pending_one_byte_completion(
+        source, registration, destination, monkeypatch, no_ledger)
+    if state == "completed":
+        _save_completion(source, registration, key, receipt)
+    ref = from_document(ArtifactRef, outcome["report_ref"])
+    path = (source.store.root / "native_reports" / registration.run_id /
+            ("smoke" if no_ledger else "recorded") / "REPORT.md")
+    path.parent.mkdir(parents=True)
+    outcomes.os.link(source.store.verify(ref), path)
+    assert path.samefile(source.store.verify(ref))
+    inode = path.stat().st_ino
+    before, objects = _catalog(source.conn), _objects(source.store)
+    effects = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    real_publish, publications = source.store.publish_bytes, []
+
+    def publish(data, *, schema_ref):
+        publications.append(schema_ref)
+        return real_publish(data, schema_ref=schema_ref)
+
+    monkeypatch.setattr(outcomes, "ledger_append", _forbid)
+    monkeypatch.setattr(outcomes, "_reserve", _forbid)
+    monkeypatch.setattr(source.store, "publish_bytes", publish)
+    with pytest.raises(OpsError) as captured:
+        outcomes.export_native_report(source.conn, source.store, registration,
+                                      ledger_path=destination, no_ledger=no_ledger)
+    _assert_conflict(source, captured, registration)
+    assert publications == ["native_experiment_refusal.v1.0"]
+    assert _catalog(source.conn) == before
+    after = _transaction_effects(source, tmp_path, ledger, safe_default_ledger)
+    for field in ("target_csv", "default_csv", "locks", "reports"):
+        assert after[field] == effects[field], field
+    assert path.stat().st_ino == inode
+    assert path.samefile(source.store.verify(ref))
+    assert path.read_bytes() == source.store.read_verified(ref) == b"x"
+    assert list(path.parent.iterdir()) == [path]
+    _assert_objects_preserved(source, objects)
+    assert len(_objects(source.store).keys() - objects.keys()) == 1
+
+
+@pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
+def test_concurrent_export_copies_share_final_file_but_never_store_inode(
+        source, tmp_path, monkeypatch, safe_default_ledger, no_ledger):
+    """A losing publisher accepts the winner while its legitimate staging link is live."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, Event
+
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.ops.catalog import connect
+
+    registration, ledger, destination, ref, path = _prepared_copy_export(
+        source, tmp_path, safe_default_ledger, no_ledger)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    ledger_before, fallback_before = _csv_state(ledger), _csv_state(safe_default_ledger)
+    real_link, real_read = outcomes.os.link, type(path).read_bytes
+    staged = Barrier(2)
+    checked = Event()
+    observed_links = []
+
+    def link(src, dst, *args, **kwargs):
+        if dst != path:
+            return real_link(src, dst, *args, **kwargs)
+        assert not type(path)(src).samefile(source.store.verify(ref))
+        staged.wait(timeout=15)
+        result = real_link(src, dst, *args, **kwargs)
+        assert checked.wait(timeout=15), "loser never verified the winner's staged report"
+        return result
+
+    def read(other):
+        result = real_read(other)
+        if other == path:
+            observed_links.append(path.stat().st_nlink)
+            checked.set()
+        return result
+
+    def export():
+        conn = connect(source.catalog_path, must_exist=True)
+        try:
+            store = ArtifactStore(source.store.root)
+            return outcomes.export_native_report(conn, store, registration,
+                                                  ledger_path=destination, no_ledger=no_ledger)
+        finally:
+            conn.close()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes.os, "link", link)
+        patch.setattr(type(path), "read_bytes", read)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: export(), range(2)))
+    assert results == [path, path]
+    assert observed_links == [2]
+    assert path.stat().st_nlink == source.store.verify(ref).stat().st_nlink == 1
+    assert not path.samefile(source.store.verify(ref))
+    assert path.read_bytes() == source.store.read_verified(ref) == REPORT.encode()
+    assert path.stat().st_mode & 0o222 == 0
+    assert list(path.parent.iterdir()) == [path]
+    assert _catalog(source.conn) == before
+    assert _objects(source.store) == objects
+    assert _csv_state(ledger) == ledger_before
+    assert _csv_state(safe_default_ledger) == fallback_before
