@@ -310,7 +310,7 @@ class Service:
                 # settlement commit or roll back together.
                 try:
                     self.reconcile_proven_attempt(row)
-                except Exception:
+                except Exception as exc:
                     # Any typed failure the callback does not convert to a
                     # permanent evidence/conflict settlement is transient here
                     # (an unavailable resource, a stale expectation), and a
@@ -318,10 +318,29 @@ class Service:
                     # leaves the attempt recovery_pending too, reservations held
                     # (ARCHITECTURE.md "pinned experiment trade loader"):
                     # never settle it as a plain LEASE_LOST with the ledger
-                    # row unappended. Nothing is reported from this loop --
-                    # ``_commit_failure`` already emitted the one redacted
-                    # stranded event when the attempt was fenced off, so
-                    # repeated ticks must not repeat the stderr line.
+                    # row unappended. An attempt whose stored failure carries
+                    # the holdout marker stays silent -- ``_commit_failure``
+                    # already emitted the one redacted stranded event when it
+                    # was fenced off. Every other proven-dead failure reports
+                    # one redacted event per (attempt_id, error code): stable
+                    # code and fixed text only, never exception details or the
+                    # stored private receipt. Then continue, leaving the
+                    # attempt recovery_pending.
+                    if "HOLDOUT_ACCESS_DENIED" not in str(row["failure_json"] or ""):
+                        code = (exc.problem.code if isinstance(exc, OpsError)
+                                else "VALIDATION_FAILED")
+                        key = (row["attempt_id"], code)
+                        reported = getattr(self, "_reported_reconcile_failures", None)
+                        if reported is None:
+                            reported = set()
+                            self._reported_reconcile_failures = reported
+                        if key not in reported:
+                            reported.add(key)
+                            _report_stranded(
+                                SimpleNamespace(job_id=row["job_id"],
+                                                attempt_id=row["attempt_id"]),
+                                make_problem(code,
+                                             "proven-dead reconciliation failed"))
                     continue
                 continue
             reconcile_attempt(self.conn, row["attempt_id"],

@@ -1356,6 +1356,77 @@ def test_recovery_does_not_replay_unmarked_refusal_receipt(tmp_path, monkeypatch
         conn.close()
 
 
+def test_supervisor_reports_generic_reconcile_errors_once(tmp_path, monkeypatch, capsys):
+    """A proven-dead generic recovery failure reports one redacted stranded
+    event per distinct error code and leaves the attempt ``recovery_pending``,
+    its reservation held; repeating a code is silent, and the private failure
+    detail never reaches the report."""
+    conn, clock, claim, _, checkout = _claimed_primary_effect(
+        tmp_path, key="primary-generic-reconcile")
+    service = Service(conn, tmp_path / "ops", stages.registry(), TEST_POLICY, clock=clock,
+                      code_source=REPO, store_root=checkout)
+    codes = iter(["RESOURCE_UNAVAILABLE", "STALE_EXPECTATION", "STALE_EXPECTATION"])
+
+    def fail_proven(attempt_row):
+        raise OpsError(make_problem(next(codes), "private failure detail"))
+
+    monkeypatch.setattr(service, "reconcile_proven_attempt", fail_proven)
+    monkeypatch.setattr(supervisor, "prove_ownership_gone",
+                        lambda *args, **kwargs: types.SimpleNamespace(
+                            proven=True, known=(), alive=(), blockers=()))
+
+    def attempt():
+        return conn.execute("SELECT state, ended_at FROM attempts WHERE attempt_id=?",
+                            (claim.attempt_id,)).fetchone()
+
+    def held_reservations():
+        return conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0]
+
+    try:
+        assert supervisor.fence_attempt_for_recovery(conn, claim.attempt_id, clock=clock)
+        fenced = conn.execute("SELECT state, failure_json FROM attempts WHERE attempt_id=?",
+                              (claim.attempt_id,)).fetchone()
+        assert fenced["state"] == "recovery_pending"
+        assert fenced["failure_json"] is None
+        capsys.readouterr()
+
+        service.reconcile()
+        raw = capsys.readouterr().err
+        first = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        assert len(first) == 1
+        assert first[0]["event"] == "attempt_left_for_recovery"
+        assert first[0]["job_id"] == claim.job_id
+        assert first[0]["attempt_id"] == claim.attempt_id
+        assert first[0]["problem"]["code"] == "RESOURCE_UNAVAILABLE"
+        assert first[0]["problem"]["message"] == "proven-dead reconciliation failed"
+        assert "private failure detail" not in raw
+        assert attempt()["state"] == "recovery_pending"
+        assert attempt()["ended_at"] is None
+        assert held_reservations() == 1
+
+        service.reconcile()
+        raw = capsys.readouterr().err
+        second = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        assert len(second) == 1
+        assert second[0]["event"] == "attempt_left_for_recovery"
+        assert second[0]["problem"]["code"] == "STALE_EXPECTATION"
+        assert second[0]["problem"]["message"] == "proven-dead reconciliation failed"
+        assert "private failure detail" not in raw
+        assert attempt()["state"] == "recovery_pending"
+        assert attempt()["ended_at"] is None
+        assert held_reservations() == 1
+
+        service.reconcile()
+        assert capsys.readouterr().err == ""
+        assert attempt()["state"] == "recovery_pending"
+        assert attempt()["ended_at"] is None
+        assert held_reservations() == 1
+    finally:
+        service.close()
+        conn.close()
+
+
 def test_missing_refusal_diagnostics_settles_validation_failed_after_proof(tmp_path,
                                                                            monkeypatch):
     """Issue #489: the worker still emits its typed ``HOLDOUT_ACCESS_DENIED``
