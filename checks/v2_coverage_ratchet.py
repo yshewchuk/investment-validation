@@ -577,16 +577,16 @@ PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.0"
 #: exercises the Phase 3 read API / bridge / projections / UI-facing server
 #: code, kept only if it exists on disk.
 PHASE3_FIXED_SUITE = (
-    "tests/test_v2_serving_api.py",
+    "tests/v2/serving/test_v2_serving_api.py",
     "tests/test_v2_serving_bridge.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
-    "tests/test_v2_serving_publication_binding.py",
+    "tests/v2/serving/test_v2_serving_publication_binding.py",
     "tests/test_v2_dashboard_preview.py",
     "tests/test_v2_dashboard_browser.py",
-    "tests/test_v2_dashboard_integration.py",
+    "tests/v2/dashboard/test_v2_dashboard_integration.py",
     "tests/test_checks_phase3_gate.py",
-    "tests/test_v2_dashboard_publish.py",
+    "tests/v2/dashboard/test_v2_dashboard_publish.py",
 )
 
 

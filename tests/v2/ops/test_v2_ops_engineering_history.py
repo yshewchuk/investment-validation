@@ -5,7 +5,7 @@ observation per scheduled occurrence via ``health.record_check``: a retry or
 a later same-night generation updates that occurrence's own row (bumping its
 retry count) without ever adding a second night, and a night nobody ever
 observed reads back as unknown, never green
-(``tests/test_v2_ops_generation_effects.py``'s own
+(``tests/v2/ops/test_v2_ops_generation_effects.py``'s own
 ``test_health_streak_counts_one_occurrence_per_night_not_per_generation``
 already proves the underlying table collapses correctly; this file proves
 the effect actually WRITES into it, and the engineering-history window built
@@ -22,7 +22,7 @@ failure's own reason.
 
 Real SQLite/ArtifactStore/submission machinery throughout, the same
 technique ``tests/test_v2_ops_effects_graph.py`` and
-``tests/test_v2_ops_generation_effects.py`` use; ``publication_effect`` is
+``tests/v2/ops/test_v2_ops_generation_effects.py`` use; ``publication_effect`` is
 called directly against a real claim, exactly as
 ``supervisor.Service._coordinator_effect`` calls it.
 """
@@ -383,7 +383,7 @@ def test_failed_update_keeps_old_release_and_shows_reason(tmp_path):
 
 # --------------------------------------------------------------------------
 # no-history release: the API-level "unknown, not green" case is
-# ``tests/test_v2_serving_api.py``'s own ``test_operations_route_unknown_
+# ``tests/v2/serving/test_v2_serving_api.py``'s own ``test_operations_route_unknown_
 # history_is_not_green``; this proves the ops side that feeds it never
 # manufactures a "pass" for a night nobody observed.
 # --------------------------------------------------------------------------

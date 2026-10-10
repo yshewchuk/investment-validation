@@ -46,7 +46,7 @@ from tests.v2.ops.test_v2_ops_effects_graph import _publish_raw as _ops_publish_
 from tests.v2.ops.test_v2_ops_effects_graph import _seed_decisions  # noqa: E402
 from tests.v2.ops.test_v2_ops_effects_graph import _submit_and_claim  # noqa: E402
 from tests.v2.ops.test_v2_ops_effects_graph import _succeed_parent  # noqa: E402
-from tests.test_v2_serving_api import _FORBIDDEN_MODULE_SUBSTRINGS, _get, _start, _stop  # noqa: E402
+from tests.v2.serving.test_v2_serving_api import _FORBIDDEN_MODULE_SUBSTRINGS, _get, _start, _stop  # noqa: E402
 from tests.test_v2_serving_projections import (  # noqa: E402
     _bundle,
     _compact,
@@ -519,7 +519,7 @@ def test_publication_effect_binds_the_operator_supplied_projection_and_publishes
 
 # --------------------------------------------------------------------------
 # 8. the API process never imports ops, even resolving a real bound pointer
-#    (extends tests/test_v2_serving_api.py's own no-import guard)
+#    (extends tests/v2/serving/test_v2_serving_api.py's own no-import guard)
 # --------------------------------------------------------------------------
 
 

@@ -13,7 +13,7 @@ never ``SERVING_INDEX_UNREADABLE``) pin the boundary on either side. The
 before-fix red evidence (500/untyped against the unchanged ``api.py``) is
 recorded in the issue hand-back, not re-asserted here.
 
-Reuses ``tests/test_v2_serving_api.py``'s real-HTTP fixture machinery (two
+Reuses ``tests/v2/serving/test_v2_serving_api.py``'s real-HTTP fixture machinery (two
 synthetic releases over a real ``serving.sqlite``, a ``uvicorn.Server`` on an
 ephemeral loopback port) and ``engine.v2.serving.projections``' own read helpers;
 never mocks a projection exception and never zeroes a header so ``connect``
@@ -30,12 +30,12 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.foundation import ArtifactStore  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
-from tests.test_v2_serving_api import (  # noqa: E402
+from tests.v2.serving.test_v2_serving_api import (  # noqa: E402
     TOKEN,
     _get,
     _set_current,
