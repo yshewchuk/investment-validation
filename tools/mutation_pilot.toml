@@ -664,6 +664,7 @@ mutate = [
     "engine/v2/ops/provider_budget.py",
     "engine/v2/ops/provider_requirements.py",
     "engine/v2/ops/refresh_staging.py",
+    "engine/v2/ops/reclaim.py",
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
