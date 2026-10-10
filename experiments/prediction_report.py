@@ -68,6 +68,8 @@ def prediction_result(repository, registration):
     binding = registration.document
     plan = binding["execution_plan"]
     years = _years(plan)
+    if plan["seed"] != 0:
+        raise fail("INVALID_EXPERIMENT_SPEC", "prior prediction execution supports only seed 0")
     rows = load_prediction_targets(repository, from_document(SnapshotRef, binding["snapshot"]),
         as_of_month=binding["holdouts"]["holdout_as_of_month"], purpose="selection",
         event_ids=binding["event_ids"]).sort_values("event_id", kind="stable")

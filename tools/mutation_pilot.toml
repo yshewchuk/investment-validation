@@ -224,6 +224,7 @@ skip = [
     "*/canonical.py",
 ]
 tests = [
+    "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/serving/test_score_population.py",
     "tests/v2/foundation/test_experiment_holdouts.py",
     "tests/test_phase4_analog_recipe_cache.py",
@@ -623,6 +624,7 @@ mutate = [
     "engine/v2/ops/experiments.py",
 ]
 tests = [
+    "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
     "tests/v2/research/test_native_outcomes.py",
     "tests/v2/research/test_v2_prediction_cli.py",
@@ -933,6 +935,7 @@ mutate = [
     "engine/v2/ops/carried_set.py",
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",
+    "engine/v2/ops/massive_plan.py",
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/forward_calendar_store.py",
     "engine/v2/ops/incremental_data.py",
@@ -952,6 +955,7 @@ tests = [
     "tests/v2/ops/test_provider_response_boundary.py",
     "tests/v2/ops/test_native_parity_inputs_leaf.py",
     "tests/v2/ops/test_carried_set.py",
+    "tests/v2/ops/test_massive_plan.py",
     "tests/v2/ops/test_native_parity_pairing.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
