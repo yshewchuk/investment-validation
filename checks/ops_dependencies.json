@@ -7,7 +7,7 @@
       "executor_cgroup", "executor_watchdog", "fingerprints", "input_bindings", "lifecycle", "migrations", "outbox", "parity", "plans",
       "profiles", "provider_budget", "provider_requirements", "provider_response", "recovery", "resources", "scheduler", "schema", "schema_runtime",
       "session_backfill", "session_resolution", "store_barrier", "submission", "worker_progress"],
-    "runtime": ["executor", "supervisor", "worker", "nightly_readiness", "nightly_receipts", "nightly_session", "nightly_trigger"],
+    "runtime": ["executor", "supervisor", "worker", "nightly_chain", "nightly_readiness", "nightly_receipts", "nightly_session", "nightly_trigger"],
     "workflows": ["workflows", "workflows.commands", "backup", "decision_commit", "decision_evidence", "effects_graph", "experiment_folds", "experiments", "health",
       "nightly", "publication", "publication_submit", "stages", "training"],
     "legacy": ["capture_inputs", "features_compare", "finality", "generation_binding", "ledger_history_import", "legacy_actions",
