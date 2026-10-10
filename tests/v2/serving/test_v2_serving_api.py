@@ -30,7 +30,8 @@ from urllib.request import urlopen
 import pytest
 import uvicorn
 
-ROOT = Path(__file__).resolve().parents[3]
+from engine.paths import ROOT
+
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import Problem  # noqa: E402

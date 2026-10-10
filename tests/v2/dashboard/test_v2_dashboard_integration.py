@@ -34,7 +34,8 @@ import pytest
 from fastapi.staticfiles import StaticFiles
 from playwright.sync_api import expect
 
-ROOT = Path(__file__).resolve().parents[3]
+from engine.paths import ROOT
+
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import PreviewRelease  # noqa: E402

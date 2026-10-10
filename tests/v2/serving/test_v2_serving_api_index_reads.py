@@ -30,7 +30,8 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[3]
+from engine.paths import ROOT
+
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.foundation import ArtifactStore  # noqa: E402
