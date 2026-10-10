@@ -24,6 +24,7 @@ from engine.v2.ops.experiments import (
     resolve_experiment_plan,
 )
 from engine.v2.ops.fingerprints import environment_identity, source_closure
+from engine.v2.ops.native_registration import verified_registration_bytes
 from engine.v2.foundation.final_holdout import declaration_from_document, request_from_registration
 from engine.v2.research.experiment_population import load_population
 
@@ -100,33 +101,12 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
 
 
 def _existing(conn, store, registration):
-    row = conn.execute(
-        "SELECT e.*, h.input_hash AS registered_input, h.payload_hash AS registered_payload, "
-        "h.payload_json AS registered_document FROM experiment_runs e "
-        "LEFT JOIN hypotheses h ON h.run_id=e.run_id AND h.spec_hash=e.spec_hash "
-        "WHERE e.run_id=?", (registration.run_id,)).fetchone()
-    if row is None:
-        return False
     try:
-        evidence = json.loads(row["evidence_json"])
-        ref = from_document(ArtifactRef, evidence["native_registration"])
-        schema = registration.document["schema_version"]
-        expected_ref = artifact_reference(registration.binding_json, schema)
-        valid = (schema in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1")
-                 and row["spec_hash"] == registration.document["spec_hash"]
-                 and row["mode"] == "primary"
-                 and row["input_hash"] == row["registered_input"] == registration.variant_id
-                 and row["registered_payload"] == content_hash({
-                     "spec": row["spec_hash"], "input": registration.variant_id})
-                 and row["registered_document"] == "{}" and ref == expected_ref
-                 and evidence["variant_id"] == registration.variant_id
-                 and type(evidence["planned_variants"]) is int and evidence["planned_variants"] == 1
-                 and store.read_verified(ref) == registration.binding_json)
-    except (ArtifactError, ValueError, TypeError, KeyError):
-        valid = False
-    if not valid:
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding")
-    return True
+        ref = artifact_reference(registration.binding_json, registration.document["schema_version"])
+        binding = verified_registration_bytes(conn, store, registration.run_id, expected_ref=ref)
+        return binding is not None
+    except (ValueError, TypeError, KeyError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding") from None
 
 
 def register_native(conn, store, repository, spec, *, code_root, as_of_month,

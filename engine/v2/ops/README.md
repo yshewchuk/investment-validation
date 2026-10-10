@@ -39,9 +39,12 @@ Native experiment registration also exposes these existing submodule APIs:
 `catalog.transaction`, `errors.OpsError`, `errors.fail`,
 `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`,
 `experiments.register_hypothesis_in_transaction`,
-`fingerprints.environment_identity` and `fingerprints.source_closure`.
+`fingerprints.environment_identity`, `fingerprints.source_closure` and
+`native_registration.verified_registration_bytes`.
 They compose one resolved plan, source/environment binding and primary catalog
 reservation; the caller owns the transaction around the reservation helper.
+The registration verifier reads only catalog-owned binding evidence; it grants no final-read authority.
+Internal `final_holdout.authorize_final_holdout` has only synthetic tests as consumers; no production entrypoint or read capability exists yet.
 Native prediction reporting also consumes the public fold-local
 `experiment_folds.TrainFoldRule` and `experiment_folds.fit_walk_forward_fold`.
 Its CLI consumes `catalog.connect` and `experiments.experiment_spec_from_document`
@@ -96,7 +99,7 @@ either required table. Their current consumer is
 
 `nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package: no other package imports it and it has no production caller yet; `tests/v2/ops/test_nightly_session.py` is its only consumer. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is likewise internal: `nightly_trigger` does not call it yet and `tests/v2/ops/test_nightly_receipts.py` is its only consumer. `nightly_readiness` (legacy run-report readiness for a session, #564 slice 3; exports `LegacyReadiness`, `check_legacy_report`) is likewise internal, uncalled by `nightly_trigger`, with `tests/v2/ops/test_nightly_readiness.py` as its only consumer. `nightly_chain` (snapshot import/refresh/moves/capture step chain over step receipts, #564 slice 4; exports `ChainResult`, `ChainStep`, `run_snapshot_chain`) is likewise internal and uncalled, with `tests/v2/ops/test_nightly_chain.py` as its only consumer.
 
-<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, environment_identity, source_closure, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document -->
+<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, environment_identity, source_closure, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document -->
 
 ## Consumers
 

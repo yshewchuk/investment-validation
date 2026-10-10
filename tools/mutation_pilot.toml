@@ -624,6 +624,7 @@ mutate = [
     "engine/v2/ops/experiments.py",
 ]
 tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
     "tests/v2/research/test_native_outcomes.py",
@@ -717,8 +718,11 @@ mutate = [
     "engine/v2/ops/migrations.py",
     "engine/v2/ops/schema.py",
     "engine/v2/ops/schema_runtime.py",
+    "engine/v2/ops/native_registration.py",
 ]
 tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
+    "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
@@ -749,8 +753,10 @@ why = "The job/attempt state machine and the Problem envelope of every refusal: 
 mutate = [
     "engine/v2/ops/lifecycle.py",
     "engine/v2/ops/errors.py",
+    "engine/v2/ops/final_holdout.py",
 ]
 tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_catalog.py",
