@@ -1220,6 +1220,14 @@ def _rows_from_batches(batches):
         yield from rows
 
 
+def open_legacy_part(path):
+    """Avoid Python-file decrefs on Arrow pool threads during worker shutdown.
+
+    The caller owns closing this read-only handle, including on reader errors.
+    """
+    return pa.OSFile(str(path), "rb")
+
+
 def materialized_batches(path, columns=None, *, batch_rows: int | None = None):
     """Yield a written Parquet part as bounded Arrow batches (all columns when
     ``columns`` is None). An unreadable or missing part raises the reader's own
