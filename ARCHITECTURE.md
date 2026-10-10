@@ -399,6 +399,14 @@ Only a tracked path absent from the worktree reads as empty.
 
 ## 4. Production entrypoints and the job graph
 
+- **Shadow nightly coordination.** The operations trigger coordinates snapshot
+  import, pinned planning, submission and bounded serving; preparation commands
+  remain separate interfaces. It does not start the production legacy nightly.
+  Job/plan generation identity is separate from authoritative decision identity:
+  a new execution does not replace the first committed decision for an occurrence.
+  See the [current ops boundary](engine/v2/ops/ARCHITECTURE.md#current-nightly-orchestration-boundary).
+  The unimplemented complete-chain design and its decisions are in [PR #564](https://github.com/yshewchuk/investment-validation/pull/564).
+
 - **Legacy nightly — `engine.dashboard.nightly`.** The board in production
   today. Its own module docstring states the load-bearing order: refresh →
   validate → score → ledger → render → selfcheck → publish → flags → backup,

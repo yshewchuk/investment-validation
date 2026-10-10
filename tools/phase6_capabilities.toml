@@ -593,7 +593,7 @@ old = ["nightly:legacy finality"]
 new = ["nightly:v2 finality", "action:legacy_finality", "py:engine/v2/ops/finality.py::resolve_final_session"]
 producer = "native engine/v2/ops/finality.py inside the legacy_finality job kind"
 identity = "finality receipt bound to the materialization root"
-tests = ["tests/test_v2_ops_finality.py", "tests/test_finality.py"]
+tests = ["tests/v2/ops/test_v2_ops_finality.py", "tests/test_finality.py"]
 disposition = "native"
 owner = "P6-2"
 

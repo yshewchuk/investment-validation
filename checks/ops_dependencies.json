@@ -28,13 +28,11 @@
       ["calendar_moves_jobs", "unit_receipts"],
       ["computed_moves_store", "incremental_data"],
       ["computed_moves_store", "unit_receipts"],
-      ["finality", "legacy_adapter"],
       ["forward_calendar_store", "incremental_data"],
       ["forward_calendar_store", "unit_receipts"],
       ["incremental_data", "computed_moves_store"],
       ["incremental_data", "forward_calendar_store"],
       ["incremental_data", "refresh_staging"],
-      ["legacy_adapter", "finality"],
       ["refresh_staging", "calendar_moves_jobs"],
       ["refresh_staging", "incremental_data"],
       ["unit_receipts", "incremental_data"]

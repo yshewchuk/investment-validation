@@ -7,7 +7,7 @@ v2 invocation executes this implementation and records its own result.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
 import pandas as pd
 
@@ -30,34 +30,33 @@ class SessionFinality:
         return asdict(self)
 
 
-def _legacy_compatibility(name, native):
-    """Honor an explicitly monkeypatched legacy seam during transition tests."""
-    from engine.v2.ops import legacy_adapter
-    return legacy_adapter.finality_compatibility(name, native)
+@dataclass(frozen=True)
+class FinalityReads:
+    """Legacy read and compatibility callbacks supplied by the sole legacy adapter.
+
+    compatibility(name, native) returns the explicitly monkeypatched legacy
+    callable when one is installed, else native.
+    """
+    compatibility: Callable[[str, Callable], Callable]
+    market_wide_complete: Callable[[pd.Timestamp], bool]
+    coverage_frame: Callable[[str, str, pd.Timestamp], object]
 
 
-def _market_wide_complete(stamp: pd.Timestamp) -> bool:
-    from engine.v2.ops import legacy_adapter
-    # R3B-7 fix: honor the same explicitly-monkeypatched legacy seam as
-    # ``session_finality``/``resolve_final_session``/``covered_tickers``
-    # below, so a test that fakes ``engine.data.finality._market_wide_complete``
-    # (without also faking the public ``covered_tickers`` name) still reaches
-    # the native per-ticker computation with the fake data, instead of
-    # silently falling through to a real ORATS-cache read.
-    compatibility = _legacy_compatibility(
-        "_market_wide_complete", legacy_adapter.finality_market_wide_complete)
-    return compatibility(stamp)
+def _market_wide_complete(stamp: pd.Timestamp, reads: FinalityReads) -> bool:
+    # R3B-7 fix: honor the same explicitly-monkeypatched legacy seam as the
+    # public entry points below, so a test that fakes only the private legacy
+    # helper still reaches the native per-ticker computation with fake data.
+    return reads.compatibility(
+        "_market_wide_complete", reads.market_wide_complete)(stamp)
 
 
-def _coverage_frame(table: str, column: str, stamp: pd.Timestamp):
-    from engine.v2.ops import legacy_adapter
-    compatibility = _legacy_compatibility(
-        "_coverage_frame", legacy_adapter.finality_coverage_frame)
-    return compatibility(table, column, stamp)
+def _coverage_frame(table: str, column: str, stamp: pd.Timestamp, reads: FinalityReads):
+    return reads.compatibility("_coverage_frame", reads.coverage_frame)(table, column, stamp)
 
 
 def _coverage_sets(table: str, column: str, stamp: pd.Timestamp,
-                   wanted: set[str], frame=None) -> tuple[set[str], set[str]]:
+                   wanted: set[str], frame=None, *,
+                   reads: FinalityReads) -> tuple[set[str], set[str]]:
     """Return requested tickers carried at all and present on the target date.
 
     Session finality combines the carried sets from both tables before
@@ -66,7 +65,7 @@ def _coverage_sets(table: str, column: str, stamp: pd.Timestamp,
     """
     if not wanted:
         return set(), set()
-    frame = frame if frame is not None else _coverage_frame(table, column, stamp)
+    frame = frame if frame is not None else _coverage_frame(table, column, stamp, reads)
     if frame is None or frame.empty or column not in frame or "ticker" not in frame:
         return set(), set()
     carried = wanted & set(frame["ticker"].dropna().astype(str))
@@ -86,19 +85,19 @@ def _shared_coverage(daily_carried: set[str], daily_exact: set[str],
     return len(daily_exact) / covered, len(chain_exact) / covered, covered
 
 
-def _native_session_finality(value, tickers: Iterable[str], *, frames=None,
-                              market_wide=None):
+def _native_session_finality(value, tickers: Iterable[str], *, reads: FinalityReads,
+                              frames=None, market_wide=None):
     stamp = pd.Timestamp(value).normalize()
     wanted = {str(item) for item in tickers if item is not None and str(item)}
     frames = frames or {}
     daily_carried, daily_exact = _coverage_sets(
-        "daily_market", "date", stamp, wanted, frames.get("daily_market"))
+        "daily_market", "date", stamp, wanted, frames.get("daily_market"), reads=reads)
     chain_carried, chain_exact = _coverage_sets(
-        "option_chains", "obs_date", stamp, wanted, frames.get("option_chains"))
+        "option_chains", "obs_date", stamp, wanted, frames.get("option_chains"), reads=reads)
     daily_share, chain_share, covered = _shared_coverage(
         daily_carried, daily_exact, chain_carried, chain_exact)
     if market_wide is None:
-        market_wide = _market_wide_complete(stamp)
+        market_wide = _market_wide_complete(stamp, reads)
     final = bool(wanted) and covered > 0 and market_wide \
         and daily_share >= MIN_FINAL_DAILY_SHARE \
         and chain_share >= MIN_FINAL_CHAIN_SHARE
@@ -120,24 +119,26 @@ def _native_session_finality(value, tickers: Iterable[str], *, frames=None,
         tickers=len(wanted), covered=int(covered))
 
 
-def session_finality(value, tickers: Iterable[str], *, frames=None, market_wide=None):
-    compatibility = _legacy_compatibility("session_finality", _native_session_finality)
+def session_finality(value, tickers: Iterable[str], *, reads: FinalityReads,
+                     frames=None, market_wide=None):
+    compatibility = reads.compatibility("session_finality", _native_session_finality)
     if compatibility is not _native_session_finality:
         result = compatibility(value, tickers, frames=frames)
         return SessionFinality(**result.as_dict())
-    return _native_session_finality(value, tickers, frames=frames,
+    return _native_session_finality(value, tickers, reads=reads, frames=frames,
                                     market_wide=market_wide)
 
 
-def _native_resolve_final_session(requested, tickers, *, calendar, max_sessions=15):
+def _native_resolve_final_session(requested, tickers, *, calendar, reads: FinalityReads,
+                                  max_sessions=15):
     stamp = pd.Timestamp(requested).normalize()
     frames = {
-        "daily_market": _coverage_frame("daily_market", "date", stamp),
-        "option_chains": _coverage_frame("option_chains", "obs_date", stamp),
+        "daily_market": _coverage_frame("daily_market", "date", stamp, reads),
+        "option_chains": _coverage_frame("option_chains", "obs_date", stamp, reads),
     }
     for _ in range(max_sessions):
         if calendar.is_trading_day(stamp):
-            result = session_finality(stamp, tickers, frames=frames)
+            result = session_finality(stamp, tickers, frames=frames, reads=reads)
             if result.is_final:
                 return result
         stamp = calendar.shift(stamp, -1)
@@ -146,27 +147,28 @@ def _native_resolve_final_session(requested, tickers, *, calendar, max_sessions=
         f"within {max_sessions} trading sessions")
 
 
-def resolve_final_session(requested, tickers, *, calendar, max_sessions=15):
-    compatibility = _legacy_compatibility("resolve_final_session", _native_resolve_final_session)
+def resolve_final_session(requested, tickers, *, calendar, reads: FinalityReads,
+                          max_sessions=15):
+    compatibility = reads.compatibility("resolve_final_session", _native_resolve_final_session)
     if compatibility is not _native_resolve_final_session:
         result = compatibility(requested, tickers, calendar=calendar, max_sessions=max_sessions)
         return SessionFinality(**result.as_dict())
     return _native_resolve_final_session(requested, tickers, calendar=calendar,
-                                         max_sessions=max_sessions)
+                                         reads=reads, max_sessions=max_sessions)
 
 
-def _native_covered_tickers(value, tickers):
+def _native_covered_tickers(value, tickers, *, reads: FinalityReads):
     stamp = pd.Timestamp(value).normalize()
     frames = {
-        "daily_market": _coverage_frame("daily_market", "date", stamp),
-        "option_chains": _coverage_frame("option_chains", "obs_date", stamp),
+        "daily_market": _coverage_frame("daily_market", "date", stamp, reads),
+        "option_chains": _coverage_frame("option_chains", "obs_date", stamp, reads),
     }
     return [ticker for ticker in sorted({str(item) for item in tickers if item})
-            if session_finality(stamp, (ticker,), frames=frames).is_final]
+            if session_finality(stamp, (ticker,), frames=frames, reads=reads).is_final]
 
 
-def covered_tickers(value, tickers):
-    compatibility = _legacy_compatibility("covered_tickers", _native_covered_tickers)
+def covered_tickers(value, tickers, *, reads: FinalityReads):
+    compatibility = reads.compatibility("covered_tickers", _native_covered_tickers)
     if compatibility is not _native_covered_tickers:
         return compatibility(value, tickers)
-    return _native_covered_tickers(value, tickers)
+    return _native_covered_tickers(value, tickers, reads=reads)

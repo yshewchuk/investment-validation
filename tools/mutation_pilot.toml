@@ -855,7 +855,7 @@ tests = [
     "tests/test_v2_ops_critical_review.py",
     "tests/test_v2_ops_effect_receipt_collision.py",
     "tests/test_v2_ops_engineering_history.py",
-    "tests/test_v2_ops_finality.py",
+    "tests/v2/ops/test_v2_ops_finality.py",
     "tests/v2/ops/test_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
     "tests/v2/ops/test_v2_ops_parity.py",
