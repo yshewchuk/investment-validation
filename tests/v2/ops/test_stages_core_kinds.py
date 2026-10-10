@@ -79,7 +79,7 @@ _CASES = {
     "native_score_batch": dict(
         resource_class="projection",
         checkpoint_contract="native_score_batch_records.v2.0",
-        max_attempts=2, backoff=(5, 30),
+        max_attempts=5, backoff=(30, 120, 600, 1800),
         extra_field=("calendar_revision", "cal-rev-1"),
         # CodeRabbit round 1 (PR #66): gate_policy is exercised here as a
         # non-empty dict so the parametrized submit() path decodes it
