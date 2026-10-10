@@ -1,7 +1,7 @@
 """Dependency-free names shared by the refresh stores and their executor staging.
 
 A leaf: it imports nothing from ``engine.v2.ops``. The names live here so
-``incremental_data`` (which reads the forward-calendar document name) and
+``calendar_moves_jobs`` (which reads the forward-calendar document name) and
 ``refresh_staging`` (which writes the documents) need not import each other.
 """
 from __future__ import annotations

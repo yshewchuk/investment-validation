@@ -916,7 +916,7 @@ waits without submitting until its paired succeeded inputs are ready.
   Classification validates unique nonempty requested keys, returned/empty/
   unsupported subsets and nonnegative observed quota before returning an outcome;
   invalid values retain `INVALID_REQUEST`. No I/O, cache, transaction, partial
-  write or retry occurs in the leaf; equal inputs give equal outcomes; retry/coverage policy remains in `incremental_data`.
+  write or retry occurs in the leaf; equal inputs give equal outcomes; retry/coverage policy remains in `incremental_data`, which imports neither refresh store: `calendar_moves_jobs` owns their callback loaders.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).

@@ -14,7 +14,7 @@ module here imports nothing else from `engine.v2.ops`.
 ## Non-responsibilities
 
 - **Write or read the staged documents** — `engine.v2.ops.refresh_staging`
-  writes them; `engine.v2.ops.incremental_data` reads the forward-calendar one.
+  writes them; `engine.v2.ops.calendar_moves_jobs` reads the forward-calendar one.
 - **Define refresh parameters or results** — those stay with their owners until
   their own prerequisite slices move them here.
 
@@ -28,7 +28,7 @@ refresh job kind to staged document file name.
 ## Consumers
 
 `engine.v2.ops.refresh_staging` (writes the documents) and
-`engine.v2.ops.incremental_data` (forward-calendar callback).
+`engine.v2.ops.calendar_moves_jobs` (forward-calendar callback).
 
 ## Usage
 

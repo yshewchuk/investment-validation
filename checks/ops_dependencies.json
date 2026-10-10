@@ -22,12 +22,8 @@
   "exceptions": {
     "forbidden": [],
     "cycles": [
-      ["computed_moves_store", "incremental_data"],
       ["decision_replay", "decision_validation"],
-      ["decision_validation", "decision_replay"],
-      ["forward_calendar_store", "incremental_data"],
-      ["incremental_data", "computed_moves_store"],
-      ["incremental_data", "forward_calendar_store"]
+      ["decision_validation", "decision_replay"]
     ]
   }
 }
