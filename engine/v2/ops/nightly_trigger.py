@@ -656,7 +656,7 @@ def full_population(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     ``--expected-population``. The trigger takes no ticker-list argument, and
     the document is not required for the trigger to run: without it the plan
     still declares ``full_run=True``, and ``universe``/``context`` are both
-    empty, so ``cli._snapshot_inputs``/``pin_snapshot_inputs`` refuse at PLAN
+    empty, so ``commands._snapshot_inputs``/``pin_snapshot_inputs`` refuse at PLAN
     time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
     ``input_mode="snapshot"`` flip, this same absent-population case built a
     plan successfully and the refusal was ``ops submit``'s to make instead)
@@ -703,7 +703,7 @@ def _capture_input_manifest(root: Path, as_of: str, tickers: tuple[str, ...],
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,
                   full_run: bool = True,
                   expected_shadow_snapshot_id: str | None = None) -> str:
-    """The production plan: the real ``cli._plan_command``, in-process.
+    """The production plan: the real ``commands._plan_command``, in-process.
 
     ``full_run=True`` is the native nightly plan's full-population option and
     is always declared for a scheduled run, so the plan's effect scope is the
@@ -714,12 +714,12 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     ``expected_shadow_snapshot_id`` is the exact snapshot id ``_submit_plan``'s
     ``ensure_snapshot_fn`` call just verified is fresh for ``as_of`` (``None``
     for any caller outside that path, e.g. a direct `ops plan` invocation) --
-    threaded through ``cli._plan_command`` as ``args.expected_snapshot_id``
+    threaded through ``commands._plan_command`` as ``args.expected_snapshot_id``
     to ``pin_snapshot_inputs``, which rejects a different loaded snapshot.
     ``expected_population`` is the operator's population document when present
     (``full_population`` derived
     the universe from the same file); absent, ``universe``/``context`` are
-    both empty, and ``cli._snapshot_inputs``/``pin_snapshot_inputs`` now
+    both empty, and ``commands._snapshot_inputs``/``pin_snapshot_inputs`` now
     refuse at PLAN time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
     ``input_mode="snapshot"`` flip, this same absent-population case built a
     plan successfully and the refusal was ``ops submit``'s to make instead).
@@ -729,8 +729,8 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     legacy's own scoring horizon) rather than being fixed constants.
     """
     from engine.v2.foundation import ensure_directory
-    from engine.v2.ops import cli
     from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.workflows import commands
 
     clock = clock or SystemClock()
     ops_root = _ops_root(root)
@@ -755,14 +755,14 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
         refresh_plan=None, expected_snapshot_id=expected_shadow_snapshot_id)
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     try:
-        planned = cli._plan_command(plan_args, ops_root, conn, clock)
+        planned = commands._plan_command(plan_args, ops_root, conn, clock)
     finally:
         conn.close()
     return str(planned["plan_ref"])
 
 
 def _default_submit(root: Path, as_of: str, plan_ref: str | None, clock) -> object:
-    """The production submit: ``cli._submit_command``, in-process.
+    """The production submit: ``commands._submit_command``, in-process.
 
     Nightly job identity comes from the plan document itself, so submitting
     the SAME ``plan_ref`` again is a no-op (``submission._insert_or_match``
@@ -770,17 +770,18 @@ def _default_submit(root: Path, as_of: str, plan_ref: str | None, clock) -> obje
     property the ``submitting`` state relies on after a crash between submit
     and the state write.
     """
-    from engine.v2.ops import cli
     from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.profiles import DEFAULT_POLICY
+    from engine.v2.ops.workflows import commands
 
     if not plan_ref:
         raise fail("INVALID_REQUEST", "the trigger has no plan_ref to submit")
     ops_root = _ops_root(root)
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     try:
-        return cli._submit_command(
+        return commands._submit_command(
             argparse.Namespace(plan=plan_ref, idempotency_key="nightly-" + as_of),
-            ops_root, conn, clock)
+            ops_root, conn, clock, DEFAULT_POLICY)
     finally:
         conn.close()
 
@@ -791,7 +792,7 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
     ``supervisor.serve`` is the exact entry ``ops serve`` uses; the trigger
     owns the process for the duration (while holding the legacy lock), so the
     native DAG runs in-process here instead of needing a second supervisor.
-    The job set is resolved through the idempotent ``cli._submit_command`` (a
+    The job set is resolved through the idempotent ``commands._submit_command`` (a
     no-op resubmission), then polled until every job is terminal via
     :func:`_drive_jobs_to_terminal` (shared with
     ``_ensure_shadow_snapshot``'s own drive-to-terminal step, Cutover PR-7b, so
@@ -802,18 +803,18 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
     indefinitely. The final status is ``completed`` only when every job
     succeeded, else ``failed``.
     """
-    from engine.v2.ops import cli
     from engine.v2.ops.bootstrap import open_catalog
     from engine.v2.ops.profiles import DEFAULT_POLICY
     from engine.v2.ops.stages import registry
     from engine.v2.ops.supervisor import Service
+    from engine.v2.ops.workflows import commands
 
     ops_root = _ops_root(root)
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     try:
-        submitted = cli._submit_command(
+        submitted = commands._submit_command(
             argparse.Namespace(plan=plan_ref, idempotency_key="nightly-serve"),
-            ops_root, conn, clock)
+            ops_root, conn, clock, DEFAULT_POLICY)
         rows = submitted.get("jobs", ()) if isinstance(submitted, dict) else ()
         job_ids = tuple(str(row["job_id"]) for row in rows
                         if isinstance(row, dict) and row.get("job_id"))

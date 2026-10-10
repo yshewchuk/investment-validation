@@ -1,6 +1,6 @@
 """Carried-set filtering regression, against the REAL producer and the REAL validator.
 
-The plan comes from ``cli._plan_command`` over the real snapshot fixture (only the
+The plan comes from ``workflows.commands._plan_command`` over the real snapshot fixture (only the
 pin step is stubbed, by the imported ``_plan`` helper); the plan and evidence
 documents are the real ``decision_evidence.derive`` outputs and every refusal is
 the real ``decision_validation.validate`` raising — no finality result is stubbed.

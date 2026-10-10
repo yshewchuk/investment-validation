@@ -404,7 +404,7 @@ serving caches, chooser analog pool, calendar) from the newest committed import
 receipt for that snapshot (`engine.v2.data.reference_catalog`), refusing when
 there is none;
 the default `--input-mode legacy` graph is byte-identical to before. Tested in
-`tests/test_v2_ops_snapshot_stages.py`.
+`tests/v2/ops/test_v2_ops_snapshot_stages.py`.
 
 The phase-1 engineering gate needs a coverage measurement passed in; run bare
 it fails the coverage row with `COVERAGE_EVIDENCE_MISSING` by design (a missing
