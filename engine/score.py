@@ -4950,6 +4950,22 @@ def score_calendar(
                 continue
             if newest is not None:
                 keys.add((ticker, pd.Timestamp(newest).normalize()))
+        # The scorer's stale-quote fallback anchors on the DECISION/ENTRY date
+        # (`_fresh_quote_date`), not on `as_of`. A row whose entry has already
+        # passed with no chain that day (STR-RUNUP) needs the newest chain at
+        # or before THAT date; without it in the index the board reported
+        # NO_CHAIN while an on-demand re-score (selfcheck) priced the row.
+        # Never past `as_of`: that chain did not exist on the night.
+        ceiling = pd.Timestamp(as_of).normalize()
+        for ticker, day in sorted(keys):
+            try:
+                older = latest_chain_date(ticker, day)
+            except MemoryError:
+                raise
+            except Exception:
+                continue
+            if older is not None and pd.Timestamp(older).normalize() <= ceiling:
+                keys.add((ticker, pd.Timestamp(older).normalize()))
     index = load_chain_index(keys, progress_every=0) if keys else ChainIndex({})
 
     #: Alternative strikes are offered as fractions of spot either side of ATM.

@@ -60,7 +60,7 @@ def main(argv=None):
             OSError, sqlite3.Error, RuntimeError) as error:
         problem = error.problem if isinstance(error, (OpsError, DataError)) else fail(
             "RESOURCE_UNAVAILABLE" if isinstance(error, (foundation.ArtifactError, OSError, sqlite3.Error)) else
-            "EXPERIMENT_VARIANT_FAILED" if attempted else "INVALID_EXPERIMENT_SPEC",
+            "WORKER_FAILED" if attempted else "INVALID_EXPERIMENT_SPEC",
             "native prediction request could not be completed").problem
         if problem.code == "INVALID_REQUEST":
             problem = fail("INVALID_EXPERIMENT_SPEC", "prediction specification is incomplete").problem

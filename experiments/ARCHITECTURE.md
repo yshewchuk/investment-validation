@@ -161,8 +161,9 @@ existing catalog/store and explicit holdout month. It fingerprints its executing
 metadata-only. `read_native_registration` verifies the stored identity; run performs current
 admission before replay or evaluation; missing registration is R1. R3/R4/R5
 refusals use that admitted identity and never export a current-attempt report.
-R1/R2/R6 preserve private receipts only. `--no-ledger` isolates smoke recording;
-otherwise `--ledger` is required. Completed `REPORT.md` is exported through the
+R1/R2/R6 preserve private receipts only. Untyped evaluation/rendering errors use
+retryable `WORKER_FAILED`, never terminal outcomes or CSV rows. `--no-ledger`
+isolates smoke recording; otherwise `--ledger` is required. Completed `REPORT.md` is exported through the
 shared immutable outcome lifecycle; retries reuse the original result/date.
 Stored spec/source/snapshot/scope/environment identity is checked before population
 admission, so a changed request cannot consume an original variant's refusal slot.

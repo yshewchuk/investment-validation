@@ -718,3 +718,39 @@ def test_report_destination_conflict_precedes_cli_publication_effects(
     assert Path(result["report"]) == path
     assert "# Native prediction report" in path.read_text()
     assert not ledger.exists() if smoke else len(_rows(ledger)) == 1
+
+
+@pytest.mark.parametrize("error_type", [ValueError, TypeError, KeyError, RuntimeError])
+@pytest.mark.parametrize("failing_call", ["prediction_result", "render_prediction_report"])
+@pytest.mark.parametrize("smoke", [False, True])
+def test_untyped_execution_errors_stay_private_and_retry_same_registration(
+        source, monkeypatch, capsys, error_type, failing_call, smoke):
+    """Programming errors cannot consume the preregistered scientific outcome slot."""
+    _invoke(source, capsys, "register")
+    ledger = source.root / "recorded" / "ledger.csv"
+    args = ["--ledger", ledger] + (["--no-ledger"] if smoke else [])
+    before, objects = _catalog(source.conn), _objects(source.store)
+
+    def unexpected(*args, **kwargs):
+        raise error_type("SECRET synthetic implementation failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(prediction, failing_call, unexpected)
+        response = _invoke(source, capsys, "run", *args, status=2)
+    _private_refusal(source, response, "WORKER_FAILED")
+    assert "SECRET" not in json.dumps(response)
+    _preserved(source, before, objects)
+    assert not ledger.parent.exists()
+    assert not list(source.root.rglob("REPORT.md"))
+    after = _objects(source.store)
+    for key in set(after) - set(objects):
+        assert json.loads(after[key])["schema_version"] == "native_experiment_refusal.v1.0"
+    result = _invoke(source, capsys, "run", *args)
+    assert Path(result["report"]).is_file()
+    key = "native_smoke" if smoke else "native_outcome"
+    assert _document(source, _evidence(source)[key])["failure_code"] is None
+    if smoke:
+        assert not ledger.parent.exists()
+    else:
+        assert len(_rows(ledger)) == 1
+        assert _rows(ledger)[0]["stage"] == "ran"
