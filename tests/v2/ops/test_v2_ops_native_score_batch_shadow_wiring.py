@@ -40,7 +40,7 @@ from engine.v2.ops.submission import (
     submit_graph,
 )
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import catalog
+from tests.ops_support import TEST_POLICY, catalog
 
 _POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 
@@ -282,11 +282,8 @@ def test_submit_dedupes_an_existing_job_under_the_key(tmp_path, monkeypatch):
     assert _native_score_batch_job_count(conn) == before
 
 
-def test_submit_raises_when_snapshot_pinned_and_producer_missing(tmp_path, monkeypatch):
-    """B2: with a snapshot-pinned "score" job and NO existing job under the
-    batch key, the unbuilt PR-6 raw-row producer must raise so
-    ``Service._reconcile_native_score_batch_shadow``'s problem-reporting and
-    backoff machinery surfaces it -- never silently return ``None``."""
+def test_submit_raises_when_native_identity_lacks_snapshot_id(tmp_path, monkeypatch):
+    """A ready identity without its pin fails before it can be submitted."""
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
     score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
@@ -301,19 +298,13 @@ def test_submit_raises_when_snapshot_pinned_and_producer_missing(tmp_path, monke
             code_source=ROOT, clock=clock)
 
 
-def test_submit_builds_one_shadow_batch_request_from_the_slice5_refs(tmp_path, monkeypatch):
-    """Slice 5 regression: the valid snapshot-pinned path now BUILDS and
-    submits instead of raising -- and it builds only from the three
-    caller-supplied refs. ``submission.submit`` is intercepted, so this pins
-    the ONE request the builder hands that boundary (ARCHITECTURE.md "The
-    builder only builds"), never what admission does with it: the staged
-    ``events.json``/``producer_refusals.json`` artifact ids bind both worker
-    files AND ride ``JobSpec.input_refs`` (a direct artifact binding is only
-    admitted through ``spec.input_refs``, ``input_bindings.py:66``), and the
-    supplied ``calendar_revision`` is serialized verbatim into
-    ``NativeScoreBatchParameters``. The PR-6 producer is patched to a
-    tripwire -- the builder must never call it (importing the producer here
-    to patch it is the test's own import, never nightly.py's)."""
+def test_submit_builds_one_shadow_batch_request_from_snapshot_parameters(tmp_path, monkeypatch):
+    """A snapshot-pinned identity submits one projection worker request.
+
+    The request keeps the score job's identity and carries producer scope and
+    pinned catalog/object roots, without doing source reads or staging event
+    artifacts in the submit builder.
+    """
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
     score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
@@ -321,14 +312,9 @@ def test_submit_builds_one_shadow_batch_request_from_the_slice5_refs(tmp_path, m
     monkeypatch.setattr(nightly, "_native_score_batch_identity",
                         lambda conn: (session, scope_hash, True))
 
-    events_ref = store.publish_bytes(
-        b"[]", schema_ref="native_score_batch_events.v1.0").artifact_id
-    producer_refusals_ref = store.publish_bytes(
-        b'{"schema_version": "native_score_batch_producer_refusals.v1.0", "refusals": []}',
-        schema_ref="native_score_batch_producer_refusals.v1.0").artifact_id
-    calendar_revision = "earnings-events-dataset-rev-42"
     snapshot_id = "snapshot-2026-01-01-abc123"
-    assert len({events_ref, producer_refusals_ref, calendar_revision}) == 3
+    horizon_days = 21
+    tickers = ("FILTER-A", "FILTER-B")
     assert snapshot_id != scope_hash
 
     captured = []
@@ -344,68 +330,51 @@ def test_submit_builds_one_shadow_batch_request_from_the_slice5_refs(tmp_path, m
             fence=1, attempt_count=0)
 
     monkeypatch.setattr("engine.v2.ops.submission.submit", _capture_submit)
-    producer_calls = []
-
-    def _producer_tripwire(*args, **kwargs):
-        producer_calls.append((args, kwargs))
-        raise AssertionError("the builder must not call the PR-6 producer")
-
-    monkeypatch.setattr(
-        "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
-        _producer_tripwire)
-
     release_root = str(tmp_path / "verified-release-root")
     receipt = nightly.submit_native_score_batch_shadow_if_ready(
         conn, registry(), _POLICY, store, release_root,
         catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
-        code_source=ROOT, clock=clock, events_ref=events_ref,
-        producer_refusals_ref=producer_refusals_ref, calendar_revision=calendar_revision,
-        snapshot_id=snapshot_id)
+        code_source=ROOT, clock=clock, snapshot_id=snapshot_id,
+        horizon_days=horizon_days, tickers=tickers)
 
     assert len(captured) == 1
     request = captured[0]
     _assert_sidecar_runtime_identity(
         request.job.resource_class, request.job.environment_ref, "projection")
-    with pytest.raises(AssertionError):
-        _assert_sidecar_runtime_identity(
-            "validation", request.job.environment_ref, "projection")
-    with pytest.raises(AssertionError):
-        _assert_sidecar_runtime_identity(
-            request.job.resource_class, "corrupted", "projection")
     assert request.namespace == "shadow"
     assert request.principal == "operator"
     assert request.job.kind == "native_score_batch"
+    assert request.job.retry_policy_ref == "bounded"
     assert request.job.output_namespace == "shadow"
-    # key/identity behavior is unchanged: the batch key is still THIS score
-    # job's own session+scope_hash, and the existing parser round-trips it.
     key = nightly._native_score_batch_key(session, scope_hash)
     assert request.idempotency_key == key
     assert nightly._scope_from_native_score_batch_key(key) == (session, scope_hash)
 
     parameters = request.job.parameters
-    assert parameters["input_bindings"] == {
-        "events.json": events_ref, "producer_refusals.json": producer_refusals_ref}
-    assert request.job.input_refs == (events_ref, producer_refusals_ref)
-    assert parameters["calendar_revision"] == calendar_revision
+    assert parameters["input_bindings"] is None
+    assert request.job.input_refs == ()
+    assert request.job.dependency_job_ids == ()
+    assert parameters["calendar_revision"] == ""
+    assert parameters["catalog_path"] == str(tmp_path / "ops.sqlite")
+    assert parameters["objects_root"] == str(tmp_path)
+    assert parameters["horizon_days"] == horizon_days
+    assert parameters["tickers"] == list(tickers)
+    assert parameters["producer_mode"] == "snapshot"
     assert parameters["as_of"] == session
     assert parameters["snapshot_id"] == snapshot_id
     assert parameters["release_root"] == release_root
     assert parameters["expected_ids"] == [session + "|" + scope_hash]
 
     assert receipt is not None and receipt.idempotency_key == key
-    assert producer_calls == []
-    # intercepted at the boundary: the builder wrote nothing to the catalog.
     assert _native_score_batch_job_count(conn) == 0
 
 
-def test_service_backs_off_one_attempt_when_pinned_producer_fails(tmp_path, monkeypatch):
-    """Slice 5's whole-producer-failure path: a snapshot-pinned identity whose
-    ``Repository.resolve`` succeeds but whose PR-6 ``build_native_score_batch_events``
-    raise must surface through ``Service._reconcile_native_score_batch_shadow``'s
-    catch/backoff -- the exception lands BEFORE any publish/register/submit, so
-    nothing is submitted or registered -- with exactly one spent sidecar build
-    attempt and ``not_before`` pushed into the future, while the separate
-    identity-LOOKUP memo (whose own lookup succeeded this tick) stays untouched."""
+def test_service_tick_submits_without_running_pinned_producer(tmp_path, monkeypatch):
+    """A slow/failing producer seam is not called by the supervisor tick.
+
+    The tick submits the snapshot-pinned native worker while retaining its
+    independent lookup/backoff bookkeeping; the producer runs after claim.
+    """
     conn, clock, _ = catalog(tmp_path)
     session = "2026-01-01"
     scope_hash = "sha256:0123456789abcdef01234567"
@@ -435,7 +404,8 @@ def test_service_backs_off_one_attempt_when_pinned_producer_fails(tmp_path, monk
     def _producer(repository, resolved_snapshot, *, as_of, horizon_days, tickers):
         producer_calls.append({"as_of": as_of, "horizon_days": horizon_days,
                                "tickers": tickers})
-        raise RuntimeError("planted whole-producer failure")
+        return [], {"schema_version": "native_score_batch_producer_refusals.v1.0",
+                    "refusals": []}
 
     monkeypatch.setattr(
         "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
@@ -448,40 +418,134 @@ def test_service_backs_off_one_attempt_when_pinned_producer_fails(tmp_path, monk
     monkeypatch.setattr(service, "_native_release_root_or_none",
                         lambda: str(tmp_path / "verified-release-root"))
 
-    service._reconcile_native_score_batch_shadow()  # must not raise
+    import time
+    started = time.perf_counter()
+    service.tick()
+    elapsed = time.perf_counter() - started
 
-    assert resolved == [snapshot_id]  # resolve ran, on the pinned generation id
-    assert len(producer_calls) == 1
-    call = producer_calls[0]
-    assert call["as_of"] == session
-    assert call["horizon_days"] == horizon_days
-    assert call["tickers"] == tickers
-    assert _native_score_batch_job_count(conn) == 0
+    assert elapsed < 2.0
+    assert resolved == []
+    assert producer_calls == []
+    assert _native_score_batch_job_count(conn) == 1
     assert conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == 0
-    memo = service._native_score_batch_memo
-    assert memo is not None
-    assert memo["identity"] == (session, scope_hash, producer_parameters)
-    assert memo["attempts"] == 1
-    assert memo["not_before"] > clock.monotonic()
-    # the identity lookup itself succeeded this tick -- its own failure
-    # memo must be untouched (None), never conflated with this backoff.
+    assert service._native_score_batch_memo is None
     assert service._native_score_batch_lookup_memo is None
 
 
-def test_service_stages_both_producer_documents_before_shadow_submission(tmp_path, monkeypatch):
-    """Slice 5's core claim: a snapshot-pinned identity reaches the REAL
-    shadow submission only after the sidecar's full staging path ran -- the
-    raw-row producer is called exactly once for this session with the
-    identity's own nondefault ``horizon_days`` and ticker filter and the
-    exact snapshot ``Repository.resolve`` returned, both JSON-ready
-    documents are then published into the real artifact store AND
-    registered in the catalog, and the submitted job binds the SAME two
-    artifact ids that its ``input_bindings`` name (in the producer's own
-    order) -- so a job can never reference a one-sided stage. Everything
-    except the four documented seams stays real: the catalog connection,
-    the ``Service`` and its ``ArtifactStore``, ``register_artifact``,
-    ``Repository`` itself, and ``submit_native_score_batch_shadow_if_ready``
-    (the test never intercepts the submission boundary)."""
+def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, monkeypatch):
+    """A blocked native producer must not delay the tick or a sibling's lease.
+
+    The claimed native worker's slow raw-row production runs outside the
+    tick: the tick still submits the shadow ``native_score_batch`` job and
+    still renews every OTHER running attempt's lease while that producer
+    stays blocked, and the submitted key is still derived from the succeeded
+    score job's own session/scope.
+    """
+    conn, clock, supervisor = catalog(tmp_path)
+    session = "2026-01-01"
+    snapshot_id = "snap-2026-01-01-producer-blocks-99"
+    earnings_revision = "earnings-dataset-revision-1313"
+    tickers = ("FILTER-A", "FILTER-B")
+    horizon_days = 21
+    snapshot = SimpleNamespace(
+        snapshot_id=snapshot_id,
+        table_versions={"earnings_events": SimpleNamespace(
+            dataset_version_id=earnings_revision)})
+    score_key = _mark_score_succeeded(conn, clock, session=session, tickers=tickers)
+    score_session, score_scope = nightly._session_scope_from_score_key(score_key)
+    other_job_id = job_id_for("shadow", score_key)
+    producer_parameters = LegacyParameters(
+        expected_ids=(score_session + "|" + score_scope,), session=score_session,
+        tickers=tickers, horizon_days=horizon_days,
+        snapshot_generation_id=snapshot_id)
+
+    resolved = []
+
+    def _resolve(repository, snapshot_generation_id):
+        resolved.append(snapshot_generation_id)
+        return snapshot
+
+    monkeypatch.setattr(Repository, "resolve", _resolve)
+
+    producer_calls = []
+
+    import threading
+
+    producer_started = threading.Event()
+    release_producer = threading.Event()
+
+    def _producer(repository, resolved_snapshot, *, as_of, horizon_days, tickers):
+        producer_calls.append({"as_of": as_of, "horizon_days": horizon_days,
+                               "tickers": tickers})
+        producer_started.set()
+        release_producer.wait(timeout=5)
+        return [], {"schema_version": "native_score_batch_producer_refusals.v1.0",
+                    "refusals": []}
+
+    monkeypatch.setattr(
+        "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
+        _producer)
+    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+                        lambda conn: (score_session, score_scope, producer_parameters))
+
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    service.identity = supervisor
+    monkeypatch.setattr(service, "_native_release_root_or_none",
+                        lambda: str(tmp_path / "verified-release-root"))
+    claim = SimpleNamespace(job_id=other_job_id, attempt_id="other-attempt", fence=1)
+    service.running[claim.attempt_id] = SimpleNamespace(claim=claim, failure=None, peak=0)
+    monkeypatch.setattr("engine.v2.ops.executor.poll",
+                        lambda conn, running, **kwargs: {"done": False, "memory": 0})
+    monkeypatch.setattr(service, "_track_steps", lambda running, status: None)
+    monkeypatch.setattr(service, "_observation_due", lambda running, status: False)
+    heartbeat_calls = []
+
+    def _heartbeat(conn, attempt_id, fence, *, clock, lease_seconds):
+        heartbeat_calls.append((attempt_id, lease_seconds))
+        return True
+
+    monkeypatch.setattr("engine.v2.ops.supervisor.heartbeat", _heartbeat)
+    monkeypatch.setattr(service, "_launch", lambda claim: None)
+    worker = threading.Thread(
+        target=_producer, args=(None, snapshot),
+        kwargs={"as_of": score_session, "horizon_days": horizon_days, "tickers": tickers})
+    worker.start()
+    try:
+        assert producer_started.wait(timeout=1)
+        clock.advance(1)
+        import time
+        started = time.perf_counter()
+        service.tick()
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 2.0
+        assert worker.is_alive()  # the slow producer is still blocked
+        assert ("other-attempt", 120) in heartbeat_calls
+        assert resolved == []  # the tick never resolves the snapshot itself
+        assert len(producer_calls) == 1  # only the separate worker thread called it
+        assert _native_score_batch_job_count(conn) == 1
+        row = conn.execute(
+            "SELECT idempotency_key FROM jobs WHERE kind = ?",
+            ("native_score_batch",)).fetchone()
+        assert row["idempotency_key"] == nightly._native_score_batch_key(
+            score_session, score_scope)
+        assert conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == 0
+    finally:
+        release_producer.set()
+        worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert service._native_score_batch_memo is None
+    assert service._native_score_batch_lookup_memo is None
+
+
+def test_service_submits_worker_producer_parameters_without_staging(tmp_path, monkeypatch):
+    """The active tick sidecar submits producer scope without source reads.
+
+    Snapshot resolution and the complete event/refusal production happen in
+    the claimed native worker, so the sidecar leaves no staged artifacts.
+    """
     conn, clock, _ = catalog(tmp_path)
     session = "2026-01-01"
     scope_hash = "sha256:0123456789abcdef01234567"
@@ -536,15 +600,8 @@ def test_service_stages_both_producer_documents_before_shadow_submission(tmp_pat
 
     service._reconcile_native_score_batch_shadow()  # must not raise
 
-    assert resolved == [snapshot_id]
-    assert len(producer_calls) == 1
-    call = producer_calls[0]
-    assert isinstance(call["repository"], Repository)
-    assert call["snapshot"] is snapshot
-    assert call["as_of"] == session
-    assert call["horizon_days"] == horizon_days
-    assert call["tickers"] == tickers
-
+    assert resolved == []
+    assert producer_calls == []
     assert _native_score_batch_job_count(conn) == 1
     row = conn.execute(
         "SELECT namespace, state, resource_class, spec_json FROM jobs WHERE kind = ?",
@@ -554,38 +611,149 @@ def test_service_stages_both_producer_documents_before_shadow_submission(tmp_pat
     spec = json.loads(row["spec_json"])
     _assert_sidecar_runtime_identity(
         row["resource_class"], spec["environment_ref"], "projection")
-
-    events_ref, producer_refusals_ref = spec["input_refs"]
-    assert len({events_ref, producer_refusals_ref, snapshot_id, earnings_revision,
-                scope_hash}) == 5
+    assert spec["input_refs"] == []
     parameters = spec["parameters"]
-    assert parameters["input_bindings"] == {
-        "events.json": events_ref, "producer_refusals.json": producer_refusals_ref}
+    assert parameters["input_bindings"] is None
     assert parameters["snapshot_id"] == snapshot_id
-    assert parameters["calendar_revision"] == earnings_revision
+    assert parameters["calendar_revision"] == ""
     assert parameters["as_of"] == session
     assert parameters["release_root"] == release_root
+    assert parameters["catalog_path"] == str(tmp_path / "ops.sqlite")
+    assert parameters["objects_root"] == str(tmp_path)
+    assert parameters["horizon_days"] == horizon_days
+    assert parameters["tickers"] == list(tickers)
     assert parameters["expected_ids"] == [session + "|" + scope_hash]
+    assert conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == 0
 
-    registered = {ref: registered_artifact(conn, ref)
-                  for ref in (events_ref, producer_refusals_ref)}
-    assert set(registered) == {events_ref, producer_refusals_ref}
-    assert registered[events_ref].schema_ref == "native_score_batch_events.v1.0"
-    assert registered[producer_refusals_ref].schema_ref == \
-        "native_score_batch_producer_refusals.v1.0"
-    assert service.store.read_verified(registered[events_ref]) == \
-        canonical_json(events_document).encode()
-    assert service.store.read_verified(registered[producer_refusals_ref]) == \
-        canonical_json(refusals_document).encode()
-
-    artifact_rows_before = conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"]
-
-    service._reconcile_native_score_batch_shadow()  # existing job: must be a pure no-op
-
-    assert len(producer_calls) == 1
+    service._reconcile_native_score_batch_shadow()  # existing job: pure no-op
+    assert producer_calls == []
     assert _native_score_batch_job_count(conn) == 1
-    assert conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == \
-        artifact_rows_before
+    assert conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == 0
+
+
+def test_native_worker_produces_events_from_its_pinned_snapshot(tmp_path, monkeypatch):
+    from engine.v2.ops import native_score_batch
+
+    class Connection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    conn = Connection()
+    snapshot_id = "snapshot-worker-test"
+    snapshot = SimpleNamespace(
+        snapshot_id=snapshot_id,
+        table_versions={"earnings_events": SimpleNamespace(
+            dataset_version_id="earnings-revision-worker-test")})
+
+    class Repository:
+        def __init__(self, connection, store):
+            assert connection is conn
+            assert isinstance(store, ArtifactStore)
+
+        def resolve(self, requested_snapshot_id):
+            assert requested_snapshot_id == snapshot_id
+            return snapshot
+
+    catalog_paths = []
+    monkeypatch.setattr("engine.v2.ops.catalog.connect",
+                        lambda path, must_exist=True: catalog_paths.append(path) or conn)
+    monkeypatch.setattr("engine.v2.data.repository.Repository", Repository)
+    produced = []
+    producer_refusals = {
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [],
+    }
+
+    def producer(repository, resolved_snapshot, *, as_of, horizon_days, tickers):
+        produced.append((resolved_snapshot, as_of, horizon_days, tickers))
+        return [], producer_refusals
+
+    monkeypatch.setattr(
+        "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
+        producer)
+    from engine.v2.scoring import release_bindings
+    monkeypatch.setattr(release_bindings, "resolve_release_binding", lambda root: object())
+    monkeypatch.setattr(release_bindings, "resolve_gate_policy", lambda binding, root: {})
+    assembled_calls = []
+    monkeypatch.setattr(
+        native_score_batch, "assemble_score_batch_inputs",
+        lambda **kwargs: (assembled_calls.append(kwargs) or ({}, ())))
+    monkeypatch.setattr(native_score_batch, "score_batch", lambda batch, fields: object())
+    records_doc = {"schema_version": "native_score_batch_records.v2.0", "records": {}}
+    refusals_doc = {"schema_version": "native_score_batch_refusals.v2.0",
+                    "refusals": {}, "unkeyable_refusals": []}
+    monkeypatch.setattr(native_score_batch, "_native_score_batch_documents",
+                        lambda *args: (records_doc, refusals_doc))
+    root = tmp_path / "worker-staging"
+    root.mkdir()
+    # A retry may reuse its staging directory; production inputs must be rebuilt.
+    (root / "events.json").write_text("[]", encoding="utf-8")
+    (root / "producer_refusals.json").write_text(
+        json.dumps({"schema_version": "native_score_batch_producer_refusals.v1.0",
+                    "refusals": [{"stale": True}]}), encoding="utf-8")
+
+    result = native_score_batch.run_native_score_batch_worker({
+        "expected_ids": ["session|scope"], "release_root": str(tmp_path / "release"),
+        "as_of": "2026-01-01", "snapshot_id": snapshot_id,
+        "calendar_revision": "", "feature_names": [],
+        "producer_mode": "snapshot",
+        "catalog_path": str(tmp_path / "catalog.sqlite"),
+        "objects_root": str(tmp_path / "objects"),
+        "horizon_days": 21, "tickers": ["AAA", "BBB"],
+    }, root)
+
+    assert catalog_paths == [str(tmp_path / "catalog.sqlite")]
+    assert conn.closed
+    assert produced == [(snapshot, "2026-01-01", 21, ["AAA", "BBB"])]
+    assert assembled_calls[0]["snapshot_id"] == snapshot_id
+    assert assembled_calls[0]["calendar_revision"] == "earnings-revision-worker-test"
+    assert (root / "events.json").read_text(encoding="utf-8") == "[]"
+    assert json.loads((root / "producer_refusals.json").read_text()) == producer_refusals
+    assert result["outputs"][0]["path"] == "records.json"
+
+    def failed_producer(repository, resolved_snapshot, *, as_of, horizon_days, tickers):
+        raise RuntimeError("producer failed")
+
+    monkeypatch.setattr(
+        "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
+        failed_producer)
+    failed_root = tmp_path / "worker-failure"
+    failed_root.mkdir()
+    with pytest.raises(RuntimeError, match="producer failed"):
+        native_score_batch.run_native_score_batch_worker({
+            "expected_ids": ["session|scope"], "release_root": str(tmp_path / "release"),
+            "as_of": "2026-01-01", "snapshot_id": snapshot_id,
+            "calendar_revision": "", "feature_names": [],
+            "producer_mode": "snapshot",
+            "catalog_path": str(tmp_path / "catalog.sqlite"),
+            "objects_root": str(tmp_path / "objects"),
+            "horizon_days": 21, "tickers": ["AAA", "BBB"],
+        }, failed_root)
+    assert not (failed_root / "events.json").exists()
+    assert not (failed_root / "producer_refusals.json").exists()
+    assert not (failed_root / "records.json").exists()
+    assert not (failed_root / "refusals.json").exists()
+
+
+def test_worker_without_producer_parameters_requires_staged_events(tmp_path):
+    from engine.v2.ops.native_score_batch import _worker_event_documents
+
+    with pytest.raises(FileNotFoundError):
+        _worker_event_documents({"calendar_revision": "earnings-rev"}, tmp_path)
+    (tmp_path / "events.json").write_text("[]", encoding="utf-8")
+    assert _worker_event_documents({
+        "calendar_revision": "earnings-rev",
+        "catalog_path": str(tmp_path / "catalog.sqlite"),
+    }, tmp_path) == ([], None, "earnings-rev")
+    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+        _worker_event_documents({"producer_mode": "snapshot"}, tmp_path)
+    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+        _worker_event_documents({
+            "producer_mode": "snapshot",
+            "catalog_path": str(tmp_path / "catalog.sqlite"),
+        }, tmp_path)
 
 
 # --------------------------------------------------------------------------
@@ -603,6 +771,19 @@ def test_service_tick_never_submits_without_model_release_root(tmp_path, monkeyp
     service._reconcile_native_score_batch_shadow()  # must not raise
 
     assert _native_score_batch_job_count(conn) == 0
+
+
+def test_service_sidecar_keeps_legacy_unpinned_identity_as_noop(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    _mark_score_succeeded(conn, clock, session="2026-01-01")
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: "fake-release")
+
+    service._reconcile_native_score_batch_shadow()
+
+    assert _native_score_batch_job_count(conn) == 0
+    assert service._native_score_batch_lookup_memo is None
 
 
 def test_service_tick_never_submits_with_release_root_but_no_promoted_release(tmp_path, monkeypatch):

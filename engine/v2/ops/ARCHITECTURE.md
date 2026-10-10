@@ -10,7 +10,7 @@ Durable job submission, leases, retry history and dependencies; resource
 admission (each constrained cgroup uses `max(0, memory.current - (file - shmem))`, reading `file` and `shmem` from that same directory’s `memory.stat`; active and inactive file cache is reclaimable, while shmem/tmpfs stays counted; missing, malformed or unreadable statistics fall back to `max(0, memory.current - inactive_file)`, then raw usage; headroom remains `min(host_available, container_remaining) - free_margin`) and per-job CPU placement; the nightly job graph and its release
 boundary. It does not decide research conclusions (`engine/v2/evaluation`) and does not compute a score (`engine/v2/scoring`) — it only sequences and persists the jobs that call into those packages. `legacy_render` renders the staged score document's board rows, which scale with output rows, and builds a `Scorer` without calling its scoring path. Its `feature_panel`, `trades`, and `earnings_events` inputs are whole-table reads; `FeatureContext.load` filters its `daily_market` input by plan `context_tickers` and year range, while `Scorer` construction separately reads each historical `daily_market` year slice, then filters it to trade-derived ticker chunks, spanning the trade entry years plus one prior year. The lazy Tier-4 forecast path is not reached. The render profile (`projection`) must account for the complete evidence working set, which can include more tickers than the staged board rows; its 3 GiB reservation and cgroup `memory.max` cap are INTERIM, sized from the observed 100-ticker render only and NOT shown to fit the full universe, so the bounded/chunked read design tracked by issue #505 is the actual fix; available subset evidence does not establish full-universe fit.
 
-This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy `engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a legacy `Scorer`; production flow is `Service.tick()` → `_reconcile_native_score_batch_shadow` → `build_native_score_batch_events` → `scan_forward_board_requests` → `board_requests` (see "Dependencies"); schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
+This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy `engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a legacy `Scorer`; the native worker runs `build_native_score_batch_events` over the pinned snapshot, off the supervisor tick (see "Dependencies"); schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
 
 **Planned package split.**
 The `design/ops-package-split` PR records the proposed module homes and move slices.
@@ -77,15 +77,19 @@ turns one release binding (`ScoringReleaseBinding`) plus a sequence of
 already-staged `NightlyEventInputs` into `dict[BoardRequest,
 tuple[ScoreRequest, NativeScoreInputs]]` plus a tuple of typed per-row
 refusals — a pure function; an empty `events` sequence is a legitimate no-op.
-`run_native_score_batch_worker(parameters, root)` is the worker entrypoint:
-resolves the release once, reads staged `events.json` (plus an optional
-`producer_refusals.json`, merged into the per-row refusals before build — see
-"Failure semantics" below), assembles, scores under `no_fit_guard()`, and
-writes `records.json`/`refusals.json`. **Supports `STR-THRU` only** — any
-other strategy refuses per-row. `supervisor.Service`'s tick sidecar (below) is
-its one production caller: once it has staged and registered both documents it
-submits the shadow JobSpec with the `projection` profile for a new eligible
-snapshot-pinned identity; the production-default `legacy`/unpinned path stays a no-op.
+`run_native_score_batch_worker(parameters, root)` resolves the release, builds
+`events.json` and `producer_refusals.json` from the pinned snapshot in the
+`projection` worker, then assembles, scores under `no_fit_guard()`, and writes
+`records.json`/`refusals.json`. **Supports `STR-THRU` only** — any other
+strategy refuses per-row. The tick sidecar only submits the shadow job for a
+new eligible snapshot-pinned identity (`producer_mode="snapshot"`); direct
+worker callers default to staged `events.json`. Snapshot mode derives
+`calendar_revision` from pinned earnings data; staged mode uses its parameter.
+The production-default `legacy`/unpinned path stays a no-op; production uses `projection` (3 GiB, 2 CPUs). A producer exception fails the native attempt
+before writing that attempt's event/refusal or score outputs; reused-root files
+may remain as untrusted residue. The job follows bounded retries; worker
+production cannot stall supervisor ticks or renewals, and native failure leaves
+legacy jobs unaffected.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
@@ -523,7 +527,7 @@ idempotency key to recover `(session, scope_hash, snapshot_pinned)`, or
 directly via `ops plan` (not the scheduled trigger) still gets a silent
 no-op (see "Failure semantics" below).
 
-**Cutover PR-7b (implemented, #145/#150): the shadow nightly plan pins a snapshot before scoring.** `nightly_trigger._default_plan` runs in `input_mode="snapshot"`, `snapshot_scope="shadow"`: legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/`"model_evidence"` read through that pinned snapshot. `pin_snapshot_inputs` binds it to the exact `snapshot_id` `_ensure_shadow_snapshot` verified; its three required bindings are `core/snapshot_contracts.py::SNAPSHOT_BINDINGS`. The native sidecar's raw-row producer also accepts an explicit `SnapshotRef` and enumerates its pinned forward board. This never starts the real legacy nightly: `nightly_trigger.py` runs on its own systemd timer (`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate from whatever schedules the legacy nightly.
+**Cutover PR-7b (implemented, #145/#150): the shadow nightly plan pins a snapshot before scoring.** `nightly_trigger._default_plan` runs in `input_mode="snapshot"`, `snapshot_scope="shadow"`: legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/`"model_evidence"` read through that pinned snapshot. `pin_snapshot_inputs` binds it to the exact `snapshot_id` `_ensure_shadow_snapshot` verified; its three required bindings are `core/snapshot_contracts.py::SNAPSHOT_BINDINGS`. The native batch worker resolves that pinned snapshot and enumerates its forward board. This never starts the real legacy nightly: `nightly_trigger.py` runs on its own systemd timer (`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate from whatever schedules the legacy nightly.
 
 `nightly_trigger._ensure_shadow_snapshot(root, as_of, clock, attempt, ...)
 -> (status, snapshot_id | None)`, called from `_submit_plan` immediately
@@ -582,17 +586,17 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
 
-**Cutover PR-6: 4a.2 helpers and 4b producer, with slice 5's production caller.** The 4a.2 `nightly_calendar_inputs` helpers and the 4b `nightly_raw_row_producer.build_native_score_batch_events` producer are implemented, and `Service._reconcile_native_score_batch_shadow` (slice 5) is their production caller: it stages/registers the complete `events.json`/`producer_refusals.json` pair before calling `submit_native_score_batch_shadow_if_ready`, and a producer-wide or staging/registration failure submits nothing. The slice-5 Inputs bullet and the R1–R6 table below express the caller, artifact staging, and failure contract; the 4a/4b helper and producer internals are implementation detail specified there and in the code. Snapshot reads remain SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
+**Cutover PR-6: 4a.2 helpers and 4b producer.** `nightly_raw_row_producer.build_native_score_batch_events` runs in the `native_score_batch` worker over its pinned snapshot, never in `Service.tick()`. Snapshot reads remain SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
 
 `nightly_calendar_inputs.py` exposes `scan_decision_calendar(repository, snapshot, *, decision_session, event_through) -> CalendarSessions`, `scan_candidate_expiries(repository, snapshot, key, *, decision_session) -> tuple[str, ...]`, and `scan_calendar_row_inputs(repository, snapshot, key, *, decision_session, calendar) -> CalendarRowInputs`. The calendar source is the pinned SPY price series through the decision session; its observed maximum stays distinct from projected sessions. Candidate scans use one exact option-chain session, and `generation.resolve_expiry` applies the native strategy policy. Spot is the finite positive raw close on the exact decision session. The helper passes the independent planned exit and resolved expiry into `scan_calendar_row`; the returned calendar revision is the matched pinned earnings-events dataset revision.
 
 | Native score batch raw-row producer and sidecar (R1–R6) | Outcome |
 |---|---|
 | R1: per-key producer refusal (`NO_RESOLVABLE_EXPIRY`, `EVENT_NOT_FOUND`/`IDENTITY_CONFLICT`, `INTRADAY_EVENT_NOT_ADMITTED`, `PANEL_HISTORY_NOT_AVAILABLE`, `PRICE_HISTORY_NOT_AVAILABLE`, or a calendar/expiry refusal) | The typed refusal is included in the refusal artifact and complete successful rows for the other keys can still be submitted. A ticker absent from the pinned price-history membership gets one refusal per affected board request; malformed series data is not retyped as absence. A later snapshot carrying that ticker's history is evaluated afresh and does not inherit the prior refusal. Missing eligible score identity, a job that already exists, an unavailable required release, or a sidecar tick that never reaches production means no submission on that tick. |
-| R2: producer-wide failure (missing source table or exact spot, malformed source input, or a repository failure) | Returns no partial tuple and writes no files, and no job is submitted; unrelated geometry failures propagate too. Existing sidecar redacted reporting and retry/backoff behavior handles the error. The producer keeps no durable/negative cache and never fetches from a provider: reuse is build- and snapshot-scoped, and unchanged inputs reproduce the same result or refusal. |
+| R2: producer-wide failure (missing source table or exact spot, malformed source input, or a repository failure) | Returns no partial tuple; the native worker attempt fails before score outputs are committed and follows its bounded retry policy. Tick-side leases and legacy jobs are unaffected. The producer keeps no durable/negative cache and never fetches from a provider: reuse is build- and snapshot-scoped, and unchanged inputs reproduce the same result or refusal. |
 | R3: late or unavailable prerequisite, or a readiness no-op | No producer refusal and no job; the next eligible sidecar tick reevaluates under existing scheduling/backoff behavior — no specific retry time is promised. |
-| R4: caller and builder boundaries | The sidecar is the sole producer caller, and the read-only producer makes no catalog writes; `submit_native_score_batch_shadow_if_ready` consumes the supplied references only — it never reads source inputs or reruns the producer. For a new eligible snapshot-pinned identity, if any of the two staged artifact refs, the calendar revision, or the snapshot ID is absent, that builder raises `VALIDATION_FAILED` before creating or submitting a JobSpec. |
-| R5: staging and registration | The sidecar stages/registers both complete documents before submission; if production or either stage/register step fails there is no submission and no partial tuple or job. An object already published before a later stage/register error may remain unreferenced in the artifact store, with no job referencing it; staging side effects do not roll back atomically. |
+| R4: caller and builder boundaries | The worker is the sole producer caller, and the read-only producer makes no catalog writes. The tick builder supplies the snapshot identity and producer parameters; the worker derives the calendar revision from that pinned snapshot. |
+| R5: worker failure boundary | Producer failure returns no partial tuple and fails only the native job attempt; staged worker files are private to the attempt and no score checkpoint is committed. Other jobs continue through supervisor ticks and legacy outcomes are unchanged. |
 | R6: preserved invariants | Event order and deterministic document content, exact event identity and earnings dataset revision, timestamp-preserving refusal identity — `YYYY-MM-DD` for midnight and canonical naive ISO for intraday, including `INTRADAY_EVENT_NOT_ADMITTED` ([#356](https://github.com/yshewchuk/investment-validation/issues/356)) — disjoint event and refusal keys, the shadow/smoke namespace and `(session, scope_hash)` idempotency, and compatibility with a missing optional refusal artifact. |
 
 ## Inputs
@@ -634,21 +638,17 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   `event_id`, see "Failure semantics"), the batch's `feature_names`, and an
   optional `gate_policy: Mapping[str, Mapping[str, Any]]` keyed by strategy
   (when the worker's parameter is empty it uses the release's own, see below). The
-  worker's own `NativeScoreBatchParameters` additionally carries
-  `release_root` as a plain string field and
-  `input_bindings={"events.json": <artifact ref>}` for the one staged
-  events array.
+  worker's own `NativeScoreBatchParameters` carries `release_root`, the pinned
+  snapshot ID, and the catalog/object roots used to open it.
 
-**Cutover PR-7a's input sourcing (slice 5).** Two things are gathered before a
-`JobSpec` is built, entirely inside `supervisor.Service`'s own sidecar
-(`_reconcile_native_score_batch_shadow`), never inside
-`nightly.submit_native_score_batch_shadow_if_ready` itself; the builder's own boundary is the third bullet:
+**Native batch input sourcing.** The tick sidecar performs bounded identity
+and release checks, then submits. The worker does the snapshot reads:
 
 - **The release binding.** `Service._native_release_root_or_none` resolves the production release root, re-verifying it only when it may have changed since last checked, and passes only the resolved root (a plain string) to `submit_native_score_batch_shadow_if_ready`'s own `release_root` argument. `run_native_score_batch_worker` never receives the sidecar's `ScoringReleaseBinding` object; it independently re-resolves and re-verifies the binding itself, matching that type's documented contract. Every failure mode here (unset/blank env var, no pointer, or a release that fails hash verification) is Failure semantics R1 below.
-- **Per-event raw rows** (`calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows`): built by the raw-row producer — see "Cutover PR-6" above for the per-key condition/outcome account (R1). Once it has a pinned snapshot and an eligible identity the sidecar calls `build_native_score_batch_events` once, waits for its complete pair of JSON-ready documents, stages/registers `events.json` and `producer_refusals.json`, and passes `events_ref` and `producer_refusals_ref` to `submit_native_score_batch_shadow_if_ready`.
-- **The builder only builds.** It constructs the existing shadow `JobSpec` and its references; it never calls the producer or repeats a source read, and takes `calendar_revision` from `snapshot.table_versions["earnings_events"].dataset_version_id`.
+- **Per-event raw rows** (`calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows`): the worker's raw-row producer builds these from the exact pinned `snapshot_id`; it takes the calendar revision from that snapshot's `earnings_events` table version.
+- **The tick builder only submits.** It preserves the `(session, scope_hash)` job identity and tick-side memo/backoff; it does not resolve the snapshot or call the producer.
 
-`SourceBundle` construction (`assemble_nightly_source_bundle`, `source_inputs.build_native_score_inputs`) happens inside the worker, not at submission time — both are pure, I/O-free functions run from the staged `events.json`, so the submission side never touches `engine.v2.scoring.source_inputs`. Both documents are staged as immutable, content-addressed artifacts via `spec.input_refs`, never a `job_<id>#<name>` reference, since no prior job produces them.
+`SourceBundle` construction (`assemble_nightly_source_bundle`, `source_inputs.build_native_score_inputs`) happens inside the worker — both are pure, I/O-free functions over the worker-local event documents, so the submission side never touches `engine.v2.scoring.source_inputs`.
 
 Worker compatibility: `events.json` is required and `producer_refusals.json` is optional for existing callers; when present, producer refusal records merge into the worker's own refusals, and successful event keys and refusal keys are disjoint. The existing shadow/smoke namespace and `(session, scope_hash)` idempotency are preserved.
 
@@ -882,13 +882,13 @@ material": `BoardRequest`'s own fields and
   in production today — see "Cutover PR-4 (redo)" above) would break; no
   such caller exists to migrate.
 
-**Cited, not solved here: `native_score_batch`'s submission contract.** The
-tick-loop sidecar does submit for an eligible snapshot-pinned `"score"`
-identity once its required producer inputs are staged; production's default
-`"legacy"` input mode pins no snapshot, so there it stays a normal no-op —
-`None`, no JobSpec, no raise. For a NEW eligible identity a missing
-`events_ref`, `producer_refusals_ref`, `calendar_revision` or `snapshot_id`
-raises typed `VALIDATION_FAILED` before any job is created. Until some
+**Native `native_score_batch` submission contract.** The tick-loop sidecar
+submits producer parameters for an eligible snapshot-pinned `"score"`
+identity after its release check; production's default `"legacy"` input mode
+pins no snapshot, so there it stays a normal no-op — `None`, no JobSpec, no
+raise. The native worker resolves the pinned snapshot and builds both producer
+documents. For a NEW eligible identity, a missing `snapshot_id` raises typed
+`VALIDATION_FAILED` before any job is created. Until some
 `native_score_batch` job has succeeded, `_native_parity_identity` (above)
 keeps returning `None` (R1, "Failure semantics" below) — the same graceful
 "nothing to do yet" outcome as a night that has not reached that point yet,
@@ -1051,8 +1051,8 @@ cache on the next attempt.
 
 **Cutover PR-7a/PR-6: where the native `ScoreRecord`s will land.** The
 unpinned-snapshot branch still returns before any job is built; the
-pinned-snapshot branch reaches a real `native_score_batch` attempt once
-the raw-row producer (above) stages `events.json`.
+pinned-snapshot branch reaches a real `native_score_batch` attempt, whose
+worker builds `events.json` from the pinned snapshot before scoring.
 
 - **Durable address.** `job_<native_score_batch job_id>#records` (and
   `#refusals`) — resolvable through `input_bindings.resolve_bindings`
@@ -1125,7 +1125,7 @@ top-level `tools/v2_*.py` operator CLIs and `experiments/*` plan submitters;
 `checks/rearchitecture_*.py`; and `tests/test_v2_ops_*.py`. Top-level tools are
 unlayered (§1); no other layered or legacy engine caller imports ops.
 The raw-row producer consumes `board_requests`; its sole production caller is
-`supervisor.Service._reconcile_native_score_batch_shadow` in the tick loop.
+`native_score_batch.run_native_score_batch_worker` in the worker process.
 `experiments/native_registration.py` may also import the public submodule APIs
 `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`,
 `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`,
@@ -1265,7 +1265,7 @@ job.
 
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|
-| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; under slice 5 this sidecar is the producer's only caller, so an eligible pinned-snapshot tick produces, stages both documents and submits (R1–R6 above) | the specific succeeded score job read, not session alone |
+| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; an eligible pinned-snapshot tick submits producer parameters and the worker produces both documents (R1–R6 above) | the specific succeeded score job read, not session alone |
 | `native_parity` | no paired, succeeded `native_score_batch`/`score` identity yet — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id`, skipping the artifact read and attempt spend on every later tick carrying it (the identity/existing-job lookup itself still runs on eligible ticks) | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
 | pool-nightly refresh | design only, not yet implemented — see [#192](https://github.com/yshewchuk/investment-validation/issues/192) | — |
@@ -1417,7 +1417,7 @@ flowchart TD
     class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh,native_score_batch optional
 ```
 
-Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never blocks the graph. This diagram is the *shadow* graph — `run_shadow_nightly` is the only function that walks it whole, inline, for every stage including `native_parity`; it has no production caller, only `tests/test_v2_ops_legacy_workflows.py` and `tests/v2/ops/test_native_shadow_render.py` call it. `computed_moves_refresh` and `native_score_batch` are both real submittable job kinds and `GRAPH` nodes; `run_shadow_nightly` reaches both through its whole-graph walk. Automatic *production* submission reaches them only through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` / `Service._reconcile_native_score_batch_shadow`); `_stage_sequence` filters both out of every job-submission stage list by name (see "Outputs"). `native_score_batch`'s sidecar returns a normal no-op if the selected `"score"` job pinned no snapshot or no eligible identity exists (never a JobSpec, never a raise — R3 above); for a new eligible snapshot-pinned job it is the raw-row producer's only production caller — see "Outputs"/"Failure semantics" for both cases.
+Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never blocks the graph. This diagram is the *shadow* graph — `run_shadow_nightly` is the only function that walks it whole, inline, for every stage including `native_parity`; it has no production caller, only `tests/test_v2_ops_legacy_workflows.py` and `tests/v2/ops/test_native_shadow_render.py` call it. `computed_moves_refresh` and `native_score_batch` are both real submittable job kinds and `GRAPH` nodes; `run_shadow_nightly` reaches both through its whole-graph walk. Automatic *production* submission reaches them only through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` / `Service._reconcile_native_score_batch_shadow`); `_stage_sequence` filters both out of every job-submission stage list by name (see "Outputs"). `native_score_batch`'s sidecar returns a normal no-op if the selected `"score"` job pinned no snapshot or no eligible identity exists (never a JobSpec, never a raise — R3 above); for a new eligible snapshot-pinned identity it submits producer parameters, and the native worker is the raw-row producer's only production caller — see "Outputs"/"Failure semantics" for both cases.
 
 **`native_parity`.** The job kind and its worker
 (`run_native_parity_worker`, dispatched from `worker.py`) receive jobs through
@@ -1511,10 +1511,10 @@ flowchart LR
     SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
-    OUT --> RRP["nightly_raw_row_producer.build_native_score_batch_events\n(called only by Service._reconcile_native_score_batch_shadow, slice 5)"]
+    OUT --> RRP["nightly_raw_row_producer.build_native_score_batch_events\n(called only by native_score_batch worker)"]
 ```
 
-`board_requests` itself only consumes an `events_table` a caller passes in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a real shadow-scope snapshot via `import_snapshot.plan_import`/`submit_import` only — never a `Repository.scan("earnings_events")` call, which belongs to `computed_moves_store._scan_once` instead, a different boundary. It is reachable today for `nightly_trigger._default_plan`'s scheduled `"score"` job specifically (see "Primary contracts"); a plan built directly with the lower-level plan builder can still default to `legacy` input mode instead. The raw-row producer consumes these requests and is called only by `native_score_batch`'s shadow sidecar (slice 5). Slice 1's `carried_set.resolve_carried_set` reads the per-table ticker sets from one pinned snapshot, using `daily_market.date` and `option_chains.obs_date` in the inclusive January 1 of the prior calendar year through `as_of` window; `computed_at` and future data dates do not count. `build_uncarried_exclusions` emits one ticker-sorted `UNCARRIED_TICKER` per supplied non-carried candidate, with sorted missing-table names. Missing or unreadable tables propagate the Repository's typed refusal. Slice 2 applies this resolver while building the supervised nightly population, carries the exclusion records in the saved plan, and passes the filtered ticker set to both the legacy score parameters and native board enumerator. The ordinary live legacy dashboard keeps its current population; An uncarried ticker is absent from the decision candidates and so never enters the `candidate_tickers ⊆ covered_tickers` check, while a carried ticker without final coverage still refuses `VALIDATION_FAILED`. The exclusions live in the saved plan only; `decision_plan`/`decision_evidence` documents do not carry them.
+`board_requests` itself only consumes an `events_table` a caller passes in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a real shadow-scope snapshot via `import_snapshot.plan_import`/`submit_import` only — never a `Repository.scan("earnings_events")` call, which belongs to `computed_moves_store._scan_once` instead, a different boundary. It is reachable today for `nightly_trigger._default_plan`'s scheduled `"score"` job specifically (see "Primary contracts"); a plan built directly with the lower-level plan builder can still default to `legacy` input mode instead. The raw-row producer consumes these requests in the native batch worker. Slice 1's `carried_set.resolve_carried_set` reads the per-table ticker sets from one pinned snapshot, using `daily_market.date` and `option_chains.obs_date` in the inclusive January 1 of the prior calendar year through `as_of` window; `computed_at` and future data dates do not count. `build_uncarried_exclusions` emits one ticker-sorted `UNCARRIED_TICKER` per supplied non-carried candidate, with sorted missing-table names. Missing or unreadable tables propagate the Repository's typed refusal. Slice 2 applies this resolver while building the supervised nightly population, carries the exclusion records in the saved plan, and passes the filtered ticker set to both the legacy score parameters and native board enumerator. The ordinary live legacy dashboard keeps its current population; An uncarried ticker is absent from the decision candidates and so never enters the `candidate_tickers ⊆ covered_tickers` check, while a carried ticker without final coverage still refuses `VALIDATION_FAILED`. The exclusions live in the saved plan only; `decision_plan`/`decision_evidence` documents do not carry them.
 
 ### Native nightly pool/residual refresh (Cutover PR-13a)
 

@@ -33,7 +33,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.features.panel_row_inputs import PanelRowInputs, scan_panel_row
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_board_universe import BoardRequest
-from engine.v2.ops.native_score_batch import NativeScoreBatchRowRefusal
+from engine.v2.ops.native_score_batch_types import NativeScoreBatchRowRefusal
 from engine.v2.ops.nightly_calendar_inputs import (
     scan_calendar_row_inputs,
     scan_decision_calendar,

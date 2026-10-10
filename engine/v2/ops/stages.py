@@ -38,11 +38,8 @@ class RescoreParameters:
 
 @dataclass(frozen=True)
 class NativeScoreBatchParameters:
-    """Cutover PR-3: a batch of already-staged per-event inputs plus a
-    release pointer -- see engine/v2/ops/native_score_batch.py and
-    ARCHITECTURE.md. ``events.json`` (the per-event input array) is
-    resolved into staging via ``input_bindings`` exactly like
-    ``RescoreParameters``'s request pair."""
+    """Native batch inputs, built by its worker from the pinned snapshot;
+    staged event bindings remain available for existing direct callers."""
 
     expected_ids: tuple[str, ...]
     release_root: str
@@ -50,6 +47,11 @@ class NativeScoreBatchParameters:
     snapshot_id: str
     calendar_revision: str
     feature_names: tuple[str, ...]
+    catalog_path: str = ""
+    objects_root: str = ""
+    horizon_days: int = 35
+    tickers: tuple[str, ...] = ()
+    producer_mode: str = "staged"
     gate_policy: dict[str, Any] | None = None
     input_bindings: dict[str, str] | None = None
 
@@ -284,13 +286,11 @@ def _calendar_moves_kinds() -> list:
 
 
 def _native_score_batch_kind() -> JobKind:
-    """Cutover PR-3: a batch-shaped sibling of adhoc_rescore -- assembles
-    {BoardRequest: (ScoreRequest, NativeScoreInputs)} from a release binding
-    and already-staged per-event inputs, then scores the whole batch under
-    the same no-fit guard. No production caller submits this kind yet (see
-    engine/v2/ops/native_score_batch.py, ARCHITECTURE.md). Pulled out of
-    _core_kinds' own list literal, like _calendar_moves_kinds above, to keep
-    that function under its line budget."""
+    """A native score batch worker that accepts staged event inputs for direct
+    callers and builds pinned-snapshot events in production before scoring
+    under the no-fit guard. See native_score_batch.py and ARCHITECTURE.md.
+    Pulled out of _core_kinds' list literal to keep that function within its
+    line budget."""
     return JobKind(
         name="native_score_batch", worker="native_score_batch",
         parameters=NativeScoreBatchParameters,
