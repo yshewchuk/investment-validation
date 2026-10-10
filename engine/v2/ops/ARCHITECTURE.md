@@ -558,9 +558,9 @@ Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `
 | Same step with another request digest or effect (changed inputs) | `IDEMPOTENCY_CONFLICT`; a rerun generation is the way forward. |
 | `complete_step` with no intent or an incomplete effect; malformed step, request digest (also in `reconcile_step`) or effect (an artifact needs a 64-hex sha256; no ref may contain NUL; a stored effect failing this is `INTEGRITY_FAILED`); a `catalog_job` probe (`complete_step`, `reconcile_step`) without the catalog connection | `INVALID_REQUEST`. Unparseable or foreign receipt files: `INTEGRITY_FAILED` / `CHECKPOINT_INCOMPATIBLE`. |
 
-### Nightly legacy readiness (`nightly_readiness.py`, slice 3 of #564)
+### Nightly legacy readiness (`nightly_readiness.py`)
 
-Leaf, not yet called by `nightly_trigger`. Admission (lock, window, default session) stays in `nightly_trigger`; wiring is slice 8. There is no rebuild step and no rebuild fallback (D2=iv): `check_legacy_report(reports_dir, as_of)` only verifies what the legacy nightly produced. It reads the legacy run reports as plain JSON (no `engine.dashboard` import) and returns a `LegacyReadiness` record for the most recent report whose recorded session is D. A report's content decides, never its name beyond locating it, nor mtime, locks or elapsed time. Read-only, nothing written. A session that is not canonical `YYYY-MM-DD` is `INVALID_REQUEST`.
+Leaf, not yet called by `nightly_trigger`. Admission (lock, window, default session) stays in `nightly_trigger`. There is no rebuild step and no rebuild fallback: `check_legacy_report(reports_dir, as_of)` only verifies what the legacy nightly produced. It reads the legacy run reports as plain JSON (no `engine.dashboard` import) and returns a `LegacyReadiness` record for the most recent report whose recorded session is D. A report's content decides, never its name beyond locating it, nor mtime, locks or elapsed time. Read-only, nothing written. A session that is not canonical `YYYY-MM-DD` is `INVALID_REQUEST`.
 
 | Condition | Outcome |
 |---|---|
