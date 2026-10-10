@@ -344,6 +344,8 @@ def _registered_runner_manifest(plan):
             raise fail("VALIDATION_FAILED",
                        "registered runner source is missing or indirect",
                        details={"runner": runner}) from exc
+        if exc.code == "INVALID_EXPERIMENT_SPEC":
+            raise
         raise fail("INVALID_EXPERIMENT_SPEC", "experiment runner is not registered",
                    details={"runner": runner}) from exc
     return declared, Path(checkout_root).resolve(), manifest

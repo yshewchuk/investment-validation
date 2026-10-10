@@ -1202,12 +1202,16 @@ def invoke_evaluate(root, spec, trades, *, run_dir, **kwargs):
     return evaluate(spec, trades, run_dir=run_dir, **kwargs)
 
 
-REGISTERED_RUNNERS = frozenset({
-    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
-})
+REGISTERED_RUNNERS = frozenset()
+DISABLED_RUNNERS = {
+    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py": (
+        "disabled 2026-10-10: reads EXP-179 parquet directly "
+        "(no v2_snapshot_id), bypassing holdouts"
+    ),
+}
 
-_FIXED_ARM_RUNNER = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
-_FIXED_ARM_ARGS = frozenset({("--clock", "d1")})
+_FIXED_ARM_RUNNER = "experiments/_holdout_refusal_signal_probe.py"
+_FIXED_ARM_ARGS = frozenset()
 
 #: Wall-clock budget for one registered legacy runner subprocess. Sized to
 #: the experiment_heavy resource profile (profiles.py: 5 CPUs, 5.5 GiB,
@@ -1227,6 +1231,12 @@ def run_legacy_script(root, script, args=(), *, declared_runtime_sources=()):
     _rooted_import(root)
     base = Path(root).resolve()
     relative = str(Path(script))
+
+    disabled_reason = DISABLED_RUNNERS.get(relative)
+    if disabled_reason is not None:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   f"registered experiment runner is disabled: {disabled_reason}",
+                   details={"runner": relative, "reason": disabled_reason})
     script_path = (base / relative).resolve()
     if relative not in REGISTERED_RUNNERS or not script_path.is_relative_to(base):
         raise fail("INVALID_REQUEST", "legacy experiment runner is unaudited")

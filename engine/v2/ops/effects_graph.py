@@ -987,6 +987,10 @@ def _experiment_refusal_failure_effect(claim, problem, *, code_source, store_roo
     if invalid:
         raise fail("VALIDATION_FAILED", "holdout refusal receipt evidence is invalid",
                    details={"fields": invalid})
+    expected_ids = claim.spec.parameters.get("expected_ids") or ()
+    if "experiment:" + receipt["experiment_id"] not in expected_ids:
+        raise fail("VALIDATION_FAILED", "holdout refusal receipt evidence is invalid",
+                   details={"fields": ["experiment_id"]})
     if claim.spec.parameters.get("no_ledger", True):
         return None
     checkout_root = (claim.spec.parameters.get("preregistration_root")

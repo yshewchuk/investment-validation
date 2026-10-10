@@ -23,7 +23,7 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.ops.experiments import experiment_spec_from_document
 from tests.ops_support import catalog
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 EVALUATE_SPEC = {
     "id": "EXP-SPECB-REPORT-PROBE",
     "title": "real report reachability probe",
@@ -91,7 +91,31 @@ def test_primary_run_produces_a_real_engine_report(tmp_path):
 # tmp checkout, plus the ran row's metrics/notes built from the run's outputs.
 # --------------------------------------------------------------------------
 
-REGISTERED_RUNNER = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
+REGISTERED_RUNNER = "experiments/synthetic_test_runner/run.py"
+DISABLED_EXP182 = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
+
+
+@pytest.fixture(autouse=True)
+def _install_synthetic_runner_registration(monkeypatch):
+    from engine.v2.ops import legacy_adapter
+
+    source = "experiments/synthetic_test_runner/source.py"
+    monkeypatch.setitem(experiments.RUNNER_INVENTORY, REGISTERED_RUNNER, {
+        "spec_source": "experiments/synthetic_test_runner/spec.yaml",
+        "declared_runtime_sources": (source,),
+        "declared_runtime_inputs": (),
+        "fixed_arm_args": {"d1": ()},
+        "ledger_write_behavior": "test-only synthetic runner",
+        "registry_effects": "none",
+        "report_path": "REPORT.md",
+        "resumable_units": "none_declared",
+        "backup_behavior": "none",
+        "removal_phase": "test-only",
+    })
+    monkeypatch.setattr(legacy_adapter, "REGISTERED_RUNNERS",
+                        frozenset({REGISTERED_RUNNER}))
+    monkeypatch.setattr(legacy_adapter, "_FIXED_ARM_RUNNER", REGISTERED_RUNNER)
+    monkeypatch.setattr(legacy_adapter, "_FIXED_ARM_ARGS", frozenset())
 
 TINY_RUNNER = '''\
 import json
@@ -110,14 +134,14 @@ TINY_RUNNER_NO_METRICS = TINY_RUNNER.split("results = root")[0]
 
 
 def _tiny_checkout(tmp_path, *, with_metrics=True):
-    """A tmp checkout with the registered runner, its legacy spec.yaml and a
-    PLANNED ledger row; returns ``(checkout, spec_path, ledger, planned_hash)``."""
+    """A tmp checkout with a test-only synthetic runner and planned row."""
     from experiments import lib
 
     checkout = tmp_path / "checkout"
     runner = checkout / REGISTERED_RUNNER
     runner.parent.mkdir(parents=True)
     runner.write_text(TINY_RUNNER if with_metrics else TINY_RUNNER_NO_METRICS)
+    (runner.parent / "source.py").write_text("# --no-ledger test-only declared source\n")
     legacy_spec = runner.parent / "spec.yaml"
     legacy_spec.write_text("id: EXP-182\nprimary_spec:\n  x: 1\n")
     planned_hash = lib.spec_hash(lib.load_spec(legacy_spec))
@@ -193,10 +217,10 @@ def test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger(
     refused = tmp_path / "refused"
     refused.mkdir()
     (refused / "spec.json").write_text(json.dumps(_experiment_document(
-        experiment_id="EXP-182", runner=REGISTERED_RUNNER)))
+        experiment_id="EXP-182", runner=DISABLED_EXP182)))
     with pytest.raises(OpsError) as excinfo:
         worker.dispatch("experiment", {"expected_ids": ["experiment:EXP-182"],
-                                       "runner": REGISTERED_RUNNER, "no_ledger": True}, refused)
+                                       "runner": DISABLED_EXP182, "no_ledger": True}, refused)
     assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
     assert not (refused / "resolved_experiment_plan.json").exists()
     assert not (refused / "experiment_receipt.json").exists()

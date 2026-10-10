@@ -5,6 +5,8 @@ and implementation status are tracked in [the v2 experiment platform](https://gi
 Legacy `phase2_experiment_framework.md` describes a historical workflow, not
 the v2 procedure.
 
+Runner input access follows the [research experiment-runner contract](../engine/v2/research/ARCHITECTURE.md#primary-contracts-and-public-interfaces).
+
 ## Define and preregister
 
 1. State the question, hypothesis, primary outcome, candidate variant, and

@@ -459,8 +459,15 @@ def _registered_experiment_runner(root, runner_id, primary_arm_id):
     ``HOLDOUT_ACCESS_DENIED`` naming only the four validated pins, which
     ``run_experiment`` captures as the private refusal receipt.
     """
-    from engine.v2.ops.experiments import RUNNER_INVENTORY
+    from engine.v2.ops.experiments import DISABLED_RUNNERS, RUNNER_INVENTORY
     from engine.v2.ops.legacy_adapter import run_legacy_script
+
+    disabled_reason = DISABLED_RUNNERS.get(runner_id)
+    if disabled_reason is not None:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   f"registered experiment runner is disabled: {disabled_reason}",
+                   details={"runner": runner_id, "primary_arm_id": primary_arm_id,
+                            "reason": disabled_reason})
 
     fixed_arm_args = RUNNER_INVENTORY.get(runner_id, {}).get("fixed_arm_args", {})
     selected_args = fixed_arm_args.get(primary_arm_id)

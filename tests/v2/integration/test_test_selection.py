@@ -76,6 +76,14 @@ def test_phase1_coverage_keeps_relocated_nightly_completion_file():
     assert relative in phase1_suite(ROOT)
 
 
+def test_phase1_coverage_keeps_relocated_experiment_reports_file():
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    relative = "tests/v2/ops/test_v2_ops_experiment_reports.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
+
+
 def test_phase1_coverage_keeps_relocated_native_parity_pairing_file():
     """A root glob cannot match a moved test; its new path is named explicitly."""
     from checks.v2_coverage_ratchet import phase1_suite
@@ -108,6 +116,7 @@ def _phase1_root(tmp_path, listed, present, extra=()):
 
 _PHASE1_EXTRA = ("tests/v2/ops/test_cli_rescore.py", "tests/v2/ops/test_forward_calendar_store.py",
                  "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py",
+                 "tests/v2/ops/test_v2_ops_experiment_reports.py",
                  "tests/v2/ops/test_v2_ops_refresh_staging.py")
 
 

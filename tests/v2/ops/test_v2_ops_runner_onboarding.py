@@ -43,18 +43,15 @@ def _synthetic_root(root: Path, source: str) -> Path:
     return run_dir / "run.py"
 
 
-def test_runner_manifest_mixes_reviewed_inventory_with_mechanical_evidence():
+def test_disabled_runner_manifest_refuses_with_reason():
+    from engine.v2.ops.experiments import DISABLED_RUNNERS
+
     root = Path(__file__).resolve().parents[3]
-    manifest = runner_manifest(root, REGISTERED)
-    assert manifest["schema_version"] == "runner_capability_manifest.v1.0"
-    assert manifest["no_ledger_support"] is True
-    assert manifest["spec_hash"].startswith("sha256:")
-    closure = manifest["source_closure"]
-    assert "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py" in closure
-    assert "experiments/EXP-181_d_1_gated_execution_parity/run.py" in closure
-    assert manifest["report_path"] == "REPORT.md"
-    assert "promotion" in manifest["registry_effects"]
-    assert runner_manifest(root, REGISTERED) == manifest
+    reason = DISABLED_RUNNERS[REGISTERED]
+    with pytest.raises(OpsError) as excinfo:
+        runner_manifest(root, REGISTERED)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert excinfo.value.problem.details == {"runner": REGISTERED, "reason": reason}
 
 
 def test_unaudited_runner_is_refused(tmp_path):
@@ -64,26 +61,31 @@ def test_unaudited_runner_is_refused(tmp_path):
         run_legacy_script(tmp_path, "experiments/EXP-999_nope/run.py")
 
 
-def test_registered_runner_executes_no_ledger_only_in_its_synthetic_root(tmp_path):
+def test_disabled_runner_adapter_refuses_before_subprocess(tmp_path):
+    from engine.v2.ops.experiments import DISABLED_RUNNERS
+
     script = _synthetic_root(tmp_path, FAKE_RUNNER)
-    result = run_legacy_script(tmp_path, REGISTERED)
-    assert result.returncode == 0
-    assert (tmp_path / "REPORT.md").is_file()
-    with pytest.raises(OpsError, match="ledger"):
-        run_legacy_script(tmp_path, REGISTERED, args=("--record",))
-    script.unlink()
-    with pytest.raises(OpsError):
-        runner_manifest(tmp_path, REGISTERED)
+    reason = DISABLED_RUNNERS[REGISTERED]
+    with pytest.raises(OpsError) as excinfo:
+        run_legacy_script(tmp_path, REGISTERED)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert excinfo.value.problem.details == {"runner": REGISTERED, "reason": reason}
+    assert not (tmp_path / "REPORT.md").exists()
+    assert script.is_file()
 
 
-def test_leaking_runner_is_caught_by_the_write_audit(tmp_path):
+def test_disabled_runner_cannot_write_even_if_a_script_exists(tmp_path):
     prod = tmp_path / "root"
     (prod / "ledger" / "predictions").mkdir(parents=True)
-    _synthetic_root(prod, LEAKING_RUNNER)
+    script = _synthetic_root(prod, LEAKING_RUNNER)
     before = snapshot_sensitive(prod)
-    run_legacy_script(prod, REGISTERED)
+    with pytest.raises(OpsError) as excinfo:
+        run_legacy_script(prod, REGISTERED)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
     findings = audit_writes(prod, before, disclosed=(prod / "experiments",))
-    assert {"path": "ledger/predictions/leak.jsonl", "kind": "new"} in findings
+    assert findings == []
+    assert script.is_file()
+    assert not (prod / "ledger" / "predictions" / "leak.jsonl").exists()
 
 
 def test_exp185_wrapper_patches_here_and_results_before_main():
@@ -140,14 +142,13 @@ def test_retired_runner_is_refused_before_any_subprocess(retired, monkeypatch):
     assert spawn_calls == []
 
 
-def test_active_registration_keeps_its_audited_source_closure():
+def test_exp182_registration_is_disabled_with_audited_reason():
     from engine.v2.ops import legacy_adapter
-    from engine.v2.ops.experiments import RUNNER_INVENTORY
+    from engine.v2.ops.experiments import DISABLED_RUNNERS, RUNNER_INVENTORY
 
-    root = Path(__file__).resolve().parents[3]
-    assert set(RUNNER_INVENTORY) == {REGISTERED}
-    assert legacy_adapter.REGISTERED_RUNNERS == frozenset({REGISTERED})
-    manifest = runner_manifest(root, REGISTERED)
-    assert manifest["no_ledger_support"] is True
-    assert REGISTERED in manifest["source_closure"]
-    assert "experiments/EXP-181_d_1_gated_execution_parity/run.py" in manifest["source_closure"]
+    assert REGISTERED in RUNNER_INVENTORY
+    assert RUNNER_INVENTORY[REGISTERED]["enabled"] is False
+    assert REGISTERED not in legacy_adapter.REGISTERED_RUNNERS
+    assert DISABLED_RUNNERS[REGISTERED] == (
+        "disabled 2026-10-10: reads EXP-179 parquet directly "
+        "(no v2_snapshot_id), bypassing holdouts")

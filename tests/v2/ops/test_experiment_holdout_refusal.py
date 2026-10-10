@@ -398,6 +398,16 @@ def test_real_loader_receipt_sync_failure_replays_before_ledger_append(
         conn_, clock_, claim, _, _ = _claimed_primary_effect(
             tmp_path, key="refusal-order", document=_spec_document(spec),
             checkout=checkout)
+        claim.spec.parameters["expected_ids"] = ["experiment:" + spec.experiment_id]
+        mismatched_receipt = dict(refusal_receipt)
+        mismatched_receipt["experiment_id"] = "EXP-489-other"
+        with pytest.raises(OpsError) as mismatch_error:
+            effects_graph._experiment_refusal_failure_effect(
+                claim, denied.value.problem, code_source=checkout,
+                refusal_receipt=mismatched_receipt)
+        assert mismatch_error.value.code == "VALIDATION_FAILED"
+        assert mismatch_error.value.problem.details == {"fields": ["experiment_id"]}
+        assert _refused_rows(ledger) == []
         try:
             failure_effects = effects_graph._experiment_refusal_failure_effect(
                 claim, denied.value.problem, code_source=checkout,
@@ -430,6 +440,7 @@ def test_real_loader_receipt_sync_failure_replays_before_ledger_append(
         conn_def, clock_def, defect_claim, _, _ = _claimed_primary_effect(
             tmp_path / "defect", key="refusal-order-defect",
             document=_spec_document(spec), checkout=defect_checkout)
+        defect_claim.spec.parameters["expected_ids"] = ["experiment:" + spec.experiment_id]
         try:
             defect_effects = effects_graph._experiment_refusal_failure_effect(
                 defect_claim, defect_denied.value.problem,
@@ -466,10 +477,10 @@ def test_registered_runner_consumer_validates_signal_and_falls_back(
     """
     from types import SimpleNamespace
 
-    runner_id, primary_arm_id = next(
-        (registered, arm)
-        for registered, entry in experiments.RUNNER_INVENTORY.items()
-        for arm in entry.get("fixed_arm_args", {}))
+    runner_id, primary_arm_id = "experiments/synthetic_holdout_runner/run.py", "test"
+    monkeypatch.setitem(experiments.RUNNER_INVENTORY, runner_id, {
+        "declared_runtime_sources": ("experiments/synthetic_holdout_runner/source.py",),
+        "fixed_arm_args": {primary_arm_id: ()}})
     pins = {"snapshot_id": "snap-registered", "holdout_as_of_month": "2025-01",
             "random_membership_version": "canonical-event-sha256.v1",
             "rolling_membership_version": "calendar-months.v1"}
@@ -502,8 +513,13 @@ def test_registered_runner_consumer_validates_signal_and_falls_back(
     assert _RANDOM[0] not in leaked
 
     transport = None
-    (run_dir / "holdout_refusal_signal.json").write_text(json.dumps(
-        {"schema_version": "holdout_refusal_signal.v2", **pins}))
+    wrong_schema = json.dumps(
+        {"schema_version": "holdout_refusal_signal.v2",
+         "failure_code": "HOLDOUT_ACCESS_DENIED", **pins}).encode("utf-8")
+    signal_path = run_dir / "holdout_refusal_signal.json"
+    signal_path.write_bytes(wrong_schema)
+    signal_path.with_name(signal_path.name + ".sha256").write_text(
+        hashlib.sha256(wrong_schema).hexdigest(), encoding="ascii")
     with pytest.raises(OpsError) as generic:
         runner(run_dir=run_dir, no_ledger=True)
     assert generic.value.code == "VALIDATION_FAILED"
@@ -526,10 +542,11 @@ def test_run_legacy_script_sets_private_signal_path_and_clears_stale_file(
     """
     import subprocess
 
-    runner_id, primary_arm_id = next(
-        (registered, arm)
-        for registered, entry in experiments.RUNNER_INVENTORY.items()
-        for arm in entry.get("fixed_arm_args", {}))
+    runner_id, primary_arm_id = "experiments/synthetic_holdout_runner/run.py", "test"
+    monkeypatch.setitem(experiments.RUNNER_INVENTORY, runner_id, {
+        "declared_runtime_sources": ("experiments/synthetic_holdout_runner/source.py",),
+        "fixed_arm_args": {primary_arm_id: ()}})
+    monkeypatch.setattr(legacy_adapter, "REGISTERED_RUNNERS", frozenset({runner_id}))
     entry = experiments.RUNNER_INVENTORY[runner_id]
     run_dir = tmp_path.resolve()
     signal = run_dir / "holdout_refusal_signal.json"
@@ -571,6 +588,8 @@ def test_real_subprocess_refusal_signal_round_trip(tmp_path, monkeypatch):
     loader call-site stays covered by
     ``test_real_loader_refusal_replay_and_private_receipt``.
     """
+    monkeypatch.setattr(legacy_adapter, "REGISTERED_RUNNERS",
+                        frozenset({legacy_adapter._FIXED_ARM_RUNNER}))
     repo_root = Path(__file__).resolve().parents[3]
     monkeypatch.setenv("PYTHONPATH", str(repo_root))
     pins = {"snapshot_id": "snap-subprocess", "holdout_as_of_month": "2025-01",

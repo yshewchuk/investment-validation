@@ -2391,10 +2391,14 @@ def test_run_legacy_script_refuses_unregistered_and_args(tmp_path):
         run_legacy_script(REPO, "experiments/not_registered/run.py")
     assert err.value.code == "INVALID_REQUEST"
 
+    from engine.v2.ops.experiments import DISABLED_RUNNERS
+
+    disabled = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
     with pytest.raises(OpsError) as err:
-        run_legacy_script(REPO, "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
-                          args=("--extra",))
-    assert err.value.code == "INVALID_REQUEST"
+        run_legacy_script(REPO, disabled)
+    assert err.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert err.value.problem.details == {
+        "runner": disabled, "reason": DISABLED_RUNNERS[disabled]}
 
 
 def test_run_legacy_rebuild_surfaces_subprocess_failure(tmp_path):

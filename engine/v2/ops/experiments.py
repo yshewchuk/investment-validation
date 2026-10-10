@@ -26,6 +26,7 @@ from engine.v2.ops.fingerprints import (
     source_closure,
     worker_source_manifest,
 )
+from engine.v2.ops.legacy_adapter import DISABLED_RUNNERS
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
 #: The closed top-level field set of a spec document: a key this resolver
@@ -633,8 +634,12 @@ def capability_manifest(spec: ExperimentSpec, root: Path | str) -> dict:
 #: Reviewed capability inventory, one entry per enabled legacy runner (§11.1).
 #: Mechanical evidence (hashes, closure, flag detection) is re-derived on every
 #: call; the reviewed statements here are the audit record, not runtime config.
+#: Reviewed capability inventory. Disabled entries retain audit metadata but
+#: are never dispatched; their reason is recorded in ``DISABLED_RUNNERS``.
 RUNNER_INVENTORY = {
+    # disabled 2026-10-10: reads EXP-179 parquet directly (no v2_snapshot_id), bypassing holdouts; see research ARCHITECTURE.md §11.1.
     "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py": {
+        "enabled": False,
         "spec_source": "experiments/EXP-182_d_1_gated_execution_parity_registered/spec.yaml",
         "declared_runtime_sources": (
             "experiments/EXP-181_d_1_gated_execution_parity/run.py",
@@ -657,6 +662,11 @@ RUNNER_INVENTORY = {
 def runner_manifest(root: Path | str, script: str) -> dict:
     """One reviewed capability manifest per enabled runner (§11.1)."""
     relative = str(PurePosixPath(script))
+    disabled_reason = DISABLED_RUNNERS.get(relative)
+    if disabled_reason is not None:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   f"registered experiment runner is disabled: {disabled_reason}",
+                   details={"runner": relative, "reason": disabled_reason})
     entry = RUNNER_INVENTORY.get(relative)
     if entry is None:
         raise fail("INVALID_REQUEST", "experiment runner is not audited")

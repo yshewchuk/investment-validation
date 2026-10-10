@@ -25,14 +25,14 @@ the trade table that replay publishes — reading exactly one resolved,
 named snapshot per run instead of the legacy mutable Tier-2 store. It
 produces measured tables and reports for a person to read; it never decides
 a research conclusion, never fetches from a network provider, and never
-mutates the legacy trades ledger. `experiment_trades.load_trades` extends
-this same one-snapshot-per-read contract to the v2 experiment platform:
-read the committed `trades` version
-`tools/v2_build_trades.py` published, never the legacy mutable store.
-Completed experiments need not remain runnable;
-their historical wrappers are not a supported experiment execution boundary.
+mutates the legacy trades ledger. `experiment_trades.load_trades` reads
+committed `trades` from one pinned v2 snapshot, never the legacy store.
 
 ## Primary contracts and public interfaces
+
+### Experiment runners
+
+Every experiment runner reads inputs only through `experiment_trades.load_trades` and its holdout-excluding refusal path over one pinned v2 snapshot; direct parquet or other file reads bypass both holdout sets and are inadmissible.
 
 CLI leaves (`tools/`, one process per run, each takes `--catalog`,
 `--store-root`, `--scope` and `--snapshot-id`):

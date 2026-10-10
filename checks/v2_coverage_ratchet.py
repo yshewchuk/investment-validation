@@ -189,6 +189,7 @@ PHASE1_EXTRA = (
     "tests/v2/ops/test_cli_rescore.py",
     "tests/v2/ops/test_forward_calendar_store.py",
     "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py",
+    "tests/v2/ops/test_v2_ops_experiment_reports.py",
     "tests/v2/ops/test_v2_ops_refresh_staging.py",
 )
 
