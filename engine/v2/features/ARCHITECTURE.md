@@ -47,6 +47,10 @@ wiring anything to call it.
 | `add_implied_history(df) -> pd.DataFrame` | DataFrame in, DataFrame out | byte-identical copy of `engine.data.features.panel.add_implied_history` — the one function in this module that is pandas-shaped, because its ported body is itself pandas code (`groupby`/`shift`/`expanding`) |
 | `daily_state_lookup(rows, decision_date) -> dict` | plain sequence of mappings + a date in, plain mapping out | new: factors the per-`(ticker, as_of)` extraction rule out of `engine.features.daily_state_frame`, which is batched (DataFrame-in/DataFrame-out) and stays in legacy unchanged |
 
+Research's `event_history.load_event_history` feeds `history_features` only
+after canonical holdout, physical object-isolation and availability admission.
+That read boundary owns provenance and missing-history status; the math is unchanged.
+
 ### Runup feature math
 
 `runup_math.add_runup_features(frame, prices_by_ticker, as_of_column)`

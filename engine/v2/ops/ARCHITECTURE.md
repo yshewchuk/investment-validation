@@ -948,7 +948,6 @@ waits without submitting until its paired succeeded inputs are ready.
   Parameters pin the parent receipt for reference inputs/lineage; legacy unpinned jobs resolve it at commit. Lineage uses `price_history_capture`; append-only captures dedupe by `capture_id`.
   All event objects and hashes are prepared before the atomic catalog/head/capture-log commit. A failed preparation leaves no partial generation; immutable objects and completed raw receipts may remain for retry.
   No-fragment runs persist attempts only after fence and parent receipt validation. `computed_at` derives from `as_of`; unchanged same-layout, same-`as_of` retries resolve to the parent without a generation.
-  This is #629's storage prerequisite, not holdout admission: the subsequent research reader must validate canonical membership, singleton fragment provenance and cutoffs before opening outcomes; inherited mixed fragments are not retroactively safe.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
   here since the list can drift) — catalog/outbox/filesystem writes
