@@ -441,13 +441,11 @@ def _assemble_one_event(
     try:
         native_inputs = build_native_score_inputs(bundle)
     except ValueError as exc:
-        # CodeRabbit round 4 (PR #66, CWE-209): never str(exc) -- its text can
-        # name staged recipe/field shapes, and refusals.json is a published
-        # output. Only the exception class and, for AnswerFieldsInSource, its
-        # field PATHS (names, never values) are published.
+        # CWE-209: never str(exc) (refusals.json is published). Only the class
+        # and, for AnswerFieldsInSource, fixed-vocabulary answer-field names.
         detail = f"native input build failed: {type(exc).__name__}"
         if isinstance(exc, AnswerFieldsInSource):
-            detail += f" {sorted(exc.paths)}"
+            detail += f" {exc.fields}"
         return NativeScoreBatchRowRefusal(key, "NATIVE_INPUT_BUILD_FAILED", detail)
     request = ScoreRequest(
         event_id=str(event_id), calendar_revision=str(calendar_revision),

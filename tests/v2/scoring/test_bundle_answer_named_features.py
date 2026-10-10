@@ -45,7 +45,8 @@ def test_calculated_answer_name_in_feature_order_builds_and_scorer_computes_it()
     assert set(bundle.feature_missing_mask) == {"signal", "pred_abs_move"}
     values = assemble_native_values(
         build_native_score_inputs(bundle), strategy="STR-THRU")
-    assert "entry_cost_pct" in values
+    # Independent expectation: mid(call)=1.1 plus mid(put)=1.2 over spot 100.
+    assert values["entry_cost_pct"] == pytest.approx((1.1 + 1.2) / 100.0 * 100.0)
 
 
 def test_answer_name_staged_in_a_source_row_is_still_refused_with_paths():
@@ -53,4 +54,4 @@ def test_answer_name_staged_in_a_source_row_is_still_refused_with_paths():
     bad = type(bundle)(**{**bundle.__dict__, "metadata": {"entry_cost_pct": 1.0}})
     with pytest.raises(AnswerFieldsInSource) as info:
         build_native_score_inputs(bad)
-    assert info.value.paths == ["metadata.entry_cost_pct"]
+    assert info.value.fields == ["entry_cost_pct"]
