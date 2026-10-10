@@ -688,6 +688,7 @@ tests = [
     "tests/test_v2_ops_recovery_ownership.py",
     "tests/test_v2_ops_recovery_reboot.py",
     "tests/v2/ops/test_v2_ops_refresh_staging.py",
+    "tests/v2/ops/test_ops_reclaim.py",
     "tests/v2/ops/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_worker_typed_failures.py",

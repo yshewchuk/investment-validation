@@ -313,6 +313,7 @@ class Service:
     #: #609: monotonic time before which the reclaim pass is idle, and the
     #: (kind, attempt_id) pairs whose failure was already printed (rebound, never mutated).
     _reclaim_next_at = 0.0
+    _reclaim_ended = -1
     _reclaim_reported = frozenset()
 
     def _reclaim_terminal_staging(self):
@@ -322,9 +323,14 @@ class Service:
         on the next. Never raises and never changes a job or attempt: a failure
         is printed once per entry and retried after the idle interval."""
         now = self.clock.monotonic()
-        if now < self._reclaim_next_at:
-            return
         try:
+            # An attempt that ended since the last pass (a finish, or a recovery
+            # settlement) wakes an idle pass at once.
+            ended = self.conn.execute(
+                "SELECT COUNT(*) FROM attempts WHERE ended_at IS NOT NULL").fetchone()[0]
+            if now < self._reclaim_next_at and ended == self._reclaim_ended:
+                return
+            self._reclaim_ended = ended
             done = reclaim(self.conn, self.root, apply=True, limit=1,
                            materialization_base=self.materialization_base)
         except Exception:

@@ -171,6 +171,19 @@ def test_tick_pass_removes_one_entry_then_idles_and_never_touches_jobs(world):
         "SELECT job_id, state FROM jobs ORDER BY job_id")] == before
 
 
+def test_an_idle_pass_wakes_when_another_attempt_ends(world):
+    service = _service(world)
+    for _ in range(3):
+        Service._reclaim_terminal_staging(service)
+    assert service._reclaim_next_at > world.clock.monotonic()
+    fence = world.conn.execute("SELECT fence FROM attempts WHERE attempt_id = ?",
+                               (world.ids["starting"],)).fetchone()[0]
+    commit_attempt(world.conn, world.ids["starting"], fence,
+                   Outcome(True, "verified_dead", 0), clock=world.clock)
+    Service._reclaim_terminal_staging(service)
+    assert not _legacy(world, "starting").exists()
+
+
 def test_tick_pass_survives_a_reclaim_failure_and_reports_it_once(world, monkeypatch, capsys):
     def boom(*args, **kwargs):
         raise OSError("disk")
