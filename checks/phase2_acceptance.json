@@ -58,20 +58,20 @@
     "D13": {
       "tier": 1,
       "tests": ["tests/test_v2_data_legacy_materialization.py",
-                "tests/test_v2_ops_snapshot_stages.py",
+                "tests/v2/ops/test_v2_ops_snapshot_stages.py",
                 "tests/test_v2_data_reference_inputs.py",
                 "tests/test_v2_data_tier4_coverage.py",
-                "tests/test_v2_ops_tier4_coverage.py",
+                "tests/v2/ops/test_v2_ops_tier4_coverage.py",
                 "tests/test_v2_ops_fingerprints_code_assets.py",
                 "tests/test_v2_ops_fingerprints_model_scan.py",
-                "tests/test_v2_ops_capture_inputs.py",
+                "tests/v2/ops/test_v2_ops_capture_inputs.py",
                 "tests/test_v2_data_price_downloads.py",
                 "tests/test_v2_ops_price_history.py"]
     },
     "D14": {
       "tier": 1,
       "tests": ["tests/test_v2_data_legacy_materialization.py",
-                "tests/test_v2_ops_snapshot_stages.py",
+                "tests/v2/ops/test_v2_ops_snapshot_stages.py",
                 "tests/test_v2_data_reference_inputs.py",
                 "tests/test_checks_phase2_corpus_parity.py"],
       "evidence_fields": ["corpus_comparison_receipt_ref"]

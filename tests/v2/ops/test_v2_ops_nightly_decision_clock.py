@@ -8,6 +8,7 @@ import pytest
 from engine.v2.data.legacy_nightly_read_plan import NIGHTLY_CAPTURE_IMPLEMENTATION_REF
 from engine.v2.foundation import SystemClock
 from engine.v2.ops import cli
+from engine.v2.ops.workflows import commands
 from tests.ops_support import sample
 
 SESSION = "2026-09-12"
@@ -19,10 +20,10 @@ def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(
     """Clock identity is independent of the host running this submission-only test."""
     monkeypatch.setattr("os.cpu_count", lambda: host_cpu_count)
     capacity = sample(SystemClock())
-    monkeypatch.setattr(cli, "sample_capacity", lambda *args, **kwargs: capacity)
+    monkeypatch.setattr(commands, "sample_capacity", lambda *args, **kwargs: capacity)
     # Keep DEFAULT_POLICY and its admission checks; supply a fitting fake host
     # at both discovery boundaries, without changing other modules' CPU view.
-    monkeypatch.setattr(cli, "os", SimpleNamespace(cpu_count=lambda: len(capacity.allowed_cpu_ids)))
+    monkeypatch.setattr(commands, "os", SimpleNamespace(cpu_count=lambda: len(capacity.allowed_cpu_ids)))
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))

@@ -40,5 +40,5 @@ from engine.v2.ops.core.snapshot_contracts import SNAPSHOT_BINDINGS
 ## Testing
 
 `tests/v2/ops/test_ops_dependencies.py` asserts the import graph, including
-function-level imports; `tests/test_v2_ops_snapshot_stages.py` exercises the
+function-level imports; `tests/v2/ops/test_v2_ops_snapshot_stages.py` exercises the
 bindings through the real launch path.
