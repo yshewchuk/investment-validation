@@ -311,7 +311,6 @@ def _validate_history_pins(pinned_files, discovered):
 
 
 def _history_files_by_family(source_root, pinned_files):
-    discovered = discover_history_files(source_root)
     groups = {family: [] for family, _, _, _ in _FAMILIES}
     if pinned_files is None:
         for family, subdir, _, _ in _FAMILIES:
@@ -319,6 +318,7 @@ def _history_files_by_family(source_root, pinned_files):
             groups[family] = [(path, None) for path in sorted(directory.glob("*.jsonl"))] \
                 if directory.is_dir() else []
         return groups
+    discovered = discover_history_files(source_root)
     for rel, digest in _validate_history_pins(pinned_files, discovered).items():
         path = discovered[rel]
         family = next((f for f, subdir, _, _ in _FAMILIES

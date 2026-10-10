@@ -217,6 +217,23 @@ def test_symlinked_history_file_refuses_before_import(tmp_path):
     conn.close()
 
 
+def test_unpinned_history_import_keeps_glob_behavior_for_symlinked_file(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    target = tmp_path / "prediction.jsonl"
+    target.write_text(json.dumps(_prediction("linked-row", "2023-12-31")) + "\n")
+    link = source / "ledger" / "predictions" / "2023-12-31.jsonl"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+
+    summary = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"),
+        dry_run=True, clock=clock)
+    assert summary["families"]["predictions"]["files"] == 1
+    assert summary["families"]["predictions"]["lines"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
 def test_malformed_persisted_pin_hash_is_integrity_failure(tmp_path):
     ops_root, conn, clock, source = _setup(tmp_path)
     state = nightly_history.load_session(ops_root, IDENTITY)
