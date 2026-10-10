@@ -514,34 +514,33 @@ artifact; `tools/phase5_prepare_release.py:215-232` stages its typed document.
 Use standard promotion. It records schema, model IDs, exclusive cutoff,
 lineage and hash; no request fallback, rebuild or invented residuals.
 
-`resolve_release_binding` in `engine/v2/scoring/release_bindings.py` loads the
-typed member into `ScoringReleaseBinding` with artifact and derived recipe. Derive it only from the validated
-artifact key/hash; requests cannot override it or reintroduce per-row pools.
-Batch sets internal `SourceBundle` fields after assembly. The loader recomputes
-hash and validates schema, identities, lineage, cutoff and row/array structure
-before `resolve_release_binding` returns, ahead of bundle assembly/scoring. A missing
-required paired residual member or failed check raises `ModelNotReady` (`MODEL_NOT_READY`);
-paired-member failure is atomic/release-wide; model-role gaps remain request-scoped.
-Valid zero-row artifacts are not refusals; simulation preserves legacy's thin-pool/undetermined outcome.
-Rebuild/promote before rollout; old releases intentionally have no fallback.
+The proposed `resolve_release_binding` path in `engine/v2/scoring/release_bindings.py`
+loads the typed member into `ScoringReleaseBinding` with its artifact and derived
+recipe. Derive the recipe only from the verified artifact key/hash; requests
+cannot override it or reintroduce per-row pools. Missing or malformed paired
+state raises `ModelNotReady` (`MODEL_NOT_READY`) atomically for the release;
+model-role gaps retain their existing per-row refusals. A valid zero-row artifact is not a
+refusal and preserves the legacy thin-pool/undetermined outcome. Changed
+releases use the standard rebuild and promotion path; old releases have no fallback.
+The loader verifies hash, schema, identities, lineage, cutoff and row/array
+structure before returning the binding and before bundle assembly or scoring.
 
 `SourceBundle.paired_residual_artifact` and `.paired_residual_recipe` already exist (`engine/v2/scoring/source_inputs.py:301`);
 `paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`) is
-an invariant assertion: load validation ensures a returned binding passes;
-it is never a first failure or per-row refusal. Synthetic inputs run the real producer,
-staging, loader, bundle and simulation; CI does not run full training.
+an invariant assertion, never the first failure or a per-row refusal. Planned
+synthetic tests use small fixtures; CI does not run full training.
 
-Matched parity uses identical joined ticker/event rows and the exact exclusive
-cutoff value recorded under the selected paired-state or release-wide policy.
-The cutoff policy and population remain open decisions below. Legacy scope is its `Scorer`'s loaded tickers. Test
-mismatched full/nightly scopes and cutoffs too; output can differ, and lineage records frozen scope.
+Parity requires identical joined ticker/event rows and the exact exclusive
+cutoff value. Legacy scope is its `Scorer`'s loaded tickers; mismatched full and
+nightly scopes or cutoffs can change results. The chosen population and cutoff
+must be recorded in lineage. Policy choices are below.
 
-Planned slices (non-test code slices each below 200 lines):
+Planned slices (each non-test code slice below 200 lines; detailed split estimates are in PR #619):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. `tests/v2/scoring/` (~300 lines): validation before bind/assembly/score;
-   reject request recipe/pool fields; missing/old release, zero rows, each
-   malformed-member atomic refusal; matched/mismatched scope/cutoff parity.
+3. `tests/v2/scoring/` (~300 lines) for validation before bind/assembly/score;
+   real producer→staging→loader→bundle→simulation; refusal, zero-row,
+   request-isolation and matched/mismatched scope/cutoff cases.
 
 Decisions needed before implementing these slices:
 - **Population:** full producer universe (deterministic) or nightly ticker scope (closer parity, coupled release).
