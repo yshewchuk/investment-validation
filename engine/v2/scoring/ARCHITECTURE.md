@@ -512,24 +512,24 @@ source join and pool population.
 The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211-242`)
 builds the artifact from paired forecasts, outcomes and realized-crush inputs;
 `tools/phase5_prepare_release.py:215-232` stages its typed frozen-state
-document. Promotion uses this standard path. The artifact carries model
-identities, cutoff, lineage and content hash; no request-row fallback, per-request
-reconstruction or invented residual is allowed.
+document. Promotion uses this standard path. The artifact carries schema,
+model identities, cutoff, lineage and content hash; no request-row fallback,
+per-request reconstruction or invented residual is allowed.
 
 Add a typed paired-artifact field to `ScoringReleaseBinding` and load the
 `paired_residual_pool` catalog member in `resolve_release_binding`. Missing or
-malformed required members, including hash, schema, identity or causal-cutoff
-failures, refuse with `ModelNotReady` naming `paired_residual_pool` and return
-no partial binding. STR-THRU requires a rebuilt release before activation;
+malformed required members, including schema, hash, identity, lineage or
+causal-cutoff failures, raise `ModelNotReady` (`MODEL_NOT_READY`) naming
+`paired_residual_pool` and return no partial binding. STR-THRU requires a
+rebuilt release before activation;
 there is no empty-recipe compatibility path for planned-exit scoring.
 
 `SourceBundle` already has `paired_residual_artifact` and
 `paired_residual_recipe` (`engine/v2/scoring/source_inputs.py:301`);
 `native_residuals.paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`)
 validates/extracts arrays. Native batch must attach the verified release artifact
-and causal recipe.
-Synthetic real-path coverage must exercise production, staging/loading,
-attachment and planned-exit consumption together.
+and causal recipe. Tests use synthetic source rows with the real producer,
+staging/loader, bundle attachment and planned-exit consumer end to end.
 
 Parity depends on population: legacy uses the tickers/rows loaded into its
 `Scorer`; a release freezes its producer's universe and cutoff. Compare under
@@ -540,7 +540,7 @@ auditable.
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. End-to-end producer, simulation, refusal and matched/mismatched population tests (~150 test lines).
+3. Production-path tests on synthetic artifacts for refusals and matched/mismatched population parity (~150 test lines).
 
 Decisions needed before implementing these slices:
 - **Population:** freeze the full producer universe (one deterministic
