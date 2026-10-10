@@ -67,7 +67,7 @@ def test_begin_is_idempotent_and_refuses_a_changed_request(root, tmp_path):
     ("s", DIGEST, nr.Effect("bogus", "x")), ("s", DIGEST, nr.Effect("catalog_job")),
     ("s", DIGEST, nr.Effect("artifact", "/x")), ("s", DIGEST, "not-an-effect"),
      ("s", DIGEST, nr.Effect("external", "x", "abc")),
-    ("s", DIGEST, nr.Effect("artifact", "relative/out.bin", "abc")),
+    ("s", DIGEST, nr.Effect("artifact", "relative/out.bin", "a" * 64)),
     ("s", DIGEST, nr.Effect("artifact", "/tmp/x", "abc")),
     ("s", DIGEST, nr.Effect("artifact", "/tmp/x", "G" * 64)),
     ("s", DIGEST, nr.Effect("artifact", "/tmp/x\0y", "a" * 64)),
