@@ -26,7 +26,7 @@ from tests.v2.research.test_prediction_inputs import MONTH, _commit, _event, _mo
 def _spec(**changes):
     return ExperimentSpec(**{
         "experiment_id": "synthetic-prediction", "hypothesis": "A fixed prior baseline provides a calibration reference.",
-        "primary_arm_id": "prior", "arms": ("prior",), "seed": 7,
+        "primary_arm_id": "prior", "arms": ("prior",), "seed": 0,
         "folds": ("2023", "2024"), "economic_params": {}, "price_source": "computed_moves",
         "runner": prediction.RUNNER, **changes,
     })
@@ -146,7 +146,7 @@ def test_fitting_uses_real_shared_helper_constant_features_and_restores_threadpo
 
     def inspect_fit(estimator, train_features, train_labels, test_features, rule):
         assert isinstance(estimator, DummyClassifier)
-        assert estimator.strategy == "prior" and estimator.random_state == 7
+        assert estimator.strategy == "prior" and estimator.random_state == 0
         assert isinstance(rule, TrainFoldRule)
         assert rule.top_fraction == 0.5
         assert np.all(train_features == 1) and np.all(test_features == 1)

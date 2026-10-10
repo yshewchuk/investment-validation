@@ -622,7 +622,24 @@ def test_cli_rejects_alternative_fingerprint_root(source, capsys):
     assert _objects(source.store) == objects
 
 
-@pytest.mark.parametrize("seed", [-1, 1, 2**32])
+def test_nonzero_prior_seed_refuses_before_target_reads(tmp_path, monkeypatch, capsys):
+    source = _source(tmp_path, spec=_spec(seed=1))
+    try:
+        _invoke(source, capsys, "register")
+        before = _catalog(source.conn)
+        monkeypatch.setattr(prediction, "load_prediction_targets", _forbid)
+        monkeypatch.setattr(DummyClassifier, "fit", _forbid)
+        monkeypatch.setattr(prediction, "render_prediction_report", _forbid)
+        monkeypatch.setattr(outcomes, "ledger_append", _forbid)
+        response = _invoke(source, capsys, "run", "--no-ledger", status=2)
+        _private_refusal(source, response, "INVALID_EXPERIMENT_SPEC")
+        assert _catalog(source.conn) == before
+        assert not list(source.root.rglob("REPORT.md"))
+    finally:
+        source.conn.close()
+
+
+@pytest.mark.parametrize("seed", [-1, 2**32])
 @pytest.mark.parametrize("action", ["register", "run"])
 @pytest.mark.parametrize("smoke", [False, True])
 def test_unsupported_prior_seed_refuses_before_admission_or_reads(tmp_path, monkeypatch, capsys, seed, action, smoke):

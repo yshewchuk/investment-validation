@@ -19,7 +19,7 @@ RUNNER = "experiments/v2_prediction.py"
 def _years(plan):
     folds = plan.get("folds")
     if (plan.get("runner") != RUNNER or plan.get("price_source") != "computed_moves"
-            or type(plan.get("seed")) is not int or plan["seed"] != 0
+            or type(plan.get("seed")) is not int or not 0 <= plan["seed"] < 2**32
             or plan.get("economic_params") != {} or not isinstance(folds, list) or not folds
             or any(not isinstance(y, str) or len(y) != 4 or not y.isascii()
                    or not y.isdecimal() or int(y) < 1 for y in folds)
@@ -68,6 +68,8 @@ def prediction_result(repository, registration):
     binding = registration.document
     plan = binding["execution_plan"]
     years = _years(plan)
+    if plan["seed"] != 0:
+        raise fail("INVALID_EXPERIMENT_SPEC", "prior prediction execution supports only seed 0")
     rows = load_prediction_targets(repository, from_document(SnapshotRef, binding["snapshot"]),
         as_of_month=binding["holdouts"]["holdout_as_of_month"], purpose="selection",
         event_ids=binding["event_ids"]).sort_values("event_id", kind="stable")
