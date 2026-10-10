@@ -5,7 +5,7 @@ import pytest
 
 from engine.v2.ops.diagnostics import audit_writes, snapshot_sensitive
 from engine.v2.ops.errors import OpsError
-from engine.v2.ops.experiments import runner_manifest
+from engine.v2.ops.experiments import experiment_plan, runner_manifest
 from engine.v2.ops.legacy_adapter import run_legacy_script
 
 REGISTERED = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
@@ -43,20 +43,6 @@ def _synthetic_root(root: Path, source: str) -> Path:
     return run_dir / "run.py"
 
 
-def test_runner_manifest_mixes_reviewed_inventory_with_mechanical_evidence():
-    root = Path(__file__).resolve().parents[3]
-    manifest = runner_manifest(root, REGISTERED)
-    assert manifest["schema_version"] == "runner_capability_manifest.v1.0"
-    assert manifest["no_ledger_support"] is True
-    assert manifest["spec_hash"].startswith("sha256:")
-    closure = manifest["source_closure"]
-    assert "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py" in closure
-    assert "experiments/EXP-181_d_1_gated_execution_parity/run.py" in closure
-    assert manifest["report_path"] == "REPORT.md"
-    assert "promotion" in manifest["registry_effects"]
-    assert runner_manifest(root, REGISTERED) == manifest
-
-
 def test_unaudited_runner_is_refused(tmp_path):
     with pytest.raises(OpsError, match="not audited"):
         runner_manifest(tmp_path, "experiments/EXP-999_nope/run.py")
@@ -64,19 +50,61 @@ def test_unaudited_runner_is_refused(tmp_path):
         run_legacy_script(tmp_path, "experiments/EXP-999_nope/run.py")
 
 
-def test_registered_runner_executes_no_ledger_only_in_its_synthetic_root(tmp_path):
+def test_runner_manifest_computes_mechanical_evidence_for_synthetic_entry(
+        tmp_path, monkeypatch):
+    from engine.v2.ops import experiments
+
+    runner = "experiments/synthetic_runner/run.py"
+    spec = "experiments/synthetic_runner/spec.yaml"
+    source = "experiments/synthetic_runner/source.py"
+    for relative, contents in (
+            (runner, "def main():\n    return '--no-ledger'\n"),
+            (spec, "id: synthetic\n"),
+            (source, "SOURCE = 1\n")):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
+    monkeypatch.setitem(experiments.RUNNER_INVENTORY, runner, {
+        "spec_source": spec,
+        "declared_runtime_sources": (source,),
+        "declared_runtime_inputs": (),
+        "fixed_arm_args": {},
+        "ledger_write_behavior": "synthetic only",
+        "registry_effects": "none",
+        "report_path": "REPORT.md",
+        "resumable_units": "none",
+        "backup_behavior": "none",
+        "removal_phase": "test fixture",
+    })
+
+    manifest = runner_manifest(tmp_path, runner)
+    assert manifest["schema_version"] == "runner_capability_manifest.v1.0"
+    assert manifest["no_ledger_support"] is True
+    assert manifest["spec_hash"].startswith("sha256:")
+    assert runner in manifest["source_closure"]
+    assert source in manifest["source_closure"]
+
+
+def test_registered_runner_executes_no_ledger_only_in_its_synthetic_root(
+        tmp_path, monkeypatch):
+    from engine.v2.ops import legacy_adapter
+
+    monkeypatch.setattr(legacy_adapter, "REGISTERED_RUNNERS", frozenset({REGISTERED}))
+    monkeypatch.setattr(legacy_adapter, "DISABLED_RUNNERS", {})
     script = _synthetic_root(tmp_path, FAKE_RUNNER)
     result = run_legacy_script(tmp_path, REGISTERED)
     assert result.returncode == 0
     assert (tmp_path / "REPORT.md").is_file()
-    with pytest.raises(OpsError, match="ledger"):
+    with pytest.raises(OpsError, match="arguments are not audited"):
         run_legacy_script(tmp_path, REGISTERED, args=("--record",))
     script.unlink()
-    with pytest.raises(OpsError):
-        runner_manifest(tmp_path, REGISTERED)
 
 
-def test_leaking_runner_is_caught_by_the_write_audit(tmp_path):
+def test_leaking_runner_is_caught_by_the_write_audit(tmp_path, monkeypatch):
+    from engine.v2.ops import legacy_adapter
+
+    monkeypatch.setattr(legacy_adapter, "REGISTERED_RUNNERS", frozenset({REGISTERED}))
+    monkeypatch.setattr(legacy_adapter, "DISABLED_RUNNERS", {})
     prod = tmp_path / "root"
     (prod / "ledger" / "predictions").mkdir(parents=True)
     _synthetic_root(prod, LEAKING_RUNNER)
@@ -140,14 +168,35 @@ def test_retired_runner_is_refused_before_any_subprocess(retired, monkeypatch):
     assert spawn_calls == []
 
 
-def test_active_registration_keeps_its_audited_source_closure():
-    from engine.v2.ops import legacy_adapter
-    from engine.v2.ops.experiments import RUNNER_INVENTORY
+def test_exp182_disabled_runner_refuses_before_any_subprocess(tmp_path, monkeypatch):
+    import json
+    import subprocess
 
+    from engine.v2.ops import experiments, legacy_adapter
+
+    runner = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
     root = Path(__file__).resolve().parents[3]
-    assert set(RUNNER_INVENTORY) == {REGISTERED}
-    assert legacy_adapter.REGISTERED_RUNNERS == frozenset({REGISTERED})
-    manifest = runner_manifest(root, REGISTERED)
-    assert manifest["no_ledger_support"] is True
-    assert REGISTERED in manifest["source_closure"]
-    assert "experiments/EXP-181_d_1_gated_execution_parity/run.py" in manifest["source_closure"]
+    spec_path = tmp_path / "exp182.json"
+    spec_path.write_text(json.dumps({"experiment_id": "EXP-182", "runner": runner}))
+    invoked = []
+
+    def sentinel(*args, **kwargs):
+        invoked.append((args, kwargs))
+
+    monkeypatch.setattr(subprocess, "run", sentinel)
+    assert runner not in experiments.RUNNER_INVENTORY
+    assert runner not in legacy_adapter.REGISTERED_RUNNERS
+    assert legacy_adapter.DISABLED_RUNNERS == experiments.DISABLED_RUNNERS
+    # Prove the explicit disabled status wins over accidental re-registration.
+    monkeypatch.setitem(experiments.RUNNER_INVENTORY, runner, {})
+    monkeypatch.setattr(legacy_adapter, "REGISTERED_RUNNERS", frozenset({runner}))
+
+    for attempt in (
+            lambda: experiment_plan(spec_path),
+            lambda: runner_manifest(root, runner),
+            lambda: legacy_adapter.run_legacy_script(root, runner)):
+        with pytest.raises(OpsError) as excinfo:
+            attempt()
+        assert excinfo.value.code == "INVALID_REQUEST"
+        assert "EXP-182 disabled" in str(excinfo.value)
+    assert invoked == []
