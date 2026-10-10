@@ -1,6 +1,6 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:947a88525ce72c55b4ddca4cbd776dea006332b83a76ae7c9c7b69c8cf5f5500",
+  "suite_version": "phase2_coverage_suite:1d9ad1104c878760cee7f25ed3e3b333a56e8e1693bb2db1d93130b598c86880",
   "test_files": [
     "tests/test_checks_phase2_corpus_parity.py",
     "tests/test_checks_phase2_fault_matrix.py",
