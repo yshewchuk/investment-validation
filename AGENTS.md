@@ -1,3 +1,12 @@
+## Workspace artifacts
+
+- Except for ops-store attempt staging assigned to the supervisor below, put disposable scratch, spills, transient staging copies, and intermediate outputs that no process reads after the producer exits under `/tmp` or a dedicated directory named `scratch`, `tmp`, or `disposable`, outside durable-data trees.
+- Keep durable outputs, including catalogs, content-addressed objects, evidence, and the ledger, in their established locations.
+- Tools that create scratch remove it on success; on failure, they remove all scratch contents except diagnostics and leave those in the disposable scratch location.
+- Agents remove their worktrees when abandoned; the supervisor removes merged worktrees with no uncommitted changes.
+- The supervisor manages and reclaims ops-store attempt staging as specified in [#609](https://github.com/yshewchuk/investment-validation/issues/609); this overrides the placement and cleanup rules above for that staging.
+- Agents never hand-delete under an ops store and report cleanup needs to the supervisor.
+
 ## Pull requests, gates and owners
 
 - The PR watcher runs the merge gate at `/root/agent-ops/gate/gate.sh` after CI `test` is green, CodeRabbit approves, and no thread is open on the head. It starts detached, once per head and at most five times per PR. Owners do not run the gate.
