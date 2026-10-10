@@ -281,6 +281,17 @@ def test_nightly_trigger_does_not_import_cli_even_lazily():
     assert ("workflows.commands", "supervisor") in ops.findings(files, rules)["forbidden"]
 
 
+def test_unit_receipts_does_not_import_incremental_data_even_lazily():
+    rules = json.loads((ROOT / ops.POLICY).read_bytes())
+    files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)
+             if path.startswith(ops.SOURCE) and path.endswith(".py")}
+    assert ["unit_receipts", "incremental_data"] not in rules["exceptions"]["cycles"]
+    assert ("unit_receipts", "incremental_data") not in ops.findings(files, rules)["cycles"]
+    files[ops.SOURCE + "unit_receipts.py"] += (
+        b"\n\ndef _planted():\n    from engine.v2.ops import incremental_data\n")
+    assert ("unit_receipts", "incremental_data") in ops.findings(files, rules)["cycles"]
+
+
 def test_layer_cli_rejects_planted_ops_violation(tmp_path):
     files = {name.replace(".", "/") + "/__init__.py": b""
              for name in [*layers.CONTAINERS, *(p.dotted for p in layers.PACKAGES)]}
