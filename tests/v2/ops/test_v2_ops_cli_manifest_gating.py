@@ -8,7 +8,7 @@ import pytest
 from engine.v2.data.legacy_nightly_read_plan import NIGHTLY_CAPTURE_IMPLEMENTATION_REF
 from engine.v2.foundation import SystemClock
 from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.ops.cli import _read_input_manifest_ref
+from engine.v2.ops.workflows.commands import _read_input_manifest_ref
 from engine.v2.ops.errors import OpsError
 
 

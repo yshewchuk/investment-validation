@@ -174,7 +174,7 @@ def _merge_bound(current, candidate, *, keep_lower):
 
 
 def _set_authority_once(conn, committed_owner, stamp, *, dry_run):
-    """Idempotent, matching ``tests/test_v2_ops_scope_separation.py``'s
+    """Idempotent, matching ``tests/v2/ops/test_v2_ops_scope_separation.py``'s
     production pattern: read the durably committed owner once (by the
     caller) and only call ``set_authority`` when it is not already
     ``"catalog"`` -- calling it every file would otherwise bump
