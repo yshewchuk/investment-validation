@@ -517,18 +517,18 @@ lineage and hash; no request fallback, rebuild or invented residuals.
 `resolve_release_binding` in `engine/v2/scoring/release_bindings.py` loads the
 typed member into `ScoringReleaseBinding` with artifact and derived recipe. Derive it only from the validated
 artifact key/hash; requests cannot override it or reintroduce per-row pools.
-Batch sets internal `SourceBundle` fields after assembly. Before return, hash and
-validate schema, identities, lineage, cutoff and row/array structure. A missing
+Batch sets internal `SourceBundle` fields after assembly. The loader recomputes
+hash and validates schema, identities, lineage, cutoff and row/array structure
+before `resolve_release_binding` returns, ahead of bundle assembly/scoring. A missing
 required paired residual member or failed check raises `ModelNotReady` (`MODEL_NOT_READY`);
-the shared release member fails atomically before row scoring, unlike
-request-scoped model-role gaps. Valid zero-row artifacts are not refusals;
-simulation preserves legacy's thin-pool/undetermined outcome. Rebuild/promote
-before rollout; old releases intentionally have no fallback.
+paired-member failure is atomic/release-wide; model-role gaps remain request-scoped.
+Valid zero-row artifacts are not refusals; simulation preserves legacy's thin-pool/undetermined outcome.
+Rebuild/promote before rollout; old releases intentionally have no fallback.
 
 `SourceBundle.paired_residual_artifact` and `.paired_residual_recipe` already exist (`engine/v2/scoring/source_inputs.py:301`);
 `paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`) is
-defense-in-depth: a load-validated binding must pass it before scoring; it
-cannot be the first failure surface or raise a per-row refusal. Synthetic inputs run the real producer,
+an invariant assertion: load validation ensures a returned binding passes;
+it is never a first failure or per-row refusal. Synthetic inputs run the real producer,
 staging, loader, bundle and simulation; CI does not run full training.
 
 Matched parity uses identical joined ticker/event rows and the exact exclusive
@@ -539,9 +539,9 @@ mismatched full/nightly scopes and cutoffs too; output can differ, and lineage r
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. `tests/v2/scoring/` (~300 lines): missing member/old-release no-fallback,
-   derived recipe and explicit request-isolation, zero rows, malformed-member atomicity,
-   no row scoring, and matched/mismatched scope/cutoff parity.
+3. `tests/v2/scoring/` (~300 lines): validation before bind/assembly/score;
+   reject request recipe/pool fields; missing/old release, zero rows, each
+   malformed-member atomic refusal; matched/mismatched scope/cutoff parity.
 
 Decisions needed before implementing these slices:
 - **Population:** full producer universe (deterministic) or nightly ticker scope (closer parity, coupled release).
