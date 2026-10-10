@@ -896,7 +896,7 @@ def _persist_refusal_pin_sidecar(ledger: Path, experiment_id: str, identity: dic
     if path.exists():
         try:
             existing = json.loads(path.read_text())
-        except (OSError, ValueError):
+        except ValueError:
             raise fail("IDEMPOTENCY_CONFLICT",
                        "existing refusal pin sidecar is invalid",
                        details={"experiment_id": experiment_id}) from None

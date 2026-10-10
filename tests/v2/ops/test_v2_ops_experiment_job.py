@@ -1231,13 +1231,18 @@ def test_real_dispatch_refusal_pin_conflict_across_run_directories(tmp_path, mon
         snapshot_conn.close()
 
 
-def test_cli_reconcile_settles_a_stranded_holdout_refusal_once(tmp_path, monkeypatch):
-    """Issue #489: the operator's ``ops reconcile`` path settles a holdout
-    refusal stranded by a failed fenced ledger append. The attempt was fenced
-    to ``recovery_pending`` by the real refusal recovery helper with its
-    private receipt on disk and no refused row; the command runs the ownership
-    proof, its replay appends exactly one refused row carrying the resolved
-    primary variant, and reconciling again leaves that single row alone."""
+def test_reconcile_retries_transient_refusal_sidecar_read_once(tmp_path, monkeypatch):
+    """Issue #489: the supervisor's ``Service.reconcile()`` path settles and
+    replays a holdout refusal stranded by a failed fenced ledger append. The real refusal append
+    persists its pin sidecar first and only then fails the CSV append through a
+    patched ``experiments.lib.ledger_append``; the attempt stays
+    ``recovery_pending`` with its reservation held and no refused row. A
+    transient sidecar read error strands the sidecar-recognizing replay for a
+    later tick; once the read succeeds the replay runs the ownership proof,
+    appends exactly one refused row carrying the resolved primary variant, and
+    reconciling again leaves that single row and the sidecar bytes alone."""
+    from experiments import lib as experiments_lib
+
     conn, clock, claim, _, checkout = _claimed_primary_effect(
         tmp_path, key="primary-cli-reconcile")
     ledger = checkout / "experiments" / "LEDGER.csv"
@@ -1265,37 +1270,79 @@ def test_cli_reconcile_settles_a_stranded_holdout_refusal_once(tmp_path, monkeyp
         with open(ledger, newline="") as fh:
             return [row for row in csv.DictReader(fh) if row["stage"] == "refused"]
 
-    real_append = experiments._append_refusal_row
+    real_ledger_append = experiments_lib.ledger_append
 
-    def append_fails(experiment_id, refused_variant_id, ledger_path, *, refusal_pins=None):
+    def append_fails(rows, path=None, *, unique_by=None):
         raise OSError("simulated ledger append failure")
 
+    def attempt_row():
+        return conn.execute("SELECT state, failure_json, ended_at FROM attempts "
+                            "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+
+    def reservations_held():
+        return conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                            "WHERE released_at IS NULL").fetchone()[0]
+
     try:
-        monkeypatch.setattr(experiments, "_append_refusal_row", append_fails)
+        monkeypatch.setattr(experiments_lib, "ledger_append", append_fails)
         service._commit_failure(claim, {"exit_code": 1}, problem)
-        stranded = conn.execute("SELECT state, failure_json FROM attempts "
-                                "WHERE attempt_id=?", (claim.attempt_id,)).fetchone()
+        stranded = attempt_row()
         assert stranded["state"] == "recovery_pending"
+        assert stranded["ended_at"] is None
         assert "HOLDOUT_ACCESS_DENIED" in stranded["failure_json"]
         assert refused_rows() == []
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        assert reservations_held() == 1
+        sidecars = list(ledger.parent.glob(".refusal_pin.*.json"))
+        assert len(sidecars) == 1
+        sidecar = sidecars[0]
+        sidecar_bytes = sidecar.read_bytes()
 
-        monkeypatch.setattr(experiments, "_append_refusal_row", real_append)
-        monkeypatch.setattr(cli, "prove_ownership_gone",
+        monkeypatch.setattr(experiments_lib, "ledger_append", real_ledger_append)
+        real_read_text = Path.read_text
+        read_errors = []
+
+        def read_text_once_fails(self, *args, **kwargs):
+            if self == sidecar and not read_errors:
+                read_errors.append(self)
+                raise OSError("simulated refusal pin sidecar read failure")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text_once_fails)
+        monkeypatch.setattr(supervisor, "prove_ownership_gone",
                             lambda *args, **kwargs: types.SimpleNamespace(
                                 proven=True, known=(), alive=(), blockers=()))
-        args = types.SimpleNamespace(job_id=claim.job_id, expected_attempt=claim.attempt_id)
-        result = cli.reconcile_command(args, ops_root, conn, clock)
-        assert result["state"] == "failed"
+        service.reconcile()
+        assert read_errors == [sidecar]
+        still = attempt_row()
+        assert still["state"] == "recovery_pending"
+        assert still["ended_at"] is None
+        assert reservations_held() == 1
+        assert refused_rows() == []
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        assert sidecar.read_bytes() == sidecar_bytes
+
+        monkeypatch.setattr(Path, "read_text", real_read_text)
+        service.reconcile()
+        settled = attempt_row()
+        assert settled["state"] == "failed"
+        assert settled["ended_at"] is not None
+        refusal = json.loads(settled["failure_json"])
+        assert refusal["code"] == "HOLDOUT_ACCESS_DENIED"
+        assert refusal["retryable"] is False
         rows = refused_rows()
         assert len(rows) == 1
         assert rows[0]["id"] == spec.experiment_id
         assert rows[0]["spec_hash"] == variant_id
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
                                         {"id": "x", "stage": "refused"}]
+        assert sidecar.read_bytes() == sidecar_bytes
+        assert reservations_held() == 0
 
         service.reconcile()
         assert len(refused_rows()) == 1
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
+                                        {"id": "x", "stage": "refused"}]
     finally:
         conn.close()
 
