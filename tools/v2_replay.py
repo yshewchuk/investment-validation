@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -27,6 +28,18 @@ from engine.v2.research import _replay_run, _snapshot
 from engine.v2.research._pricing import STRUCTURES
 
 
+def _alpha_value(value: str) -> float:
+    try:
+        alpha = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "alpha must be a finite number in [0, 1]"
+        ) from exc
+    if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+        raise argparse.ArgumentTypeError("alpha must be finite and in [0, 1]")
+    return alpha
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--catalog", required=True, type=Path)
@@ -38,8 +51,8 @@ def _parser() -> argparse.ArgumentParser:
                         default=None, help="repeatable; default is every strategy")
     parser.add_argument("--years", nargs="*", type=int, default=None,
                         help="restrict events to these event_date years")
-    parser.add_argument("--alpha", action="append", type=float, default=None,
-                        help="repeatable fill alpha; default is the core alpha grid")
+    parser.add_argument("--alpha", action="append", type=_alpha_value, default=None,
+                        help="repeatable fill alpha in [0, 1]; default is the core alpha grid")
     return parser
 
 
@@ -56,10 +69,13 @@ def main(argv: list[str] | None = None) -> int:
         events = _replay_run.events_frame(
             repository, snapshot, years=args.years
         )
+        run_kwargs = {}
+        if args.alpha is not None:
+            run_kwargs["alphas"] = args.alpha
         outcome = _replay_run.run(
             repository, strategies=strategies, events=events,
             reports_dir=args.reports_dir, scope=scope,
-            snapshot_id=snapshot.snapshot_id, alphas=args.alpha,
+            snapshot_id=snapshot.snapshot_id, **run_kwargs,
         )
     except DataError as exc:
         print(

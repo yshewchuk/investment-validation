@@ -280,9 +280,12 @@ This bounds retained unmatched rows, not total process RSS.
   past the resolved snapshot.
 - `tools/v2_replay.py --alpha A` is repeatable. When supplied, the ordered
   values replace replay's default `ALPHA_GRID`; each priced event produces
-  one row per requested fill alpha. When omitted, the core default remains
-  in effect. The CLI continues to derive its calendar from the pinned
-  snapshot rather than accepting an external calendar.
+  one row per requested fill alpha. Values must be finite and in `[0, 1]`;
+  argparse rejects invalid values before opening the catalog. Repeated
+  values remain separate requests and are not deduplicated. When omitted,
+  `_replay_run.run` uses its default `ALPHA_GRID`. The CLI continues to
+  derive its calendar from the pinned snapshot rather than accepting an
+  external calendar.
 - `--dry-run` (build-trades, reconcile-trades): compute the candidate
   changeset, skip `commit_generic_table_candidate`.
 
