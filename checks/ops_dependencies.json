@@ -8,7 +8,7 @@
       "profiles", "provider_budget", "provider_requirements", "provider_response", "recovery", "resources", "scheduler", "schema", "schema_runtime",
       "session_backfill", "session_resolution", "store_barrier", "submission", "worker_progress"],
     "runtime": ["executor", "supervisor", "worker", "nightly_session", "nightly_trigger"],
-    "workflows": ["backup", "decision_commit", "decision_evidence", "effects_graph", "experiment_folds", "experiments", "health",
+    "workflows": ["workflows", "workflows.commands", "backup", "decision_commit", "decision_evidence", "effects_graph", "experiment_folds", "experiments", "health",
       "nightly", "publication", "publication_submit", "stages", "training"],
     "legacy": ["capture_inputs", "features_compare", "finality", "generation_binding", "ledger_history_import", "legacy_actions",
       "legacy_adapter", "materialization_worker", "render_inputs", "snapshot_roots", "snapshot_stages"],
@@ -19,9 +19,7 @@
     "providers": ["providers", "providers.nasdaq_calendar", "providers.orats_daily_market", "providers.yfinance_edge"]
   },
   "exceptions": {
-    "forbidden": [
-      ["nightly_trigger", "cli"]
-    ],
+    "forbidden": [],
     "cycles": [
       ["calendar_moves_jobs", "forward_calendar_store"],
       ["calendar_moves_jobs", "incremental_data"],

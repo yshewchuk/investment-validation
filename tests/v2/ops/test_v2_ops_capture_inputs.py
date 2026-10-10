@@ -41,7 +41,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.data import reference_inputs  # noqa: E402
@@ -164,11 +164,11 @@ def test_cli_guard_refuses_a_snapshot_import_manifest():
     file_refs and no ``data/raw/fetch/**`` at all -- reaching a barrier-mode
     nightly's ``--input-manifest``. ``test_manifest_problems_rejects_wrong_capture_ref``
     already proves the pure function; this proves the CLI-wired guard
-    (``engine.v2.ops.cli._check_nightly_manifest``, called from both
+    (``engine.v2.ops.workflows.commands._check_nightly_manifest``, called from both
     ``plan nightly`` and ``submit``) raises a typed ``OpsError`` for exactly
     that document shape, not just an empty stub.
     """
-    from engine.v2.ops.cli import _check_nightly_manifest
+    from engine.v2.ops.workflows.commands import _check_nightly_manifest
 
     document = {
         "manifest_id": "snap1",
