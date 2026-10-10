@@ -136,7 +136,7 @@ def cached_unit_outcomes(conn, units: Sequence, *, source: str, endpoint: str) -
     """
     from engine.v2.data.incremental import _jsonable
     from engine.v2.foundation import content_hash
-    from engine.v2.ops.incremental_data import classify_response
+    from engine.v2.ops.provider_response import classify_response
 
     outcomes = {}
     for unit in units:
