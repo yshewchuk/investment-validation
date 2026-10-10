@@ -53,9 +53,22 @@ def test_cli_reports_standard_report_write_failure(tmp_path, monkeypatch, capsys
         raise OSError("disk full")
 
     monkeypatch.setattr(nightly, "_write_report_atomic", fail_write)
-    result = nightly.main(["--as-of", requested_date])
+    optional_path = tmp_path / "optional.json"
+    optional_writes = []
+    original_write_text = Path.write_text
+
+    def track_optional_write(path, *args, **kwargs):
+        optional_writes.append(path)
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", track_optional_write)
+    result = nightly.main([
+        "--as-of", requested_date,
+        "--json", str(optional_path),
+    ])
 
     assert result == 1
+    assert optional_writes == []
     assert "Failed to write standard nightly report: disk full" in capsys.readouterr().err
 
 
