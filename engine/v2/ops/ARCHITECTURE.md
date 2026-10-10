@@ -88,7 +88,7 @@ worker callers default to staged `events.json`. Snapshot mode derives
 The production-default `legacy`/unpinned path stays a no-op; production uses `projection` (3 GiB, 2 CPUs). A producer exception fails the native attempt
 before writing that attempt's event/refusal or score outputs; reused-root files
 may remain as untrusted residue. The worker job has five bounded attempts,
-with delays of 30s, 2m, 10m, 30m and 1h. Worker production cannot stall
+with delays of 30s, 2m, 10m and 30m. Worker production cannot stall
 supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section

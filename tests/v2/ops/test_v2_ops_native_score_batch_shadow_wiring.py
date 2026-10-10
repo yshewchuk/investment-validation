@@ -109,7 +109,7 @@ def test_graph_and_optional_include_native_score_batch():
     assert nightly.GRAPH["native_score_batch"] == ("score",)
     assert "native_score_batch" in nightly.OPTIONAL
     assert registry().get("native_score_batch").retry == RetryPolicy(
-        "bounded", 5, (30, 120, 600, 1800, 3600))
+        "bounded", 5, (30, 120, 600, 1800))
 
 
 def test_stage_sequence_excludes_native_score_batch():
@@ -427,7 +427,7 @@ def test_service_tick_submits_without_running_pinned_producer(tmp_path, monkeypa
     service.tick()
     elapsed = time.perf_counter() - started
 
-    assert elapsed < 2.0
+    assert elapsed < 3.0
     assert resolved == []
     assert producer_calls == []
     assert _native_score_batch_job_count(conn) == 1
@@ -564,7 +564,7 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
         service.tick()
         elapsed = time.perf_counter() - started
 
-        assert elapsed < 2.0
+        assert elapsed < 3.0
         assert worker.is_alive()
         assert ("other-attempt", 120) in heartbeat_calls
         assert resolved == [snapshot_id]

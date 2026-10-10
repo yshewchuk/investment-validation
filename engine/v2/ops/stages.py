@@ -295,7 +295,7 @@ def _native_score_batch_kind() -> JobKind:
         name="native_score_batch", worker="native_score_batch",
         parameters=NativeScoreBatchParameters,
         resource_classes=frozenset({"projection"}), effects=("staged",),
-        retry=RetryPolicy("bounded", 5, (30, 120, 600, 1800, 3600)),
+        retry=RetryPolicy("bounded", 5, (30, 120, 600, 1800)),
         checkpoint_contract="native_score_batch_records.v2.0",
         namespaces=frozenset({"shadow", "smoke"}))
 
