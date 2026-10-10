@@ -281,10 +281,9 @@ def discover_history_files(source_root):
     if any((source_root / subdir).is_symlink()
            for _, subdir, _, _ in _FAMILIES):
         raise fail("INPUT_CHANGED", "ledger history directory is a symlink")
-    discovered = {
-        path.relative_to(source_root).as_posix(): path
-        for _, subdir, _, _ in _FAMILIES
-        for path in (source_root / subdir).glob("*.jsonl")}
+    discovered = {path.relative_to(source_root).as_posix(): path
+                  for _, subdir, _, _ in _FAMILIES
+                  for path in (source_root / subdir).glob("*.jsonl")}
     if any(path.is_symlink() or not path.is_file() for path in discovered.values()):
         raise fail("INPUT_CHANGED", "ledger history file is not a regular file")
     return discovered
@@ -295,7 +294,7 @@ def _validate_history_pins(pinned_files, discovered):
         raise fail("INVALID_REQUEST", "pinned_files must be a sequence of pairs")
     pins = {}
     for pair in pinned_files:
-        if not (isinstance(pair, tuple) and len(pair) == 2
+        if not (isinstance(pair, (tuple, list)) and len(pair) == 2
                 and isinstance(pair[0], str) and isinstance(pair[1], str)):
             raise fail("INVALID_REQUEST", "pinned_files must be pairs of (path, sha256)")
         rel, digest = pair

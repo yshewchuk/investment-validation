@@ -1,6 +1,7 @@
 """Real catalog and synthetic source coverage for slice 5 history resume."""
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date
 from pathlib import Path
@@ -149,6 +150,39 @@ def test_resume_reuses_pins_after_a_later_file_fails_after_prior_commit(tmp_path
     conn.close()
 
 
+def test_changed_later_file_refuses_after_prior_file_commit(tmp_path, monkeypatch):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-30.jsonl",
+                       _prediction("first-row", "2023-12-30"))
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("second-row", "2023-12-31"))
+    original_import = nightly_history.import_history
+    original_file_import = history_import._import_one_file
+
+    def drift_second_file(conn_arg, path, *args, **kwargs):
+        if path.name == "2023-12-31.jsonl":
+            _write_predictions(source, "2023-12-31.jsonl",
+                               _prediction("changed-second-row", "2023-12-31"))
+        return original_file_import(conn_arg, path, *args, **kwargs)
+
+    def drift_during_import(conn_arg, root, source_root, *, dry_run=False, **kwargs):
+        if dry_run:
+            return original_import(conn_arg, root, source_root, dry_run=True, **kwargs)
+        monkeypatch.setattr(history_import, "_import_one_file", drift_second_file)
+        try:
+            return original_import(conn_arg, root, source_root, dry_run=False, **kwargs)
+        finally:
+            monkeypatch.setattr(history_import, "_import_one_file", original_file_import)
+
+    monkeypatch.setattr(nightly_history, "import_history", drift_during_import)
+    with pytest.raises(OpsError) as changed:
+        _run(ops_root, conn, clock, source)
+    assert changed.value.code == "INPUT_CHANGED"
+    assert [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions").fetchall()] == ["prediction:first-row"]
+    conn.close()
+
+
 def test_d1_history_import_includes_outcomes_and_excludes_session_date(tmp_path):
     ops_root, conn, clock, source = _setup(tmp_path)
     _write_predictions(source, "2023-12-31.jsonl",
@@ -227,4 +261,19 @@ def test_importer_rejects_invalid_pinned_hash_shape(tmp_path):
             dry_run=True, clock=clock,
             pinned_files=(("ledger/predictions/2023-12-31.jsonl", "bad"),))
     assert exc.value.code == "INVALID_REQUEST"
+    conn.close()
+
+
+def test_importer_accepts_list_pairs_for_pinned_files(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    path = source / "ledger" / "predictions" / "2023-12-31.jsonl"
+    _write_predictions(source, path.name, _prediction("row", "2023-12-31"))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    summary = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"),
+        dry_run=True, clock=clock,
+        pinned_files=[["ledger/predictions/2023-12-31.jsonl", digest]])
+    assert summary["dry_run"] is True
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
     conn.close()
