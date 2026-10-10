@@ -366,7 +366,7 @@ def scan_panel_row(
     *,
     decision_session: object,
     history_start: object,
-    spy_market_cache: dict[tuple[str, str, str, str], list[dict[str, object]]] | None = None,
+    spy_market_cache: dict[tuple[str, str, str, str], tuple[dict[str, object], ...]] | None = None,
 ) -> PanelRowInputs:
     """One ``BoardRequest`` key's full-superset raw panel row and latest anchor.
 
@@ -400,10 +400,12 @@ def scan_panel_row(
             start.isoformat(),
             decision.isoformat(),
         )
-        spy_rows = spy_market_cache.get(spy_key)
-        if spy_rows is None:
+        cached_spy_rows = spy_market_cache.get(spy_key)
+        if cached_spy_rows is None:
             spy_rows = _read_spy_market(repository, snapshot, start, decision)
-            spy_market_cache[spy_key] = spy_rows
+            spy_market_cache[spy_key] = tuple(dict(row) for row in spy_rows)
+        else:
+            spy_rows = [dict(row) for row in cached_spy_rows]
     regime_features, regime_asof = _regime_from_spy(spy_rows, event_day, decision)
 
     runup_features, runup_asof = _runup_from_prices(

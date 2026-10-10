@@ -419,7 +419,8 @@ def test_panel_reader_called_once_per_ticker(
     # Captured by the first fixture run, before the implementation cache edit.
     # Pin the pre-optimization event bytes so the shared read cannot change output.
     assert hashlib.sha256(event_bytes).hexdigest() == (
-        "43e9c8530d6600ba49ead8aa61c24dda4175af38fcd47d8f00e6c73ceac69b74")
+        "43e9c8530d6600ba49ead8aa61c24dda4175af38fcd47d8f00e6c73ceac69b74"), (
+        "expected digest depends on the bounded producer fixture data")
 
     again_events, again_refusals = nrp.build_native_score_batch_events(
         repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
