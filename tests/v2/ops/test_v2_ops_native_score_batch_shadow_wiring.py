@@ -433,14 +433,17 @@ def test_service_tick_submits_without_running_pinned_producer(tmp_path, monkeypa
 
 
 def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, monkeypatch):
-    """A blocked native producer must not delay the tick or a sibling's lease.
+    """A blocked native worker producer must not delay the tick or sibling lease.
 
-    The claimed native worker's slow raw-row production runs outside the
-    tick: the tick still submits the shadow ``native_score_batch`` job and
-    still renews every OTHER running attempt's lease while that producer
-    stays blocked, and the submitted key is still derived from the succeeded
-    score job's own session/scope.
+    The real native worker resolves and calls the snapshot producer on its
+    worker thread. While that call is blocked, the tick still submits its
+    shadow job and renews every OTHER running attempt's lease.
     """
+    import threading
+    import time
+
+    from engine.v2.ops import native_score_batch
+
     conn, clock, supervisor = catalog(tmp_path)
     session = "2026-01-01"
     snapshot_id = "snap-2026-01-01-producer-blocks-99"
@@ -466,17 +469,17 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
         return snapshot
 
     monkeypatch.setattr(Repository, "resolve", _resolve)
+    catalog_path = conn.execute(
+        "PRAGMA database_list").fetchone()["file"]
 
     producer_calls = []
-
-    import threading
-
     producer_started = threading.Event()
     release_producer = threading.Event()
 
     def _producer(repository, resolved_snapshot, *, as_of, horizon_days, tickers):
-        producer_calls.append({"as_of": as_of, "horizon_days": horizon_days,
-                               "tickers": tickers})
+        producer_calls.append({
+            "snapshot": resolved_snapshot, "as_of": as_of,
+            "horizon_days": horizon_days, "tickers": tickers})
         producer_started.set()
         release_producer.wait(timeout=5)
         return [], {"schema_version": "native_score_batch_producer_refusals.v1.0",
@@ -485,18 +488,60 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
     monkeypatch.setattr(
         "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
         _producer)
-    monkeypatch.setattr(nightly, "_native_score_batch_identity",
-                        lambda conn: (score_session, score_scope, producer_parameters))
+    monkeypatch.setattr(
+        nightly, "_native_score_batch_identity",
+        lambda conn: (score_session, score_scope, producer_parameters))
+    from engine.v2.scoring import release_bindings
+    monkeypatch.setattr(
+        release_bindings, "resolve_release_binding", lambda root: object())
+    monkeypatch.setattr(
+        release_bindings, "resolve_gate_policy", lambda binding, root: {})
+    monkeypatch.setattr(
+        native_score_batch, "assemble_score_batch_inputs",
+        lambda **kwargs: ({}, ()))
+    monkeypatch.setattr(
+        native_score_batch, "score_batch", lambda batch, fields: object())
+    monkeypatch.setattr(
+        native_score_batch, "_native_score_batch_documents",
+        lambda *args: (
+            {"schema_version": "native_score_batch_records.v2.0", "records": {}},
+            {"schema_version": "native_score_batch_refusals.v2.0",
+             "refusals": {}, "unkeyable_refusals": []}))
+
+    worker_root = tmp_path / "blocked-native-worker"
+    worker_root.mkdir()
+    worker_parameters = {
+        "expected_ids": [score_session + "|" + score_scope],
+        "release_root": str(tmp_path / "verified-release-root"),
+        "as_of": score_session,
+        "snapshot_id": snapshot_id,
+        "feature_names": [],
+        "producer_mode": "snapshot",
+        "catalog_path": catalog_path,
+        "objects_root": str(tmp_path / "objects"),
+        "horizon_days": horizon_days,
+        "tickers": list(tickers),
+    }
+    worker_results = []
+    worker = threading.Thread(
+        target=lambda: worker_results.append(
+            native_score_batch.run_native_score_batch_worker(
+                worker_parameters, worker_root)))
+    worker.start()
 
     service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
     service.identity = supervisor
-    monkeypatch.setattr(service, "_native_release_root_or_none",
-                        lambda: str(tmp_path / "verified-release-root"))
-    claim = SimpleNamespace(job_id=other_job_id, attempt_id="other-attempt", fence=1)
-    service.running[claim.attempt_id] = SimpleNamespace(claim=claim, failure=None, peak=0)
-    monkeypatch.setattr("engine.v2.ops.executor.poll",
-                        lambda conn, running, **kwargs: {"done": False, "memory": 0})
+    monkeypatch.setattr(
+        service, "_native_release_root_or_none",
+        lambda: str(tmp_path / "verified-release-root"))
+    claim = SimpleNamespace(
+        job_id=other_job_id, attempt_id="other-attempt", fence=1)
+    service.running[claim.attempt_id] = SimpleNamespace(
+        claim=claim, failure=None, peak=0)
+    monkeypatch.setattr(
+        "engine.v2.ops.executor.poll",
+        lambda conn, running, **kwargs: {"done": False, "memory": 0})
     monkeypatch.setattr(service, "_track_steps", lambda running, status: None)
     monkeypatch.setattr(service, "_observation_due", lambda running, status: False)
     heartbeat_calls = []
@@ -507,35 +552,36 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
 
     monkeypatch.setattr("engine.v2.ops.supervisor.heartbeat", _heartbeat)
     monkeypatch.setattr(service, "_launch", lambda claim: None)
-    worker = threading.Thread(
-        target=_producer, args=(None, snapshot),
-        kwargs={"as_of": score_session, "horizon_days": horizon_days, "tickers": tickers})
-    worker.start()
+
     try:
         assert producer_started.wait(timeout=1)
         clock.advance(1)
-        import time
         started = time.perf_counter()
         service.tick()
         elapsed = time.perf_counter() - started
 
         assert elapsed < 2.0
-        assert worker.is_alive()  # the slow producer is still blocked
+        assert worker.is_alive()
         assert ("other-attempt", 120) in heartbeat_calls
-        assert resolved == []  # the tick never resolves the snapshot itself
-        assert len(producer_calls) == 1  # only the separate worker thread called it
+        assert resolved == [snapshot_id]
+        assert producer_calls == [{
+            "snapshot": snapshot, "as_of": score_session,
+            "horizon_days": horizon_days, "tickers": list(tickers)}]
         assert _native_score_batch_job_count(conn) == 1
         row = conn.execute(
             "SELECT idempotency_key FROM jobs WHERE kind = ?",
             ("native_score_batch",)).fetchone()
         assert row["idempotency_key"] == nightly._native_score_batch_key(
             score_session, score_scope)
-        assert conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == 0
     finally:
         release_producer.set()
-        worker.join(timeout=1)
+        worker.join(timeout=2)
 
     assert not worker.is_alive()
+    assert worker_results
+    assert worker_results[0]["completed_ids"] == [score_session + "|" + score_scope]
     assert service._native_score_batch_memo is None
     assert service._native_score_batch_lookup_memo is None
 

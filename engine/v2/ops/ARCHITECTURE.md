@@ -1432,7 +1432,7 @@ uses the separately maintained `_DAG_STAGES`, never containing
 `native_parity`, `computed_moves_refresh` or `native_score_batch`. Their only
 path is `supervisor.Service`'s tick loop: `computed_moves_refresh`'s and
 `native_score_batch`'s sidecars both reach `submission.submit`, the latter
-for an eligible snapshot-pinned identity once its producer refs are staged
+for an eligible snapshot-pinned identity with producer parameters only
 (see "Outputs"); `native_parity` submits through its own tested builder
 (`nightly.submit_native_parity_if_ready`), also called from the tick loop.
 
