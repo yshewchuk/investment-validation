@@ -173,12 +173,12 @@ snapshot-read helpers), `_pricing.py` (except the names carved out above),
 
 ### Proposed authorized final read (#490)
 
-Design only; existing interfaces still deny final reads. Depends on [#555](https://github.com/yshewchuk/investment-validation/pull/555)'s refusal receipts/recovery, not its review status; extends #445's union exclusion.
+Request preparation is implemented; authorization, final reads and result retrieval remain unavailable. Their proposed lifecycle depends on [#555](https://github.com/yshewchuk/investment-validation/pull/555)'s refusal receipts/recovery and preserves #445's union exclusion.
 The [user decision](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6072905454)
 permits agents/supervisors to prepare requests, never to authorize them.
 
-**Request.** Canonical versioned bytes bind a stable research `decision_id`, its
-immutable selected-winner record, registered `variant_id`/registration reference,
+**Request.** Canonical versioned bytes use the existing `experiment_id` as the decision identity, without a question record or alias detection, per the [user decisions](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6101284544).
+They bind the selected registered `variant_id`/registration reference,
 resolved plan/source/evaluation-recipe and applicable frozen-model hashes, exact committed
 `snapshot_id`, `holdout_as_of_month`, `random_membership_version` and
 `rolling_membership_version`. No latest-head resolution, caller population override,
@@ -186,10 +186,13 @@ alternate arm, fitting, threshold search or evaluator callback is accepted.
 Membership stays in `foundation.experiment_holdouts`: random and rolling sets under
 its versioned as-of-month contract, with ambiguous identities refused, never admitted.
 Both sets are bound together; changing month, version, snapshot or winner cannot reset a decision's spend. The request digest identifies bytes, not a new decision.
+`native_registration.prepare_final_holdout_request` verifies existing catalog/artifact registration metadata only; it never resolves a head, scans a population or reads results.
+Native registration's optional `final_read` declaration seals recipe, completeness-bar and frozen-model artifact references before authorization; preparation derives them, never accepts replacements. Registrations without that declaration refuse preparation.
+Request validity proves neither winner selection nor read eligibility. The later metadata-only preflight must verify the preregistered completeness artifact and refuse an unmet bar before any holdout outcome read; declared references alone do not prove completeness.
 
 **Authority/ownership.** A proposed `tools/v2_final_holdout.py` leaf composes ops'
 private authorization/state owner with a private research final evaluator. It is
-the sole supported evaluator caller; ops/research remain layer-7 peers with no imports between them. Foundation supplies membership only, never grants or state.
+the sole supported evaluator caller; ops/research remain layer-7 peers with no imports between them. Foundation supplies membership and pure request validation, never grants or state.
 Training's lower layer cannot import either owner. Selection/sweep/loaders gain no
 grant argument, final purpose, environment bypass or returned holdout frame.
 Import/call-site regression guards also cover unlayered tools/experiments, which
@@ -201,14 +204,14 @@ No reusable grant escapes that invocation. This is procedural/audited, not a sec
 one transaction records who, UTC when, explicit confirmation, request digest and
 the permanent decision spend. An interactive terminal and fresh explicit user
 confirmation of the displayed binding are required; flags/piped input/agents cannot assent.
-Unique `decision_id` plus compare-and-swap state serialize authorization and reads.
-States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or terminal `revoked`/`indeterminate`; every transition appends evidence, never refunds. Proposed default: `authorized_unread` has no automatic expiry; explicit revocation or a changed winner ends eligibility with `HOLDOUT_ACCESS_DENIED`, retaining the spend. No renewal can reset the spend.
+Unique `experiment_id` plus compare-and-swap state serialize authorization and reads.
+States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or terminal `revoked`/`indeterminate`; every transition appends evidence, never refunds. Authorization has no expiry; revocation or a changed winner ends eligibility with `HOLDOUT_ACCESS_DENIED`, retaining the spend. Interrupted reads stay spent with no continuation; no renewal resets spend.
 
 | Proposed condition | Required outcome before any returned metric/report |
 |---|---|
 | Missing user record, noninteractive authorization, tuning/training/selection/sweep, new read after `read_started`, or revoked/changed winner | Non-retryable `HOLDOUT_ACCESS_DENIED`, before holdout outcome scans or metrics; no partial result. Recheck winner/revocation at the fenced start and publication. Revocation after start but before completion burns the read and withholds its result. |
 | Duplicate authorization | Identical request returns the original acknowledgement only after the same interactive checks; never another grant/spend. Changed bytes under the same decision refuse `IDEMPOTENCY_CONFLICT`; changed registration refuses `EXPERIMENT_IDENTITY_CONFLICT`. |
-| Crash after authorization, before read | Resume the same `authorized_unread` request only; atomically commit `read_started` with one owner/fence before any holdout outcome scan. No second owner starts; missing/corrupt state never means unspent. |
+| Authorization recorded, no read started | A first user-invoked read may atomically commit `read_started` with one owner/fence before any holdout outcome scan. This never continues an interrupted read; missing/corrupt state never means unspent. |
 | Crash after `read_started`, before durable `result_staged` | Once ownership is proven gone, mark `indeterminate`; never reread, even if the crash might precede the first scan. No result is released and the spend remains. |
 | Crash after durable result, before completion receipt | Only a catalog-bound `result_staged` reference to fully synced immutable result bytes permits artifact-only reconciliation. Verify hashes/pins and the current fence/winner, then commit the receipt reference; never evaluate again. Unbound files cannot prove completion. |
 | Receipt/diagnostic/ledger publication failure | Preserve the original refusal and durable state; no success output. Retry storage reconciliation only. Missing/malformed evidence is `VALIDATION_FAILED`, conflicting identities `IDEMPOTENCY_CONFLICT`, transient storage `RESOURCE_UNAVAILABLE`; a visible file alone, including failed sync/rollback residue, is not committed evidence. |
@@ -216,7 +219,7 @@ States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or 
 
 Results remain private until completion binds the request, authorizing act, spend, both memberships, per-set counts/metrics and overlap count; never average the sets.
 Random-set temporal-neighbour correlation and post-release-selection provenance remain disclosed (#373).
-Proposed retrieval default: only the dedicated leaf serves a completed report to its recorded authorizing user, using the same procedural actor/interactive checks plus fresh explicit view confirmation. Other callers refuse `HOLDOUT_ACCESS_DENIED` before report output.
+Only the authorizing user may view results through the dedicated tool, with fresh interactive confirmation. Results belong in a separate namespace excluded from agent-facing tools and covered by an agent read-deny rule; no encryption or OS containment. Other callers refuse `HOLDOUT_ACCESS_DENIED` before output.
 Ops durably audits the viewing actor, UTC when, verified request/report references and checked revocation-history revision before output; failed checks/audit publication release nothing. Retrieval returns unchanged verified artifacts with that history alongside them; it never scans, recomputes, tunes, reauthorizes or spends again.
 Agent reconciliation may verify private artifacts but cannot return their metrics/report. No loader, training, selection or sweep report interface or `--no-ledger` final read is available.
 Completion is the release point: later revocation appends audit history and accompanies retrieval; it cannot erase the completed report or renew read access.
