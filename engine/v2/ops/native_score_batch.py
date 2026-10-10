@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -22,9 +21,13 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from engine.v2.contracts import ScoreBatch, ScoreRequest
-from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.models.payoff_artifact import payoff_artifact_key
 from engine.v2.ops.native_board_universe import BoardRequest
+from engine.v2.ops.native_score_batch_types import (
+    NativeScoreBatchRowRefusal,
+    _event_date_identity,
+)
 from engine.v2.scoring.application import score_batch
 from engine.v2.scoring.identity import request_hash
 from engine.v2.scoring.native_gate_features import GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS
@@ -80,30 +83,6 @@ class NightlyEventInputs:
     quote_max_age_sessions: Any = None
 
 
-class NativeScoreBatchRowRefusal(ValueError):
-    """One row's typed refusal. Collected, never raised, by
-    :func:`assemble_score_batch_inputs` -- one bad row never sinks the batch.
-    """
-
-    def __init__(self, key: BoardRequest, code: str, detail: str) -> None:
-        self.key = key
-        self.code = code
-        self.detail = detail
-        super().__init__(f"{code}: {key!r}: {detail}")
-
-    def as_document(self) -> dict[str, Any]:
-        return {
-            "key": {
-                "ticker": self.key.ticker,
-                "strategy": self.key.strategy,
-                "event_date": _event_date_identity(self.key.event_date),
-                "session": self.key.session,
-            },
-            "code": self.code,
-            "detail": self.detail,
-        }
-
-
 def _board_request_key(key: BoardRequest) -> str:
     """The canonical, JSON-object-key-safe string identity for one row:
     ``f"{ticker}|{strategy}|{event_date_identity}|{session}"``. The
@@ -133,53 +112,6 @@ def _iso(value: Any) -> str | None:
     if value is None:
         return None
     return str(pd.Timestamp(value).date())
-
-
-#: The one fixed message every strict event-date identity rejection carries
-#: -- never an echo of the rejected value (``refusals.json`` and
-#: ``producer_refusals.json`` decode errors surface on published-output
-#: paths; CWE-209 discipline, as everywhere else in this module).
-_EVENT_DATE_IDENTITY_ERROR = (
-    "event_date must be a naive calendar date/day value or a naive "
-    "datetime, encoded as YYYY-MM-DD (midnight) or a canonical ISO datetime")
-
-
-def _event_date_identity(value: Any) -> str:
-    """One ``BoardRequest.event_date`` as its canonical identity component.
-
-    Issue #356: a midnight/day value keeps the legacy ``YYYY-MM-DD`` form
-    (every existing wire/key identity is byte-identical), while a non-
-    midnight naive datetime encodes as its full canonical ISO datetime
-    (``YYYY-MM-DDTHH:MM:SS``, microseconds appended only when set) -- the
-    instant's stated naive wall-clock fields are preserved, never
-    normalized to UTC or truncated to a calendar day, so midnight and
-    intraday events on the same day keep DISTINCT identities and equal
-    instants keep ONE identity. Strings must already be in canonical form
-    (parse, then re-encode, then round-trip against the input), which
-    rejects relative strings like ``"today"``/``"now"`` (they would resolve
-    to wall-clock time at gate-run time instead of from the document's
-    content), offset/Z values, and every malformed or non-canonical shape.
-    Timezone-aware values and non-date-shaped values raise a fixed
-    ``ValueError``.
-    """
-    if isinstance(value, str):
-        canonical_input: str | None = value
-    else:
-        if not isinstance(value, (date, datetime)) \
-                or getattr(value, "tzinfo", None) is not None:
-            raise ValueError(_EVENT_DATE_IDENTITY_ERROR)
-        canonical_input = None
-    try:
-        timestamp = pd.Timestamp(value)
-    except (TypeError, ValueError):
-        raise ValueError(_EVENT_DATE_IDENTITY_ERROR) from None
-    if pd.isna(timestamp) or getattr(timestamp, "tz", None) is not None:
-        raise ValueError(_EVENT_DATE_IDENTITY_ERROR)
-    encoded = (timestamp.date().isoformat()
-               if timestamp.normalize() == timestamp else timestamp.isoformat())
-    if canonical_input is not None and encoded != canonical_input:
-        raise ValueError(_EVENT_DATE_IDENTITY_ERROR)
-    return encoded
 
 
 def _matched_decision_clock(
@@ -883,12 +815,67 @@ def _native_score_batch_documents(
     return records_document, refusals_document
 
 
+def _worker_event_documents(parameters: Mapping[str, Any], root: Path):
+    events_path = root / "events.json"
+    producer_refusals_path = root / "producer_refusals.json"
+    from engine.v2.ops.errors import fail
+
+    producer_mode = parameters.get("producer_mode", "staged")
+    if producer_mode not in ("staged", "snapshot"):
+        raise fail("VALIDATION_FAILED", "native score batch producer_mode is invalid")
+    production_mode = producer_mode == "snapshot"
+    has_catalog_path = bool(parameters.get("catalog_path"))
+    has_objects_root = bool(parameters.get("objects_root"))
+    if production_mode and has_catalog_path != has_objects_root:
+        raise fail(
+            "VALIDATION_FAILED",
+            "native score batch production requires catalog_path and objects_root together")
+    if production_mode and not has_catalog_path:
+        raise fail(
+            "VALIDATION_FAILED",
+            "native score batch snapshot production requires catalog_path and objects_root",
+            details={"missing": ("catalog_path", "objects_root")})
+    if not production_mode:
+        if not events_path.exists():
+            raise FileNotFoundError(events_path)
+        events_doc = json.loads(events_path.read_text(encoding="utf-8"))
+        if not isinstance(events_doc, list):
+            raise ValueError("events.json must be a JSON array")
+        producer_doc = None
+        if producer_refusals_path.exists():
+            producer_doc = json.loads(producer_refusals_path.read_text(encoding="utf-8"))
+        return events_doc, producer_doc, parameters["calendar_revision"]
+
+    from engine.v2.data.repository import Repository
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.ops.catalog import connect
+    from engine.v2.ops.nightly_raw_row_producer import build_native_score_batch_events
+
+    conn = connect(parameters["catalog_path"], must_exist=True)
+    try:
+        repository = Repository(conn, ArtifactStore(parameters["objects_root"]))
+        snapshot = repository.resolve(parameters["snapshot_id"])
+        events_doc, producer_doc = build_native_score_batch_events(
+            repository, snapshot, as_of=parameters["as_of"],
+            horizon_days=parameters.get("horizon_days", 35),
+            tickers=parameters.get("tickers") or None)
+        calendar_revision = snapshot.table_versions[
+            "earnings_events"].dataset_version_id
+        events_path.write_text(canonical_json(events_doc), encoding="utf-8")
+        producer_refusals_path.write_text(canonical_json(producer_doc), encoding="utf-8")
+        return events_doc, producer_doc, calendar_revision
+    finally:
+        conn.close()
+
+
 def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> dict[str, Any]:
     """The ``native_score_batch`` job kind's worker entrypoint.
 
-    Resolves the release binding once from ``parameters["release_root"]``,
-    decodes the staged ``events.json`` per-event input array, assembles the
-    batch with :func:`assemble_score_batch_inputs`, scores it under
+    In production the worker builds the event and refusal documents from the
+    pinned snapshot in its own worker process, while staged ``events.json``
+    remains supported for direct callers. It resolves the release binding
+    once from ``parameters["release_root"]``, assembles the batch with
+    :func:`assemble_score_batch_inputs`, scores it under
     ``engine.v2.models.no_fit.no_fit_guard``, and writes ``records.json`` /
     ``refusals.json`` into ``root`` -- see ARCHITECTURE.md's
     ``native_score_batch.py`` section for the full contract.
@@ -896,14 +883,11 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
     from engine.v2.models.no_fit import no_fit_guard
     from engine.v2.scoring.release_bindings import resolve_gate_policy, resolve_release_binding
 
-    events_doc = json.loads((root / "events.json").read_text())
-    if not isinstance(events_doc, list):
-        raise ValueError("events.json must be a JSON array")
-    events = tuple(_event_inputs_from_document(item) for item in events_doc)
-    binding = resolve_release_binding(parameters["release_root"])
     as_of = parameters["as_of"]
     snapshot_id = parameters["snapshot_id"]
-    calendar_revision = parameters["calendar_revision"]
+    binding = resolve_release_binding(parameters["release_root"])
+    events_doc, producer_doc, calendar_revision = _worker_event_documents(parameters, root)
+    events = tuple(_event_inputs_from_document(item) for item in events_doc)
     raw_feature_names = parameters.get("feature_names")
     if raw_feature_names is None:
         raw_feature_names = ()
@@ -916,9 +900,7 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
         gate_policy=(parameters.get("gate_policy")
                      or resolve_gate_policy(binding, parameters["release_root"])),
     )
-    producer_refusals_path = root / "producer_refusals.json"
-    if producer_refusals_path.exists():
-        producer_doc = json.loads(producer_refusals_path.read_text(encoding="utf-8"))
+    if producer_doc is not None:
         refusals = refusals + _decode_producer_refusals(producer_doc)
     seen_unkeyable_identities: set[tuple[str, str, str, str]] = set()
     for refusal in refusals:

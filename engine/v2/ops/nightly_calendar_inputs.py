@@ -30,7 +30,7 @@ from engine.v2.foundation.market_calendar import (
 )
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_board_universe import BoardRequest
-from engine.v2.ops.native_score_batch import NativeScoreBatchRowRefusal
+from engine.v2.ops.native_score_batch_types import NativeScoreBatchRowRefusal
 from engine.v2.ops.nightly_raw_rows import CalendarRowInputs, scan_calendar_row
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,

@@ -712,16 +712,12 @@ class Service:
         self._native_score_batch_lookup_memo, never conflated with a real
         identity's build-attempt count. Only past both does this method reach the
         SAME bounded backoff schedule _reconcile_computed_moves_refresh uses.
-        Past the memo gate a snapshot-pinned identity stages its COMPLETE
-        events.json/producer_refusals.json pair -- produce, publish, register in
-        ONE catalog transaction -- before the builder is reached, so no failure
-        path can leave a job referencing a one-sided stage; every exception is
+        Past the memo gate a snapshot-pinned identity submits the identity and
+        producer parameters; raw-row production and its complete
+        event/refusal documents run in the native worker; every exception is
         caught and reported the same redacted way _reconcile_publication_status
         reports its own, never crashing the tick."""
-        from engine.v2.data.repository import Repository
-        from engine.v2.foundation import canonical_json
         from engine.v2.ops.nightly import submit_native_score_batch_shadow_if_ready
-        from engine.v2.ops.nightly_raw_row_producer import build_native_score_batch_events
         from engine.v2.ops.snapshot_stages import _catalog_path
         from engine.v2.ops.submission import NamespacePolicy
 
@@ -742,33 +738,13 @@ class Service:
             return
         policy = NamespacePolicy({"operator": frozenset({"shadow"})})
         try:
-            events_ref = producer_refusals_ref = calendar_revision = snapshot_id = None
-            if producer_parameters:
-                repository = Repository(self.conn, self.store)
-                snapshot = repository.resolve(producer_parameters.snapshot_generation_id)
-                events, refusals = build_native_score_batch_events(repository, snapshot,
-                    as_of=session, horizon_days=producer_parameters.horizon_days,
-                    tickers=producer_parameters.tickers or None)
-                earnings = snapshot.table_versions["earnings_events"]
-                calendar_revision = earnings.dataset_version_id
-                events_ref = self.store.publish_bytes(
-                    canonical_json(events).encode(),
-                    schema_ref="native_score_batch_events.v1.0")
-                producer_refusals_ref = self.store.publish_bytes(
-                    canonical_json(refusals).encode(),
-                    schema_ref="native_score_batch_producer_refusals.v1.0")
-                with transaction(self.conn):
-                    register_artifact(self.conn, events_ref, None, self.clock)
-                    register_artifact(self.conn, producer_refusals_ref, None, self.clock)
-                events_ref, producer_refusals_ref = (events_ref.artifact_id,
-                    producer_refusals_ref.artifact_id)
-                snapshot_id = snapshot.snapshot_id
             receipt = submit_native_score_batch_shadow_if_ready(
                 self.conn, self.registry, policy, self.store, release_root,
                 catalog_path=_catalog_path(self.conn), objects_root=str(self.root),
-                code_source=self.code_source, clock=self.clock, snapshot_id=snapshot_id,
-                calendar_revision=calendar_revision, events_ref=events_ref,
-                producer_refusals_ref=producer_refusals_ref)
+                code_source=self.code_source, clock=self.clock,
+                snapshot_id=getattr(producer_parameters, "snapshot_generation_id", None),
+                horizon_days=getattr(producer_parameters, "horizon_days", 35),
+                tickers=getattr(producer_parameters, "tickers", ()) or None)
         except Exception as exc:
             self._native_score_batch_backoff(memo, now)
             self._report_native_score_batch_problem(exc)
