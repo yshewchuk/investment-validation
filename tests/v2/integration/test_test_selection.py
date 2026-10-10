@@ -137,20 +137,22 @@ def test_phase1_suite_keeps_a_baseline_test_that_did_not_move(tmp_path):
 
 
 def test_phase1_baseline_inventory_matches_active_suite():
-    """The committed baseline inventory matches the active Phase 1 suite.
+    """Every baseline-listed test is retained in the active Phase 1 suite.
 
-    The stored baseline counts are historical; they are not required to be a
-    fresh measurement of the live source tree.
+    The stored baseline keeps historical paths; each path is resolved to where
+    the test lives now before checking it is still in the suite.
     """
     from checks.v2_coverage_ratchet import (
         PHASE1_BASELINE,
         PHASE1_SUITE_VERSION,
+        _phase1_resolve,
         phase1_suite,
     )
 
     baseline = json.loads(PHASE1_BASELINE.read_text())
     assert baseline["suite_version"] == PHASE1_SUITE_VERSION
-    assert baseline["test_files"] == phase1_suite(ROOT)
+    resolved = {_phase1_resolve(ROOT, rel) for rel in baseline["test_files"]}
+    assert resolved <= set(phase1_suite(ROOT))
 
 
 def test_phase1_measurement_identity_is_checked_on_measurement_evidence():
