@@ -520,7 +520,7 @@ derived recipe in `ScoringReleaseBinding`. Derive it only from the validated
 artifact key/hash; requests have no recipe input, and batch sets internal
 `SourceBundle` fields after assembly. Before return, recompute content hash and
 validate schema, identities, lineage, cutoff and row/array structure. A missing
-required member or failed check raises `ModelNotReady` (`MODEL_NOT_READY`);
+required paired residual member or failed check raises `ModelNotReady` (`MODEL_NOT_READY`);
 the shared release member fails atomically before row scoring, unlike
 request-scoped model-role gaps. Valid zero-row artifacts are not refusals;
 simulation preserves legacy's thin-pool/undetermined outcome. Rebuild/promote
@@ -529,19 +529,19 @@ before rollout; old releases intentionally have no fallback.
 `SourceBundle` already has `paired_residual_artifact` and `paired_residual_recipe`
 (`engine/v2/scoring/source_inputs.py:301`); `native_residuals.paired_arrays_from_artifact`
 (`engine/v2/scoring/native_residuals.py:73`) checks at consumption too. Small
-synthetic inputs exercise real producer/staging/loader/bundle/simulation paths;
-CI must not run full training.
+synthetic inputs exercise real producer/staging/loader/bundle/simulation paths; CI must not run full training.
 
-Parity baseline: identical joined ticker/event rows and exclusive cutoff;
-population/cutoff remain open below. Legacy scope is its `Scorer`'s loaded
-tickers. Test mismatched full/nightly scopes and cutoffs too; output can differ,
-and lineage records frozen scope.
+Matched parity uses identical joined ticker/event rows at whichever cutoff is
+selected below; population/cutoff remain open. Legacy scope is its `Scorer`'s
+loaded tickers. Test mismatched full/nightly scopes and cutoffs too; output can
+differ, and lineage records frozen scope.
 
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. `tests/v2/scoring/` (~300 lines): rebuild/recipe, request override, zero rows,
-   malformed-member atomicity/no scoring and matched/mismatched scope/cutoff parity.
+3. `tests/v2/scoring/` (~300 lines): missing member/old-release no-fallback,
+   recipe derivation/injection rejection, zero rows, malformed-member atomicity,
+   no row scoring, and matched/mismatched scope/cutoff parity.
 
 Decisions needed before implementing these slices:
 - **Population:** full producer universe (deterministic) or nightly ticker scope (closer parity, coupled release).
