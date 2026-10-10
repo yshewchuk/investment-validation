@@ -1,8 +1,10 @@
 """Pinned D-1 history import for the nightly snapshot chain (slice 5 of #564)."""
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -20,6 +22,20 @@ from engine.v2.ops.nightly_session import (
 )
 
 __all__ = ["run_pinned_history_import"]
+
+
+@contextmanager
+def _history_lock(root: Path, identity: SessionIdentity):
+    path = Path(root).joinpath(*STATE_DIR, f"{identity.session_key}.history.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.open("a")
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+
 
 def _pins(source_root: Path) -> tuple[tuple[str, str], ...]:
     if not (source_root / "ledger").is_dir():
@@ -90,22 +106,23 @@ def run_pinned_history_import(root: Path, identity: SessionIdentity, generation:
                               start_snapshot: str, *, conn, source_root, clock) -> ChainResult:
     """Import pinned D-1 ledger history from the preceding price-history snapshot."""
     source_root = Path(source_root)
-    run_id, through, pins = _load_or_dry_run_pins(
-        root, identity, generation, source_root, conn, clock)
-    history_path = Path(root).joinpath(*STATE_DIR, f"{run_id}.history-complete.json")
-    history_text = json.dumps({"schema": "nightly_history_receipt.v1", "run_id": run_id,
-                               "through": through, "files": [list(pair) for pair in pins]},
-                              sort_keys=True)
-    history_hash = hashlib.sha256(history_text.encode()).hexdigest()
+    with _history_lock(root, identity):
+        run_id, through, pins = _load_or_dry_run_pins(
+            root, identity, generation, source_root, conn, clock)
+        history_path = Path(root).joinpath(*STATE_DIR, f"{run_id}.history-complete.json")
+        history_text = json.dumps({"schema": "nightly_history_receipt.v1", "run_id": run_id,
+                                   "through": through, "files": [list(pair) for pair in pins]},
+                                  sort_keys=True)
+        history_hash = hashlib.sha256(history_text.encode()).hexdigest()
 
-    def history_effect(_predecessor):
-        return Effect("artifact", str(history_path), history_hash)
+        def history_effect(_predecessor):
+            return Effect("artifact", str(history_path), history_hash)
 
-    def import_pinned_history(_predecessor):
-        import_history(conn, root, source_root, through=date.fromisoformat(through),
-                       dry_run=False, clock=clock, pinned_files=pins)
-        atomic_write(history_path, history_text)
-    step = ChainStep(
-        "history_import", history_effect, import_pinned_history,
-        lambda predecessor: _artifact_successor(history_path, history_hash, predecessor))
-    return run_snapshot_chain(root, identity, generation, start_snapshot, [step], conn=conn)
+        def import_pinned_history(_predecessor):
+            import_history(conn, root, source_root, through=date.fromisoformat(through),
+                           dry_run=False, clock=clock, pinned_files=pins)
+            atomic_write(history_path, history_text)
+        step = ChainStep(
+            "history_import", history_effect, import_pinned_history,
+            lambda predecessor: _artifact_successor(history_path, history_hash, predecessor))
+        return run_snapshot_chain(root, identity, generation, start_snapshot, [step], conn=conn)

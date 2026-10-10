@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
+from threading import Barrier, Event, Lock
 
 import pytest
 
 from engine.v2.ops import ledger_history_import as history_import
 from engine.v2.ops import nightly_history
+from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly_session import SessionIdentity, ensure_session, mark_started
 from tests.ops_support import catalog
@@ -276,4 +279,71 @@ def test_importer_accepts_list_pairs_for_pinned_files(tmp_path):
         pinned_files=[["ledger/predictions/2023-12-31.jsonl", digest]])
     assert summary["dry_run"] is True
     assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+def test_overlapping_same_run_calls_keep_pins_stable_and_resume(tmp_path, monkeypatch):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl", _prediction("row", "2023-12-31"))
+    first_pins_entered = Event()
+    second_lock_attempted = Event()
+    release_first = Event()
+    guard = Lock()
+    pins_calls = 0
+    lock_calls = 0
+    original_pins = nightly_history._pins
+    original_lock = nightly_history._history_lock
+
+    def paused_pins(source_root):
+        nonlocal pins_calls
+        with guard:
+            pins_calls += 1
+            first_call = pins_calls == 1
+        if first_call:
+            first_pins_entered.set()
+            assert release_first.wait(5)
+        return original_pins(source_root)
+
+    def observed_lock(root, run_id):
+        nonlocal lock_calls
+        with guard:
+            lock_calls += 1
+            if lock_calls == 2:
+                second_lock_attempted.set()
+        return original_lock(root, run_id)
+
+    monkeypatch.setattr(nightly_history, "_pins", paused_pins)
+    monkeypatch.setattr(nightly_history, "_history_lock", observed_lock)
+    start = Barrier(2)
+
+    def invoke():
+        thread_conn = open_catalog(ops_root / "ops.sqlite", clock=clock)
+        try:
+            start.wait(5)
+            return _run(ops_root, thread_conn, clock, source)
+        finally:
+            thread_conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [pool.submit(invoke), pool.submit(invoke)]
+        assert first_pins_entered.wait(5)
+        assert second_lock_attempted.wait(5)
+        release_first.set()
+        results = [call.result(timeout=10) for call in calls]
+
+    assert pins_calls == 1
+    assert sorted((result.executed, result.skipped) for result in results) == sorted([
+        (("history_import",), ()), ((), ("history_import",))])
+    state = nightly_history.load_session(ops_root, IDENTITY)
+    pin_path = ops_root.joinpath(
+        *nightly_history.STATE_DIR, f"{state.active.run_id}.history-inputs.json")
+    persisted = json.loads(pin_path.read_text())
+    assert persisted["files"] == [[
+        "ledger/predictions/2023-12-31.jsonl",
+        hashlib.sha256((source / "ledger/predictions/2023-12-31.jsonl").read_bytes()).hexdigest(),
+    ]]
+    resumed = _run(ops_root, conn, clock, source)
+    assert resumed.executed == ()
+    assert resumed.skipped == ("history_import",)
+    assert json.loads(pin_path.read_text()) == persisted
     conn.close()
