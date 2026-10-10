@@ -187,11 +187,11 @@ submission path reads either edge (the rule Part 4 established for
 - **`native.parity_inputs.legacy_parity_rows(score_document: Mapping[str, Any]) ->
   dict[str, dict]`** (new, this package). Keys the legacy `score.json`
   document's own `"rows"` array by
-  `engine.v2.foundation.score_population.population_key`'s `"ticker|strategy|
-  event_date"` format for complete identities — REUSED, not re-derived or
-  re-added: this public helper already exists and `decision_replay.py` imports
-  it. Like `native_row_key` for native `ScoreRecord`s, it uses the same
-  three-field format for complete identities; `population_key` joins the
+  `engine.v2.foundation.score_population.population_key`'s
+  `"ticker|strategy|event_date"` format for complete identities — REUSED,
+  not re-derived or re-added: this public helper already exists and is imported
+  by `decision_replay.py`. Like `native_row_key` for native `ScoreRecord`s, it uses
+  the same three-field format; `population_key` joins the
   ticker/strategy/event_date values from `row.get(key, "")`, while
   `native_row_key` uses the event reference and resolved request to form its
   key. Bridge, legacy adapter, and parity use
