@@ -21,7 +21,10 @@ _PINS = {
 
 def test_changed_receipt_pins_conflict_across_attempt_effects(tmp_path):
     claim = SimpleNamespace(spec=SimpleNamespace(
-        kind="experiment", parameters={"no_ledger": False}))
+        kind="experiment", parameters={
+            "no_ledger": False,
+            "expected_ids": ["experiment:" + _EXPERIMENT_ID],
+        }))
     problem = make_problem("HOLDOUT_ACCESS_DENIED", "holdout refused")
 
     def refusal_receipt(pins):
