@@ -406,7 +406,7 @@ tests = [
     "tests/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_tier4_coverage.py",
     "tests/test_v2_ops_price_history.py",
-    "tests/test_v2_ops_tier4_coverage.py",
+    "tests/v2/ops/test_v2_ops_tier4_coverage.py",
 ]
 
 [modules.models_training]
@@ -615,6 +615,7 @@ tests = [
 why = "The ops CLI surface, diagnostics and health checks."
 mutate = [
     "engine/v2/ops/cli.py",
+    "engine/v2/ops/workflows/*.py",
     "engine/v2/ops/__main__.py",
     "engine/v2/ops/diagnostics.py",
     "engine/v2/ops/health.py",
@@ -622,8 +623,10 @@ mutate = [
 ]
 tests = [
     "tests/v2/research/test_native_registration.py",
+    "tests/v2/research/test_native_outcomes.py",
+    "tests/v2/research/test_native_outcome_validation.py",
     "tests/test_v2_ops_authority.py",
-    "tests/test_v2_ops_capture_inputs.py",
+    "tests/v2/ops/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_coordinator_lease.py",
     "tests/test_v2_ops_diagnostics.py",
     "tests/test_v2_ops_engineering_history.py",
@@ -672,7 +675,7 @@ tests = [
     "tests/test_v2_ops_effects_graph.py",
     "tests/test_v2_ops_executor_faults.py",
     "tests/test_v2_ops_explain_from_logs.py",
-    "tests/test_v2_ops_generation_binding_lineage.py",
+    "tests/v2/ops/test_v2_ops_generation_binding_lineage.py",
     "tests/test_v2_ops_incremental_data.py",
     "tests/test_v2_ops_incremental_registration.py",
     "tests/v2/ops/test_legacy_defects.py",
@@ -733,7 +736,7 @@ tests = [
     "tests/test_v2_ops_recovery_reboot.py",
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_same_session_replan.py",
-    "tests/test_v2_ops_scope_separation.py",
+    "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
 ]
 
@@ -764,7 +767,7 @@ tests = [
     "tests/test_v2_ops_recovery_reboot.py",
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_same_session_replan.py",
-    "tests/test_v2_ops_scope_separation.py",
+    "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
 ]
 
@@ -796,7 +799,7 @@ tests = [
     "tests/test_v2_ops_recovery_reboot.py",
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_same_session_replan.py",
-    "tests/test_v2_ops_scope_separation.py",
+    "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
 ]
 
@@ -829,7 +832,7 @@ tests = [
     "tests/test_v2_ops_recovery_reboot.py",
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_same_session_replan.py",
-    "tests/test_v2_ops_scope_separation.py",
+    "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_source_availability.py",
     "tests/test_v2_ops_store_barrier.py",
 ]
@@ -847,10 +850,12 @@ mutate = [
     "engine/v2/ops/decision_replay.py",
 ]
 tests = [
+    "tests/v2/ops/test_planned_price_refresh.py",
+    "tests/v2/ops/test_planned_price_recovery.py",
     "tests/v2/serving/test_score_population.py",
     "tests/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
-    "tests/test_v2_ops_capture_inputs.py",
+    "tests/v2/ops/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_checkpoint_output_names.py",
     "tests/test_v2_ops_critical_review.py",
     "tests/test_v2_ops_effect_receipt_collision.py",
@@ -936,6 +941,8 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_planned_price_refresh.py",
+    "tests/v2/ops/test_planned_price_recovery.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/v2/ops/test_forward_calendar_admission.py",
     "tests/v2/ops/test_provider_response.py",
@@ -944,7 +951,7 @@ tests = [
     "tests/v2/ops/test_carried_set.py",
     "tests/v2/ops/test_native_parity_pairing.py",
     "tests/test_v2_data_incremental_persistence.py",
-    "tests/test_v2_ops_capture_inputs.py",
+    "tests/v2/ops/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",
     "tests/test_v2_ops_computed_moves_store.py",
     "tests/test_v2_ops_partition_consumer.py",
@@ -962,13 +969,15 @@ tests = [
     "tests/test_v2_ops_calendar_moves_jobs.py",
     "tests/v2/ops/test_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
-    # tests/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked
-    # file caveat as the mutate list above; the glob matches it once.
+    # tests/v2/ops/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked
+    # file caveat as the mutate list above; listed literally since it moved.
     "tests/test_v2_ops_nightly*.py",
+    "tests/v2/ops/test_v2_ops_nightly_decision_clock.py",
+    "tests/v2/ops/test_v2_ops_nightly_trigger.py",
     "tests/test_v2_ops_render_parity.py",
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",
-    "tests/test_v2_ops_scope_separation.py",
+    "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
     "tests/test_v2_ops_training_job.py",
     "tests/test_v2_ops_worker_typed_failures.py",
@@ -986,12 +995,14 @@ mutate = [
     "engine/v2/ops/materialization_worker.py",
 ]
 tests = [
+    "tests/v2/ops/test_planned_price_refresh.py",
+    "tests/v2/ops/test_planned_price_recovery.py",
     "tests/test_v2_data_legacy_materialization.py",
     "tests/test_v2_data_rebuild_rollback.py",
     "tests/test_v2_data_repository.py",
-    "tests/test_v2_ops_generation_binding_lineage.py",
+    "tests/v2/ops/test_v2_ops_generation_binding_lineage.py",
     "tests/test_v2_ops_price_history.py",
-    "tests/test_v2_ops_snapshot_stages.py",
+    "tests/v2/ops/test_v2_ops_snapshot_stages.py",
     "tests/v2/ops/test_calendar_ticker_price_history.py",
 ]
 

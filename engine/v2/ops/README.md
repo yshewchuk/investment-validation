@@ -113,6 +113,9 @@ returns the job ids, leaving execution to a separately started supervisor.
 The top-level `experiments/native_registration.py` library consumes the narrow
 registration surface above. Like other `experiments/` callers, it is outside
 the engine import graph; it introduces no peer-layer engine dependency.
+`experiments/native_outcomes.py` consumes `catalog.transaction` and
+`errors.OpsError`/`fail` for catalog-owned publication and typed refusal.
+It owns short catalog transactions; artifact and CSV effects stay outside them.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection
@@ -404,7 +407,7 @@ serving caches, chooser analog pool, calendar) from the newest committed import
 receipt for that snapshot (`engine.v2.data.reference_catalog`), refusing when
 there is none;
 the default `--input-mode legacy` graph is byte-identical to before. Tested in
-`tests/test_v2_ops_snapshot_stages.py`.
+`tests/v2/ops/test_v2_ops_snapshot_stages.py`.
 
 The phase-1 engineering gate needs a coverage measurement passed in; run bare
 it fails the coverage row with `COVERAGE_EVIDENCE_MISSING` by design (a missing

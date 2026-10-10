@@ -11,9 +11,9 @@ could never launch a barrier-only stage (``legacy_finality``/
 ``legacy_model_evidence``/``legacy_selfcheck``).
 
 Reuses the real SQLite catalog + ``ArtifactStore`` + ``Service`` fixtures
-``tests.test_v2_ops_snapshot_stages.Case``/``case`` and the
+``tests.v2.ops.test_v2_ops_snapshot_stages.Case``/``case`` and the
 generation-binding test helpers already established in
-``tests.test_v2_ops_tier4_coverage`` (``_accept_generation``, ``_claim``,
+``tests.v2.ops.test_v2_ops_tier4_coverage`` (``_accept_generation``, ``_claim``,
 ``_publish_manifest``, ``_service``) rather than re-deriving them -- the
 same cross-file reuse pattern that file itself already uses for ``Case``.
 """
@@ -40,8 +40,8 @@ from tests.data_scan_support import (
     contract_ref_for,
     publish_and_inspect,
 )
-from tests.test_v2_ops_snapshot_stages import SESSION, Case, case  # noqa: F401
-from tests.test_v2_ops_tier4_coverage import _accept_generation, _claim, _publish_manifest, _service
+from tests.v2.ops.test_v2_ops_snapshot_stages import SESSION, Case, case  # noqa: F401
+from tests.v2.ops.test_v2_ops_tier4_coverage import _accept_generation, _claim, _publish_manifest, _service
 
 _HASH_A = "sha256:" + "1" * 64
 _HASH_MISMATCH = "sha256:" + "2" * 64

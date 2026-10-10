@@ -265,6 +265,22 @@ def test_finality_does_not_import_the_legacy_adapter_even_lazily():
     assert ("finality", "legacy_adapter") in ops.findings(files, rules)["cycles"]
 
 
+def test_nightly_trigger_does_not_import_cli_even_lazily():
+    rules = json.loads((ROOT / ops.POLICY).read_bytes())
+    files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)
+             if path.startswith(ops.SOURCE) and path.endswith(".py")}
+    actual = ops.findings(files, rules)
+    assert ("nightly_trigger", "cli") not in actual["forbidden"]
+    assert not [edge for edge in actual["forbidden"] if edge[0] == "workflows.commands"]
+    assert rules["exceptions"]["forbidden"] == []
+    files[ops.SOURCE + "nightly_trigger.py"] += (
+        b"\n\ndef _planted():\n    from engine.v2.ops import cli\n")
+    assert ("nightly_trigger", "cli") in ops.findings(files, rules)["forbidden"]
+    files[ops.SOURCE + "workflows/commands.py"] += (
+        b"\n\ndef _planted():\n    from engine.v2.ops import supervisor\n")
+    assert ("workflows.commands", "supervisor") in ops.findings(files, rules)["forbidden"]
+
+
 def test_layer_cli_rejects_planted_ops_violation(tmp_path):
     files = {name.replace(".", "/") + "/__init__.py": b""
              for name in [*layers.CONTAINERS, *(p.dotted for p in layers.PACKAGES)]}

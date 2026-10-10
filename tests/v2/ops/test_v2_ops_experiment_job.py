@@ -34,6 +34,7 @@ from engine.v2.ops.recovery import reconcile_attempt
 from engine.v2.ops.scheduler import claim_next
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
+from engine.v2.ops.workflows import commands
 from tests.ops_support import TEST_POLICY, catalog, run_until, sample
 
 REPO = Path(__file__).resolve().parents[3]
@@ -240,7 +241,7 @@ def test_primary_runner_bindings_reject_parent_symlink_escape(tmp_path, monkeypa
     manifest = {"runner": "linked/run.py", "spec_source": "linked/spec.yaml",
                 "source_closure": []}
     monkeypatch.setattr(
-        cli, "_registered_runner_manifest",
+        commands, "_registered_runner_manifest",
         lambda plan: ((), base, manifest))
 
     class CapturingStore:
@@ -253,7 +254,7 @@ def test_primary_runner_bindings_reject_parent_symlink_escape(tmp_path, monkeypa
 
     store = CapturingStore()
     with pytest.raises(OpsError) as excinfo:
-        cli._primary_runner_bindings({}, store)
+        commands._primary_runner_bindings({}, store)
     assert excinfo.value.code == "VALIDATION_FAILED"
     assert store.published == []
 
@@ -295,7 +296,7 @@ def test_primary_runner_bindings_publish_registered_runner_dependency(tmp_path):
                                              economic_params={}),
             "parameters": {"runner": runner, "no_ledger": False},
             "preregistration_root": str(checkout)}
-    bindings = dict(cli._primary_runner_bindings(plan, store))
+    bindings = dict(commands._primary_runner_bindings(plan, store))
     assert bindings[dependency] == (checkout / dependency).read_bytes()
     assert bindings[population] == b"synthetic frozen d1 matched trades"
     assert bindings["spec.yaml"] == (checkout / entry["spec_source"]).read_bytes()
