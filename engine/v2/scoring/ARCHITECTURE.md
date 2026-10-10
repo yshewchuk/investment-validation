@@ -499,15 +499,15 @@ resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
 
-#### Paired planned-exit residual member (issue #498, design)
+#### Proposed paired residual contract (issue #498; not implemented)
 
 Legacy `Scorer._residual_pool` (`engine/score.py:3687-3718`) joins Tier-4
 forecasts, panel outcomes and realized crush on `(ticker,event_date)`.
 Each paired row is `(event_date,ticker,pred_abs_move,err_move,err_crush)`:
 `err_move=abs_move-pred_abs_move`, `err_crush=crush_pct_iv30-pred_iv_crush_30`.
 Both errors travel together. `ResidualPool` (`engine/pnl_sim.py:102-126`)
-draws only earlier events, conditioned on `pred_abs_move`; ticker defines the
-join and population.
+draws only earlier events; it uses the `pred_abs_move` bucket if large enough,
+otherwise the full pre-cutoff pool. Join and population use `(ticker,event_date)`.
 
 The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211-242`) builds the paired
 artifact; `tools/phase5_prepare_release.py:215-232` stages its typed document.
