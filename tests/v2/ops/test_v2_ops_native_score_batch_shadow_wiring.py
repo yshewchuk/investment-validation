@@ -481,7 +481,9 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
             "snapshot": resolved_snapshot, "as_of": as_of,
             "horizon_days": horizon_days, "tickers": tickers})
         producer_started.set()
-        release_producer.wait(timeout=5)
+        # Released only by the test's finally block; the generous timeout is a
+        # hang guard far beyond any test runtime, not a timing assertion.
+        release_producer.wait(timeout=300)
         producer_returned.set()
         return [], {"schema_version": "native_score_batch_producer_refusals.v1.0",
                     "refusals": []}
