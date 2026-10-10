@@ -65,6 +65,7 @@ from engine.v2.ops.lifecycle import (
     record_progress,
     renew_after_resume,
 )
+from engine.v2.ops.reclaim import reclaim
 from engine.v2.ops.recovery import (
     SupervisorLock,
     begin_epoch,
@@ -290,6 +291,7 @@ class Service:
 
     def tick(self):
         self._clock_check()
+        self._reclaim_terminal_staging()
         expire_leases(self.conn, clock=self.clock)
         self.reconcile()
         for attempt_id, running in list(self.running.items()):
@@ -306,6 +308,35 @@ class Service:
         self._reconcile_native_score_batch_shadow()
         self._reconcile_native_parity()
         return bool(self.running or claim)
+
+    _RECLAIM_IDLE_SECONDS = 30.0
+    #: #609: monotonic time before which the reclaim pass is idle, and the
+    #: (kind, attempt_id) pairs whose failure was already printed (rebound, never mutated).
+    _reclaim_next_at = 0.0
+    _reclaim_reported = frozenset()
+
+    def _reclaim_terminal_staging(self):
+        """#609/#467: remove ONE read-once entry of a terminal attempt per pass
+        (``reclaim.py``; contract: ARCHITECTURE.md "Attempt staging reclaim").
+        Runs before polling, so an attempt that finished this tick is reclaimed
+        on the next. Never raises and never changes a job or attempt: a failure
+        is printed once per entry and retried after the idle interval."""
+        now = self.clock.monotonic()
+        if now < self._reclaim_next_at:
+            return
+        try:
+            done = reclaim(self.conn, self.root, apply=True, limit=1,
+                           materialization_base=self.materialization_base)
+        except Exception:
+            done = [{"kind": "reclaim", "attempt_id": "", "error": "ReclaimFailed"}]
+        for entry in done:
+            key = (entry["kind"], entry["attempt_id"])
+            if entry.get("error") and key not in self._reclaim_reported:
+                self._reclaim_reported = self._reclaim_reported | {key}
+                print(json.dumps({"event": "reclaim_failed", "kind": entry["kind"],
+                                  "attempt_id": entry["attempt_id"], "error": entry["error"]}))
+        removed = any(entry.get("removed") for entry in done)
+        self._reclaim_next_at = now if removed else now + self._RECLAIM_IDLE_SECONDS
 
     def _reconcile_publication_status(self):
         """2026-09-14 review fix, item 1: the one place, across the whole

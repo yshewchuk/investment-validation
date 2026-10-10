@@ -41,7 +41,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `submit --plan --idempotency-key`
 - `rescore --request --native-inputs` — read-only, no provider pulls, no fitting
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
-- `reconcile <job_id> --expected-attempt`
+- `reconcile <job_id> --expected-attempt`; `reclaim [--apply]` (dry run by default; see "Attempt staging reclaim")
 - `provider-account --account --remaining --live-reserve`
 - `snapshot {plan-import,submit,promote,rollback}`
 - `ledger {import-history,status,calibrate,book}` — history summaries count new provenance writes as `imported` (excluding new divergences), and remaining lines as `already_present`; identical committed content under another purpose writes no provenance. Dry runs report the same projected counts and roll back writes.
@@ -1277,6 +1277,16 @@ job.
 | the CURRENT or claimed attempt's own renewal fails (fence void, job cancelling, lease already expired), or the supervisor crashes mid-staging | a failed renewal raises `LEASE_LOST`: staging stops, nothing is launched, and the refusal is recorded through the fence-aware `_commit_failure` path (a lost lease is handed to recovery); a heartbeat never extends a lease whose fence is gone (it verifies the fence first and writes nothing on refusal). A crash stops renewal, the lease expires, and the existing recovery path (`expire_leases`, reconcile) settles the attempt as before |
 | a long subprocess (e.g. the engineering gate) exceeds its own deadline, or the keepalive call itself fails mid-run | killed and reaped before the failure propagates; refused as before |
 
+### Attempt staging reclaim (`reclaim.py`, #609, #467)
+
+| Condition | Outcome |
+|---|---|
+| durable vs read-once, under `attempts/<id>/staging/` | only `legacy/` (the read-set copy, or the overlay of symlinks into a verified materialization root) is read-once: the worker reads it during the attempt and nothing afterwards. Kept: `diagnostics/` (read by `ops explain`/`logs`), candidate outputs, bound-input copies, and every catalog row and object. A retry or `resume` is a NEW attempt with its own staging and reads catalog outputs, never an earlier attempt's staging |
+| eligible | `state` in `succeeded`/`failed`/`cancelled` and `process_state` in `unlaunched`/`exited`/`verified_dead`; `starting`, `running`, `cancelling`, `recovery_pending` and any other process state are never touched. An orphan `<ops>.materializations/.<hex>.partial-<attempt_id>` of an eligible attempt follows the same rule (finished roots never) |
+| when | the supervisor tick removes one eligible entry per pass, idling 30 s when none is left; `ops reclaim` lists every eligible entry with its bytes (dry run) and removes them only with `--apply`. A symlinked `legacy` is unlinked, never followed |
+| crash mid-reclaim | eligibility is the entry's existence, so a partly removed tree is finished by the next pass; nothing is recorded |
+| reclaim fails | an entry's `OSError` is reported (tick: one JSON line per distinct failed (kind, attempt) entry for the process lifetime; CLI: that entry's `error`) and the other entries still run; a catalog or directory-listing error aborts the pass (tick: reported once, swallowed; CLI: the usual redacted error). No job or attempt state ever changes, so a job is never failed or rolled back; the entry is retried after the 30 s idle interval |
+
 ### `legacy_features` / `legacy_score`: the features receipt (`legacy_adapter.py`, `features_compare.py`)
 
 `legacy_score` refuses unless `features.json` (the receipt `legacy_features` writes) still describes the panel and Tier-4 tables it reads. **Legacy mode**: byte-exact `panel_sha256`/`tier4_sha256`, unchanged. **Snapshot mode**: score reads the materialization's tables, not the stage's rebuild, and a refit is not bit-reproducible (1-ulp noise), so `features` is a cross-check stage (`nightly.CROSS_CHECK_STAGES`, like `finality`): it binds the snapshot artifacts, launches as `finality_check`, receives the materialization root (`envelope["finality_cross_check"]`) and compares with `features_compare.compare_tables`. Score re-hashes the materialization against the receipt's pinned hashes, so a later swap is still refused.
@@ -1345,18 +1355,7 @@ The finality receipt's `covered_tickers` (from `finality_coverage.json`) lists o
 
 ## Invariants
 Score-plan validation shares `foundation.score_population.population_difference` with serving: only an extra `DYN-SV` key with an exact planned non-chooser ticker/date is allowed. Every planned key remains required; other differences retain `VALIDATION_FAILED` before score output.
-Enforces or is bound by, from the root doc §5: missing-input typed refusal;
-no parity-only mode (`native_parity` runs the real code, never a
-legacy-shaped branch); one shared parity comparator (`native_parity_report.py`
-calls `engine/v2/parity`, never a second comparator); snapshot/root
-isolation (data and artifact paths resolve through `engine.paths`/the v2
-foundation, never a module's own `Path(__file__)`-derived root); a root-doc
-requirement, not something this package mechanically enforces everywhere,
-is that nothing published carries a local path, raw exception text, or an
-unsanitised free-text field. `worker.py` keeps a caught traceback in a
-private per-attempt file, never the result pipe, which is the model other
-stages follow — but that one convention does not by itself cover every
-diagnostic or native batch output writer in this package.
+Enforces or is bound by, from the root doc §5: missing-input typed refusal; no parity-only mode (`native_parity` runs the real code, never a legacy-shaped branch); one shared parity comparator (`native_parity_report.py` calls `engine/v2/parity`, never a second comparator); snapshot/root isolation (data and artifact paths resolve through `engine.paths`/the v2 foundation, never a module's own `Path(__file__)`-derived root); a root-doc requirement, not something this package mechanically enforces everywhere, is that nothing published carries a local path, raw exception text, or an unsanitised free-text field. `worker.py` keeps a caught traceback in a private per-attempt file, never the result pipe, which is the model other stages follow — but that one convention does not by itself cover every diagnostic or native batch output writer in this package.
 
 **The one documented root-isolation exemption is worker-*source*
 fingerprinting**, and it applies only to that — never to a data or artifact
@@ -1514,8 +1513,3 @@ flowchart LR
 ```
 
 `board_requests` itself only consumes an `events_table` a caller passes in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a real shadow-scope snapshot via `import_snapshot.plan_import`/`submit_import` only — never a `Repository.scan("earnings_events")` call, which belongs to `computed_moves_store._scan_once` instead, a different boundary. It is reachable today for `nightly_trigger._default_plan`'s scheduled `"score"` job specifically (see "Primary contracts"); a plan built directly with the lower-level plan builder can still default to `legacy` input mode instead. The raw-row producer consumes these requests in the native batch worker. Slice 1's `carried_set.resolve_carried_set` reads the per-table ticker sets from one pinned snapshot, using `daily_market.date` and `option_chains.obs_date` in the inclusive January 1 of the prior calendar year through `as_of` window; `computed_at` and future data dates do not count. `build_uncarried_exclusions` emits one ticker-sorted `UNCARRIED_TICKER` per supplied non-carried candidate, with sorted missing-table names. Missing or unreadable tables propagate the Repository's typed refusal. Slice 2 applies this resolver while building the supervised nightly population, carries the exclusion records in the saved plan, and passes the filtered ticker set to both the legacy score parameters and native board enumerator. The ordinary live legacy dashboard keeps its current population; An uncarried ticker is absent from the decision candidates and so never enters the `candidate_tickers ⊆ covered_tickers` check, while a carried ticker without final coverage still refuses `VALIDATION_FAILED`. The exclusions live in the saved plan only; `decision_plan`/`decision_evidence` documents do not carry them.
-
-### Native nightly pool/residual refresh (Cutover PR-13a)
-
-Design only, not yet implemented — see
-[#192](https://github.com/yshewchuk/investment-validation/issues/192).

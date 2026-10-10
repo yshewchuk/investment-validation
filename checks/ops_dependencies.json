@@ -13,7 +13,7 @@
     "legacy": ["capture_inputs", "features_compare", "finality", "generation_binding", "ledger_history_import", "legacy_actions",
       "legacy_adapter", "materialization_worker", "render_inputs", "snapshot_roots", "snapshot_stages"],
     "stores": ["calendar_moves_jobs", "computed_moves_store", "forward_calendar_store", "incremental_data", "pinned_partition_reader",
-      "price_history_store", "refresh_staging", "snapshot_import", "snapshot_planning", "snapshot_promotion", "snapshots", "stores",
+      "price_history_store", "reclaim", "refresh_staging", "snapshot_import", "snapshot_planning", "snapshot_promotion", "snapshots", "stores",
       "stores.refresh_contracts", "unit_receipts"],
     "native": ["carried_set", "native", "native.input_decoding", "native.parity_inputs", "native_board_universe", "native_parity_report", "native_score_batch", "native_score_batch_types", "native_shadow_render", "nightly_calendar_inputs",
       "nightly_quote_rows", "nightly_raw_row_producer", "nightly_raw_rows", "source_availability"],
