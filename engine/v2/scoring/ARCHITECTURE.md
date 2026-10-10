@@ -510,39 +510,39 @@ uses strictly earlier events, conditioned on `pred_abs_move`; ticker affects the
 source join and pool population.
 
 The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211-242`)
-builds the artifact from paired forecasts, outcomes and realized-crush inputs;
-`tools/phase5_prepare_release.py:215-232` stages its typed frozen-state
-document. Promotion uses this standard path. Artifact schema, model identities,
-cutoff, lineage and content hash are frozen; requests cannot supply, rebuild or
-invent residual rows.
+builds from paired forecasts, outcomes and realized crush;
+`tools/phase5_prepare_release.py:215-232` stages its typed document. Promote
+through this standard path. Freeze schema, model IDs, cutoff, lineage and hash;
+requests cannot supply, rebuild or invent residual rows.
 
-Add a typed paired-artifact field to `ScoringReleaseBinding` and load the
-`paired_residual_pool` catalog member in `resolve_release_binding`. Missing or
-malformed required members, including schema, recomputed content hash,
-identity, lineage, cutoff or row/array failures, raise `ModelNotReady`
-(`MODEL_NOT_READY`) naming `paired_residual_pool` and return no partial binding.
-STR-THRU requires a rebuilt release before activation;
-there is no empty-recipe compatibility path for planned-exit scoring.
-A valid zero-row artifact is not a refusal; simulation returns legacy's
+Load the typed `paired_residual_pool` member in `resolve_release_binding` and
+carry both its artifact and a derived recipe in `ScoringReleaseBinding`. Derive
+the recipe only from the verified artifact key and hash; requests cannot supply
+it. Missing/malformed schema, recomputed hash, identities, lineage, cutoff,
+rows or arrays raise `ModelNotReady` (`MODEL_NOT_READY`) for the release-wide
+member, returning no partial binding. Unlike request-scoped model-role gaps,
+this shared artifact invalidates the binding before row scoring. Rebuild and
+promote before activation; old releases intentionally have no fallback.
+Valid zero-row artifacts are not refusals; simulation preserves legacy's
 early-history thin-pool/undetermined outcome.
 
-`SourceBundle` already has `paired_residual_artifact` and
-`paired_residual_recipe` (`engine/v2/scoring/source_inputs.py:301`);
-`native_residuals.paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`)
-validates/extracts arrays. Native batch must attach the verified release artifact
-and causal recipe. Tests use synthetic source rows with the real producer,
-staging/loader, bundle attachment and planned-exit consumer end to end.
+`SourceBundle` already has `paired_residual_artifact` and `paired_residual_recipe`
+(`engine/v2/scoring/source_inputs.py:301`); `native_residuals.paired_arrays_from_artifact`
+(`engine/v2/scoring/native_residuals.py:73`) validates/extracts arrays. Native
+batch attaches only the verified artifact and derived recipe. Synthetic inputs
+must exercise the real producer, staging/loader, bundle and simulation paths.
 
-Parity depends on population: legacy uses the tickers loaded into its `Scorer`;
-freeze the producer universe and cutoff selected below. Compare matched and
-mismatched full-universe/nightly scopes and cutoffs; differences can change
-output. Artifact lineage records the frozen scope for audit.
+Parity depends on population: legacy uses tickers loaded into its `Scorer`;
+the chosen producer universe and cutoff remain open decisions below. Compare
+matching/mismatching full-universe/nightly scopes and cutoffs; differences can
+change output. Lineage records frozen scope.
 
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. Real-path tests (~190 lines): rebuild/no-empty-recipe, zero rows, schema/hash/
-   identity/lineage/cutoff/row refusals, and matched/mismatched scope parity.
+3. Real-path tests (~230 lines): rebuild/no-empty-recipe; zero rows; each
+   schema/hash/identity/lineage/cutoff/row refusal has no partial binding;
+   recipe integrity and matched/mismatched scope/cutoff parity.
 
 Decisions needed before implementing these slices:
 - **Population:** full producer universe (deterministic) or nightly ticker scope (closer parity, coupled release).
