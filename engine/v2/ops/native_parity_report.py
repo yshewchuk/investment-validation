@@ -377,7 +377,7 @@ def _empty_native_report(
 def _ticker_from_population_key(key: str) -> str:
     """The ``ticker`` carried by a three-field ``population_key`` string: the
     first component before the first ``"|"`` -- the exact join format
-    :func:`engine.v2.ops.decision_validation.population_key` builds from
+    :func:`engine.v2.foundation.score_population.population_key` builds from
     ``("ticker", "strategy", "event_date")``.
     """
     return key.split("|", 1)[0]
