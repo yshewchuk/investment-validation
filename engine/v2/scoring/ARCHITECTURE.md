@@ -512,18 +512,19 @@ source join and pool population.
 The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211-242`)
 builds the artifact from paired forecasts, outcomes and realized-crush inputs;
 `tools/phase5_prepare_release.py:215-232` stages its typed frozen-state
-document. Promotion uses this standard path. The artifact carries schema,
-model identities, cutoff, lineage and content hash; no request-row fallback,
-per-request reconstruction or invented residual is allowed.
+document. Promotion uses this standard path. Artifact schema, model identities,
+cutoff, lineage and content hash are frozen; requests cannot supply, rebuild or
+invent residual rows.
 
 Add a typed paired-artifact field to `ScoringReleaseBinding` and load the
 `paired_residual_pool` catalog member in `resolve_release_binding`. Missing or
-malformed required members, including schema, hash, identity, lineage or
-causal-cutoff failures, raise `ModelNotReady` (`MODEL_NOT_READY`) naming
-`paired_residual_pool` and return no partial binding. STR-THRU requires a
-rebuilt release before activation;
+malformed required members, including schema, recomputed content hash,
+identity, lineage, cutoff or row/array failures, raise `ModelNotReady`
+(`MODEL_NOT_READY`) naming `paired_residual_pool` and return no partial binding.
+STR-THRU requires a rebuilt release before activation;
 there is no empty-recipe compatibility path for planned-exit scoring.
-Valid empty artifacts preserve legacy's early-history thin-pool/undetermined outcome.
+A valid zero-row artifact is not a refusal; simulation returns legacy's
+early-history thin-pool/undetermined outcome.
 
 `SourceBundle` already has `paired_residual_artifact` and
 `paired_residual_recipe` (`engine/v2/scoring/source_inputs.py:301`);
@@ -533,20 +534,19 @@ and causal recipe. Tests use synthetic source rows with the real producer,
 staging/loader, bundle attachment and planned-exit consumer end to end.
 
 Parity depends on population: legacy uses the tickers loaded into its `Scorer`;
-freeze whichever producer universe and cutoff the decision below selects.
-Compare under matching ticker/event scope and cutoff; mismatches can change
+freeze the producer universe and cutoff selected below. Compare matched and
+mismatched full-universe/nightly scopes and cutoffs; differences can change
 output. Artifact lineage records the frozen scope for audit.
 
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. Real-path tests for refusals, zero rows and matched/mismatched parity (~150 test lines).
+3. Real-path tests (~190 lines): rebuild/no-empty-recipe, zero rows, schema/hash/
+   identity/lineage/cutoff/row refusals, and matched/mismatched scope parity.
 
 Decisions needed before implementing these slices:
-- **Population:** freeze the full producer universe (one deterministic
-  artifact) or pass nightly ticker scope (closer board parity, coupled release).
-- **Cutoff:** keep the explicit exclusive paired-state cutoff (reproducible)
-  or adopt a release-wide policy (simpler consumers, broader coordination).
+- **Population:** full producer universe (deterministic) or nightly ticker scope (closer parity, coupled release).
+- **Cutoff:** exclusive paired-state cutoff (reproducible) or release-wide policy (simpler consumers, broader coordination).
 - **Activation:** require rebuild before refusal (planned rollout) or accept planned-exit unavailability until rebuild.
 
 ### `nightly_source_bundle.py`
