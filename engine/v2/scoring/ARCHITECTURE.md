@@ -501,53 +501,53 @@ required model roles keeps the native batch's existing per-row refusals.
 
 #### Paired planned-exit residual member (issue #498, design)
 
-Legacy `Scorer._residual_pool` (`engine/score.py:3687-3718`) joins stored
-Tier-4 forecasts, panel outcomes and realized crush by `(ticker,event_date)`.
-Each paired row is `(event_date,ticker,pred_abs_move,err_move,err_crush)`, with
-`err_move=abs_move-pred_abs_move` and `err_crush=crush_pct_iv30-pred_iv_crush_30`.
-Both errors come from one event; `ResidualPool` (`engine/pnl_sim.py:102-126`)
-uses strictly earlier events, conditioned on `pred_abs_move`; ticker affects the
-source join and pool population.
+Legacy `Scorer._residual_pool` (`engine/score.py:3687-3718`) joins Tier-4
+forecasts, panel outcomes and realized crush on `(ticker,event_date)`.
+Each paired row is `(event_date,ticker,pred_abs_move,err_move,err_crush)`:
+`err_move=abs_move-pred_abs_move`, `err_crush=crush_pct_iv30-pred_iv_crush_30`.
+Both errors travel together. `ResidualPool` (`engine/pnl_sim.py:102-126`)
+draws only earlier events, conditioned on `pred_abs_move`; ticker defines the
+join and population.
 
 The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211-242`)
-builds from paired forecasts, outcomes and realized crush;
-`tools/phase5_prepare_release.py:215-232` stages its typed document. Promote
-through this standard path. Freeze schema, model IDs, cutoff, lineage and hash;
-requests cannot supply, rebuild or invent residual rows.
+builds from paired forecasts, outcomes and crush; `tools/phase5_prepare_release.py:215-232`
+stages the typed document. Promote through this standard path. Freeze schema,
+model IDs, cutoff, lineage and hash; never reconstruct per request or use/invent
+request residual rows.
 
-Load the typed `paired_residual_pool` member in `resolve_release_binding` and
-carry both its artifact and a derived recipe in `ScoringReleaseBinding`. Derive
-the recipe only from the verified artifact key and hash; requests cannot supply
-it. Missing/malformed schema, recomputed hash, identities, lineage, cutoff,
-missing rows field or malformed row/array values raise `ModelNotReady` (`MODEL_NOT_READY`) for the release-wide
-member, returning no partial binding. Unlike request-scoped model-role gaps,
-this shared artifact invalidates the binding before row scoring. Rebuild and
-promote before activation; old releases intentionally have no fallback.
-Valid zero-row artifacts are not refusals; simulation preserves legacy's
-early-history thin-pool/undetermined outcome.
+`resolve_release_binding` loads the typed member and carries artifact plus
+derived recipe in `ScoringReleaseBinding`. Derive it only from the validated
+artifact key/hash; requests have no recipe input, and batch sets internal
+`SourceBundle` fields after assembly. Before return, recompute content hash and
+validate schema, identities, lineage, cutoff and row/array structure. A missing
+required member or failed check raises `ModelNotReady` (`MODEL_NOT_READY`);
+the shared release member fails atomically before row scoring, unlike
+request-scoped model-role gaps. Valid zero-row artifacts are not refusals;
+simulation preserves legacy's thin-pool/undetermined outcome. Rebuild/promote
+before rollout; old releases intentionally have no fallback.
 
 `SourceBundle` already has `paired_residual_artifact` and `paired_residual_recipe`
 (`engine/v2/scoring/source_inputs.py:301`); `native_residuals.paired_arrays_from_artifact`
-(`engine/v2/scoring/native_residuals.py:73`) validates/extracts arrays. Native
-batch attaches only the verified artifact and derived recipe. Synthetic inputs
-must exercise the real producer, staging/loader, bundle and simulation paths.
+(`engine/v2/scoring/native_residuals.py:73`) checks at consumption too. Small
+synthetic inputs exercise real producer/staging/loader/bundle/simulation paths;
+CI must not run full training.
 
-Parity depends on population: legacy uses tickers loaded into its `Scorer`;
-the chosen producer universe and cutoff remain open decisions below. Compare
-matching/mismatching full-universe/nightly scopes and cutoffs; differences can
-change output. Lineage records frozen scope.
+Parity baseline: identical joined ticker/event rows and exclusive cutoff;
+population/cutoff remain open below. Legacy scope is its `Scorer`'s loaded
+tickers. Test mismatched full/nightly scopes and cutoffs too; output can differ,
+and lineage records frozen scope.
 
 Planned slices (non-test code slices each below 200 lines):
 1. Typed loader/refusals in `engine/v2/scoring/release_bindings.py` (~100 lines).
 2. Binding-to-bundle attachment in `engine/v2/ops/native_score_batch.py` (~80 lines).
-3. Real-path tests (~250 lines): rebuild recipe; recipe integrity/request override;
-   zero rows; schema/hash/identity/lineage/cutoff/missing-row atomic refusals;
-   matched/mismatched scope and cutoff parity.
+3. `tests/v2/scoring/` (~300 lines): rebuild/recipe, request override, zero rows,
+   malformed-member atomicity/no scoring and matched/mismatched scope/cutoff parity.
 
 Decisions needed before implementing these slices:
 - **Population:** full producer universe (deterministic) or nightly ticker scope (closer parity, coupled release).
 - **Cutoff:** exclusive paired-state cutoff (reproducible) or release-wide policy (simpler consumers, broader coordination).
-- **Activation:** require rebuild before refusal (planned rollout) or accept planned-exit unavailability until rebuild.
+- **Activation:** gate rollout on standard promotion or ship the required-member
+  refusal first and accept planned-exit unavailability until promotion.
 
 ### `nightly_source_bundle.py`
 
