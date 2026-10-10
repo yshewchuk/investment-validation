@@ -6,10 +6,10 @@ refuses ``PRICE_HISTORY_NOT_AVAILABLE`` for a ticker absent from the pinned
 ``price_history`` table (via ``tickers_with_price_history``), while every other
 present ticker still composes into an event; the refusal decodes through
 ``_decode_producer_refusals`` and lands in the real parity worker's report
-under ``native_refused``. A ticker whose series IS present but whose exact-
-session ``close_raw`` is unusable is NOT an absence -- the real
-``scan_calendar_row_inputs`` / ``get_price_series`` path raises
-``CONTRACT_MISMATCH`` and the whole producer build propagates it.
+under ``native_refused``. A ticker whose series is present but lacks an exact-session row or has an
+unusable ``close_raw`` receives the per-key ``PRICE_HISTORY_NOT_AVAILABLE``
+refusal. Repository failures during the real spot read still fail the whole
+producer build.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import json
 import pandas as pd
 import pytest
 
-from engine.v2.data.errors import DataError
+from engine.v2.data.errors import DataError, fail as data_fail
 from engine.v2.data.price_history_table import (
     PRICE_HISTORY_CONTRACT,
     PRICE_HISTORY_TABLE_NAME,
@@ -26,6 +26,7 @@ from engine.v2.data.price_history_table import (
 from engine.v2.data.repository import Repository
 from engine.v2.features.panel_row_inputs import PanelRowInputs
 from engine.v2.foundation.market_calendar import CalendarSessions
+from engine.v2.ops import nightly_calendar_inputs as nci
 from engine.v2.ops import nightly_raw_row_producer as nrp
 from engine.v2.foundation.score_population import population_key
 from engine.v2.ops.native_board_universe import BoardRequest
@@ -46,6 +47,7 @@ from engine.v2.parity.dimensions import (
 from tests.data_scan_support import (
     catalog_and_store,
     commit_tables,
+    contract_for,
     contract_ref_for,
     fake_hash,
     publish_and_inspect,
@@ -83,9 +85,9 @@ def _history_row(ticker: str, *, close_raw: float | None = 100.0) -> dict:
     }
 
 
-def _repository_with_history(tmp_path, rows: list[dict]):
-    """Build a real repository and snapshot pinning ONLY the ``price_history``
-    table built from ``rows`` (no ``option_chains`` table)."""
+def _repository_with_history(tmp_path, rows: list[dict], *, include_option_chains=True):
+    """Build a real repository and snapshot pinning ``price_history`` and, by
+    default, an empty registered ``option_chains`` table."""
     conn, clock, store = catalog_and_store(tmp_path)
     by_ticker: dict[str, list[dict]] = {}
     for row in rows:
@@ -95,13 +97,12 @@ def _repository_with_history(tmp_path, rows: list[dict]):
             store, PRICE_HISTORY_CONTRACT, _PH_REF, ticker_rows, ticker)
         for ticker, ticker_rows in sorted(by_ticker.items())
     ]
-    snapshot = commit_tables(
-        conn,
-        clock,
-        {PRICE_HISTORY_TABLE_NAME: records},
-        {PRICE_HISTORY_TABLE_NAME: PRICE_HISTORY_CONTRACT},
-        scope="test",
-    )
+    tables = {PRICE_HISTORY_TABLE_NAME: records}
+    contracts = {PRICE_HISTORY_TABLE_NAME: PRICE_HISTORY_CONTRACT}
+    if include_option_chains:
+        tables["option_chains"] = []
+        contracts["option_chains"] = contract_for("option_chains")
+    snapshot = commit_tables(conn, clock, tables, contracts, scope="test")
     return Repository(conn, store), snapshot
 
 
@@ -348,7 +349,8 @@ def test_missing_option_chains_still_fails_when_every_ticker_is_refused(
     absent ``option_chains`` table propagates as ``CONTRACT_MISMATCH``
     instead of the build returning a per-ticker refusal document."""
     repository, snapshot = _repository_with_history(
-        tmp_path, [_history_row(ticker) for ticker in _HISTORY_TICKERS])
+        tmp_path, [_history_row(ticker) for ticker in _HISTORY_TICKERS],
+        include_option_chains=False)
     _patch_context(monkeypatch, _requests((_MISSING_TICKER,)))
 
     with pytest.raises(DataError) as caught:
@@ -359,22 +361,149 @@ def test_missing_option_chains_still_fails_when_every_ticker_is_refused(
     assert caught.value.code != _CODE
 
 
-def test_present_but_unusable_history_still_fails_the_producer(
+def test_missing_option_chains_still_fails_before_exact_spot_refusal(
         tmp_path, monkeypatch):
-    """A present series whose exact-session close is null is not an absence:
-    the real spot read propagates ``CONTRACT_MISMATCH`` through the build."""
-    ticker = "BAD"
+    """A real date-gap refusal must not hide an absent required option table."""
+    stale = _history_row("GAP")
+    stale["date"] = "2024-01-04"
     repository, snapshot = _repository_with_history(
-        tmp_path, [_history_row(ticker, close_raw=None)])
-    _patch_context(monkeypatch, _requests((ticker,)), real_spot=True)
+        tmp_path, [stale], include_option_chains=False)
+    _patch_context(monkeypatch, _requests(("GAP",)), real_spot=True)
 
     with pytest.raises(DataError) as caught:
         nrp.build_native_score_batch_events(
             repository, snapshot, as_of=_AS_OF, horizon_days=30)
 
     assert caught.value.code == "CONTRACT_MISMATCH"
-    assert caught.value.problem.message == (
-        "exact-session pinned spot close is unusable")
+    assert caught.value.code != _CODE
+
+
+def test_present_but_unusable_history_is_refused_per_key(tmp_path, monkeypatch):
+    """The real exact-session reader turns a null raw close into the existing
+    per-key producer refusal, without masking any repository exception."""
+    ticker = "BAD"
+    repository, snapshot = _repository_with_history(
+        tmp_path, [_history_row(ticker, close_raw=None)])
+    _patch_context(monkeypatch, _requests((ticker,)), real_spot=True)
+
+    events, refusals = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=30)
+
+    assert events == []
+    assert refusals["refusals"] == [{
+        "key": {"ticker": ticker, "strategy": _STRATEGY,
+                "event_date": _EVENT_DATE, "session": _SESSION},
+        "code": _CODE,
+        "detail": "the pinned snapshot has no usable exact-session close for this ticker",
+    }]
+
+
+def test_missing_exact_session_spot_is_refused_and_other_ticker_scores(
+        tmp_path, monkeypatch):
+    """A real pinned date gap refuses one key while its exact-session sibling
+    reaches the real score worker."""
+    stale = _history_row("GAP")
+    stale["date"] = "2024-01-04"
+    repository, snapshot = _repository_with_history(
+        tmp_path, [stale, _history_row("GOOD")])
+    _patch_context(monkeypatch, _requests(("GAP", "GOOD")), real_spot=True)
+
+    monkeypatch.setattr(nci, "scan_candidate_expiries",
+                        lambda repository, snapshot, key, *, decision_session: (_EVENT_DATE,))
+
+    def calendar_row(repository, snapshot, key, *, entry_date, exit_date,
+                     expiry, spot, calendar_observed_through):
+        return CalendarRowInputs(
+            calendar_revision="cal-v1",
+            calendar_row={
+                "event_id": f"evt-{key.ticker}", "ticker": key.ticker,
+                "event_date": _EVENT_DATE, "session": key.session,
+                "entry_date": entry_date, "exit_date": exit_date,
+                "expiry": expiry, "spot": spot,
+                "calendar_observed_through": calendar_observed_through,
+            })
+
+    monkeypatch.setattr(nci, "scan_calendar_row", calendar_row)
+    monkeypatch.setattr(nci, "planned_exit_date", lambda key, calendar: _EVENT_DATE)
+
+    def quotes(repository, snapshot, key, *, expiry, decision_session):
+        rows = tuple({
+            "ticker": key.ticker, "right": right, "strike": 100.0,
+            "expiry": expiry, "bid": 1.0, "ask": 1.2,
+            "observed_at": _AS_OF,
+        } for right in ("C", "P"))
+        return QuoteRowInputs(quote_rows=rows, quote_status="recorded")
+
+    monkeypatch.setattr(nrp, "scan_quote_rows", quotes)
+    events, producer_refusals = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=30)
+
+    assert [event["key"]["ticker"] for event in events] == ["GOOD"]
+    assert producer_refusals["refusals"] == [{
+        "key": {"ticker": "GAP", "strategy": _STRATEGY,
+                "event_date": _EVENT_DATE, "session": _SESSION},
+        "code": _CODE,
+        "detail": "the pinned snapshot has no usable exact-session close for this ticker",
+    }]
+
+    job_root = tmp_path / "score-job"
+    job_root.mkdir()
+    (job_root / "events.json").write_text(json.dumps(events))
+    (job_root / "producer_refusals.json").write_text(json.dumps(producer_refusals))
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    _stage_release(release_root)
+    parameters = {
+        "expected_ids": (f"{_AS_OF}|scope",),
+        "release_root": str(release_root), "as_of": _AS_OF,
+        "snapshot_id": snapshot.snapshot_id, "calendar_revision": "cal-v1",
+        "feature_names": ("x",),
+        "gate_policy": {"STR-THRU": {"threshold": 0.0}},
+    }
+    result = run_native_score_batch_worker(parameters, job_root)
+    records = json.loads((job_root / "records.json").read_text())["records"]
+    score_refusals = json.loads((job_root / "refusals.json").read_text())["refusals"]
+    assert result["completed_ids"] == list(parameters["expected_ids"])
+    assert sorted(records) == [_canonical_key("GOOD")]
+    assert score_refusals == {
+        _canonical_key("GAP"): {
+            "code": _CODE,
+            "detail": "the pinned snapshot has no usable exact-session close for this ticker",
+        }}
+    (job_root / "score.json").write_text(json.dumps({
+        "rows": _legacy_score_rows(("GAP", "GOOD"))}, sort_keys=True))
+    parity_result = run_native_parity_worker(parameters, job_root)
+    report = json.loads(
+        (job_root / "native_parity_report.json").read_text())
+    assert parity_result["completed_ids"] == list(parameters["expected_ids"])
+    assert [entry["ticker"] for entry in report["native_refused"]] == ["GAP"]
+    assert [entry["refusal_code"] for entry in report["native_refused"]] == [_CODE]
+    assert report["native_refused_unmatched"] == []
+
+
+def test_repository_failure_during_spot_read_still_fails_the_batch(
+        tmp_path, monkeypatch):
+    """A genuine typed repository scan failure is not translated to a row refusal."""
+    ticker = "FAIL"
+    repository, snapshot = _repository_with_history(
+        tmp_path, [_history_row(ticker)])
+    _patch_context(monkeypatch, _requests((ticker,)), real_spot=True)
+    assert any(record.partition_key == ticker and record.row_count > 0
+               for record in repository.fragment_records(
+                   snapshot, PRICE_HISTORY_TABLE_NAME))
+    scan_calls = []
+
+    def failed_scan(*args, **kwargs):
+        scan_calls.append(True)
+        raise data_fail("CONTRACT_MISMATCH", "synthetic repository scan failure")
+
+    monkeypatch.setattr(repository, "scan", failed_scan)
+    with pytest.raises(DataError) as caught:
+        nrp.build_native_score_batch_events(
+            repository, snapshot, as_of=_AS_OF, horizon_days=30)
+    assert scan_calls == [True]
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert caught.value.problem.message == "synthetic repository scan failure"
 
 
 def test_malformed_history_is_rejected_before_snapshot_admission(tmp_path):

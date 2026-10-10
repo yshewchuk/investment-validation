@@ -8,7 +8,10 @@ import pandas as pd
 
 from engine.v2.ops.native_board_universe import BoardRequest
 
-__all__ = ["NativeScoreBatchRowRefusal"]
+PRICE_HISTORY_NOT_AVAILABLE_DETAIL = (
+    "the pinned snapshot has no usable exact-session close for this ticker")
+
+__all__ = ["NativeScoreBatchRowRefusal", "PRICE_HISTORY_NOT_AVAILABLE_DETAIL"]
 
 _EVENT_DATE_IDENTITY_ERROR = (
     "event_date must be a naive calendar date/day value or a naive "
