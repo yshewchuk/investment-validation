@@ -896,27 +896,17 @@ waits without submitting until its paired succeeded inputs are ready.
 
 ## Outputs
 
-- **`orats_daily_market_fetcher`'s rows** (`providers/orats_daily_market.py`).
-  `fetcher(unit)` returns `ticker_rows` dicts keyed by `daily_market` columns.
-  Scaled fields outside `PLAUSIBLE_RANGES` (a test-verified local mirror of
-  `engine.data.normalize.common.PLAUSIBLE_RANGES`) become `None`, as does
-  in-range `implied_move <= 0` (ORATS's "no quote" sentinel); masking never raises.
-  Missing daily market cap stays `mcap_usd=None`; backward-looking as-of carry
-  belongs to `engine.v2.data.incremental.merge_daily_market`, not this fetcher.
-  Paired summaries/cores calls retry once for non-empty 2xx missing tickers:
-  four reserved calls maximum. Exhaustion returns available rows as partial,
-  with session/attempt metadata and typed missing-ticker coverage bound to the
-  raw receipt, never complete. Empty or literal-404 stays not_final under the
-  normal retry policy; independently classified endpoints retain credential,
-  rate-limit and not-final refusal precedence over partial.
-  `provider_response.py` owns pure `classify_response`, `OutcomeKind` and
-  frozen `AcquisitionOutcome`; `incremental_data` re-exports the same objects.
-  The ORATS edge imports that leaf directly: only stdlib and `ops.errors.fail`,
-  so importing providers/credentials no longer reaches refresh orchestration.
-  Classification validates unique nonempty requested keys, returned/empty/
-  unsupported subsets and nonnegative observed quota before returning an outcome;
-  invalid values retain `INVALID_REQUEST`. No I/O, cache, transaction, partial
-  write or retry occurs in the leaf; equal inputs give equal outcomes; retry/coverage policy remains in `incremental_data`, which imports neither refresh store: `calendar_moves_jobs` owns their callback loaders.
+- **ORATS rows** (`providers/orats_daily_market.py`): `fetcher(unit)` returns `daily_market` ticker rows. Out-of-range scaled fields and nonpositive `implied_move` become `None` without raising; `PLAUSIBLE_RANGES` mirrors the legacy normalizer under tests. Missing mcap remains null; backward carry belongs to `data.incremental.merge_daily_market`.
+  Summaries/cores retry once for nonempty 2xx missing tickers (four reserved calls). Remaining gaps retain partial coverage, session/attempt metadata and raw receipts, never complete; empty/404 remains not_final. Credential, rate-limit and not-final outcomes precede partial.
+  `provider_response` owns pure `classify_response`, `OutcomeKind`, `AcquisitionOutcome`; `incremental_data` re-exports them and owns retry/coverage, importing neither refresh store. `calendar_moves_jobs` owns callback loaders. ORATS imports the leaf directly (stdlib and `ops.errors.fail` only), so provider imports never reach orchestration.
+  Classification validates unique nonempty requested keys, returned/empty/unsupported subsets and nonnegative quota; invalid values remain `INVALID_REQUEST`. Equal inputs produce equal outcomes, without I/O, cache, retry, transaction, writes or partial return.
+- **Massive Basic planning**: `python -m tools.v2_massive_plan` calls `massive_plan.plan` over an existing read-only catalog and verified raw objects. No credentials, provider I/O, migration, acquisition, normalization, research read or snapshot publication occurs.
+  The explicit `as_of` selects versioned `massive_stocks_basic.2026-10-10`: daily REST OHLCV, splits/dividends, two calendar years (February 29 clamps), previous calendar day maximum, five requests/minute. This conservative planning policy is not account entitlement or EOD-finality evidence.
+  Dates are never clipped; S3, unsupported datasets and out-of-policy history refuse `INVALID_REQUEST` with a typed capability reason before catalog access. Tickers and per-unit HTTP-attempt caps are bounded; the cap includes pagination/retries, whose actual count remains unknown.
+  Request identity preserves ticker case, dataset, endpoint, dates, params and explicit raw/split-only adjustment. No key contains credentials. Other providers and the legacy `price_history` quantity mapping are never substituted.
+  R1: malformed requests or evidence refuse without partial return; corrupt objects retain their typed integrity refusal. R2: exact-request reuse only, over the latest receipt (received_at then rowid), with request/receipt/object identities reverified; empty, non-complete or paginated responses remain missing.
+  A verified raw hit proves stored bytes for that request, not normalized coverage, historical availability or permitted use. Oversized receipts refuse before allocation. R3: no retries or provider calls. R4: the CLI owns one SQLite read transaction; library callers own their connection/transaction. R5: no writes or partial result. R6: identical request/catalog/object inputs produce identical plans.
+  Only missing units contribute to minimum initial calls and the maximum attempt budget; these are bounds, not an asserted page count. Interval/superset reuse, acquisition and new adjustment-aware table contracts remain later slices.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
