@@ -24,6 +24,7 @@ from engine.v2.ops.experiments import (
     resolve_experiment_plan,
 )
 from engine.v2.ops.fingerprints import environment_identity, source_closure
+from engine.v2.foundation.final_holdout import declaration_from_document, request_from_registration
 from engine.v2.research.experiment_population import load_population
 
 
@@ -42,10 +43,14 @@ class NativeRegistration:
         return content_hash(self.document)
 
 
-def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids):
+def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids, final_read=None):
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
+    try:
+        declaration = None if final_read is None else declaration_from_document(to_document(final_read))
+    except (ValueError, TypeError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "invalid final-read preregistration metadata") from None
     try:
         safe_relative_path(plan.runner)
         if (spec.input_files != () or not plan.runner.endswith(".py")
@@ -81,6 +86,9 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids):
         "holdouts": {name: events.iloc[0][name] for name in (
             "holdout_as_of_month", "random_membership_version", "rolling_membership_version")},
     }
+    if declaration is not None:
+        document.update(schema_version="native_experiment_registration.v1.1",
+                        final_read=to_document(declaration))
     key = content_hash({"experiment_id": plan.experiment_id, "arm": plan.arms[0]})
     return NativeRegistration("native_" + key.removeprefix("sha256:"),
                               canonical_json(document).encode("utf-8")), spec
@@ -97,8 +105,10 @@ def _existing(conn, store, registration):
     try:
         evidence = json.loads(row["evidence_json"])
         ref = from_document(ArtifactRef, evidence["native_registration"])
-        expected_ref = artifact_reference(registration.binding_json, "native_experiment_registration.v1.0")
-        valid = (row["spec_hash"] == registration.document["spec_hash"]
+        schema = registration.document["schema_version"]
+        expected_ref = artifact_reference(registration.binding_json, schema)
+        valid = (schema in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1")
+                 and row["spec_hash"] == registration.document["spec_hash"]
                  and row["mode"] == "primary"
                  and row["input_hash"] == row["registered_input"] == registration.variant_id
                  and row["registered_payload"] == content_hash({
@@ -115,18 +125,18 @@ def _existing(conn, store, registration):
 
 
 def register_native(conn, store, repository, spec, *, code_root, as_of_month,
-                    scope="shadow", event_ids=None):
+                    scope="shadow", event_ids=None, final_read=None):
     """Explicitly reserve an exact current binding before any outcome is read.
 
     Publication precedes the short catalog transaction. A failed commit can
     leave an unreferenced complete object, never a partially admitted binding.
     """
     registration, spec = _binding(repository, spec, code_root=code_root, as_of_month=as_of_month,
-                                  scope=scope, event_ids=event_ids)
+                                  scope=scope, event_ids=event_ids, final_read=final_read)
     if _existing(conn, store, registration):
         return registration
     ref = store.publish_bytes(registration.binding_json,
-                              schema_ref="native_experiment_registration.v1.0")
+                              schema_ref=registration.document["schema_version"])
     with transaction(conn):
         if _existing(conn, store, registration):
             return registration
@@ -144,10 +154,10 @@ def register_native(conn, store, repository, spec, *, code_root, as_of_month,
 
 
 def require_native_registration(conn, store, repository, spec, *, code_root,
-                                as_of_month, scope="shadow", event_ids=None):
+                                as_of_month, scope="shadow", event_ids=None, final_read=None):
     """Read-only admission; never create registration, ledger, or result rows."""
     registration, _ = _binding(repository, spec, code_root=code_root, as_of_month=as_of_month,
-                               scope=scope, event_ids=event_ids)
+                               scope=scope, event_ids=event_ids, final_read=final_read)
     if not _existing(conn, store, registration):
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     return registration
@@ -157,3 +167,17 @@ def verify_native_registration(conn, store, registration):
     """Verify stored admission without claiming current-request revalidation."""
     if not isinstance(registration, NativeRegistration) or not _existing(conn, store, registration):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native outcome requires an intact registration")
+
+
+def prepare_final_holdout_request(conn, store, registration):
+    """Derive a request from preregistered metadata only; grant no authority."""
+    verify_native_registration(conn, store, registration)
+    try:
+        document = registration.document
+        if canonical_json(document).encode() != registration.binding_json:
+            raise ValueError
+        return request_from_registration(document, registration.run_id,
+                                         artifact_reference(registration.binding_json,
+                                                            document["schema_version"]))
+    except (ValueError, TypeError, KeyError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "invalid final-read registration metadata") from None
