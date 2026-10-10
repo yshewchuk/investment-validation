@@ -2,6 +2,8 @@
 
 reviews:
   profile: assertive
+  auto_review:
+    enabled: false  # requested only by the PR watcher (user SOP 2026-10-10)
   request_changes_workflow: true
   path_filters:
     - "!dashboard/published/**"
