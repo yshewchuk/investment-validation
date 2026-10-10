@@ -614,6 +614,9 @@ shared foundation definitions; its explicit month/version/snapshot context and
 typed refusal boundary are documented in the research component contract.
 The v2 research boundary requires explicit holdout context over a pinned v2
 snapshot. Completed experiments need not remain runnable.
+The proposed [final-read boundary](engine/v2/research/ARCHITECTURE.md#proposed-authorized-final-read-490)
+is user-authorized and single-use per research decision; it grants no training,
+selection or sweep access. It is design-only; final holdout reads remain unavailable.
 
 EOD source availability is a separate admission contract from session identity.
 Pinned object hashes prove which bytes were read; an observation day, import
