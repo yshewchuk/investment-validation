@@ -33,7 +33,20 @@ from engine.v2.scoring.stages import (
     receipt,
 )
 
-__all__ = ["SourceBundle", "build_native_score_inputs", "fold_pool", "SUPPORTED_STRATEGIES"]
+__all__ = ["SourceBundle", "build_native_score_inputs", "fold_pool", "SUPPORTED_STRATEGIES",
+           "AnswerFieldsInSource"]
+
+
+class AnswerFieldsInSource(ValueError):
+    """A calculated answer field name appeared in a source input.
+
+    ``fields`` holds the matched answer-field NAMES only (a fixed vocabulary,
+    never staged mapping keys or values), so it is safe to publish.
+    """
+
+    def __init__(self, message: str, fields: list[str]) -> None:
+        super().__init__(message)
+        self.fields = fields
 
 _ANSWER_FIELDS = frozenset({
     "legs", "selected_legs", "selected_contracts", "resolved_legs",
@@ -371,7 +384,9 @@ def _answer_paths(value: Any, path: str) -> list[str]:
 def _reject_answers(name: str, values: Any) -> None:
     forbidden = sorted(_answer_paths(values, name))
     if forbidden:
-        raise ValueError(f"{name} contains calculated answer fields: {forbidden}")
+        raise AnswerFieldsInSource(
+            f"{name} contains calculated answer fields: {forbidden}",
+            sorted({path.rsplit(".", 1)[-1] for path in forbidden}))
 
 
 def _finite_number(value: Any, label: str) -> float:
