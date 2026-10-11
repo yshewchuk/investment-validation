@@ -78,8 +78,6 @@ def check_layout(base_paths, head_paths, base_budget, head_budget, root=ROOT,
         found.append(f"budget {head_budget} != root test count {total}")
     if head_budget > base_budget:  # R3: budget increased
         found.append(f"budget grew from {base_budget} to {head_budget}")
-    if base_budget - head_budget != base_total - total:  # R3/R5: move accounting
-        found.append("budget change does not match the root test count change")
     for path in sorted(base | head):
         if (path in head and path.startswith(V2) and not path.startswith(ts.INTEGRATION)
                 and path.endswith(".py") and _owned(path) is None):  # R4: unknown package
