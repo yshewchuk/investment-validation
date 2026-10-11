@@ -98,7 +98,10 @@ caller wraps a read in `holdout_refusal.record_holdout_refusal(experiment_id,
 ledger_path)`, which on `HOLDOUT_ACCESS_DENIED` appends one plain ledger row
 (id, date, `stage="refused:HOLDOUT_ACCESS_DENIED"`, other columns empty) and
 re-raises the same refusal. No metrics, partial results or holdout data are
-recorded; a failed append is logged and never masks the refusal.
+recorded; a failed append is logged and never masks the refusal. The recorded
+native prediction runner already writes its own `refused` outcome row
+(`native_outcomes.STAGES`) and does not use this wrapper; `ledger_context`
+excludes every `refused*` row from specs tried.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout
