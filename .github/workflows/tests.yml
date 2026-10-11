@@ -65,7 +65,10 @@ jobs:
 
       - name: Print shard matrix
         id: matrix
-        run: echo "matrix=$(python3 tools/ci_shards.py matrix)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          MATRIX="$(python3 tools/ci_shards.py matrix)"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   shard:
     name: tests (${{ matrix.shard }})
@@ -114,11 +117,14 @@ jobs:
           if [ -n "$SELECTION_FILE" ]; then
             SEL=(--selection "$SELECTION_FILE")
           fi
-          mapfile -t FILES < <(python3 tools/ci_shards.py files "$SHARD" "${SEL[@]}")
-          if [ "${#FILES[@]}" -eq 0 ]; then
+          # Capture first: a failing tool must fail this step (mapfile < <(...) would
+          # swallow the producer's exit status and run zero tests).
+          LIST="$(python3 tools/ci_shards.py files "$SHARD" "${SEL[@]}")"
+          if [ -z "$LIST" ]; then
             echo "No test files selected for shard $SHARD; skipping pytest."
             exit 0
           fi
+          mapfile -t FILES <<< "$LIST"
           python -m pytest -n auto --dist loadgroup -m "not needs_data and not needs_corpus and not heavy_host and not browser" -rfE --durations=25 --junitxml=junit.xml "${FILES[@]}"
 
       - name: Upload test results
