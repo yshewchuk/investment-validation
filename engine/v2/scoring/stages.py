@@ -1203,7 +1203,9 @@ def _decision_days_to_print(inputs: NativeScoreInputs) -> float | None:
     """The scorer-computed days_to_print (decision date `as_of`, else `requested_as_of`;
     never entry_date), or None. Never a captured value."""
     context = inputs.context
-    decision = context.get("as_of") or context.get("requested_as_of")
+    decision = context.get("as_of")
+    if decision is None:  # fall back ONLY when as_of is absent; falsy invalid values stay invalid
+        decision = context.get("requested_as_of")
     return financial.days_to_print(context.get("event_date"), decision)
 
 

@@ -376,6 +376,9 @@ def _assert_days_absent(inputs):
     values, receipt_values, overlay = _days_surfaces(inputs)
     assert "days_to_print" not in values
     assert "days_to_print" not in receipt_values
+    facts = _facts(inputs, values)
+    assert "days_to_print" not in facts
+    assert "days_to_print" not in facts["_native_stage_facts"]
     assert "days_to_print" not in overlay
 
 
@@ -398,6 +401,36 @@ def test_as_of_wins_over_conflicting_requested_as_of(tmp_path):
 
 def test_neither_decision_date_leaves_it_absent():
     _assert_days_absent(_inputs(context_overrides={"as_of": _DROP}))
+
+
+#: Supplied-but-invalid as_of values: only a missing/None as_of may fall back.
+_INVALID_AS_OF = (False, 0, 0.0, "", "junk", 20261007)
+
+
+@pytest.mark.parametrize("invalid_as_of", _INVALID_AS_OF)
+def test_invalid_as_of_never_falls_back_to_requested_as_of(invalid_as_of):
+    # A supplied (even falsy/invalid) as_of is parsed strictly; the identity
+    # requested_as_of must never replace it, so days_to_print is absent from
+    # every surface even though the forecast consumer wants it.
+    inputs = _inputs(forecast_coefficients={"days_to_print": 1.0},
+                     context_overrides={"as_of": invalid_as_of,
+                                        "requested_as_of": "2026-10-07"})
+    _assert_days_absent(inputs)
+
+
+def test_as_of_none_or_absent_falls_back_to_requested_as_of(tmp_path):
+    # A present-but-None as_of is the only supplied-as_of fallback case...
+    _assert_days_on_all_surfaces(
+        tmp_path,
+        _inputs(context_overrides={"as_of": None,
+                                   "requested_as_of": "2026-10-07"}),
+        20.0)
+    # ...and an absent as_of key falls back too.
+    _assert_days_on_all_surfaces(
+        tmp_path,
+        _inputs(context_overrides={"as_of": _DROP,
+                                   "requested_as_of": "2026-10-07"}),
+        20.0)
 
 
 def test_missing_event_date_leaves_days_absent():
