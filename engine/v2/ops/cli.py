@@ -170,6 +170,13 @@ def _add_price_refresh_command(commands):
     price_refresh.add_argument("--dry-run", action="store_true",
                                help="print plan counts only; touches disk (Tier-2 events, "
                                     "the Tier-1 fetch store) but never the network")
+    # SUPPRESS keeps the default namespace unchanged when the flags are absent.
+    price_refresh.add_argument("--tickers", default=argparse.SUPPRESS,
+                               help="comma list or @file: plan exactly these names plus the "
+                                    "calendar ticker (requires --source-root)")
+    price_refresh.add_argument("--source-root", default=argparse.SUPPRESS,
+                               help="source tree whose data/raw/fetch holds fetch history "
+                                    "(requires --tickers)")
 
 
 def _add_refresh_mode_arguments(plan):
@@ -975,7 +982,22 @@ def price_refresh_command(args, root):
     ``<root>/price_refresh/<session>.json``."""
     from engine.v2.ops.legacy_adapter import invoke_price_refresh
 
-    result = invoke_price_refresh(args.session, dry_run=args.dry_run)
+    tickers_arg = getattr(args, "tickers", None)
+    source_root = getattr(args, "source_root", None)
+    if source_root is not None and not source_root.strip():
+        raise fail("INVALID_REQUEST", "--source-root must not be blank")
+    if (tickers_arg is None) != (source_root is None):
+        raise fail("INVALID_REQUEST", "--tickers and --source-root must be given together")
+    if source_root is not None:
+        source_root = Path(source_root)
+    if tickers_arg is None:
+        result = invoke_price_refresh(args.session, dry_run=args.dry_run)
+    else:
+        planned = _ticker_list(tickers_arg)
+        if not planned:
+            raise fail("INVALID_REQUEST", "--tickers names no tickers")
+        result = invoke_price_refresh(args.session, dry_run=args.dry_run,
+                                      planned_tickers=planned, source_root=source_root)
     plan = result["plan"]
     if args.dry_run:
         return {"session": plan["session"], "dry_run": True,
