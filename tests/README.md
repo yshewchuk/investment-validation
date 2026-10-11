@@ -168,6 +168,20 @@ python3 tools/bounded_run.py --cores 8 -- python3 -m pytest -q -n 4 --dist loadg
 
 The `heavy_host` and `browser` tests keep their existing procedure (see above).
 
+### CI shards
+
+CI splits the suite into parallel jobs, one per shard. `tests/shards.toml` is the
+only declaration: ordered `[[shard]]` tables of fnmatch patterns (`*` also matches
+`/`), first match wins, and the last shard is the remainder that owns every file no
+pattern claims, so a new test file can never fall out of CI. `python3 tools/ci_shards.py matrix`
+prints the job matrix and `python3 tools/ci_shards.py files SHARD [--selection FILE]`
+prints a shard's files (a PR's selection from `select-tests` is intersected with it,
+and an empty result skips the shard). `tests/v2/integration/test_ci_shards.py` checks
+that every test file is in exactly one shard and that no pattern is dead or shadowed.
+The required check `test` is an aggregator job that fails unless the plan job and
+every shard job succeeded. To rebalance, move a pattern between shards; keep each
+shard under about 10 minutes of wall time.
+
 ### PR test selection
 
 On pull requests, `tools/mutation_pilot.py select-tests` uses the tracked-file
