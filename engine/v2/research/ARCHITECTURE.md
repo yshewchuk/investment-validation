@@ -93,15 +93,11 @@ before returning a frame to metric/report writers. Missing/invalid context,
 an as-of month later than the current UTC month,
 unknown purposes and an entirely excluded population receive the same refusal.
 There is no date fallback, partial returned frame, report write or retry here.
-Final holdout reads are unavailable. The loaders write nothing themselves; a
-caller wraps a read in `holdout_refusal.record_holdout_refusal(experiment_id,
-ledger_path)`, which on `HOLDOUT_ACCESS_DENIED` appends one plain ledger row
-(id, date, `stage="refused:HOLDOUT_ACCESS_DENIED"`, other columns empty) and
-re-raises the same refusal. No metrics, partial results or holdout data are
-recorded; a failed append is logged and never masks the refusal. The recorded
-native prediction runner already writes its own `refused` outcome row
-(`native_outcomes.STAGES`) and does not use this wrapper; `ledger_context`
-excludes every `refused*` row from specs tried.
+Final holdout reads are unavailable. The loaders write nothing themselves; the
+recorded native prediction runner writes one plain `refused` outcome ledger row
+(`native_outcomes.STAGES`; no metrics) on `HOLDOUT_ACCESS_DENIED`, and the
+`--no-ledger` smoke paths write none. `ledger_context` excludes every
+`refused*` row from specs tried.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout
