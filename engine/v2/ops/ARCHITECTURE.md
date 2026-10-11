@@ -1117,16 +1117,16 @@ strategies by construction, so no legacy read is needed; it is instead
 checked against `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset
 assertion paid once at import time, no I/O, no legacy dependency).
 
-**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops.
-The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
-`experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, and `fingerprints.environment_identity`/`source_closure`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
+**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
+`experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, `fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
 `experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Prediction reporting consumes public `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Other modules stay internal.
 
-### Proposed final-holdout authority (#490)
+### Final-holdout authorization (#490)
 
-Design only: ops will own the private durable user-authorization/spend ledger and fenced lifecycle in the [research final-read contract](../research/ARCHITECTURE.md#proposed-authorized-final-read-490). Only an interactive user act can create authorization; agents and the supervisor may prepare a request or reconcile saved evidence, never authorize it. The dedicated tool leaf composes the peer packages; ops gains no research import or generic final-read job/bypass.
-Authorization facts and the unique decision spend commit together in the catalog before reading. Filesystem receipts/results publish outside SQL; a later transaction binds their verified references. Reconciliation never repeats a started read. Revocation and winner changes serialize with read start and completion; spend survives both.
-Final-read records use their own versioned decision/request namespace, not #555's `(experiment_id, refused)` slot or #565's existing experiment/variant outcome slot. Reuse #555's private pin-bound refusal evidence, fenced reconciliation, redaction and fail-closed publication rules without treating a refusal receipt as authorization; ordinary experiment `--no-ledger` semantics remain unchanged. `HOLDOUT_ACCESS_DENIED` depends on #555's ops-code registration; other named refusals already exist. No new refusal code is proposed.
+| Condition | Outcome |
+| --- | --- |
+| New authorization | `final_holdout.authorize_final_holdout(conn, store, request, *, clock)` is private with no production caller or result-read capability. It requires exact terminal assent and records the process OS identity; the confirmation does not authenticate the human at the terminal. It verifies catalog registration and rechecks the exact request in the committing transaction. Migration 10 stores an immutable, permanent row keyed by `experiment_id` with request, registration, actor, timestamp, and confirmation. This final-read record is separate from ordinary experiment/variant outcomes. Ops does not import research. |
+| Repeat, conflict, or failure | The catalog uses `BEGIN IMMEDIATE` to serialize competing spends; the same UID confirming an identical request gets the original acknowledgement, including after an account rename.<br>Changed request bytes → `IDEMPOTENCY_CONFLICT`; mismatch with registration → `EXPERIMENT_IDENTITY_CONFLICT`.<br>Noninteractive/cancelled assent or another UID → `HOLDOUT_ACCESS_DENIED`; storage failure → `RESOURCE_UNAVAILABLE`.<br>Uncertain commit → no acknowledgement; reconcile with an identical interactive retry. |
 
 ## External systems and libraries
 
