@@ -107,7 +107,9 @@ def _supervise(tmp_path, source, document, registration, parameters, *, key="smo
         assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == checkpoint_count
         if state == "succeeded":
             assert len(outputs) == 1 and outputs[0]["name"] == "native_gate_consumption"
-            return json.loads(store.read_verified(artifact(conn, store, outputs[0]["artifact_id"])))
+            ref = artifact(conn, store, outputs[0]["artifact_id"])
+            assert ref.schema_ref == "native_gate_consumption.v1.0"
+            return json.loads(store.read_verified(ref))
         assert outputs == []
         failure = json.loads(attempt["failure_json"])
         if expected_details is not None:
@@ -682,3 +684,14 @@ def test_supervised_receipt_conflict_has_no_success_output(source, tmp_path, mon
     assert result["retryable"] is False
     assert outside.read_bytes() == b"foreign sentinel"
     assert _catalog(source[0]) == before
+
+
+@pytest.mark.parametrize("parameters", [None, [], 0, False, "", ()])
+def test_non_mapping_worker_arguments_refuse_before_io(tmp_path, parameters):
+    """The real dispatch boundary refuses malformed argument shapes without staging."""
+    stage = tmp_path / "must-not-open"
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.retryable is False
+    assert list(tmp_path.iterdir()) == []

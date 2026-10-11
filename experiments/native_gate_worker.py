@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import stat
+from collections.abc import Mapping
 from dataclasses import asdict
 from math import isfinite
 from pathlib import Path
@@ -89,6 +90,8 @@ def _admit(parameters, root, conn, store):
 
 def run(parameters, root):
     """Read only the registered snapshot and return a complete staged receipt."""
+    if not isinstance(parameters, Mapping):
+        raise fail("INVALID_EXPERIMENT_SPEC", "native worker arguments must be a mapping")
     if parameters.get("purpose", "sweep") != "sweep":
         raise fail("HOLDOUT_ACCESS_DENIED", "native pricing permits sweep reads only")
     if parameters.get("no_ledger") is not True:

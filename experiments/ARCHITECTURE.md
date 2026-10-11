@@ -95,7 +95,7 @@ there is no dedicated plan CLI. The worker's catalog connection is read-only.
 Each staged document is limited to 16 MiB, opened nonblocking without following
 the final symlink, and checked as a regular file on the open descriptor. A
 replacement after opening cannot redirect the bytes; growth past the cap refuses.
-The supervisor publishes one consumption receipt after complete pricing,
+The supervisor publishes one `native_gate_consumption.v1.0` receipt after complete pricing,
 including the immutable plan, stage inputs and per-event mark-based cash flows.
 Its staging file is created exclusively with a nonblocking, no-follow descriptor;
 existing destinations are never opened or overwritten.
@@ -104,7 +104,7 @@ This receipt is not an evaluation report or promotion evidence.
 | Native worker condition | Outcome |
 | --- | --- |
 | Recording requested or missing smoke opt-in | Submission `INVALID_REQUEST`; worker defense `INVALID_EXPERIMENT_SPEC` before catalog access. |
-| Unsupported recipe or malformed staging, including missing/null required spec fields or excessive JSON nesting; missing staged bytes | `INVALID_EXPERIMENT_SPEC`; `INPUT_CHANGED`, respectively, before pricing. |
+| Non-mapping worker arguments; unsupported recipe or malformed staging, including missing/null required spec fields or excessive JSON nesting; missing staged bytes | `INVALID_EXPERIMENT_SPEC` before catalog access for non-mappings and before pricing for malformed staging; `INPUT_CHANGED` for missing bytes. |
 | Changed staged spec, registration, expected identity, source or numerical environment | `EXPERIMENT_IDENTITY_CONFLICT`; preserve registration and prior evidence. |
 | Unresolved pin or non-sweep purpose | `SNAPSHOT_UNRESOLVED` or `HOLDOUT_ACCESS_DENIED`; no pricing receipt or partial report. |
 | Incomplete/nonfinite pricing or pinned-data failure | Incomplete/nonfinite pricing yields `EXPERIMENT_VARIANT_FAILED`. Data codes registered with ops retain their code; others use that fallback. The original data code remains only in private `data_failure_code` details; no success receipt. |
