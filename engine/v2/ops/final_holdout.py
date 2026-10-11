@@ -228,7 +228,11 @@ def revoke_final_holdout(conn, store, request, *, clock):
                     raise fail("HOLDOUT_ACCESS_DENIED", "the final read is already spent")
                 if latest["state"] != "read_started":
                     raise fail("VALIDATION_FAILED", "final-read state history is inconsistent")
-            fence = 1 if latest is None else int(latest["fence"]) + 1
+            fence = 1
+            if latest is not None:
+                if latest["fence"] >= 2**63 - 1:
+                    raise fail("VALIDATION_FAILED", "final-read revocation fence is exhausted")
+                fence = int(latest["fence"]) + 1
             stamp = format_timestamp(clock.now())
             conn.execute("INSERT INTO final_holdout_state_events (experiment_id,request_digest,state,fence,actor,occurred_at,confirmation) "
                          "VALUES (?,?, 'revoked',?,?,?,?)", (request.experiment_id, digest, fence, actor, stamp, phrase))

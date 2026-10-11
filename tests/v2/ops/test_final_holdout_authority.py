@@ -535,6 +535,28 @@ def test_revocation_before_start_and_state_history_are_permanent(context, monkey
     assert [row["state"] for row in _state_events(context)] == ["revoked"]
 
 
+def test_revoke_refuses_maximum_started_fence_without_mutation(context, monkeypatch):
+    authorization = _authorize(context)
+    identity, *_ = authority.process_info(os.getpid(), authority.read_boot_id())
+    context.conn.execute(
+        "INSERT INTO final_holdout_state_events "
+        "(experiment_id,request_digest,state,fence,owner_boot_id,owner_pid,owner_start_ticks,"
+        "owner_process_group,actor,occurred_at,confirmation) "
+        "VALUES (?,?, 'read_started',?,?,?,?,?,?,?,?)",
+        (context.request.experiment_id, authorization["request_digest"], 2**63 - 1,
+         identity.boot_id, identity.pid, identity.start_ticks, identity.process_group,
+         "1234:synthetic-user", "2026-10-10T00:00:00.000000Z", _state_phrase(context, "START")),
+    )
+    authorization_before = _rows(context)
+    events_before = [dict(row) for row in _state_events(context)]
+    _state_assent(monkeypatch, context, "REVOKE")
+    with pytest.raises(OpsError) as exc_info:
+        _revoke(context)
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert _rows(context) == authorization_before
+    assert [dict(row) for row in _state_events(context)] == events_before
+
+
 def test_recovery_refuses_while_owner_is_alive(context, monkeypatch):
     _authorize(context)
     _state_assent(monkeypatch, context, "START")
@@ -701,12 +723,16 @@ def test_start_and_revoke_serialize_to_a_revoked_fence(context, monkeypatch):
 
 def test_boot_change_proves_the_old_process_dead(context, monkeypatch):
     authorization = _authorize(context)
-    monkeypatch.setattr(context.clock, "now", lambda: datetime(2026, 10, 10, 0, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(authority, "read_boot_id", lambda: "synthetic-old-boot")
-    _state_assent(monkeypatch, context, "START")
-    started = _start(context)
-    assert started["owner_boot_id"] == "synthetic-old-boot"
-    assert started["occurred_at"] == "2026-10-10T00:01:00.000000Z"
+    identity, *_ = authority.process_info(os.getpid(), "synthetic-old-boot")
+    context.conn.execute(
+        "INSERT INTO final_holdout_state_events "
+        "(experiment_id,request_digest,state,fence,owner_boot_id,owner_pid,owner_start_ticks,"
+        "owner_process_group,actor,occurred_at,confirmation) "
+        "VALUES (?,?, 'read_started',?,?,?,?,?,?,?,?)",
+        (context.request.experiment_id, authorization["request_digest"], 37,
+         identity.boot_id, identity.pid, identity.start_ticks, identity.process_group,
+         "1234:synthetic-user", "2026-10-10T00:01:00.000000Z", _state_phrase(context, "START")),
+    )
     monkeypatch.setattr(context.clock, "now", lambda: datetime(2026, 10, 10, 0, 2, tzinfo=timezone.utc))
     monkeypatch.setattr(authority, "read_boot_id", lambda: "synthetic-new-boot")
     monkeypatch.setattr(authority, "is_alive", lambda *args: pytest.fail("old-boot identity checked in new boot"))
@@ -715,6 +741,11 @@ def test_boot_change_proves_the_old_process_dead(context, monkeypatch):
     assert recovered["state"] == "indeterminate"
     assert recovered["request_digest"] == authorization["request_digest"]
     assert recovered["occurred_at"] == "2026-10-10T00:02:00.000000Z"
+    events = _state_events(context)
+    assert events[0]["fence"] == 37
+    assert recovered["fence"] == 37
+    assert [row["state"] for row in events] == ["read_started", "indeterminate"]
+    assert [row["fence"] for row in events] == [37, 37]
 
 
 @pytest.mark.parametrize(("field", "invalid_value"), [
