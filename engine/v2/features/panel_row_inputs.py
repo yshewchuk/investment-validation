@@ -359,6 +359,30 @@ def _anchor(*sources: object) -> pd.Timestamp | None:
     return max(present) if present else None
 
 
+def _legacy_named_inputs(daily_values: Mapping[str, float],
+                         runup_features: Mapping[str, float]) -> dict[str, float]:
+    """Legacy-named model inputs the panel math does not produce.
+
+    ``or_implied``/``or_rvol30`` are the daily-state ``im``/``rvol30`` (absent
+    when those are absent; panel.py ``ORATS_FEATURES``). ``abs_dist_*`` are
+    absolute values, NaN stays NaN (features.py ``add_absolute_features``).
+    ``has_implied_quote`` is 1.0 only for a present value above 0
+    (features.py ``add_quote_indicators``).
+    """
+    implied = daily_values.get("im")
+    out: dict[str, float] = {
+        "abs_dist_high": abs(runup_features["dist_high"]),
+        "abs_dist_ema": abs(runup_features["dist_ema"]),
+        "has_implied_quote": 1.0 if implied is not None and implied > 0 else 0.0,
+    }
+    if implied is not None:
+        out["or_implied"] = implied
+    rvol = daily_values.get("rvol30")
+    if rvol is not None:
+        out["or_rvol30"] = rvol
+    return out
+
+
 def scan_panel_row(
     repository: repository.Repository,
     snapshot: SnapshotRef,
@@ -419,6 +443,7 @@ def scan_panel_row(
         **history,
         **regime_features,
         **runup_features,
+        **_legacy_named_inputs(daily_state.values, runup_features),
         "date": event_day.date().isoformat(),
     }
     return PanelRowInputs(panel_row=panel_row, panel_anchor=panel_anchor)
