@@ -78,9 +78,13 @@ def test_clean_required_and_succeeded_qualification_is_completed():
     assert _row(report, "primary")["count"] == 2
 
 
-def test_required_failure_is_never_clean_success_even_with_clean_sidecars():
+@pytest.mark.parametrize("required_status", ["failed", "degraded"])
+def test_required_failure_or_degradation_is_never_clean_success_even_with_clean_sidecars(
+        required_status):
     expected = {"primary": "required", "side": "optional", "quality": "qualification"}
-    observed = {"primary": Disposition("failed", reason_code="WORK_FAILED"),
+    observed = {"primary": Disposition(
+                    required_status,
+                    reason_code="WORK_FAILED" if required_status == "failed" else "WORK_DEGRADED"),
                 "side": Disposition("succeeded"), "quality": Disposition("succeeded")}
     report = _report(expected, observed)
     assert report["required_outcome"] == "failed"
@@ -98,13 +102,13 @@ def test_missing_selected_sidecar_waits_and_is_never_inferred_from_idleness():
     assert report["status"] != "completed"
 
 
-def test_qualification_stays_pending_until_every_selected_sidecar_is_terminal():
+def test_optional_pending_sidecar_waits_without_changing_qualification():
     expected = {"primary": "required", "quality": "qualification", "optional": "optional"}
     observed = {"primary": Disposition("succeeded"), "quality": Disposition("succeeded"),
                 "optional": Disposition("pending")}
     report = _report(expected, observed)
     assert report["status"] == "waiting"
-    assert report["qualification_outcome"] == "pending"
+    assert report["qualification_outcome"] == "qualified"
     assert report["sidecars_terminal"] == 1
 
 
@@ -198,21 +202,42 @@ def test_report_rejects_pathlike_identifiers(run_id, expected):
     assert exc.value.code == "INVALID_REQUEST"
 
 
-@pytest.mark.parametrize("sidecar,qualification,overall,terminal_count", [
-    (Disposition("recovery_required"), "invalid", "recovery_required", 1),
-    (Disposition("succeeded", evidence_valid=False), "invalid", "recovery_required", 1),
-    (Disposition("failed", reason_code="SIDE_FAILED"), "failed", "completed_degraded", 2),
-    (Disposition("timed_out", reason_code="SIDE_TIMEOUT"), "failed", "completed_degraded", 2),
+@pytest.mark.parametrize("sidecar,overall,terminal_count", [
+    (Disposition("recovery_required"), "recovery_required", 1),
+    (Disposition("succeeded", evidence_valid=False), "recovery_required", 1),
+    (Disposition("failed", reason_code="SIDE_FAILED"), "completed_degraded", 2),
+    (Disposition("timed_out", reason_code="SIDE_TIMEOUT"), "completed_degraded", 2),
 ])
-def test_optional_sidecar_disposition_is_part_of_requested_qualification(
-        sidecar, qualification, overall, terminal_count):
+def test_optional_sidecar_does_not_change_qualification_outcome(
+        sidecar, overall, terminal_count):
     expected = {"primary": "required", "quality": "qualification", "optional": "optional"}
     observed = {"primary": Disposition("succeeded"), "quality": Disposition("succeeded"),
                 "optional": sidecar}
     report = _report(expected, observed)
-    assert report["qualification_outcome"] == qualification
+    assert report["qualification_outcome"] == "qualified"
     assert report["status"] == overall
     assert report["sidecars_terminal"] == terminal_count
+
+
+def test_optional_count_degrades_report_but_required_count_is_report_only():
+    expected = {"primary": "required", "quality": "qualification", "optional": "optional"}
+    observed = {"primary": Disposition("succeeded", count=7),
+                "quality": Disposition("succeeded"),
+                "optional": Disposition("succeeded", count=2)}
+    report = _report(expected, observed)
+    assert report["required_outcome"] == "completed"
+    assert report["degraded_outcome"] == "degraded"
+    assert report["qualification_outcome"] == "qualified"
+    assert report["status"] == "completed_degraded"
+
+
+def test_qualification_count_marks_qualification_degraded():
+    report = _report({"primary": "required", "quality": "qualification"},
+                     {"primary": Disposition("succeeded"),
+                      "quality": Disposition("succeeded", count=1)})
+    assert report["qualification_outcome"] == "degraded"
+    assert report["degraded_outcome"] == "degraded"
+    assert report["status"] == "completed_degraded"
 
 
 @pytest.mark.parametrize("disposition", [
@@ -275,6 +300,61 @@ def test_service_records_a_real_run_scoped_report_and_is_byte_stable(tmp_path):
         conn.close()
 
 
+def test_same_generation_record_rebuilds_instead_of_using_report_cache(tmp_path):
+    ensure_session(tmp_path, IDENT)
+    state = mark_started(tmp_path, IDENT, 1)
+    conn, service = _service(tmp_path)
+    expected = {"primary": "required", "side": "optional"}
+    path = tmp_path.joinpath(*STATE_DIR, f"{state.active.run_id}.completion.json")
+    try:
+        first = service.record_nightly_completion(
+            IDENT, 1, expected,
+            {"primary": Disposition("succeeded"), "side": Disposition("succeeded")})
+        updated = service.record_nightly_completion(
+            IDENT, 1, expected,
+            {"primary": Disposition("succeeded"),
+             "side": Disposition("failed", reason_code="OPTIONAL_FAILED")})
+        assert first["status"] == "completed"
+        assert updated["status"] == "completed_degraded"
+        assert updated != first
+        assert json.loads(path.read_text()) == updated
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("has_previous", [False, True])
+def test_failed_completion_replace_keeps_previous_report_or_none(
+        tmp_path, monkeypatch, has_previous):
+    ensure_session(tmp_path, IDENT)
+    state = mark_started(tmp_path, IDENT, 1)
+    conn, service = _service(tmp_path)
+    expected = {"primary": "required"}
+    path = tmp_path.joinpath(*STATE_DIR, f"{state.active.run_id}.completion.json")
+    try:
+        if has_previous:
+            service.record_nightly_completion(
+                IDENT, 1, expected, {"primary": Disposition("succeeded")})
+        previous = path.read_bytes() if has_previous else None
+        real_replace = os.replace
+
+        def fail_completion_replace(source, destination):
+            if str(destination).endswith(".completion.json"):
+                raise OSError("replace failed")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(os, "replace", fail_completion_replace)
+        with pytest.raises(OSError, match="replace failed"):
+            service.record_nightly_completion(
+                IDENT, 1, expected,
+                {"primary": Disposition("failed", reason_code="STEP_FAILED")})
+        if previous is None:
+            assert not path.exists()
+        else:
+            assert path.read_bytes() == previous
+    finally:
+        conn.close()
+
+
 def test_overlapping_recorders_and_rerun_share_the_session_lock(tmp_path, monkeypatch):
     ensure_session(tmp_path, IDENT)
     mark_started(tmp_path, IDENT, 1)
@@ -320,10 +400,9 @@ def test_overlapping_recorders_and_rerun_share_the_session_lock(tmp_path, monkey
             release.set()
             report = first.result(timeout=5)
             try:
-                second_report = second.result(timeout=5)
+                assert second.result(timeout=5) == report
             except OpsError as exc:
                 assert exc.code == "CHECKPOINT_INCOMPATIBLE"
-                second_report = report
             active = next_generation.result(timeout=5)
         assert active.active.generation == 2
         old_path = tmp_path.joinpath(*STATE_DIR, f"{report['run_id']}.completion.json")
@@ -332,7 +411,7 @@ def test_overlapping_recorders_and_rerun_share_the_session_lock(tmp_path, monkey
             service.record_nightly_completion(IDENT, 1, expected, observed)
         assert exc.value.code == "CHECKPOINT_INCOMPATIBLE"
         assert old_path.read_bytes() == before
-        assert json.loads(before) in (report, second_report)
+        assert json.loads(before) == report
     finally:
         release.set()
         conn.close()

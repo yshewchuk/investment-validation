@@ -87,17 +87,16 @@ def _required_outcome(required: Mapping[str, Disposition]) -> str:
     return "completed"
 
 
-def _qualification_outcome(items: list[Disposition], sidecars: Mapping[str, Disposition]) -> str:
+def _qualification_outcome(items: list[Disposition]) -> str:
     if not items:
         return "not_requested"
-    if any(not item.evidence_valid or item.status == "recovery_required"
-           for item in sidecars.values()):
+    if any(not item.evidence_valid or item.status == "recovery_required" for item in items):
         return "invalid"
-    if any(item.status == "pending" for item in sidecars.values()):
+    if any(item.status == "pending" for item in items):
         return "pending"
-    if any(item.status in {"failed", "timed_out"} for item in sidecars.values()):
+    if any(item.status in {"failed", "timed_out"} for item in items):
         return "failed"
-    if any(item.status == "degraded" or item.count for item in sidecars.values()):
+    if any(item.status == "degraded" or item.count for item in items):
         return "degraded"
     return "qualified"
 
@@ -145,7 +144,7 @@ def build_completion_report(run_id: str, expected: Mapping[str, str],
             "status": _overall_outcome(required_status, sidecars, degraded),
             "required_outcome": required_status,
             "degraded_outcome": "degraded" if degraded else "clean",
-            "qualification_outcome": _qualification_outcome(qualification, sidecars),
+            "qualification_outcome": _qualification_outcome(qualification),
             "required_count": len(required), "sidecar_count": len(sidecars),
             "sidecars_terminal": sum(item.status in _TERMINAL and item.evidence_valid
                                       for item in sidecars.values()),
