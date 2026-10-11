@@ -61,6 +61,92 @@ def _run(ops_root, conn, clock, source):
         source_root=source, clock=clock)
 
 
+def test_corrupt_history_completion_artifact_refuses_resume(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl", _prediction("row", "2023-12-31"))
+    _run(ops_root, conn, clock, source)
+    state = nightly_history.load_session(ops_root, IDENTITY)
+    artifact = ops_root.joinpath(
+        *nightly_history.STATE_DIR, f"{state.active.run_id}.history-complete.json")
+    artifact.write_text("corrupt")
+
+    with pytest.raises(OpsError) as exc:
+        _run(ops_root, conn, clock, source)
+    assert exc.value.code == "INTEGRITY_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
+    conn.close()
+
+
+def test_pinned_import_revalidates_added_file_after_per_file_commit(tmp_path, monkeypatch):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl", _prediction("first", "2023-12-31"))
+    original = history_import._import_one_file
+    added = False
+
+    def add_file_after_import(*args, **kwargs):
+        nonlocal added
+        result = original(*args, **kwargs)
+        if not kwargs.get("dry_run") and not added:
+            added = True
+            _write_predictions(source, "late.jsonl", _prediction("late", "2023-12-31"))
+        return result
+
+    monkeypatch.setattr(history_import, "_import_one_file", add_file_after_import)
+    with pytest.raises(OpsError) as exc:
+        _run(ops_root, conn, clock, source)
+    assert exc.value.code == "INPUT_CHANGED"
+    assert [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions").fetchall()] == ["prediction:first"]
+    state = nightly_history.load_session(ops_root, IDENTITY)
+    artifact = ops_root.joinpath(
+        *nightly_history.STATE_DIR, f"{state.active.run_id}.history-complete.json")
+    assert not artifact.exists()
+    conn.close()
+
+
+def test_history_pin_capture_rejects_symlinked_ledger_ancestor(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    outside = tmp_path / "outside-ledger"
+    _write_predictions(outside, "2023-12-31.jsonl", _prediction("row", "2023-12-31"))
+    source.mkdir()
+    (source / "ledger").symlink_to(outside / "ledger", target_is_directory=True)
+
+    with pytest.raises(OpsError) as exc:
+        _run(ops_root, conn, clock, source)
+    assert exc.value.code == "INPUT_CHANGED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+def test_pinned_import_rejects_ledger_swap_during_final_revalidation(tmp_path, monkeypatch):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    target = source / "ledger" / "predictions" / "2023-12-31.jsonl"
+    _write_predictions(source, target.name, _prediction("row", "2023-12-31"))
+    outside = tmp_path / "outside"
+    _write_predictions(outside, target.name, _prediction("row", "2023-12-31"))
+    pins = nightly_history._pins(source)
+    original_open = Path.open
+    opens = 0
+
+    def swap_on_second_open(path, *args, **kwargs):
+        nonlocal opens
+        if path == target:
+            opens += 1
+            if opens == 2:
+                (source / "ledger").rename(source / "ledger-original")
+                (source / "ledger").symlink_to(outside / "ledger", target_is_directory=True)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", swap_on_second_open)
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=date.fromisoformat("2023-12-31"),
+            dry_run=False, clock=clock, pinned_files=pins)
+    assert exc.value.code == "INPUT_CHANGED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
+    conn.close()
+
+
 def test_d1_history_import_and_resume_after_source_drift(tmp_path):
     ops_root, conn, clock, source = _setup(tmp_path)
     _write_predictions(source, "2023-12-31.jsonl",
@@ -254,14 +340,14 @@ def test_pinned_history_file_unavailable_refuses(tmp_path, monkeypatch):
     target = source / "ledger" / "predictions" / "2023-12-31.jsonl"
     _write_predictions(source, target.name, _prediction("row", "2023-12-31"))
     pins = nightly_history._pins(source)
-    original_read_bytes = Path.read_bytes
+    original_open = Path.open
 
-    def unavailable(path):
+    def unavailable(path, *args, **kwargs):
         if path == target:
             raise OSError("simulated unavailable pinned file")
-        return original_read_bytes(path)
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", unavailable)
+    monkeypatch.setattr(Path, "open", unavailable)
     with pytest.raises(OpsError) as exc:
         history_import.import_history(
             conn, ops_root, source, through=date.fromisoformat("2023-12-31"),

@@ -10,7 +10,6 @@ from pathlib import Path
 
 from engine.v2.ops import ledger_history_import
 from engine.v2.ops.errors import fail
-from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.ledger_history_import import import_history
 from engine.v2.ops.nightly_chain import ChainResult, ChainStep, run_snapshot_chain
 from engine.v2.ops.nightly_receipts import Effect
@@ -41,8 +40,10 @@ def _pins(source_root: Path) -> tuple[tuple[str, str], ...]:
     if not (source_root / "ledger").is_dir():
         raise fail("SOURCE_NOT_FOUND", "source root has no ledger directory")
     discovered = ledger_history_import.discover_history_files(source_root)
-    return tuple(sorted((relative, file_hash(path).removeprefix("sha256:"))
-                        for relative, path in discovered.items()))
+    return tuple(sorted(
+        (relative, hashlib.sha256(
+            ledger_history_import._read_pinned_bytes(source_root, path)).hexdigest())
+        for relative, path in discovered.items()))
 
 
 def _valid_pin_entries(files):

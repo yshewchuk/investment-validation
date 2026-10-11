@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from datetime import date
 from pathlib import Path
 
@@ -69,14 +71,29 @@ def _row_date(date_field, payload):
                    details={"field": date_field}) from None
 
 
-def _read_lines(path, *, expected_sha256=None):
+def _read_pinned_bytes(source_root, path):
+    path = Path(path)
     try:
-        data = path.read_bytes()
+        root = Path(source_root).resolve(strict=True)
+        with path.open("rb") as stream:
+            opened = Path(os.readlink(f"/proc/self/fd/{stream.fileno()}")).resolve(strict=True)
+            if not opened.is_relative_to(root):
+                raise fail("INPUT_CHANGED", "pinned legacy ledger file escapes source root",
+                           details={"file": path.name})
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise fail("INPUT_CHANGED", "pinned legacy ledger file is not regular",
+                           details={"file": path.name})
+            return stream.read()
     except OSError:
-        if expected_sha256 is None:
-            raise
         raise fail("INPUT_CHANGED", "pinned legacy ledger file is unavailable",
                    details={"file": path.name}) from None
+
+
+def _read_lines(path, *, expected_sha256=None, source_root=None):
+    if expected_sha256 is None:
+        data = path.read_bytes()
+    else:
+        data = _read_pinned_bytes(source_root, path)
     content_sha256 = hashlib.sha256(data).hexdigest()
     if expected_sha256 is not None and content_sha256 != expected_sha256:
         raise fail("INPUT_CHANGED", "pinned legacy ledger file changed",
@@ -218,7 +235,7 @@ def _new_divergences(conn, before_ids):
 
 
 def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, clock,
-                     committed_owner, totals, divergent_ids, summary,
+                     committed_owner, totals, divergent_ids, summary, source_root=None,
                      expected_sha256=None):
     """Import one legacy ledger file's leading in-scope prefix, mutating
     ``totals`` (this family's running counters, already installed in
@@ -239,7 +256,8 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
     provenance conflict, not a legacy duplicate -- still refuses typed.
     """
     totals["files"] += 1
-    lines, source_hash = _read_lines(path, expected_sha256=expected_sha256)
+    lines, source_hash = _read_lines(
+        path, expected_sha256=expected_sha256, source_root=source_root)
     included = _included_prefix(lines, date_field, through)
     totals["lines"] += len(included)
     low, high = _date_span(included, date_field)
@@ -278,8 +296,9 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
 
 
 def discover_history_files(source_root):
-    if any((source_root / subdir).is_symlink()
-           for _, subdir, _, _ in _FAMILIES):
+    if ((source_root / "ledger").is_symlink()
+            or any((source_root / subdir).is_symlink()
+                   for _, subdir, _, _ in _FAMILIES)):
         raise fail("INPUT_CHANGED", "ledger history directory is a symlink")
     discovered = {path.relative_to(source_root).as_posix(): path
                   for _, subdir, _, _ in _FAMILIES
@@ -310,6 +329,16 @@ def _validate_history_pins(pinned_files, discovered):
     return pins
 
 
+def _validate_pinned_history_files(source_root, pinned_files):
+    discovered = discover_history_files(source_root)
+    pins = _validate_history_pins(pinned_files, discovered)
+    for relative, digest in pins.items():
+        data = _read_pinned_bytes(source_root, discovered[relative])
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise fail("INPUT_CHANGED", "pinned legacy ledger file changed",
+                       details={"file": discovered[relative].name})
+
+
 def _history_files_by_family(source_root, pinned_files):
     groups = {family: [] for family, _, _, _ in _FAMILIES}
     if pinned_files is None:
@@ -321,10 +350,8 @@ def _history_files_by_family(source_root, pinned_files):
     discovered = discover_history_files(source_root)
     for rel, digest in _validate_history_pins(pinned_files, discovered).items():
         path = discovered[rel]
-        family = next((f for f, subdir, _, _ in _FAMILIES
-                       if rel.startswith(subdir + "/")), None)
-        if family is None:
-            raise fail("INVALID_REQUEST", "pinned file path is outside a ledger family")
+        family = next(f for f, subdir, _, _ in _FAMILIES
+                      if rel.startswith(subdir + "/"))
         groups[family].append((path, digest))
     for files in groups.values():
         files.sort(key=lambda item: item[0].name)
@@ -349,10 +376,12 @@ def _run(conn, source_root, *, through, dry_run, clock, pinned_files=None):
             committed_owner, low, high = _import_one_file(
                 conn, path, family, kind, date_field, through=through, dry_run=dry_run,
                 clock=clock, committed_owner=committed_owner, totals=totals,
-                divergent_ids=divergent_ids, summary=summary,
+                divergent_ids=divergent_ids, summary=summary, source_root=source_root,
                 expected_sha256=expected_sha256)
             seen_min = _merge_bound(seen_min, low, keep_lower=True)
             seen_max = _merge_bound(seen_max, high, keep_lower=False)
+    if pinned_files is not None:
+        _validate_pinned_history_files(source_root, pinned_files)
     summary["date_range"] = {"min": seen_min.isoformat() if seen_min else None,
                              "max": seen_max.isoformat() if seen_max else None}
     return summary
