@@ -373,6 +373,22 @@ def _state_events(context):
         "SELECT * FROM final_holdout_state_events ORDER BY event_id")]
 
 
+@pytest.mark.parametrize("action", ["START", "REVOKE"])
+def test_state_action_rechecks_registration_after_assent(context, monkeypatch, action):
+    _authorize(context)
+
+    def changed_during_assent(prompt):
+        assert not context.conn.in_transaction
+        context.conn.execute("UPDATE hypotheses SET input_hash=?", (content_hash("changed"),))
+        return _state_phrase(context, action)
+
+    monkeypatch.setattr(builtins, "input", changed_during_assent)
+    state_action = _start if action == "START" else _revoke
+    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+        state_action(context)
+    assert _state_events(context) == []
+
+
 def test_fenced_start_spends_once_and_revocation_invalidates_publication(context, monkeypatch):
     _authorize(context)
     _state_assent(monkeypatch, context, "START")
@@ -393,6 +409,11 @@ def test_fenced_start_spends_once_and_revocation_invalidates_publication(context
     revoked = _revoke(context)
     assert revoked["state"] == "revoked"
     assert revoked["fence"] == 2
+    events = _state_events(context)
+    assert [(row["actor"], row["occurred_at"], row["confirmation"]) for row in events] == [
+        ("1234:synthetic-user", "2026-10-10T00:00:00.000000Z", _state_phrase(context, "START")),
+        ("1234:synthetic-user", "2026-10-10T00:00:00.000000Z", _state_phrase(context, "REVOKE")),
+    ]
     assert not authority.final_holdout_fence_current(
         context.conn, context.request.experiment_id, started["request_digest"], started["fence"])
     with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
