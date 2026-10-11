@@ -1,6 +1,6 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:a1af7add9fccfdf7ed109ebca0d0c240c42e564e59334d178ed223d56d2f770d",
+  "suite_version": "phase2_coverage_suite:b7295a7e36e9af849fc68fcac89f333f2d2651c3b5a11040b0a51d00085b1052",
   "test_files": [
     "tests/test_checks_phase2_corpus_parity.py",
     "tests/test_checks_phase2_fault_matrix.py",
@@ -30,7 +30,7 @@
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/test_v2_ops_fingerprints_model_scan.py",
     "tests/test_v2_ops_ledger_history_import.py",
-    "tests/test_v2_ops_price_history.py",
+    "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/integration/test_checks_phase2_parity.py",
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
     "tests/v2/ops/test_v2_ops_effects_graph.py",

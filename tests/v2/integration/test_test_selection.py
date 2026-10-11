@@ -139,6 +139,12 @@ def test_phase1_suite_keeps_a_baseline_test_that_did_not_move(tmp_path):
     assert "tests/test_still_root.py" in phase1_suite(root)
 
 
+def test_phase1_suite_keeps_relocated_price_history_test():
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    assert "tests/v2/ops/test_v2_ops_price_history.py" in phase1_suite(ROOT)
+
+
 def test_phase1_baseline_inventory_matches_active_suite():
     """Every baseline-listed test is retained in the active Phase 1 suite.
 
