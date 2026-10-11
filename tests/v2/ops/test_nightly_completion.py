@@ -105,11 +105,31 @@ def test_missing_selected_sidecar_waits_and_is_never_inferred_from_idleness():
 def test_optional_pending_sidecar_waits_without_changing_qualification():
     expected = {"primary": "required", "quality": "qualification", "optional": "optional"}
     observed = {"primary": Disposition("succeeded"), "quality": Disposition("succeeded"),
-                "optional": Disposition("pending")}
+                "optional": Disposition("pending", count=1)}
     report = _report(expected, observed)
     assert report["status"] == "waiting"
+    assert report["degraded_outcome"] == "degraded"
     assert report["qualification_outcome"] == "qualified"
     assert report["sidecars_terminal"] == 1
+
+
+def test_missing_qualification_disposition_is_pending():
+    expected = {"primary": "required", "quality": "qualification"}
+    report = _report(expected, {"primary": Disposition("succeeded")})
+    assert report["qualification_outcome"] == "pending"
+    assert report["status"] == "waiting"
+
+
+@pytest.mark.parametrize("quality", [
+    Disposition("recovery_required", reason_code="RECOVERY_REQUIRED"),
+    Disposition("succeeded", evidence_valid=False),
+    Disposition("pending", evidence_valid=False),
+])
+def test_recovery_or_invalid_qualification_evidence_is_invalid(quality):
+    expected = {"primary": "required", "quality": "qualification"}
+    report = _report(expected, {"primary": Disposition("succeeded"), "quality": quality})
+    assert report["qualification_outcome"] == "invalid"
+    assert report["status"] == "recovery_required"
 
 
 def test_optional_sidecar_failure_is_completed_degraded_without_qualification():
@@ -261,16 +281,54 @@ def test_invalid_work_names_and_roles_have_a_named_work_refusal(expected):
     assert exc.value.problem.message == "completion needs named expected work"
 
 
+@pytest.mark.parametrize("identity", [None, "bad", {}])
+def test_recording_malformed_identity_refuses_without_report_write(tmp_path, identity):
+    conn, service = _service(tmp_path)
+    try:
+        with pytest.raises(OpsError) as exc:
+            service.record_nightly_completion(identity, 1, {"primary": "required"}, {})
+        assert exc.value.code == "INVALID_REQUEST"
+        report_dir = tmp_path.joinpath(*STATE_DIR)
+        assert not report_dir.exists() or not list(report_dir.glob("*.completion.json"))
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("expected, observed", [
+    ({"primary": "invalid-role"}, {}),
+    ({"primary": "required"}, {"primary": object()}),
+])
+def test_recording_malformed_work_refuses_without_report_write(tmp_path, expected, observed):
+    ensure_session(tmp_path, IDENT)
+    mark_started(tmp_path, IDENT, 1)
+    conn, service = _service(tmp_path)
+    try:
+        with pytest.raises(OpsError) as exc:
+            service.record_nightly_completion(IDENT, 1, expected, observed)
+        assert exc.value.code == "INVALID_REQUEST"
+        assert not list(tmp_path.joinpath(*STATE_DIR).glob("*.completion.json"))
+    finally:
+        conn.close()
+
+
 def test_recording_missing_or_unstarted_session_refuses(tmp_path):
     conn, service = _service(tmp_path)
+    malformed = {"primary": "invalid-role"}
     try:
         with pytest.raises(OpsError) as missing:
             service.record_nightly_completion(IDENT, 1, {"primary": "required"}, {})
         assert missing.value.code == "CHECKPOINT_INCOMPATIBLE"
+        with pytest.raises(OpsError) as missing_malformed:
+            service.record_nightly_completion(IDENT, 1, malformed, {})
+        assert missing_malformed.value.code == "CHECKPOINT_INCOMPATIBLE"
         ensure_session(tmp_path, IDENT)  # allocated, but not started
         with pytest.raises(OpsError) as allocated:
             service.record_nightly_completion(IDENT, 1, {"primary": "required"}, {})
         assert allocated.value.code == "CHECKPOINT_INCOMPATIBLE"
+        with pytest.raises(OpsError) as allocated_malformed:
+            service.record_nightly_completion(IDENT, 1, malformed, {})
+        assert allocated_malformed.value.code == "CHECKPOINT_INCOMPATIBLE"
+        assert not list(tmp_path.joinpath(*STATE_DIR).glob("*.completion.json"))
     finally:
         conn.close()
 

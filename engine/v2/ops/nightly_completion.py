@@ -154,6 +154,8 @@ def build_completion_report(run_id: str, expected: Mapping[str, str],
 def record_completion(root: Path, identity: SessionIdentity, generation: int,
                       expected: Mapping[str, str], observed: Mapping[str, Disposition]) -> dict:
     """Write only for the active started generation, under the session-transition lock."""
+    if not isinstance(identity, SessionIdentity):
+        raise OpsError(make_problem("INVALID_REQUEST", "completion needs a session identity"))
     with session_transition_lock(root, identity):
         state = load_session(root, identity)
         if (type(generation) is not int or state is None
