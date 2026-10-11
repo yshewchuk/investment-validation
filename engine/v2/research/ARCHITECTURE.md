@@ -233,6 +233,35 @@ admission remains a later prerequisite. This seam has no fitting, target
 join, CLI, provider, report, ledger or final-read caller. Repository failures
 propagate with no cache, retry, write or partial result.
 
+`magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
+evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
+annual evaluation folds. Years are explicit, increasing, unique four-digit
+strings; the canonical training-start date precedes the first evaluation year.
+Exact snapshot and population admission exclude the random/rolling/ambiguous
+union before the pinned calendar is read. Bulk metadata is restricted to the
+training start through the last evaluation year; explicit out-of-window IDs
+refuse. Every declared year must have evaluation events and training candidates.
+
+All three fixed horizons (5/3/1) for an event share its event-year evaluation
+fold. Each fold's common fitting boundary is the earlier of January 1 and its
+earliest evaluation source-session ceiling. Training candidates precede that
+boundary; later label admission must separately require recorded availability
+strictly before it. Candidates are not certified usable labels. Earlier folds'
+events may train later folds; issuer overlap across time is intentional, not a
+held-out-issuer evaluation. These annual outer folds define no inner HPO split.
+
+The result binds the target recipe, fold rules, ordered event/session/cutoff
+metadata, train/evaluation membership, holdout versions, exact snapshot and all
+calendar/population objects into a deterministic plan digest. It reads no
+computed-move object, label or history feature, even for training candidates.
+Invalid declarations/windows refuse `CONTRACT_MISMATCH`, empty folds refuse
+`POPULATION_COLLAPSED`, and shared snapshot/admission/calendar errors propagate.
+No cache, retry, write, partial return, fitting, registration or final-read
+authority is added. A future runner must preregister this plan and bind stored,
+holdout-context-qualified feature inputs before execution; production aggregates
+are not interchangeable with research history. Schedule/publication evidence
+remains explicitly unverified reconstruction, not observed point-in-time data.
+
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
 economics with `price_source="option_chains"` and explicit numeric `fill` in
