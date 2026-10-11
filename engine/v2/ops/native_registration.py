@@ -1,5 +1,7 @@
 """Verify native registration evidence owned by the existing catalog reservation."""
 import json
+import re
+from datetime import date
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import (
@@ -66,7 +68,82 @@ def _magnitude_binding(document):
                      "target_recipe", "fold_policy", "population_input", "calendar_input", "events",
                      "folds", "availability", "plan_id"}:
         return False
-    return _magnitude_context(document, plan, request)
+    return (_magnitude_metadata(plan) and _magnitude_sources(plan, document["snapshot"])
+            and _magnitude_context(document, plan, request))
+
+
+def _text(value):
+    return isinstance(value, str) and bool(value.strip()) and value == value.strip()
+
+
+def _day(value):
+    """Validate the JSON wire date, without accepting timestamps or compact ISO dates."""
+    return (isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is not None
+            and date.fromisoformat(value).isoformat() == value)
+
+
+def _digest(value):
+    return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+
+
+def _magnitude_metadata(plan):
+    """Validate fixed v1 wire descriptors, not live calendar or fold semantics."""
+    recipe = {"schema_version": "earnings_magnitude.v1", "units": "percentage_points",
+        "target": "absolute_earnings_close_to_close_return", "price_basis": "split_neutral_non_dividend_adjusted",
+        "estimand": "conditional_mean", "primary_loss": "pooled_rmse",
+        "secondary_diagnostics": ["mae", "quantile_calibration"]}
+    policy = {"kind": "expanding_event_year", "group_key": "event_id",
+        "fit_boundary": "min_year_start_and_evaluation_forecast_ceilings",
+        "training_label_availability": "strictly_before_fit_boundary_required_later",
+        "issuer_overlap": "allowed_across_time", "inner_search": "not_defined"}
+    availability = {"basis": "reconstructed_date_bounds", "event_schedule_as_known": "unverified",
+                    "source_publication": "unverified"}
+    return (plan["target_recipe"] == recipe and plan["fold_policy"] == policy
+            and plan["availability"] == availability and _magnitude_window(plan)
+            and plan["random_membership_version"] == "canonical-event-sha256.v1"
+            and plan["rolling_membership_version"] == "calendar-months.v1"
+            and _text(plan["snapshot_id"]) and _text(plan["holdout_as_of_month"])
+            and len(plan["holdout_as_of_month"]) == 7 and _day(plan["holdout_as_of_month"] + "-01"))
+
+
+def _magnitude_window(plan):
+    years = plan["evaluation_years"]
+    return (isinstance(years, list) and bool(years)
+            and all(isinstance(year, str) and re.fullmatch(r"[0-9]{4}", year)
+                    and 2 <= int(year) <= 9998 for year in years)
+            and years == sorted(set(years)) and _day(plan["training_start"])
+            and plan["training_start"] < years[0] + "-01-01")
+
+
+def _magnitude_sources(plan, snapshot):
+    """Bind closed provenance records to the already sealed snapshot, without I/O."""
+    columns = ["event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"]
+    population, calendar = plan["population_input"], plan["calendar_input"]
+    if (not _magnitude_source(population, "earnings_events", columns, snapshot)
+            or not _magnitude_source(calendar, "daily_market", ["date"], snapshot)):
+        return False
+    return (calendar["snapshot_id"] == plan["snapshot_id"]
+            and _text(calendar["calendar_version"]) and calendar["calendar_version"] == snapshot["calendar_version"])
+
+
+def _magnitude_source(source, table, columns, snapshot):
+    fields = {"table", "columns", "dataset_version", "objects"}
+    if table == "daily_market":
+        fields |= {"snapshot_id", "calendar_version"}
+    if not isinstance(source, dict) or set(source) != fields:
+        return False
+    return (source["table"] == table and source["columns"] == columns and _text(source["dataset_version"])
+            and source["dataset_version"] == snapshot["table_versions"][table]["dataset_version_id"]
+            and _magnitude_objects(source["objects"]))
+
+
+def _magnitude_objects(objects):
+    if not isinstance(objects, list) or not objects:
+        return False
+    return (all(isinstance(obj, dict) and set(obj) == {"fragment_id", "object_id", "content_hash"}
+                and _text(obj["fragment_id"]) and _text(obj["object_id"]) and _digest(obj["content_hash"])
+                for obj in objects)
+            and len({obj["fragment_id"] for obj in objects}) == len(objects))
 
 
 def _magnitude_context(document, plan, request):
@@ -90,10 +167,15 @@ def _magnitude_events(events, expected):
                                           for event in events)):
         return False
     ids = [event["event_id"] for event in events]
-    return (bool(ids) and all(isinstance(event[key], str) and event[key].strip()
-                             for event in events for key in fields - {"forecasts"})
+    return (bool(ids) and all(_magnitude_event(event) for event in events)
             and len(set(ids)) == len(ids) and sorted(ids) == expected
-            and all(_magnitude_forecasts(event) for event in events))
+            and len({clock["calendar_id"] for event in events for clock in event["forecasts"]}) == 1)
+
+
+def _magnitude_event(event):
+    return (all(_text(event[key]) for key in ("event_id", "ticker", "event_date", "session", "population_use"))
+            and _day(event["event_date"]) and event["session"] in ("AMC", "BMO")
+            and event["population_use"] == "post-release selection" and _magnitude_forecasts(event))
 
 
 def _magnitude_forecasts(event):
@@ -101,14 +183,20 @@ def _magnitude_forecasts(event):
     clocks = event["forecasts"]
     if not isinstance(clocks, list) or len(clocks) != 3:
         return False
+    return (all(_magnitude_clock(clock, horizon, event) for clock, horizon in zip(clocks, (5, 3, 1)))
+            and len({clock["pre_announcement_close"] for clock in clocks}) == 1)
+
+
+def _magnitude_clock(clock, horizon, event):
     fields = {"schema_version", "event_date", "session", "horizon_sessions", "pre_announcement_close",
               "source_session_ceiling", "calendar_id", "cutoff_id"}
-    return all(isinstance(clock, dict) and set(clock) == fields
+    return (isinstance(clock, dict) and set(clock) == fields
         and clock["schema_version"] == "earnings_forecast_cutoff.v1"
         and clock["event_date"] == event["event_date"] and clock["session"] == event["session"]
         and type(clock["horizon_sessions"]) is int and clock["horizon_sessions"] == horizon
-        and clock["cutoff_id"] == content_hash({k: v for k, v in clock.items() if k != "cutoff_id"})
-        for clock, horizon in zip(clocks, (5, 3, 1)))
+        and _day(clock["pre_announcement_close"]) and _day(clock["source_session_ceiling"])
+        and _digest(clock["calendar_id"])
+        and clock["cutoff_id"] == content_hash({k: v for k, v in clock.items() if k != "cutoff_id"}))
 
 
 def _magnitude_folds(plan):
@@ -128,8 +216,7 @@ def _magnitude_fold(fold, year, events):
             "year", "training_labels_before", "training_candidate_event_ids", "evaluation_event_ids"}:
         return False
     train, test = fold["training_candidate_event_ids"], fold["evaluation_event_ids"]
-    return (fold["year"] == year and isinstance(fold["training_labels_before"], str)
-            and bool(fold["training_labels_before"])
+    return (fold["year"] == year and _day(fold["training_labels_before"])
             and all(isinstance(ids, list) and bool(ids) and len(set(ids)) == len(ids)
                     and set(ids) <= events.keys() for ids in (train, test))
             and not set(train).intersection(test)

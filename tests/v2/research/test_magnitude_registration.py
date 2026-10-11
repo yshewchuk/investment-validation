@@ -326,6 +326,76 @@ def test_stored_integrity_does_not_replace_fresh_semantic_admission(source):
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
 
+_DESCRIPTORS = ("target_recipe", "fold_policy", "population_input", "calendar_input", "availability")
+_BAD_DATES = (None, True, "20231212", "2023-2-12", "2023-02-30", "2023-12-12T00:00:00", " 2023-12-12")
+_NESTED_MALFORMED = [
+    *((name, value) for name in _DESCRIPTORS for value in (None, [], {}, {"unknown": True})),
+    *((name + ".unknown", True) for name in _DESCRIPTORS),
+    ("target_recipe.secondary_diagnostics", None), ("target_recipe.estimand", "conditional_median"),
+    ("fold_policy.inner_search", "adaptive"), ("availability.source_publication", "verified"),
+    *((name + "." + key, value) for name in ("population_input", "calendar_input")
+      for key, value in (("table", None), ("columns", None), ("columns", ["outcome"]),
+                         ("dataset_version", None), ("dataset_version", "foreign"),
+                         ("objects", None), ("objects", []), ("objects", [None]),
+                         ("objects", "$duplicate"), ("objects", [{}]),
+                         ("objects.0.unknown", True), ("objects.0.fragment_id", None),
+                         ("objects.0.fragment_id", " padded "), ("objects.0.object_id", None),
+                         ("objects.0.object_id", " padded "), ("objects.0.content_hash", "sha256:bad"))),
+    ("calendar_input.snapshot_id", None), ("calendar_input.snapshot_id", "foreign"),
+    ("calendar_input.calendar_version", None), ("calendar_input.calendar_version", "foreign"),
+    *((name, value) for name in ("training_start", "events.0.event_date", "folds.0.training_labels_before",
+                                "events.0.forecasts.0.pre_announcement_close",
+                                "events.0.forecasts.0.source_session_ceiling") for value in _BAD_DATES),
+    *(("evaluation_years", years) for years in (None, [], {}, [True], [2024], ["24"], ["２０２４"],
+          ["0000"], ["0001"], ["9999"], ["2024", "2024"], ["2025", "2024"])),
+    ("training_start", "2024-01-01"), ("holdout_as_of_month", None), ("holdout_as_of_month", "2026-13"),
+    ("holdout_as_of_month", "202601"), ("random_membership_version", None), ("rolling_membership_version", []),
+    ("random_membership_version", "unknown"), ("rolling_membership_version", "unknown"), ("snapshot_id", None),
+    ("events.0.session", "UNKNOWN"), ("events.0.population_use", "training"), ("events.0.event_id", " padded "),
+    *(("events.0.forecasts.0.calendar_id", value) for value in (None, True, "bad", content_hash("foreign"))),
+    ("events.0.forecasts.0.pre_announcement_close", "2023-12-11"),
+]
+
+
+@pytest.mark.parametrize("path,value", _NESTED_MALFORMED)
+def test_rehashed_nested_wire_schema_refuses_before_metadata_scan(source, monkeypatch, path, value):
+    """Rehash and synchronize declarations so nested schema checks, not stale digests, refuse."""
+    registered = _call(source)
+    doc = registered.document
+    plan = doc["magnitude_plan"]
+    target = plan
+    keys = [int(key) if key.isdecimal() else key for key in path.split(".")]
+    for key in keys[:-1]:
+        target = target[key]
+    target[keys[-1]] = target[keys[-1]] * 2 if value == "$duplicate" else value
+    doc["magnitude_request"] = {key: plan[key] for key in ("training_start", "evaluation_years")}
+    doc["execution_plan"]["folds"] = plan["evaluation_years"]
+    if path == "evaluation_years" and value == []:
+        plan["folds"] = []
+    doc["holdouts"] = {key: plan[key] for key in doc["holdouts"]}
+    if path == "snapshot_id":
+        doc["snapshot"]["snapshot_id"] = plan["calendar_input"]["snapshot_id"] = value
+    if path == "calendar_input.calendar_version" and value is None:
+        doc["snapshot"]["calendar_version"] = None
+    if path.endswith("dataset_version") and value is None:
+        table = plan[keys[0]]["table"]
+        doc["snapshot"]["table_versions"][table]["dataset_version_id"] = None
+    doc["event_ids"] = sorted(event["event_id"] for event in plan["events"])
+    for event in plan["events"]:
+        for clock in event["forecasts"]:
+            clock.update(event_date=event["event_date"], session=event["session"])
+            clock["cutoff_id"] = content_hash({key: item for key, item in clock.items() if key != "cutoff_id"})
+    plan["plan_id"] = content_hash({key: item for key, item in plan.items() if key != "plan_id"})
+    forged = _rewrite(source, registered, doc)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(source.repository, "scan", _forbid)
+    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+        native.verify_native_registration(source.conn, source.store, forged)
+    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+        _call(source, admit=True)
+    assert _catalog(source.conn) == before and _objects(source.store) == objects
+
+
 def _declaration():
     """Synthetic final-request metadata only; none of these referenced objects are read."""
     return FinalHoldoutDeclaration(
