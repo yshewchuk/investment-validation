@@ -105,6 +105,10 @@ prerequisites have no supervisor caller or report/ledger writer.
 `event_history.load_event_history` returns admitted prior-event features and
 consumed-object/cutoff provenance; mixed outcome fragments refuse before access.
 
+`magnitude_inputs.forecast_cutoff` defines full-session forecast ceilings;
+`magnitude_inputs.load_magnitude_targets` reads isolated magnitude labels under
+a separate strict label-availability cutoff. Neither is a runnable experiment.
+
 The manual no-ledger `experiments.v2_gate_variant` CLI consumes
 `experiment_population.load_population`, `_pricing.STRUCTURES`, and
 `replay.replay`/`replay.ReplayResult` for fresh per-arm fill pricing.
