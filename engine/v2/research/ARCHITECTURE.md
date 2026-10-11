@@ -235,34 +235,30 @@ propagate with no cache, retry, write or partial result.
 
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
 evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
-annual evaluation folds. Years are explicit, increasing, unique four-digit
-strings; the canonical training-start date precedes the first evaluation year.
-Exact snapshot and population admission exclude the random/rolling/ambiguous
-union before the pinned calendar is read. Bulk metadata is restricted to the
-training start through the last evaluation year; explicit out-of-window IDs
-refuse. Every declared year must have evaluation events and training candidates.
+annual evaluation folds from one admitted snapshot and its pinned calendar.
 
-All three fixed horizons (5/3/1) for an event share its event-year evaluation
-fold. Each fold's common fitting boundary is the earlier of January 1 and its
-earliest evaluation source-session ceiling. Training candidates precede that
-boundary; later label admission must separately require recorded availability
-strictly before it. Candidates are not certified usable labels. Earlier folds'
-events may train later folds; issuer overlap across time is intentional, not a
-held-out-issuer evaluation. These annual outer folds define no inner HPO split.
-An annual fold contains admitted events only, not guaranteed full-year coverage.
+- Exact snapshot and random/rolling/ambiguous-union admission precede calendar
+  reads. Bulk membership includes `training_start` and excludes January 1
+  after the last evaluation year.
+- Each event's 5/3/1 horizons share its event-year fold. Training candidates
+  precede `min(year_start, all evaluation source-session ceilings)`; usable
+  labels separately require availability strictly before that boundary.
+- Earlier evaluation events may train later folds, including the same issuer.
+  Annual membership need not cover a full year; no inner HPO split is defined.
+- The deterministic digest binds request, target/fold rules, ordered canonical
+  event/cutoff memberships, holdout versions, snapshot and metadata-source objects.
+- No computed-move, label or history-feature access, fitting or registration/
+  final-read authority. Native non-session announcement anchoring is preserved;
+  schedule/publication evidence remains unverified reconstruction, not PIT data.
 
-The result binds the target recipe, fold rules, ordered event/session/cutoff
-metadata, train/evaluation membership, holdout versions, exact snapshot and all
-calendar/population objects into a deterministic plan digest. It reads no
-computed-move object, label or history feature, even for training candidates.
-Invalid declarations/windows refuse `CONTRACT_MISMATCH`, empty folds refuse
-`POPULATION_COLLAPSED`, and shared snapshot/admission/calendar errors propagate.
-Native announcement-date anchoring is preserved, including non-session dates;
-the event date itself is not certified to be an observed trading session.
-Identical date/session/horizon clocks are reused within one call only.
-No cross-call cache, retry, write, partial return, fitting, registration or final-read
-authority is added. Schedule/publication evidence
-remains explicitly unverified reconstruction, not observed point-in-time data.
+| Magnitude fold condition | Outcome |
+|---|---|
+| Years not explicit ordered unique four-digit strings, or training start not canonical and before the first year | `CONTRACT_MISMATCH` before repository access. |
+| Explicit event outside the declared window | `CONTRACT_MISMATCH` before calendar access. |
+| Empty window or any year lacking evaluation events/training candidates | `POPULATION_COLLAPSED`; no empty success. |
+| Missing calendar table, snapshot/admission or repository failure | Shared typed error propagates; no source fallback. |
+| Empty calendar / malformed dates or incomplete session window | `CALENDAR_UNAVAILABLE` / `CONTRACT_MISMATCH`; no outcome access. |
+| Cache, retry, transaction, partial write, replay | No cross-call cache, retry, write or partial return; identical pinned inputs give identical plans. |
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
