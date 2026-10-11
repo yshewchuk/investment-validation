@@ -359,3 +359,21 @@ def test_gremlin_matrix_reads_base_sha_from_environment(case, tmp_path, monkeypa
     monkeypatch.setenv("BASE_SHA", "a" * 40)
     assert gremlin_pilot.select_modules(cfg, "", str(path)) == ["alpha"]
     assert seen == ["a" * 40]
+
+
+def test_mutation_matrix_reads_base_sha_from_environment(case, tmp_path, monkeypatch, capsys):
+    base, cfg, changed, graph = case
+    path = tmp_path / "changed"
+    path.write_bytes("\0".join(changed).encode())
+    monkeypatch.setattr(pilot, "build_import_graph", lambda: graph)
+    seen = []
+
+    def fake_base(sha, config, paths):
+        seen.append(sha)
+        return base
+
+    monkeypatch.setattr(pilot, "registration_base_config", fake_base)
+    monkeypatch.setenv("BASE_SHA", "b" * 40)
+    assert pilot.cmd_matrix(cfg, SimpleNamespace(only="", changed_files=str(path))) == 0
+    assert capsys.readouterr().out.strip() == '["alpha"]'
+    assert seen == ["b" * 40]
