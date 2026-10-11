@@ -107,6 +107,10 @@ evidence. See the models and data component contracts.
   - `tools/oc_check.py` appends one best-effort JSONL line per run to
     `$OC_METRICS_DIR/oc_check.jsonl` (default `.oc_logs/oc_check.jsonl`, per worktree);
     its module docstring defines the fields and failure behavior.
+    Its automatic discovery covers root `tests/test_*.py` and recursive
+    `tests/v2/**/test_*.py`: changed tests, textual importers of changed
+    engine/checks/tools modules, and exact always-run markers when such a module
+    changes. Selection limits, execution checks and result verification are unchanged.
   - **Experiment grid runs** (`experiments/lib.evaluate_with_grid`, called by
     the `run.py` that `experiments/new_experiment.py` scaffolds): evaluates the
     preregistered primary spec, then each `grid` cell as a secondary arm

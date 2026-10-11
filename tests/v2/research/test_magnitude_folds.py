@@ -59,43 +59,51 @@ def test_plan_groups_all_horizons_and_removes_january_training_leak(tmp_path, mo
         changes = conn.total_changes
         result = _plan(repository, snapshot, evaluation_years=["2024", "2025"])
         assert result == _plan(repository, snapshot, evaluation_years=("2024", "2025"))
-        assert result["schema_version"] == "magnitude_temporal_plan.v1"
+        assert {key: value for key, value in result.items()
+                if key not in ("plan_id", "events", "folds", "population_input", "calendar_input")} == {
+            "schema_version": "magnitude_temporal_plan.v1", "snapshot_id": snapshot.snapshot_id,
+            "holdout_as_of_month": "2026-01", "random_membership_version": "canonical-event-sha256.v1",
+            "rolling_membership_version": "calendar-months.v1", "training_start": "2023-12-10",
+            "evaluation_years": ["2024", "2025"], "horizons": [5, 3, 1],
+            "target_recipe": {"schema_version": "earnings_magnitude.v1", "units": "percentage_points",
+                "target": "absolute_earnings_close_to_close_return",
+                "price_basis": "split_neutral_non_dividend_adjusted", "estimand": "conditional_mean",
+                "primary_loss": "pooled_rmse", "secondary_diagnostics": ["mae", "quantile_calibration"]},
+            "fold_policy": {"kind": "expanding_event_year", "group_key": "event_id",
+                "fit_boundary": "min_year_start_and_evaluation_forecast_ceilings",
+                "training_label_availability": "strictly_before_fit_boundary_required_later",
+                "issuer_overlap": "allowed_across_time", "inner_search": "not_defined"},
+            "availability": {"basis": "reconstructed_date_bounds", "event_schedule_as_known": "unverified",
+                             "source_publication": "unverified"}}
         assert result["plan_id"] == content_hash({k: v for k, v in result.items() if k != "plan_id"})
-        assert result["horizons"] == [5, 3, 1]
-        assert result["target_recipe"]["estimand"] == "conditional_mean"
-        assert result["target_recipe"]["primary_loss"] == "pooled_rmse"
-        assert result["target_recipe"]["units"] == "percentage_points"
         ids = [r["event_id"] for r in result["events"]]
         assert ids == [e["event_id"] for e in (train, on_boundary, late, first, second, next_year)]
         early, later = result["folds"]
         assert early == {"year": "2024", "training_labels_before": "2023-12-22",
             "training_candidate_event_ids": [train["event_id"]],
             "evaluation_event_ids": [first["event_id"], second["event_id"]]}
-        assert later["training_candidate_event_ids"] == ids[:-1]
-        assert later["evaluation_event_ids"] == [next_year["event_id"]]
-        assert later["training_labels_before"] == "2024-12-27"
+        assert later == {"year": "2025", "training_labels_before": "2024-12-27",
+            "training_candidate_event_ids": [e["event_id"] for e in (train, on_boundary, late, first, second)],
+            "evaluation_event_ids": [next_year["event_id"]]}
         for event in result["events"]:
             assert [f["horizon_sessions"] for f in event["forecasts"]] == [5, 3, 1]
             assert all(f["event_date"] == event["event_date"] and f["session"] == event["session"]
                        for f in event["forecasts"])
-        assert result["fold_policy"]["group_key"] == "event_id"
-        assert result["fold_policy"]["inner_search"] == "not_defined"
-        assert result["availability"] == {"basis": "reconstructed_date_bounds",
-            "event_schedule_as_known": "unverified", "source_publication": "unverified"}
         assert all(q.snapshot_id == snapshot.snapshot_id for _, q in repository.scans)
         assert {name for name, _ in repository.scans} == {"earnings_events", "daily_market"}
         assert all(list(q.columns) == result["population_input"]["columns"]
                    for name, q in repository.scans if name == "earnings_events")
         assert all(q.columns == ("date",) for name, q in repository.scans if name == "daily_market")
-        assert result["snapshot_id"] == snapshot.snapshot_id and result["holdout_as_of_month"] == "2026-01"
-        assert result["random_membership_version"] and result["rolling_membership_version"]
         for table, field in (("earnings_events", "population_input"), ("daily_market", "calendar_input")):
-            source = result[field]
-            assert source["dataset_version"] == snapshot.table_versions[table].dataset_version_id
-            assert source["objects"] == [
-                {"fragment_id": record.fragment_id, "object_id": record.object_ref.object_id,
-                 "content_hash": record.object_ref.content_hash}
-                for record in repository.fragment_records(snapshot, table)]
+            expected = {"table": table, "dataset_version": snapshot.table_versions[table].dataset_version_id,
+                "columns": ["date"] if table == "daily_market" else [
+                    "event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"],
+                "objects": [{"fragment_id": record.fragment_id, "object_id": record.object_ref.object_id,
+                             "content_hash": record.object_ref.content_hash}
+                            for record in repository.fragment_records(snapshot, table)]}
+            if table == "daily_market":
+                expected.update(snapshot_id=snapshot.snapshot_id, calendar_version=snapshot.calendar_version)
+            assert result[field] == expected
         assert conn.total_changes == changes
         assert not list(tmp_path.rglob("REPORT.md")) and not list(tmp_path.rglob("LEDGER.csv"))
     finally:
@@ -235,9 +243,15 @@ def test_equivalent_explicit_population_order_and_call_local_clock_reuse(tmp_pat
              "population_use": "post-release selection"}
             for event in (train, first, second)]
         a, b = bulk["events"][1:]
-        assert a["forecasts"] == b["forecasts"]
-        assert [clock["source_session_ceiling"] for clock in a["forecasts"]] == [
-            "2023-12-26", "2023-12-28", "2024-01-02"]
+        calendar = _calendar("2023-12-01", "2025-01-10")
+        calendar_id = content_hash({"days": list(calendar.days), "observed_through": calendar.days[-1]})
+        expected_forecasts = []
+        for horizon, ceiling in ((5, "2023-12-26"), (3, "2023-12-28"), (1, "2024-01-02")):
+            expected = {"schema_version": "earnings_forecast_cutoff.v1", "event_date": "2024-01-03",
+                "session": "AMC", "horizon_sessions": horizon, "pre_announcement_close": "2024-01-03",
+                "source_session_ceiling": ceiling, "calendar_id": calendar_id}
+            expected_forecasts.append({**expected, "cutoff_id": content_hash(expected)})
+        assert a["forecasts"] == b["forecasts"] == expected_forecasts
         assert a["forecasts"][0] is not b["forecasts"][0]
     finally:
         conn.close()
