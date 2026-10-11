@@ -5,6 +5,7 @@ import pwd
 import sqlite3
 import sys
 
+from engine.v2.contracts import ProcessIdentity
 from engine.v2.foundation import (
     canonical_json,
     content_hash,
@@ -15,14 +16,15 @@ from engine.v2.foundation import (
 from engine.v2.foundation.final_holdout import request_from_document, request_from_registration
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import fail
+from engine.v2.ops.executor_watchdog import is_alive, process_info
 from engine.v2.ops.native_registration import verified_registration_bytes
+from engine.v2.ops.recovery import read_boot_id
 
 
 def _registered(conn, store, request):
-    binding = verified_registration_bytes(conn, store, request.registration_run_id,
-                                          expected_ref=request.registration_ref)
-    if binding is None or request_from_registration(
-            json.loads(binding), request.registration_run_id, request.registration_ref) != request:
+    binding = verified_registration_bytes(conn, store, request.registration_run_id, expected_ref=request.registration_ref)
+    if binding is None or request_from_registration(json.loads(binding),
+                                                    request.registration_run_id, request.registration_ref) != request:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "final-read request differs from preregistration")
 
 
@@ -86,3 +88,167 @@ def _authorize(conn, store, request, clock):
         row = conn.execute("SELECT * FROM final_holdout_authorizations WHERE experiment_id=?",
                            (request.experiment_id,)).fetchone()
     return dict(row)
+
+
+def _latest_event(conn, experiment_id):
+    return conn.execute("SELECT * FROM final_holdout_state_events WHERE experiment_id=? "
+                        "ORDER BY event_id DESC LIMIT 1", (experiment_id,)).fetchone()
+
+
+def _state_action_context(conn, store, request, action):
+    request = request_from_document(to_document(request))
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise fail("HOLDOUT_ACCESS_DENIED", "final-read state change requires the authorizing user")
+    authorization = conn.execute("SELECT * FROM final_holdout_authorizations WHERE experiment_id=?",
+                                 (request.experiment_id,)).fetchone()
+    if authorization is None:
+        raise fail("HOLDOUT_ACCESS_DENIED", "final-read authorization is required")
+    uid = os.getuid()
+    if (not isinstance(authorization["actor"], str)
+            or authorization["actor"].split(":", 1)[0] != str(uid)):
+        raise fail("HOLDOUT_ACCESS_DENIED", "only the authorizing user may change final-read state")
+    _registered(conn, store, request)
+    encoded, digest = canonical_json(to_document(request)), content_hash(to_document(request))
+    if (authorization["schema_version"] != "final_holdout_authorization.v1.0"
+            or authorization["registration_run_id"] != request.registration_run_id
+            or authorization["request_digest"] != digest
+            or authorization["request_json"] != encoded):
+        raise fail("VALIDATION_FAILED", "final-read authorization evidence is inconsistent")
+    try:
+        username = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        raise fail("RESOURCE_UNAVAILABLE", "current OS user record is unavailable") from None
+    actor = f"{uid}:{username}"
+    phrase = f'{action} {json.dumps(request.experiment_id)} {digest} AS {json.dumps(actor)}'
+    sys.stdout.write(encoded + "\n")
+    sys.stdout.flush()
+    try:
+        answer = input(f"Type exactly: {phrase}\n")
+    except (EOFError, KeyboardInterrupt):
+        raise fail("HOLDOUT_ACCESS_DENIED", "final-read state change was not confirmed") from None
+    if answer != phrase:
+        raise fail("HOLDOUT_ACCESS_DENIED", "final-read state change was not confirmed")
+    return request, authorization, digest, actor, phrase
+
+
+def start_final_holdout_read(conn, store, request, *, clock):
+    """Atomically consume the one read fence before any outcome access."""
+    try:
+        request, authorization, digest, actor, phrase = _state_action_context(conn, store, request, "START")
+        identity, *_ = process_info(os.getpid(), read_boot_id())
+        if not isinstance(identity.boot_id, str) or not identity.boot_id or any(
+                type(value) is not int or value <= 0 for value in
+                (identity.pid, identity.start_ticks, identity.process_group)):
+            raise fail("VALIDATION_FAILED", "final-read owner identity is malformed")
+        with transaction(conn):
+            _registered(conn, store, request)
+            current = conn.execute("SELECT * FROM final_holdout_authorizations WHERE experiment_id=?",
+                                   (request.experiment_id,)).fetchone()
+            if current is None:
+                raise fail("VALIDATION_FAILED", "final-read authorization changed before start")
+            if any((current["request_digest"] != digest,
+                    current["request_json"] != authorization["request_json"])):
+                raise fail("VALIDATION_FAILED", "final-read authorization changed before start")
+            latest = _latest_event(conn, request.experiment_id)
+            if latest is not None:
+                if latest["request_digest"] != digest or latest["state"] not in (
+                    "read_started", "revoked", "indeterminate"
+                ):
+                    raise fail("VALIDATION_FAILED", "final-read state history is inconsistent")
+                if latest["state"] == "read_started":
+                    raise fail("HOLDOUT_ACCESS_DENIED", "the final read is already in progress")
+                raise fail("HOLDOUT_ACCESS_DENIED", "the final read is already spent or revoked")
+            stamp = format_timestamp(clock.now())
+            conn.execute(
+                "INSERT INTO final_holdout_state_events "
+                "(experiment_id,request_digest,state,fence,owner_boot_id,owner_pid,owner_start_ticks,owner_process_group,actor,occurred_at,confirmation) "
+                "VALUES (?,?, 'read_started',1,?,?,?,?,?,?,?)",
+                (request.experiment_id, digest, identity.boot_id, identity.pid,
+                 identity.start_ticks, identity.process_group, actor, stamp, phrase),
+            )
+            return dict(_latest_event(conn, request.experiment_id))
+    except (ValueError, TypeError, KeyError, IndexError):
+        raise fail("VALIDATION_FAILED", "invalid final-read state metadata") from None
+    except (OSError, sqlite3.Error, KeyboardInterrupt):
+        raise fail("RESOURCE_UNAVAILABLE", "final-read state storage or process identity unavailable") from None
+
+
+def revoke_final_holdout(conn, store, request, *, clock):
+    """Append a user revocation; it never refunds the permanent experiment spend."""
+    try:
+        request, authorization, digest, actor, phrase = _state_action_context(conn, store, request, "REVOKE")
+        with transaction(conn):
+            _registered(conn, store, request)
+            current = conn.execute("SELECT * FROM final_holdout_authorizations WHERE experiment_id=?",
+                                   (request.experiment_id,)).fetchone()
+            if (current is None or current["request_digest"] != digest
+                    or current["request_json"] != authorization["request_json"]):
+                raise fail("VALIDATION_FAILED", "final-read authorization changed before revocation")
+            latest = _latest_event(conn, request.experiment_id)
+            if latest is not None:
+                if latest["request_digest"] != digest:
+                    raise fail("VALIDATION_FAILED", "final-read state history is inconsistent")
+                if latest["state"] == "revoked":
+                    return dict(latest)
+                if latest["state"] == "indeterminate":
+                    raise fail("HOLDOUT_ACCESS_DENIED", "the final read is already spent")
+                if latest["state"] != "read_started":
+                    raise fail("VALIDATION_FAILED", "final-read state history is inconsistent")
+            fence = 1 if latest is None else int(latest["fence"]) + 1
+            stamp = format_timestamp(clock.now())
+            conn.execute("INSERT INTO final_holdout_state_events (experiment_id,request_digest,state,fence,actor,occurred_at,confirmation) "
+                         "VALUES (?,?, 'revoked',?,?,?,?)", (request.experiment_id, digest, fence, actor, stamp, phrase))
+            return dict(_latest_event(conn, request.experiment_id))
+    except (ValueError, TypeError, KeyError, IndexError):
+        raise fail("VALIDATION_FAILED", "invalid final-read state metadata") from None
+    except (OSError, sqlite3.Error, KeyboardInterrupt):
+        raise fail("RESOURCE_UNAVAILABLE", "final-read state storage or terminal unavailable") from None
+
+
+def final_holdout_fence_current(conn, experiment_id, request_digest, fence):
+    """Whether a started read still owns the current publication fence."""
+    try:
+        latest = _latest_event(conn, experiment_id)
+    except (OSError, sqlite3.Error):
+        raise fail("RESOURCE_UNAVAILABLE", "final-read fence storage unavailable") from None
+    return bool(latest is not None and latest["state"] == "read_started"
+                and latest["request_digest"] == request_digest and latest["fence"] == fence)
+
+
+def recover_interrupted_final_holdout_read(conn, experiment_id, *, clock):
+    """Mark a read indeterminate only after its exact owner process is proven gone."""
+    try:
+        latest = _latest_event(conn, experiment_id)
+        if latest is None:
+            raise fail("STALE_EXPECTATION", "no started final read awaits recovery")
+        if latest["state"] != "read_started":
+            raise fail("STALE_EXPECTATION", "no started final read awaits recovery")
+        authorization = conn.execute("SELECT request_digest FROM final_holdout_authorizations WHERE experiment_id=?",
+                                     (experiment_id,)).fetchone()
+        if authorization is None:
+            raise fail("VALIDATION_FAILED", "final-read recovery evidence is inconsistent")
+        if authorization["request_digest"] != latest["request_digest"]:
+            raise fail("VALIDATION_FAILED", "final-read recovery evidence is inconsistent")
+        values = (latest["owner_boot_id"], latest["owner_pid"], latest["owner_start_ticks"], latest["owner_process_group"])
+        if any((not isinstance(values[0], str), not values[0],
+                any(type(value) is not int or value <= 0 for value in values[1:]))):
+            raise fail("VALIDATION_FAILED", "final-read owner identity is malformed")
+        boot_id = read_boot_id()
+        identity = ProcessIdentity(boot_id=values[0], pid=values[1], start_ticks=values[2], process_group=values[3])
+        proven_dead = identity.boot_id != boot_id or not is_alive(identity, boot_id)
+        if not proven_dead:
+            raise fail("HOLDOUT_ACCESS_DENIED", "the final-read owner is still alive")
+        with transaction(conn):
+            current = _latest_event(conn, experiment_id)
+            if current is None or (current["state"], current["event_id"], current["fence"]) != (
+                "read_started", latest["event_id"], latest["fence"]
+            ):
+                raise fail("STALE_EXPECTATION", "the final-read fence changed during recovery")
+            stamp = format_timestamp(clock.now())
+            conn.execute("INSERT INTO final_holdout_state_events (experiment_id,request_digest,state,fence,occurred_at) "
+                         "VALUES (?,?,'indeterminate',?,?)", (experiment_id, latest["request_digest"], latest["fence"], stamp))
+            return dict(_latest_event(conn, experiment_id))
+    except (ValueError, TypeError, KeyError, IndexError):
+        raise fail("VALIDATION_FAILED", "invalid final-read recovery metadata") from None
+    except (OSError, sqlite3.Error, KeyboardInterrupt):
+        raise fail("RESOURCE_UNAVAILABLE", "final-read recovery evidence unavailable") from None

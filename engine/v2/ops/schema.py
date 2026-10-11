@@ -228,4 +228,28 @@ MIGRATIONS = (
         WHEN EXISTS (SELECT 1 FROM final_holdout_authorizations WHERE experiment_id=NEW.experiment_id)
         BEGIN SELECT RAISE(ABORT, 'final holdout authorizations are immutable'); END""",
     )),
+    Migration(version=11, name="final_holdout_state_events", statements=(
+        """CREATE TABLE final_holdout_state_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            experiment_id TEXT NOT NULL REFERENCES final_holdout_authorizations(experiment_id),
+            request_digest TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('read_started','revoked','indeterminate')),
+            fence INTEGER NOT NULL CHECK(fence > 0),
+            owner_boot_id TEXT CHECK(state <> 'read_started' OR owner_boot_id IS NOT NULL),
+            owner_pid INTEGER CHECK(state <> 'read_started' OR owner_pid IS NOT NULL),
+            owner_start_ticks INTEGER CHECK(state <> 'read_started' OR owner_start_ticks IS NOT NULL),
+            owner_process_group INTEGER CHECK(state <> 'read_started' OR owner_process_group IS NOT NULL),
+            actor TEXT CHECK(state NOT IN ('read_started','revoked') OR actor IS NOT NULL),
+            occurred_at TEXT NOT NULL,
+            confirmation TEXT CHECK(state NOT IN ('read_started','revoked') OR confirmation IS NOT NULL)
+        ) STRICT""",
+        "CREATE INDEX final_holdout_state_events_experiment ON final_holdout_state_events(experiment_id, event_id)",
+        """CREATE TRIGGER final_holdout_state_events_no_update BEFORE UPDATE ON final_holdout_state_events
+        BEGIN SELECT RAISE(ABORT, 'final holdout state events are immutable'); END""",
+        """CREATE TRIGGER final_holdout_state_events_no_delete BEFORE DELETE ON final_holdout_state_events
+        BEGIN SELECT RAISE(ABORT, 'final holdout state events are immutable'); END""",
+        """CREATE TRIGGER final_holdout_state_events_no_replace BEFORE INSERT ON final_holdout_state_events
+        WHEN EXISTS (SELECT 1 FROM final_holdout_state_events WHERE event_id=NEW.event_id)
+        BEGIN SELECT RAISE(ABORT, 'final holdout state events are immutable'); END""",
+    )),
 )
