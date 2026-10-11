@@ -1172,6 +1172,20 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
     return output
 
 
+def _stage_days_to_print(inputs: NativeScoreInputs, values: dict[str, Any]) -> None:
+    """days_to_print = calendar days from the DECISION date to the announcement
+    (legacy engine/features.py:1166-1168 with as_of_column="decision_date",
+    passed at engine/score.py:2652-2655). It needs no pricing, so it is staged
+    before the forecast models run (legacy computes it before them too). The
+    decision date is the context's `as_of`, else the identity `requested_as_of`;
+    with neither, nothing is written (never fall back to entry_date)."""
+    context = inputs.context
+    decision = context.get("as_of") or context.get("requested_as_of")
+    computed = financial.days_to_print(context.get("event_date"), decision)
+    if computed is not None:
+        values["days_to_print"] = computed
+
+
 def _initial_values(
     inputs: NativeScoreInputs,
     flags: list[str],
@@ -1206,6 +1220,7 @@ def _initial_values(
         # leaked content differ, and the divergence is misreported as the
         # forecast stage's INPUT rather than its OUTPUT.
         prior = {"prior": executed[-1].output_hash, "values": dict(values)}
+    _stage_days_to_print(inputs, values)
     if compatibility:
         values.update(inputs.forecast)
         forecast_output = dict(inputs.forecast)
@@ -2964,16 +2979,15 @@ def _check_pricing_boundary(
     values["entry_cost_pct"] = financial.entry_cost_pct(
         values.get("entry_cost"), values.get("spot"),
     )
-    # Computed only when the staged dates allow it: a captured primitive
-    # (the chooser stages dte_entry) is never overwritten with None.
-    for name, computed in (
-        ("days_to_print", financial.days_to_print(
-            values.get("event_date"), values.get("entry_date"))),
-        ("dte_entry", financial.dte_entry(
-            values.get("expiry"), values.get("quote_date"))),
-    ):
-        if computed is not None:
-            values[name] = computed
+    # dte_entry is the SUCCESSFULLY PRICED first leg's days to expiry (legacy
+    # engine/score.py:2451 `int(priced.legs[0].dte)`). On a pricing/geometry
+    # refusal nothing is written, and a captured primitive (the chooser stages
+    # dte_entry) is never overwritten with None.
+    if pricing.refusal is None and geometry.refusal is None and pricing.legs:
+        computed_dte = financial.dte_entry(
+            pricing.legs[0].expiry, values.get("quote_date"))
+        if computed_dte is not None:
+            values["dte_entry"] = computed_dte
     _check_wide_market(pricing, flags)
     _check_bad_quote(pricing, flags)
     _check_extrapolated(geometry, pricing, flags)

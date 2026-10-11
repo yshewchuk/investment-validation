@@ -19,19 +19,27 @@ _RECEIPTS = tuple(
     StageReceipt(s, "declared-input", "declared-output")
     for s in STAGE_NAMES if s != "diagnostics")
 _QUOTES = {r: {"bid": 1.9, "ask": 2.1}
-           for r in (("C", 100.0, "2026-09-18"), ("P", 100.0, "2026-09-18"))}
+           for r in (("C", 100.0, "2026-11-20"), ("P", 100.0, "2026-11-20"))}
 
 
-def _inputs(*, gate=None) -> NativeScoreInputs:
+def _inputs(*, gate=None, quotes=None, forecast_coefficients=None,
+            drop_decision=False) -> NativeScoreInputs:
+    context = {"ticker": "AAA", "strategy": "STR-THRU",
+               "event_date": "2026-10-27", "entry_date": "2026-10-08",
+               "quote_date": "2026-10-08", "exit_date": "2026-10-27",
+               "expiry": "2026-11-20", "strike": 100.0, "spot": 100.0,
+               "as_of": "2026-10-07",
+               "quotes": dict(_QUOTES) if quotes is None else quotes}
+    if drop_decision:
+        del context["as_of"]
+    coefficients = ({} if forecast_coefficients is None
+                    else forecast_coefficients)
     return NativeScoreInputs(
-        context={"ticker": "AAA", "strategy": "STR-THRU",
-                 "event_date": "2026-10-27", "entry_date": "2026-10-08",
-                 "quote_date": "2026-10-08", "exit_date": "2026-09-18",
-                 "expiry": "2026-11-20", "strike": 100.0, "spot": 100.0,
-                 "quotes": dict(_QUOTES)},
+        context=context,
         features={"model_inputs": {}},
         forecast={"driver_name": "abs_move",
-                  "models": {"driver_prediction": {"intercept": 0.0, "coefficients": {}}}},
+                  "models": {"driver_prediction": {
+                      "intercept": 0.0, "coefficients": coefficients}}},
         geometry=None, pricing=None, analogs={"recipe": None},
         simulation={"mode": "not_applicable"},
         gate=gate if gate is not None else {"mode": "not_applicable"},
@@ -107,9 +115,32 @@ def test_gate_receives_scorer_computed_dates(tmp_path):
     gate = _frozen_gate(tmp_path, ("days_to_print", "dte_entry"))
     values = assemble_native_values(_inputs(gate=gate))
     assert "MISSING_FEATURES" not in values["flags"]
+    assert not [f for f in values["flags"] if f.startswith("MISSING_QUOTE")]
+    assert values.get("entry_cost") is not None  # pricing succeeded
     assert values.get("gate_score") is not None
-    assert values["days_to_print"] == 19.0
-    assert values["dte_entry"] == 43
+    # decision date 2026-10-07 differs from entry_date 2026-10-08: legacy uses the decision date
+    assert values["days_to_print"] == 20.0
+    assert values["dte_entry"] == 43  # priced first leg expiry 2026-11-20 minus quote date 2026-10-08
+
+
+def test_forecast_consumer_receives_days_to_print():
+    values = assemble_native_values(_inputs(forecast_coefficients={"days_to_print": 1.0}))
+    assert not [f for f in values["flags"] if f.startswith("MISSING_FORECAST_INPUT")]
+    assert values["days_to_print"] == 20.0
+    assert values["driver_prediction"] == 20.0
+
+
+def test_days_to_print_never_falls_back_to_entry_date():
+    values = assemble_native_values(
+        _inputs(forecast_coefficients={"days_to_print": 1.0}, drop_decision=True))
+    assert "days_to_print" not in values
+    assert "MISSING_FORECAST_INPUT:days_to_print" in values["flags"]
+
+
+def test_dte_entry_not_written_when_pricing_refuses():
+    values = assemble_native_values(_inputs(quotes={}))
+    assert "dte_entry" not in values
+    assert values.get("entry_cost") is None
 
 
 def test_dates_not_projected_into_source_mask():
