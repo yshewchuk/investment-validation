@@ -75,7 +75,8 @@ def _read_pinned_bytes(source_root, path):
     path = Path(path)
     try:
         root = Path(source_root).resolve(strict=True)
-        with path.open("rb") as stream:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
             opened = Path(os.readlink(f"/proc/self/fd/{stream.fileno()}")).resolve(strict=True)
             if not opened.is_relative_to(root):
                 raise fail("INPUT_CHANGED", "pinned legacy ledger file escapes source root",

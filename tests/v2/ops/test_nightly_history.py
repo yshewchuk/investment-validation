@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -118,6 +119,17 @@ def test_history_pin_capture_rejects_symlinked_ledger_ancestor(tmp_path):
     conn.close()
 
 
+def test_pinned_fifo_refuses_without_waiting_for_writer(tmp_path):
+    source = tmp_path / "legacy"
+    fifo = source / "ledger" / "predictions" / "blocked.jsonl"
+    fifo.parent.mkdir(parents=True)
+    os.mkfifo(fifo)
+
+    with pytest.raises(OpsError) as exc:
+        history_import._read_pinned_bytes(source, fifo)
+    assert exc.value.code == "INPUT_CHANGED"
+
+
 def test_pinned_import_rejects_ledger_swap_during_final_revalidation(tmp_path, monkeypatch):
     ops_root, conn, clock, source = _setup(tmp_path)
     target = source / "ledger" / "predictions" / "2023-12-31.jsonl"
@@ -125,19 +137,19 @@ def test_pinned_import_rejects_ledger_swap_during_final_revalidation(tmp_path, m
     outside = tmp_path / "outside"
     _write_predictions(outside, target.name, _prediction("row", "2023-12-31"))
     pins = nightly_history._pins(source)
-    original_open = Path.open
+    original_open = os.open
     opens = 0
 
-    def swap_on_second_open(path, *args, **kwargs):
+    def swap_on_second_open(path, flags, *args, **kwargs):
         nonlocal opens
-        if path == target:
+        if Path(path) == target:
             opens += 1
             if opens == 2:
                 (source / "ledger").rename(source / "ledger-original")
                 (source / "ledger").symlink_to(outside / "ledger", target_is_directory=True)
-        return original_open(path, *args, **kwargs)
+        return original_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", swap_on_second_open)
+    monkeypatch.setattr(os, "open", swap_on_second_open)
     with pytest.raises(OpsError) as exc:
         history_import.import_history(
             conn, ops_root, source, through=date.fromisoformat("2023-12-31"),
@@ -340,14 +352,14 @@ def test_pinned_history_file_unavailable_refuses(tmp_path, monkeypatch):
     target = source / "ledger" / "predictions" / "2023-12-31.jsonl"
     _write_predictions(source, target.name, _prediction("row", "2023-12-31"))
     pins = nightly_history._pins(source)
-    original_open = Path.open
+    original_open = os.open
 
-    def unavailable(path, *args, **kwargs):
-        if path == target:
+    def unavailable(path, flags, *args, **kwargs):
+        if Path(path) == target:
             raise OSError("simulated unavailable pinned file")
-        return original_open(path, *args, **kwargs)
+        return original_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", unavailable)
+    monkeypatch.setattr(os, "open", unavailable)
     with pytest.raises(OpsError) as exc:
         history_import.import_history(
             conn, ops_root, source, through=date.fromisoformat("2023-12-31"),
