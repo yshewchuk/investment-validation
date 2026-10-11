@@ -163,6 +163,40 @@ No cache, automatic retry, transaction, write or partial return occurs. This
 library seam has no supervisor, provider, market-price, report or ledger caller;
 production panel reads and final-read authority remain unchanged.
 
+`magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
+pure contract over native `CalendarSessions`: horizons are five, three or one
+full intervening sessions, counted backward from the shared last-pre-print
+close. Wednesday AMC at one uses Tuesday close; Wednesday BMO uses Monday.
+Invalid dates/sessions/horizons/calendars, projected anchors, gaps in the
+required session window or insufficient history refuse `CONTRACT_MISMATCH`.
+Its identity binds event/session/horizon, calendar contents, pre-print close
+and source-session ceiling. It does not assert an intraday issue time, source
+publication/finality or that the earnings schedule was known at that cutoff.
+An experiment caller must bind the calendar to its pinned native snapshot;
+this pure helper does not load a calendar or select a forecast horizon.
+
+`magnitude_inputs.load_magnitude_targets(repository, snapshot, *, as_of_month,
+labels_before, purpose="selection", event_ids=None)` is the separate label
+view. The fixed target recipe is absolute split-neutral, non-dividend-adjusted
+earnings close-to-close return in percentage points; the native signed
+`computed_moves` value is retained, never rescaled, clipped or adjusted again.
+Its primary prediction estimand is conditional mean, selected by pooled RMSE;
+MAE and quantile calibration are secondary, not implemented metric writers.
+Shared population admission precedes label access. Bulk reads exclude events
+on/after `labels_before`; explicit requests containing one refuse. All
+remaining objects pass `event_history`'s shared singleton preflight before
+any is opened; mixed inherited snapshots refuse. Decoded label availability
+must be strictly before `labels_before`; missing, skipped, malformed or
+non-finite labels refuse the whole call, with zero remaining a valid value.
+Earlier events with late availability can be decoded to check their recorded
+date; this is reconstructed availability, not verified publication evidence.
+Output rows carry target/object identity; frame attributes bind recipe,
+label cutoff, snapshot/dataset/month/membership versions and consumed inputs.
+Forecast cutoff and training/evaluation label cutoff are distinct contracts;
+this seam neither fits a model nor joins labels into forecast features.
+Repository failures propagate; no cache, retry, write or partial return.
+These library prerequisites have no CLI, supervisor or final-read caller.
+
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
 economics with `price_source="option_chains"` and explicit numeric `fill` in
