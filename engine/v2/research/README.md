@@ -109,6 +109,10 @@ consumed-object/cutoff provenance; mixed outcome fragments refuse before access.
 `magnitude_inputs.load_magnitude_targets` reads isolated magnitude labels under
 a separate strict label-availability cutoff. Neither is a runnable experiment.
 
+`magnitude_features.load_magnitude_history` binds one admitted event's pinned
+calendar, forecast ceiling and protected history features, explicitly retaining
+unverified publication/schedule provenance and all decoded history inputs.
+
 The manual no-ledger `experiments.v2_gate_variant` CLI consumes
 `experiment_population.load_population`, `_pricing.STRUCTURES`, and
 `replay.replay`/`replay.ReplayResult` for fresh per-arm fill pricing.
