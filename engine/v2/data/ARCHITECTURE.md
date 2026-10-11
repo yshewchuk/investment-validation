@@ -237,6 +237,36 @@ knowable. It is null exactly when `realized_move_pct` is null; null means
 unavailable to any decision. Readers must require
 `available_as_of_date <= decision_session`.
 
+**`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
+no clock. A feature declares its parameters; none is hard-coded in the module.
+- `event_sequence(event_dates, warmup=, first_known=)` takes one ticker's FULL
+  ordered event list. `ordinal` is the 0-based count of every earlier event,
+  whether or not it has a realised move; `admitted = ordinal >= warmup`. It
+  refuses (`CONTRACT_MISMATCH`) unsorted or duplicate dates, a negative
+  `warmup`, and a first event that differs from a given `first_known` date
+  (the list does not start at the ticker's first event, so ordinals would be
+  wrong).
+- `AsofSeries(rows, eligible=, value=, on_missing=)` anchors on the last row
+  whose data date is strictly before the event date and whose `eligible` fields
+  are all non-null (None or NaN counts as null, and such a row is ineligible,
+  not an anchor); eligibility is separate from the value field. If that
+  anchor's value is null the result is a miss; the lookup never reaches back to
+  an older row. A miss (no anchor, a stale anchor under the optional
+  `max_staleness_days`, or a null value) is `None` under `on_missing="null"` and
+  `CONTRACT_MISMATCH` under `"refuse"`. `on_missing` has no default. Rows must
+  be date-ascending (refused otherwise); a missing eligibility or value column,
+  a non-ISO date, or a non-numeric anchor value refuses.
+- `strict_prior_mean(events, values, population=)` returns `(mean, count)` per
+  event over earlier-ordinal events whose value is non-null, within
+  `population` (`"admitted"` or `"all"`). Under `"admitted"` a non-admitted
+  event gets `(None, 0)`. No contribution gives `(None, 0)`. A length mismatch
+  or unknown population refuses.
+- Causality uses data dates only: the functions read `date`/`event_date`;
+  `retrieved_at` and `computed_at` are provenance and never filter or order.
+- Platform rule (user 2026-10-11): history aggregates are computed when a table
+  is built, stored as columns and rebuilt by the standard rebuild. A reader
+  never computes one per run. Adoption by `computed_moves` is a later slice.
+
 ## Dependencies
 
 Layer 1.0 has no `only_imports` restriction (root doc §2), but in practice
