@@ -191,13 +191,14 @@ def test_exact_only_no_other_source_or_superset_fallback(cache):
     assert inventory(cache, datasets=["daily"], adjustment="split_adjusted")["minimum_initial_calls"] == 1
 
 
-def test_only_missing_units_spend_the_declared_call_cap(cache):
+@pytest.mark.parametrize("cap", [1, 7, 100])
+def test_only_missing_units_spend_the_declared_call_cap(cache, cap):
     request = inventory()["units"][0]["request"]
     seed(cache, request)
-    result = inventory(cache)
+    result = inventory(cache, max_calls_per_request=cap)
     assert result["minimum_initial_calls"] == 2
-    assert result["maximum_http_attempts"] == 14
-    assert result["max_calls_per_request"] == 7
+    assert result["maximum_http_attempts"] == 2 * cap
+    assert result["max_calls_per_request"] == cap
 
 
 @pytest.mark.parametrize("missing_key", ["kind", "content_hash", "byte_size"])
