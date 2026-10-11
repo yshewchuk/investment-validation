@@ -191,13 +191,13 @@ def strict_prior_mean(events: Sequence[SequencedEvent], values: Sequence[Any], *
     set never overflows an intermediate sum.
     """
     _check_aggregate_inputs(events, values, population)
+    numbers = [_number(val) if _present(val) else None for val in values]
     out: list[tuple[float | None, int]] = []
     mean, count = 0.0, 0
-    for ev, val in zip(events, values):
+    for ev, number in zip(events, numbers):
         counted = population == "all" or ev.admitted
         out.append((mean if count else None, count) if counted else (None, 0))
-        if counted and _present(val):
+        if counted and number is not None:
             count += 1
-            number = _number(val)
             mean += number / count - mean / count
     return tuple(out)

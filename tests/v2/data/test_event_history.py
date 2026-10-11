@@ -340,3 +340,46 @@ def test_hand_built_events_must_be_strictly_ascending(population, dates):
     with pytest.raises(DataError) as err:
         strict_prior_mean(events, [1.0, 2.0, 3.0], population=population)
     assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("bad", ["abc", math.inf, [1], True])
+def test_warmup_event_values_are_validated_under_admitted(bad):
+    seq = event_sequence(DAYS, warmup=4)
+    with pytest.raises(DataError) as err:
+        strict_prior_mean(seq, [bad, 1.0, 1.0, 1.0, 1.0, 1.0], population="admitted")
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+def test_admitted_population_means_over_several_admitted_events():
+    seq = event_sequence(DAYS, warmup=2)
+    out = strict_prior_mean(seq, [100.0, 200.0, 2.0, 4.0, 6.0, 8.0], population="admitted")
+    assert out == ((None, 0), (None, 0), (None, 0), (2.0, 1), (3.0, 2), (4.0, 3))
+
+
+@pytest.mark.parametrize("max_age, expected", [(9, None), (10, 4.0), (11, 4.0)])
+def test_staleness_boundary_is_inclusive_at_exact_age(max_age, expected):
+    # anchor 2020-01-01, event 2020-01-11: age is exactly 10 days
+    series = _series(max_staleness_days=max_age)
+    assert series.at("2020-01-11") == expected
+
+
+def test_stale_anchor_refuses_when_declared_and_zero_staleness_is_a_miss():
+    with pytest.raises(DataError) as err:
+        _series(max_staleness_days=1, on_missing="refuse").at("2020-01-11")
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert _series(max_staleness_days=0).at("2020-01-02") is None
+    assert _series(max_staleness_days=1).at("2020-01-02") == 4.0
+
+
+def test_duplicate_row_dates_refuse():
+    with pytest.raises(DataError) as err:
+        AsofSeries(_rows(("2020-01-01", 0.5, 1.0), ("2020-01-01", 0.5, 2.0)),
+                   eligible=("src_iv",), value="implied_move", on_missing="null")
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+def test_every_eligible_field_must_be_present():
+    rows = [dict(date="2020-01-01", a=1.0, b=1.0, v=4.0),
+            dict(date="2020-01-08", a=1.0, b=None, v=9.0)]
+    series = AsofSeries(rows, eligible=("a", "b"), value="v", on_missing="null")
+    assert series.at("2020-01-10") == 4.0

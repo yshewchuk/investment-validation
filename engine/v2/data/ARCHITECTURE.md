@@ -241,41 +241,25 @@ unavailable to any decision. Readers must require
 no clock. A feature declares its parameters; none is hard-coded in the module.
 - `event_sequence(event_dates, warmup=, first_known=)` takes one ticker's FULL
   ordered event list. `ordinal` is the 0-based count of every earlier event,
-  whether or not it has a realised move; `admitted = ordinal >= warmup`. It
-  refuses (`CONTRACT_MISMATCH`) unsorted or duplicate dates, a negative
-  `warmup`, and a first event that differs from a given `first_known` date
-  (the list does not start at the ticker's first event, so ordinals would be
-  wrong).
+  realised or not; `admitted = ordinal >= warmup`.
 - `AsofSeries(rows, eligible=, value=, on_missing=)` anchors on the last row
-  whose data date is strictly before the event date and whose `eligible` fields
-  are all non-null (None or any float NaN, numpy dtypes included, counts as null, and such a row is ineligible,
-  not an anchor); eligibility is separate from the value field. If that
-  anchor's value is null the result is a miss; the lookup never reaches back to
-  an older row. A miss (no anchor, a stale anchor under the optional
-  `max_staleness_days`, or a null value) is `None` under `on_missing="null"` and
-  `CONTRACT_MISMATCH` under `"refuse"`. `on_missing` has no default. Rows must
-  be date-ascending (refused otherwise); a missing eligibility or value column,
-  a date that is not exactly canonical `YYYY-MM-DD` (rows, event dates,
-  `first_known`, lookup date), or a non-numeric or non-finite anchor value
-  refuses. Inputs are checked against type allow-lists, not deny-lists:
-  numbers are only int, float, numpy integer/floating (never bool or numeric
-  strings) and finite; declarations (`on_missing`, `population`) must be a `str`
-  in the allowed set; `warmup`/`max_staleness_days` non-negative integers.
-  Anything else refuses with `CONTRACT_MISMATCH`, never a bare exception.
-  `SequencedEvent` validates its fields on construction (canonical date,
-  non-negative integer ordinal, bool `admitted`).
+  with a data date strictly before the event date whose `eligible` fields are
+  all non-null (None or float NaN); eligibility is separate from the value
+  field, and the lookup never reaches back past that anchor. `max_staleness_days`
+  optionally bounds the anchor's age. `on_missing` has no default.
 - `strict_prior_mean(events, values, population=)` returns `(mean, count)` per
-  event over earlier-ordinal events whose value is non-null, within
-  `population` (`"admitted"` or `"all"`). Under `"admitted"` a non-admitted
-  event gets `(None, 0)`. No contribution gives `(None, 0)`. A length mismatch
-  or unknown population refuses, as do events (including hand-built ones) whose
-  dates are not strictly ascending in ordinal order. The mean is a running mean, so finite inputs
-  never overflow an intermediate sum (`[1e308, 1e308]` gives `1e308`).
-- Causality uses data dates only: the functions read `date`/`event_date`;
-  `retrieved_at` and `computed_at` are provenance and never filter or order.
-- Platform rule (user 2026-10-11): history aggregates are computed when a table
-  is built, stored as columns and rebuilt by the standard rebuild. A reader
-  never computes one per run. Adoption by `computed_moves` is a later slice.
+  event over earlier-ordinal events with a non-null value, within `population`
+  (`"admitted"` or `"all"`; a non-admitted event gets `(None, 0)` under
+  `"admitted"`). The mean is a running mean, so finite inputs never overflow.
+- Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
+  `computed_at` are provenance and never filter or order.
+- History aggregates are computed when a table is built, stored as columns and
+  rebuilt by the standard rebuild; a reader never computes one per run.
+
+| Condition | Outcome |
+|---|---|
+| no anchor, stale anchor, or null anchor value | `None` under `on_missing="null"`, `CONTRACT_MISMATCH` under `"refuse"` |
+| any other malformed input: wrong type or container, non-canonical date, unsorted or duplicate dates, `first_known` not the first event, missing column, negative or non-integer declaration, unknown `on_missing`/`population`, non-numeric or non-finite value (every value is checked whatever the population), length mismatch | `CONTRACT_MISMATCH`, never a bare exception |
 
 ## Dependencies
 
