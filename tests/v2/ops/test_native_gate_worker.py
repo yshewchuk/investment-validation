@@ -63,7 +63,8 @@ def single_thread(monkeypatch):
         monkeypatch.setenv(name, "1")
 
 
-def _supervise(tmp_path, source, document, registration, parameters, *, key="smoke"):
+def _supervise(tmp_path, source, document, registration, parameters, *, key="smoke",
+               staged_bytes=None, expected_details=None):
     """Submit through the production registry, launcher, child and checkpoint path."""
     root = tmp_path / key
     root.mkdir()
@@ -74,7 +75,8 @@ def _supervise(tmp_path, source, document, registration, parameters, *, key="smo
         bindings = {}
         for name, data in (("spec.json", json.dumps(document).encode()),
                            ("native_registration.json", registration.binding_json)):
-            ref = store.publish_bytes(data, schema_ref="native_staged_input.v1.0")
+            ref = store.publish_bytes((staged_bytes or {}).get(name, data),
+                                      schema_ref="native_staged_input.v1.0")
             with transaction(conn):
                 register_artifact(conn, ref, None, clock)
             bindings[name] = ref.artifact_id
@@ -103,7 +105,12 @@ def _supervise(tmp_path, source, document, registration, parameters, *, key="smo
             assert len(outputs) == 1 and outputs[0]["name"] == "native_gate_consumption"
             return json.loads(store.read_verified(artifact(conn, store, outputs[0]["artifact_id"])))
         assert outputs == []
-        return json.loads(attempt["failure_json"])
+        failure = json.loads(attempt["failure_json"])
+        if expected_details is not None:
+            assert "data_failure_code" not in json.dumps(failure)
+            diagnostic = artifact(conn, store, failure["diagnostic_ref"])
+            assert json.loads(store.read_verified(diagnostic)) == expected_details
+        return failure
     finally:
         conn.close()
 
@@ -263,6 +270,65 @@ def test_malformed_staging_has_no_success_evidence(source, tmp_path, single_thre
     assert error.value.code == code
     assert _catalog(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
+
+
+@pytest.mark.parametrize("name", ["spec.json", "native_registration.json"])
+def test_excessive_staged_json_depth_has_exact_refusal(source, tmp_path, single_thread, name):
+    """Sub-cap nesting is a non-retryable refusal in dispatch and the real child."""
+    document, registration, parameters = _registered(source)
+    data = b"[" * 100_000 + b"0" + b"]" * 100_000
+    stage = _stage(tmp_path / "staging", document, registration)
+    (stage / name).write_bytes(data)
+    before = _catalog(source[0])
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.retryable is False
+    assert error.value.problem.details == {}
+    result = _supervise(tmp_path, source, document, registration, parameters,
+                        staged_bytes={name: data}, expected_details={})
+    assert result["code"] == "INVALID_EXPERIMENT_SPEC"
+    assert result["retryable"] is False
+    assert _catalog(source[0]) == before
+    assert not list(tmp_path.rglob("native_gate_consumption.json"))
+
+
+@pytest.mark.parametrize("case,data_code,ops_code", [
+    ("corrupt-snapshot", "SNAPSHOT_UNRESOLVED", "SNAPSHOT_UNRESOLVED"),
+    ("missing-calendar", "CONTRACT_MISMATCH", "EXPERIMENT_VARIANT_FAILED"),
+    ("empty-calendar", "CALENDAR_UNAVAILABLE", "EXPERIMENT_VARIANT_FAILED"),
+])
+def test_real_data_failures_preserve_private_diagnostics(
+        source, tmp_path, single_thread, case, data_code, ops_code):
+    """Real repository failures cross the worker pipe without public detail leaks."""
+    from tests.test_v2_research_replay import _chain_rows, _commit, _event_rows
+
+    if case != "corrupt-snapshot":
+        snapshot = _commit(source[0], source[1], source[2], chain_rows=_chain_rows(),
+                           event_rows=_event_rows(), receipt_id=case,
+                           expected_head=source[4].snapshot_id, generation=1,
+                           include_daily_market=case != "missing-calendar",
+                           daily_market_empty=case == "empty-calendar")
+        source = (*source[:4], snapshot)
+    document, registration, parameters = _registered(source)
+    if case == "corrupt-snapshot":
+        source[0].execute("DROP TRIGGER data_snapshots_no_update")
+        source[0].execute("UPDATE data_snapshots SET manifest_hash=? WHERE snapshot_id=?",
+                          ("sha256:" + "0" * 64, source[4].snapshot_id))
+    stage = _stage(tmp_path / "staging", document, registration)
+    before = _catalog(source[0])
+    details = {"data_failure_code": data_code}
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == ops_code
+    assert error.value.problem.details == details
+    assert error.value.problem.retryable is False
+    result = _supervise(tmp_path, source, document, registration, parameters,
+                        expected_details=details)
+    assert result["code"] == ops_code
+    assert result["retryable"] is False
+    assert _catalog(source[0]) == before
+    assert not list(tmp_path.rglob("native_gate_consumption.json"))
 
 
 def test_no_cross_job_cache_can_skip_native_admission(source):

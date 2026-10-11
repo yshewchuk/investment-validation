@@ -102,10 +102,10 @@ This receipt is not an evaluation report or promotion evidence.
 | Native worker condition | Outcome |
 | --- | --- |
 | Recording requested or missing smoke opt-in | Submission `INVALID_REQUEST`; worker defense `INVALID_EXPERIMENT_SPEC` before catalog access. |
-| Unsupported recipe or malformed staging, including missing/null required spec fields; missing staged bytes | `INVALID_EXPERIMENT_SPEC`; `INPUT_CHANGED`, respectively, before pricing. |
+| Unsupported recipe or malformed staging, including missing/null required spec fields or excessive JSON nesting; missing staged bytes | `INVALID_EXPERIMENT_SPEC`; `INPUT_CHANGED`, respectively, before pricing. |
 | Changed staged spec, registration, expected identity, source or numerical environment | `EXPERIMENT_IDENTITY_CONFLICT`; preserve registration and prior evidence. |
 | Unresolved pin or non-sweep purpose | `SNAPSHOT_UNRESOLVED` or `HOLDOUT_ACCESS_DENIED`; no pricing receipt or partial report. |
-| Incomplete/nonfinite pricing or other pinned-data failure | `EXPERIMENT_VARIANT_FAILED` (original data code in private details); no success receipt. |
+| Incomplete/nonfinite pricing or pinned-data failure | Incomplete/nonfinite pricing yields `EXPERIMENT_VARIANT_FAILED`. Data codes registered with ops retain their code; others use that fallback. The original data code remains only in private `data_failure_code` details; no success receipt. |
 | Retry/cache/transaction | One attempt; cross-job cache reuse is disabled so admission is checked again. No worker catalog transaction or CSV access. |
 | Interrupted receipt write | Private attempt bytes may remain; the supervisor publishes no successful checkpoint. |
 | Successful smoke | Operations job/checkpoint rows only; native registration/outcome and experiment ledger rows stay unchanged. |

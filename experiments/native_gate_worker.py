@@ -113,7 +113,7 @@ def run(parameters, root):
     except DataError as error:
         code = error.code if error.code in FAILURE_CODES else "EXPERIMENT_VARIANT_FAILED"
         raise fail(code, "native pinned pricing refused", details={"data_failure_code": error.code}) from None
-    except (ArtifactError, ValueError, TypeError, KeyError):
+    except (ArtifactError, ValueError, TypeError, KeyError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "native staged input is malformed") from None
     except (OSError, sqlite3.Error):
         raise fail("INPUT_CHANGED", "native staged input is unavailable") from None
