@@ -972,24 +972,20 @@ def test_appending_a_changed_capture_after_pinning_leaves_materialized_output_un
 
 
 # --------------------------------------------------------------------------
-# materialization is point-in-time to the JOB's own cutoff (SEND-BACK
-# 2026-09-14 item 2) -- not a maximal ceiling that sees every retrieval ever
-# captured, even when a later one sits in the SAME pinned snapshot version.
+# Materialization is bounded by bar data dates, not retrieval timestamps.
 # --------------------------------------------------------------------------
 
 
 def test_materialize_price_series_respects_the_jobs_own_cutoff_not_a_maximal_one(tmp_path):
-    """Retrievals A (fetched 2024-01-01, before a job's cutoff) and B
-    (fetched 2024-06-01, after it) both land in the SAME pinned snapshot (one
-    capture run sees both Tier-1 entries at once). A job whose own cutoff
-    sits between them must materialize A's value; a job with a later cutoff
-    -- still the SAME pinned snapshot, never a re-resolve -- gets B's."""
+    """A June retrieval may revise a January bar visible to a March session,
+    because the bar date is before the session. A June-dated bar in that same
+    pinned snapshot must remain invisible at the March cutoff."""
     from engine.v2.data.legacy_materialization import materialize_price_series
     conn, clock, store, _base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
     _write_tier1(source_root, "AAPL", {"2024-01-01": 100.0}, key="a",
                 fetched_at="2024-01-01T00:00:00+00:00")
-    _write_tier1(source_root, "AAPL", {"2024-01-01": 200.0}, key="b",
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 200.0, "2024-06-01": 300.0}, key="b",
                 fetched_at="2024-06-01T00:00:00+00:00")
     report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
     assert report["by_outcome"] == {"added": 2}
@@ -1002,13 +998,13 @@ def test_materialize_price_series_respects_the_jobs_own_cutoff_not_a_maximal_one
         observation_ceiling="2024-03-01T00:00:00Z").written
     before = price_download_sources.read_legacy_px_csv(
         between_a_and_b["AAPL"])
-    assert list(before["close_adj"]) == [100.0]
+    assert list(before["close_adj"]) == [200.0]
 
     after_b = materialize_price_series(
         repository, pinned_snapshot, tmp_path / "after", tickers=("AAPL",),
         observation_ceiling="2024-12-31T23:59:59Z").written
     later = price_download_sources.read_legacy_px_csv(after_b["AAPL"])
-    assert list(later["close_adj"]) == [200.0]
+    assert list(later["close_adj"]) == [200.0, 300.0]
 
 
 # --------------------------------------------------------------------------
@@ -1049,19 +1045,13 @@ def _runup_style_features(closes, idx: int) -> dict:
 
 
 def test_a_later_restatement_leaves_scale_invariant_runup_features_unchanged(tmp_path):
-    """Retrieval 1 (px, retrieved T1): 300 synthetic old dates. Retrieval 2
-    (Tier-1, retrieved T2 > T1): the SAME 300 dates with close_adj rescaled
-    by k=0.99 (a later dividend/split restating the whole history it covers,
-    same shape a real yfinance re-pull produces), plus 5 brand-new appended
-    dates. Both retrievals land in ONE pinned snapshot (a real capture -> `
-    materialize_price_series` round trip, never a bare DataFrame check).
-    Materializing at a cutoff BEFORE T2 sees only the k=1 view; materializing
-    at a cutoff AFTER T2 sees the k=0.99 view for the same old dates. A
-    ratio-of-closes feature anchored on the LAST old date (whose entire
-    252-day lookback lies inside the uniformly-rescaled old region) must
-    come out identical between the two views, within 1e-9 relative -- proof
-    that the rescale factor cancels exactly through the real storage/as-of
-    path, not merely in the abstract arithmetic.
+    """300 old dates from a px retrieval and a June Tier-1 retrieval of the
+    same dates rescaled by k=0.99 plus five new dates; both are in one
+    pinned snapshot; the March data-date ceiling includes the restated old
+    bars even though they were retrieved in June; April-dated new bars are
+    excluded from March and included by December; scale-invariant features
+    at the last old date remain equal through the real capture/
+    materialization path.
     """
     from engine.v2.data import price_download_sources
     from engine.v2.data.legacy_materialization import materialize_price_series
@@ -1072,13 +1062,13 @@ def test_a_later_restatement_leaves_scale_invariant_runup_features_unchanged(tmp
     new_closes = old_closes[-1] * np.cumprod(1 + rng.normal(0, 0.01, size=n_new))
     old_dates = [d.strftime("%Y-%m-%d") for d in pd.date_range("2023-01-02", periods=n_old)]
     new_dates = [d.strftime("%Y-%m-%d")
-                for d in pd.date_range(old_dates[-1], periods=n_new + 1)[1:]]
+                for d in pd.date_range("2024-04-01", periods=n_new)]
 
     conn, clock, store, _base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
     px_path = _write_px(source_root, "ZLK", dict(zip(old_dates, old_closes)))
     os.utime(px_path, (_epoch("2024-01-01T00:00:00+00:00"),) * 2)
-    capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    original_report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
 
     restated = dict(zip(old_dates, old_closes * k)) | dict(zip(new_dates, new_closes))
     _write_tier1(source_root, "ZLK", restated, key="k1", fetched_at="2024-06-01T00:00:00+00:00")
@@ -1086,24 +1076,36 @@ def test_a_later_restatement_leaves_scale_invariant_runup_features_unchanged(tmp
     assert report["rows_added"] == n_old + n_new  # every old date restated + n_new brand new
 
     repository = Repository(conn, store)
+    original_pinned = repository.resolve(original_report["result_snapshot_id"])
+    original = materialize_price_series(
+        repository, original_pinned, tmp_path / "original", tickers=("ZLK",),
+        observation_ceiling="2024-12-31T23:59:59Z").written
+    original_closes = price_download_sources.read_legacy_px_csv(
+        original["ZLK"])["close_adj"].to_numpy()
     pinned = repository.resolve(report["result_snapshot_id"])
 
     before = materialize_price_series(repository, pinned, tmp_path / "before", tickers=("ZLK",),
                                       observation_ceiling="2024-03-01T00:00:00Z").written
     after = materialize_price_series(repository, pinned, tmp_path / "after", tickers=("ZLK",),
                                      observation_ceiling="2024-12-31T23:59:59Z").written
-    before_closes = price_download_sources.read_legacy_px_csv(before["ZLK"])["close_adj"].to_numpy()
+    before_bars = price_download_sources.read_legacy_px_csv(before["ZLK"])
+    before_closes = before_bars["close_adj"].to_numpy()
+    assert (before_bars["date"].astype(str) < "2024-04-01").all()
     after_closes = price_download_sources.read_legacy_px_csv(after["ZLK"])["close_adj"].to_numpy()
     assert len(before_closes) == n_old
+    assert len(original_closes) == n_old
+    assert not np.allclose(original_closes, before_closes)
     assert len(after_closes) == n_old + n_new
-    # The restatement actually took effect (else this test would prove nothing).
-    assert not np.allclose(before_closes, after_closes[:n_old])
+    # The June retrieval's restatement is visible by bar date at both cutoffs.
+    assert np.allclose(before_closes, old_closes * k)
+    assert np.allclose(after_closes[:n_old], old_closes * k)
 
     anchor_idx = n_old - 1  # the last old date -- its whole 252-day lookback is old-region
-    before_features = _runup_style_features(before_closes, anchor_idx)
-    after_features = _runup_style_features(after_closes, anchor_idx)
-    assert set(before_features) == {"dist_high", "dist_ema", "ret5", "ret10", "ret20"}
-    assert set(before_features) == set(after_features)
-    for name, b in before_features.items():
-        a = after_features[name]
-        assert abs(a - b) <= 1e-9 * max(abs(a), abs(b), 1.0), (name, a, b)
+    original_features = _runup_style_features(original_closes, anchor_idx)
+    restated_features = _runup_style_features(before_closes, anchor_idx)
+    assert set(original_features) == {"dist_high", "dist_ema", "ret5", "ret10", "ret20"}
+    assert set(original_features) == set(restated_features)
+    for name, original_value in original_features.items():
+        restated_value = restated_features[name]
+        assert abs(restated_value - original_value) <= 1e-9 * max(
+            abs(restated_value), abs(original_value), 1.0), (name, restated_value, original_value)

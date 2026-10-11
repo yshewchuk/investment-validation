@@ -13,7 +13,7 @@ from engine.v2.ops import nightly_trigger, price_history_store
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.recovery import SupervisorLock
 from tests.data_scan_support import RECEIPT, fake_hash, publish_and_inspect
-from tests.test_v2_ops_price_history import _SEC, _SEC_REF, _securities_row
+from tests.v2.ops.test_v2_ops_price_history import _SEC, _SEC_REF, _securities_row
 from tests.v2.ops.test_v2_ops_snapshot_stages import (
     SESSION as PLAN_SESSION,
 )
