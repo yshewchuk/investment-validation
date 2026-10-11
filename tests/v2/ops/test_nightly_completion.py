@@ -63,7 +63,8 @@ def _service(root):
 
 def test_clean_required_and_succeeded_qualification_is_completed():
     expected = {"qualifier": "qualification", "primary": "required"}
-    observed = {"primary": Disposition("succeeded"), "qualifier": Disposition("succeeded")}
+    observed = {"primary": Disposition("succeeded", count=2),
+                "qualifier": Disposition("succeeded")}
     report = _report(expected, observed)
     assert report["status"] == "completed"
     assert report["required_outcome"] == "completed"
@@ -71,6 +72,7 @@ def test_clean_required_and_succeeded_qualification_is_completed():
     assert report["qualification_outcome"] == "qualified"
     assert _names(report) == ["primary", "qualifier"]  # stable sorted, not insertion order
     assert report["sidecars_terminal"] == 1
+    assert _row(report, "primary")["count"] == 2
 
 
 def test_required_failure_is_never_clean_success_even_with_clean_sidecars():
@@ -149,6 +151,7 @@ def test_invalid_evidence_requires_recovery_and_is_not_terminal():
     (Disposition("pending"), Disposition("succeeded", evidence_valid=False),
      "waiting", "recovery_required"),
     (Disposition("timed_out"), Disposition("succeeded"), "timed_out", "timed_out"),
+    (Disposition("degraded"), Disposition("succeeded"), "failed", "failed"),
 ])
 def test_uncertain_sidecar_and_required_timeout_remain_non_success(
         required, sidecar, required_status, overall):
@@ -190,6 +193,23 @@ def test_report_rejects_pathlike_identifiers(run_id, expected):
     with pytest.raises(OpsError) as exc:
         _report(expected, {}, run_id=run_id)
     assert exc.value.code == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize("sidecar,qualification,overall,terminal_count", [
+    (Disposition("recovery_required"), "invalid", "recovery_required", 1),
+    (Disposition("succeeded", evidence_valid=False), "invalid", "recovery_required", 1),
+    (Disposition("failed", reason_code="SIDE_FAILED"), "failed", "completed_degraded", 2),
+    (Disposition("timed_out", reason_code="SIDE_TIMEOUT"), "failed", "completed_degraded", 2),
+])
+def test_optional_sidecar_disposition_is_part_of_requested_qualification(
+        sidecar, qualification, overall, terminal_count):
+    expected = {"primary": "required", "quality": "qualification", "optional": "optional"}
+    observed = {"primary": Disposition("succeeded"), "quality": Disposition("succeeded"),
+                "optional": sidecar}
+    report = _report(expected, observed)
+    assert report["qualification_outcome"] == qualification
+    assert report["status"] == overall
+    assert report["sidecars_terminal"] == terminal_count
 
 
 @pytest.mark.parametrize("disposition", [

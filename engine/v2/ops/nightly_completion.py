@@ -16,7 +16,7 @@ _STATES = {"pending", "succeeded", "degraded", "failed", "timed_out", "recovery_
 _CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _RUN_ID = re.compile(r"^[0-9a-f]{64}$")
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-_TERMINAL = {"succeeded", "degraded", "failed", "timed_out", "recovery_required"}
+_TERMINAL = {"succeeded", "degraded", "failed", "timed_out"}
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ def _valid_expected(expected: object) -> bool:
                     for name, role in expected.items()))
 
 
-def _valid_disposition(item: object, role: str) -> bool:
+def _valid_disposition(item: object) -> bool:
     if not isinstance(item, Disposition):
         return False
     if not isinstance(item.status, str) or item.status not in _STATES:
@@ -46,9 +46,7 @@ def _valid_disposition(item: object, role: str) -> bool:
         return False
     if type(item.count) is not int or item.count < 0:
         return False
-    if type(item.evidence_valid) is not bool:
-        return False
-    return role != "required" or item.count == 0
+    return type(item.evidence_valid) is bool
 
 
 def _validate(run_id: object, expected: Mapping[str, str],
@@ -64,7 +62,7 @@ def _validate(run_id: object, expected: Mapping[str, str],
     result: dict[str, Disposition] = {}
     for name, role in expected.items():
         item = observed.get(name, Disposition("pending"))
-        if not _valid_disposition(item, role):
+        if not _valid_disposition(item):
             raise OpsError(make_problem("INVALID_REQUEST", "completion disposition is malformed"))
         result[name] = item
     return result
@@ -86,13 +84,14 @@ def _required_outcome(required: Mapping[str, Disposition]) -> str:
 def _qualification_outcome(items: list[Disposition], sidecars: Mapping[str, Disposition]) -> str:
     if not items:
         return "not_requested"
-    if any(not item.evidence_valid for item in items):
+    if any(not item.evidence_valid or item.status == "recovery_required"
+           for item in sidecars.values()):
         return "invalid"
     if any(item.status == "pending" for item in sidecars.values()):
         return "pending"
-    if any(item.status in {"failed", "timed_out", "recovery_required"} for item in items):
+    if any(item.status in {"failed", "timed_out"} for item in sidecars.values()):
         return "failed"
-    if any(item.status == "degraded" or item.count for item in items):
+    if any(item.status == "degraded" or item.count for item in sidecars.values()):
         return "degraded"
     return "qualified"
 
