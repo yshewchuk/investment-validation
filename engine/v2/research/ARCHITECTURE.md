@@ -247,6 +247,8 @@ annual evaluation folds from one admitted snapshot and its pinned calendar.
   Annual membership need not cover a full year; no inner HPO split is defined.
 - The deterministic digest binds request, target/fold rules, ordered canonical
   event/cutoff memberships, holdout versions, snapshot and metadata-source objects.
+  With all other inputs fixed, equivalent admitted explicit/bulk memberships
+  yield the same `plan_id`; selection mode is not part of identity.
 - No computed-move, label or history-feature access, fitting or registration/
   final-read authority. Native non-session announcement anchoring is preserved;
   schedule/publication evidence remains unverified reconstruction, not PIT data.
@@ -258,7 +260,8 @@ annual evaluation folds from one admitted snapshot and its pinned calendar.
 | Empty window or any year lacking evaluation events/training candidates | `POPULATION_COLLAPSED`; no empty success. |
 | Missing calendar table, snapshot/admission or repository failure | Shared typed error propagates; no source fallback. |
 | Empty calendar / malformed dates or incomplete session window | `CALENDAR_UNAVAILABLE` / `CONTRACT_MISMATCH`; no outcome access. |
-| Cache, retry, transaction, partial write, replay | No cross-call cache, retry, write or partial return; identical pinned inputs give identical plans. |
+| Catalog transactions | Short read-only SQLite transactions; no planner-owned write transaction or transaction spanning the full call. |
+| Cache, retry, partial write, replay | No cross-call cache, retry, write or partial return; identical pinned inputs give identical plans. |
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
