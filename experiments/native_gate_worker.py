@@ -1,7 +1,9 @@
 """Admitted smoke pricing from staged registration; no scientific recording."""
+import errno
 import json
 import os
 import sqlite3
+import stat
 from dataclasses import asdict
 from math import isfinite
 from pathlib import Path
@@ -20,6 +22,28 @@ from experiments.v2_gate_variant import price_variant
 
 RUNNER = "experiments/native_gate_worker.py"
 BINDINGS = {"spec.json", "native_registration.json"}
+MAX_STAGED_BYTES = 16 * 1024 * 1024
+
+
+def _read_staged(path):
+    """Bound allocation and validate the descriptor actually supplying bytes."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_STAGED_BYTES:
+                raise fail("INVALID_EXPERIMENT_SPEC", "native staging requires bounded regular files")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                data = stream.read(MAX_STAGED_BYTES + 1)
+            if len(data) > MAX_STAGED_BYTES:
+                raise fail("INVALID_EXPERIMENT_SPEC", "native staged document exceeds its bound")
+            return data
+        finally:
+            os.close(fd)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise fail("INVALID_EXPERIMENT_SPEC", "native staging must not follow symlinks") from None
+        raise
 
 
 def _admit(parameters, root, conn, store):
@@ -27,10 +51,8 @@ def _admit(parameters, root, conn, store):
     if (parameters.get("no_ledger") is not True
             or set(parameters.get("input_bindings") or {}) != BINDINGS):
         raise fail("INVALID_EXPERIMENT_SPEC", "native pricing requires bound smoke inputs")
-    if any((root / name).is_symlink() for name in BINDINGS):
-        raise fail("INVALID_EXPERIMENT_SPEC", "native staging must contain regular inputs")
     try:
-        spec = experiment_spec_from_document(json.loads((root / "spec.json").read_bytes()))
+        spec = experiment_spec_from_document(json.loads(_read_staged(root / "spec.json")))
     except OpsError as error:
         if error.code != "INVALID_REQUEST":
             raise
@@ -41,7 +63,7 @@ def _admit(parameters, root, conn, store):
     if not isinstance(plan.economic_params.get("strategy"), str):
         raise fail("INVALID_EXPERIMENT_SPEC", "native worker requires a registered strategy")
     registration = NativeRegistration(parameters["run_id"],
-                                      (root / "native_registration.json").read_bytes())
+                                      _read_staged(root / "native_registration.json"))
     verify_native_registration(conn, store, registration)
     binding = registration.document
     if (registration.variant_id != parameters["variant_id"]

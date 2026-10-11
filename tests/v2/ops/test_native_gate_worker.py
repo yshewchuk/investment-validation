@@ -1,5 +1,8 @@
 """Real staged worker admission over committed synthetic option-chain snapshots."""
 import json
+import os
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -143,7 +146,8 @@ def test_supervised_unconsumed_economics_refuse_without_receipt(source, tmp_path
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
 
 
-@pytest.mark.parametrize("change", ["fill", "identity", "strategy", "arm", "environment", "registration"])
+@pytest.mark.parametrize("change", ["fill", "identity", "expected-ids", "run-id", "strategy",
+                                    "arm", "environment", "registration"])
 def test_changed_staged_binding_refuses_before_pricing(source, tmp_path, single_thread, monkeypatch, change):
     """Canonical current-request differences cannot reuse another arm's registration."""
     document, registration, parameters = _registered(source)
@@ -151,6 +155,10 @@ def test_changed_staged_binding_refuses_before_pricing(source, tmp_path, single_
         document["economic_params"]["fill"] = 1.0
     if change == "identity":
         parameters["variant_id"] = "sha256:" + "0" * 64
+    if change == "expected-ids":
+        parameters["expected_ids"] = ["sha256:" + "0" * 64]
+    if change == "run-id":
+        parameters["run_id"] = "unregistered-run"
     if change == "strategy":
         document["economic_params"]["strategy"] = "SHORT-PUT"
     if change == "arm":
@@ -213,8 +221,11 @@ def test_worker_retains_registered_pin_when_head_moves(source, tmp_path, single_
     assert result["mark_based_cashflows"][0]["pnl"] == pytest.approx(1.2)
 
 
-@pytest.mark.parametrize("change", ["missing-spec", "symlink", "extra-binding", "bad-json"])
-def test_malformed_staging_has_no_success_evidence(source, tmp_path, single_thread, change):
+@pytest.mark.parametrize("change,code", [("missing-spec", "INPUT_CHANGED"),
+                                        ("symlink", "INVALID_EXPERIMENT_SPEC"),
+                                        ("extra-binding", "INVALID_EXPERIMENT_SPEC"),
+                                        ("bad-json", "INVALID_EXPERIMENT_SPEC")])
+def test_malformed_staging_has_no_success_evidence(source, tmp_path, single_thread, change, code):
     """Staging errors are typed before replay; there is no current-path fallback."""
     document, registration, parameters = _registered(source)
     stage = _stage(tmp_path / "staging", document, registration)
@@ -230,7 +241,7 @@ def test_malformed_staging_has_no_success_evidence(source, tmp_path, single_thre
     before = _catalog(source[0])
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
-    assert error.value.code in {"INPUT_CHANGED", "INVALID_EXPERIMENT_SPEC"}
+    assert error.value.code == code
     assert _catalog(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
@@ -372,3 +383,88 @@ def test_supervised_required_spec_fields_use_experiment_refusal(source, tmp_path
     assert _catalog(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
     assert not list(tmp_path.rglob("REPORT.md"))
+
+
+@pytest.mark.parametrize("name", ["spec.json", "native_registration.json"])
+@pytest.mark.parametrize("kind", ["fifo", "directory", "symlink", "oversized"])
+def test_staged_documents_refuse_unsafe_files_without_blocking(source, tmp_path, single_thread, name, kind):
+    """A real dispatch child must terminate on each unsafe staged document."""
+    from experiments.native_gate_worker import MAX_STAGED_BYTES
+
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    path = stage / name
+    path.unlink()
+    if kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        path.symlink_to(stage / "absent-target")
+    else:
+        with path.open("wb") as stream:
+            stream.truncate(MAX_STAGED_BYTES + 1)
+    before = _catalog(source[0])
+    program = """
+import json, sys
+from pathlib import Path
+from engine.v2.ops.worker import dispatch
+from engine.v2.ops.errors import OpsError
+try:
+    dispatch('native_gate_pricing', json.loads(sys.argv[1]), Path(sys.argv[2]))
+except OpsError as error:
+    print(error.code)
+else:
+    raise AssertionError('unsafe staged input was accepted')
+"""
+    child = subprocess.run([sys.executable, "-c", program, json.dumps(parameters), str(stage)],
+                           capture_output=True, text=True, timeout=10, check=True)
+    assert child.stdout.strip() == "INVALID_EXPERIMENT_SPEC"
+    assert _catalog(source[0]) == before
+    assert not (stage / "native_gate_consumption.json").exists()
+
+
+@pytest.mark.parametrize("name", ["spec.json", "native_registration.json"])
+def test_staged_replacement_cannot_bypass_no_follow(source, tmp_path, single_thread, monkeypatch, name):
+    """Swap immediately before the real open, retaining its descriptor checks."""
+    from experiments import native_gate_worker as native
+
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    path, outside = stage / name, tmp_path / "replacement.json"
+    original_open = native.os.open
+    swapped = []
+
+    def replace_before_open(target, flags, *args, **kwargs):
+        if Path(target) == path and not swapped:
+            path.rename(outside)
+            path.symlink_to(outside)
+            swapped.append(True)
+        return original_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(native.os, "open", replace_before_open)
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert swapped == [True]
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not (stage / "native_gate_consumption.json").exists()
+
+
+def test_staged_growth_is_bounded_after_descriptor_validation(tmp_path, monkeypatch):
+    """A real file growing after fstat cannot bypass the bounded read."""
+    from experiments import native_gate_worker as native
+
+    path = tmp_path / "growing.json"
+    path.write_bytes(b"{}")
+    original_fstat = native.os.fstat
+
+    def grow_after_stat(fd):
+        info = original_fstat(fd)
+        with path.open("ab") as stream:
+            stream.truncate(native.MAX_STAGED_BYTES + 1)
+        return info
+
+    monkeypatch.setattr(native.os, "fstat", grow_after_stat)
+    with pytest.raises(OpsError) as error:
+        native._read_staged(path)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"

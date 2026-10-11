@@ -92,6 +92,9 @@ bind it. Snapshot, event IDs and holdout context come only from registration.
 It never re-resolves a scope head or accepts a supplied trades frame.
 Submission uses the existing `SubmitRequest` API and artifact input bindings;
 there is no dedicated plan CLI. The worker's catalog connection is read-only.
+Each staged document is limited to 16 MiB, opened nonblocking without following
+the final symlink, and checked as a regular file on the open descriptor. A
+replacement after opening cannot redirect the bytes; growth past the cap refuses.
 The supervisor publishes one consumption receipt after complete pricing,
 including the immutable plan, stage inputs and per-event mark-based cash flows.
 This receipt is not an evaluation report or promotion evidence.
