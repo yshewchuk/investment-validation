@@ -5,6 +5,8 @@ Normal engine startup may load .env; planning never contacts providers or emits 
 import argparse
 import json
 import sqlite3
+import subprocess
+import sys
 from contextlib import closing
 from pathlib import Path
 
@@ -14,8 +16,10 @@ from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.massive_plan import plan
 
+PLAN_TIMEOUT_SECONDS = 30
 
-def main(argv=None):
+
+def _main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True, type=Path)
     parser.add_argument("--store-root", required=True, type=Path)
@@ -45,6 +49,27 @@ def main(argv=None):
         return 2
     print(json.dumps(result, sort_keys=True))
     return 0
+
+
+def main(argv=None):
+    """Bound all worker filesystem/SQLite I/O, including raced special-file opens."""
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    worker = ("import json, sys; paths, arguments = json.load(sys.stdin); sys.path[:] = paths; "
+              "from tools.v2_massive_plan import _main; "
+              "raise SystemExit(_main(arguments))")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", worker],
+            input=json.dumps([sys.path, arguments]), capture_output=True, text=True,
+            timeout=PLAN_TIMEOUT_SECONDS, check=False)
+        if result.returncode not in (0, 2):
+            raise OSError("planning worker failed")
+    except (OSError, subprocess.TimeoutExpired):
+        print(json.dumps({"refused": "RESOURCE_UNAVAILABLE"}))
+        return 2
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
 
 
 if __name__ == "__main__":

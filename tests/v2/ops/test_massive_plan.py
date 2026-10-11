@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import sqlite3
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -365,7 +366,7 @@ def test_cli_is_reachable_and_opens_a_read_only_transaction(cache, monkeypatch, 
     assert sqlite3.connect is original
     with sqlite3.connect(":memory:") as unrelated:
         assert unrelated.execute("SELECT 1").fetchone() == (1,)
-    assert main(cli_args(root)) == 0
+    assert cli._main(cli_args(root)) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["plan_only"] and output["maximum_http_attempts"] == 0
     assert "BEGIN" in statements and "PRAGMA query_only=ON" in statements
@@ -384,9 +385,22 @@ def test_cli_s3_refuses_before_connect(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "sqlite3", SimpleNamespace(
         connect=lambda *a, **kw: pytest.fail("opened catalog"),
         Row=sqlite3.Row, Error=sqlite3.Error))
-    assert main(cli_args(tmp_path, transport="s3")) == 2
+    assert cli._main(cli_args(tmp_path, transport="s3")) == 2
     assert json.loads(capsys.readouterr().out) == {
         "refused": "INVALID_REQUEST", "reason": "CAPABILITY_UNAVAILABLE"}
+
+
+def test_cli_process_launch_failure_is_redacted(monkeypatch, capsys):
+    def unavailable(*args, **kwargs):
+        assert kwargs["timeout"] == 30
+        raise OSError("synthetic private launch diagnostic")
+
+    monkeypatch.setattr(cli, "subprocess", SimpleNamespace(
+        run=unavailable, TimeoutExpired=subprocess.TimeoutExpired))
+    assert main([]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == '{"refused": "RESOURCE_UNAVAILABLE"}\n'
+    assert captured.err == ""
 
 
 def test_request_hash_matches_existing_raw_receipt_contract(cache):
