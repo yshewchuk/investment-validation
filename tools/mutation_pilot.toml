@@ -10,7 +10,7 @@
 #
 # `mutate` and `tests` entries are tracked paths or globs (fnmatch: `*` also
 # matches `/`); `skip` removes paths from `mutate`. A pattern that matches
-# nothing is an error. tests/test_mutation_ci.py checks that every
+# nothing is an error. tests/v2/integration/test_mutation_ci.py checks that every
 # engine/v2 file sits in exactly one module.
 #
 # Each [modules.<name>] mutates only its `mutate` files and runs only its
@@ -30,7 +30,7 @@
 # expansion and `[defaults]
 # deselect` unchanged -- it only changes how the mutants are executed (parallel
 # gremlin workers in the repo checkout, not mutmut in a work copy). Keeping one
-# map means the exhaustive module-ownership test (tests/test_mutation_ci.py:
+# map means the exhaustive module-ownership test (tests/v2/integration/test_mutation_ci.py:
 # every engine/v2 file in exactly one module) governs both backends. The gremlins
 # CI cache key folds in the SAME per-module config-hash (defaults plus that
 # module's own section) mutmut uses, but that is only PART of the gremlins
@@ -389,7 +389,7 @@ tests = [
 # CI run 35458557499 (2026-09-19, push/incremental) shows its mutmut step ran the
 # full 330-minute cap and was killed (run_exit_code -1, 3097/4280 mutants checked
 # before the cutoff) -- exactly the "full run times out after 5.5 hours" symptom.
-# Still listed (never run) so `tests/test_mutation_ci.py` keeps every engine/v2 file
+# Still listed (never run) so `tests/v2/integration/test_mutation_ci.py` keeps every engine/v2 file
 # owned by exactly one module.
 excluded = "legacy materialization/mapping/reference bridge the rearchitecture deletes on cutover; also the module whose 330-minute mutmut step timeout (CI run 35458557499, 2026-09-19) caused the whole weekly run to time out at 5.5 hours."
 why = "Legacy materialization, mapping, reference inputs and price history: the bridge that feeds legacy-shaped inputs into v2."
@@ -600,7 +600,7 @@ tests = [
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
-    # A glob, not a new literal line: tests/test_mutation_ci.py expands the
+    # A glob, not a new literal line: tests/v2/integration/test_mutation_ci.py expands the
     # pattern list against `git ls-files`, so a literal for a file not yet
     # committed would fail as "matches no tracked file". This keeps every
     # tests/test_v2_serving_*.py (native_render included) in the module's pool
@@ -624,6 +624,7 @@ mutate = [
     "engine/v2/ops/experiments.py",
 ]
 tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
     "tests/v2/research/test_native_outcomes.py",
@@ -721,6 +722,8 @@ mutate = [
     "engine/v2/ops/schema_runtime.py",
 ]
 tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
+    "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
@@ -753,6 +756,7 @@ mutate = [
     "engine/v2/ops/errors.py",
 ]
 tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_catalog.py",
@@ -775,6 +779,15 @@ tests = [
     "tests/v2/ops/test_v2_ops_same_session_replan.py",
     "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
+]
+
+[modules.ops_final_holdout]
+why = "Catalog-bound native registration verification and immutable user-only final-read spend: forged metadata or a duplicate act must never create authority."
+mutate = ["engine/v2/ops/native_registration.py", "engine/v2/ops/final_holdout.py"]
+tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
+    "tests/v2/research/test_final_holdout_requests.py",
+    "tests/v2/research/test_native_registration.py",
 ]
 
 [modules.ops_catalog_sched]
@@ -924,6 +937,7 @@ tests = [
 
 [modules.ops_nightly]
 why = "Nightly DAG, stage map, plans, fingerprints and incremental data wiring."
+skip = ["engine/v2/ops/native_registration.py"]
 mutate = [
     # ``n*.py`` keeps nightly.py and nightly_trigger.py (phase 6 slice 12)
     # owned and lands native_shadow_render.py (the spec_ns_b ops half of the
