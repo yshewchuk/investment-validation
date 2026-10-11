@@ -223,28 +223,34 @@ def test_late_calendar_scan_failure_propagates_without_retry_or_partial_plan(tmp
 
 def test_equivalent_explicit_population_order_and_call_local_clock_reuse(tmp_path, monkeypatch):
     train = _event("2023-12-12")
+    # Native announcement dates may be non-session days; this lies between the two deadlines.
+    between = _event("2023-12-25")
     first, second = _event("2024-01-03", ticker="A"), _event("2024-01-03", ticker="B")
     third = {**_event("2024-01-03", ticker="C"), "session": "BMO"}
-    conn, repository, snapshot = _fixture(tmp_path, [third, second, train, first])
+    conn, repository, snapshot = _fixture(tmp_path, [third, second, train, first, between])
     original, calls = magnitude_folds.forecast_cutoff, []
     def clock(*args):
         calls.append(args[:3])
         return original(*args)
     monkeypatch.setattr(magnitude_folds, "forecast_cutoff", clock)
     try:
+        _metadata_only(monkeypatch, repository, snapshot)
         bulk = _plan(repository, snapshot)
-        assert len(calls) == 9  # Three unique date/session groups, three horizons each.
+        assert len(calls) == 12  # Four unique date/session groups, three horizons each.
         selected = _plan(repository, snapshot,
-            event_ids=[event["event_id"] for event in (third, second, first, train)])
-        assert len(calls) == 18  # There is no cross-call cache.
+            event_ids=[event["event_id"] for event in (third, second, first, between, train)])
+        assert len(calls) == 24  # There is no cross-call cache.
         assert bulk == selected
+        assert bulk["folds"] == [{"year": "2024", "training_labels_before": "2023-12-22",
+            "training_candidate_event_ids": [train["event_id"]],
+            "evaluation_event_ids": [event["event_id"] for event in (first, second, third)]}]
         assert [{key: value for key, value in event.items() if key != "forecasts"}
                 for event in bulk["events"]] == [
             {"event_id": event["event_id"], "ticker": event["ticker"],
              "event_date": event["event_date"].date().isoformat(), "session": event["session"],
              "population_use": "post-release selection"}
-            for event in (train, first, second, third)]
-        a, b, c = bulk["events"][1:]
+            for event in (train, between, first, second, third)]
+        a, b, c = bulk["events"][2:]
         calendar = _calendar("2023-12-01", "2025-01-10")
         calendar_id = content_hash({"days": list(calendar.days), "observed_through": calendar.days[-1]})
         expected_forecasts = {}
