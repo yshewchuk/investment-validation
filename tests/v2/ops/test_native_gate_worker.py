@@ -695,3 +695,54 @@ def test_non_mapping_worker_arguments_refuse_before_io(tmp_path, parameters):
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
     assert error.value.problem.retryable is False
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_partial_receipt_cleanup_preserves_error_and_closes_fd(tmp_path, cleanup_fails):
+    """Real partial OS writes retain their failure even if cleanup is denied."""
+    path = tmp_path / "native_gate_consumption.json"
+    program = """
+import errno, json, os, resource, signal, sys
+from pathlib import Path
+from experiments import native_gate_worker as native
+path = Path(sys.argv[1])
+cleanup_fails = sys.argv[2] == 'True'
+real_open, real_unlink = os.open, os.unlink
+fds, failures, partials = [], [], []
+def observe_open(*args, **kwargs):
+    fd = real_open(*args, **kwargs)
+    fds.append(fd)
+    return fd
+def cleanup(target):
+    assert target == path
+    failures.append(sys.exception())
+    partials.append(path.read_bytes())
+    if cleanup_fails:
+        raise PermissionError(errno.EACCES, 'injected cleanup denial')
+    real_unlink(target)
+native.os.open, native.os.unlink = observe_open, cleanup
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (64, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
+try:
+    native._write_receipt(path, {'padding': 'x' * 256})
+except OSError as error:
+    assert len(failures) == 1 and error is failures[0]
+    assert error.errno == errno.EFBIG
+else:
+    raise AssertionError('partial write unexpectedly succeeded')
+assert len(fds) == 1
+try:
+    os.fstat(fds[0])
+except OSError as error:
+    assert error.errno == errno.EBADF
+else:
+    raise AssertionError('receipt descriptor was not closed')
+assert partials == [b'{"padding":"' + b'x' * 52]
+assert path.exists() is cleanup_fails
+if cleanup_fails:
+    assert path.read_bytes() == partials[0]
+print(json.dumps({'partial_bytes': len(partials[0]), 'cleanup_failed': cleanup_fails}))
+"""
+    child = subprocess.run([sys.executable, "-c", program, str(path), str(cleanup_fails)],
+                           capture_output=True, text=True, timeout=10, check=True)
+    assert json.loads(child.stdout) == {"partial_bytes": 64, "cleanup_failed": cleanup_fails}
