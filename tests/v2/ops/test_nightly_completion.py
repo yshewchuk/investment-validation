@@ -11,7 +11,7 @@ import json
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, Thread
 
 import pytest
 
@@ -23,6 +23,7 @@ from engine.v2.ops.nightly_session import (
     ensure_session,
     mark_started,
     request_rerun,
+    session_path,
 )
 from engine.v2.ops.stages import registry
 from engine.v2.ops.supervisor import Service
@@ -390,6 +391,153 @@ def test_service_persists_expected_roles_and_evidence_validity(tmp_path):
         conn.close()
 
 
+@pytest.mark.parametrize("target, unsafe", [
+    ("session", "symlink"), ("session", "fifo"),
+    ("lock", "symlink"), ("lock", "fifo"),
+])
+def test_service_rejects_unsafe_session_and_lock_files_without_blocking(
+        tmp_path, target, unsafe):
+    ensure_session(tmp_path, IDENT)
+    mark_started(tmp_path, IDENT, 1)
+    session_file = session_path(tmp_path, IDENT)
+    unsafe_path = (session_file if target == "session" else
+                   session_file.with_name(session_file.name + ".lock"))
+    sentinel = tmp_path / f"{target}-sentinel"
+    if unsafe == "symlink":
+        if target == "session":
+            session_file.rename(sentinel)
+        else:
+            sentinel.write_text("lock sentinel")
+            unsafe_path.unlink()
+        unsafe_path.symlink_to(sentinel)
+    else:
+        unsafe_path.unlink(missing_ok=True)
+        os.mkfifo(unsafe_path)
+
+    conn, service = _service(tmp_path)
+    errors = []
+
+    def record():
+        try:
+            service.record_nightly_completion(
+                IDENT, 1, {"primary": "required"},
+                {"primary": Disposition("succeeded")})
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = Thread(target=record, daemon=True)
+    try:
+        worker.start()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert len(errors) == 1 and isinstance(errors[0], OpsError)
+        assert errors[0].code == "INTEGRITY_FAILED"
+        report_dir = tmp_path.joinpath(*STATE_DIR)
+        assert not list(report_dir.glob("*.completion.json"))
+        if unsafe == "symlink":
+            assert unsafe_path.is_symlink()
+            assert sentinel.exists()
+    finally:
+        conn.close()
+
+
+def test_service_rejects_oversized_session_state_without_report(tmp_path):
+    ensure_session(tmp_path, IDENT)
+    mark_started(tmp_path, IDENT, 1)
+    session_path(tmp_path, IDENT).write_bytes(b"x" * (1024 * 1024 + 1))
+    conn, service = _service(tmp_path)
+    try:
+        with pytest.raises(OpsError) as exc:
+            service.record_nightly_completion(
+                IDENT, 1, {"primary": "required"},
+                {"primary": Disposition("succeeded")})
+        assert exc.value.code == "INTEGRITY_FAILED"
+        assert not list(tmp_path.joinpath(*STATE_DIR).glob("*.completion.json"))
+    finally:
+        conn.close()
+
+
+def test_service_rejects_preexisting_completion_temp_symlink(tmp_path):
+    ensure_session(tmp_path, IDENT)
+    state = mark_started(tmp_path, IDENT, 1)
+    report_path = tmp_path.joinpath(
+        *STATE_DIR, f"{state.active.run_id}.completion.json")
+    external = tmp_path / "external-sentinel"
+    external.write_text("preserve me")
+    temp_link = report_path.with_name(report_path.name + ".tmp")
+    temp_link.symlink_to(external)
+    conn, service = _service(tmp_path)
+    try:
+        with pytest.raises(OpsError) as exc:
+            service.record_nightly_completion(
+                IDENT, 1, {"primary": "required"},
+                {"primary": Disposition("succeeded")})
+        assert exc.value.code == "INTEGRITY_FAILED"
+        assert not report_path.exists()
+        assert external.read_text() == "preserve me"
+        assert temp_link.is_symlink()
+    finally:
+        conn.close()
+
+
+def test_service_rejects_symlinked_session_directory_before_report(tmp_path):
+    ensure_session(tmp_path, IDENT)
+    state = mark_started(tmp_path, IDENT, 1)
+    session_dir = session_path(tmp_path, IDENT).parent
+    moved_dir = session_dir.with_name("sessions-moved")
+    session_dir.rename(moved_dir)
+    session_dir.symlink_to(moved_dir, target_is_directory=True)
+    conn, service = _service(tmp_path)
+    try:
+        with pytest.raises(OpsError) as exc:
+            service.record_nightly_completion(
+                IDENT, 1, {"primary": "required"},
+                {"primary": Disposition("succeeded")})
+        assert exc.value.code == "INTEGRITY_FAILED"
+        assert not moved_dir.joinpath(f"{state.active.run_id}.completion.json").exists()
+        assert not list(moved_dir.glob("*.tmp"))
+    finally:
+        conn.close()
+
+
+def test_service_rejects_directory_at_completion_destination(tmp_path):
+    ensure_session(tmp_path, IDENT)
+    state = mark_started(tmp_path, IDENT, 1)
+    report_path = tmp_path.joinpath(
+        *STATE_DIR, f"{state.active.run_id}.completion.json")
+    report_path.mkdir()
+    conn, service = _service(tmp_path)
+    try:
+        with pytest.raises(OpsError) as exc:
+            service.record_nightly_completion(
+                IDENT, 1, {"primary": "required"},
+                {"primary": Disposition("succeeded")})
+        assert exc.value.code == "INTEGRITY_FAILED"
+        assert report_path.is_dir()
+        assert not report_path.with_name(report_path.name + ".tmp").exists()
+    finally:
+        conn.close()
+
+
+def test_service_reclaims_stale_regular_completion_temp(tmp_path):
+    ensure_session(tmp_path, IDENT)
+    state = mark_started(tmp_path, IDENT, 1)
+    report_path = tmp_path.joinpath(
+        *STATE_DIR, f"{state.active.run_id}.completion.json")
+    stale_temp = report_path.with_name(report_path.name + ".tmp")
+    stale_temp.write_text("left by a prior process stop")
+    conn, service = _service(tmp_path)
+    try:
+        report = service.record_nightly_completion(
+            IDENT, 1, {"primary": "required"},
+            {"primary": Disposition("succeeded")})
+        assert report["status"] == "completed"
+        assert json.loads(report_path.read_text()) == report
+        assert not stale_temp.exists()
+    finally:
+        conn.close()
+
+
 def test_same_generation_record_rebuilds_instead_of_using_report_cache(tmp_path):
     ensure_session(tmp_path, IDENT)
     state = mark_started(tmp_path, IDENT, 1)
@@ -433,14 +581,16 @@ def test_failed_completion_replace_keeps_previous_report_or_none(
             return real_replace(source, destination)
 
         monkeypatch.setattr(os, "replace", fail_completion_replace)
-        with pytest.raises(OSError, match="replace failed"):
+        with pytest.raises(OpsError) as exc:
             service.record_nightly_completion(
                 IDENT, 1, expected,
                 {"primary": Disposition("failed", reason_code="STEP_FAILED")})
+        assert exc.value.code == "INTEGRITY_FAILED"
         if previous is None:
             assert not path.exists()
         else:
             assert path.read_bytes() == previous
+        assert not path.with_name(path.name + ".tmp").exists()
     finally:
         conn.close()
 
