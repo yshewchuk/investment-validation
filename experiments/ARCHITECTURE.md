@@ -26,6 +26,32 @@ Optional `final_read` metadata creates a versioned native registration that seal
 `prepare_final_holdout_request` verifies that original registration and derives an immutable request keyed by experiment ID; missing declarations or malformed request metadata refuse `INVALID_EXPERIMENT_SPEC`, and changed catalog/artifact identity refuses `EXPERIMENT_IDENTITY_CONFLICT`.
 Preparation reads only registration metadata, performs no repository/head/population/result access or writes, and grants no authority. Foundation owns shared request decoding so ops and research need no peer import; later read admission must verify the referenced evidence and completeness before reading.
 
+Optional `magnitude_training_start` selects registration v1.2 for a
+`computed_moves` specification. Years come only from resolved `spec.folds`;
+shared `magnitude_folds.magnitude_window` validates the explicit request.
+Registration reconstructs and seals the full metadata-only temporal plan from
+the one pinned snapshot. Its selected canonical membership and holdout context
+own the enclosing event IDs/context; no caller-supplied plan is accepted.
+Equivalent explicit/bulk membership gives identical bytes with other inputs fixed.
+Omitting this option preserves v1.0/v1.1 bytes and identities.
+
+Magnitude admission verifies the catalog-owned original even without `expected`.
+Mode, request, source/environment/scope/snapshot and holdout-month conflicts
+refuse before population/calendar scans; current plan reconstruction must then
+match the complete stored binding. Stored verification alone proves integrity,
+not current semantic admission. This library prerequisite has no magnitude CLI
+or production caller, performs no feature/label read or fitting, and adds no
+aggregate materialization or final-read authority.
+
+| Magnitude registration condition | Outcome |
+|---|---|
+| Invalid window, non-`computed_moves` source, or combined `final_read` | `INVALID_EXPERIMENT_SPEC` before repository access. |
+| Missing admission reservation | `INVALID_EXPERIMENT_SPEC`; no metadata scan or implicit registration. |
+| Changed/omitted mode, conflicting expected identity, or malformed/cross-context stored plan | `EXPERIMENT_IDENTITY_CONFLICT`; prior evidence remains unchanged. |
+| Planner admission, calendar or empty-fold failure | Shared typed error propagates; no partial registration. |
+| v1.2 final-request preparation | `INVALID_EXPERIMENT_SPEC`; final declarations remain exclusive to v1.1. |
+Existing publication/transaction/retry semantics above apply unchanged.
+
 | Condition | Outcome |
 | --- | --- |
 | Invalid plan, external inputs, unsupported runner path, or missing/malformed/indirect source | `INVALID_EXPERIMENT_SPEC` before registration. |
