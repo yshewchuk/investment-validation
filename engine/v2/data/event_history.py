@@ -25,14 +25,23 @@ def _refuse(message: str, **details: Any) -> DataError:
 
 
 def _present(value: Any) -> bool:
-    return value is not None and not (isinstance(value, float) and math.isnan(value))
+    """False for None and for any float NaN, including numpy float dtypes."""
+    if value is None:
+        return False
+    try:
+        return not math.isnan(value)
+    except TypeError:
+        return True
 
 
 def _day(text: Any) -> date:
     try:
-        return date.fromisoformat(text)
+        parsed = date.fromisoformat(text)
     except (TypeError, ValueError):
         raise _refuse("dates must be ISO YYYY-MM-DD strings") from None
+    if parsed.isoformat() != text:
+        raise _refuse("dates must be canonical YYYY-MM-DD strings")
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -48,6 +57,10 @@ def event_sequence(event_dates: Sequence[str], *, warmup: int,
     if warmup < 0:
         raise _refuse("warmup must be non-negative")
     days = list(event_dates)
+    for day in days:
+        _day(day)
+    if first_known is not None:
+        _day(first_known)
     for prev, cur in zip(days, days[1:]):
         if cur <= prev:
             raise _refuse("event dates must be strictly ascending")

@@ -248,14 +248,15 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
   wrong).
 - `AsofSeries(rows, eligible=, value=, on_missing=)` anchors on the last row
   whose data date is strictly before the event date and whose `eligible` fields
-  are all non-null (None or NaN counts as null, and such a row is ineligible,
+  are all non-null (None or any float NaN, numpy dtypes included, counts as null, and such a row is ineligible,
   not an anchor); eligibility is separate from the value field. If that
   anchor's value is null the result is a miss; the lookup never reaches back to
   an older row. A miss (no anchor, a stale anchor under the optional
   `max_staleness_days`, or a null value) is `None` under `on_missing="null"` and
   `CONTRACT_MISMATCH` under `"refuse"`. `on_missing` has no default. Rows must
   be date-ascending (refused otherwise); a missing eligibility or value column,
-  a non-ISO date, or a non-numeric anchor value refuses.
+  a date that is not exactly canonical `YYYY-MM-DD` (rows, event dates,
+  `first_known`, lookup date), or a non-numeric anchor value refuses.
 - `strict_prior_mean(events, values, population=)` returns `(mean, count)` per
   event over earlier-ordinal events whose value is non-null, within
   `population` (`"admitted"` or `"all"`). Under `"admitted"` a non-admitted

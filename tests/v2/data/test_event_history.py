@@ -1,6 +1,7 @@
 """Event-history primitives on the real path (design #651)."""
 import math
 
+import numpy as np
 import pytest
 
 from engine.v2.data.errors import DataError
@@ -159,3 +160,31 @@ def test_non_iso_dates_and_non_numeric_values_refuse():
 
 def test_matching_first_known_is_accepted():
     assert len(event_sequence(DAYS, warmup=4, first_known=DAYS[0])) == 6
+
+
+@pytest.mark.parametrize("bad", ["20200110", "2020-W02-5", "2020-1-10", "2020-01-10T00:00"])
+def test_non_canonical_dates_refuse_everywhere(bad):
+    series = AsofSeries(_rows(("2020-01-11", 0.5, 4.0)), eligible=("src_iv",),
+                        value="implied_move", on_missing="null")
+    with pytest.raises(DataError):
+        series.at(bad)
+    with pytest.raises(DataError):
+        AsofSeries(_rows((bad, 0.5, 4.0)), eligible=("src_iv",),
+                   value="implied_move", on_missing="null")
+    with pytest.raises(DataError):
+        event_sequence([bad], warmup=0)
+    with pytest.raises(DataError):
+        event_sequence(DAYS, warmup=0, first_known=bad)
+
+
+@pytest.mark.parametrize("nan", [np.float32("nan"), np.float64("nan"), np.float16("nan")])
+def test_numpy_nan_is_null_everywhere(nan):
+    rows = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-08", nan, 9.0))
+    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
+    assert series.at("2020-01-10") == 4.0
+    nan_value = AsofSeries(_rows(("2020-01-01", 0.5, nan)), eligible=("src_iv",),
+                           value="implied_move", on_missing="null")
+    assert nan_value.at("2020-02-01") is None
+    out = strict_prior_mean(event_sequence(DAYS, warmup=0), [1.0, nan, 3.0, 5.0, 7.0, 9.0],
+                            population="all")
+    assert out[2] == (1.0, 1)
