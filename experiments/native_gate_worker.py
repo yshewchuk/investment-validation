@@ -46,6 +46,16 @@ def _read_staged(path):
         raise
 
 
+def _write_receipt(path, receipt):
+    """Create once without following or blocking on an existing destination."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as stream:
+            stream.write(canonical_json(receipt))
+    finally:
+        os.close(fd)
+
+
 def _admit(parameters, root, conn, store):
     """Validate the staged request against existing immutable native admission."""
     if (parameters.get("no_ledger") is not True
@@ -110,14 +120,14 @@ def run(parameters, root):
                        "stage_inputs": inputs, "mark_based_cashflows": cashflows}
         finally:
             conn.close()
+        _write_receipt(root / "native_gate_consumption.json", receipt)
     except DataError as error:
         code = error.code if error.code in FAILURE_CODES else "EXPERIMENT_VARIANT_FAILED"
         raise fail(code, "native pinned pricing refused", details={"data_failure_code": error.code}) from None
     except (ArtifactError, ValueError, TypeError, KeyError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "native staged input is malformed") from None
     except (OSError, sqlite3.Error):
-        raise fail("INPUT_CHANGED", "native staged input is unavailable") from None
-    (root / "native_gate_consumption.json").write_text(canonical_json(receipt))
+        raise fail("INPUT_CHANGED", "native staged I/O is unavailable") from None
     return {"outputs": [{"name": "native_gate_consumption", "path": "native_gate_consumption.json",
                          "schema": "native_gate_consumption.v1.0"}],
             "completed_ids": [registration.variant_id], "no_work": False}

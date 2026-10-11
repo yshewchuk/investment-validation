@@ -64,10 +64,10 @@ def single_thread(monkeypatch):
 
 
 def _supervise(tmp_path, source, document, registration, parameters, *, key="smoke",
-               staged_bytes=None, expected_details=None):
+               staged_bytes=None, expected_details=None, shared_root=None, before_start=None):
     """Submit through the production registry, launcher, child and checkpoint path."""
-    root = tmp_path / key
-    root.mkdir()
+    root = tmp_path / (shared_root or key)
+    root.mkdir(exist_ok=shared_root is not None)
     clock = SystemClock()
     conn = open_catalog(root / "catalog.sqlite", clock=clock)
     store = ArtifactStore(root)
@@ -91,6 +91,9 @@ def _supervise(tmp_path, source, document, registration, parameters, *, key="smo
                          SubmitRequest(namespace="smoke", idempotency_key=key, principal="operator", job=job),
                          clock=clock)
         service = Service(conn, root, stages.registry(), TEST_POLICY, clock=clock, code_source=REPO)
+        if before_start is not None:
+            before_start(conn, store, job, clock)
+        checkpoint_count = conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
         try:
             service.start()
             state = run_until(service, conn, receipt.job_id, timeout=90)
@@ -101,6 +104,7 @@ def _supervise(tmp_path, source, document, registration, parameters, *, key="smo
                                (attempt["attempt_id"],)).fetchall()
         assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == checkpoint_count
         if state == "succeeded":
             assert len(outputs) == 1 and outputs[0]["name"] == "native_gate_consumption"
             return json.loads(store.read_verified(artifact(conn, store, outputs[0]["artifact_id"])))
@@ -331,12 +335,46 @@ def test_real_data_failures_preserve_private_diagnostics(
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
 
 
-def test_no_cross_job_cache_can_skip_native_admission(source):
-    """Both supervisor checkpoint lookup and storage consult the same guard."""
-    from types import SimpleNamespace
+def test_no_cross_job_cache_can_skip_native_admission(source, tmp_path):
+    """A real compatible cache hit cannot bypass fresh pinned-data admission."""
+    from engine.v2.contracts import CheckpointReceipt
+    from engine.v2.foundation import format_timestamp
+    from engine.v2.ops.catalog import dumps
+    from engine.v2.ops.checkpoints import cache_identity, reuse
+    from engine.v2.ops.input_bindings import resolve_bindings, resolved_inputs_hash
 
-    claim = SimpleNamespace(spec=SimpleNamespace(kind="native_gate_pricing"))
-    assert Service._cache_allowed(None, claim) is False
+    document, registration, parameters = _registered(source)
+    _supervise(tmp_path, source, document, registration, parameters,
+               key="producer", shared_root="cache-boundary")
+
+    def seed_compatible_checkpoint(conn, store, job, clock):
+        producer = conn.execute("SELECT attempt_id, fence FROM attempts WHERE state='succeeded'").fetchone()
+        output = conn.execute("SELECT artifact_id FROM attempt_outputs WHERE attempt_id=?",
+                              (producer["attempt_id"],)).fetchone()
+        ref = artifact(conn, store, output[0])
+        inputs = resolved_inputs_hash(job, resolve_bindings(conn, store, job))
+        key = cache_identity(kind=job.kind, inputs=inputs, implementation=job.implementation_ref,
+                             parameters=content_hash(job.parameters), environment=job.environment_ref,
+                             schema="legacy_action.v1.0", shard="default")
+        receipt = CheckpointReceipt(
+            stage_id=job.kind, shard_key="default", cache_key=key, input_hash=inputs,
+            implementation_hash=job.implementation_ref, parameter_hash=content_hash(job.parameters),
+            environment_hash=job.environment_ref, output_schema_ref="legacy_action.v1.0",
+            artifact_refs=(ref,), validation_refs=(), producer_attempt_id=producer["attempt_id"],
+            producer_fence=producer["fence"], committed_at=format_timestamp(clock.now()))
+        with transaction(conn):
+            conn.execute("INSERT INTO checkpoints VALUES (?,?,?,?,?)",
+                         (key, job.kind, "default", dumps(receipt), producer["attempt_id"]))
+        assert reuse(conn, store, key) == receipt
+        source[0].execute("DROP TRIGGER data_snapshots_no_update")
+        source[0].execute("UPDATE data_snapshots SET manifest_hash=? WHERE snapshot_id=?",
+                          ("sha256:" + "0" * 64, source[4].snapshot_id))
+
+    result = _supervise(tmp_path, source, document, registration, parameters,
+                        key="consumer", shared_root="cache-boundary",
+                        before_start=seed_compatible_checkpoint,
+                        expected_details={"data_failure_code": "SNAPSHOT_UNRESOLVED"})
+    assert result["code"] == "SNAPSHOT_UNRESOLVED"
 
 
 def test_supervised_changed_fill_cannot_reuse_registered_identity(source, tmp_path):
@@ -366,19 +404,37 @@ def test_finite_quotes_that_overflow_cashflows_refuse_whole_worker(source, tmp_p
     assert not (stage / "native_gate_consumption.json").exists()
 
 
-def test_smoke_opt_in_is_required_by_submission_and_worker(tmp_path):
-    """The schema and dispatch both require explicit no-ledger intent."""
-    from engine.v2.foundation import DocumentError, from_document
-
+@pytest.mark.parametrize("opt_in", [False, None], ids=["false", "missing"])
+def test_smoke_opt_in_is_required_by_submission_and_worker(tmp_path, opt_in):
+    """Actual submission refuses missing/false opt-in before storing a job."""
     parameters = {"expected_ids": ["variant"], "catalog_path": "unopened.sqlite",
                   "objects_root": "unopened", "run_id": "run", "variant_id": "variant",
                   "input_bindings": {}}
-    with pytest.raises(DocumentError):
-        from_document(stages.NativeGateParameters, parameters)
+    if opt_in is not None:
+        parameters["no_ledger"] = opt_in
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
+    job = JobSpec(kind="native_gate_pricing", spec_hash=content_hash({}),
+                  implementation_ref=content_hash({}), environment_ref=content_hash({}),
+                  parameters=parameters, output_namespace="smoke",
+                  resource_class="native_experiment", retry_policy_ref="once",
+                  checkpoint_contract_ref="native_gate_consumption.v1.0")
+    try:
+        before = list(conn.iterdump())
+        with pytest.raises(OpsError) as error:
+            submit(conn, stages.registry(), NamespacePolicy({"operator": frozenset({"smoke"})}),
+                   SubmitRequest(namespace="smoke", idempotency_key="opt-in", principal="operator", job=job),
+                   clock=clock)
+        assert error.value.code == "INVALID_REQUEST"
+        assert list(conn.iterdump()) == before
+    finally:
+        conn.close()
+    stage = tmp_path / "unopened"
+    stage.mkdir()
     with pytest.raises(OpsError) as error:
-        worker.dispatch("native_gate_pricing", parameters, tmp_path)
+        worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert list(tmp_path.iterdir()) == []
+    assert list(stage.iterdir()) == []
 
 
 def test_registered_code_must_match_the_running_worker(source, tmp_path, single_thread):
@@ -553,3 +609,76 @@ def test_staged_growth_is_bounded_after_descriptor_validation(tmp_path, monkeypa
     with pytest.raises(OpsError) as error:
         native._read_staged(path)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink", "hardlink", "fifo", "write-error"])
+def test_receipt_destination_refuses_without_truncation_or_blocking(source, tmp_path, single_thread, kind):
+    """Real dispatch and OS writes preserve foreign targets and typed I/O failure."""
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    path, outside = stage / "native_gate_consumption.json", tmp_path / "foreign.json"
+    outside.write_bytes(b"foreign sentinel")
+    if kind == "file":
+        path.write_bytes(b"existing sentinel")
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        path.symlink_to(outside)
+    elif kind == "hardlink":
+        path.hardlink_to(outside)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    before = _catalog(source[0])
+    program = """
+import json, resource, signal, sys
+from pathlib import Path
+from engine.v2.ops.worker import dispatch
+from engine.v2.ops.errors import OpsError
+if sys.argv[3] == 'write-error':
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
+try:
+    dispatch('native_gate_pricing', json.loads(sys.argv[1]), Path(sys.argv[2]))
+except OpsError as error:
+    print(json.dumps({'code': error.code, 'retryable': error.problem.retryable}))
+else:
+    raise AssertionError('unsafe receipt destination was accepted')
+"""
+    child = subprocess.run([sys.executable, "-c", program, json.dumps(parameters), str(stage), kind],
+                           capture_output=True, text=True, timeout=10, check=True)
+    assert json.loads(child.stdout.strip().splitlines()[-1]) == {"code": "INPUT_CHANGED", "retryable": False}
+    assert _catalog(source[0]) == before
+    assert outside.read_bytes() == b"foreign sentinel"
+    if kind == "file":
+        assert path.read_bytes() == b"existing sentinel"
+    elif kind == "write-error":
+        assert path.read_bytes() == b""
+    elif kind == "directory":
+        assert path.is_dir() and list(path.iterdir()) == []
+    elif kind == "symlink":
+        assert path.is_symlink()
+    elif kind == "fifo":
+        import stat
+        assert stat.S_ISFIFO(path.stat().st_mode)
+
+
+def test_supervised_receipt_conflict_has_no_success_output(source, tmp_path, monkeypatch):
+    """An occupied assigned destination stays private and cannot publish success."""
+    request = _registered(source)
+    outside = tmp_path / "foreign.json"
+    outside.write_bytes(b"foreign sentinel")
+    original_stage = Service._stage_legacy_inputs
+
+    def occupy_destination(service, claim, launch):
+        overlay = original_stage(service, claim, launch)
+        path = service.store.staging_dir(claim.attempt_id) / "native_gate_consumption.json"
+        path.symlink_to(outside)
+        return overlay
+
+    monkeypatch.setattr(Service, "_stage_legacy_inputs", occupy_destination)
+    before = _catalog(source[0])
+    result = _supervise(tmp_path, source, *request, expected_details={})
+    assert result["code"] == "INPUT_CHANGED"
+    assert result["retryable"] is False
+    assert outside.read_bytes() == b"foreign sentinel"
+    assert _catalog(source[0]) == before
