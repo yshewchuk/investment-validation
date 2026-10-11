@@ -50,7 +50,7 @@ CHILD = GUARDS + r'''
 import subprocess
 assert "MASSIVE_API_KEY" in engine.env.loaded_keys
 arguments = json.loads(sys.argv[2])
-guards, replacement = sys.argv[3:5]
+guards, replacement, guard_worker = sys.argv[3:6]
 source_root = sys.argv[1]
 original_run, workers = subprocess.run, []
 original_popen, processes = subprocess.Popen, []
@@ -63,8 +63,9 @@ def track_popen(*args, **kwargs):
 def guarded_worker(command, **kwargs):
     command = list(command)
     assert command[1:4] == ["-I", "-B", "-c"]
-    command[4] = guards + replacement + command[4]
-    command.append(source_root)
+    if guard_worker == "yes":
+        command[4] = guards + replacement + command[4]
+        command.append(source_root)
     workers.append(True)
     result = original_run(command, **kwargs)
     assert "AssertionError" not in result.stderr, result.stderr
@@ -93,13 +94,13 @@ print(json.dumps({"code": code, "stdout": out.getvalue(), "stderr": err.getvalue
 '''
 
 
-def _run(root, arguments, revision, replacement=""):
+def _run(root, arguments, revision, replacement="", *, guard_worker=True):
     markers = [f"synthetic-planner-{revision}-{index}" for index in range(len(KEYS))]
     (root / ".env").write_text("PLANNER_STARTUP_SENTINEL=synthetic-startup\n" + "".join(
         f"{key}={value}\n" for key, value in zip(KEYS, markers, strict=True)))
     with subprocess.Popen(
         [sys.executable, "-I", "-B", "-c", CHILD, str(ROOT), json.dumps(arguments),
-         GUARDS, replacement],
+         GUARDS, replacement, "yes" if guard_worker else "no"],
         cwd=root, env={"HOME": str(root), "INVESTING_PLAN_ROOT": str(root)},
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
     ) as process:
@@ -118,6 +119,7 @@ def _run(root, arguments, revision, replacement=""):
     "help", "invalid", "s3", "missing", "empty", "cached", "fifo", "nul_catalog", "nul_store",
     "receipt_corrupt", "bytes_corrupt", "object_missing",
     "cwd_shadow",
+    "missing_flags", "missing_value", "bad_adjustment", "bad_cap", "unsupported_transport",
 ])
 def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, mode):
     conn, _, root = cache
@@ -141,7 +143,17 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
     if mode == "help":
         arguments = ["--help"]
     elif mode == "invalid":
-        arguments = ["--unknown-option"]
+        arguments += ["--unknown-option", "synthetic-private-unknown"]
+    elif mode == "missing_flags":
+        arguments = []
+    elif mode == "missing_value":
+        arguments += ["--ticker"]
+    elif mode == "bad_adjustment":
+        arguments = cli_args(root, adjustment="synthetic-private-choice")
+    elif mode == "bad_cap":
+        arguments = cli_args(root, **{"max-calls-per-request": "synthetic-private-cap"})
+    elif mode == "unsupported_transport":
+        arguments = cli_args(root, transport="synthetic-private-transport")
     elif mode == "s3":
         arguments = cli_args(root, transport="s3")
     elif mode == "missing":
@@ -172,9 +184,17 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         assert json.loads(first["stdout"]) == {"refused": "RESOURCE_UNAVAILABLE"}
         assert first["stderr"] == ""
         assert not (root / "missing.sqlite").exists()
-    if mode == "s3":
+    if mode in ("s3", "unsupported_transport"):
         assert json.loads(first["stdout"]) == {
             "refused": "INVALID_REQUEST", "reason": "CAPABILITY_UNAVAILABLE"}
+        assert first["stderr"] == ""
+    if mode in ("invalid", "missing_flags", "missing_value", "bad_adjustment", "bad_cap"):
+        assert json.loads(first["stdout"]) == {"refused": "INVALID_REQUEST", "reason": None}
+        assert first["stderr"] == ""
+    if mode == "help":
+        assert first["stdout"].startswith("usage: tools.v2_massive_plan ")
+        assert "--max-calls-per-request" in first["stdout"]
+        assert first["stderr"] == ""
     if mode in ("receipt_corrupt", "bytes_corrupt", "object_missing"):
         assert json.loads(first["stdout"]) == {
             "refused": "MISSING" if mode == "object_missing" else "INTEGRITY_FAILED",
@@ -184,6 +204,17 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
     assert objects == {str(path.relative_to(root)): path.read_bytes()
                        for path in (root / "store").rglob("*") if path.is_file()}
     assert all(marker not in str(before) + str(objects) for marker in markers + more_markers)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_unmodified_worker_bootstrap_succeeds_outside_source_tree(cache, cached):
+    if cached:
+        for unit in inventory(cache)["units"]:
+            seed(cache, unit["request"])
+    output, _ = _run(cache[2], cli_args(cache[2]), "unmodified", guard_worker=False)
+    assert output["code"] == 0
+    assert output["stderr"] == ""
+    assert json.loads(output["stdout"]) == inventory(cache)
 
 
 @pytest.mark.parametrize("failure", ["replacement", "partial_timeout", "crash"])

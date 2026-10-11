@@ -4,6 +4,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,8 @@ from tools.v2_massive_plan import main
 
 PARAMS = {"tickers": ["TEST.A"], "start": "2026-01-01", "end": "2026-01-31",
           "as_of": "2026-10-10", "adjustment": "raw", "max_calls_per_request": 7}
+DATASETS = ("daily", "splits", "dividends")
+PRIVATE_PAYLOAD_MARKER = "synthetic-private-raw-payload-marker"
 
 
 @pytest.fixture(autouse=True)
@@ -92,25 +95,29 @@ def test_descriptors_and_budgets_are_canonical_and_explicit(ticker, start, end, 
     assert result["requests_per_minute"] == 5
     assert result["minimum_initial_calls"] == 6
     assert result["maximum_http_attempts"] == 42
-    requests = {u["request"]["dataset"]: u["request"] for u in result["units"]
-                if u["request"]["ticker"] == ticker}
-    common = {"schema_version": "massive_request.v1", "source": "massive-stocks",
-              "transport": "rest", "ticker": ticker, "start": start, "end": end}
-    assert requests == {
-        "daily": common | {"dataset": "daily", "adjustment_basis": adjustment,
-                            "endpoint": f"/v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}",
-                            "params": {"adjusted": adjusted, "sort": "asc", "limit": 50000}},
-        "splits": common | {"dataset": "splits", "adjustment_basis": "corporate_action",
-                             "endpoint": "/stocks/v1/splits",
-                             "params": {"ticker": ticker, "execution_date.gte": start,
-                                        "execution_date.lte": end,
-                                        "sort": "execution_date.asc", "limit": 5000}},
-        "dividends": common | {"dataset": "dividends", "adjustment_basis": "corporate_action",
-                                "endpoint": "/stocks/v1/dividends",
-                                "params": {"ticker": ticker, "ex_dividend_date.gte": start,
-                                           "ex_dividend_date.lte": end,
-                                           "sort": "ex_dividend_date.asc", "limit": 5000}},
-    }
+    expected = {}
+    for stock in {ticker, "ZZZ"}:
+        common = {"schema_version": "massive_request.v1", "source": "massive-stocks",
+                  "transport": "rest", "ticker": stock, "start": start, "end": end}
+        expected[stock] = {
+            "daily": common | {"dataset": "daily", "adjustment_basis": adjustment,
+                                "endpoint": f"/v2/aggs/ticker/{stock}/range/1/day/{start}/{end}",
+                                "params": {"adjusted": adjusted, "sort": "asc", "limit": 50000}},
+            "splits": common | {"dataset": "splits", "adjustment_basis": "corporate_action",
+                                 "endpoint": "/stocks/v1/splits",
+                                 "params": {"ticker": stock, "execution_date.gte": start,
+                                            "execution_date.lte": end,
+                                            "sort": "execution_date.asc", "limit": 5000}},
+            "dividends": common | {"dataset": "dividends", "adjustment_basis": "corporate_action",
+                                    "endpoint": "/stocks/v1/dividends",
+                                    "params": {"ticker": stock, "ex_dividend_date.gte": start,
+                                               "ex_dividend_date.lte": end,
+                                               "sort": "ex_dividend_date.asc", "limit": 5000}},
+        }
+    assert result["units"] == [
+        {"request": request, "request_hash": content_hash(request), "raw_receipt_id": None}
+        for stock in sorted(expected) for _, request in sorted(expected[stock].items())
+    ]
     text = json.dumps(result)
     assert "apiKey" not in text and "MASSIVE_" not in text and "https://" not in text
 
@@ -153,8 +160,9 @@ def test_invalid_inputs_refuse_before_catalog_access(change):
         def execute(self, *args):
             raise AssertionError("invalid input reached the catalog")
 
-    with pytest.raises(OpsError, match="INVALID_REQUEST"):
+    with pytest.raises(OpsError) as error:
         massive_plan.plan(Poison(), None, **(PARAMS | change))
+    assert error.value.code == "INVALID_REQUEST"
 
 
 @pytest.mark.parametrize("change,reason", [
@@ -188,6 +196,20 @@ def test_real_cache_hits_are_read_only_and_do_not_fetch(cache):
     assert [u["raw_receipt_id"] for u in result["units"]] == [r.raw_receipt_id for r in receipts]
     assert inventory(cache) == result
     assert before == (conn.total_changes, tuple(conn.iterdump()), sorted(p.relative_to(root) for p in store.root.rglob("*")))
+
+
+@pytest.mark.parametrize("dataset", ["splits", "dividends"])
+@pytest.mark.parametrize("row_count", [1, 2, 3])
+def test_countless_corporate_action_envelopes_are_complete_hits(cache, dataset, row_count):
+    unit = inventory(datasets=[dataset])["units"][0]
+    document = {"status": "OK", "results": [
+        {"ticker": unit["request"]["ticker"], "v": index + 1.25} for index in range(row_count)
+    ]}
+    assert "resultsCount" not in document
+    record = seed(cache, unit["request"], document=document)
+    result = inventory(cache, datasets=[dataset])
+    assert result["units"] == [unit | {"raw_receipt_id": record.raw_receipt_id}]
+    assert result["minimum_initial_calls"] == result["maximum_http_attempts"] == 0
 
 
 def test_exact_only_no_other_source_or_superset_fallback(cache):
@@ -224,12 +246,17 @@ def test_schema_admissible_incomplete_manifest_is_typed(cache, missing_key):
     assert error.value.code == "INTEGRITY_FAILED"
 
 
-@pytest.mark.parametrize("kind", ["partial", "failed", "auth_failed", "rate_limited", "legitimate_empty"])
-def test_newer_noncomplete_receipt_never_falls_back(cache, kind):
-    req = inventory(datasets=["daily"])["units"][0]["request"]
+@pytest.mark.parametrize("dataset", DATASETS)
+@pytest.mark.parametrize("kind", [
+    "legitimate_empty", "partial", "failed", "auth_failed", "rate_limited", "delayed", "unavailable",
+])
+def test_newer_noncomplete_receipt_never_falls_back(cache, dataset, kind):
+    missing = inventory(datasets=[dataset])
+    req = missing["units"][0]["request"]
     seed(cache, req)
-    seed(cache, req, document=body(req, request_id="second"), kind=kind)
-    assert inventory(cache, datasets=["daily"])["minimum_initial_calls"] == 1
+    seed(cache, req, document=body(req, request_id="second"), kind=kind,
+         received_at="2026-10-10T12:00:00Z")
+    assert inventory(cache, datasets=[dataset]) == missing
 
 
 @pytest.mark.parametrize("indexed", [True, False])
@@ -251,35 +278,60 @@ def test_latest_tie_break_and_timestamp_order(cache, indexed):
     assert inventory(cache, datasets=["daily"])["units"][0]["raw_receipt_id"] == latest.raw_receipt_id
 
 
+@pytest.mark.parametrize("dataset", DATASETS)
 @pytest.mark.parametrize("changes", [
     {"results": [], "resultsCount": 0}, {"next_url": "https://api.massive.com/next?apiKey=secret"},
 ])
-def test_empty_or_paginated_is_missing_not_complete(cache, changes):
-    req = inventory(datasets=["daily"])["units"][0]["request"]
+def test_empty_or_paginated_is_missing_not_complete(cache, dataset, changes):
+    missing = inventory(datasets=[dataset])
+    req = missing["units"][0]["request"]
     seed(cache, req, document=body(req, **changes))
-    result = inventory(cache, datasets=["daily"])
+    result = inventory(cache, datasets=[dataset])
+    assert result == missing
     assert result["minimum_initial_calls"] == 1
     assert result["maximum_http_attempts"] == 7
     assert "secret" not in json.dumps(result)
 
 
+@pytest.mark.parametrize("dataset", DATASETS)
 @pytest.mark.parametrize("changes", [
     {"status": "ERROR"}, {"resultsCount": 2}, {"resultsCount": True},
-    {"results": None}, {"results": [1]}, {"ticker": "WRONG"}, {"adjusted": 0},
+    {"results": None}, {"results": [1]},
 ])
-def test_invalid_cached_envelopes_refuse(cache, changes):
+def test_invalid_cached_envelopes_refuse(cache, dataset, changes):
+    req = inventory(datasets=[dataset])["units"][0]["request"]
+    seed(cache, req, document=body(req, **changes))
+    with pytest.raises(OpsError) as error:
+        inventory(cache, datasets=[dataset])
+    assert error.value.code == "SOURCE_INVALID"
+
+
+@pytest.mark.parametrize("changes", [{"ticker": "WRONG"}, {"adjusted": 0}])
+def test_daily_identity_mismatch_refuses(cache, changes):
     req = inventory(datasets=["daily"])["units"][0]["request"]
     seed(cache, req, document=body(req, **changes))
-    with pytest.raises(OpsError, match="SOURCE_INVALID"):
+    with pytest.raises(OpsError) as error:
         inventory(cache, datasets=["daily"])
+    assert error.value.code == "SOURCE_INVALID"
 
 
-@pytest.mark.parametrize("raw", [b"not-json", b"[]", b"[" * 2000 + b"0" + b"]" * 2000])
-def test_malformed_json_is_redacted(cache, raw):
-    req = inventory(datasets=["daily"])["units"][0]["request"]
+@pytest.mark.parametrize("dataset", DATASETS)
+@pytest.mark.parametrize("raw", [
+    (PRIVATE_PAYLOAD_MARKER + ":not-json").encode(),
+    json.dumps([PRIVATE_PAYLOAD_MARKER]).encode(),
+    b"[" * 2000 + json.dumps(PRIVATE_PAYLOAD_MARKER).encode() + b"]" * 2000,
+], ids=["invalid-json", "not-an-object", "too-deep"])
+def test_malformed_json_is_redacted(cache, dataset, raw):
+    req = inventory(datasets=[dataset])["units"][0]["request"]
     seed(cache, req, raw=raw)
-    with pytest.raises(OpsError, match="SOURCE_INVALID"):
-        inventory(cache, datasets=["daily"])
+    with pytest.raises(OpsError) as error:
+        inventory(cache, datasets=[dataset])
+    assert error.value.code == "SOURCE_INVALID"
+    rendered = "\n".join((str(error.value), repr(error.value), json.dumps(error.value.args),
+                          canonical_json(asdict(error.value.problem))))
+    assert PRIVATE_PAYLOAD_MARKER in raw.decode()
+    assert PRIVATE_PAYLOAD_MARKER not in rendered
+    assert raw.decode() not in rendered
 
 
 @pytest.mark.parametrize("field,value", [
@@ -292,8 +344,9 @@ def test_corrupted_object_manifest_binding_refuses(cache, field, value):
     document = json.loads(cache[0].execute("SELECT artifact_ref_json FROM data_raw_receipts").fetchone()[0])
     document[field] = value
     mutate_receipt(cache, record, "artifact_ref_json", json.dumps(document))
-    with pytest.raises(OpsError, match="INTEGRITY_FAILED"):
+    with pytest.raises(OpsError) as error:
         inventory(cache, datasets=["daily"])
+    assert error.value.code == "INTEGRITY_FAILED"
 
 
 def test_request_hash_recomputed_without_false_integer_alias(cache):
@@ -301,16 +354,18 @@ def test_request_hash_recomputed_without_false_integer_alias(cache):
     record = seed(cache, req)
     req["params"]["adjusted"] = 0
     mutate_receipt(cache, record, "request_json", json.dumps(req))
-    with pytest.raises(OpsError, match="INTEGRITY_FAILED"):
+    with pytest.raises(OpsError) as error:
         inventory(cache, datasets=["daily"])
+    assert error.value.code == "INTEGRITY_FAILED"
 
 
 def test_receipt_identity_is_recomputed(cache):
     req = inventory(datasets=["daily"])["units"][0]["request"]
     record = seed(cache, req)
     mutate_receipt(cache, record, "raw_receipt_id", "raw_" + "0" * 32)
-    with pytest.raises(OpsError, match="INTEGRITY_FAILED"):
+    with pytest.raises(OpsError) as error:
         inventory(cache, datasets=["daily"])
+    assert error.value.code == "INTEGRITY_FAILED"
 
 
 def test_oversized_manifest_refuses_before_object_read(cache, monkeypatch):
@@ -320,8 +375,9 @@ def test_oversized_manifest_refuses_before_object_read(cache, monkeypatch):
     document["byte_size"] = massive_plan.MAX_RAW_BYTES + 1
     mutate_receipt(cache, record, "artifact_ref_json", json.dumps(document))
     monkeypatch.setattr(massive_plan, "load_raw_receipt", lambda *a: pytest.fail("read oversized bytes"))
-    with pytest.raises(OpsError, match="RESOURCE_LIMIT_EXCEEDED"):
+    with pytest.raises(OpsError) as error:
         inventory(cache, datasets=["daily"])
+    assert error.value.code == "RESOURCE_LIMIT_EXCEEDED"
 
 
 @pytest.mark.parametrize("missing", [False, True])
@@ -381,11 +437,12 @@ def test_missing_catalog_is_not_created(tmp_path, capsys):
     assert not (tmp_path / "store").exists()
 
 
-def test_cli_s3_refuses_before_connect(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("transport", ["s3", "synthetic-unsupported-transport"])
+def test_cli_unsupported_transport_refuses_before_connect(tmp_path, monkeypatch, capsys, transport):
     monkeypatch.setattr(cli, "sqlite3", SimpleNamespace(
         connect=lambda *a, **kw: pytest.fail("opened catalog"),
         Row=sqlite3.Row, Error=sqlite3.Error))
-    assert cli._main(cli_args(tmp_path, transport="s3")) == 2
+    assert cli._main(cli_args(tmp_path, transport=transport)) == 2
     assert json.loads(capsys.readouterr().out) == {
         "refused": "INVALID_REQUEST", "reason": "CAPABILITY_UNAVAILABLE"}
 

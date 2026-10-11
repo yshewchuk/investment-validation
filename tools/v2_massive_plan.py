@@ -13,14 +13,19 @@ from pathlib import Path
 from engine.v2.data.errors import DataError
 from engine.v2.foundation import ArtifactStore
 from engine.v2.foundation.artifacts import ArtifactError
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.massive_plan import plan
 
 PLAN_TIMEOUT_SECONDS = 30
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise fail("INVALID_REQUEST", "invalid planning arguments") from None
+
+
 def _main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _Parser(description=__doc__, prog="tools.v2_massive_plan")
     parser.add_argument("--catalog", required=True, type=Path)
     parser.add_argument("--store-root", required=True, type=Path)
     parser.add_argument("--ticker", required=True, action="append", dest="tickers")
@@ -28,10 +33,10 @@ def _main(argv=None):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--adjustment", required=True, choices=("raw", "split_adjusted"))
     parser.add_argument("--max-calls-per-request", required=True, type=int)
-    parser.add_argument("--transport", default="rest", choices=("rest", "s3"))
-    args = vars(parser.parse_args(argv))
-    catalog, root = args.pop("catalog"), args.pop("store_root")
+    parser.add_argument("--transport", default="rest")
     try:
+        args = vars(parser.parse_args(argv))
+        catalog, root = args.pop("catalog"), args.pop("store_root")
         plan(None, None, **args)
         if "\0" in str(catalog) or "\0" in str(root) or not catalog.is_file():
             raise OSError("planning paths require a regular catalog and no NUL characters")
