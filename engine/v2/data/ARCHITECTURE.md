@@ -253,8 +253,8 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
   `"admitted"`). The mean is a running mean, so finite inputs never overflow.
 - Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
   `computed_at` are provenance and never filter or order.
-- History aggregates are computed when a table is built, stored as columns and
-  rebuilt by the standard rebuild; a reader never computes one per run.
+- The module only computes from the inputs it is given; it stores nothing and
+  has no production caller yet.
 
 | Condition | Outcome |
 |---|---|

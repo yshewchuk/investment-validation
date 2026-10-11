@@ -37,7 +37,7 @@ def _present(value: Any) -> bool:
     return not (isinstance(value, _FLOATS) and math.isnan(value))
 
 
-def _number(value: Any) -> float:
+def _finite_float(value: Any) -> float:
     """Allow-list: int, float, numpy integer/floating (not bool); finite only."""
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, _NUMBERS):
         raise _refuse("a numeric value is required")
@@ -150,7 +150,7 @@ class AsofSeries:
                 raise _refuse("rows must be strictly date-ascending")
             prev = day
             if _present(row[value]):
-                _number(row[value])  # every present value is checked, eligible or not
+                _finite_float(row[value])  # every present value is checked, eligible or not
             if all(_present(row[c]) for c in eligible):
                 self._dates.append(day)
                 self._values.append(row[value])
@@ -164,7 +164,7 @@ class AsofSeries:
             if self._max_staleness is None or age <= self._max_staleness:
                 found = self._values[i]
         if _present(found):
-            return _number(found)
+            return _finite_float(found)
         if self._on_missing == "refuse":
             raise _refuse("no usable observation before the event")
         return None
@@ -197,7 +197,7 @@ def strict_prior_mean(events: Sequence[SequencedEvent], values: Sequence[Any], *
     set never overflows an intermediate sum.
     """
     _check_aggregate_inputs(events, values, population)
-    numbers = [_number(val) if _present(val) else None for val in values]
+    numbers = [_finite_float(val) if _present(val) else None for val in values]
     out: list[tuple[float | None, int]] = []
     mean, count = 0.0, 0
     for ev, number in zip(events, numbers):

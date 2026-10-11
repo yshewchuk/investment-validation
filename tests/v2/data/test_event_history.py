@@ -441,8 +441,8 @@ def test_mean_does_not_overflow_on_large_finite_values():
 
 def test_tuples_are_accepted_as_containers():
     seq = event_sequence(tuple(DAYS), warmup=0)
-    out = strict_prior_mean(seq, tuple([1.0] * 6), population="all")
-    _assert_means(out, [(None, 0), (1.0, 1), (1.0, 2), (1.0, 3), (1.0, 4), (1.0, 5)])
+    out = strict_prior_mean(seq, (2.0, 4.0, 6.0, 8.0, 10.0, 12.0), population="all")
+    _assert_means(out, [(None, 0), (2.0, 1), (3.0, 2), (4.0, 3), (5.0, 4), (6.0, 5)])
     series = AsofSeries(tuple(_rows(("2020-01-01", 0.5, 4.0))), eligible=("src_iv",),
                         value="implied_move", on_missing="null")
     assert series.at("2020-01-02") == 4.0
