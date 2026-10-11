@@ -353,5 +353,6 @@ def test_checker_registration_does_not_expand_runtime_mutation_pool():
     registered = config["modules"]["ops_dependency_checks"]
     assert registered["excluded"]
     assert registered["mutate"] == []
-    assert registered["tests"] == ["tests/v2/ops/test_ops_dependencies.py"]
-    assert registered["tests"][0] not in config["modules"]["ops_runtime"]["tests"]
+    assert registered["tests"] == ["tests/v2/ops/test_ops_dependencies.py",
+                                   "tests/v2/integration/test_oc_check_discovery.py"]
+    assert not set(registered["tests"]) & set(config["modules"]["ops_runtime"]["tests"])
