@@ -65,8 +65,8 @@
                 "tests/test_v2_ops_fingerprints_code_assets.py",
                 "tests/test_v2_ops_fingerprints_model_scan.py",
                 "tests/v2/ops/test_v2_ops_capture_inputs.py",
-                "tests/test_v2_data_price_downloads.py",
-                "tests/test_v2_ops_price_history.py"]
+                "tests/v2/data/test_price_downloads.py",
+                "tests/v2/ops/test_v2_ops_price_history.py"]
     },
     "D14": {
       "tier": 1,

@@ -93,8 +93,13 @@ before returning a frame to metric/report writers. Missing/invalid context,
 an as-of month later than the current UTC month,
 unknown purposes and an entirely excluded population receive the same refusal.
 There is no date fallback, partial returned frame, report write or retry here.
-Final holdout reads are unavailable. This read-only interface does not write
-durable refusal receipts or ledger rows.
+Final holdout reads are unavailable. The loaders write nothing themselves; the
+recorded native prediction runner appends one plain `refused` row (no metrics;
+replay adds no second) when a `run` on an admitted registration hits
+`HOLDOUT_ACCESS_DENIED`, unless a different immutable outcome for that variant is
+already saved, success or failure: identity conflict, ledger unchanged.
+`register`, a run with no admitted registration, and `--no-ledger` smoke write
+none. `ledger_context` excludes `refused*` rows from specs tried.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout
@@ -125,8 +130,8 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
 | Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
 
-These readers preserve no durable refusal receipt or economic variant identity
-and cannot authorize the separate user-only final holdout read.
+These readers preserve no economic variant identity and cannot authorize the
+separate user-only final holdout read.
 
 `event_history.load_event_history(repository, snapshot, *, event_id, as_of_month,
 decision_session, history_start, purpose="selection")` constructs prior-event
@@ -162,6 +167,40 @@ membership-version/cutoff pins and their deterministic history digest.
 No cache, automatic retry, transaction, write or partial return occurs. This
 library seam has no supervisor, provider, market-price, report or ledger caller;
 production panel reads and final-read authority remain unchanged.
+
+`magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
+pure contract over native `CalendarSessions`: horizons are five, three or one
+full intervening sessions, counted backward from the shared last-pre-print
+close. Wednesday AMC at one uses Tuesday close; Wednesday BMO uses Monday.
+Invalid dates/sessions/horizons/calendars, projected anchors, gaps in the
+required session window or insufficient history refuse `CONTRACT_MISMATCH`.
+Its identity binds event/session/horizon, calendar contents, pre-print close
+and source-session ceiling. It does not assert an intraday issue time, source
+publication/finality or that the earnings schedule was known at that cutoff.
+An experiment caller must bind the calendar to its pinned native snapshot;
+this pure helper does not load a calendar or select a forecast horizon.
+
+`magnitude_inputs.load_magnitude_targets(repository, snapshot, *, as_of_month,
+labels_before, purpose="selection", event_ids=None)` is the separate label
+view. The fixed target recipe is absolute split-neutral, non-dividend-adjusted
+earnings close-to-close return in percentage points; the native signed
+`computed_moves` value is retained, never rescaled, clipped or adjusted again.
+Its primary prediction estimand is conditional mean, selected by pooled RMSE;
+MAE and quantile calibration are secondary, not implemented metric writers.
+Shared population admission precedes label access. Bulk reads exclude events
+on/after `labels_before`; explicit requests containing one refuse. All
+remaining objects pass `event_history`'s shared singleton preflight before
+any is opened; mixed inherited snapshots refuse. Decoded label availability
+must be strictly before `labels_before`; missing, skipped, malformed or
+non-finite labels refuse the whole call, with zero remaining a valid value.
+Earlier events with late availability can be decoded to check their recorded
+date; this is reconstructed availability, not verified publication evidence.
+Output rows carry target/object identity; frame attributes bind recipe,
+label cutoff, snapshot/dataset/month/membership versions and consumed inputs.
+Forecast cutoff and training/evaluation label cutoff are distinct contracts;
+this seam neither fits a model nor joins labels into forecast features.
+Repository failures propagate; no cache, retry, write or partial return.
+These library prerequisites have no CLI, supervisor or final-read caller.
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
@@ -208,7 +247,7 @@ snapshot-read helpers), `_pricing.py` (except the names carved out above),
 
 ### Proposed authorized final read (#490)
 
-Request preparation is implemented; authorization, final reads and result retrieval remain unavailable. Their proposed lifecycle depends on [#555](https://github.com/yshewchuk/investment-validation/pull/555)'s refusal receipts/recovery and preserves #445's union exclusion.
+Request preparation and the private ops authorization/spend primitive are implemented; no production authorization entrypoint, final read or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
 The [user decision](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6072905454)
 permits agents/supervisors to prepare requests, never to authorize them.
 
@@ -239,6 +278,7 @@ No reusable grant escapes that invocation. This is procedural/audited, not a sec
 one transaction records who, UTC when, explicit confirmation, request digest and
 the permanent decision spend. An interactive terminal and fresh explicit user
 confirmation of the displayed binding are required; flags/piped input/agents cannot assent.
+`ops.final_holdout.authorize_final_holdout` is currently test-consumed only: it verifies the exact catalog-owned registration, displays canonical request bytes and requires a terminal-entered phrase containing the digest and recorded process OS identity. This is procedural confirmation, not authentication of the human at the terminal. Its persisted acknowledgement is not a read grant or completeness verdict; the later fenced reader must still verify winner/revocation and the preregistered completeness artifact before scans.
 Unique `experiment_id` plus compare-and-swap state serialize authorization and reads.
 States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or terminal `revoked`/`indeterminate`; every transition appends evidence, never refunds. Authorization has no expiry; revocation or a changed winner ends eligibility with `HOLDOUT_ACCESS_DENIED`, retaining the spend. Interrupted reads stay spent with no continuation; no renewal resets spend.
 

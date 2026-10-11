@@ -454,8 +454,8 @@ its 330-minute step timeout.
   is also excluded (2026-09-19): it is code the rearchitecture deletes on
   cutover, and it was the module whose 330-minute mutmut step timeout made
   the weekly full run time out at 5.5 hours (CI run 35458557499). Both stay
-  listed, never run, so `tests/test_mutation_ci.py` still counts their files
-  as owned. `tests/test_mutation_ci.py` fails if an `engine/v2` file is in no
+  listed, never run, so `tests/v2/integration/test_mutation_ci.py` still counts their files
+  as owned. `tests/v2/integration/test_mutation_ci.py` fails if an `engine/v2` file is in no
   module, or in two.
 - **Tests per module** are data-free files only, since CI has no `data/`. Each
   was run alone with no `data/` (2026-09-19). Tests are picked from those that

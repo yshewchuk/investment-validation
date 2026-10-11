@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops import massive_plan
 from engine.v2.ops.errors import OpsError
 from tests.ops_support import catalog
+from tools import v2_massive_plan as cli
 from tools.v2_massive_plan import main
 
 PARAMS = {"tickers": ["TEST.A"], "start": "2026-01-01", "end": "2026-01-31",
@@ -275,8 +277,9 @@ def test_corrupt_or_missing_object_is_never_a_hit(cache, missing):
     else:
         path.chmod(0o600)
         path.write_bytes(b"tampered")
-    with pytest.raises((ArtifactError, OSError)):
+    with pytest.raises(ArtifactError) as error:
         inventory(cache, datasets=["daily"])
+    assert error.value.code == ("MISSING" if missing else "INTEGRITY_FAILED")
 
 
 def cli_args(root, **changes):
@@ -299,7 +302,12 @@ def test_cli_is_reachable_and_opens_a_read_only_transaction(cache, monkeypatch, 
         result.set_trace_callback(statements.append)
         return result
 
-    monkeypatch.setattr(sqlite3, "connect", guarded)
+    monkeypatch.setattr(cli, "sqlite3", SimpleNamespace(
+        connect=guarded, Row=sqlite3.Row, Error=sqlite3.Error))
+    # Coverage/mutation plugins use SQLite while this test's guard is active.
+    assert sqlite3.connect is original
+    with sqlite3.connect(":memory:") as unrelated:
+        assert unrelated.execute("SELECT 1").fetchone() == (1,)
     assert main(cli_args(root)) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["plan_only"] and output["maximum_http_attempts"] == 0
@@ -316,7 +324,9 @@ def test_missing_catalog_is_not_created(tmp_path, capsys):
 
 
 def test_cli_s3_refuses_before_connect(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(sqlite3, "connect", lambda *a, **kw: pytest.fail("opened catalog"))
+    monkeypatch.setattr(cli, "sqlite3", SimpleNamespace(
+        connect=lambda *a, **kw: pytest.fail("opened catalog"),
+        Row=sqlite3.Row, Error=sqlite3.Error))
     assert main(cli_args(tmp_path, transport="s3")) == 2
     assert json.loads(capsys.readouterr().out) == {
         "refused": "INVALID_REQUEST", "reason": "CAPABILITY_UNAVAILABLE"}
