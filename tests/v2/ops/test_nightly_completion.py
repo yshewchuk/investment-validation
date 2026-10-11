@@ -281,13 +281,20 @@ def test_service_records_a_real_run_scoped_report_and_is_byte_stable(tmp_path):
     run_id = state.active.run_id
     conn, service = _service(tmp_path)
     try:
-        expected = {"primary": "required", "side": "optional", "quality": "qualification"}
-        observed = {"primary": Disposition("succeeded"), "side": Disposition("succeeded"),
+        expected = {"primary": "required", "secondary": "required",
+                    "side": "optional", "quality": "qualification"}
+        observed = {"primary": Disposition("succeeded"),
+                    "secondary": Disposition("succeeded"),
+                    "side": Disposition("succeeded"),
                     "quality": Disposition("succeeded")}
         report = service.record_nightly_completion(IDENT, 1, expected, observed)
         path = tmp_path.joinpath(*STATE_DIR, f"{run_id}.completion.json")
         text = path.read_text()
-        assert json.loads(text) == report
+        persisted = json.loads(text)
+        assert persisted == report
+        assert persisted["schema_version"] == "nightly_completion.v1"
+        assert persisted["required_count"] == 2
+        assert persisted["sidecar_count"] == 2
         assert report["run_id"] == run_id  # scoped to this run, not its date or key
         assert report["status"] == "completed"
         assert str(tmp_path) not in text  # redacted: no local path leaked
