@@ -393,6 +393,13 @@ def test_r2_root_growth_fails(tmp_path):
     assert any(finding.startswith("root test set grew") for finding in report.findings)
 
 
+def test_r3_budget_can_reconcile_down_without_test_moves(tmp_path):
+    paths = {"tests/test_a.py", "tests/test_b.py"}
+    assert tb.check_layout(paths, paths, 3, 2, tmp_path).ok
+    assert any("budget 1 != root test count 2" in finding
+               for finding in tb.check_layout(paths, paths, 3, 1, tmp_path).findings)
+
+
 def test_r3_stale_or_increased_budget_fails(tmp_path):
     base = {"tests/test_a.py", "tests/test_b.py"}
     head = {"tests/test_a.py", "tests/v2/ops/test_b.py"}
