@@ -2,6 +2,7 @@
 
 Data-free and mutmut-free: every mutmut state file here is synthetic, written
 in the layout mutmut 3.8 uses (``mutants/<file>.meta``, ``mutmut-stats.json``).
+# packages: engine.v2.contracts, engine.v2.foundation, engine.v2.data, engine.v2.features, engine.v2.models, engine.v2.registry, engine.v2.domain.generation, engine.v2.domain.scenarios, engine.v2.domain.valuation, engine.v2.domain.simulation, engine.v2.scoring, engine.v2.evaluation, engine.v2.research, engine.v2.ledger, engine.v2.models.training, engine.v2.serving, engine.v2.ops, engine.v2.dashboard, engine.v2.diagnosis, engine.v2.parity
 """
 from __future__ import annotations
 # land: always-run
@@ -22,7 +23,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import mutation_pilot as pilot  # noqa: E402
@@ -2528,7 +2529,7 @@ def test_scoring_stages_change_no_longer_selects_every_enabled_module():
     ]
     selected = pilot.changed_modules(CFG, names, changed)
     assert set(selected) == set(names) - {
-        "canonical", "data_incremental", "no_fit", "ops_experiment_folds", "research",
+        "canonical", "data_incremental", "no_fit", "ops_experiment_folds", "ops_final_holdout", "research",
     }, (
         "selection drifted from the exact expected set -- re-check whether "
         "this is a narrowing regression (e.g. back toward all 33) or a "

@@ -1,3 +1,4 @@
+# disabled 2026-10-10: reads EXP-179 parquet directly (no v2_snapshot_id), bypassing holdouts
 id: EXP-182
 title: "D-1 gated execution parity"
 hypothesis: >

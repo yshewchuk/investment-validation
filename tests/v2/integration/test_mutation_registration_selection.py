@@ -16,7 +16,7 @@ from tools import mutation_pilot as pilot
 
 CONFIG = "tools/mutation_pilot.toml"
 READERS = {
-    "tests/test_mutation_ci.py", "tests/test_gremlin_ci.py", "tests/test_gremlins_ci.py",
+    "tests/v2/integration/test_mutation_ci.py", "tests/v2/integration/test_gremlin_ci.py", "tests/test_gremlins_ci.py",
     "tests/test_mutation_results.py", "tests/test_checks_mutation_ratchet.py",
     "tests/v2/integration/test_mutation_registration_selection.py",
 }

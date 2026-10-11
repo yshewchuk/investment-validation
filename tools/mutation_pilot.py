@@ -1805,7 +1805,7 @@ def _closure_from_roots(roots: set[str], graph: dict[str, set[str]],
 _REGISTRATION_CONFIG = "tools/mutation_pilot.toml"
 # Bare tools imports are not reliable graph edges: retain these readers explicitly.
 _REGISTRATION_READERS = {
-    "tests/test_mutation_ci.py", "tests/test_gremlin_ci.py", "tests/test_gremlins_ci.py",
+    "tests/v2/integration/test_mutation_ci.py", "tests/v2/integration/test_gremlin_ci.py", "tests/test_gremlins_ci.py",
     "tests/test_mutation_results.py", "tests/test_checks_mutation_ratchet.py",
     "tests/v2/integration/test_mutation_registration_selection.py",
 }
