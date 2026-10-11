@@ -667,6 +667,7 @@ mutate = [
     "engine/v2/ops/provider_budget.py",
     "engine/v2/ops/provider_requirements.py",
     "engine/v2/ops/refresh_staging.py",
+    "engine/v2/ops/reclaim.py",
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
@@ -690,6 +691,7 @@ tests = [
     "tests/test_v2_ops_recovery_ownership.py",
     "tests/test_v2_ops_recovery_reboot.py",
     "tests/v2/ops/test_v2_ops_refresh_staging.py",
+    "tests/v2/ops/test_ops_reclaim.py",
     "tests/v2/ops/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_worker_typed_failures.py",

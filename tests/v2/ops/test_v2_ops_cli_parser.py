@@ -32,7 +32,7 @@ def test_command_tree_is_exactly_the_expected_set():
     p = parser()
     assert _subparser_choices(p) == sorted({
         "init", "doctor", "health", "serve", "plan", "submit", "rescore",
-        "capture-inputs", "reconcile", "provider-account", "snapshot", "ledger",
+        "capture-inputs", "reconcile", "reclaim", "provider-account", "snapshot", "ledger",
         "decisions", "price-refresh", "price-history", "computed-moves", "get", "logs",
         "cancel", "resume", "explain"})
     for action in p._actions:
@@ -117,6 +117,10 @@ _CASES = [
       "root": "data/operations"}),
     ("reconcile_explicit_root", ["reconcile", "--root", "R1", "job2", "--expected-attempt", "a2"],
      {"command": "reconcile", "expected_attempt": "a2", "job_id": "job2", "root": "R1"}),
+    ("reclaim_defaults", ["reclaim"],
+     {"command": "reclaim", "apply": False, "root": "data/operations"}),
+    ("reclaim_explicit", ["reclaim", "--root", "R1", "--apply"],
+     {"command": "reclaim", "apply": True, "root": "R1"}),
     ("snapshot_plan_import_defaults",
      ["snapshot", "plan-import", "--source-root", "sr", "--scope", "shadow"],
      {"command": "snapshot", "expected_head_generation": 0,
