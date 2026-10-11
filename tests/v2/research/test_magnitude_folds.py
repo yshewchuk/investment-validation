@@ -224,7 +224,8 @@ def test_late_calendar_scan_failure_propagates_without_retry_or_partial_plan(tmp
 def test_equivalent_explicit_population_order_and_call_local_clock_reuse(tmp_path, monkeypatch):
     train = _event("2023-12-12")
     first, second = _event("2024-01-03", ticker="A"), _event("2024-01-03", ticker="B")
-    conn, repository, snapshot = _fixture(tmp_path, [second, train, first])
+    third = {**_event("2024-01-03", ticker="C"), "session": "BMO"}
+    conn, repository, snapshot = _fixture(tmp_path, [third, second, train, first])
     original, calls = magnitude_folds.forecast_cutoff, []
     def clock(*args):
         calls.append(args[:3])
@@ -232,26 +233,33 @@ def test_equivalent_explicit_population_order_and_call_local_clock_reuse(tmp_pat
     monkeypatch.setattr(magnitude_folds, "forecast_cutoff", clock)
     try:
         bulk = _plan(repository, snapshot)
-        assert len(calls) == 6  # Two unique date/session groups, three horizons each.
-        selected = _plan(repository, snapshot, event_ids=[second["event_id"], first["event_id"], train["event_id"]])
-        assert len(calls) == 12  # There is no cross-call cache.
+        assert len(calls) == 9  # Three unique date/session groups, three horizons each.
+        selected = _plan(repository, snapshot,
+            event_ids=[event["event_id"] for event in (third, second, first, train)])
+        assert len(calls) == 18  # There is no cross-call cache.
         assert bulk == selected
         assert [{key: value for key, value in event.items() if key != "forecasts"}
                 for event in bulk["events"]] == [
             {"event_id": event["event_id"], "ticker": event["ticker"],
              "event_date": event["event_date"].date().isoformat(), "session": event["session"],
              "population_use": "post-release selection"}
-            for event in (train, first, second)]
-        a, b = bulk["events"][1:]
+            for event in (train, first, second, third)]
+        a, b, c = bulk["events"][1:]
         calendar = _calendar("2023-12-01", "2025-01-10")
         calendar_id = content_hash({"days": list(calendar.days), "observed_through": calendar.days[-1]})
-        expected_forecasts = []
-        for horizon, ceiling in ((5, "2023-12-26"), (3, "2023-12-28"), (1, "2024-01-02")):
-            expected = {"schema_version": "earnings_forecast_cutoff.v1", "event_date": "2024-01-03",
-                "session": "AMC", "horizon_sessions": horizon, "pre_announcement_close": "2024-01-03",
-                "source_session_ceiling": ceiling, "calendar_id": calendar_id}
-            expected_forecasts.append({**expected, "cutoff_id": content_hash(expected)})
-        assert a["forecasts"] == b["forecasts"] == expected_forecasts
+        expected_forecasts = {}
+        for session, anchor, ceilings in (
+            ("AMC", "2024-01-03", ("2023-12-26", "2023-12-28", "2024-01-02")),
+            ("BMO", "2024-01-02", ("2023-12-22", "2023-12-27", "2023-12-29")),
+        ):
+            expected_forecasts[session] = []
+            for horizon, ceiling in zip((5, 3, 1), ceilings):
+                expected = {"schema_version": "earnings_forecast_cutoff.v1", "event_date": "2024-01-03",
+                    "session": session, "horizon_sessions": horizon, "pre_announcement_close": anchor,
+                    "source_session_ceiling": ceiling, "calendar_id": calendar_id}
+                expected_forecasts[session].append({**expected, "cutoff_id": content_hash(expected)})
+        assert a["forecasts"] == b["forecasts"] == expected_forecasts["AMC"]
+        assert c["forecasts"] == expected_forecasts["BMO"]
         assert a["forecasts"][0] is not b["forecasts"][0]
     finally:
         conn.close()
@@ -297,5 +305,29 @@ def test_non_session_announcement_preserves_native_date_and_anchor(tmp_path, ses
         assert event["event_date"] == "2024-01-01" and event["session"] == session
         assert all(f["pre_announcement_close"] == "2023-12-29" for f in event["forecasts"])
         assert event["forecasts"][0]["source_session_ceiling"] == "2023-12-21"
+    finally:
+        conn.close()
+
+
+def test_request_window_includes_start_excludes_end_and_refuses_explicit_end_before_calendar(tmp_path, monkeypatch):
+    """Both exact endpoints are admitted metadata, so membership follows the window alone."""
+    start, test, end = [_event(day) for day in ("2023-12-12", "2024-06-12", "2025-01-01")]
+    conn, repository, snapshot = _fixture(tmp_path, [start, test, end])
+    try:
+        _metadata_only(monkeypatch, repository, snapshot)
+        plan = _plan(repository, snapshot, training_start="2023-12-12")
+        assert [event["event_id"] for event in plan["events"]] == [start["event_id"], test["event_id"]]
+        assert plan["folds"] == [{"year": "2024", "training_labels_before": "2024-01-01",
+            "training_candidate_event_ids": [start["event_id"]], "evaluation_event_ids": [test["event_id"]]}]
+        blocked = {record.object_ref.object_id for record in repository.fragment_records(snapshot, "daily_market")}
+        original = objects.verify_object_path
+        def verify(store, ref):
+            assert ref.object_id not in blocked, "explicit end-boundary refusal must precede calendar access"
+            return original(store, ref)
+        monkeypatch.setattr(objects, "verify_object_path", verify)
+        repository.scans.clear()
+        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+            _plan(repository, snapshot, training_start="2023-12-12", event_ids=[end["event_id"]])
+        assert repository.scans and all(name == "earnings_events" for name, _ in repository.scans)
     finally:
         conn.close()
