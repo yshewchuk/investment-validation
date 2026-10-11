@@ -313,6 +313,13 @@ This bounds retained unmatched rows, not total process RSS.
 - `--since`, `--min-date`, `--years`, `--strategy` (repeatable, from
   `_pricing.STRUCTURES`): per-tool read/filter narrowing; never widen a read
   past the resolved snapshot.
+- `tools/v2_replay.py --alpha A` is repeatable. When supplied, the ordered
+  values replace replay's default `ALPHA_GRID`; repeated values remain
+  separate requests, and each priced event produces one row per requested
+  fill alpha. Values must be finite and in `[0, 1]`. When omitted,
+  `_replay_run.run` uses its default `ALPHA_GRID`. The CLI continues to
+  derive its calendar from the pinned snapshot rather than accepting an
+  external calendar.
 - `--dry-run` (build-trades, reconcile-trades): compute the candidate
   changeset, skip `commit_generic_table_candidate`.
 
@@ -371,22 +378,19 @@ resolution, its own no-partition refusal, and its own empty-result frame
 shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
 
-Callers: nothing inside `engine/` imports this package (checked against
-`checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
-listed above are one consumer; `experiments/common_v2.py` is another, for
-`experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
-and `_chains.load_chain_index`; its archived trade-read caller omits the now-required
-holdout context and is refused. The historical EXP-147 confirmatory-validation
-runner is a third, for `experiment_trades.PROVENANCE` alone (its native
-replay tag, selecting that runner's analog population).
+Callers: no `engine/` modules import this package (checked by `checks/import_layers.py`).
+Consumers are `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
+trade, calendar, and chain inputs from pinned v2 data. The archived
+trade-read caller omits required holdout context and is refused.
+Historical EXP-147 reads its native replay tag from `experiment_trades.PROVENANCE`.
 `experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266
-slice 2) is a fourth: it reads
+slice 2) reads
 `_chains.filter_plan_by_availability`/`read_chain_keys_for`, `_plan.plan_events`,
 `_pricing.STRUCTURES`/`execution_variant_label`/`trading_calendar_from_snapshot`,
 and `replay.ALPHA_GRID`/`replay_one` to price one strategy family across a
 grid-position sweep on one pinned snapshot. `experiments/EXP-186_.../run.py`
-is a fifth, reading `_replay_run.events_frame` for its known-session event
-universe before handing it to `price_candidate_grid`. None of the five are
+reads `_replay_run.events_frame` for its known-session event universe before
+handing it to `price_candidate_grid`. None of these research callers are
 parsed by the layering hook (it only parses `engine*` importers, and
 `experiments/` is outside it too).
 
@@ -419,14 +423,19 @@ else it reads (see Failure semantics, Invariants). No third-party service.
 
 ## Failure semantics
 
-The 4c R1–R6 template. Every refusal is meant to be a `DataError`
+The 4c R1–R6 template covers data-boundary refusals, which generally use `DataError`
 (`engine.v2.data.errors.DataError`) carrying one of the registered
 `DATA_FAILURE_CODES`, which a CLI catches at `main()` and exits 2 with the
-code and message on stderr rather than a bare traceback — with one
-pre-existing exception, called out below where it applies
-(`_snapshot.py`'s bare `ValueError`, issue #70), that escapes as an
-uncaught traceback instead.
+code and message on stderr rather than a bare traceback. CLI argument
+validation is described separately because it can refuse before `main()`
+reaches that handler. One pre-existing data-path exception, called out below
+where it applies (`_snapshot.py`'s bare `ValueError`, issue #70), escapes as
+an uncaught traceback instead.
 
+- **CLI argument parsing (before R1–R6).**
+  - **A supplied replay `--alpha` is non-finite or outside `[0, 1]`.**
+    The CLI parser exits 2 before `open_catalog` or `ArtifactStore` is
+    called, so no replay runs.
 - **R1, missing input.**
   - **No committed scope head, and no explicit `--snapshot-id`.**
     `resolve_pinned(scope)` (or, for the `_snapshot.py`-backed tools,
@@ -560,6 +569,9 @@ uncaught traceback instead.
   and written into every output
   (root doc §5's "no silent default" invariant, applied to research reads) —
   including the experiment loader's returned context columns (see Outputs).
+- Every experiment runner reads from its pinned v2 snapshot, applying shared random/rolling holdout enforcement through the reader appropriate to its inputs:
+  `experiment_trades.load_trades` for trades; `experiment_population.load_population` for populations and its prediction/history consumers. Inadmissible reads refuse.
+  Direct parquet/file reads bypass snapshot pinning and both holdout sets and are inadmissible.
 - Never reads the legacy mutable Tier-2 store (`engine.data.store`) —
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.

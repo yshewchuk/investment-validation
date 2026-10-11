@@ -17,13 +17,12 @@ import pandas as pd
 import pytest
 
 from engine import paths
-from engine.v2.ops import cli, effects_graph, experiments, worker
+from engine.v2.ops import effects_graph, experiments
 from engine.v2.ops.catalog import transaction
-from engine.v2.ops.errors import OpsError
 from engine.v2.ops.experiments import experiment_spec_from_document
 from tests.ops_support import catalog
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 EVALUATE_SPEC = {
     "id": "EXP-SPECB-REPORT-PROBE",
     "title": "real report reachability probe",
@@ -87,11 +86,10 @@ def test_primary_run_produces_a_real_engine_report(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Review fix items 5/9: the ops plan -> worker -> run_legacy_script path in a
-# tmp checkout, plus the ran row's metrics/notes built from the run's outputs.
+# Synthetic temporary-checkout data for the ledger metrics-source test.
 # --------------------------------------------------------------------------
 
-REGISTERED_RUNNER = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
+REPORT_RUNNER = "experiments/EXP-REPORT-PROBE/run.py"
 
 TINY_RUNNER = '''\
 import json
@@ -109,97 +107,29 @@ results.mkdir(exist_ok=True)
 TINY_RUNNER_NO_METRICS = TINY_RUNNER.split("results = root")[0]
 
 
-def _tiny_checkout(tmp_path, *, with_metrics=True):
+def _tiny_checkout(tmp_path, *, with_metrics=True,
+                    experiment_id="EXP-REPORT-PROBE", runner=REPORT_RUNNER):
     """A tmp checkout with the registered runner, its legacy spec.yaml and a
     PLANNED ledger row; returns ``(checkout, spec_path, ledger, planned_hash)``."""
     from experiments import lib
 
     checkout = tmp_path / "checkout"
-    runner = checkout / REGISTERED_RUNNER
-    runner.parent.mkdir(parents=True)
-    runner.write_text(TINY_RUNNER if with_metrics else TINY_RUNNER_NO_METRICS)
-    legacy_spec = runner.parent / "spec.yaml"
-    legacy_spec.write_text("id: EXP-182\nprimary_spec:\n  x: 1\n")
+    runner_path = checkout / runner
+    runner_path.parent.mkdir(parents=True)
+    runner_path.write_text(TINY_RUNNER if with_metrics else TINY_RUNNER_NO_METRICS)
+    legacy_spec = runner_path.parent / "spec.yaml"
+    legacy_spec.write_text(f"id: {experiment_id}\nprimary_spec:\n  x: 1\n")
     planned_hash = lib.spec_hash(lib.load_spec(legacy_spec))
     ledger = checkout / "experiments" / "LEDGER.csv"
-    lib.ledger_append([{"id": "EXP-182", "spec_hash": planned_hash,
+    lib.ledger_append([{"id": experiment_id, "spec_hash": planned_hash,
                         "date": "2026-01-01", "stage": "planned",
                         "oos_mean_mid": "", "sharpe_trade": "", "promoted": "False"}],
                       path=ledger)
     spec_path = checkout / "spec.json"
     spec_path.write_text(json.dumps(_experiment_document(
-        experiment_id="EXP-182", runner=REGISTERED_RUNNER, economic_params={},
+        experiment_id=experiment_id, runner=runner, economic_params={},
         primary_arm_id="d1", arms=["d1"])))
     return checkout, spec_path, ledger, planned_hash
-
-
-def _planned_parameters(tmp_path, checkout, spec_path, capsys, monkeypatch):
-    monkeypatch.setattr(experiments, "default_checkout_root", lambda: checkout)
-    ops = tmp_path / "ops"
-    assert cli.main(["--root", str(ops), "init"]) == 0
-    capsys.readouterr()
-    assert cli.main(["--root", str(ops), "plan", "experiment", "--spec", str(spec_path),
-                     "--activate-ledger"]) == 0
-    return ops, json.loads(capsys.readouterr().out)["plan"]
-
-
-def test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger(
-        tmp_path, monkeypatch, capsys):
-    """The production wiring end to end without market data: a primary plan
-    from the real CLI, the worker dispatch that calls ``run_legacy_script``,
-    the registered runner's own REPORT.md/results, and the coordinator's ran
-    row in the CHECKOUT ledger with the planned row's spec_hash."""
-    checkout, spec_path, ledger, planned_hash = _tiny_checkout(tmp_path)
-    ops, plan = _planned_parameters(tmp_path, checkout, spec_path, capsys, monkeypatch)
-
-    result = worker.dispatch("experiment", plan["parameters"], checkout)
-    assert result["completed_ids"] == ["experiment:EXP-182"]
-    assert [output["name"] for output in result["outputs"]] == [
-        "experiment_receipt", "resolved_experiment_plan", "experiment_variant_report"]
-    plan_artifact = checkout / "resolved_experiment_plan.json"
-    assert plan_artifact.is_file()
-    persisted = plan_artifact.read_bytes()
-    assert persisted == experiments.resolve_experiment_plan(
-        experiment_spec_from_document(json.loads(spec_path.read_text()))).json_bytes()
-    assert persisted == json.dumps(json.loads(persisted), sort_keys=True,
-                                   separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    assert json.loads(persisted)["schema_version"] == "experiment_execution_plan.v1.0"
-    receipt = json.loads((checkout / "experiment_receipt.json").read_text())
-    assert receipt["status"] == "succeeded"
-    assert receipt["evidence"]["report_bytes"] > 0
-    report_text = (checkout / "REPORT.md").read_text()
-    assert "by engine.report v" in report_text
-    assert "Tiny synthetic experiment" in report_text
-
-    document = json.loads(spec_path.read_text())
-    spec = experiments.experiment_spec_from_document(document)
-    conn, _clock, _ = catalog(ops)
-    try:
-        effects_graph._append_ledger_row(conn, checkout, spec, receipt, run_id="exp-run",
-                                         variant_id=receipt["evidence"]["variant_id"])
-    finally:
-        conn.close()
-
-    from experiments import lib
-
-    frame = lib.ledger_read(ledger).fillna("")
-    ran = frame[frame["stage"] == "ran"].iloc[-1]
-    assert ran["spec_hash"] == planned_hash, "planned and ran rows must join"
-    assert float(ran["oos_mean_mid"]) == pytest.approx(0.02)
-    assert float(ran["sharpe_trade"]) == pytest.approx(1.5)
-    assert "notes" not in frame.columns, "the legacy ledger format stays at 7 columns"
-    assert not (ops / "experiments").exists()
-
-    refused = tmp_path / "refused"
-    refused.mkdir()
-    (refused / "spec.json").write_text(json.dumps(_experiment_document(
-        experiment_id="EXP-182", runner=REGISTERED_RUNNER)))
-    with pytest.raises(OpsError) as excinfo:
-        worker.dispatch("experiment", {"expected_ids": ["experiment:EXP-182"],
-                                       "runner": REGISTERED_RUNNER, "no_ledger": True}, refused)
-    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert not (refused / "resolved_experiment_plan.json").exists()
-    assert not (refused / "experiment_receipt.json").exists()
 
 
 def test_ran_row_records_metrics_source_unavailable_when_the_runner_wrote_none(tmp_path):

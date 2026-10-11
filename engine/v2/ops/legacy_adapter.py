@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import sys
 import time
 from collections.abc import Callable
@@ -1202,12 +1203,17 @@ def invoke_evaluate(root, spec, trades, *, run_dir, **kwargs):
     return evaluate(spec, trades, run_dir=run_dir, **kwargs)
 
 
-REGISTERED_RUNNERS = frozenset({
-    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
-})
+REGISTERED_RUNNERS = frozenset()
 
-_FIXED_ARM_RUNNER = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
-_FIXED_ARM_ARGS = frozenset({("--clock", "d1")})
+# Mirrors experiments.DISABLED_RUNNERS; the ops dependency checker forbids
+# this adapter from importing the higher-level experiment planner module.
+DISABLED_RUNNERS = {
+    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py": (
+        "EXP-182 disabled: reads EXP-179 parquet directly (no v2_snapshot_id), bypassing holdouts"
+    ),
+}
+
+RUNNER_ARGUMENTS = {}
 
 #: Wall-clock budget for one registered legacy runner subprocess. Sized to
 #: the experiment_heavy resource profile (profiles.py: 5 CPUs, 5.5 GiB,
@@ -1224,15 +1230,18 @@ def run_legacy_script(root, script, args=(), *, declared_runtime_sources=()):
     """Run a registered legacy runner in a private root with smoke protection."""
     import os
 
+    relative = posixpath.normpath(str(script))
+    disabled_reason = DISABLED_RUNNERS.get(relative)
+    if disabled_reason is not None:
+        raise fail("INVALID_REQUEST", disabled_reason)
     _rooted_import(root)
     base = Path(root).resolve()
-    relative = str(Path(script))
     script_path = (base / relative).resolve()
     if relative not in REGISTERED_RUNNERS or not script_path.is_relative_to(base):
         raise fail("INVALID_REQUEST", "legacy experiment runner is unaudited")
     arguments = tuple(args)
-    if arguments and (relative != _FIXED_ARM_RUNNER or arguments not in _FIXED_ARM_ARGS):
-        raise fail("INVALID_REQUEST", "legacy runner may not enable ledger writes")
+    if arguments and arguments not in RUNNER_ARGUMENTS.get(relative, ()):
+        raise fail("INVALID_REQUEST", "legacy runner arguments are not audited")
     import subprocess
     command = [sys.executable, "-u", str(script_path), *arguments, "--no-ledger"]
     env = dict(os.environ, INVESTING_PLAN_ROOT=str(base))
