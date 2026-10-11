@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import math
+import posixpath
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -70,6 +71,9 @@ def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | Non
     runner = document.get("runner")
     if not isinstance(runner, str) or not runner:
         raise fail("INVALID_REQUEST", "experiment specification has no runner")
+    disabled_reason = DISABLED_RUNNERS.get(posixpath.normpath(runner))
+    if disabled_reason is not None:
+        raise fail("INVALID_REQUEST", disabled_reason)
     plan = {
         "schema_version": "operations_plan.v1.0",
         "kind": "experiment",
@@ -628,30 +632,21 @@ def capability_manifest(spec: ExperimentSpec, root: Path | str) -> dict:
 #: Reviewed capability inventory, one entry per enabled legacy runner (§11.1).
 #: Mechanical evidence (hashes, closure, flag detection) is re-derived on every
 #: call; the reviewed statements here are the audit record, not runtime config.
-RUNNER_INVENTORY = {
-    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py": {
-        "spec_source": "experiments/EXP-182_d_1_gated_execution_parity_registered/spec.yaml",
-        "declared_runtime_sources": (
-            "experiments/EXP-181_d_1_gated_execution_parity/run.py",
-        ),
-        "declared_runtime_inputs": (
-            "experiments/EXP-179_execution_clock_d1_parity/results/trades/STR-THRU/d1_matched.parquet",
-        ),
-        "fixed_arm_args": {"d1": ("--clock", "d1")},
-        "ledger_write_behavior": ("appends experiments/LEDGER.csv rows via main(record=...) "
-                                  "unless --no-ledger is passed; the adapter always passes it"),
-        "registry_effects": "none; champion promotion is a separately authorized job",
-        "report_path": "REPORT.md",
-        "resumable_units": "none_declared",
-        "backup_behavior": "none internal; the coordinator performs the single final private backup",
-        "removal_phase": "phase-5 model extraction",
-    },
+RUNNER_INVENTORY = {}
+
+DISABLED_RUNNERS = {
+    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py": (
+        "EXP-182 disabled: reads EXP-179 parquet directly (no v2_snapshot_id), bypassing holdouts"
+    ),
 }
 
 
 def runner_manifest(root: Path | str, script: str) -> dict:
     """One reviewed capability manifest per enabled runner (§11.1)."""
-    relative = str(PurePosixPath(script))
+    relative = posixpath.normpath(str(PurePosixPath(script)))
+    reason = DISABLED_RUNNERS.get(relative)
+    if reason is not None:
+        raise fail("INVALID_REQUEST", reason)
     entry = RUNNER_INVENTORY.get(relative)
     if entry is None:
         raise fail("INVALID_REQUEST", "experiment runner is not audited")

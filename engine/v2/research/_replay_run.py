@@ -49,7 +49,8 @@ def events_frame(repository, snapshot_ref, years=None) -> pd.DataFrame:
 
 def run(repository, *, strategies: Sequence[str], events: pd.DataFrame,
         reports_dir: Path = Path("reports"), scope: str = DEFAULT_SCOPE,
-        snapshot_id: str | None = None, stamp: str | None = None) -> dict:
+        snapshot_id: str | None = None, stamp: str | None = None,
+        alphas: Sequence[float] | None = None) -> dict:
     """Replay every strategy against one pinned snapshot and write a report.
 
     The returned ``trades`` frame is stamped with ``provenance =
@@ -59,8 +60,12 @@ def run(repository, *, strategies: Sequence[str], events: pd.DataFrame,
     """
     snapshot = resolve_snapshot(repository, scope=scope, snapshot_id=snapshot_id)
     calendar = _pricing.trading_calendar_from_snapshot(repository, snapshot)
-    results = [replay.replay(repository, snapshot, s, events, calendar=calendar)
-               for s in strategies]
+    selected_alphas = replay.ALPHA_GRID if alphas is None else alphas
+    results = [
+        replay.replay(repository, snapshot, strategy, events,
+                      calendar=calendar, alphas=selected_alphas)
+        for strategy in strategies
+    ]
     trades = to_trades_table(results)
     if len(trades):
         trades["provenance"] = "engine.v2.research.replay"

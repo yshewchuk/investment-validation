@@ -18,6 +18,7 @@ the v2 procedure.
    **2026-10-08**: an experiment never consumes another experiment's outputs
    or an old data subset. If comparing with an incumbent, recompute it as a
    variant arm on the same snapshot, folds, and holdouts.
+   Runner inputs must follow the [research snapshot and holdout invariant](../engine/v2/research/ARCHITECTURE.md#invariants).
 4. Record the preregistration, variant identity, pinned snapshot, planned folds,
    holdout context, and intended comparison in the experiment record before
    evaluating results. Keep the primary outcome distinct from exploratory
