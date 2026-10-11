@@ -261,9 +261,7 @@ Native announcement-date anchoring is preserved, including non-session dates;
 the event date itself is not certified to be an observed trading session.
 Identical date/session/horizon clocks are reused within one call only.
 No cross-call cache, retry, write, partial return, fitting, registration or final-read
-authority is added. A future runner must preregister this plan and bind stored,
-holdout-context-qualified feature inputs before execution; production aggregates
-are not interchangeable with research history. Schedule/publication evidence
+authority is added. Schedule/publication evidence
 remains explicitly unverified reconstruction, not observed point-in-time data.
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`

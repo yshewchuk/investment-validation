@@ -92,8 +92,10 @@ def test_plan_groups_all_horizons_and_removes_january_training_leak(tmp_path, mo
         for table, field in (("earnings_events", "population_input"), ("daily_market", "calendar_input")):
             source = result[field]
             assert source["dataset_version"] == snapshot.table_versions[table].dataset_version_id
-            assert {obj["object_id"] for obj in source["objects"]} == {
-                obj.object_ref.object_id for obj in repository.fragment_records(snapshot, table)}
+            assert source["objects"] == [
+                {"fragment_id": record.fragment_id, "object_id": record.object_ref.object_id,
+                 "content_hash": record.object_ref.content_hash}
+                for record in repository.fragment_records(snapshot, table)]
         assert conn.total_changes == changes
         assert not list(tmp_path.rglob("REPORT.md")) and not list(tmp_path.rglob("LEDGER.csv"))
     finally:
