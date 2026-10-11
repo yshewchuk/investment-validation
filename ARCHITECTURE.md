@@ -265,6 +265,16 @@ layer](guides/test_selection_by_layer.md). The checked-in test-layout ratchet
 packages migrate. On `pull_request`, `tests.yml` runs it against the PR base SHA before
 pytest and a nonzero result fails the `test` job; pushes to `main` keep the full-suite backstop.
 
+CI runs the suite as shards declared in `tests/shards.toml`. `tools/ci_shards.py matrix`
+prints the shard names and `files SHARD [--selection FILE]` prints one shard's test files
+(first matching pattern wins; the last shard owns every file no pattern claims; a
+selection only narrows, and unknown paths are ignored). The loader refuses a bad
+declaration with `ValueError`; an unknown shard exits 2. In `tests.yml` a `plan` job
+selects the PR's tests once and prints the matrix, a `shard` matrix job runs one shard
+each, and the required check `test` is an aggregator that fails unless `plan` and every
+shard succeeded (failed, cancelled and skipped all fail). A failing `ci_shards.py` fails
+its step; it never means "no tests".
+
 Fixed dependencies in verification code should use ordinary imports or lazy
 literal `importlib.import_module` calls, retaining every target and its import
 timing. Query-only package metadata names can be imported explicitly. These

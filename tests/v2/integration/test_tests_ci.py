@@ -8,7 +8,9 @@ from __future__ import annotations
 
 # packages: ops
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -118,15 +120,56 @@ def test_layout_ratchet_step_runs_only_on_pull_request_with_base_sha_env():
     assert step["run"] == 'python3 checks/test_layout_budget.py --base-ref "$BASE_SHA"'
 
 
-def test_pytest_step_falls_back_to_tests_dir_and_has_selection_fallback():
+def _stub_bin(tmp_path: Path, python3_script: str) -> dict[str, str]:
+    """Env whose `python3` is a stub (the shard tool) and `python` records its argv."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").write_text("#!/bin/sh\n" + python3_script + "\n")
+    (bin_dir / "python").write_text(f'#!/bin/sh\necho "$@" >> "{tmp_path}/pytest_calls"\n')
+    for stub in ("python3", "python"):
+        (bin_dir / stub).chmod(0o755)
+    return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+
+def _run_bash(run: str, env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", "-e", "-c", run], env=env, capture_output=True,
+                          text=True, timeout=60)
+
+
+def test_pytest_step_passes_the_shard_file_list_to_pytest():
     run = _step(_workflow(), "Run pytest")["run"]
-    if "tools/ci_shards.py files" in run:
-        # Sharded: tools/ci_shards.py owns __ALL__ / empty-selection handling.
-        for substring in ("--selection", "No test files", "pytest"):
-            assert substring in run, substring
-        return
-    for substring in ('TARGETS=("tests/")', "SELECTED[0]", "__ALL__", "No test files selected"):
-        assert substring in run, substring
+    assert "tools/ci_shards.py files" in run and "--selection" in run
+    pytest_line = next(ln for ln in run.splitlines() if "-m pytest" in ln)
+    assert '"${FILES[@]}"' in pytest_line
+
+
+def test_failing_shard_list_command_fails_the_step_and_runs_no_pytest(tmp_path):
+    run = _step(_workflow(), "Run pytest")["run"]
+    env = dict(_stub_bin(tmp_path, "exit 3"), SHARD="ops", SELECTION_FILE="")
+    proc = _run_bash(run, env)
+    assert proc.returncode != 0
+    assert not (tmp_path / "pytest_calls").exists()
+
+
+def test_empty_shard_list_skips_pytest_and_a_nonempty_one_runs_it(tmp_path):
+    run = _step(_workflow(), "Run pytest")["run"]
+    env = dict(_stub_bin(tmp_path, "exit 0"), SHARD="ops", SELECTION_FILE="")
+    proc = _run_bash(run, env)
+    assert proc.returncode == 0 and "No test files" in proc.stdout
+    assert not (tmp_path / "pytest_calls").exists()
+    other = tmp_path / "other"
+    other.mkdir()
+    env = dict(_stub_bin(other, "echo tests/a/test_x.py"), SHARD="ops", SELECTION_FILE="")
+    assert _run_bash(run, env).returncode == 0
+    assert "tests/a/test_x.py" in (other / "pytest_calls").read_text()
+
+
+def test_failing_matrix_command_fails_the_plan_step(tmp_path):
+    run = _step(_workflow(), "Print shard matrix")["run"]
+    output = tmp_path / "out"
+    env = dict(_stub_bin(tmp_path, "exit 3"), GITHUB_OUTPUT=str(output))
+    assert _run_bash(run, env).returncode != 0
+    assert not output.exists() or "matrix=" not in output.read_text()
 
 
 def test_upload_step_warns_instead_of_failing_on_no_junit():
@@ -134,14 +177,28 @@ def test_upload_step_warns_instead_of_failing_on_no_junit():
     assert step["with"]["if-no-files-found"] == "warn"
 
 
-def test_sharded_workflow_aggregator_named_test_needs_plan_and_every_shard_job():
-    jobs = _workflow()["jobs"]
-    if "plan" not in jobs:
-        pytest.skip("single-job workflow (pre-shard)")
-    aggregator = jobs["test"]
+def test_shard_job_needs_the_plan_job_and_runs_the_plan_matrix():
+    shard = _workflow()["jobs"]["shard"]
+    assert shard["needs"] in ("plan", ["plan"])
+    assert shard["strategy"]["fail-fast"] is False
+    assert "fromJSON(needs.plan.outputs.matrix)" in shard["strategy"]["matrix"]
+
+
+@pytest.mark.parametrize(("plan", "shard", "ok"), [
+    ("success", "success", True),
+    ("success", "failure", False),
+    ("success", "skipped", False),
+    ("success", "cancelled", False),
+    ("failure", "success", False),
+    ("skipped", "skipped", False),
+])
+def test_aggregator_named_test_succeeds_only_when_plan_and_every_shard_succeeded(
+        plan, shard, ok):
+    aggregator = _workflow()["jobs"]["test"]
     assert set(aggregator["needs"]) == {"plan", "shard"}
     assert aggregator["if"] == "${{ always() }}"
     run = "\n".join(s.get("run", "") for s in aggregator["steps"])
-    assert "needs.plan.result" in run and "needs.shard.result" in run
-    assert jobs["shard"]["strategy"]["fail-fast"] is False
-    assert "fromJSON(needs.plan.outputs.matrix)" in jobs["shard"]["strategy"]["matrix"]
+    results = {"plan": plan, "shard": shard}
+    run = re.sub(r"\$\{\{\s*needs\.(\w+)\.result\s*\}\}", lambda m: results[m.group(1)], run)
+    assert "${{" not in run
+    assert (_run_bash(run, dict(os.environ)).returncode == 0) is ok

@@ -31,10 +31,11 @@ def _toml(tmp_path: Path, text: str) -> Path:
 def test_discovery_matches_the_git_tracked_test_inventory():
     # Independent oracle: git's own file list, not the discovery being checked.
     tracked = subprocess.run(
-        ["git", "ls-files", "tests/**/test_*.py", "tests/test_*.py"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
+        ["git", "ls-files", "tests/**/*.py", "tests/*.py"],
+        cwd=ROOT, capture_output=True, text=True, check=True, timeout=60,
     ).stdout.split()
-    tracked = [p for p in tracked if Path(p).name.startswith("test_") and p.endswith(".py")]
+    tracked = [p for p in tracked
+               if Path(p).name.startswith("test_") or Path(p).name.endswith("_test.py")]
     if not tracked:
         pytest.skip("not a git checkout")
     assert set(REAL_FILES) >= set(tracked), sorted(set(tracked) - set(REAL_FILES))
@@ -48,13 +49,47 @@ def test_every_test_file_is_in_exactly_one_shard():
     assert REAL_FILES, "no test files discovered"
 
 
-def test_every_declared_pattern_claims_a_file_nothing_earlier_claimed():
-    for i, shard in enumerate(REAL_SHARDS[:-1]):
+def _first_unclaimed_pattern(shards, files):
+    """The first (shard, pattern) that claims no file an earlier pattern left over."""
+    claimed: set[str] = set()
+    for shard in shards[:-1]:
         for pat in shard.patterns:
-            matched = [f for f in REAL_FILES if fnmatch.fnmatchcase(f, pat)]
-            assert matched, f"{shard.name}: pattern {pat!r} matches no test file"
-            mine = [f for f in matched if ci_shards.owner(f, REAL_SHARDS) == shard.name]
-            assert mine, f"{shard.name}: pattern {pat!r} is fully shadowed by an earlier shard"
+            fresh = {f for f in files if fnmatch.fnmatchcase(f, pat)} - claimed
+            if not fresh:
+                return shard.name, pat
+            claimed |= fresh
+    return None
+
+
+def test_every_declared_pattern_claims_a_file_nothing_earlier_claimed():
+    assert _first_unclaimed_pattern(REAL_SHARDS, REAL_FILES) is None
+
+
+def test_a_duplicate_or_shadowed_pattern_inside_one_shard_is_found(tmp_path):
+    files = ["tests/a/test_x.py", "tests/b/test_y.py"]
+    dup = _toml(tmp_path, '[[shard]]\nname="a"\npatterns=["tests/a/*", "tests/a/*"]\n'
+                          '[[shard]]\nname="r"\nremainder=true\n')
+    assert _first_unclaimed_pattern(ci_shards.load_shards(dup), files) == ("a", "tests/a/*")
+    shadow = _toml(tmp_path, '[[shard]]\nname="a"\npatterns=["tests/*", "tests/a/*"]\n'
+                             '[[shard]]\nname="r"\nremainder=true\n')
+    assert _first_unclaimed_pattern(ci_shards.load_shards(shadow), files) == ("a", "tests/a/*")
+
+
+def test_discovery_finds_both_pytest_naming_conventions(tmp_path):
+    for rel in ("tests/test_a.py", "tests/v2/x/b_test.py", "tests/v2/x/helper.py",
+                "tests/__pycache__/test_c.py"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
+    assert ci_shards.discover_test_files(tmp_path) == ["tests/test_a.py", "tests/v2/x/b_test.py"]
+
+
+def test_selection_ignores_unknown_paths_and_directories(tmp_path, capsys):
+    sel = tmp_path / "sel.txt"
+    sel.write_text("tests/nope/test_missing.py\ntests/v2\n")
+    for shard in REAL_SHARDS:
+        assert ci_shards.main(["files", shard.name, "--selection", str(sel)]) == 0
+        assert capsys.readouterr().out == ""
 
 
 def test_every_shard_owns_at_least_one_file():

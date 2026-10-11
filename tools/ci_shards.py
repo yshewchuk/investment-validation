@@ -21,12 +21,13 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
 import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get("INVESTING_PLAN_ROOT") or Path(__file__).resolve().parents[1])
 SHARDS_TOML = ROOT / "tests" / "shards.toml"
 ALL = "__ALL__"
 
@@ -76,7 +77,9 @@ def load_shards(path: Path = SHARDS_TOML) -> list[Shard]:
 
 def discover_test_files(root: Path = ROOT) -> list[str]:
     """Every pytest test file under tests/, as sorted posix paths from root."""
-    found = (p.relative_to(root).as_posix() for p in (root / "tests").rglob("test_*.py"))
+    tests = root / "tests"
+    found = {p.relative_to(root).as_posix()
+             for pattern in ("test_*.py", "*_test.py") for p in tests.rglob(pattern)}
     return sorted(f for f in found if "__pycache__" not in f)
 
 
@@ -112,7 +115,7 @@ def shard_files(name: str, selection: Path | None = None) -> list[str]:
     if selection is not None:
         chosen = read_selection(selection)
         if chosen is not None:
-            files = sorted(set(chosen))
+            files = sorted(set(chosen) & set(files))
     return assign(files, shards)[name]
 
 
