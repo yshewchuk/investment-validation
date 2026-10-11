@@ -369,6 +369,89 @@ def _revoke(context):
         context.conn, context.store, context.request, clock=context.clock)
 
 
+@pytest.mark.parametrize("action", ["START", "REVOKE"])
+def test_state_action_displays_exact_request_and_prompt(context, monkeypatch, action):
+    _authorize(context)
+    output = Terminal()
+    monkeypatch.setattr(authority.sys, "stdout", output)
+    expected_phrase = _state_phrase(context, action)
+    prompts = []
+
+    def confirm(prompt):
+        prompts.append(prompt)
+        return expected_phrase
+
+    monkeypatch.setattr(builtins, "input", confirm)
+    (_start if action == "START" else _revoke)(context)
+    assert output.getvalue() == canonical_json(to_document(context.request)) + "\n"
+    assert prompts == [f"Type exactly: {expected_phrase}\n"]
+    assert _state_events(context)[0]["confirmation"] == expected_phrase
+
+
+@pytest.mark.parametrize(("action", "failure", "expected_code", "retryable"), [
+    ("START", "storage", "RESOURCE_UNAVAILABLE", True),
+    ("START", "process", "RESOURCE_UNAVAILABLE", True),
+    ("START", "user", "RESOURCE_UNAVAILABLE", True),
+    ("START", "eof", "HOLDOUT_ACCESS_DENIED", False),
+    ("START", "interrupt", "HOLDOUT_ACCESS_DENIED", False),
+    ("REVOKE", "storage", "RESOURCE_UNAVAILABLE", True),
+    ("REVOKE", "user", "RESOURCE_UNAVAILABLE", True),
+    ("REVOKE", "eof", "HOLDOUT_ACCESS_DENIED", False),
+    ("REVOKE", "interrupt", "HOLDOUT_ACCESS_DENIED", False),
+    ("RECOVERY", "storage", "RESOURCE_UNAVAILABLE", True),
+    ("RECOVERY", "process", "RESOURCE_UNAVAILABLE", True),
+])
+def test_lifecycle_faults_return_typed_retryability_and_preserve_state(
+        context, monkeypatch, action, failure, expected_code, retryable):
+    authorization = _authorize(context)
+    if action == "RECOVERY":
+        _state_assent(monkeypatch, context, "START")
+        _start(context)
+    def process_unavailable(*args):
+        raise OSError("process unavailable")
+
+    if failure in ("eof", "interrupt"):
+        def interrupted(prompt):
+            if failure == "eof":
+                raise EOFError
+            raise KeyboardInterrupt
+        monkeypatch.setattr(builtins, "input", interrupted)
+    elif failure == "user":
+        def missing_user(uid):
+            raise KeyError(uid)
+        monkeypatch.setattr(authority.pwd, "getpwuid", missing_user)
+    elif failure == "process" and action == "START":
+        monkeypatch.setattr(authority, "process_info", process_unavailable)
+    elif failure == "process":
+        monkeypatch.setattr(authority, "is_alive", process_unavailable)
+    elif failure == "storage":
+        if action == "RECOVERY":
+            monkeypatch.setattr(authority, "read_boot_id", lambda: "synthetic-reboot")
+        def deny_event_insert(sql_action, table, column, database, trigger):
+            if sql_action == sqlite3.SQLITE_INSERT and table == "final_holdout_state_events":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        context.conn.set_authorizer(deny_event_insert)
+    if action in ("START", "REVOKE") and failure not in ("eof", "interrupt", "user"):
+        _state_assent(monkeypatch, context, action)
+    try:
+        with pytest.raises(OpsError) as caught:
+            if action == "START":
+                _start(context)
+            elif action == "REVOKE":
+                _revoke(context)
+            else:
+                authority.recover_interrupted_final_holdout_read(
+                    context.conn, context.request.experiment_id, clock=context.clock)
+        assert caught.value.code == expected_code
+        assert caught.value.problem.retryable is retryable
+        assert _rows(context) == [authorization]
+        expected_states = ["read_started"] if action == "RECOVERY" else []
+        assert [row["state"] for row in _state_events(context)] == expected_states
+    finally:
+        context.conn.set_authorizer(None)
+
+
 def _state_events(context):
     return [dict(row) for row in context.conn.execute(
         "SELECT * FROM final_holdout_state_events ORDER BY event_id")]
