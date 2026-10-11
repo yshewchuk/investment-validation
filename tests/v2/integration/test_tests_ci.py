@@ -242,6 +242,98 @@ def test_selection_artifact_is_uploaded_and_downloaded_on_pull_requests_only():
     assert upload in jobs["plan"]["steps"] and download in jobs["shard"]["steps"]
 
 
+PR = "github.event_name == 'pull_request'"
+BASE_SHA = {"BASE_SHA": "${{ github.event.pull_request.base.sha }}"}
+FETCH_DEPTH = "${{ github.event_name == 'pull_request' && '0' || 1 }}"
+BEHAVIOUR_TESTED = "<run block asserted by its behaviour tests>"
+SELECT_RUN = r'''set -euo pipefail
+CHANGED_FILE="$RUNNER_TEMP/pr-changed-files.txt"
+git diff -z --no-renames --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
+python3 tools/mutation_pilot.py select-tests --changed-files "$CHANGED_FILE" \
+  --base-sha "$BASE_SHA" \
+  > "$RUNNER_TEMP/pr-test-selection.txt"
+'''
+EXPECTED_WORKFLOW = {
+    "name": "Tests",
+    "on": {"push": {"branches": ["main"]}, "pull_request": {"branches": ["main"]},
+           "workflow_dispatch": None},
+    "permissions": {"contents": "read"},
+    "concurrency": {
+        "group": ("tests-${{ github.event_name == 'pull_request' "
+                  "&& github.event.pull_request.number || github.ref }}"),
+        "cancel-in-progress": True,
+    },
+    "jobs": {
+        "plan": {
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 15,
+            "outputs": {"matrix": "${{ steps.matrix.outputs.matrix }}"},
+            "steps": [
+                {"uses": "actions/checkout@v4", "with": {"fetch-depth": FETCH_DEPTH}},
+                {"name": "Set up Python", "uses": "actions/setup-python@v5",
+                 "with": {"python-version": "3.14.4"}},
+                {"name": "Select PR test files", "if": PR, "env": BASE_SHA, "run": SELECT_RUN},
+                {"name": "Check test layout ratchet", "if": PR, "env": BASE_SHA,
+                 "run": 'python3 checks/test_layout_budget.py --base-ref "$BASE_SHA"'},
+                {"name": "Upload PR test selection", "if": PR,
+                 "uses": "actions/upload-artifact@v4",
+                 "with": {"name": "pr-test-selection",
+                          "path": "${{ runner.temp }}/pr-test-selection.txt",
+                          "if-no-files-found": "error"}},
+                {"name": "Print shard matrix", "id": "matrix", "run": BEHAVIOUR_TESTED},
+            ],
+        },
+        "shard": {
+            "name": "tests (${{ matrix.shard }})",
+            "needs": "plan",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 25,
+            "strategy": {"fail-fast": False,
+                         "matrix": "${{ fromJSON(needs.plan.outputs.matrix) }}"},
+            "steps": [
+                {"uses": "actions/checkout@v4", "with": {"fetch-depth": FETCH_DEPTH}},
+                {"name": "Set up Python", "uses": "actions/setup-python@v5",
+                 "with": {"python-version": "3.14.4", "cache": "pip"}},
+                {"name": "Install dependencies",
+                 "run": "python -m pip install -r requirements.txt -r requirements-dev.txt\n"},
+                {"name": "Install pre-commit hook", "run": "python checks/install_hooks.py\n"},
+                {"name": "Download PR test selection", "if": PR,
+                 "uses": "actions/download-artifact@v4",
+                 "with": {"name": "pr-test-selection", "path": "${{ runner.temp }}"}},
+                {"name": "Run pytest",
+                 "env": {"SHARD": "${{ matrix.shard }}",
+                         "SELECTION_FILE": ("${{ github.event_name == 'pull_request' && "
+                                            "format('{0}/pr-test-selection.txt', "
+                                            "runner.temp) || '' }}")},
+                 "run": BEHAVIOUR_TESTED},
+                {"name": "Upload test results", "if": "always()",
+                 "uses": "actions/upload-artifact@v4",
+                 "with": {"name": "junit-results-${{ matrix.shard }}", "path": "junit.xml",
+                          "if-no-files-found": "warn"}},
+            ],
+        },
+        "test": {
+            "needs": ["plan", "shard"],
+            "if": "${{ always() }}",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 5,
+            "steps": [{"name": "Require the plan and every shard to have succeeded",
+                       "run": BEHAVIOUR_TESTED}],
+        },
+    },
+}
+
+
+def test_every_workflow_field_matches_the_documented_shape_exactly():
+    actual = _workflow()
+    for job in actual["jobs"].values():
+        for step in job["steps"]:
+            if step.get("name") in ("Print shard matrix", "Run pytest",
+                                    "Require the plan and every shard to have succeeded"):
+                step["run"] = BEHAVIOUR_TESTED
+    assert actual == EXPECTED_WORKFLOW
+
+
 def test_upload_step_warns_instead_of_failing_on_no_junit():
     step = _step(_workflow(), "Upload test results")
     assert step["with"]["if-no-files-found"] == "warn"

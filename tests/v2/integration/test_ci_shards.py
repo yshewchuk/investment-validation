@@ -130,6 +130,11 @@ R = '[[shard]]\nname="r"\nremainder=true\n'
     ('[[shard]]\nname="a"\npatterns=["x"]\n[[shard]]\nname="r"\nremainder="false"\n',
      "shard 'r': remainder must be a boolean"),
     ('[[shard]]\nname="a"\npatterns=["x"]\nextra=1\n' + R, "shard #0 has unknown keys: ['extra']"),
+    ('[[shard]]\nname=1\npatterns=["x"]\n' + R, "shard #0 has no name"),
+    ('[[shard]]\nname=""\npatterns=["x"]\n' + R, "shard #0 has no name"),
+    ('[[shard]]\nname="a"\npatterns=[1]\n' + R, "shard 'a': patterns must be a list of strings"),
+    ('[[shard]]\nname="a"\npatterns=["x", 2]\n' + R,
+     "shard 'a': patterns must be a list of strings"),
 ])
 def test_loader_rejects_a_bad_declaration_with_the_specific_refusal(tmp_path, text, message):
     with pytest.raises(ValueError) as excinfo:
@@ -184,6 +189,23 @@ def test_files_prints_the_shard_files(capsys):
     name = REAL_SHARDS[0].name
     assert ci_shards.main(["files", name]) == 0
     assert capsys.readouterr().out.split() == ci_shards.assign(REAL_FILES, REAL_SHARDS)[name]
+
+
+def test_selection_lines_are_stripped_and_blank_lines_ignored(tmp_path, capsys):
+    shard = REAL_SHARDS[-1].name
+    target = ci_shards.assign(REAL_FILES, REAL_SHARDS)[shard][0]
+    sel = tmp_path / "sel.txt"
+    sel.write_text(f"\n   \n  {target}  \n\n")
+    assert ci_shards.main(["files", shard, "--selection", str(sel)]) == 0
+    assert capsys.readouterr().out == target + "\n"
+
+
+def test_all_marker_only_counts_as_the_first_selection_line(tmp_path, capsys):
+    shard = REAL_SHARDS[-1].name
+    sel = tmp_path / "sel.txt"
+    sel.write_text("tests/nope/test_x.py\n__ALL__\n")
+    assert ci_shards.main(["files", shard, "--selection", str(sel)]) == 0
+    assert capsys.readouterr().out == ""
 
 
 def test_unknown_shard_exits_2(capsys):
