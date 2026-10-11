@@ -242,11 +242,15 @@ def recover_interrupted_final_holdout_read(conn, experiment_id, *, clock):
             raise fail("STALE_EXPECTATION", "no started final read awaits recovery")
         if latest["state"] != "read_started":
             raise fail("STALE_EXPECTATION", "no started final read awaits recovery")
-        authorization = conn.execute("SELECT request_digest FROM final_holdout_authorizations WHERE experiment_id=?",
+        authorization = conn.execute("SELECT * FROM final_holdout_authorizations WHERE experiment_id=?",
                                      (experiment_id,)).fetchone()
         if authorization is None:
             raise fail("VALIDATION_FAILED", "final-read recovery evidence is inconsistent")
-        if authorization["request_digest"] != latest["request_digest"]:
+        request = request_from_document(json.loads(authorization["request_json"]))
+        encoded = canonical_json(to_document(request))
+        digest = content_hash(to_document(request))
+        _validate_authorization_evidence(authorization, request, digest, encoded)
+        if request.experiment_id != experiment_id or digest != latest["request_digest"]:
             raise fail("VALIDATION_FAILED", "final-read recovery evidence is inconsistent")
         identity = _owner_identity(latest)
         boot_id = read_boot_id()

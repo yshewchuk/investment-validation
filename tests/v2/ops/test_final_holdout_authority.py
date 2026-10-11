@@ -644,6 +644,22 @@ def test_start_rejects_foreign_digest_in_persisted_history(context, monkeypatch)
     assert _state_events(context)[0]["request_digest"] != authorization["request_digest"]
 
 
+@pytest.mark.parametrize(("column", "value"), [
+    ("confirmation", "tampered confirmation"), ("authorized_at", "not a timestamp"),
+])
+def test_recovery_rejects_corrupt_authorization_evidence(context, monkeypatch, column, value):
+    _authorize(context)
+    _state_assent(monkeypatch, context, "START")
+    _start(context)
+    context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_update")
+    context.conn.execute(f"UPDATE final_holdout_authorizations SET {column}=?", (value,))
+    monkeypatch.setattr(authority, "is_alive", lambda *args: pytest.fail("corrupt authorization reached owner check"))
+    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+        authority.recover_interrupted_final_holdout_read(
+            context.conn, context.request.experiment_id, clock=context.clock)
+    assert [row["state"] for row in _state_events(context)] == ["read_started"]
+
+
 def test_recovery_rejects_malformed_persisted_owner_identity(context):
     authorization = _authorize(context)
     context.conn.execute(
