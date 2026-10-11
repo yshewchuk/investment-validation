@@ -118,10 +118,12 @@ def test_adjustment_case_and_date_changes_separate_keys():
 
 
 def test_calendar_year_boundaries_and_no_same_day_claim():
-    result = inventory(start="2024-10-10", end="2026-10-09")
+    result = inventory(as_of="2026-10-10", start="2024-10-10", end="2026-10-09")
+    assert result["as_of"] == "2026-10-10"
     assert result["earliest_date"] == "2024-10-10"
     assert result["latest_date"] == "2026-10-09"
     leap = inventory(as_of="2024-02-29", start="2022-02-28", end="2024-02-28")
+    assert leap["as_of"] == "2024-02-29"
     assert leap["earliest_date"] == "2022-02-28"
 
 
