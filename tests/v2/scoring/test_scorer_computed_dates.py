@@ -2,6 +2,7 @@
 bundle: ``days_to_print`` (legacy ``engine/features.py:1166-1168``) and
 ``dte_entry`` (legacy ``engine/score.py:2451``: ``dte_entry = int(priced.legs[0].dte)``).
 """
+import datetime
 import hashlib
 import json
 import types
@@ -549,3 +550,67 @@ def test_computed_dates_matrix(scenario, tmp_path):
     assert diagnosed["days_to_print"] == days
     assert diagnosed["dte_entry"] == dte
     assert diagnosed["entry_cost_pct"] == pytest.approx(pct)
+
+
+#: Non-exact or wrong-typed date values the strict parser must reject.
+_BAD_DATES = [
+    20261007, 20261007.0, True, float("nan"), pd.NaT,
+    "2026-10-07junk", "20261007", " 2026-10-07", "2026-10-07 ",
+    "2026-13-45", "", "2026-10-07T",
+]
+
+
+@pytest.mark.parametrize("bad", _BAD_DATES)
+@pytest.mark.parametrize("helper", ["days_to_print", "dte_entry"])
+@pytest.mark.parametrize("position", ["first", "second"])
+def test_date_helpers_reject_bad_types_and_suffixes(helper, position, bad):
+    good = "2026-10-08"
+    args = (bad, good) if position == "first" else (good, bad)
+    assert getattr(financial, helper)(*args) is None
+
+
+#: Exact ISO forms (objects or complete strings) that collapse to the same day.
+_GOOD_FORMS = [
+    "2026-10-27",
+    datetime.date(2026, 10, 27),
+    datetime.datetime(2026, 10, 27, 15, 30),
+    pd.Timestamp("2026-10-27"),
+    "2026-10-27T00:00:00",
+    "2026-10-27 00:00:00",
+]
+
+
+@pytest.mark.parametrize("form", _GOOD_FORMS)
+def test_date_helpers_accept_exact_forms(form):
+    # 2026-10-27 minus 2026-10-08 is 19 days, computed independently.
+    assert financial.days_to_print(form, "2026-10-08") == 19.0
+    assert financial.dte_entry(form, "2026-10-08") == 19
+
+
+def test_scoring_ignores_malformed_decision_and_event_dates():
+    # as_of is an int and the identity requested_as_of is dropped: no decision date.
+    values = assemble_native_values(_inputs(
+        context_overrides={"as_of": 20261007, "requested_as_of": _DROP}))
+    assert "days_to_print" not in values
+
+    values = assemble_native_values(_inputs(
+        context_overrides={"as_of": "2026-10-07junk"}))
+    assert "days_to_print" not in values
+
+    values = assemble_native_values(_inputs(
+        context_overrides={"event_date": "2026-10-27junk"}))
+    assert "days_to_print" not in values
+
+    values = assemble_native_values(_inputs(
+        context_overrides={"quote_date": "2026-10-08junk"}))
+    assert values.get("entry_cost") is not None  # the run priced
+    assert "dte_entry" not in values  # its malformed quote_date blocks the write
+
+
+def test_answer_denylist_claim_matches_code():
+    from engine.v2.scoring.source_inputs import (
+        _reject_answers, AnswerFieldsInSource)
+    with pytest.raises(AnswerFieldsInSource):
+        _reject_answers("probe", {"entry_cost_pct": 1.0})
+    _reject_answers("probe", {"dte_entry": 5})
+    _reject_answers("probe", {"days_to_print": 3.0})
