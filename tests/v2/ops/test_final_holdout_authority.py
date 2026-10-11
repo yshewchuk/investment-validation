@@ -382,6 +382,10 @@ def test_fenced_start_spends_once_and_revocation_invalidates_publication(context
     assert started["owner_pid"] == os.getpid()
     assert authority.final_holdout_fence_current(
         context.conn, context.request.experiment_id, started["request_digest"], started["fence"])
+    assert not authority.final_holdout_fence_current(
+        context.conn, context.request.experiment_id, content_hash("wrong request"), started["fence"])
+    assert not authority.final_holdout_fence_current(
+        context.conn, context.request.experiment_id, started["request_digest"], started["fence"] + 1)
     with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
         _start(context)
     assert len(_state_events(context)) == 1
