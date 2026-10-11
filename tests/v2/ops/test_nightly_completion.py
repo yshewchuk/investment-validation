@@ -18,7 +18,8 @@ from threading import Event, Thread
 import pytest
 
 from engine.v2.ops.errors import OpsError
-from engine.v2.ops.nightly_completion import Disposition, build_completion_report
+from engine.v2.ops.nightly_completion import (
+    Disposition, build_completion_report, record_completion)
 from engine.v2.ops import nightly_session
 from engine.v2.ops.nightly_session import (
     MAX_SESSION_BYTES,
@@ -161,10 +162,15 @@ def test_valid_qualification_refusal_yields_degraded_with_explicit_count_and_cod
     assert row["count"] == 3 and row["reason_code"] == "REFUSED"
 
 
-def test_qualification_failure_is_reported_separately_from_completed_required():
+@pytest.mark.parametrize(("quality_status", "reason_code"), [
+    ("failed", "QUALITY_FAILED"),
+    ("timed_out", "QUALITY_TIMEOUT"),
+])
+def test_qualification_failure_is_reported_separately_from_completed_required(
+        quality_status, reason_code):
     expected = {"primary": "required", "quality": "qualification"}
     observed = {"primary": Disposition("succeeded"),
-                "quality": Disposition("failed", reason_code="QUALITY_FAILED")}
+                "quality": Disposition(quality_status, reason_code=reason_code)}
     report = _report(expected, observed)
     assert report["qualification_outcome"] == "failed"
     assert report["required_outcome"] == "completed"
@@ -183,6 +189,8 @@ def test_invalid_evidence_requires_recovery_and_is_not_terminal():
 
 @pytest.mark.parametrize("required,sidecar,required_status,overall", [
     (Disposition("pending"), Disposition("recovery_required"), "waiting", "recovery_required"),
+    (Disposition("recovery_required"), Disposition("succeeded"),
+     "recovery_required", "recovery_required"),
     (Disposition("pending"), Disposition("succeeded", evidence_valid=False),
      "waiting", "recovery_required"),
     (Disposition("timed_out"), Disposition("succeeded"), "timed_out", "timed_out"),
@@ -214,7 +222,7 @@ def test_malformed_no_required_extra_or_unselected_inputs_refuse(expected, obser
 @pytest.mark.parametrize("run_id,expected,observed", [
     pytest.param(RUN_ID, {"primary": "required"}, {"primary": Disposition("unknown")},
                  id="unknown-status"),
-    pytest.param(RUN_ID, {"primary": "required"}, {"primary": Disposition(None)},
+    pytest.param(RUN_ID, {"primary": "required"}, {"primary": Disposition([])},
                  id="nonstring-status"),
     pytest.param(RUN_ID, {"primary": "required"},
                  {"primary": Disposition("succeeded", count=-1)}, id="negative-count"),
@@ -229,7 +237,7 @@ def test_malformed_no_required_extra_or_unselected_inputs_refuse(expected, obser
     pytest.param(RUN_ID, {"primary": "required"}, None, id="nonmapping-observed"),
     pytest.param(RUN_ID, {}, {}, id="empty-expected-work"),
     pytest.param(RUN_ID, {7: "required"}, {}, id="nonstring-work-name"),
-    pytest.param(RUN_ID, {"primary": 7}, {}, id="nonstring-work-role"),
+    pytest.param(RUN_ID, {"primary": []}, {}, id="nonstring-work-role"),
     pytest.param("a" * 63, {"primary": "required"}, {}, id="short-run-id"),
     pytest.param("a" * 65, {"primary": "required"}, {}, id="long-run-id"),
     pytest.param(RUN_ID, {"n" * 65: "required"}, {}, id="long-work-name"),
@@ -248,11 +256,69 @@ def test_64_character_run_and_work_names_are_valid():
     assert report["dispositions"][0]["name"] == name
 
 
+@pytest.mark.parametrize(("count", "accepted"), [
+    pytest.param(2**63 - 1, True, id="maximum-count"),
+    pytest.param(2**63, False, id="one-above-maximum"),
+])
+def test_count_limit_has_an_inclusive_boundary(count, accepted):
+    expected = {"primary": "required"}
+    observed = {"primary": Disposition("succeeded", count=count)}
+    if accepted:
+        report = _report(expected, observed)
+        assert report["dispositions"][0]["count"] == 2**63 - 1
+    else:
+        with pytest.raises(OpsError) as exc:
+            _report(expected, observed)
+        assert exc.value.code == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize(("reason_code", "accepted"), [
+    pytest.param("A" * 64, True, id="maximum-reason-code"),
+    pytest.param("A" * 65, False, id="oversized-reason-code"),
+])
+def test_reason_code_limit_has_an_inclusive_boundary(reason_code, accepted):
+    expected = {"primary": "required"}
+    observed = {"primary": Disposition("failed", reason_code=reason_code)}
+    if accepted:
+        report = _report(expected, observed)
+        assert report["dispositions"][0]["reason_code"] == reason_code
+    else:
+        with pytest.raises(OpsError) as exc:
+            _report(expected, observed)
+        assert exc.value.code == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize("run_id", [None, [], 7])
+def test_nonstring_run_id_is_invalid_request(run_id):
+    with pytest.raises(OpsError) as exc:
+        _report({"primary": "required"}, {}, run_id=run_id)
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.problem.message == "completion needs a run ID"
+
+
+@pytest.mark.parametrize("expected,observed", [
+    (None, {}),
+    ({"primary": "required"}, None),
+])
+def test_nonmapping_inputs_take_the_typed_mapping_refusal(expected, observed):
+    with pytest.raises(OpsError) as exc:
+        _report(expected, observed)
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.problem.message == "completion dispositions must be mappings"
+
+
 def test_shared_atomic_writer_default_preserves_large_sibling_artifact_capacity(tmp_path):
     path = tmp_path / "history-manifest.json"
     payload = "x" * (MAX_SESSION_BYTES + 1)
     atomic_write(path, payload)
     assert path.read_text() == payload
+
+
+def test_expected_work_requires_at_least_one_required_item():
+    with pytest.raises(OpsError) as exc:
+        _report({"only-sidecar": "optional"}, {})
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.problem.message == "completion needs required work"
 
 
 @pytest.mark.parametrize("raw", ["/tmp/secret path", "FileNotFoundError: it broke", "lowercase"])
@@ -276,6 +342,7 @@ def test_report_rejects_pathlike_identifiers(run_id, expected):
 
 @pytest.mark.parametrize("sidecar,overall,terminal_count", [
     (Disposition("recovery_required"), "recovery_required", 1),
+    (Disposition("degraded", reason_code="SIDE_DEGRADED"), "completed_degraded", 2),
     (Disposition("succeeded", evidence_valid=False), "recovery_required", 1),
     (Disposition("failed", reason_code="SIDE_FAILED"), "completed_degraded", 2),
     (Disposition("timed_out", reason_code="SIDE_TIMEOUT"), "completed_degraded", 2),
@@ -305,10 +372,13 @@ def test_optional_count_degrades_report_but_required_count_is_report_only():
     assert report["status"] == "completed_degraded"
 
 
-def test_qualification_count_marks_qualification_degraded():
+@pytest.mark.parametrize("quality", [
+    Disposition("succeeded", count=1),
+    Disposition("degraded"),
+])
+def test_qualification_count_or_status_marks_qualification_degraded(quality):
     report = _report({"primary": "required", "quality": "qualification"},
-                     {"primary": Disposition("succeeded"),
-                      "quality": Disposition("succeeded", count=1)})
+                     {"primary": Disposition("succeeded"), "quality": quality})
     assert report["qualification_outcome"] == "degraded"
     assert report["degraded_outcome"] == "degraded"
     assert report["status"] == "completed_degraded"
@@ -354,6 +424,15 @@ def test_real_recording_rejects_integer_beyond_json_limit_before_publication(tmp
 
 
 @pytest.mark.parametrize("identity", [None, "bad", {}])
+def test_record_completion_identity_guard_is_typed_before_lock(tmp_path, identity):
+    with pytest.raises(OpsError) as exc:
+        record_completion(tmp_path, identity, 1, {"primary": "required"}, {})
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.problem.message == "completion needs a session identity"
+    assert not tmp_path.joinpath(*STATE_DIR).exists()
+
+
+@pytest.mark.parametrize("identity", [None, "bad", {}])
 def test_recording_malformed_identity_refuses_without_report_write(tmp_path, identity):
     conn, service = _service(tmp_path)
     try:
@@ -381,6 +460,20 @@ def test_recording_malformed_work_refuses_without_report_write(tmp_path, expecte
         assert not list(tmp_path.joinpath(*STATE_DIR).glob("*.completion.json"))
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("generation", [True, 1.0, "1", 2])
+def test_record_completion_rejects_invalid_generation_with_exact_code(
+        tmp_path, generation):
+    ensure_session(tmp_path, IDENT)
+    mark_started(tmp_path, IDENT, 1)
+    with pytest.raises(OpsError) as exc:
+        record_completion(
+            tmp_path, IDENT, generation, {"primary": "required"}, {})
+    assert exc.value.code == "CHECKPOINT_INCOMPATIBLE"
+    assert exc.value.problem.message == (
+        "completion generation is not the active started run")
+    assert not list(tmp_path.joinpath(*STATE_DIR).glob("*.completion.json"))
 
 
 def test_recording_missing_or_unstarted_session_refuses(tmp_path):
