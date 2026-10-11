@@ -2,7 +2,8 @@
 
 Dates are canonical ``YYYY-MM-DD`` strings and are the only time basis;
 provenance timestamps such as ``retrieved_at`` or ``computed_at`` are never
-read. Every malformed input refuses with ``CONTRACT_MISMATCH``.
+read. Every input is checked against a type allow-list and a malformed one
+refuses with ``CONTRACT_MISMATCH``, never a bare exception.
 """
 from __future__ import annotations
 
@@ -11,8 +12,9 @@ from bisect import bisect_left
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from numbers import Integral
 from typing import Any
+
+import numpy as np
 
 from engine.v2.data.errors import DataError, fail
 
@@ -20,6 +22,8 @@ __all__ = ["SequencedEvent", "event_sequence", "AsofSeries", "strict_prior_mean"
 
 _ON_MISSING = ("null", "refuse")
 _POPULATIONS = ("admitted", "all")
+_FLOATS = (float, np.floating)
+_NUMBERS = (int, float, np.integer, np.floating)
 
 
 def _refuse(message: str, **details: Any) -> DataError:
@@ -27,23 +31,20 @@ def _refuse(message: str, **details: Any) -> DataError:
 
 
 def _present(value: Any) -> bool:
-    """False for None and for any float NaN, including numpy float dtypes."""
+    """False for None and any float NaN (numpy dtypes included)."""
     if value is None:
         return False
-    try:
-        return not math.isnan(value)
-    except (TypeError, ValueError, OverflowError):
-        return True
+    return not (isinstance(value, _FLOATS) and math.isnan(value))
 
 
 def _number(value: Any) -> float:
-    """A finite real number as float; anything else refuses."""
-    if isinstance(value, bool):
+    """Allow-list: int, float, numpy integer/floating (not bool); finite only."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, _NUMBERS):
         raise _refuse("a numeric value is required")
     try:
         number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        raise _refuse("a numeric value is required") from None
+    except OverflowError:
+        raise _refuse("a finite numeric value is required") from None
     if not math.isfinite(number):
         raise _refuse("a finite numeric value is required")
     return number
@@ -51,9 +52,15 @@ def _number(value: Any) -> float:
 
 def _count(value: Any, name: str) -> int:
     """A non-negative integer declaration (not bool, not fractional, not NaN)."""
-    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 0:
         raise _refuse(f"{name} must be a non-negative integer")
     return int(value)
+
+
+def _choice(value: Any, allowed: tuple[str, ...], name: str) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise _refuse(f"{name} must be one of {allowed}")
+    return value
 
 
 def _names(value: Any, what: str) -> tuple[str, ...]:
@@ -76,9 +83,17 @@ def _day(text: Any) -> date:
 
 @dataclass(frozen=True)
 class SequencedEvent:
+    """Validated on construction: canonical date, non-negative int ordinal, bool."""
+
     event_date: str
     ordinal: int
     admitted: bool
+
+    def __post_init__(self) -> None:
+        _day(self.event_date)
+        _count(self.ordinal, "ordinal")
+        if not isinstance(self.admitted, bool):
+            raise _refuse("admitted must be a bool")
 
 
 def event_sequence(event_dates: Sequence[str], *, warmup: int,
@@ -105,8 +120,7 @@ class AsofSeries:
 
     def __init__(self, rows: Sequence[Mapping[str, Any]], *, eligible: Sequence[str],
                  value: str, on_missing: str, max_staleness_days: int | None = None) -> None:
-        if on_missing not in _ON_MISSING:
-            raise _refuse("on_missing must be 'null' or 'refuse'")
+        self._on_missing = _choice(on_missing, _ON_MISSING, "on_missing")
         eligible = _names(eligible, "eligible")
         if not isinstance(value, str):
             raise _refuse("value must be a column name")
@@ -114,7 +128,6 @@ class AsofSeries:
             max_staleness_days = _count(max_staleness_days, "max_staleness_days")
         if isinstance(rows, (str, Mapping)) or not isinstance(rows, Sequence):
             raise _refuse("rows must be a sequence of mappings")
-        self._on_missing = on_missing
         self._max_staleness = max_staleness_days
         self._dates: list[str] = []
         self._values: list[Any] = []
@@ -150,8 +163,7 @@ class AsofSeries:
 
 
 def _check_aggregate_inputs(events: Any, values: Any, population: Any) -> None:
-    if population not in _POPULATIONS:
-        raise _refuse("population must be 'admitted' or 'all'")
+    _choice(population, _POPULATIONS, "population")
     if isinstance(events, str) or not isinstance(events, Sequence):
         raise _refuse("events must be a sequence of SequencedEvent")
     if isinstance(values, str) or not isinstance(values, Sequence):
@@ -166,14 +178,19 @@ def _check_aggregate_inputs(events: Any, values: Any, population: Any) -> None:
 
 def strict_prior_mean(events: Sequence[SequencedEvent], values: Sequence[Any], *,
                       population: str) -> tuple[tuple[float | None, int], ...]:
-    """Per event: mean and count of non-null values of earlier-ordinal events."""
+    """Per event: mean and count of non-null values of earlier-ordinal events.
+
+    The mean is a running mean (``mean += x / n - mean / n``) so a finite input
+    set never overflows an intermediate sum.
+    """
     _check_aggregate_inputs(events, values, population)
     out: list[tuple[float | None, int]] = []
-    total, count = 0.0, 0
+    mean, count = 0.0, 0
     for ev, val in zip(events, values):
         counted = population == "all" or ev.admitted
-        out.append((total / count if count else None, count) if counted else (None, 0))
+        out.append((mean if count else None, count) if counted else (None, 0))
         if counted and _present(val):
-            total += _number(val)
             count += 1
+            number = _number(val)
+            mean += number / count - mean / count
     return tuple(out)

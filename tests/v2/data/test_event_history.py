@@ -5,7 +5,12 @@ import numpy as np
 import pytest
 
 from engine.v2.data.errors import DataError
-from engine.v2.data.event_history import AsofSeries, event_sequence, strict_prior_mean
+from engine.v2.data.event_history import (
+    AsofSeries,
+    SequencedEvent,
+    event_sequence,
+    strict_prior_mean,
+)
 
 DAYS = ["2020-01-10", "2020-04-10", "2020-07-10", "2020-10-09", "2021-01-08", "2021-04-09"]
 
@@ -269,3 +274,57 @@ def test_bad_aggregate_inputs_refuse_with_code(events, values):
     with pytest.raises(DataError) as err:
         strict_prior_mean(events, values, population="all")
     assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("bad", ["1.5", b"1", np.array([1.0]), np.bool_(True), True, [1.0],
+                                 {"a": 1}, 1 + 2j, object()])
+def test_numeric_inputs_are_an_allow_list(bad):
+    series = AsofSeries(_rows(("2020-01-01", 0.5, bad)), eligible=("src_iv",),
+                        value="implied_move", on_missing="null")
+    with pytest.raises(DataError) as err:
+        series.at("2020-02-01")
+    assert err.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as err:
+        strict_prior_mean(event_sequence(DAYS, warmup=0), [bad] + [1.0] * 5, population="all")
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("good", [3, 3.0, np.int32(3), np.float32(3.0), np.float64(3.0)])
+def test_numeric_allow_list_members_are_accepted(good):
+    series = AsofSeries(_rows(("2020-01-01", 0.5, good)), eligible=("src_iv",),
+                        value="implied_move", on_missing="null")
+    assert series.at("2020-02-01") == 3.0
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"event_date": "20200110", "ordinal": 0, "admitted": True},
+    {"event_date": None, "ordinal": 0, "admitted": True},
+    {"event_date": "2020-01-10", "ordinal": -1, "admitted": True},
+    {"event_date": "2020-01-10", "ordinal": 1.5, "admitted": True},
+    {"event_date": "2020-01-10", "ordinal": True, "admitted": True},
+    {"event_date": "2020-01-10", "ordinal": 0, "admitted": 1},
+    {"event_date": "2020-01-10", "ordinal": 0, "admitted": None},
+])
+def test_sequenced_event_validates_on_construction(kwargs):
+    with pytest.raises(DataError) as err:
+        SequencedEvent(**kwargs)
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("policy", [None, 5, ["null"], b"null", "NULL", "default", {"null"}])
+def test_policy_declarations_check_type_then_membership(policy):
+    with pytest.raises(DataError) as err:
+        _series(on_missing=policy)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as err:
+        strict_prior_mean(event_sequence(DAYS, warmup=0), [1.0] * 6, population=policy)
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+def test_mean_does_not_overflow_on_large_finite_values():
+    seq = event_sequence(DAYS, warmup=0)
+    out = strict_prior_mean(seq, [1e308, 1e308, 0.0, 1.0, 1.0, 1.0], population="all")
+    assert out[2] == (pytest.approx(1e308), 2)
+    assert all(m is None or math.isfinite(m) for m, _ in out)
+    mixed = strict_prior_mean(seq, [1e308, -1e308, 0.0, 1.0, 1.0, 1.0], population="all")
+    assert mixed[2] == (pytest.approx(0.0, abs=1e292), 2)

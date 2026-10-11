@@ -257,15 +257,19 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
   be date-ascending (refused otherwise); a missing eligibility or value column,
   a date that is not exactly canonical `YYYY-MM-DD` (rows, event dates,
   `first_known`, lookup date), or a non-numeric or non-finite anchor value
-  refuses. Every malformed input to any entry point (wrong type, container,
-  `warmup`/`max_staleness_days` not a non-negative integer, bad column names, a
-  non-numeric aggregate contribution) refuses with `CONTRACT_MISMATCH`, never a
-  bare exception.
+  refuses. Inputs are checked against type allow-lists, not deny-lists:
+  numbers are only int, float, numpy integer/floating (never bool or numeric
+  strings) and finite; declarations (`on_missing`, `population`) must be a `str`
+  in the allowed set; `warmup`/`max_staleness_days` non-negative integers.
+  Anything else refuses with `CONTRACT_MISMATCH`, never a bare exception.
+  `SequencedEvent` validates its fields on construction (canonical date,
+  non-negative integer ordinal, bool `admitted`).
 - `strict_prior_mean(events, values, population=)` returns `(mean, count)` per
   event over earlier-ordinal events whose value is non-null, within
   `population` (`"admitted"` or `"all"`). Under `"admitted"` a non-admitted
   event gets `(None, 0)`. No contribution gives `(None, 0)`. A length mismatch
-  or unknown population refuses.
+  or unknown population refuses. The mean is a running mean, so finite inputs
+  never overflow an intermediate sum (`[1e308, 1e308]` gives `1e308`).
 - Causality uses data dates only: the functions read `date`/`event_date`;
   `retrieved_at` and `computed_at` are provenance and never filter or order.
 - Platform rule (user 2026-10-11): history aggregates are computed when a table
