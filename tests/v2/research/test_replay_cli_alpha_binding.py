@@ -14,10 +14,13 @@ def test_replay_cli_alpha_list_changes_real_snapshot_result(tmp_path, monkeypatc
     real_run = v2_replay._replay_run.run
     omitted = object()
     forwarded_alphas = []
+    replay_outputs = []
 
     def recording_run(*args, **kwargs):
         forwarded_alphas.append(kwargs.get("alphas", omitted))
-        return real_run(*args, **kwargs)
+        result = real_run(*args, **kwargs)
+        replay_outputs.append(result)
+        return result
 
     monkeypatch.setattr(v2_replay._replay_run, "run", recording_run)
     snapshot = replay_snapshot(tmp_path)
@@ -66,6 +69,32 @@ def test_replay_cli_alpha_list_changes_real_snapshot_result(tmp_path, monkeypatc
     assert default_alphas["results"][0]["rows"] == sum(
         report["results"][0]["rows"] for report in grid_alphas
     )
+
+    one_trades = replay_outputs[0]["trades"]
+    end_trades = replay_outputs[1]["trades"]
+    two_trades = replay_outputs[2]["trades"]
+    duplicate_trades = replay_outputs[3]["trades"]
+    assert two_trades["fill_alpha"].tolist() == [0.0, 1.0]
+    assert duplicate_trades["fill_alpha"].tolist() == [0.0, 0.0]
+
+    def assert_expected_prices(trades, alpha, entry_cost, exit_value):
+        matched = trades.loc[trades["fill_alpha"] == alpha]
+        assert len(matched) == 1
+        row = matched.iloc[0]
+        assert row["entry_cost"] == pytest.approx(entry_cost)
+        assert row["exit_value"] == pytest.approx(exit_value)
+        assert row["ret"] == pytest.approx((exit_value - entry_cost) / entry_cost)
+
+    # Synthetic ATM call+put sums: May 2 ask/bid are 3.8/3.0; May 3
+    # bid/ask are 5.0/5.8. Alpha 0 crosses entry ask and exit bid;
+    # alpha 1 uses entry bid and exit ask.
+    assert_expected_prices(one_trades, 0.0, 3.8, 5.0)
+    assert_expected_prices(end_trades, 1.0, 3.0, 5.8)
+
+    corrupted_trades = end_trades.copy()
+    corrupted_trades.loc[corrupted_trades["fill_alpha"] == 1.0, "exit_value"] += 1.0
+    with pytest.raises(AssertionError):
+        assert_expected_prices(corrupted_trades, 1.0, 3.0, 5.8)
 
 
 @pytest.mark.parametrize("alpha", ["abc", "nan", "inf", "-0.1", "1.1"])
