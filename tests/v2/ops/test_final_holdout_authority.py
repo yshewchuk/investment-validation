@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -390,7 +391,9 @@ def test_state_action_rechecks_registration_after_assent(context, monkeypatch, a
 
 
 def test_fenced_start_spends_once_and_revocation_invalidates_publication(context, monkeypatch):
-    _authorize(context)
+    authorization = _authorize(context)
+    assert authorization["authorized_at"] == "2026-10-10T00:00:00.000000Z"
+    monkeypatch.setattr(context.clock, "now", lambda: datetime(2026, 10, 10, 0, 1, tzinfo=timezone.utc))
     _state_assent(monkeypatch, context, "START")
     started = _start(context)
     assert started["state"] == "read_started"
@@ -406,14 +409,15 @@ def test_fenced_start_spends_once_and_revocation_invalidates_publication(context
     with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
         _start(context)
     assert len(_state_events(context)) == 1
+    monkeypatch.setattr(context.clock, "now", lambda: datetime(2026, 10, 10, 0, 2, tzinfo=timezone.utc))
     _state_assent(monkeypatch, context, "REVOKE")
     revoked = _revoke(context)
     assert revoked["state"] == "revoked"
     assert revoked["fence"] == 2
     events = _state_events(context)
     assert [(row["actor"], row["occurred_at"], row["confirmation"]) for row in events] == [
-        ("1234:synthetic-user", "2026-10-10T00:00:00.000000Z", _state_phrase(context, "START")),
-        ("1234:synthetic-user", "2026-10-10T00:00:00.000000Z", _state_phrase(context, "REVOKE")),
+        ("1234:synthetic-user", "2026-10-10T00:01:00.000000Z", _state_phrase(context, "START")),
+        ("1234:synthetic-user", "2026-10-10T00:02:00.000000Z", _state_phrase(context, "REVOKE")),
     ]
     assert not authority.final_holdout_fence_current(
         context.conn, context.request.experiment_id, started["request_digest"], started["fence"])
@@ -437,6 +441,14 @@ def test_revocation_before_start_and_state_history_are_permanent(context, monkey
     ):
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             context.conn.execute(sql)
+    row = _state_events(context)[0]
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        context.conn.execute(
+            "INSERT OR REPLACE INTO final_holdout_state_events "
+            "(event_id,experiment_id,request_digest,state,fence,actor,occurred_at,confirmation) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (row["event_id"], row["experiment_id"], row["request_digest"], row["state"],
+             row["fence"], row["actor"], row["occurred_at"], row["confirmation"]))
     assert [row["state"] for row in _state_events(context)] == ["revoked"]
 
 
@@ -478,6 +490,7 @@ def test_recovery_rejects_revocation_between_death_check_and_commit(context, mon
 
 def test_real_owner_exit_is_proven_dead_without_a_timeout(context, monkeypatch):
     authorization = _authorize(context)
+    monkeypatch.setattr(context.clock, "now", lambda: datetime(2026, 10, 10, 0, 1, tzinfo=timezone.utc))
     _state_assent(monkeypatch, context, "START")
     ctx = multiprocessing.get_context("fork")
 
@@ -491,16 +504,25 @@ def test_real_owner_exit_is_proven_dead_without_a_timeout(context, monkeypatch):
     child = ctx.Process(target=start_in_child)
     child.start()
     try:
-        os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            waited = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if waited is not None and waited.si_pid == child.pid:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("child did not exit before the deadline")
         assert authority.process_info(child.pid, authority.read_boot_id())[2] == "Z"
         started = _state_events(context)[0]
         assert started["owner_pid"] == child.pid
+        assert started["occurred_at"] == "2026-10-10T00:01:00.000000Z"
+        monkeypatch.setattr(context.clock, "now", lambda: datetime(2026, 10, 10, 0, 2, tzinfo=timezone.utc))
         recovered = authority.recover_interrupted_final_holdout_read(
             context.conn, context.request.experiment_id, clock=context.clock)
         assert recovered["state"] == "indeterminate"
         assert recovered["fence"] == started["fence"]
         assert recovered["request_digest"] == authorization["request_digest"]
-        assert recovered["occurred_at"] == context.clock.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        assert recovered["occurred_at"] == "2026-10-10T00:02:00.000000Z"
         assert not authority.final_holdout_fence_current(
             context.conn, context.request.experiment_id, started["request_digest"], started["fence"])
         _state_assent(monkeypatch, context, "START")
@@ -517,7 +539,11 @@ def test_real_owner_exit_is_proven_dead_without_a_timeout(context, monkeypatch):
         child.join(20)
         if child.is_alive():
             child.terminate()
-            child.join()
+            child.join(5)
+        if child.is_alive():
+            child.kill()
+            child.join(5)
+    assert not child.is_alive()
     assert child.exitcode == 0
 
 
@@ -592,30 +618,63 @@ def test_start_and_revoke_serialize_to_a_revoked_fence(context, monkeypatch):
 
 def test_boot_change_proves_the_old_process_dead(context, monkeypatch):
     authorization = _authorize(context)
+    monkeypatch.setattr(context.clock, "now", lambda: datetime(2026, 10, 10, 0, 1, tzinfo=timezone.utc))
     monkeypatch.setattr(authority, "read_boot_id", lambda: "synthetic-old-boot")
     _state_assent(monkeypatch, context, "START")
     started = _start(context)
     assert started["owner_boot_id"] == "synthetic-old-boot"
+    assert started["occurred_at"] == "2026-10-10T00:01:00.000000Z"
+    monkeypatch.setattr(context.clock, "now", lambda: datetime(2026, 10, 10, 0, 2, tzinfo=timezone.utc))
     monkeypatch.setattr(authority, "read_boot_id", lambda: "synthetic-new-boot")
     monkeypatch.setattr(authority, "is_alive", lambda *args: pytest.fail("old-boot identity checked in new boot"))
     recovered = authority.recover_interrupted_final_holdout_read(
         context.conn, context.request.experiment_id, clock=context.clock)
     assert recovered["state"] == "indeterminate"
     assert recovered["request_digest"] == authorization["request_digest"]
-    assert recovered["occurred_at"] == context.clock.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    assert recovered["occurred_at"] == "2026-10-10T00:02:00.000000Z"
 
 
-def test_start_refuses_malformed_owner_identity_before_spending(context, monkeypatch):
+@pytest.mark.parametrize(("field", "invalid_value"), [
+    ("boot_id", ""), ("pid", 0), ("start_ticks", 0), ("process_group", 0),
+])
+def test_start_refuses_malformed_owner_identity_before_spending(context, monkeypatch, field, invalid_value):
     _authorize(context)
     _state_assent(monkeypatch, context, "START")
+    identity = {"boot_id": "synthetic-boot", "pid": os.getpid(),
+                "start_ticks": 1, "process_group": os.getpgrp()}
+    identity[field] = invalid_value
     monkeypatch.setattr(
         authority, "process_info",
-        lambda pid, boot_id: (SimpleNamespace(boot_id="", pid=pid, start_ticks=1,
-                                               process_group=pid), None),
+        lambda pid, boot_id: (SimpleNamespace(**identity), None),
     )
     with pytest.raises(OpsError, match="VALIDATION_FAILED"):
         _start(context)
     assert _state_events(context) == []
+
+
+@pytest.mark.parametrize(("experiment_id", "request_digest", "fence"), [
+    (1 << 100, "a" * 64, 1),
+    ("experiment", 1 << 100, 1),
+    ("experiment", "malformed", 1),
+    ("experiment", "a" * 64, True),
+    ("experiment", "a" * 64, 1.0),
+    ("experiment", "a" * 64, 1 << 100),
+])
+def test_publication_fence_rejects_malformed_arguments_before_lookup(
+        context, monkeypatch, experiment_id, request_digest, fence):
+    monkeypatch.setattr(authority, "_latest_event", lambda *args: pytest.fail("invalid input reached SQLite lookup"))
+    with pytest.raises(OpsError) as exc_info:
+        authority.final_holdout_fence_current(context.conn, experiment_id, request_digest, fence)
+    assert exc_info.value.code == "VALIDATION_FAILED"
+
+
+@pytest.mark.parametrize("experiment_id", [None, "", 1 << 100])
+def test_recovery_rejects_malformed_experiment_id_before_lookup(context, monkeypatch, experiment_id):
+    monkeypatch.setattr(authority, "_latest_event", lambda *args: pytest.fail("invalid input reached SQLite lookup"))
+    with pytest.raises(OpsError) as exc_info:
+        authority.recover_interrupted_final_holdout_read(
+            context.conn, experiment_id, clock=context.clock)
+    assert exc_info.value.code == "VALIDATION_FAILED"
 
 
 def test_publication_fence_storage_failure_is_typed(monkeypatch, context):
@@ -641,22 +700,38 @@ def test_start_rejects_corrupt_authorization_evidence(context, monkeypatch, colu
     assert _state_events(context) == []
 
 
-def test_state_schema_requires_owner_and_assent_evidence(context):
+@pytest.mark.parametrize(("state", "missing_field"), [
+    ("read_started", "owner_boot_id"),
+    ("read_started", "owner_pid"),
+    ("read_started", "owner_start_ticks"),
+    ("read_started", "owner_process_group"),
+    ("read_started", "actor"),
+    ("read_started", "confirmation"),
+    ("revoked", "actor"),
+    ("revoked", "confirmation"),
+])
+def test_state_schema_requires_each_owner_and_assent_field(context, state, missing_field):
     authorization = _authorize(context)
-    digest = authorization["request_digest"]
-    with pytest.raises(sqlite3.IntegrityError):
+    identity, *_ = authority.process_info(os.getpid(), authority.read_boot_id())
+    values = {
+        "experiment_id": context.request.experiment_id,
+        "request_digest": authorization["request_digest"],
+        "state": state,
+        "fence": 1,
+        "owner_boot_id": identity.boot_id,
+        "owner_pid": identity.pid,
+        "owner_start_ticks": identity.start_ticks,
+        "owner_process_group": identity.process_group,
+        "actor": "1234:synthetic-user",
+        "occurred_at": "2026-10-10T00:00:00.000000Z",
+        "confirmation": "synthetic confirmation",
+    }
+    values.pop(missing_field)
+    columns = tuple(values)
+    with pytest.raises(sqlite3.IntegrityError, match=missing_field):
         context.conn.execute(
-            "INSERT INTO final_holdout_state_events "
-            "(experiment_id,request_digest,state,fence,occurred_at) VALUES (?,?, 'read_started',1,?)",
-            (context.request.experiment_id, digest, "2026-10-10T00:00:00.000000Z"),
-        )
-    with pytest.raises(sqlite3.IntegrityError):
-        context.conn.execute(
-            "INSERT INTO final_holdout_state_events "
-            "(experiment_id,request_digest,state,fence,actor,occurred_at) VALUES (?,?, 'revoked',1,?,?)",
-            (context.request.experiment_id, digest, "1234:synthetic-user",
-             "2026-10-10T00:00:00.000000Z"),
-        )
+            f"INSERT INTO final_holdout_state_events ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})", tuple(values.values()))
     assert _state_events(context) == []
 
 
@@ -716,14 +791,26 @@ def test_recovery_rejects_corrupt_authorization_evidence(context, monkeypatch, c
     assert [row["state"] for row in _state_events(context)] == ["read_started"]
 
 
-def test_recovery_rejects_malformed_persisted_owner_identity(context):
+@pytest.mark.parametrize(("field", "invalid_value"), [
+    ("owner_boot_id", ""), ("owner_pid", 0), ("owner_start_ticks", 0), ("owner_process_group", 0),
+])
+def test_recovery_rejects_malformed_persisted_owner_identity(context, field, invalid_value):
     authorization = _authorize(context)
+    identity, *_ = authority.process_info(os.getpid(), authority.read_boot_id())
+    values = {
+        "owner_boot_id": identity.boot_id,
+        "owner_pid": identity.pid,
+        "owner_start_ticks": identity.start_ticks,
+        "owner_process_group": identity.process_group,
+    }
+    values[field] = invalid_value
     context.conn.execute(
         "INSERT INTO final_holdout_state_events "
         "(experiment_id,request_digest,state,fence,owner_boot_id,owner_pid,owner_start_ticks,"
         "owner_process_group,actor,occurred_at,confirmation) "
         "VALUES (?,?, 'read_started',1,?,?,?,?,?,?,?)",
-        (context.request.experiment_id, authorization["request_digest"], "", 0, 0, 0,
+        (context.request.experiment_id, authorization["request_digest"], values["owner_boot_id"],
+         values["owner_pid"], values["owner_start_ticks"], values["owner_process_group"],
          "1234:synthetic-user", "2026-10-10T00:00:00.000000Z", "synthetic confirmation"),
     )
     with pytest.raises(OpsError, match="VALIDATION_FAILED"):

@@ -99,6 +99,22 @@ def _authorize(conn, store, request, clock):
     return dict(row)
 
 
+def _validate_experiment_id(experiment_id):
+    if type(experiment_id) is not str or not experiment_id:
+        raise fail("VALIDATION_FAILED", "invalid final-read experiment ID")
+
+
+def _validate_publication_fence_inputs(experiment_id, request_digest, fence):
+    _validate_experiment_id(experiment_id)
+    digest_hex = (request_digest.removeprefix("sha256:")
+                  if type(request_digest) is str else "")
+    if (len(digest_hex) != 64
+            or any(character not in "0123456789abcdef" for character in digest_hex)):
+        raise fail("VALIDATION_FAILED", "invalid final-read request digest")
+    if type(fence) is not int or not 0 < fence <= (2**63 - 1):
+        raise fail("VALIDATION_FAILED", "invalid final-read publication fence")
+
+
 def _latest_event(conn, experiment_id):
     return conn.execute("SELECT * FROM final_holdout_state_events WHERE experiment_id=? "
                         "ORDER BY event_id DESC LIMIT 1", (experiment_id,)).fetchone()
@@ -222,6 +238,7 @@ def revoke_final_holdout(conn, store, request, *, clock):
 
 def final_holdout_fence_current(conn, experiment_id, request_digest, fence):
     """Whether a started read still owns the current publication fence."""
+    _validate_publication_fence_inputs(experiment_id, request_digest, fence)
     try:
         latest = _latest_event(conn, experiment_id)
         if latest is None or latest["state"] != "read_started":
@@ -236,6 +253,7 @@ def final_holdout_fence_current(conn, experiment_id, request_digest, fence):
 
 def recover_interrupted_final_holdout_read(conn, experiment_id, *, clock):
     """Mark a read indeterminate only after its exact owner process is proven gone."""
+    _validate_experiment_id(experiment_id)
     try:
         latest = _latest_event(conn, experiment_id)
         if latest is None:
