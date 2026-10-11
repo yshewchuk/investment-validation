@@ -450,6 +450,32 @@ def test_recovery_refuses_while_owner_is_alive(context, monkeypatch):
     assert [row["state"] for row in _state_events(context)] == ["read_started"]
 
 
+def test_recovery_rejects_revocation_between_death_check_and_commit(context, monkeypatch):
+    _authorize(context)
+    _state_assent(monkeypatch, context, "START")
+    _start(context)
+    monkeypatch.setattr(builtins, "input", lambda prompt: _state_phrase(context, "REVOKE"))
+
+    def revoke_after_death_check(identity, boot_id):
+        conn = connect(context.root / "catalog.sqlite", must_exist=True)
+        try:
+            revoked = authority.revoke_final_holdout(
+                conn, context.store, context.request, clock=context.clock)
+            assert revoked["state"] == "revoked"
+        finally:
+            conn.close()
+        return False
+
+    monkeypatch.setattr(authority, "is_alive", revoke_after_death_check)
+    with pytest.raises(OpsError) as exc_info:
+        authority.recover_interrupted_final_holdout_read(
+            context.conn, context.request.experiment_id, clock=context.clock)
+    assert exc_info.value.code == "STALE_EXPECTATION"
+    events = _state_events(context)
+    assert [row["state"] for row in events] == ["read_started", "revoked"]
+    assert all(row["state"] != "indeterminate" for row in events)
+
+
 def test_real_owner_exit_is_proven_dead_without_a_timeout(context, monkeypatch):
     _authorize(context)
     _state_assent(monkeypatch, context, "START")
