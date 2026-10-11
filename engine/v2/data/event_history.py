@@ -7,11 +7,11 @@ refuses with ``CONTRACT_MISMATCH``, never a bare exception.
 """
 from __future__ import annotations
 
-import math
 from bisect import bisect_left
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from fractions import Fraction
 from typing import Any
 
 import numpy as np
@@ -34,7 +34,7 @@ def _present(value: Any) -> bool:
     """False for None and any float NaN (numpy dtypes included)."""
     if value is None:
         return False
-    return not (isinstance(value, _FLOATS) and math.isnan(value))
+    return not (isinstance(value, _FLOATS) and bool(np.isnan(value)))
 
 
 def _finite_float(value: Any) -> float:
@@ -45,7 +45,7 @@ def _finite_float(value: Any) -> float:
         number = float(value)
     except OverflowError:
         raise _refuse("a finite numeric value is required") from None
-    if not math.isfinite(number):
+    if not np.isfinite(number):
         raise _refuse("a finite numeric value is required")
     return number
 
@@ -193,17 +193,19 @@ def strict_prior_mean(events: Sequence[SequencedEvent], values: Sequence[Any], *
                       population: str | None = None) -> tuple[tuple[float | None, int], ...]:
     """Per event: mean and count of non-null values of earlier-ordinal events.
 
-    The mean is a running mean (``mean += x / n - mean / n``) so a finite input
-    set never overflows an intermediate sum.
+    Each mean is the EXACT rational mean (``fractions.Fraction`` sum / count)
+    rounded once to float: no intermediate overflow, underflow or double rounding.
+    The running Fraction sum costs O(n) big-integer work per history, fine for the
+    small per-ticker event histories this serves.
     """
     _check_aggregate_inputs(events, values, population)
     numbers = [_finite_float(val) if _present(val) else None for val in values]
     out: list[tuple[float | None, int]] = []
-    mean, count = 0.0, 0
+    total, count = Fraction(0), 0
     for ev, number in zip(events, numbers):
         counted = population == "all" or ev.admitted
-        out.append((mean if count else None, count) if counted else (None, 0))
+        out.append((float(total / count) if count else None, count) if counted else (None, 0))
         if counted and number is not None:
             count += 1
-            mean += number / count - mean / count
+            total += Fraction(number)
     return tuple(out)

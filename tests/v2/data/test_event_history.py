@@ -5,6 +5,7 @@ is compared to a complete literal expected value.
 """
 import contextlib
 import math
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -65,14 +66,8 @@ def _fields(events):
 
 
 def _assert_means(out, expected):
-    """Counts exact; means to a 1e-9 relative tolerance with NO absolute slack."""
-    assert len(out) == len(expected)
-    for (mean, n), (exp_mean, exp_n) in zip(out, expected):
-        assert n == exp_n
-        if exp_mean is None:
-            assert mean is None
-        else:
-            assert mean == pytest.approx(exp_mean, rel=1e-9, abs=0)
+    """Exact equality of the complete (mean, count) vector; no tolerance anywhere."""
+    assert list(out) == list(expected)
 
 
 # ---- event_sequence ------------------------------------------------------------------
@@ -286,7 +281,9 @@ def test_numeric_allow_list_members_are_accepted_on_the_lookup_path(given, expec
 def test_numeric_allow_list_members_are_accepted_on_the_aggregate_path(given, e):
     out = strict_prior_mean(event_sequence(DAYS, warmup=0), [given, given, 0, 0.0, 0, 0.0],
                             population="all")
-    _assert_means(out, [(None, 0), (e, 1), (e, 2), (e * 2 / 3, 3), (e / 2, 4), (e * 2 / 5, 5)])
+    f = Fraction(e)
+    _assert_means(out, [(None, 0), (e, 1), (e, 2), (float(f * 2 / 3), 3), (float(f / 2), 4),
+                        (float(f * 2 / 5), 5)])
 
 
 # ---- AsofSeries: construction refusals -----------------------------------------------
@@ -430,12 +427,29 @@ def test_admitted_population_means_over_several_admitted_events():
     _assert_means(out, [(None, 0), (None, 0), (None, 0), (2.0, 1), (3.0, 2), (4.0, 3)])
 
 
+def test_mean_is_exactly_rounded_for_subnormals():
+    s = 5e-324  # 2**-1074, the smallest subnormal
+    out = strict_prior_mean(event_sequence(DAYS, warmup=0), [s, 3 * s, 0.0, 0.0, 0.0, 0.0],
+                            population="all")
+    # (s + 3s) / 2 = 2s exactly; 4s/3, 4s/4 and 4s/5 round once to s
+    _assert_means(out, [(None, 0), (5e-324, 1), (1e-323, 2), (5e-324, 3), (5e-324, 4),
+                        (5e-324, 5)])
+
+
 def test_mean_does_not_overflow_on_large_finite_values():
-    seq = event_sequence(DAYS, warmup=0)
-    big = strict_prior_mean(seq, [1e308, 1e308, 0.0, 1.0, 1.0, 1.0], population="all")
-    _assert_means(big, [(None, 0), (1e308, 1), (1e308, 2), (6.666666666666667e307, 3),
+    out = strict_prior_mean(event_sequence(DAYS, warmup=0),
+                            [1e308, 1e308, 0.0, 1.0, 1.0, 1.0], population="all")
+    _assert_means(out, [(None, 0), (1e308, 1), (1e308, 2), (6.666666666666666e307, 3),
                         (5e307, 4), (4e307, 5)])
-    mixed = strict_prior_mean(seq, [1e308, -1e308, 0.0, 1.0, 1.0, 1.0], population="all")
+
+
+def test_mean_is_exact_under_total_cancellation():
+    out = strict_prior_mean(event_sequence(DAYS, warmup=0),
+                            [1e308, -1e308, 1.0, 1.0, 1.0, 1.0], population="all")
+    _assert_means(out, [(None, 0), (1e308, 1), (0.0, 2), (0.3333333333333333, 3), (0.5, 4),
+                        (0.6, 5)])
+    mixed = strict_prior_mean(event_sequence(DAYS, warmup=0),
+                              [1e308, -1e308, 0.0, 1.0, 1.0, 1.0], population="all")
     _assert_means(mixed, [(None, 0), (1e308, 1), (0.0, 2), (0.0, 3), (0.25, 4), (0.4, 5)])
 
 
