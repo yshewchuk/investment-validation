@@ -11,7 +11,7 @@ from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactError, ArtifactStore, canonical_json, from_document
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.executor import THREAD_VARIABLES
 from engine.v2.ops.experiments import experiment_spec_from_document, resolve_experiment_plan
 from engine.v2.ops.fingerprints import environment_identity, source_closure
@@ -29,7 +29,12 @@ def _admit(parameters, root, conn, store):
         raise fail("INVALID_EXPERIMENT_SPEC", "native pricing requires bound smoke inputs")
     if any((root / name).is_symlink() for name in BINDINGS):
         raise fail("INVALID_EXPERIMENT_SPEC", "native staging must contain regular inputs")
-    spec = experiment_spec_from_document(json.loads((root / "spec.json").read_bytes()))
+    try:
+        spec = experiment_spec_from_document(json.loads((root / "spec.json").read_bytes()))
+    except OpsError as error:
+        if error.code != "INVALID_REQUEST":
+            raise
+        raise fail("INVALID_EXPERIMENT_SPEC", "native staged specification is malformed") from None
     plan = resolve_experiment_plan(spec)
     if plan.runner != RUNNER:
         raise fail("INVALID_EXPERIMENT_SPEC", "native pricing runner is not allowlisted")

@@ -355,3 +355,20 @@ def test_registered_strategy_changes_real_consumed_geometry(source, tmp_path, si
     assert row["entry_cost"] == pytest.approx(1.8)
     assert row["exit_value"] == pytest.approx(1.6)
     assert row["pnl"] == pytest.approx(-0.2)
+
+
+@pytest.mark.parametrize("field", ["hypothesis", "primary_arm_id", "economic_params", "price_source"])
+@pytest.mark.parametrize("missing", [True, False], ids=["missing", "null"])
+def test_supervised_required_spec_fields_use_experiment_refusal(source, tmp_path, field, missing):
+    """The real staged parser's required-field errors keep the worker contract."""
+    document, registration, parameters = _registered(source)
+    if missing:
+        del document[field]
+    else:
+        document[field] = None
+    before = _catalog(source[0])
+    result = _supervise(tmp_path, source, document, registration, parameters)
+    assert result["code"] == "INVALID_EXPERIMENT_SPEC"
+    assert _catalog(source[0]) == before
+    assert not list(tmp_path.rglob("native_gate_consumption.json"))
+    assert not list(tmp_path.rglob("REPORT.md"))
