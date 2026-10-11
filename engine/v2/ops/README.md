@@ -43,8 +43,7 @@ Native experiment registration also exposes these existing submodule APIs:
 `native_registration.verified_registration_bytes`.
 They compose one resolved plan, source/environment binding and primary catalog
 reservation; the caller owns the transaction around the reservation helper.
-The registration verifier reads only catalog-owned binding evidence; it grants no final-read authority.
-Internal `final_holdout.authorize_final_holdout` has only synthetic tests as consumers; no production entrypoint or read capability exists yet.
+The registration verifier reads only catalog-owned binding evidence and grants no final-read authority; internal `final_holdout.authorize_final_holdout` has only synthetic tests as consumers and no production entrypoint or read capability.
 Native prediction reporting also consumes the public fold-local
 `experiment_folds.TrainFoldRule` and `experiment_folds.fit_walk_forward_fold`.
 Its CLI consumes `catalog.connect` and `experiments.experiment_spec_from_document`

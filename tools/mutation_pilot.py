@@ -1808,6 +1808,7 @@ _REGISTRATION_READERS = {
     "tests/v2/integration/test_mutation_ci.py", "tests/v2/integration/test_gremlin_ci.py", "tests/test_gremlins_ci.py",
     "tests/test_mutation_results.py", "tests/test_checks_mutation_ratchet.py",
     "tests/v2/integration/test_mutation_registration_selection.py",
+    "tests/v2/ops/test_final_holdout_authority.py",
 }
 _REGISTRATION_FIELDS = {
     "defaults": {"timeout_constant", "timeout_multiplier", "max_children",

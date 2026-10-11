@@ -19,6 +19,7 @@ READERS = {
     "tests/v2/integration/test_mutation_ci.py", "tests/v2/integration/test_gremlin_ci.py", "tests/test_gremlins_ci.py",
     "tests/test_mutation_results.py", "tests/test_checks_mutation_ratchet.py",
     "tests/v2/integration/test_mutation_registration_selection.py",
+    "tests/v2/ops/test_final_holdout_authority.py",
 }
 BASE = '''
 [defaults]
@@ -58,6 +59,11 @@ def case(monkeypatch):
     graph["tests/test_importer.py"] = {"engine/new.py"}
     monkeypatch.setattr(pilot, "unresolved_import_files", lambda paths: set())
     return base, cfg, [CONFIG, "engine/new.py", "tests/test_new.py"], graph
+
+
+def test_reader_registry_mirrors_all_mutation_config_readers():
+    assert READERS == pilot._REGISTRATION_READERS
+    assert "tests/v2/ops/test_final_holdout_authority.py" in READERS
 
 
 def selected(case):

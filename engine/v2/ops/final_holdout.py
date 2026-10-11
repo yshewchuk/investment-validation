@@ -43,7 +43,11 @@ def _authorize(conn, store, request, clock):
     _registered(conn, store, request)
     encoded, digest = canonical_json(to_document(request)), content_hash(to_document(request))
     uid = os.getuid()
-    actor = f"{uid}:{pwd.getpwuid(uid).pw_name}"
+    try:
+        username = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        raise fail("RESOURCE_UNAVAILABLE", "current OS user record is unavailable") from None
+    actor = f"{uid}:{username}"
     confirmation = f"AUTHORIZE {json.dumps(request.experiment_id)} {digest} AS {json.dumps(actor)}"
     sys.stdout.write(encoded + "\nThis permanently spends one final read; no expiry or interrupted-read continuation.\n")
     sys.stdout.flush()
@@ -52,7 +56,7 @@ def _authorize(conn, store, request, clock):
     except (EOFError, KeyboardInterrupt):
         raise fail("HOLDOUT_ACCESS_DENIED", "final-read authorization was not confirmed") from None
     if answer != confirmation:
-        raise fail("HOLDOUT_ACCESS_DENIED", "final-read authorization was not confirmed")
+        raise fail("HOLDOUT_ACCESS_DENIED", "final-read authorization was not confirmed") from None
     with transaction(conn):
         _registered(conn, store, request)
         row = conn.execute("SELECT * FROM final_holdout_authorizations WHERE experiment_id=?",
@@ -60,18 +64,25 @@ def _authorize(conn, store, request, clock):
         if row is not None:
             if row["request_digest"] != digest or row["request_json"] != encoded:
                 raise fail("IDEMPOTENCY_CONFLICT", "experiment final read is already spent for another request")
-            if row["actor"] != actor:
+            if row["actor"].split(":", 1)[0] != str(uid):
                 raise fail("HOLDOUT_ACCESS_DENIED", "only the original authorizing user may acknowledge this act")
+            original_confirmation = (
+                f"AUTHORIZE {json.dumps(request.experiment_id)} {digest} AS {json.dumps(row['actor'])}"
+            )
             if (row["schema_version"] != "final_holdout_authorization.v1.0"
                     or row["registration_run_id"] != request.registration_run_id
-                    or row["confirmation"] != confirmation):
+                    or row["confirmation"] != original_confirmation):
                 raise ValueError
             parse_timestamp(row["authorized_at"])
             return dict(row)
         stamp = format_timestamp(clock.now())
-        conn.execute("INSERT INTO final_holdout_authorizations VALUES (?,?,?,?,?,?,?,?)",
-                     (request.experiment_id, "final_holdout_authorization.v1.0",
-                      request.registration_run_id, digest, encoded, actor, stamp, confirmation))
+        conn.execute(
+            "INSERT INTO final_holdout_authorizations "
+            "(experiment_id, schema_version, registration_run_id, request_digest, request_json, actor, authorized_at, confirmation) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (request.experiment_id, "final_holdout_authorization.v1.0",
+             request.registration_run_id, digest, encoded, actor, stamp, confirmation),
+        )
         row = conn.execute("SELECT * FROM final_holdout_authorizations WHERE experiment_id=?",
                            (request.experiment_id,)).fetchone()
     return dict(row)

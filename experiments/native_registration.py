@@ -105,7 +105,7 @@ def _existing(conn, store, registration):
         ref = artifact_reference(registration.binding_json, registration.document["schema_version"])
         binding = verified_registration_bytes(conn, store, registration.run_id, expected_ref=ref)
         return binding is not None
-    except (ValueError, TypeError, KeyError):
+    except (ArtifactError, ValueError, TypeError, KeyError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding") from None
 
 

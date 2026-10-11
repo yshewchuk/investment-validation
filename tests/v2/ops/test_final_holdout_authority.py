@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import DATA_FAILURE_CODES, FAILURE_CODES
-from engine.v2.foundation import artifact_reference, canonical_json, content_hash, to_document
+from engine.v2.foundation import ArtifactError, artifact_reference, canonical_json, content_hash, to_document
 from engine.v2.ops import final_holdout as authority, schema
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError
@@ -125,11 +125,26 @@ def test_repeated_act_needs_confirmation_and_returns_original_without_expiry(con
     _assent(monkeypatch, context.request)
     assert _authorize(context) == first
     assert _rows(context) == [first]
-    monkeypatch.setattr(authority.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_name="another-user"))
-    _assent(monkeypatch, context.request, _phrase(context.request).replace("synthetic-user", "another-user"))
+    monkeypatch.setattr(authority.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_name="renamed-user"))
+    _assent(monkeypatch, context.request, _phrase(context.request).replace("synthetic-user", "renamed-user"))
+    assert _authorize(context) == first
+    assert _rows(context) == [first]
+    monkeypatch.setattr(authority.os, "getuid", lambda: 5678)
+    _assent(monkeypatch, context.request,
+            _phrase(context.request).replace("1234:synthetic-user", "5678:renamed-user"))
     with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
         _authorize(context)
     assert _rows(context) == [first]
+
+
+def test_missing_os_user_record_is_resource_unavailable(context, monkeypatch):
+    def missing_user(uid):
+        raise KeyError(uid)
+
+    monkeypatch.setattr(authority.pwd, "getpwuid", missing_user)
+    with pytest.raises(OpsError, match="RESOURCE_UNAVAILABLE"):
+        _authorize(context)
+    assert _rows(context) == []
 
 
 @pytest.mark.parametrize("field", ["snapshot_id", "execution_plan_hash", "source_closure_hash", "final_read"])
@@ -281,18 +296,38 @@ def test_migration_is_atomic_and_does_not_rewrite_prior_versions(tmp_path):
         conn.close()
 
 
+def test_native_admission_maps_artifact_reference_errors_to_identity_conflict(context, monkeypatch):
+    def invalid_reference(*args, **kwargs):
+        raise ArtifactError("UNSAFE_PATH", "synthetic invalid reference")
+
+    monkeypatch.setattr(native, "artifact_reference", invalid_reference)
+    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+        native._existing(context.conn, context.store, context.registration)
+
+
 def test_private_authority_is_not_reachable_from_production_callers_and_code_matches_data():
     root = Path(__file__).resolve().parents[3]
     target = "engine.v2.ops.final_holdout"
     for directory in ("engine", "experiments", "tools"):
         for path in (root / directory).rglob("*.py"):
+            package = path.relative_to(root).with_suffix("").parts[:-1]
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.ImportFrom):
-                    assert node.module != target, path
-                    assert not (node.module == "engine.v2.ops" and any(
-                        alias.name == "final_holdout" for alias in node.names)), path
+                    module = node.module or ""
+                    if node.level:
+                        base = package[:len(package) - node.level + 1]
+                        parts = (*base, *(module.split(".") if module else ()))
+                        module = ".".join(parts)
+                    imported = {alias.name for alias in node.names}
+                    assert module != target, path
+                    assert not (module == "engine.v2.ops" and "final_holdout" in imported), path
                 elif isinstance(node, ast.Import):
                     assert target not in [alias.name for alias in node.names], path
+                elif isinstance(node, ast.Call):
+                    dynamic = (isinstance(node.func, ast.Name) and node.func.id == "__import__"
+                               or isinstance(node.func, ast.Attribute) and node.func.attr == "import_module")
+                    if dynamic and node.args and isinstance(node.args[0], ast.Constant):
+                        assert node.args[0].value != target, path
     assert FAILURE_CODES["HOLDOUT_ACCESS_DENIED"] == DATA_FAILURE_CODES["HOLDOUT_ACCESS_DENIED"] == ("validation", False)
     assert verified_registration_bytes.__module__ == "engine.v2.ops.native_registration"
 
