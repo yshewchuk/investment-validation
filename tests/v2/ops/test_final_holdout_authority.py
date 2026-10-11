@@ -736,12 +736,18 @@ def test_start_refuses_malformed_owner_identity_before_spending(context, monkeyp
 
 
 @pytest.mark.parametrize(("experiment_id", "request_digest", "fence"), [
-    (1 << 100, "a" * 64, 1),
+    (1 << 100, content_hash("request"), 1),
+    ("  ", content_hash("request"), 1),
+    (" padded ", content_hash("request"), 1),
     ("experiment", 1 << 100, 1),
     ("experiment", "malformed", 1),
-    ("experiment", "a" * 64, True),
-    ("experiment", "a" * 64, 1.0),
-    ("experiment", "a" * 64, 1 << 100),
+    ("experiment", "a" * 64, 1),
+    ("experiment", "sha256:" + "A" * 64, 1),
+    ("experiment", content_hash("request"), 0),
+    ("experiment", content_hash("request"), -1),
+    ("experiment", content_hash("request"), True),
+    ("experiment", content_hash("request"), 1.0),
+    ("experiment", content_hash("request"), 1 << 100),
 ])
 def test_publication_fence_rejects_malformed_arguments_before_lookup(
         context, monkeypatch, experiment_id, request_digest, fence):
@@ -751,13 +757,30 @@ def test_publication_fence_rejects_malformed_arguments_before_lookup(
     assert exc_info.value.code == "VALIDATION_FAILED"
 
 
-@pytest.mark.parametrize("experiment_id", [None, "", 1 << 100])
+@pytest.mark.parametrize("experiment_id", [None, "", "  ", " padded ", 1 << 100])
 def test_recovery_rejects_malformed_experiment_id_before_lookup(context, monkeypatch, experiment_id):
     monkeypatch.setattr(authority, "_latest_event", lambda *args: pytest.fail("invalid input reached SQLite lookup"))
     with pytest.raises(OpsError) as exc_info:
         authority.recover_interrupted_final_holdout_read(
             context.conn, experiment_id, clock=context.clock)
     assert exc_info.value.code == "VALIDATION_FAILED"
+
+
+@pytest.mark.parametrize(("action", "experiment_id"), [
+    ("START", "  "), ("START", " padded "),
+    ("REVOKE", "  "), ("REVOKE", " padded "),
+])
+def test_state_actions_reject_noncanonical_experiment_ids(context, action, experiment_id):
+    authorization = _authorize(context)
+    request = replace(context.request, experiment_id=experiment_id)
+    with pytest.raises(OpsError) as exc_info:
+        if action == "START":
+            authority.start_final_holdout_read(context.conn, context.store, request, clock=context.clock)
+        else:
+            authority.revoke_final_holdout(context.conn, context.store, request, clock=context.clock)
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert _state_events(context) == []
+    assert _rows(context) == [authorization]
 
 
 def test_publication_fence_storage_failure_is_typed(monkeypatch, context):

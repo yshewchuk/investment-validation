@@ -100,14 +100,17 @@ def _authorize(conn, store, request, clock):
 
 
 def _validate_experiment_id(experiment_id):
-    if type(experiment_id) is not str or not experiment_id:
+    if (type(experiment_id) is not str or not experiment_id
+            or experiment_id != experiment_id.strip()):
         raise fail("VALIDATION_FAILED", "invalid final-read experiment ID")
 
 
 def _validate_publication_fence_inputs(experiment_id, request_digest, fence):
     _validate_experiment_id(experiment_id)
-    digest_hex = (request_digest.removeprefix("sha256:")
-                  if type(request_digest) is str else "")
+    prefix = "sha256:"
+    if type(request_digest) is not str or not request_digest.startswith(prefix):
+        raise fail("VALIDATION_FAILED", "invalid final-read request digest")
+    digest_hex = request_digest[len(prefix):]
     if (len(digest_hex) != 64
             or any(character not in "0123456789abcdef" for character in digest_hex)):
         raise fail("VALIDATION_FAILED", "invalid final-read request digest")
