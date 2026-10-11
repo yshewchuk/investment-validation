@@ -7,7 +7,8 @@ Usage (from the agent worktree root):
 
 Test selection (see changed_tests): changed test files, test files that import a
 changed engine/checks/tools module, and -- whenever any engine/checks/tools module
-changed -- every tests/test_*.py carrying a line equal to ALWAYS_RUN_MARKER
+changed -- every root tests/test_*.py or recursive tests/v2/**/test_*.py
+carrying a line equal to ALWAYS_RUN_MARKER
 ("# land: always-run"), for tests that scan source as text and so never name the
 module they check.
 
@@ -149,7 +150,7 @@ def verify(root):
 def changed_tests(root):
     """Test files affected by the diff against origin/main: changed test files, plus
     test files that import a changed engine/checks/tools module, plus (whenever any
-    engine/checks/tools module changed) every tests/test_*.py carrying an
+    engine/checks/tools module changed) every root or nested v2 test carrying an
     ALWAYS_RUN_MARKER line -- for tests that scan source as text (e.g. every
     fail("CODE") literal in a package) and so never name the module they check."""
     git = ["git", "-C", str(root)]
@@ -157,17 +158,17 @@ def changed_tests(root):
     diff = subprocess.run(git + ["diff", "--name-only", base or "HEAD"], capture_output=True, text=True).stdout.split()
     new = subprocess.run(git + ["ls-files", "--others", "--exclude-standard"], capture_output=True, text=True).stdout.split()
     changed = [f for f in dict.fromkeys(diff + new) if f.endswith(".py") and (root / f).is_file()]
-    picked = [f for f in changed if f.startswith("tests/test_")]
+    candidates = sorted((root / "tests").glob("test_*.py")) + sorted((root / "tests/v2").rglob("test_*.py"))
+    tests = {t.relative_to(root).as_posix(): t for t in candidates if t.is_file()}
+    picked = [f for f in changed if f in tests]
     mods = [f[:-3].replace("/", ".") for f in changed if f.split("/")[0] in ("engine", "checks", "tools")]
     mods = [m[:-9] if m.endswith(".__init__") else m for m in mods]
     if mods:
         pat = re.compile(r"\b(" + "|".join(re.escape(m) for m in mods) + r")\b")
-        for t in sorted((root / "tests").glob("test_*.py")):
-            rel = f"tests/{t.name}"
+        for rel, t in tests.items():
             if rel not in picked and pat.search(t.read_text(errors="ignore")):
                 picked.append(rel)
-        for t in sorted((root / "tests").glob("test_*.py")):
-            rel = f"tests/{t.name}"
+        for rel, t in tests.items():
             if rel in picked:
                 continue
             lines = (t.read_text(errors="ignore")).splitlines()
