@@ -80,6 +80,6 @@ def test_replay_cli_rejects_invalid_alpha_before_opening_catalog(alpha, tmp_path
         ])
 
     assert exc_info.value.code == 2
-    assert "alpha must" in capsys.readouterr().err
+    assert "alpha must be a finite number in [0, 1]" in capsys.readouterr().err
     assert not catalog_path.exists()
     assert not store_path.exists()

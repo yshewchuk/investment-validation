@@ -36,7 +36,9 @@ def _alpha_value(value: str) -> float:
             "alpha must be a finite number in [0, 1]"
         ) from exc
     if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
-        raise argparse.ArgumentTypeError("alpha must be finite and in [0, 1]")
+        raise argparse.ArgumentTypeError(
+            "alpha must be a finite number in [0, 1]"
+        )
     return alpha
 
 

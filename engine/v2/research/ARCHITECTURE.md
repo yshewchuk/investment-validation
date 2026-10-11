@@ -314,10 +314,9 @@ This bounds retained unmatched rows, not total process RSS.
   `_pricing.STRUCTURES`): per-tool read/filter narrowing; never widen a read
   past the resolved snapshot.
 - `tools/v2_replay.py --alpha A` is repeatable. When supplied, the ordered
-  values replace replay's default `ALPHA_GRID`; each priced event produces
-  one row per requested fill alpha. Values must be finite and in `[0, 1]`;
-  argparse rejects invalid values before opening the catalog. Repeated
-  values remain separate requests and are not deduplicated. When omitted,
+  values replace replay's default `ALPHA_GRID`; repeated values remain
+  separate requests, and each priced event produces one row per requested
+  fill alpha. Values must be finite and in `[0, 1]`. When omitted,
   `_replay_run.run` uses its default `ALPHA_GRID`. The CLI continues to
   derive its calendar from the pinned snapshot rather than accepting an
   external calendar.
@@ -427,14 +426,19 @@ else it reads (see Failure semantics, Invariants). No third-party service.
 
 ## Failure semantics
 
-The 4c R1–R6 template. Every refusal is meant to be a `DataError`
+The 4c R1–R6 template covers data-boundary refusals, which generally use `DataError`
 (`engine.v2.data.errors.DataError`) carrying one of the registered
 `DATA_FAILURE_CODES`, which a CLI catches at `main()` and exits 2 with the
-code and message on stderr rather than a bare traceback — with one
-pre-existing exception, called out below where it applies
-(`_snapshot.py`'s bare `ValueError`, issue #70), that escapes as an
-uncaught traceback instead.
+code and message on stderr rather than a bare traceback. CLI argument
+validation is described separately because it can refuse before `main()`
+reaches that handler. One pre-existing data-path exception, called out below
+where it applies (`_snapshot.py`'s bare `ValueError`, issue #70), escapes as
+an uncaught traceback instead.
 
+- **CLI argument parsing (before R1–R6).**
+  - **A supplied replay `--alpha` is non-finite or outside `[0, 1]`.**
+    The CLI parser exits 2 before `open_catalog` or `ArtifactStore` is
+    called, so no replay runs.
 - **R1, missing input.**
   - **No committed scope head, and no explicit `--snapshot-id`.**
     `resolve_pinned(scope)` (or, for the `_snapshot.py`-backed tools,
