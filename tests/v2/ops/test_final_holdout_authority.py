@@ -396,6 +396,7 @@ def test_fenced_start_spends_once_and_revocation_invalidates_publication(context
     assert started["state"] == "read_started"
     assert started["fence"] == 1
     assert started["owner_pid"] == os.getpid()
+    assert started["owner_process_group"] == os.getpgid(os.getpid())
     assert authority.final_holdout_fence_current(
         context.conn, context.request.experiment_id, started["request_digest"], started["fence"])
     assert not authority.final_holdout_fence_current(
