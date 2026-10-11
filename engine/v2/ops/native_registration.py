@@ -169,6 +169,7 @@ def _magnitude_events(events, expected):
     ids = [event["event_id"] for event in events]
     return (bool(ids) and all(_magnitude_event(event) for event in events)
             and len(set(ids)) == len(ids) and sorted(ids) == expected
+            and events == sorted(events, key=lambda event: (event["event_date"], event["event_id"]))
             and len({clock["calendar_id"] for event in events for clock in event["forecasts"]}) == 1)
 
 
@@ -217,7 +218,14 @@ def _magnitude_fold(fold, year, events):
         return False
     train, test = fold["training_candidate_event_ids"], fold["evaluation_event_ids"]
     return (fold["year"] == year and _day(fold["training_labels_before"])
-            and all(isinstance(ids, list) and bool(ids) and len(set(ids)) == len(ids)
-                    and set(ids) <= events.keys() for ids in (train, test))
+            and all(_magnitude_member_order(ids, events) for ids in (train, test))
             and not set(train).intersection(test)
             and set(test) == {key for key, event_year in events.items() if event_year == year})
+
+
+def _magnitude_member_order(ids, events):
+    """One linear pass preserves the canonical order and rejects duplicates/foreign IDs."""
+    if not isinstance(ids, list) or not ids:
+        return False
+    members = set(ids)
+    return ids == [key for key in events if key in members]

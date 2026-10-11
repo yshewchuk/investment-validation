@@ -33,7 +33,7 @@ class PlanRepository(TrackingRepository):
 
 
 @pytest.fixture
-def source(tmp_path, monkeypatch):
+def source(tmp_path, monkeypatch, request):
     """Commit protected, ambiguous and out-of-window siblings with poisoned labels."""
     train, test = _event("2023-12-12"), {**_event("2024-01-03"), "session": "BMO"}
     before, future = _event("2023-11-01"), _event("2025-01-02")
@@ -41,6 +41,7 @@ def source(tmp_path, monkeypatch):
     alias = _event("2024-01-05")
     events = [train, test, before, future, random, rolling, alias,
               {**alias, "event_id": "ambiguous-sibling", "session": "BMO"}]
+    events.extend(getattr(request, "param", ()))
     conn, original, snapshot = _fixture(tmp_path, events)
     repository = PlanRepository(conn, original._store)
     _metadata_only(monkeypatch, repository, snapshot)
@@ -441,3 +442,41 @@ def test_multiple_spec_years_define_the_complete_registered_fold_list(source):
     assert registered.document["magnitude_plan"] == expected
     assert [fold["year"] for fold in expected["folds"]] == ["2024", "2025"]
     assert _call(source, spec=spec, admit=True) == registered
+
+
+@pytest.mark.parametrize("source", [[_event(day, ticker="AAA") for day in
+    ("2023-12-12", "2023-12-14", "2024-01-03", "2024-01-04")]], indirect=True)
+@pytest.mark.parametrize("kind", ["events", "event-tie", "train", "train-tie", "test", "test-tie"])
+def test_rehashed_membership_permutations_refuse_before_scans(source, monkeypatch, kind):
+    """Preserve members and hashes, then reject noncanonical date or same-day ID order."""
+    registered = _call(source)
+    native.verify_native_registration(source.conn, source.store, registered)
+    assert _call(source, admit=True) == registered
+    doc = registered.document
+    plan = doc["magnitude_plan"]
+    events, fold = plan["events"], plan["folds"][0]
+    ids = [event["event_id"] for event in events]
+    assert ids == [event["event_id"] for event in sorted(events, key=lambda e: (e["event_date"], e["event_id"]))]
+    train, test = fold["training_candidate_event_ids"], fold["evaluation_event_ids"]
+    assert len(train) == len(test) == 3
+    assert train == ids[:3] and test == ids[3:]
+    if kind.startswith("event"):
+        changed = events
+    else:
+        changed = train if kind.startswith("train") else test
+    if kind.endswith("tie"):
+        members = {event["event_id"]: event for event in events}
+        first, second = changed[:2] if changed is events else [members[key] for key in changed[:2]]
+        assert first["event_date"] == second["event_date"] and first["event_id"] < second["event_id"]
+        changed[0], changed[1] = changed[1], changed[0]
+    else:
+        changed.reverse()
+    plan["plan_id"] = content_hash({key: value for key, value in plan.items() if key != "plan_id"})
+    forged = _rewrite(source, registered, doc)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(source.repository, "scan", _forbid)
+    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+        native.verify_native_registration(source.conn, source.store, forged)
+    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+        _call(source, admit=True)
+    assert _catalog(source.conn) == before and _objects(source.store) == objects
