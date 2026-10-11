@@ -134,6 +134,7 @@ def test_primary_cli_refuses_disabled_exp182_before_job(tmp_path, capsys, runner
     ("worker", "INVALID_EXPERIMENT_SPEC"),
 ))
 @pytest.mark.parametrize("runner_id", (
+    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
     "./experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
     "experiments/unused/../EXP-182_d_1_gated_execution_parity_registered/run.py",
 ))
@@ -371,6 +372,26 @@ def test_exp182_script_entrypoint_refuses_direct_invocation_before_loading_sourc
     script = Path(__file__).resolve().parents[3] / REGISTERED_RUNNER
     result = subprocess.run(
         [sys.executable, str(script)], cwd=tmp_path,
+        capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "INVALID_REQUEST" in result.stderr
+    assert "EXP-182 disabled: reads EXP-179 parquet directly" in result.stderr
+    assert not list(tmp_path.iterdir())
+
+
+def test_exp182_script_entrypoint_refuses_import_before_loading_source(tmp_path):
+    import subprocess
+    import sys
+
+    script = Path(__file__).resolve().parents[3] / REGISTERED_RUNNER
+    code = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('disabled_exp182', sys.argv[1])\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(script)], cwd=tmp_path,
         capture_output=True, text=True, check=False)
     assert result.returncode != 0
     assert "INVALID_REQUEST" in result.stderr
