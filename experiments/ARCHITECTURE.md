@@ -22,6 +22,10 @@ returned documents are copies, not mutable views of registered bytes.
 These library entrypoints do not fit models, publish reports, write the CSV
 ledger or emit outcome/refusal receipts, and have no supervisor caller.
 
+Optional `final_read` metadata creates a versioned native registration that seals recipe, completeness-bar and frozen-model artifact references. Legacy registration bytes remain unchanged when omitted.
+`prepare_final_holdout_request` verifies that original registration and derives an immutable request keyed by experiment ID; missing declarations or malformed request metadata refuse `INVALID_EXPERIMENT_SPEC`, and changed catalog/artifact identity refuses `EXPERIMENT_IDENTITY_CONFLICT`.
+Preparation reads only registration metadata, performs no repository/head/population/result access or writes, and grants no authority. Foundation owns shared request decoding so ops and research need no peer import; later read admission must verify the referenced evidence and completeness before reading.
+
 | Condition | Outcome |
 | --- | --- |
 | Invalid plan, external inputs, unsupported runner path, or missing/malformed/indirect source | `INVALID_EXPERIMENT_SPEC` before registration. |
@@ -140,7 +144,12 @@ opened, and callers remain responsible for their outcome/receipt reconciliation.
 
 `prediction_report.validate_prediction_spec` admits only the Python runner
 `experiments/v2_prediction.py`, `computed_moves`, empty economics and ordered,
-unique four-digit year folds, with an integer seed in [0, 2**32).
+unique four-digit year folds, with an integer seed in [0, 2**32) bound as run
+identity. The prior estimator is deterministic and does not consume
+randomness, so `prediction_result` supports only seed `0` and refuses other
+valid seeds before computed-move outcome reads rather than implying they
+change the computation. Registration may still bind another valid seed as
+identity.
 `prediction_result(repository, registration)`
 reads only registered eligible targets from the exact registered snapshot/month.
 Each fold fits `DummyClassifier(strategy="prior")` through the shared fold helper

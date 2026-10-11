@@ -622,10 +622,27 @@ def test_cli_rejects_alternative_fingerprint_root(source, capsys):
     assert _objects(source.store) == objects
 
 
+def test_nonzero_prior_seed_refuses_before_target_reads(tmp_path, monkeypatch, capsys):
+    source = _source(tmp_path, spec=_spec(seed=1))
+    try:
+        _invoke(source, capsys, "register")
+        before = _catalog(source.conn)
+        monkeypatch.setattr(prediction, "load_prediction_targets", _forbid)
+        monkeypatch.setattr(DummyClassifier, "fit", _forbid)
+        monkeypatch.setattr(prediction, "render_prediction_report", _forbid)
+        monkeypatch.setattr(outcomes, "ledger_append", _forbid)
+        response = _invoke(source, capsys, "run", "--no-ledger", status=2)
+        _private_refusal(source, response, "INVALID_EXPERIMENT_SPEC")
+        assert _catalog(source.conn) == before
+        assert not list(source.root.rglob("REPORT.md"))
+    finally:
+        source.conn.close()
+
+
 @pytest.mark.parametrize("seed", [-1, 2**32])
 @pytest.mark.parametrize("action", ["register", "run"])
 @pytest.mark.parametrize("smoke", [False, True])
-def test_invalid_sklearn_seed_refuses_before_admission_or_reads(tmp_path, monkeypatch, capsys, seed, action, smoke):
+def test_unsupported_prior_seed_refuses_before_admission_or_reads(tmp_path, monkeypatch, capsys, seed, action, smoke):
     spec = _spec(seed=seed)
     source = _source(tmp_path, spec=spec)
     try:
@@ -648,7 +665,7 @@ def test_invalid_sklearn_seed_refuses_before_admission_or_reads(tmp_path, monkey
         source.conn.close()
 
 
-@pytest.mark.parametrize("seed", [0, 2**32 - 1])
+@pytest.mark.parametrize("seed", [0])
 def test_sklearn_seed_boundaries_complete_real_cli_smoke(tmp_path, capsys, seed):
     source = _source(tmp_path, spec=_spec(seed=seed))
     try:
@@ -656,6 +673,18 @@ def test_sklearn_seed_boundaries_complete_real_cli_smoke(tmp_path, capsys, seed)
         result = _invoke(source, capsys, "run", "--no-ledger")
         assert result["recording_mode"] == "smoke"
         assert Path(result["report"]).is_file()
+    finally:
+        source.conn.close()
+
+
+def test_sklearn_maximum_valid_seed_registers(tmp_path, capsys):
+    seed = 2**32 - 1
+    source = _source(tmp_path, spec=_spec(seed=seed))
+    try:
+        _invoke(source, capsys, "register")
+        registration = native.read_native_registration(
+            source.conn, source.store, _spec(seed=seed))
+        assert registration.document["execution_plan"]["seed"] == seed
     finally:
         source.conn.close()
 

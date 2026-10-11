@@ -943,12 +943,11 @@ waits without submitting until its paired succeeded inputs are ready.
   (the full event-date instant is in the key, so distinct instants remain distinct),
   the worker raises before either output file is written, rather than silently
   dropping one row.
-- `computed_moves_store.py` commits only changed content, one fragment per ticker, carrying other tables and parent pins forward. New job parameters
-  pin the parent receipt before execution; commits use it for reference inputs
-  and lineage. Legacy unpinned jobs resolve a receipt at commit for compatibility.
-  Lineage uses `price_history_capture`; captures are append-only and deduped by
-  `capture_id`; no-fragment runs persist attempts only after fence and parent receipt validation, without a generation.
-  `computed_at` derives from `as_of`; identical same-`as_of` inputs resolve to the parent without a generation.
+- `computed_moves_store.py` publishes one object/fragment per event inside each rewritten ticker partition; inspected singleton key/time bounds bind its identity. Shared streamed partition hashes preserve logical content independently of layout.
+  Other tables and untouched ticker fragments/hashes remain pinned; existing snapshots are never rewritten. A refreshed old whole-ticker partition gains a new physical version even when its logical rows agree.
+  Parameters pin the parent receipt for reference inputs/lineage; legacy unpinned jobs resolve it at commit. Lineage uses `price_history_capture`; append-only captures dedupe by `capture_id`.
+  All event objects and hashes are prepared before the atomic catalog/head/capture-log commit. A failed preparation leaves no partial generation; immutable objects and completed raw receipts may remain for retry.
+  No-fragment runs persist attempts only after fence and parent receipt validation. `computed_at` derives from `as_of`; unchanged same-layout, same-`as_of` retries resolve to the parent without a generation.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
   here since the list can drift) — catalog/outbox/filesystem writes

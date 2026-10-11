@@ -10,7 +10,7 @@ refresh already uses (``incremental_data.plan_refresh`` /
 with the same immutable-object/manifest/atomic-head primitives
 ``price_history_store`` uses directly -- never ``generic_incremental``, because
 ``computed_moves`` has no manifest in the parent snapshot the way an existing
-contracted table does. One fragment per ticker; the append-only capture log is
+contracted table does. One fragment per event within each ticker partition; the capture log is
 ``data_computed_moves_captures`` (schema v12).
 
 Spec s4c rewrites two things here: the yfinance edge is the injected
@@ -509,26 +509,30 @@ def _parse_history(raw: bytes) -> tuple[np.ndarray, np.ndarray] | None:
 
 
 # --------------------------------------------------------------------------
-# staging one ticker's fragment and committing the generation
+# staging one ticker's event fragments and committing the generation
 # --------------------------------------------------------------------------
 
 
-def _write_ticker_fragment(store: ArtifactStore, ticker: str, rows: list[dict], *,
-                           request_hash: str):
+def _write_ticker_fragments(store: ArtifactStore, ticker: str, rows: list[dict], *,
+                            request_hash: str):
+    """Inspect singleton objects so metadata can prove event-level read isolation."""
     frame = pd.DataFrame(rows)
     frame = frame.sort_values(["event_date"]).reset_index(drop=True).copy()
     table = pa.Table.from_pandas(frame[list(FRAGMENT_COLUMNS)], schema=_ARROW_SCHEMA,
                                  preserve_index=False)
-    sink = pa.BufferOutputStream()
-    pq.write_table(table, sink)
-    raw = sink.getvalue().to_pybytes()
-    ref = store.publish_bytes(raw, schema_ref=objects.PARQUET_FRAGMENT_SCHEMA_REF)
-    object_ref = ObjectRef(kind="parquet_fragment", object_id=ref.artifact_id,
-                           content_hash=ref.content_hash, byte_size=ref.byte_size)
-    inspection = objects.inspect_fragment(store, object_ref, COMPUTED_MOVES_CONTRACT,
-                                          _CONTRACT_REF, ticker)
-    return manifests.fragment_record(inspection, _CONTRACT_REF, input_receipt_refs=(),
-                                     import_request_hash=request_hash)
+    records = []
+    for index in range(table.num_rows):
+        sink = pa.BufferOutputStream()
+        pq.write_table(table.slice(index, 1), sink)
+        ref = store.publish_bytes(sink.getvalue().to_pybytes(),
+                                  schema_ref=objects.PARQUET_FRAGMENT_SCHEMA_REF)
+        object_ref = ObjectRef(kind="parquet_fragment", object_id=ref.artifact_id,
+                               content_hash=ref.content_hash, byte_size=ref.byte_size)
+        inspection = objects.inspect_fragment(store, object_ref, COMPUTED_MOVES_CONTRACT,
+                                              _CONTRACT_REF, ticker)
+        records.append(manifests.fragment_record(
+            inspection, _CONTRACT_REF, input_receipt_refs=(), import_request_hash=request_hash))
+    return tuple(records)
 
 
 def _insert_captures(conn: sqlite3.Connection, attempts: list[dict]) -> None:
@@ -571,6 +575,28 @@ def _fence_check_for(staged_attempt_id, staged_fence, clock):
                                            clock.now())
 
 
+def _generation_manifest(store, prior_manifest, kept, records_by_ticker):
+    """Hash freshly inspected event objects; retain untouched partition evidence."""
+    written = tuple(record for group in records_by_ticker.values() for record in group)
+    records = tuple(sorted((*kept, *written),
+                           key=lambda item: (item.partition_key, item.primary_key_min)))
+    partition_hashes = {key: value for key, value in
+                        (prior_manifest.partition_logical_hashes.items() if prior_manifest else ())
+                        if key not in records_by_ticker}
+    for ticker, group in records_by_ticker.items():
+        if len(group) > 1:
+            partition_hashes[ticker] = objects.partition_logical_hash(
+                store, [record.object_ref for record in group],
+                COMPUTED_MOVES_CONTRACT, _CONTRACT_REF, ticker)
+    parent_version = (prior_manifest.dataset_version_ref.dataset_version_id
+                      if prior_manifest else None)
+    manifest = manifests.dataset_manifest(
+        _CONTRACT_REF, records, knowledge_mode="reconstructed",
+        coverage_receipt_refs=(), availability_evidence_refs=(),
+        parent_dataset_version_id=parent_version, partition_logical_hashes=partition_hashes)
+    return manifest, records
+
+
 def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records_by_ticker,
                        attempts, clock, expected_head, generation, request_hash, as_of,
                        staged_attempt_id=None, staged_fence=None):
@@ -598,14 +624,7 @@ def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records
             raise fail("VALIDATION_FAILED",
                        "computed moves refresh would inherit a committed fragment with "
                        "event dates on or after this run's as_of")
-    new_records = tuple(sorted((*kept, *records_by_ticker.values()),
-                               key=lambda item: (item.partition_key, item.primary_key_min)))
-    parent_version = (prior_manifest.dataset_version_ref.dataset_version_id
-                      if prior_manifest else None)
-    manifest = manifests.dataset_manifest(
-        _CONTRACT_REF, new_records, knowledge_mode="reconstructed",
-        coverage_receipt_refs=(), availability_evidence_refs=(),
-        parent_dataset_version_id=parent_version)
+    manifest, new_records = _generation_manifest(store, prior_manifest, kept, records_by_ticker)
 
     table_manifests = {name: manifest_ for name, manifest_ in parent.table_manifests.items()
                        if name != COMPUTED_MOVES_TABLE_NAME}
@@ -946,8 +965,8 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
         request_hash = content_hash({
             "kind": "computed_moves_generation", "scope": document["scope"],
             "base_snapshot_id": parent.snapshot.snapshot_id,
-            "fragments": {ticker: record.fragment_id
-                          for ticker, record in sorted(fragment_records.items())}})
+            "fragments": {ticker: [record.fragment_id for record in records]
+                          for ticker, records in sorted(fragment_records.items())}})
         receipt = _commit_generation(
             conn, store, str(document["scope"]), parent=parent,
             parent_receipt_id=parameters.parent_receipt_id,
@@ -1047,7 +1066,7 @@ def _capture_id_for(unit, *, source_hash: str | None = None,
 
 def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks,
                      as_of_day: str):
-    """Acquire and stage one fragment per unit, fresh or cached, exactly once.
+    """Acquire and stage event fragments per unit, fresh or cached, exactly once.
 
     The caller reaches this only when the plan has at least one fresh fetch, and
     EVERY wanted unit is rebuilt here -- the fresh fetches plus the cached
@@ -1114,8 +1133,8 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
             continue
         request_hash = content_hash({"kind": "computed_moves_fragment", "ticker": ticker,
                                      "capture_id": capture_id})
-        fragment_records[ticker] = _write_ticker_fragment(store, ticker, rows,
-                                                          request_hash=request_hash)
+        fragment_records[ticker] = _write_ticker_fragments(store, ticker, rows,
+                                                           request_hash=request_hash)
         attempts.append({"capture_id": capture_id, "ticker": ticker,
                          "created_at": created_at,
                          "outcome": "added" if fresh else "cached"})

@@ -68,6 +68,7 @@ from engine.v2.contracts.data import (
     TableContractRef,
     TimeInterval,
 )
+from engine.v2.contracts.final_holdout import FinalHoldoutDeclaration, FinalHoldoutRequest
 from engine.v2.contracts.incremental import (
     ACQUISITION_RECEIPT_V1,
     CHANGESET_V1,
@@ -184,6 +185,7 @@ from engine.v2.contracts.serving import (
 )
 
 __all__ = [
+    "FinalHoldoutDeclaration", "FinalHoldoutRequest",
     "ACQUISITION_RECEIPT_V1",
     "ARTIFACT_REF_V1", "ATTEMPT_RECEIPT_V1", "CANCELLATION_RECEIPT_V1",
     "CAPACITY_SAMPLE_V1", "CHANGESET_V1", "CHAIN_MEMBER_V1", "CHAIN_QUERY_V1",
