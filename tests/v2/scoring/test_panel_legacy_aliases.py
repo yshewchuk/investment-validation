@@ -1,19 +1,15 @@
 """Legacy-named panel aliases: ``or_implied``, ``or_rvol30``, ``abs_dist_*``,
-``has_implied_quote``, ``mean_prior_or_implied``.
+``has_implied_quote``.
 
 Legacy sources: ``engine/features.py`` ``add_absolute_features`` /
-``add_quote_indicators``; ``engine/data/features/panel.py`` ``ORATS_FEATURES``
-and ``add_implied_history``.
+``add_quote_indicators``; ``engine/data/features/panel.py`` ``ORATS_FEATURES``.
 """
 from __future__ import annotations
-
-import math
 
 import pandas as pd
 import pytest
 
 from engine.features import add_absolute_features, add_quote_indicators
-from engine.data.features.panel import add_implied_history
 from engine.v2.contracts.data import DatasetVersionRef, SnapshotRef, TableContractRef
 from engine.v2.data.computed_moves_table import (
     COMPUTED_MOVES_CONTRACT,
@@ -193,7 +189,7 @@ def test_scan_panel_row_emits_legacy_named_inputs():
     assert panel["abs_dist_high"] == abs(panel["dist_high"])
     assert panel["abs_dist_ema"] == abs(panel["dist_ema"])
     assert panel["has_implied_quote"] == 1.0
-    assert panel["mean_prior_or_implied"] == pytest.approx(5.0)
+    assert "mean_prior_or_implied" not in panel  # needs legacy admission + src_iv rows; see issue
 
 
 def test_derivations_match_legacy():
@@ -208,33 +204,20 @@ def test_derivations_match_legacy():
 
     daily = {"im": 2.0}
     runup = {"dist_high": -3.0, "dist_ema": 2.5}
-    out = panel_row_inputs._legacy_named_inputs(daily, runup, float("nan"))
+    out = panel_row_inputs._legacy_named_inputs(daily, runup)
     assert out["abs_dist_high"] == pytest.approx(3.0)
     assert out["abs_dist_ema"] == pytest.approx(2.5)
     assert out["has_implied_quote"] == 1.0
-    assert math.isnan(out["mean_prior_or_implied"])
+
     assert out["or_implied"] == 2.0
 
-    no_implied = panel_row_inputs._legacy_named_inputs({}, runup, float("nan"))
+    no_implied = panel_row_inputs._legacy_named_inputs({}, runup)
     assert no_implied["has_implied_quote"] == 0.0
     assert "or_implied" not in no_implied
 
-    events = pd.DataFrame({
-        "ticker": ["AAA"] * 4,
-        "date": pd.to_datetime(["2024-01-10", "2024-01-11", "2024-01-12", "2024-02-15"]),
-        "or_implied": [4.0, None, 6.0, 2.0],
-    })
-    legacy = add_implied_history(events)
-    assert legacy["mean_prior_or_implied"].iloc[-1] == pytest.approx(5.0)
-
-    kept = [{"implied_move_pct": 4.0}, {"implied_move_pct": None},
-            {"implied_move_pct": 6.0}]
-    assert panel_row_inputs._mean_prior_or_implied(kept) == pytest.approx(5.0)
-
 
 def test_size_driver_names_not_missing_after_projection():
-    feature_names = ("has_implied_quote", "abs_dist_ema", "mean_prior_or_implied",
-                     "or_implied", "or_rvol30")
+    feature_names = ("has_implied_quote", "abs_dist_ema", "or_implied", "or_rvol30")
     _, mask = _project_features(
         tier4_row={}, panel_row=_scan().panel_row, feature_names=feature_names,
         as_of_ts=pd.Timestamp("2026-01-15"))

@@ -160,9 +160,9 @@ are the daily-state `im` and `rvol30` (absent when those are absent;
 `abs_dist_ema` are `abs(dist_high)` and `abs(dist_ema)`, NaN where the source
 is NaN (`engine/features.py` `add_absolute_features`); `has_implied_quote`
 is 1.0 when `or_implied` is present and above 0, else 0.0
-(`add_quote_indicators`); `mean_prior_or_implied` is the mean of the non-null
-`implied_move_pct` of the kept history rows (`panel.py` `add_implied_history`),
-NaN when there is none.
+(`add_quote_indicators`). `mean_prior_or_implied` is deliberately NOT
+produced: `computed_moves` cannot reproduce legacy's admission (first four
+events per ticker excluded) or its `src_iv` row selection (tracked in an issue).
 It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
 (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never

@@ -68,7 +68,7 @@ _RESULT_LIMIT = 10000
 _RUNUP_LOOKBACK_SESSIONS = 400
 
 _COMPUTED_COLUMNS = ("ticker", "event_date", "realized_move_pct", "skipped",
-                     "available_as_of_date", "implied_move_pct")
+                     "available_as_of_date")
 _SPY_COLUMNS = ("ticker", "date", "spot")
 _REGIME_COLUMNS = (
     "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5", "spy_vol20",
@@ -359,19 +359,8 @@ def _anchor(*sources: object) -> pd.Timestamp | None:
     return max(present) if present else None
 
 
-def _mean_prior_or_implied(kept: list[dict[str, object]]) -> float:
-    """Mean of the non-null ``implied_move_pct`` of the kept history rows; NaN
-    when there is none (legacy ``panel.add_implied_history``: strictly prior,
-    expanding, NaN skipped)."""
-    values = [float(row["implied_move_pct"]) for row in kept
-              if row.get("implied_move_pct") is not None
-              and not pd.isna(row["implied_move_pct"])]
-    return sum(values) / len(values) if values else float("nan")
-
-
 def _legacy_named_inputs(daily_values: Mapping[str, float],
-                         runup_features: Mapping[str, float],
-                         mean_prior_implied: float) -> dict[str, float]:
+                         runup_features: Mapping[str, float]) -> dict[str, float]:
     """Legacy-named model inputs the panel math does not produce.
 
     ``or_implied``/``or_rvol30`` are the daily-state ``im``/``rvol30`` (absent
@@ -385,7 +374,6 @@ def _legacy_named_inputs(daily_values: Mapping[str, float],
         "abs_dist_high": abs(runup_features["dist_high"]),
         "abs_dist_ema": abs(runup_features["dist_ema"]),
         "has_implied_quote": 1.0 if implied is not None and implied > 0 else 0.0,
-        "mean_prior_or_implied": mean_prior_implied,
     }
     if implied is not None:
         out["or_implied"] = implied
@@ -455,8 +443,7 @@ def scan_panel_row(
         **history,
         **regime_features,
         **runup_features,
-        **_legacy_named_inputs(daily_state.values, runup_features,
-                               _mean_prior_or_implied(kept_moves)),
+        **_legacy_named_inputs(daily_state.values, runup_features),
         "date": event_day.date().isoformat(),
     }
     return PanelRowInputs(panel_row=panel_row, panel_anchor=panel_anchor)
