@@ -8,6 +8,7 @@ import types
 from dataclasses import replace
 
 import pandas as pd
+import pytest
 
 from engine.v2.models import FrozenInference, ModelBinding, ModelRelease
 from engine.v2.models.contracts import ArtifactMember
@@ -28,13 +29,19 @@ _QUOTES = {r: {"bid": 1.9, "ask": 2.1}
 _DROP = object()
 
 
-def _inputs(*, gate=None, quotes=None, forecast_coefficients=None,
+def _inputs(*, gate=None, quotes=None, quote_bid_ask=None,
+            forecast_coefficients=None,
             diagnostics=None, expiry=None, event_date=None,
             drop_decision=False, context_overrides=None) -> NativeScoreInputs:
     resolved_expiry = "2026-11-20" if expiry is None else expiry
     if quotes is None:
-        quotes = {(right, strike, resolved_expiry): dict(value)
-                  for (right, strike, _), value in _QUOTES.items()}
+        if quote_bid_ask is None:
+            quotes = {(right, strike, resolved_expiry): dict(value)
+                      for (right, strike, _), value in _QUOTES.items()}
+        else:
+            bid, ask = quote_bid_ask
+            quotes = {(right, strike, resolved_expiry): {"bid": bid, "ask": ask}
+                      for right, strike, _ in _QUOTES}
     context = {"ticker": "AAA", "strategy": "STR-THRU",
                "event_date": "2026-10-27" if event_date is None else event_date,
                "entry_date": "2026-10-08",
@@ -456,3 +463,89 @@ def test_geometry_or_pricing_refusal_blocks_dte_write():
     geometry, pricing = _pricing_stand_ins()
     _check_pricing_boundary(boundary_values, geometry, pricing, [])
     assert boundary_values["dte_entry"] == 71
+
+
+#: Two distinct scenarios so a production constant (e.g. a hard-coded
+#: ``dte_entry`` or ``days_to_print``) cannot satisfy every assertion: the
+#: literals differ across A and B. Each ``inputs`` block builds via ``_inputs``.
+_SCENARIOS = {
+    "A": {
+        "inputs": {},
+        "bid_ask": (1.9, 2.1),
+        "days_to_print": 20.0,   # event 2026-10-27 - decision as_of 2026-10-07
+        "dte_entry": 43,         # priced expiry 2026-11-20 - quote_date 2026-10-08
+        "entry_cost_pct": 4.0,   # 2 legs x mid 2.0 / spot 100 * 100
+    },
+    "B": {
+        "inputs": {"event_date": "2026-11-05", "expiry": "2026-12-18",
+                   "quote_bid_ask": (2.9, 3.1)},
+        "bid_ask": (2.9, 3.1),
+        "days_to_print": 29.0,   # event 2026-11-05 - decision as_of 2026-10-07
+        "dte_entry": 71,         # priced expiry 2026-12-18 - quote_date 2026-10-08
+        "entry_cost_pct": 6.0,   # 2 legs x mid 3.0 / spot 100 * 100
+    },
+}
+
+
+def _row(scenario: str) -> tuple:
+    spec = _SCENARIOS[scenario]
+    return (spec["days_to_print"], spec["dte_entry"], spec["entry_cost_pct"])
+
+
+@pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
+def test_computed_dates_matrix(scenario, tmp_path):
+    spec = _SCENARIOS[scenario]
+    days, dte, pct = spec["days_to_print"], spec["dte_entry"], spec["entry_cost_pct"]
+    # Independent arithmetic: the pct is 2 legs x mid x 100 / spot (spot = 100).
+    bid, ask = spec["bid_ask"]
+    assert pct == pytest.approx(2 * ((bid + ask) / 2.0) * 100.0 / 100.0)
+
+    # Surface 1 (top-level values) + Surface 2 (forecast-stage receipt input).
+    seen: list = []
+    inputs = _inputs(**spec["inputs"])
+    values = assemble_native_values(inputs, observer=seen.append)
+    assert values["days_to_print"] == days
+    assert values["dte_entry"] == dte
+    assert values["entry_cost_pct"] == pytest.approx(pct)
+
+    forecast = [o for o in seen if o.receipt.stage == "forecast"]
+    assert len(forecast) == 1
+    receipt_values = forecast[0].input_document["values"]
+    assert receipt_values["days_to_print"] == days
+    # dte_entry/entry_cost_pct are computed after forecasting: absent there.
+    assert "dte_entry" not in receipt_values
+    assert "entry_cost_pct" not in receipt_values
+
+    # Surface 3 (overlay: facts + _native_stage_facts).
+    facts = _facts(inputs, values)
+    overlay = facts["_native_stage_facts"]
+    for name, expected in (("days_to_print", days), ("dte_entry", dte),
+                           ("entry_cost_pct", pct)):
+        assert facts[name] == pytest.approx(expected)
+        assert overlay[name] == pytest.approx(expected)
+
+    # Surface 4 (frozen consumer row): both a missing row and a stale row must
+    # resolve to the scenario literals, not to a captured/constant value.
+    gate = _frozen_gate(
+        tmp_path, ("days_to_print", "dte_entry", "entry_cost_pct"))
+    executor = gate["executors"]["gate_score"]._executor
+    missing = executor.execute({
+        "role_model_inputs": {"gate": {}},
+        "_native_stage_facts": overlay,
+    })
+    assert missing.request.rows[0] == pytest.approx(_row(scenario))
+    stale = executor.execute({
+        "role_model_inputs": {"gate": {
+            "days_to_print": 99.0, "dte_entry": 99, "entry_cost_pct": 99.0}},
+        "_native_stage_facts": overlay,
+    })
+    assert stale.request.rows[0] == pytest.approx(_row(scenario))
+
+    # Surface 5 (diagnostics cannot overwrite the computed values).
+    diagnosed = assemble_native_values(_inputs(
+        diagnostics={"days_to_print": 99.0, "dte_entry": 99,
+                     "entry_cost_pct": 99.0},
+        **spec["inputs"]))
+    assert diagnosed["days_to_print"] == days
+    assert diagnosed["dte_entry"] == dte
+    assert diagnosed["entry_cost_pct"] == pytest.approx(pct)
