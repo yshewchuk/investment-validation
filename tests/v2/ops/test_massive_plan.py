@@ -19,7 +19,7 @@ PARAMS = {"tickers": ["TEST.A"], "start": "2026-01-01", "end": "2026-01-31",
 
 
 @pytest.fixture(autouse=True)
-def no_network_or_credentials(monkeypatch):
+def no_network_or_provider_lookups(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("the plan attempted network I/O")
 

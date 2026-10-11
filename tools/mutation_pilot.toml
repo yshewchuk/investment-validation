@@ -956,6 +956,7 @@ tests = [
     "tests/v2/ops/test_native_parity_inputs_leaf.py",
     "tests/v2/ops/test_carried_set.py",
     "tests/v2/ops/test_massive_plan.py",
+    "tests/v2/ops/test_massive_plan_startup.py",
     "tests/v2/ops/test_native_parity_pairing.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
@@ -1023,6 +1024,7 @@ mutate = [
 tests = [
     "tests/v2/research/test_gate_variant.py",
     "tests/v2/research/test_prediction_inputs.py",
+    "tests/v2/research/test_event_history.py",
     "tests/v2/research/test_experiment_trades.py",
     "tests/v2/research/test_exp144_v2_trades.py",
     "tests/v2/research/test_experiments_common_v2_store_root.py",

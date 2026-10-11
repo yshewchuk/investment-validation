@@ -9,21 +9,32 @@ from engine.v2.data import errors
 from engine.v2.research.experiment_population import load_population
 
 
-def _target(repository, snapshot, contract, event):
+def _target_filters(event):
+    """Shared exact ticker/day selection for planning and query construction."""
     day = event.event_date.date()
-    version = snapshot.table_versions["computed_moves"]
     keys = (KeyPredicate(column="ticker", operator="eq", values=(event.ticker,)),)
     interval = TimeInterval(column="event_date", start_inclusive=day.isoformat(),
                             end_exclusive=(day + timedelta(days=1)).isoformat())
-    bound = repository.scan_population_bound(snapshot.snapshot_id, table_name="computed_moves",
-        table_contract_ref=version.table_contract_ref, key_filter=keys, time_interval=interval)
-    query = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
+    return keys, interval
+
+
+def _target_query(repository, snapshot, contract, event, *, population_bound=None):
+    """The shared exact ticker/day query; predicates alone do not isolate bytes."""
+    version = snapshot.table_versions["computed_moves"]
+    keys, interval = _target_filters(event)
+    bound = population_bound
+    if bound is None:
+        bound = repository.scan_population_bound(snapshot.snapshot_id, table_name="computed_moves",
+            table_contract_ref=version.table_contract_ref, key_filter=keys, time_interval=interval)
+    return DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
         columns=("event_date", "realized_move_pct", "available_as_of_date", "skipped"), key_filter=keys,
         time_interval=interval, order_by=contract.primary_key,
         max_batch_rows=min(contract.maximum_batch_rows, max(1, min(bound, 2))),
         max_result_rows=min(bound, 2))
-    rows = [row for batch in repository.scan(query, table_name="computed_moves")
-            for row in batch.to_pylist()]
+
+
+def _parse_target(rows, day):
+    """Validate one admitted outcome and its recorded availability."""
     try:
         if (len(rows) != 1 or rows[0]["skipped"] is not False
                 or rows[0]["event_date"] != day.isoformat()):
@@ -38,6 +49,13 @@ def _target(repository, snapshot, contract, event):
     except (TypeError, ValueError, OverflowError):
         raise errors.fail("EXPERIMENT_VARIANT_FAILED", "prediction target or availability is invalid") from None
     return value, int(value > 0), available_on.isoformat()
+
+
+def _target(repository, snapshot, contract, event):
+    query = _target_query(repository, snapshot, contract, event)
+    rows = [row for batch in repository.scan(query, table_name="computed_moves")
+            for row in batch.to_pylist()]
+    return _parse_target(rows, event.event_date.date())
 
 
 def load_prediction_targets(repository, snapshot, *, as_of_month, purpose="selection",

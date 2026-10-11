@@ -1,4 +1,7 @@
-"""Print a network-free Basic-tier Massive cache plan: python -m tools.v2_massive_plan."""
+"""Print a network-free Basic-tier Massive cache plan: python -m tools.v2_massive_plan.
+
+Normal engine startup may load .env; planning never contacts providers or emits credentials.
+"""
 import argparse
 import json
 import sqlite3
