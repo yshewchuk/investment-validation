@@ -185,7 +185,7 @@ def test_dependency_list_change_invalidates_the_stage_and_its_dependents(tmp_pat
     assert plan.execute == ("publication",)
 
 
-@pytest.mark.parametrize("kind", ("tampered", "missing", "oversized", "fifo"))
+@pytest.mark.parametrize("kind", ("tampered", "missing", "oversized", "fifo", "symlink"))
 def test_unprovable_artifact_invalidates_its_stage_and_descendants(tmp_path, kind):
     graph = _graph()
     prior = _outputs(graph, tmp_path, "run-1")
@@ -197,9 +197,13 @@ def test_unprovable_artifact_invalidates_its_stage_and_descendants(tmp_path, kin
     elif kind == "oversized":
         with path.open("wb") as artifact:
             artifact.truncate(nr._MAX_ARTIFACT_BYTES + 1)
-    else:
+    elif kind == "fifo":
         path.unlink()
         os.mkfifo(path)
+    else:
+        target = path.with_name(f"{path.name}.target")
+        path.rename(target)
+        path.symlink_to(target.name)
     plan = _plan(_gen(2), graph, prior, previous_run_id="run-1")
     assert plan.execute == ("import", "score", "decision_commit", "publication", "audit")
     assert plan.inherited == ()
