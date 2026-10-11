@@ -237,6 +237,37 @@ knowable. It is null exactly when `realized_move_pct` is null; null means
 unavailable to any decision. Readers must require
 `available_as_of_date <= decision_session`.
 
+**Event-history primitives and `computed_moves.v4` (design #651; no code yet).**
+Three generic primitives; a feature declares its parameters, none is hard-coded.
+- *Event sequence.* Per ticker, the full ordered canonical event list from the
+  pinned `earnings_events`, never a scan window. `event_ordinal` is the 0-based
+  count of ALL earlier events of that ticker, realised or skipped. A feature
+  declares `warmup=N`: an event is admitted iff `event_ordinal >= N`. The
+  sequence refuses (`VALIDATION_FAILED`) when the list's first event is later
+  than the ticker's first known event, since the ordinal would be wrong.
+- *As-of observation.* The last row with data date strictly before the event
+  date whose declared `requires` fields are all non-null. The declaration also
+  names `on_missing`: `null` or `refuse`. No default: a declaration without it
+  is invalid. A missing source table or column always refuses.
+- *Aggregate.* Declared as strict-prior (events with a smaller ordinal),
+  `population` (`admitted` or `all`), and null handling (`skip`). With no prior
+  contribution the result is null and the count is reported.
+- *Causality is by data dates only.* `retrieved_at` and `computed_at` are
+  provenance and never filter; a realised value joins an aggregate only when its
+  `available_as_of_date <= decision_session` (above).
+
+`computed_moves.v4` adds `event_ordinal` and `admitted` (warm-up 4), and
+`implied_move_pct` is the as-of observation over `daily_market` rows with
+`requires=(implied_move, src_iv)`, `on_missing=null`, filled for skipped events
+too. `quarter_ordinal` (a per-year counter) is not the event ordinal. v4 is
+reached only by the standard rebuild, which rewrites whole ticker partitions;
+there is no in-place migration or dual read, and a reader needing v4 columns on
+a v3 snapshot gets the repository's typed contract refusal. The implied-history
+mean (`mean_prior_or_implied`) is derived by a reader with the primitives and is
+not stored. `computed_moves` is built natively (`computed_moves_store.py`) from
+Tier-1 price history, pinned `earnings_events` and `daily_market`, not captured
+from legacy output.
+
 ## Dependencies
 
 Layer 1.0 has no `only_imports` restriction (root doc §2), but in practice
