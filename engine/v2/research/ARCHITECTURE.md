@@ -128,6 +128,41 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 These readers preserve no durable refusal receipt or economic variant identity
 and cannot authorize the separate user-only final holdout read.
 
+`event_history.load_event_history(repository, snapshot, *, event_id, as_of_month,
+decision_session, history_start, purpose="selection")` constructs prior-event
+features for one admitted canonical target. Both dates are explicit calendar
+days with `history_start <= decision_session <= target event day`. Shared
+`load_population` admits the target and excludes random, rolling and ambiguous
+history identities before any outcome access. Candidates are the same ticker's
+events in `[history_start, min(target day, decision_session))`.
+
+Every candidate query is planned before any outcome scan, using the same
+fragment planner as Repository. Preflight loads fragment metadata once and
+reuses each planned bound for query construction, avoiding a second bound lookup.
+Its entire surviving membership must be one
+inspected singleton with the exact ticker/day key, partition and time bounds.
+The resolved committed catalog/manifest identity is the metadata trust anchor;
+this trusts native producer inspection, not adversarially forged metadata.
+Caller rows, implicit latest, and another experiment's outputs are not inputs.
+Mixed, missing or unprovable membership refuses `HOLDOUT_ACCESS_DENIED` before
+opening outcome objects. This intentionally refuses old whole-ticker layouts;
+it neither migrates them nor treats row predicates as physical isolation.
+
+Skipped or null-availability historical labels are explicitly omitted. A valid
+availability day must follow its event and be on or before the decision day;
+later labels are omitted before numeric validation or feature arithmetic. Their
+admitted objects are decoded; protected event objects have a no-read guarantee.
+Malformed availability or invalid eligible values refuse
+`EXPERIMENT_VARIANT_FAILED`; repository failures propagate. The date bound is reconstructed source availability, not a claim of
+intraday publication/finality evidence. Pure `panel_math.history_features` owns
+the arithmetic: empty history and undersized EMAs retain `None`, never zero fill.
+Results carry features, `available`/`empty` status, ordered consumed event/object
+identities and availability, omitted-history reasons, snapshot/dataset/month/
+membership-version/cutoff pins and their deterministic history digest.
+No cache, automatic retry, transaction, write or partial return occurs. This
+library seam has no supervisor, provider, market-price, report or ledger caller;
+production panel reads and final-read authority remain unchanged.
+
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
 economics with `price_source="option_chains"` and explicit numeric `fill` in
