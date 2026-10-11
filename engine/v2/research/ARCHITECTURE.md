@@ -164,6 +164,8 @@ the arithmetic: empty history and undersized EMAs retain `None`, never zero fill
 Results carry features, `available`/`empty` status, ordered consumed event/object
 identities and availability, omitted-history reasons, snapshot/dataset/month/
 membership-version/cutoff pins and their deterministic history digest.
+The `research_event_history.v2` identity also binds `read_inputs`: every decoded
+candidate object, including skipped/unavailable labels omitted from arithmetic.
 No cache, automatic retry, transaction, write or partial return occurs. This
 library seam has no supervisor, provider, market-price, report or ledger caller;
 production panel reads and final-read authority remain unchanged.
@@ -201,6 +203,35 @@ Forecast cutoff and training/evaluation label cutoff are distinct contracts;
 this seam neither fits a model nor joins labels into forecast features.
 Repository failures propagate; no cache, retry, write or partial return.
 These library prerequisites have no CLI, supervisor or final-read caller.
+
+`magnitude_features.load_magnitude_history(repository, snapshot, *, event_id,
+as_of_month, horizon, history_start, purpose="selection")` binds one canonical
+event's prior-history features to its full-session forecast ceiling. Exact
+snapshot and target holdout/alias admission occur before calendar or outcomes.
+The calendar is the sorted union of canonical `daily_market.date` values from
+that snapshot, with no projected days or external calendar override. Only the
+date column is requested; ordinary Repository object verification still applies.
+Missing/empty calendars refuse through the shared reader/`CALENDAR_UNAVAILABLE`;
+malformed dates, invalid horizons or incomplete anchor/session windows refuse
+`CONTRACT_MISMATCH` before historical outcome access.
+
+The shared `forecast_cutoff` computes the ceiling; `load_event_history` uses
+that exact day, excluding protected/ambiguous/current/future outcomes before
+its physical singleton preflight. This adapter never reads the target label.
+Prior-label availability on the source-session day is admitted by the existing
+history contract; later dates are omitted, not used as zero-filled features.
+Outputs bind canonical event/session, snapshot, calendar version, calendar
+dataset/object identities, horizon/cutoff, target and history-feature recipes,
+all history reads/omissions and membership versions into one deterministic
+input digest. Empty history retains explicit null features; non-finite derived
+features refuse `EXPERIMENT_VARIANT_FAILED` rather than reaching a model.
+
+Provenance explicitly says reconstructed date bounds, with event-schedule
+as-known and source-publication evidence unverified. Calendar reconstruction
+and source hashes do not establish that evidence; strict PIT experiment
+admission remains a later prerequisite. This seam has no fitting, target
+join, CLI, provider, report, ledger or final-read caller. Repository failures
+propagate with no cache, retry, write or partial result.
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
