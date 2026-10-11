@@ -1038,6 +1038,7 @@ tests = [
     "tests/v2/research/test_gate_variant.py",
     "tests/v2/research/test_prediction_inputs.py",
     "tests/v2/research/test_event_history.py",
+    "tests/v2/research/test_magnitude_inputs.py",
     "tests/v2/research/test_experiment_trades.py",
     "tests/v2/research/test_exp144_v2_trades.py",
     "tests/v2/research/test_experiments_common_v2_store_root.py",
