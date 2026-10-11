@@ -718,10 +718,15 @@ def test_boot_change_proves_the_old_process_dead(context, monkeypatch):
 
 
 @pytest.mark.parametrize(("field", "invalid_value"), [
-    ("boot_id", ""), ("pid", 0), ("start_ticks", 0), ("process_group", 0),
+    ("boot_id", ""),
+    ("pid", 0), ("pid", -1), ("pid", True), ("pid", 1.5), ("pid", "1"),
+    ("start_ticks", 0), ("start_ticks", -1), ("start_ticks", True),
+    ("start_ticks", 1.5), ("start_ticks", "1"),
+    ("process_group", 0), ("process_group", -1), ("process_group", True),
+    ("process_group", 1.5), ("process_group", "1"),
 ])
 def test_start_refuses_malformed_owner_identity_before_spending(context, monkeypatch, field, invalid_value):
-    _authorize(context)
+    authorization = _authorize(context)
     _state_assent(monkeypatch, context, "START")
     identity = {"boot_id": "synthetic-boot", "pid": os.getpid(),
                 "start_ticks": 1, "process_group": os.getpgrp()}
@@ -730,9 +735,11 @@ def test_start_refuses_malformed_owner_identity_before_spending(context, monkeyp
         authority, "process_info",
         lambda pid, boot_id: (SimpleNamespace(**identity), None),
     )
-    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+    with pytest.raises(OpsError) as exc_info:
         _start(context)
+    assert exc_info.value.code == "VALIDATION_FAILED"
     assert _state_events(context) == []
+    assert _rows(context) == [authorization]
 
 
 @pytest.mark.parametrize(("experiment_id", "request_digest", "fence"), [
@@ -742,12 +749,14 @@ def test_start_refuses_malformed_owner_identity_before_spending(context, monkeyp
     ("experiment", 1 << 100, 1),
     ("experiment", "malformed", 1),
     ("experiment", "a" * 64, 1),
+    ("experiment", "sha256:" + "a" * 63, 1),
+    ("experiment", "sha256:" + "a" * 65, 1),
     ("experiment", "sha256:" + "A" * 64, 1),
     ("experiment", content_hash("request"), 0),
     ("experiment", content_hash("request"), -1),
     ("experiment", content_hash("request"), True),
     ("experiment", content_hash("request"), 1.0),
-    ("experiment", content_hash("request"), 1 << 100),
+    ("experiment", content_hash("request"), 2**63),
 ])
 def test_publication_fence_rejects_malformed_arguments_before_lookup(
         context, monkeypatch, experiment_id, request_digest, fence):
@@ -755,6 +764,22 @@ def test_publication_fence_rejects_malformed_arguments_before_lookup(
     with pytest.raises(OpsError) as exc_info:
         authority.final_holdout_fence_current(context.conn, experiment_id, request_digest, fence)
     assert exc_info.value.code == "VALIDATION_FAILED"
+
+
+def test_publication_fence_accepts_maximum_valid_fence(context):
+    authorization = _authorize(context)
+    identity, *_ = authority.process_info(os.getpid(), authority.read_boot_id())
+    context.conn.execute(
+        "INSERT INTO final_holdout_state_events "
+        "(experiment_id,request_digest,state,fence,owner_boot_id,owner_pid,owner_start_ticks,"
+        "owner_process_group,actor,occurred_at,confirmation) "
+        "VALUES (?,?, 'read_started',?,?,?,?,?,?,?,?)",
+        (context.request.experiment_id, authorization["request_digest"], 2**63 - 1,
+         identity.boot_id, identity.pid, identity.start_ticks, identity.process_group,
+         "1234:synthetic-user", "2026-10-10T00:00:00.000000Z", "synthetic confirmation"),
+    )
+    assert authority.final_holdout_fence_current(
+        context.conn, context.request.experiment_id, authorization["request_digest"], 2**63 - 1) is True
 
 
 @pytest.mark.parametrize("experiment_id", [None, "", "  ", " padded ", 1 << 100])
@@ -898,7 +923,10 @@ def test_recovery_rejects_corrupt_authorization_evidence(context, monkeypatch, c
 
 
 @pytest.mark.parametrize(("field", "invalid_value"), [
-    ("owner_boot_id", ""), ("owner_pid", 0), ("owner_start_ticks", 0), ("owner_process_group", 0),
+    ("owner_boot_id", ""),
+    ("owner_pid", 0), ("owner_pid", -1),
+    ("owner_start_ticks", 0), ("owner_start_ticks", -1),
+    ("owner_process_group", 0), ("owner_process_group", -1),
 ])
 def test_recovery_rejects_malformed_persisted_owner_identity(context, field, invalid_value):
     authorization = _authorize(context)
@@ -919,10 +947,47 @@ def test_recovery_rejects_malformed_persisted_owner_identity(context, field, inv
          values["owner_pid"], values["owner_start_ticks"], values["owner_process_group"],
          "1234:synthetic-user", "2026-10-10T00:00:00.000000Z", "synthetic confirmation"),
     )
-    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+    original = dict(_state_events(context)[0])
+    with pytest.raises(OpsError) as fence_error:
         authority.final_holdout_fence_current(
             context.conn, context.request.experiment_id, authorization["request_digest"], 1)
-    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+    assert fence_error.value.code == "VALIDATION_FAILED"
+    with pytest.raises(OpsError) as recovery_error:
         authority.recover_interrupted_final_holdout_read(
             context.conn, context.request.experiment_id, clock=context.clock)
-    assert [row["state"] for row in _state_events(context)] == ["read_started"]
+    assert recovery_error.value.code == "VALIDATION_FAILED"
+    assert dict(_state_events(context)[0]) == original
+
+
+@pytest.mark.parametrize(("field", "invalid_value"), [
+    ("owner_boot_id", None),
+    ("owner_pid", True),
+    ("owner_start_ticks", 1.5),
+    ("owner_process_group", "1"),
+])
+def test_reader_refuses_mistyped_owner_identity_without_changing_state(
+        context, monkeypatch, field, invalid_value):
+    authorization = _authorize(context)
+    identity, *_ = authority.process_info(os.getpid(), authority.read_boot_id())
+    context.conn.execute(
+        "INSERT INTO final_holdout_state_events "
+        "(experiment_id,request_digest,state,fence,owner_boot_id,owner_pid,owner_start_ticks,"
+        "owner_process_group,actor,occurred_at,confirmation) "
+        "VALUES (?,?, 'read_started',1,?,?,?,?,?,?,?)",
+        (context.request.experiment_id, authorization["request_digest"], identity.boot_id,
+         identity.pid, identity.start_ticks, identity.process_group, "1234:synthetic-user",
+         "2026-10-10T00:00:00.000000Z", "synthetic confirmation"),
+    )
+    original = dict(_state_events(context)[0])
+    malformed = dict(original)
+    malformed[field] = invalid_value
+    monkeypatch.setattr(authority, "_latest_event", lambda *args: malformed)
+    with pytest.raises(OpsError) as fence_error:
+        authority.final_holdout_fence_current(
+            context.conn, context.request.experiment_id, authorization["request_digest"], 1)
+    assert fence_error.value.code == "VALIDATION_FAILED"
+    with pytest.raises(OpsError) as recovery_error:
+        authority.recover_interrupted_final_holdout_read(
+            context.conn, context.request.experiment_id, clock=context.clock)
+    assert recovery_error.value.code == "VALIDATION_FAILED"
+    assert dict(_state_events(context)[0]) == original
