@@ -153,6 +153,16 @@ source date could pass that cutoff while a later contributing date would
 not. A missing or null contributor never advances the max; empty history
 contributes none, yet computed history contributes even when `runup_asof`
 cannot resolve.
+`panel_row` also carries the legacy-named model inputs that the panel math
+does not produce, derived with legacy semantics: `or_implied` and `or_rvol30`
+are the daily-state `im` and `rvol30` (absent when those are absent;
+`engine/data/features/panel.py` `ORATS_FEATURES`); `abs_dist_high` and
+`abs_dist_ema` are `abs(dist_high)` and `abs(dist_ema)`, NaN where the source
+is NaN (`engine/features.py` `add_absolute_features`); `has_implied_quote`
+is 1.0 when `or_implied` is present and above 0, else 0.0
+(`add_quote_indicators`); `mean_prior_or_implied` is the mean of the non-null
+`implied_move_pct` of the kept history rows (`panel.py` `add_implied_history`),
+NaN when there is none.
 It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
 (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never
