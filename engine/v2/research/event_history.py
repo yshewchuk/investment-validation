@@ -102,8 +102,11 @@ def load_event_history(repository, snapshot, *, event_id, as_of_month,
     context.update(event_id=event_id, ticker=target.ticker, event_date=event_day.isoformat(),
         history_start=start.isoformat(), decision_session=decision.isoformat(), purpose=purpose,
         computed_moves_version=snapshot.table_versions["computed_moves"].dataset_version_id)
-    identity = {"schema_version": "research_event_history.v1", **context,
-                "history": history, "omitted_history": omitted}
+    read_inputs = [{"event_id": event.event_id, "fragment_id": record.fragment_id,
+        "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash}
+        for event, _, record in plans]
+    identity = {"schema_version": "research_event_history.v2", **context,
+                "history": history, "omitted_history": omitted, "read_inputs": read_inputs}
     return {**identity, "history_id": content_hash(identity),
             "history_status": "available" if history else "empty",
             "features": history_features(moves, [abs(value) for value in moves]),
