@@ -44,6 +44,8 @@ dates, nonempty ordered years, fixed recipe/policy/availability declarations,
 and well-typed source identities linked to the enclosing snapshot. Rehashed
 malformed metadata refuses before any repository scan; calendar arithmetic and
 fold-boundary reconstruction remain the planner's responsibility.
+Stored events follow `(event_date, event_id)` order; each fold membership list
+must retain that event order. Rehashed permutations refuse before metadata scans.
 This library prerequisite has no magnitude CLI
 or production caller, performs no feature/label read or fitting, and adds no
 aggregate materialization or final-read authority.
