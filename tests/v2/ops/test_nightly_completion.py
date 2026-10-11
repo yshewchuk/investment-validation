@@ -151,6 +151,22 @@ def test_optional_sidecar_failure_is_completed_degraded_without_qualification():
     assert report["qualification_outcome"] == "not_requested"
 
 
+@pytest.mark.parametrize(("sidecar_role", "qualification_outcome"), [
+    ("optional", "not_requested"),
+    ("qualification", "invalid"),
+])
+def test_recovery_required_sidecars_are_explicitly_degraded(
+        sidecar_role, qualification_outcome):
+    expected = {"primary": "required", "side": sidecar_role}
+    observed = {"primary": Disposition("succeeded"),
+                "side": Disposition("recovery_required", reason_code="RECOVERY_REQUIRED")}
+    report = _report(expected, observed)
+    assert report["status"] == "recovery_required"
+    assert report["required_outcome"] == "completed"
+    assert report["degraded_outcome"] == "degraded"
+    assert report["qualification_outcome"] == qualification_outcome
+
+
 def test_valid_qualification_refusal_yields_degraded_with_explicit_count_and_code():
     expected = {"primary": "required", "quality": "qualification"}
     observed = {"primary": Disposition("succeeded"),

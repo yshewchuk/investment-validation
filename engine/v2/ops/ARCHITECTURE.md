@@ -556,7 +556,7 @@ Leaf, not yet called by `nightly_trigger`; it imports no CLI or store. The pinne
 
 | Condition | Outcome |
 |---|---|
-| Identity/session/generation/work is invalid; session state/report is unsafe or outside its size limit; publication I/O fails | Invalid identity/work: `INVALID_REQUEST`; absent or inactive session: `CHECKPOINT_INCOMPATIBLE`; unsafe or oversized state, oversized report, or unsafe/failed I/O: redacted `INTEGRITY_FAILED`. No report is published before validation completes. |
+| Identity/work is malformed; the generation is not the active started generation; session state/report is unsafe or outside its size limit; publication I/O fails | Malformed identity/work: `INVALID_REQUEST`; a generation that is not the active started generation, including a wrongly typed generation: `CHECKPOINT_INCOMPATIBLE`; unsafe or oversized state, oversized report, or unsafe/failed I/O: redacted `INTEGRITY_FAILED`. No report is published before validation completes. |
 | Completion report is accepted for the active started generation | The report is rebuilt from supplied dispositions and atomically replaced under the session lock; identical inputs are byte-stable. A failure before replacement preserves the prior report or leaves none on first write. A directory-sync failure after replacement reports failure although the new report may be visible. Unsafe destinations and failed publication I/O are refused with a redacted `INTEGRITY_FAILED`. |
 
 ### Nightly legacy readiness (`nightly_readiness.py`)
