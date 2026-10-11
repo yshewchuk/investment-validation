@@ -101,12 +101,17 @@ def _ledger_rows(path):
         return [{"id": row["id"], "stage": row["stage"]} for row in csv.DictReader(fh)]
 
 
-def test_primary_cli_refuses_disabled_exp182_before_job(tmp_path, capsys):
+@pytest.mark.parametrize("runner_id", (
+    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+    "./experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+    "experiments/unused/../EXP-182_d_1_gated_execution_parity_registered/run.py",
+))
+def test_primary_cli_refuses_disabled_exp182_before_job(tmp_path, capsys, runner_id):
     ops = tmp_path / "ops"
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(_spec_document(
         experiment_id="EXP-182", primary_arm_id="d1", arms=["d1"],
-        runner=REGISTERED_RUNNER, economic_params={})))
+        runner=runner_id, economic_params={})))
 
     assert cli.main(["--root", str(ops), "init"]) == 0
     capsys.readouterr()
@@ -338,7 +343,13 @@ def test_worker_dispatch_refuses_disabled_exp182_before_subprocess(tmp_path, mon
     assert not (tmp_path / "REPORT.md").exists()
 
 
-def test_legacy_adapter_refuses_exp182_fixed_arm_before_subprocess(tmp_path, monkeypatch):
+@pytest.mark.parametrize("runner_id", (
+    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+    "./experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+    "experiments/unused/../EXP-182_d_1_gated_execution_parity_registered/run.py",
+))
+def test_legacy_adapter_refuses_exp182_fixed_arm_before_subprocess(
+        tmp_path, monkeypatch, runner_id):
     invoked = []
 
     def sentinel(*args, **kwargs):
@@ -347,10 +358,16 @@ def test_legacy_adapter_refuses_exp182_fixed_arm_before_subprocess(tmp_path, mon
     monkeypatch.setattr(subprocess, "run", sentinel)
     with pytest.raises(OpsError) as excinfo:
         legacy_adapter.run_legacy_script(
-            tmp_path, REGISTERED_RUNNER, args=("--clock", "d1"))
+            tmp_path, runner_id, args=("--clock", "d1"))
     assert excinfo.value.code == "INVALID_REQUEST"
     assert "EXP-182 disabled" in str(excinfo.value)
     assert not invoked
+
+
+def test_disabled_runner_registry_matches_adapter_registry():
+    from engine.v2.ops import experiments, legacy_adapter
+
+    assert experiments.DISABLED_RUNNERS == legacy_adapter.DISABLED_RUNNERS
 
 
 def test_run_legacy_script_clears_inherited_pinned_source_without_sources(
