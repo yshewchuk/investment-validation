@@ -80,18 +80,29 @@ def mutate_receipt(cache, record, field, value):
 def test_descriptors_and_budgets_are_canonical_and_explicit():
     result = inventory(tickers=["TEST.B", "TEST.A", "TEST.A"])
     assert result == inventory(tickers=["TEST.A", "TEST.B"])
+    assert result["schema_version"] == "massive_cache_plan.v1"
     assert result["policy_version"] == "massive_stocks_basic.2026-10-10"
     assert result["requests_per_minute"] == 5
     assert result["minimum_initial_calls"] == 6
     assert result["maximum_http_attempts"] == 42
     requests = {u["request"]["dataset"]: u["request"] for u in result["units"][:3]}
-    assert requests["daily"]["endpoint"].endswith("/TEST.A/range/1/day/2026-01-01/2026-01-31")
-    assert requests["daily"]["params"] == {"adjusted": False, "sort": "asc", "limit": 50000}
-    assert requests["splits"]["endpoint"] == "/stocks/v1/splits"
-    assert requests["splits"]["params"]["execution_date.gte"] == "2026-01-01"
-    assert requests["dividends"]["endpoint"] == "/stocks/v1/dividends"
-    assert requests["dividends"]["params"]["sort"] == "ex_dividend_date.asc"
-    assert requests["dividends"]["adjustment_basis"] == "corporate_action"
+    common = {"schema_version": "massive_request.v1", "source": "massive-stocks",
+              "transport": "rest", "ticker": "TEST.A", "start": "2026-01-01", "end": "2026-01-31"}
+    assert requests == {
+        "daily": common | {"dataset": "daily", "adjustment_basis": "raw",
+                            "endpoint": "/v2/aggs/ticker/TEST.A/range/1/day/2026-01-01/2026-01-31",
+                            "params": {"adjusted": False, "sort": "asc", "limit": 50000}},
+        "splits": common | {"dataset": "splits", "adjustment_basis": "corporate_action",
+                             "endpoint": "/stocks/v1/splits",
+                             "params": {"ticker": "TEST.A", "execution_date.gte": "2026-01-01",
+                                        "execution_date.lte": "2026-01-31",
+                                        "sort": "execution_date.asc", "limit": 5000}},
+        "dividends": common | {"dataset": "dividends", "adjustment_basis": "corporate_action",
+                                "endpoint": "/stocks/v1/dividends",
+                                "params": {"ticker": "TEST.A", "ex_dividend_date.gte": "2026-01-01",
+                                           "ex_dividend_date.lte": "2026-01-31",
+                                           "sort": "ex_dividend_date.asc", "limit": 5000}},
+    }
     text = json.dumps(result)
     assert "apiKey" not in text and "MASSIVE_" not in text and "https://" not in text
 
@@ -187,13 +198,18 @@ def test_only_missing_units_spend_the_declared_call_cap(cache):
     assert result["max_calls_per_request"] == 7
 
 
-def test_corrupt_catalog_evidence_json_is_typed(cache):
+@pytest.mark.parametrize("missing_key", ["kind", "content_hash", "byte_size"])
+def test_schema_admissible_incomplete_manifest_is_typed(cache, missing_key):
     req = inventory(datasets=["daily"])["units"][0]["request"]
     record = seed(cache, req)
-    malformed = "[" * 2000 + "0" + "]" * 2000
-    # The real schema's JSON guard rejects excessively nested JSON itself.
-    with pytest.raises(sqlite3.IntegrityError):
-        mutate_receipt(cache, record, "request_json", malformed)
+    document = json.loads(cache[0].execute("SELECT artifact_ref_json FROM data_raw_receipts").fetchone()[0])
+    del document[missing_key]
+    malformed = json.dumps(document)
+    mutate_receipt(cache, record, "artifact_ref_json", malformed)
+    assert cache[0].execute("SELECT artifact_ref_json FROM data_raw_receipts").fetchone()[0] == malformed
+    with pytest.raises(OpsError) as error:
+        inventory(cache, datasets=["daily"])
+    assert error.value.code == "INTEGRITY_FAILED"
 
 
 @pytest.mark.parametrize("kind", ["partial", "failed", "auth_failed", "rate_limited", "legitimate_empty"])
@@ -204,12 +220,22 @@ def test_newer_noncomplete_receipt_never_falls_back(cache, kind):
     assert inventory(cache, datasets=["daily"])["minimum_initial_calls"] == 1
 
 
-def test_latest_tie_break_and_timestamp_order(cache):
+@pytest.mark.parametrize("indexed", [True, False])
+def test_latest_tie_break_and_timestamp_order(cache, indexed):
     req = inventory(datasets=["daily"])["units"][0]["request"]
-    seed(cache, req, kind="partial")
+    first = seed(cache, req, kind="partial")
     latest = seed(cache, req, document=body(req, request_id="second"))
-    seed(cache, req, document=body(req, request_id="older"), kind="failed",
-         received_at="2026-10-08T12:00:00Z")
+    older = seed(cache, req, document=body(req, request_id="older"), kind="failed",
+                 received_at="2026-10-08T12:00:00Z")
+    if not indexed:
+        # Shadow the real receipts with an index-free copy, including no UNIQUE autoindex.
+        cache[0].execute("CREATE TEMP TABLE data_raw_receipts AS "
+                         "SELECT * FROM main.data_raw_receipts ORDER BY rowid")
+        assert cache[0].execute("PRAGMA temp.index_list(data_raw_receipts)").fetchall() == []
+        assert cache[0].execute("SELECT raw_receipt_id FROM data_raw_receipts "
+                                "ORDER BY received_at DESC LIMIT 1").fetchone()[0] == first.raw_receipt_id
+        assert cache[0].execute("SELECT raw_receipt_id FROM data_raw_receipts "
+                                "ORDER BY rowid DESC LIMIT 1").fetchone()[0] == older.raw_receipt_id
     assert inventory(cache, datasets=["daily"])["units"][0]["raw_receipt_id"] == latest.raw_receipt_id
 
 
