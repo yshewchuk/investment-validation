@@ -162,6 +162,12 @@ class AsofSeries:
         return None
 
 
+def _check_ascending(events: Sequence[SequencedEvent]) -> None:
+    for prev, cur in zip(events, events[1:]):
+        if cur.event_date <= prev.event_date:
+            raise _refuse("event dates must be strictly ascending in ordinal order")
+
+
 def _check_aggregate_inputs(events: Any, values: Any, population: Any) -> None:
     _choice(population, _POPULATIONS, "population")
     if isinstance(events, str) or not isinstance(events, Sequence):
@@ -174,6 +180,7 @@ def _check_aggregate_inputs(events: Any, values: Any, population: Any) -> None:
         raise _refuse("events and values differ in length")
     if any(ev.ordinal != i for i, ev in enumerate(events)):
         raise _refuse("events must be the full sequence in ordinal order")
+    _check_ascending(events)
 
 
 def strict_prior_mean(events: Sequence[SequencedEvent], values: Sequence[Any], *,

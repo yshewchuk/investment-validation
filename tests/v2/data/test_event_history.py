@@ -328,3 +328,15 @@ def test_mean_does_not_overflow_on_large_finite_values():
     assert all(m is None or math.isfinite(m) for m, _ in out)
     mixed = strict_prior_mean(seq, [1e308, -1e308, 0.0, 1.0, 1.0, 1.0], population="all")
     assert mixed[2] == (pytest.approx(0.0, abs=1e292), 2)
+
+
+@pytest.mark.parametrize("population", ["admitted", "all"])
+@pytest.mark.parametrize("dates", [
+    ["2020-03-01", "2020-02-01", "2020-04-01"],
+    ["2020-01-01", "2020-01-01", "2020-04-01"],
+])
+def test_hand_built_events_must_be_strictly_ascending(population, dates):
+    events = [SequencedEvent(day, i, True) for i, day in enumerate(dates)]
+    with pytest.raises(DataError) as err:
+        strict_prior_mean(events, [1.0, 2.0, 3.0], population=population)
+    assert err.value.code == "CONTRACT_MISMATCH"
