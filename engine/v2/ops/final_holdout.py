@@ -28,6 +28,21 @@ def _registered(conn, store, request):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "final-read request differs from preregistration")
 
 
+def _validate_authorization_evidence(row, request, digest, encoded):
+    actor = row["actor"]
+    if not isinstance(actor, str) or not actor or ":" not in actor:
+        raise ValueError
+    confirmation = (
+        f"AUTHORIZE {json.dumps(request.experiment_id)} {digest} AS {json.dumps(actor)}"
+    )
+    if (row["schema_version"] != "final_holdout_authorization.v1.0"
+            or row["registration_run_id"] != request.registration_run_id
+            or row["request_digest"] != digest or row["request_json"] != encoded
+            or row["confirmation"] != confirmation):
+        raise ValueError
+    parse_timestamp(row["authorized_at"])
+
+
 def authorize_final_holdout(conn, store, request, *, clock):
     """Record a fresh interactive user act and permanent spend, never a read grant."""
     try:
@@ -66,16 +81,10 @@ def _authorize(conn, store, request, clock):
         if row is not None:
             if row["request_digest"] != digest or row["request_json"] != encoded:
                 raise fail("IDEMPOTENCY_CONFLICT", "experiment final read is already spent for another request")
-            if row["actor"].split(":", 1)[0] != str(uid):
+            if (not isinstance(row["actor"], str)
+                    or row["actor"].split(":", 1)[0] != str(uid)):
                 raise fail("HOLDOUT_ACCESS_DENIED", "only the original authorizing user may acknowledge this act")
-            original_confirmation = (
-                f"AUTHORIZE {json.dumps(request.experiment_id)} {digest} AS {json.dumps(row['actor'])}"
-            )
-            if (row["schema_version"] != "final_holdout_authorization.v1.0"
-                    or row["registration_run_id"] != request.registration_run_id
-                    or row["confirmation"] != original_confirmation):
-                raise ValueError
-            parse_timestamp(row["authorized_at"])
+            _validate_authorization_evidence(row, request, digest, encoded)
             return dict(row)
         stamp = format_timestamp(clock.now())
         conn.execute(
@@ -95,6 +104,16 @@ def _latest_event(conn, experiment_id):
                         "ORDER BY event_id DESC LIMIT 1", (experiment_id,)).fetchone()
 
 
+def _owner_identity(event):
+    values = (event["owner_boot_id"], event["owner_pid"],
+              event["owner_start_ticks"], event["owner_process_group"])
+    if any((not isinstance(values[0], str), not values[0],
+            any(type(value) is not int or value <= 0 for value in values[1:]))):
+        raise ValueError
+    return ProcessIdentity(boot_id=values[0], pid=values[1], start_ticks=values[2],
+                           process_group=values[3])
+
+
 def _state_action_context(conn, store, request, action):
     request = request_from_document(to_document(request))
     if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -109,11 +128,7 @@ def _state_action_context(conn, store, request, action):
         raise fail("HOLDOUT_ACCESS_DENIED", "only the authorizing user may change final-read state")
     _registered(conn, store, request)
     encoded, digest = canonical_json(to_document(request)), content_hash(to_document(request))
-    if (authorization["schema_version"] != "final_holdout_authorization.v1.0"
-            or authorization["registration_run_id"] != request.registration_run_id
-            or authorization["request_digest"] != digest
-            or authorization["request_json"] != encoded):
-        raise fail("VALIDATION_FAILED", "final-read authorization evidence is inconsistent")
+    _validate_authorization_evidence(authorization, request, digest, encoded)
     try:
         username = pwd.getpwuid(uid).pw_name
     except KeyError:
@@ -209,10 +224,14 @@ def final_holdout_fence_current(conn, experiment_id, request_digest, fence):
     """Whether a started read still owns the current publication fence."""
     try:
         latest = _latest_event(conn, experiment_id)
+        if latest is None or latest["state"] != "read_started":
+            return False
+        _owner_identity(latest)
+        return bool(latest["request_digest"] == request_digest and latest["fence"] == fence)
+    except (ValueError, TypeError, KeyError, IndexError):
+        raise fail("VALIDATION_FAILED", "final-read owner identity is malformed") from None
     except (OSError, sqlite3.Error):
         raise fail("RESOURCE_UNAVAILABLE", "final-read fence storage unavailable") from None
-    return bool(latest is not None and latest["state"] == "read_started"
-                and latest["request_digest"] == request_digest and latest["fence"] == fence)
 
 
 def recover_interrupted_final_holdout_read(conn, experiment_id, *, clock):
@@ -229,12 +248,8 @@ def recover_interrupted_final_holdout_read(conn, experiment_id, *, clock):
             raise fail("VALIDATION_FAILED", "final-read recovery evidence is inconsistent")
         if authorization["request_digest"] != latest["request_digest"]:
             raise fail("VALIDATION_FAILED", "final-read recovery evidence is inconsistent")
-        values = (latest["owner_boot_id"], latest["owner_pid"], latest["owner_start_ticks"], latest["owner_process_group"])
-        if any((not isinstance(values[0], str), not values[0],
-                any(type(value) is not int or value <= 0 for value in values[1:]))):
-            raise fail("VALIDATION_FAILED", "final-read owner identity is malformed")
+        identity = _owner_identity(latest)
         boot_id = read_boot_id()
-        identity = ProcessIdentity(boot_id=values[0], pid=values[1], start_ticks=values[2], process_group=values[3])
         proven_dead = identity.boot_id != boot_id or not is_alive(identity, boot_id)
         if not proven_dead:
             raise fail("HOLDOUT_ACCESS_DENIED", "the final-read owner is still alive")

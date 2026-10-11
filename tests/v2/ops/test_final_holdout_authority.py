@@ -572,6 +572,19 @@ def test_publication_fence_storage_failure_is_typed(monkeypatch, context):
             context.conn, context.request.experiment_id, content_hash("request"), 1)
 
 
+@pytest.mark.parametrize(("column", "value"), [
+    ("confirmation", "tampered confirmation"), ("authorized_at", "not a timestamp"),
+])
+def test_start_rejects_corrupt_authorization_evidence(context, monkeypatch, column, value):
+    _authorize(context)
+    context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_update")
+    context.conn.execute(f"UPDATE final_holdout_authorizations SET {column}=?", (value,))
+    _state_assent(monkeypatch, context, "START")
+    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+        _start(context)
+    assert _state_events(context) == []
+
+
 def test_state_schema_requires_owner_and_assent_evidence(context):
     authorization = _authorize(context)
     digest = authorization["request_digest"]
@@ -641,6 +654,9 @@ def test_recovery_rejects_malformed_persisted_owner_identity(context):
         (context.request.experiment_id, authorization["request_digest"], "", 0, 0, 0,
          "1234:synthetic-user", "2026-10-10T00:00:00.000000Z", "synthetic confirmation"),
     )
+    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+        authority.final_holdout_fence_current(
+            context.conn, context.request.experiment_id, authorization["request_digest"], 1)
     with pytest.raises(OpsError, match="VALIDATION_FAILED"):
         authority.recover_interrupted_final_holdout_read(
             context.conn, context.request.experiment_id, clock=context.clock)
