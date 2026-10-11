@@ -189,10 +189,46 @@ def test_computed_days_to_print_overrides_captured_role_row(tmp_path):
     assert result.request.rows == ((20.0, 2.0),)
 
 
+def test_facts_overlay_carries_priced_dte_entry_and_entry_cost_pct(tmp_path):
+    gate = _frozen_gate(tmp_path, ("dte_entry", "entry_cost_pct"))
+    inputs = _inputs(gate=gate)
+    values = assemble_native_values(inputs)
+    facts = _facts(inputs, values)
+    assert values["entry_cost_pct"] is not None
+    assert facts["dte_entry"] == 43
+    assert facts["_native_stage_facts"]["dte_entry"] == 43
+    assert facts["_native_stage_facts"]["entry_cost_pct"] == values["entry_cost_pct"]
+
+
+def test_gate_role_row_missing_or_stale_dte_entry_uses_computed(tmp_path):
+    gate = _frozen_gate(tmp_path, ("dte_entry", "entry_cost_pct"))
+    executor = gate["executors"]["gate_score"]._executor
+    inputs = _inputs(gate=gate)
+    native = _facts(inputs, assemble_native_values(inputs))["_native_stage_facts"]
+    # (a) the captured role row omits the scorer-computed columns entirely.
+    missing = executor.execute({
+        "role_model_inputs": {"gate": {}},
+        "_native_stage_facts": native,
+    })
+    # (b) a stale captured row is overridden by the staged facts.
+    stale = executor.execute({
+        "role_model_inputs": {"gate": {"dte_entry": 99, "entry_cost_pct": 99.0}},
+        "_native_stage_facts": native,
+    })
+    assert missing.request.rows[0][0] == 43
+    assert missing.request.rows == stale.request.rows
+
+
 def test_dte_entry_not_written_when_pricing_refuses():
     values = assemble_native_values(_inputs(quotes={}))
     assert "dte_entry" not in values
     assert values.get("entry_cost") is None
+
+
+def test_overlay_omits_dte_entry_when_pricing_refuses():
+    inputs = _inputs(quotes={})
+    values = assemble_native_values(inputs)
+    assert "dte_entry" not in _facts(inputs, values)["_native_stage_facts"]
 
 
 def test_dates_not_projected_into_source_mask():

@@ -662,6 +662,17 @@ def _gate_in_domain(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> boo
     return mcap_log >= log(GATE_MCAP_FLOOR)
 
 
+def _priced_dte_entry(values: Mapping[str, Any]) -> int | None:
+    """The scorer-computed dte_entry from the successfully priced first leg
+    (legacy engine/score.py:2451), or None on a pricing refusal / no priced leg.
+    Never a captured value: it is derived from values["legs"] (published by the
+    pricing stage) and the quote date."""
+    legs = values.get("legs")
+    if values.get("entry_cost") is None or not legs:
+        return None
+    return financial.dte_entry(legs[0].get("expiry"), values.get("quote_date"))
+
+
 def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, Any]:
     """Lowest precedence first: ``source_features`` (the captured base
     feature columns -- im/im_d1/im_d5/im_d10/iv10/iv30/... --
@@ -691,6 +702,15 @@ def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, An
     if computed_days is not None:
         facts["days_to_print"] = computed_days
         facts["_native_stage_facts"]["days_to_print"] = computed_days
+    computed_dte = _priced_dte_entry(values)
+    if computed_dte is not None:
+        facts["dte_entry"] = computed_dte
+        facts["_native_stage_facts"]["dte_entry"] = computed_dte
+    computed_cost_pct = financial.entry_cost_pct(
+        values.get("entry_cost"), values.get("spot"))
+    if computed_cost_pct is not None:
+        facts["entry_cost_pct"] = computed_cost_pct
+        facts["_native_stage_facts"]["entry_cost_pct"] = computed_cost_pct
     return facts
 
 
