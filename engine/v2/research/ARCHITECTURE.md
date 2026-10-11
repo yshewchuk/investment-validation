@@ -93,8 +93,13 @@ before returning a frame to metric/report writers. Missing/invalid context,
 an as-of month later than the current UTC month,
 unknown purposes and an entirely excluded population receive the same refusal.
 There is no date fallback, partial returned frame, report write or retry here.
-Final holdout reads are unavailable. This read-only interface does not write
-durable refusal receipts or ledger rows.
+Final holdout reads are unavailable. The loaders write nothing themselves; the
+recorded native prediction runner appends one plain `refused` row (no metrics;
+replay adds no second) when a `run` on an admitted registration hits
+`HOLDOUT_ACCESS_DENIED`, unless a different immutable outcome for that variant is
+already saved, success or failure: identity conflict, ledger unchanged.
+`register`, a run with no admitted registration, and `--no-ledger` smoke write
+none. `ledger_context` excludes `refused*` rows from specs tried.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout
@@ -125,8 +130,8 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
 | Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
 
-These readers preserve no durable refusal receipt or economic variant identity
-and cannot authorize the separate user-only final holdout read.
+These readers preserve no economic variant identity and cannot authorize the
+separate user-only final holdout read.
 
 `event_history.load_event_history(repository, snapshot, *, event_id, as_of_month,
 decision_session, history_start, purpose="selection")` constructs prior-event
