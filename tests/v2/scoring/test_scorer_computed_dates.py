@@ -4,6 +4,7 @@ bundle: ``days_to_print`` (legacy ``engine/features.py:1166-1168``) and
 """
 import hashlib
 import json
+from dataclasses import replace
 
 import pandas as pd
 
@@ -12,6 +13,7 @@ from engine.v2.models.contracts import ArtifactMember
 from engine.v2.scoring import financial
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
 from engine.v2.scoring.nightly_source_bundle import assemble_nightly_source_bundle
+from engine.v2.scoring.source_inputs import build_native_score_inputs
 from engine.v2.scoring.stages import (
     NativeScoreInputs, STAGE_NAMES, StageReceipt, assemble_native_values)
 
@@ -149,6 +151,33 @@ def test_dates_not_projected_into_source_mask():
         assert name not in bundle.feature_vector
         assert name not in bundle.feature_missing_mask
     assert "signal" in bundle.feature_vector
+
+
+def test_bundle_through_scoring_gives_forecast_days_to_print():
+    bundle = assemble_nightly_source_bundle(**_kwargs(
+        as_of="2026-01-14",
+        calendar_row={"ticker": "TEST", "event_date": "2026-01-30",
+                      "entry_date": "2026-01-14", "exit_date": "2026-01-30",
+                      "expiry": "2026-02-20", "spot": 100.0,
+                      "calendar_observed_through": "2026-01-09"},
+        panel_row={"date": "2026-01-30", "signal": 1.5},
+        quote_rows=[{"right": r, "strike": 100.0, "expiry": "2026-02-20",
+                     "bid": b, "ask": a, "observed_at": "2026-01-14"}
+                    for r, b, a in (("C", 1.0, 1.2), ("P", 1.1, 1.3))],
+        forecast_recipes={"driver_prediction": {
+            "intercept": 0.0, "coefficients": {"days_to_print": 1.0}}},
+    ))
+    values = assemble_native_values(build_native_score_inputs(bundle))
+    assert values["days_to_print"] == 16.0  # 2026-01-30 minus 2026-01-14
+    assert "MISSING_FORECAST_INPUT:days_to_print" not in values["flags"]
+    assert bundle.context["as_of"] == "2026-01-14"
+
+    # Negative control: dropping the validated as_of from the context leaves
+    # the forecast consumer without its days_to_print input.
+    stripped = replace(bundle, context={
+        k: v for k, v in bundle.context.items() if k != "as_of"})
+    negative = assemble_native_values(build_native_score_inputs(stripped))
+    assert "days_to_print" not in negative
 
 
 def test_helpers_match_legacy_arithmetic():

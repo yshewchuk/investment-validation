@@ -1,7 +1,7 @@
 """``ops plan nightly`` generates its expected population from the pinned snapshot.
 
 Synthetic ``earnings_events`` plus the real synthetic ``daily_market``/``option_chains``
-rows the carried-set resolution reads, built the way ``test_v2_ops_nightly_raw_rows``
+rows the carried-set resolution reads, built the way ``test_nightly_raw_rows``
 builds them (a real catalog + ArtifactStore snapshot). The pin step is stubbed where a
 test only needs the plan wiring: its own reference-input catalog is covered elsewhere.
 """

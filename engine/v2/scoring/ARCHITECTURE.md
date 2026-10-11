@@ -320,7 +320,9 @@ The nightly source bundle preserves a supplied bound in its context and omits
 that optional key when unset. When quote rows exist, `quote_date` is their
 earliest validated `observed_at` date and `quote_latest_date` is their latest;
 both dates have passed the assembler's `as_of` upper-bound check. An allowed
-empty quote domain carries neither date. `native_score_batch` carries the
+empty quote domain carries neither date. The bundle context always carries the
+validated `as_of` calendar date as `as_of` (the decision date `days_to_print`
+is measured from). `native_score_batch` carries the
 caller policy into scoring; `None` continues to mean no policy and no numeric
 age default is invented. This policy is independent of the assembler's
 `as_of` upper-bound check, which only prevents future observations.

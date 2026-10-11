@@ -535,6 +535,8 @@ def assemble_nightly_source_bundle(
     _checked_against_as_of(calendar_row, observed, panel_anchor, as_of_ts)
     raw_quotes = quote_domain_map(list(quote_rows), quote_status)
     context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
+    # The decision date: stages._stage_days_to_print measures days_to_print from it.
+    context["as_of"] = str(as_of_ts.date())
     if quote_max_age_sessions is not None:
         context["quote_max_age_sessions"] = quote_max_age_sessions
     if observed:
