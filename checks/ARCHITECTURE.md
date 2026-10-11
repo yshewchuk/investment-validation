@@ -81,7 +81,8 @@ check defines missing-input and failure outcomes:
 | Partial write | No shared atomic-write or rollback guarantee |
 | Repeat invocation | No package-wide idempotency guarantee; effects vary |
 | Selector input or declaration is unsafe | Report the reason and select the full suite |
-| Root test count or layout budget grows/stales, or a root test is modified in place | Ratchet check fails |
+| Root test count grows, the budget increases from base, the budget differs from the current root-test count, or a root test is modified in place | Ratchet check fails |
+| Budget decreases without root-test moves | Pass only when the new budget equals the current root-test count; increases remain refused |
 | A phase-one baseline test cannot be found | `phase1_suite()` raises `FileNotFoundError` |
 | Tier-0 support gets an invalid record/receipt | Existing copy, rounding or attribute errors propagate; no retry, cache, transaction or partial writes |
 
