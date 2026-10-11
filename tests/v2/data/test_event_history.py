@@ -1,4 +1,8 @@
-"""Event-history primitives on the real path (design #651)."""
+"""Event-history primitives on the real path (design #651).
+
+Every refusal asserts the exact code, message and details; every computed output
+is compared to a complete literal expected value.
+"""
 import contextlib
 import math
 
@@ -14,326 +18,458 @@ from engine.v2.data.event_history import (
 )
 
 DAYS = ["2020-01-10", "2020-04-10", "2020-07-10", "2020-10-09", "2021-01-08", "2021-04-09"]
+ISO = "dates must be ISO YYYY-MM-DD strings"
+CANON = "dates must be canonical YYYY-MM-DD strings"
+DATE_MSG = (ISO, CANON)  # which one fires for compact/week forms depends on the Python version
+NUMERIC = "a numeric value is required"
+FINITE = "a finite numeric value is required"
+ON_MISSING_MSG = "on_missing must be one of ('null', 'refuse')"
+POPULATION_MSG = "population must be one of ('admitted', 'all')"
+WARMUP_MSG = "warmup must be a non-negative integer"
+ASCENDING_MSG = "event dates must be strictly ascending"
+FIRST_MSG = "event list does not start at the ticker's first known event"
+NO_OBS_MSG = "no usable observation before the event"
 
 
 @contextlib.contextmanager
-def _mismatch():
-    """Every refusal in this module is exactly CONTRACT_MISMATCH, never another code."""
+def _mismatch(message, **details):
+    """A refusal is exactly CONTRACT_MISMATCH with the given message and details."""
     with pytest.raises(DataError) as err:
         yield
-    assert err.value.code == "CONTRACT_MISMATCH"
+    problem = err.value.problem
+    assert problem.code == "CONTRACT_MISMATCH"
+    assert problem.details == details
+    assert problem.message in (message if isinstance(message, tuple) else (message,))
 
 
 def _rows(*items):
     return [dict(date=d, src_iv=s, implied_move=v) for d, s, v in items]
 
 
-def test_warmup_counts_every_event_including_null_move_ones():
-    seq = event_sequence(DAYS, warmup=4)
-    assert [e.ordinal for e in seq] == [0, 1, 2, 3, 4, 5]
-    assert [e.admitted for e in seq] == [False] * 4 + [True] * 2
+def _asof(rows, **kwargs):
+    base = dict(eligible=("src_iv",), value="implied_move", on_missing="null")
+    return AsofSeries(rows, **{**base, **kwargs})
 
 
-def test_warmup_is_declared_not_fixed():
-    assert [e.admitted for e in event_sequence(DAYS, warmup=1)] == [False] + [True] * 5
-    assert all(e.admitted for e in event_sequence(DAYS, warmup=0))
+def _series(**kwargs):
+    return _asof(_rows(("2020-01-01", 0.5, 4.0)), **kwargs)
 
 
-@pytest.mark.parametrize("days, kwargs", [
-    (["2020-02-01", "2020-01-01"], {}),
-    (["2020-01-01", "2020-01-01"], {}),
-    (DAYS, {"first_known": "2019-01-01"}),
-    ([], {"first_known": "2019-01-01"}),
+def _events(admitted):
+    return tuple(SequencedEvent(day, i, flag)
+                 for i, (day, flag) in enumerate(zip(DAYS, admitted)))
+
+
+def _assert_means(out, expected, abs_tol=None):
+    assert len(out) == len(expected)
+    for (mean, n), (exp_mean, exp_n) in zip(out, expected):
+        assert n == exp_n
+        if exp_mean is None:
+            assert mean is None
+        else:
+            assert mean == (pytest.approx(exp_mean, abs=abs_tol) if abs_tol
+                            else pytest.approx(exp_mean))
+
+
+# ---- event_sequence ------------------------------------------------------------------
+
+def test_event_sequence_full_expected_tuple_with_warmup_4():
+    assert event_sequence(DAYS, warmup=4) == (
+        SequencedEvent("2020-01-10", 0, False), SequencedEvent("2020-04-10", 1, False),
+        SequencedEvent("2020-07-10", 2, False), SequencedEvent("2020-10-09", 3, False),
+        SequencedEvent("2021-01-08", 4, True), SequencedEvent("2021-04-09", 5, True),
+    )
+
+
+@pytest.mark.parametrize("warmup, admitted", [
+    (0, [True] * 6),
+    (1, [False] + [True] * 5),
+    (2, [False] * 2 + [True] * 4),
+    (4, [False] * 4 + [True] * 2),
+    (6, [False] * 6),
+    (np.int64(4), [False] * 4 + [True] * 2),
+    (np.int32(2), [False] * 2 + [True] * 4),
+    (np.uint8(0), [True] * 6),
 ])
-def test_event_sequence_refuses_bad_lists(days, kwargs):
-    with pytest.raises(DataError) as err:
-        event_sequence(days, warmup=4, **kwargs)
-    assert err.value.code == "CONTRACT_MISMATCH"
+def test_warmup_is_declared_and_admission_vector_is_complete(warmup, admitted):
+    assert event_sequence(DAYS, warmup=warmup) == _events(admitted)
 
 
-def test_event_sequence_refuses_negative_warmup():
-    with _mismatch():
-        event_sequence(DAYS, warmup=-1)
+def test_event_sequence_empty_and_tuple_inputs():
+    assert event_sequence([], warmup=0) == ()
+    assert event_sequence(tuple(DAYS), warmup=4, first_known="2020-01-10") == _events(
+        [False] * 4 + [True] * 2)
 
+
+@pytest.mark.parametrize("warmup", [1.5, 0.5, math.nan, True, False, "4", None, -1, -5])
+def test_bad_warmup_refuses(warmup):
+    with _mismatch(WARMUP_MSG):
+        event_sequence(DAYS, warmup=warmup)
+
+
+@pytest.mark.parametrize("days, message", [
+    (["2020-02-01", "2020-01-01"], ASCENDING_MSG),
+    (["2020-01-01", "2020-01-01"], ASCENDING_MSG),
+])
+def test_event_sequence_refuses_unsorted_or_duplicate(days, message):
+    with _mismatch(message):
+        event_sequence(days, warmup=4)
+
+
+@pytest.mark.parametrize("days, first_known", [(DAYS, "2019-01-01"), ([], "2019-01-01"),
+                                               (DAYS, "2020-01-11")])
+def test_event_sequence_refuses_a_list_not_starting_at_first_known(days, first_known):
+    with _mismatch(FIRST_MSG):
+        event_sequence(days, warmup=4, first_known=first_known)
+
+
+@pytest.mark.parametrize("dates", [None, 5, "2020-01-10", b"2020-01-10", range(3)])
+def test_event_dates_container_must_be_list_or_tuple(dates):
+    with _mismatch("event_dates must be a list or tuple"):
+        event_sequence(dates, warmup=0)
+
+
+@pytest.mark.parametrize("dates", [[None], [20200110], [b"2020-01-10"]])
+def test_event_dates_items_must_be_strings(dates):
+    with _mismatch(ISO):
+        event_sequence(dates, warmup=0)
+
+
+@pytest.mark.parametrize("bad", ["20200110", "2020-W02-5", "2020-1-10", "2020-01-10T00:00"])
+def test_non_canonical_dates_refuse_in_every_date_input(bad):
+    series = _series()
+    with _mismatch(DATE_MSG):
+        series.at(bad)
+    with _mismatch(DATE_MSG):
+        _asof(_rows((bad, 0.5, 4.0)))
+    with _mismatch(DATE_MSG):
+        event_sequence([bad], warmup=0)
+    with _mismatch(DATE_MSG):
+        event_sequence(DAYS, warmup=0, first_known=bad)
+
+
+# ---- SequencedEvent ------------------------------------------------------------------
+
+@pytest.mark.parametrize("kwargs, message", [
+    ({"event_date": "20200110", "ordinal": 0, "admitted": True}, DATE_MSG),
+    ({"event_date": "2020-1-10", "ordinal": 0, "admitted": True}, DATE_MSG),
+    ({"event_date": None, "ordinal": 0, "admitted": True}, ISO),
+    ({"event_date": "2020-01-10", "ordinal": -1, "admitted": True},
+     "ordinal must be a non-negative integer"),
+    ({"event_date": "2020-01-10", "ordinal": 1.5, "admitted": True},
+     "ordinal must be a non-negative integer"),
+    ({"event_date": "2020-01-10", "ordinal": True, "admitted": True},
+     "ordinal must be a non-negative integer"),
+    ({"event_date": "2020-01-10", "ordinal": 0, "admitted": 1}, "admitted must be a bool"),
+    ({"event_date": "2020-01-10", "ordinal": 0, "admitted": None}, "admitted must be a bool"),
+])
+def test_sequenced_event_validates_on_construction(kwargs, message):
+    with _mismatch(message):
+        SequencedEvent(**kwargs)
+
+
+# ---- AsofSeries: lookup --------------------------------------------------------------
 
 def test_anchor_is_strictly_before_and_src_iv_only():
     rows = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-08", 0.5, 5.0),
                  ("2020-01-09", None, 99.0), ("2020-01-10", 0.5, 7.0))
-    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
+    series = _asof(rows)
     assert series.at("2020-01-10") == 5.0  # same-day row excluded; non-src_iv row ignored
     assert series.at("2020-01-11") == 7.0
+    assert series.at("2020-01-09") == 5.0
+    assert series.at("2020-01-02") == 4.0
 
 
 def test_latest_src_iv_row_with_null_value_gives_null_not_older_quote():
     rows = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-08", 0.5, None))
-    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
-    assert series.at("2020-01-10") is None
-    refusing = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="refuse")
-    with pytest.raises(DataError) as err:
-        refusing.at("2020-01-10")
-    assert err.value.code == "CONTRACT_MISMATCH"
+    assert _asof(rows).at("2020-01-10") is None
+    with _mismatch(NO_OBS_MSG):
+        _asof(rows, on_missing="refuse").at("2020-01-10")
 
 
 def test_nan_value_is_a_miss():
-    rows = _rows(("2020-01-01", 0.5, math.nan))
-    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
-    assert series.at("2020-02-01") is None
+    assert _asof(_rows(("2020-01-01", 0.5, math.nan))).at("2020-02-01") is None
 
 
 def test_no_prior_row_follows_on_missing():
     rows = _rows(("2020-01-10", 0.5, 4.0))
-    assert AsofSeries(rows, eligible=("src_iv",), value="implied_move",
-                      on_missing="null").at("2020-01-10") is None
-    with _mismatch():
-        AsofSeries(rows, eligible=("src_iv",), value="implied_move",
-                   on_missing="refuse").at("2020-01-10")
+    assert _asof(rows).at("2020-01-10") is None
+    assert _asof(rows).at("2020-01-05") is None
+    with _mismatch(NO_OBS_MSG):
+        _asof(rows, on_missing="refuse").at("2020-01-10")
+    with _mismatch(NO_OBS_MSG):
+        _asof([], on_missing="refuse").at("2020-01-10")
+
+
+@pytest.mark.parametrize("max_age, expected", [(9, None), (10, 4.0), (11, 4.0)])
+def test_staleness_boundary_is_inclusive_at_exact_age(max_age, expected):
+    # anchor 2020-01-01, event 2020-01-11: age is exactly 10 days
+    assert _series(max_staleness_days=max_age).at("2020-01-11") == expected
 
 
 def test_max_staleness_makes_an_old_anchor_a_miss():
-    rows = _rows(("2020-01-01", 0.5, 4.0))
-    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move",
-                        on_missing="null", max_staleness_days=5)
+    series = _series(max_staleness_days=5)
     assert series.at("2020-01-04") == 4.0
     assert series.at("2020-02-01") is None
 
 
-def test_asof_series_refuses_bad_declarations_and_rows():
-    good = _rows(("2020-01-01", 0.5, 4.0))
-    with _mismatch():
-        AsofSeries(good, eligible=("src_iv",), value="implied_move", on_missing="default")
-    with _mismatch():
-        AsofSeries(good, eligible=("missing",), value="implied_move", on_missing="null")
-    with _mismatch():
-        AsofSeries(_rows(("2020-01-02", 0.5, 1.0), ("2020-01-01", 0.5, 1.0)),
-                   eligible=("src_iv",), value="implied_move", on_missing="null")
+def test_stale_anchor_refuses_when_declared_and_zero_staleness_is_a_miss():
+    with _mismatch(NO_OBS_MSG):
+        _series(max_staleness_days=1, on_missing="refuse").at("2020-01-11")
+    with _mismatch(NO_OBS_MSG):
+        _series(max_staleness_days=0, on_missing="refuse").at("2020-01-02")
+    assert _series(max_staleness_days=0).at("2020-01-02") is None
+    assert _series(max_staleness_days=1).at("2020-01-02") == 4.0
+
+
+def test_eligible_nan_row_is_ineligible_not_an_anchor():
+    rows = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-08", math.nan, 9.0))
+    assert _asof(rows).at("2020-01-10") == 4.0
+
+
+def test_every_eligible_field_must_be_present():
+    rows = [dict(date="2020-01-01", a=1.0, b=1.0, v=4.0),
+            dict(date="2020-01-08", a=1.0, b=None, v=9.0),
+            dict(date="2020-01-09", a=None, b=1.0, v=11.0)]
+    series = AsofSeries(rows, eligible=("a", "b"), value="v", on_missing="null")
+    assert series.at("2020-01-10") == 4.0
+    assert series.at("2020-01-09") == 4.0
+
+
+def test_null_values_on_any_row_are_still_accepted():
+    rows = _rows(("2020-01-01", None, None), ("2020-01-05", 0.5, math.nan),
+                 ("2020-01-06", 0.5, 4.0))
+    series = _asof(rows)
+    assert series.at("2020-01-10") == 4.0
+    assert series.at("2020-01-06") is None
+    assert series.at("2020-01-05") is None
 
 
 def test_provenance_columns_never_change_the_answer():
     base = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-08", 0.5, 5.0))
     noisy = [dict(r, retrieved_at=f"2030-0{i + 1}-01", computed_at="1999-01-01")
              for i, r in enumerate(base)]
-    a = AsofSeries(base, eligible=("src_iv",), value="implied_move", on_missing="null")
-    b = AsofSeries(noisy, eligible=("src_iv",), value="implied_move", on_missing="null")
-    assert a.at("2020-01-10") == b.at("2020-01-10") == 5.0
-
-
-def test_strict_prior_mean_excludes_current_and_warmup_events():
-    seq = event_sequence(DAYS, warmup=4)
-    values = [10.0, 20.0, 30.0, 40.0, 2.0, 4.0]
-    out = strict_prior_mean(seq, values, population="admitted")
-    # warm-up events neither get a value nor contribute; event 4 has no admitted prior
-    assert out == ((None, 0),) * 5 + ((2.0, 1),)
-    allpop = strict_prior_mean(seq, values, population="all")
-    assert allpop[0] == (None, 0)
-    assert allpop[4] == (25.0, 4)  # strictly prior: its own 2.0 is excluded
-    assert allpop[5] == (pytest.approx(20.4), 5)
-
-
-def test_strict_prior_mean_skips_null_contributions():
-    seq = event_sequence(DAYS, warmup=0)
-    out = strict_prior_mean(seq, [1.0, None, math.nan, 3.0, 5.0, 7.0], population="all")
-    assert out[3] == (1.0, 1)
-    assert out[4] == (2.0, 2)
-
-
-def test_strict_prior_mean_refuses_bad_inputs():
-    seq = event_sequence(DAYS, warmup=4)
-    with _mismatch():
-        strict_prior_mean(seq, [1.0], population="all")
-    with _mismatch():
-        strict_prior_mean(seq, [1.0] * 6, population="recent")
-    with _mismatch():
-        strict_prior_mean(seq[1:], [1.0] * 5, population="all")
-
-
-def test_eligible_nan_row_is_ineligible_not_an_anchor():
-    rows = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-08", math.nan, 9.0))
-    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
-    assert series.at("2020-01-10") == 4.0
-
-
-def test_missing_value_column_refuses():
-    with _mismatch():
-        AsofSeries([dict(date="2020-01-01", src_iv=0.5)], eligible=("src_iv",),
-                   value="implied_move", on_missing="null")
-
-
-def test_non_iso_dates_and_non_numeric_values_refuse():
-    series = AsofSeries(_rows(("2020-01-01", 0.5, 4.0)), eligible=("src_iv",),
-                        value="implied_move", on_missing="null")
-    with _mismatch():
-        series.at("not-a-date")
-    with _mismatch():
-        AsofSeries(_rows(("01/02/2020", 0.5, 4.0)), eligible=("src_iv",),
-                   value="implied_move", on_missing="null")
-    with _mismatch():
-        AsofSeries(_rows(("2020-01-01", 0.5, "abc")), eligible=("src_iv",),
-                   value="implied_move", on_missing="null")
-
-
-def test_matching_first_known_is_accepted():
-    assert len(event_sequence(DAYS, warmup=4, first_known=DAYS[0])) == 6
-
-
-@pytest.mark.parametrize("bad", ["20200110", "2020-W02-5", "2020-1-10", "2020-01-10T00:00"])
-def test_non_canonical_dates_refuse_everywhere(bad):
-    series = AsofSeries(_rows(("2020-01-11", 0.5, 4.0)), eligible=("src_iv",),
-                        value="implied_move", on_missing="null")
-    with _mismatch():
-        series.at(bad)
-    with _mismatch():
-        AsofSeries(_rows((bad, 0.5, 4.0)), eligible=("src_iv",),
-                   value="implied_move", on_missing="null")
-    with _mismatch():
-        event_sequence([bad], warmup=0)
-    with _mismatch():
-        event_sequence(DAYS, warmup=0, first_known=bad)
+    assert [_asof(base).at("2020-01-10"), _asof(noisy).at("2020-01-10")] == [5.0, 5.0]
+    assert [_asof(base).at("2020-01-05"), _asof(noisy).at("2020-01-05")] == [4.0, 4.0]
 
 
 @pytest.mark.parametrize("nan", [np.float32("nan"), np.float64("nan"), np.float16("nan")])
 def test_numpy_nan_is_null_everywhere(nan):
     rows = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-08", nan, 9.0))
-    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
-    assert series.at("2020-01-10") == 4.0
-    nan_value = AsofSeries(_rows(("2020-01-01", 0.5, nan)), eligible=("src_iv",),
-                           value="implied_move", on_missing="null")
-    assert nan_value.at("2020-02-01") is None
+    assert _asof(rows).at("2020-01-10") == 4.0
+    assert _asof(_rows(("2020-01-01", 0.5, nan))).at("2020-02-01") is None
     out = strict_prior_mean(event_sequence(DAYS, warmup=0), [1.0, nan, 3.0, 5.0, 7.0, 9.0],
                             population="all")
-    assert out[2] == (1.0, 1)
+    _assert_means(out, [(None, 0), (1.0, 1), (1.0, 1), (2.0, 2), (3.0, 3), (4.0, 4)])
 
 
-def _series(**kwargs):
-    base = dict(eligible=("src_iv",), value="implied_move", on_missing="null")
-    return AsofSeries(_rows(("2020-01-01", 0.5, 4.0)), **{**base, **kwargs})
+GOOD_NUMBERS = [
+    (3, 3.0), (2.5, 2.5), (-7, -7.0), (np.int32(-3), -3.0), (np.int64(5), 5.0),
+    (np.float32(-2.5), -2.5), (np.float64(0.125), 0.125), (np.float16(1.5), 1.5),
+    (np.float32(3.0), 3.0),
+]
 
 
-@pytest.mark.parametrize("warmup", [1.5, math.nan, True, "4", None, -1])
-def test_bad_warmup_refuses_with_code(warmup):
-    with pytest.raises(DataError) as err:
-        event_sequence(DAYS, warmup=warmup)
-    assert err.value.code == "CONTRACT_MISMATCH"
+@pytest.mark.parametrize("given, expected", GOOD_NUMBERS)
+def test_numeric_allow_list_members_are_accepted_on_the_lookup_path(given, expected):
+    assert _asof(_rows(("2020-01-01", 0.5, given))).at("2020-02-01") == expected
 
 
-def test_numpy_integer_warmup_is_accepted():
-    assert event_sequence(DAYS, warmup=np.int64(4))[4].admitted
+@pytest.mark.parametrize("given, e", GOOD_NUMBERS)
+def test_numeric_allow_list_members_are_accepted_on_the_aggregate_path(given, e):
+    out = strict_prior_mean(event_sequence(DAYS, warmup=0), [given, given, 0, 0.0, 0, 0.0],
+                            population="all")
+    _assert_means(out, [(None, 0), (e, 1), (e, 2), (e * 2 / 3, 3), (e / 2, 4), (e * 2 / 5, 5)])
 
 
-@pytest.mark.parametrize("stale", [1.5, math.nan, True, "5", -1])
-def test_bad_staleness_refuses_with_code(stale):
-    with pytest.raises(DataError) as err:
-        _series(max_staleness_days=stale)
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-@pytest.mark.parametrize("kwargs", [
-    {"eligible": "src_iv"}, {"eligible": None}, {"eligible": (1,)}, {"value": None},
-    {"on_missing": None},
-])
-def test_bad_declarations_refuse_with_code(kwargs):
-    with pytest.raises(DataError) as err:
-        _series(**kwargs)
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-@pytest.mark.parametrize("rows", [None, 5, "abc", {"date": "2020-01-01"}, [1], [None]])
-def test_bad_rows_refuse_with_code(rows):
-    with pytest.raises(DataError) as err:
-        AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-@pytest.mark.parametrize("bad", [None, 20200110, b"2020-01-10"])
-def test_bad_lookup_date_type_refuses_with_code(bad):
-    with pytest.raises(DataError) as err:
-        _series().at(bad)
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-@pytest.mark.parametrize("bad", ["abc", True, math.inf, 10**400, [1]])
-def test_non_numeric_anchor_value_refuses_with_code(bad):
-    with pytest.raises(DataError) as err:
-        AsofSeries(_rows(("2020-01-01", 0.5, bad)), eligible=("src_iv",),
-                   value="implied_move", on_missing="null")
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-@pytest.mark.parametrize("bad", ["abc", True, math.inf, 10**400, [1]])
-def test_non_numeric_contribution_refuses_with_code(bad):
-    seq = event_sequence(DAYS, warmup=0)
-    with pytest.raises(DataError) as err:
-        strict_prior_mean(seq, [bad, 1.0, 1.0, 1.0, 1.0, 1.0], population="all")
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-@pytest.mark.parametrize("dates", [None, 5, "2020-01-10", [None], [20200110]])
-def test_bad_event_dates_refuse_with_code(dates):
-    with pytest.raises(DataError) as err:
-        event_sequence(dates, warmup=0)
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-@pytest.mark.parametrize("events, values", [
-    (None, [1.0]), (5, [1.0]), ("ab", [1.0]), ([1, 2], [1.0, 2.0]),
-    (event_sequence(DAYS, warmup=0), None), (event_sequence(DAYS, warmup=0), 5),
-])
-def test_bad_aggregate_inputs_refuse_with_code(events, values):
-    with pytest.raises(DataError) as err:
-        strict_prior_mean(events, values, population="all")
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-@pytest.mark.parametrize("bad", ["1.5", b"1", np.array([1.0]), np.bool_(True), True, [1.0],
-                                 {"a": 1}, 1 + 2j, object()])
-def test_numeric_inputs_are_an_allow_list(bad):
-    with pytest.raises(DataError) as err:
-        AsofSeries(_rows(("2020-01-01", 0.5, bad)), eligible=("src_iv",),
-                   value="implied_move", on_missing="null")
-    assert err.value.code == "CONTRACT_MISMATCH"
-    with pytest.raises(DataError) as err:
-        strict_prior_mean(event_sequence(DAYS, warmup=0), [bad] + [1.0] * 5, population="all")
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-@pytest.mark.parametrize("good", [3, 3.0, np.int32(3), np.float32(3.0), np.float64(3.0)])
-def test_numeric_allow_list_members_are_accepted(good):
-    series = AsofSeries(_rows(("2020-01-01", 0.5, good)), eligible=("src_iv",),
-                        value="implied_move", on_missing="null")
-    assert series.at("2020-02-01") == 3.0
-
-
-@pytest.mark.parametrize("kwargs", [
-    {"event_date": "20200110", "ordinal": 0, "admitted": True},
-    {"event_date": None, "ordinal": 0, "admitted": True},
-    {"event_date": "2020-01-10", "ordinal": -1, "admitted": True},
-    {"event_date": "2020-01-10", "ordinal": 1.5, "admitted": True},
-    {"event_date": "2020-01-10", "ordinal": True, "admitted": True},
-    {"event_date": "2020-01-10", "ordinal": 0, "admitted": 1},
-    {"event_date": "2020-01-10", "ordinal": 0, "admitted": None},
-])
-def test_sequenced_event_validates_on_construction(kwargs):
-    with pytest.raises(DataError) as err:
-        SequencedEvent(**kwargs)
-    assert err.value.code == "CONTRACT_MISMATCH"
-
+# ---- AsofSeries: construction refusals -----------------------------------------------
 
 @pytest.mark.parametrize("policy", [None, 5, ["null"], b"null", "NULL", "default", {"null"}])
 def test_policy_declarations_check_type_then_membership(policy):
-    with pytest.raises(DataError) as err:
+    with _mismatch(ON_MISSING_MSG):
         _series(on_missing=policy)
-    assert err.value.code == "CONTRACT_MISMATCH"
-    with pytest.raises(DataError) as err:
+    with _mismatch(POPULATION_MSG):
         strict_prior_mean(event_sequence(DAYS, warmup=0), [1.0] * 6, population=policy)
-    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("stale", [1.5, math.nan, True, "5", -1, -30])
+def test_bad_staleness_refuses(stale):
+    with _mismatch("max_staleness_days must be a non-negative integer"):
+        _series(max_staleness_days=stale)
+
+
+@pytest.mark.parametrize("eligible, message", [
+    ("src_iv", "eligible must be a list or tuple"),
+    (None, "eligible must be a list or tuple"),
+    (range(2), "eligible must be a list or tuple"),
+    ((1,), "eligible must be a sequence of column names"),
+    (("src_iv", None), "eligible must be a sequence of column names"),
+])
+def test_bad_eligible_declaration_refuses(eligible, message):
+    with _mismatch(message):
+        _series(eligible=eligible)
+
+
+@pytest.mark.parametrize("value", [None, 5, b"implied_move"])
+def test_bad_value_declaration_refuses(value):
+    with _mismatch("value must be a column name"):
+        _series(value=value)
+
+
+@pytest.mark.parametrize("rows, message", [
+    (None, "rows must be a list or tuple"),
+    (5, "rows must be a list or tuple"),
+    ("abc", "rows must be a list or tuple"),
+    ({"date": "2020-01-01"}, "rows must be a list or tuple"),
+    ([1], "each row must be a mapping"),
+    ([None], "each row must be a mapping"),
+    ([["2020-01-01"]], "each row must be a mapping"),
+])
+def test_bad_rows_refuse(rows, message):
+    with _mismatch(message):
+        _asof(rows)
+
+
+@pytest.mark.parametrize("rows", [
+    _rows(("2020-01-02", 0.5, 1.0), ("2020-01-01", 0.5, 1.0)),
+    _rows(("2020-01-01", 0.5, 1.0), ("2020-01-01", 0.5, 2.0)),
+])
+def test_rows_must_be_strictly_date_ascending(rows):
+    with _mismatch("rows must be strictly date-ascending"):
+        _asof(rows)
+
+
+@pytest.mark.parametrize("missing", ["date", "src_iv", "implied_move"])
+def test_missing_date_eligibility_or_value_column_refuses_with_its_name(missing):
+    row = dict(date="2020-01-01", src_iv=0.5, implied_move=4.0)
+    del row[missing]
+    with _mismatch("rows lack a required column", column=missing):
+        _asof([row])
+
+
+def test_missing_second_eligibility_column_names_that_column():
+    with _mismatch("rows lack a required column", column="ghost"):
+        _asof(_rows(("2020-01-01", 0.5, 4.0)), eligible=("src_iv", "ghost"))
+
+
+@pytest.mark.parametrize("bad", ["not-a-date", "01/02/2020", "2020-13-01"])
+def test_bad_lookup_and_row_date_strings_refuse(bad):
+    with _mismatch(ISO):
+        _series().at(bad)
+    with _mismatch(ISO):
+        _asof(_rows((bad, 0.5, 4.0)))
+
+
+@pytest.mark.parametrize("bad", [None, 20200110, b"2020-01-10"])
+def test_bad_lookup_date_type_refuses(bad):
+    with _mismatch(ISO):
+        _series().at(bad)
+
+
+NON_NUMERIC = [
+    ("abc", NUMERIC), ("1.5", NUMERIC), (b"1", NUMERIC), (True, NUMERIC),
+    (np.bool_(True), NUMERIC), ([1], NUMERIC), ([1.0], NUMERIC), ({"a": 1}, NUMERIC),
+    (1 + 2j, NUMERIC), (np.array([1.0]), NUMERIC), (object(), NUMERIC),
+    (math.inf, FINITE), (-math.inf, FINITE), (10**400, FINITE),
+]
+
+
+@pytest.mark.parametrize("bad, message", NON_NUMERIC)
+def test_non_numeric_values_refuse_on_the_lookup_path(bad, message):
+    with _mismatch(message):
+        _asof(_rows(("2020-01-01", 0.5, bad)))
+
+
+@pytest.mark.parametrize("bad, message", NON_NUMERIC)
+def test_non_numeric_values_refuse_on_the_aggregate_path(bad, message):
+    seq = event_sequence(DAYS, warmup=0)
+    with _mismatch(message):
+        strict_prior_mean(seq, [bad, 1.0, 1.0, 1.0, 1.0, 1.0], population="all")
+    with _mismatch(message):
+        strict_prior_mean(seq, [1.0, 1.0, 1.0, 1.0, 1.0, bad], population="all")
+
+
+@pytest.mark.parametrize("bad, message", [("abc", NUMERIC), (math.inf, FINITE),
+                                          ([1], NUMERIC), (True, NUMERIC)])
+def test_malformed_value_is_refused_on_ineligible_and_non_selected_rows(bad, message):
+    ineligible = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-05", None, bad))
+    non_selected = _rows(("2020-01-01", 0.5, bad), ("2020-01-05", 0.5, 4.0))
+    for rows in (ineligible, non_selected):
+        with _mismatch(message):
+            _asof(rows)
+
+
+# ---- strict_prior_mean ---------------------------------------------------------------
+
+def test_strict_prior_mean_excludes_current_and_warmup_events():
+    seq = event_sequence(DAYS, warmup=4)
+    values = [10.0, 20.0, 30.0, 40.0, 2.0, 4.0]
+    admitted = strict_prior_mean(seq, values, population="admitted")
+    _assert_means(admitted, [(None, 0)] * 5 + [(2.0, 1)])
+    everything = strict_prior_mean(seq, values, population="all")
+    _assert_means(everything, [(None, 0), (10.0, 1), (15.0, 2), (20.0, 3), (25.0, 4),
+                               (20.4, 5)])
+
+
+def test_strict_prior_mean_skips_null_contributions():
+    seq = event_sequence(DAYS, warmup=0)
+    out = strict_prior_mean(seq, [1.0, None, math.nan, 3.0, 5.0, 7.0], population="all")
+    _assert_means(out, [(None, 0), (1.0, 1), (1.0, 1), (1.0, 1), (2.0, 2), (3.0, 3)])
+
+
+def test_admitted_population_means_over_several_admitted_events():
+    seq = event_sequence(DAYS, warmup=2)
+    out = strict_prior_mean(seq, [100.0, 200.0, 2.0, 4.0, 6.0, 8.0], population="admitted")
+    _assert_means(out, [(None, 0), (None, 0), (None, 0), (2.0, 1), (3.0, 2), (4.0, 3)])
 
 
 def test_mean_does_not_overflow_on_large_finite_values():
     seq = event_sequence(DAYS, warmup=0)
-    out = strict_prior_mean(seq, [1e308, 1e308, 0.0, 1.0, 1.0, 1.0], population="all")
-    assert out[2] == (pytest.approx(1e308), 2)
-    assert all(m is None or math.isfinite(m) for m, _ in out)
+    big = strict_prior_mean(seq, [1e308, 1e308, 0.0, 1.0, 1.0, 1.0], population="all")
+    _assert_means(big, [(None, 0), (1e308, 1), (1e308, 2), (6.666666666666667e307, 3),
+                        (5e307, 4), (4e307, 5)])
     mixed = strict_prior_mean(seq, [1e308, -1e308, 0.0, 1.0, 1.0, 1.0], population="all")
-    assert mixed[2] == (pytest.approx(0.0, abs=1e292), 2)
+    _assert_means(mixed, [(None, 0), (1e308, 1), (0.0, 2), (0.0, 3), (0.0, 4), (0.0, 5)],
+                  abs_tol=1e293)
+
+
+def test_tuples_are_accepted_as_containers():
+    seq = event_sequence(tuple(DAYS), warmup=0)
+    out = strict_prior_mean(seq, tuple([1.0] * 6), population="all")
+    _assert_means(out, [(None, 0), (1.0, 1), (1.0, 2), (1.0, 3), (1.0, 4), (1.0, 5)])
+    series = AsofSeries(tuple(_rows(("2020-01-01", 0.5, 4.0))), eligible=("src_iv",),
+                        value="implied_move", on_missing="null")
+    assert series.at("2020-01-02") == 4.0
+
+
+@pytest.mark.parametrize("values, message", [
+    ([1.0], "events and values differ in length"),
+    ([1.0] * 7, "events and values differ in length"),
+])
+def test_length_mismatch_refuses(values, message):
+    with _mismatch(message):
+        strict_prior_mean(event_sequence(DAYS, warmup=4), values, population="all")
+
+
+@pytest.mark.parametrize("events", [event_sequence(DAYS, warmup=4)[1:],
+                                    event_sequence(DAYS, warmup=4)[::-1]])
+def test_events_must_be_the_full_ordinal_sequence(events):
+    with _mismatch("events must be the full sequence in ordinal order"):
+        strict_prior_mean(events, [1.0] * len(events), population="all")
+
+
+@pytest.mark.parametrize("events, values, message", [
+    (None, [1.0], "events must be a list or tuple"),
+    (5, [1.0], "events must be a list or tuple"),
+    ("ab", [1.0], "events must be a list or tuple"),
+    ([1, 2], [1.0, 2.0], "events must be SequencedEvent items"),
+    ([None], [1.0], "events must be SequencedEvent items"),
+    (event_sequence(DAYS, warmup=0), None, "values must be a list or tuple"),
+    (event_sequence(DAYS, warmup=0), 5, "values must be a list or tuple"),
+])
+def test_bad_aggregate_inputs_refuse(events, values, message):
+    with _mismatch(message):
+        strict_prior_mean(events, values, population="all")
 
 
 @pytest.mark.parametrize("population", ["admitted", "all"])
@@ -343,103 +479,32 @@ def test_mean_does_not_overflow_on_large_finite_values():
 ])
 def test_hand_built_events_must_be_strictly_ascending(population, dates):
     events = [SequencedEvent(day, i, True) for i, day in enumerate(dates)]
-    with pytest.raises(DataError) as err:
+    with _mismatch("event dates must be strictly ascending in ordinal order"):
         strict_prior_mean(events, [1.0, 2.0, 3.0], population=population)
-    assert err.value.code == "CONTRACT_MISMATCH"
 
 
-@pytest.mark.parametrize("bad", ["abc", math.inf, [1], True])
-def test_warmup_event_values_are_validated_under_admitted(bad):
+@pytest.mark.parametrize("bad, message", [("abc", NUMERIC), (math.inf, FINITE),
+                                          ([1], NUMERIC), (True, NUMERIC)])
+def test_warmup_event_values_are_validated_under_admitted(bad, message):
     seq = event_sequence(DAYS, warmup=4)
-    with pytest.raises(DataError) as err:
+    with _mismatch(message):
         strict_prior_mean(seq, [bad, 1.0, 1.0, 1.0, 1.0, 1.0], population="admitted")
-    assert err.value.code == "CONTRACT_MISMATCH"
 
 
-def test_admitted_population_means_over_several_admitted_events():
-    seq = event_sequence(DAYS, warmup=2)
-    out = strict_prior_mean(seq, [100.0, 200.0, 2.0, 4.0, 6.0, 8.0], population="admitted")
-    assert out == ((None, 0), (None, 0), (None, 0), (2.0, 1), (3.0, 2), (4.0, 3))
+NOT_LIST_OR_TUPLE = [b"\x01\x03", "2020-01-10", range(3), np.array([1.0, 2.0]), {1.0, 2.0},
+                     (x for x in [1.0])]
 
 
-@pytest.mark.parametrize("max_age, expected", [(9, None), (10, 4.0), (11, 4.0)])
-def test_staleness_boundary_is_inclusive_at_exact_age(max_age, expected):
-    # anchor 2020-01-01, event 2020-01-11: age is exactly 10 days
-    series = _series(max_staleness_days=max_age)
-    assert series.at("2020-01-11") == expected
-
-
-def test_stale_anchor_refuses_when_declared_and_zero_staleness_is_a_miss():
-    with pytest.raises(DataError) as err:
-        _series(max_staleness_days=1, on_missing="refuse").at("2020-01-11")
-    assert err.value.code == "CONTRACT_MISMATCH"
-    assert _series(max_staleness_days=0).at("2020-01-02") is None
-    assert _series(max_staleness_days=1).at("2020-01-02") == 4.0
-
-
-def test_duplicate_row_dates_refuse():
-    with pytest.raises(DataError) as err:
-        AsofSeries(_rows(("2020-01-01", 0.5, 1.0), ("2020-01-01", 0.5, 2.0)),
-                   eligible=("src_iv",), value="implied_move", on_missing="null")
-    assert err.value.code == "CONTRACT_MISMATCH"
-
-
-def test_every_eligible_field_must_be_present():
-    rows = [dict(date="2020-01-01", a=1.0, b=1.0, v=4.0),
-            dict(date="2020-01-08", a=1.0, b=None, v=9.0)]
-    series = AsofSeries(rows, eligible=("a", "b"), value="v", on_missing="null")
-    assert series.at("2020-01-10") == 4.0
-
-
-_NOT_LIST_OR_TUPLE = [b"\x01\x03", "2020-01-10", range(3), np.array([1.0, 2.0]), {1.0, 2.0},
-                      (x for x in [1.0])]
-
-
-@pytest.mark.parametrize("bad", _NOT_LIST_OR_TUPLE)
+@pytest.mark.parametrize("bad", NOT_LIST_OR_TUPLE)
 def test_every_container_input_allows_only_list_or_tuple(bad):
     seq = event_sequence(DAYS, warmup=0)
-    calls = [
-        lambda: event_sequence(bad, warmup=0),
-        lambda: AsofSeries(bad, eligible=("src_iv",), value="implied_move",
-                           on_missing="null"),
-        lambda: AsofSeries(_rows(("2020-01-01", 0.5, 4.0)), eligible=bad,
-                           value="implied_move", on_missing="null"),
-        lambda: strict_prior_mean(bad, [1.0] * 6, population="all"),
-        lambda: strict_prior_mean(seq, bad, population="all"),
-    ]
-    for call in calls:
-        with pytest.raises(DataError) as err:
-            call()
-        assert err.value.code == "CONTRACT_MISMATCH"
-
-
-def test_tuples_are_accepted_as_containers():
-    seq = event_sequence(tuple(DAYS), warmup=0)
-    assert strict_prior_mean(seq, tuple([1.0] * 6), population="all")[1] == (1.0, 1)
-    series = AsofSeries(tuple(_rows(("2020-01-01", 0.5, 4.0))), eligible=("src_iv",),
-                        value="implied_move", on_missing="null")
-    assert series.at("2020-01-02") == 4.0
-
-
-@pytest.mark.parametrize("missing", ["date", "src_iv", "implied_move"])
-def test_missing_date_eligibility_or_value_column_refuses_exact_code(missing):
-    row = dict(date="2020-01-01", src_iv=0.5, implied_move=4.0)
-    del row[missing]
-    with _mismatch():
-        AsofSeries([row], eligible=("src_iv",), value="implied_move", on_missing="null")
-
-
-@pytest.mark.parametrize("bad", ["abc", math.inf, True, [1]])
-def test_malformed_value_is_refused_on_ineligible_and_non_selected_rows(bad):
-    ineligible = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-05", None, bad))
-    non_selected = _rows(("2020-01-01", 0.5, bad), ("2020-01-05", 0.5, 4.0))
-    for rows in (ineligible, non_selected):
-        with _mismatch():
-            AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
-
-
-def test_null_values_on_any_row_are_still_accepted():
-    rows = _rows(("2020-01-01", None, None), ("2020-01-05", 0.5, math.nan),
-                 ("2020-01-06", 0.5, 4.0))
-    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
-    assert series.at("2020-01-10") == 4.0
+    with _mismatch("event_dates must be a list or tuple"):
+        event_sequence(bad, warmup=0)
+    with _mismatch("rows must be a list or tuple"):
+        _asof(bad)
+    with _mismatch("eligible must be a list or tuple"):
+        _series(eligible=bad)
+    with _mismatch("events must be a list or tuple"):
+        strict_prior_mean(bad, [1.0] * 6, population="all")
+    with _mismatch("values must be a list or tuple"):
+        strict_prior_mean(seq, bad, population="all")
