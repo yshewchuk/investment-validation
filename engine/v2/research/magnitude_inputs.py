@@ -1,0 +1,104 @@
+"""Protected earnings-magnitude labels and a separate full-session forecast clock."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from engine.v2.data import errors
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
+from engine.v2.foundation import content_hash, market_calendar
+from engine.v2.foundation.experiment_holdouts import _calendar_date
+from engine.v2.research.event_history import _CONTEXT, _plans
+from engine.v2.research.experiment_population import load_population
+from engine.v2.research.prediction_inputs import _parse_target
+
+
+def magnitude_recipe():
+    """Fresh fixed recipe bytes; no caller-selected price basis or hidden scaling."""
+    return {"schema_version": "earnings_magnitude.v1", "units": "percentage_points",
+            "target": "absolute_earnings_close_to_close_return",
+            "price_basis": "split_neutral_non_dividend_adjusted",
+            "estimand": "conditional_mean", "primary_loss": "pooled_rmse",
+            "secondary_diagnostics": ["mae", "quantile_calibration"]}
+
+
+def forecast_cutoff(event_date, session, horizon, calendar):
+    """Source-session ceiling, not proof of intraday source/schedule availability."""
+    try:
+        day = _calendar_date(event_date)
+        if type(horizon) is not int or horizon not in (5, 3, 1):
+            raise ValueError
+        if not isinstance(calendar, market_calendar.CalendarSessions):
+            raise ValueError
+        observed = _calendar_date(calendar.observed_through)
+        key = SimpleNamespace(event_date=day, session=session, strategy="STR-RUNUP")
+        anchor = market_calendar.planned_exit_date(key, calendar)
+        index = calendar.days.index(anchor) - horizon
+        if index < 0 or anchor > observed.isoformat() or calendar.observed_through not in calendar.days:
+            raise ValueError
+        ceiling = calendar.days[index]
+        # The native rule calendar detects missing interior sessions without weekday subtraction.
+        complete = market_calendar.build_calendar_sessions((ceiling,), event_through=day)
+        if anchor != market_calendar.planned_exit_date(key, complete):
+            raise ValueError
+        expected = tuple(d for d in complete.days if d <= anchor)
+        if calendar.days[index:index + horizon + 1] != expected:
+            raise ValueError
+    except (ValueError, TypeError, OverflowError, AttributeError):
+        raise errors.fail("CONTRACT_MISMATCH", "invalid or insufficient full-session forecast calendar") from None
+    identity = {"schema_version": "earnings_forecast_cutoff.v1", "event_date": day.isoformat(),
+        "session": session, "horizon_sessions": horizon, "pre_announcement_close": anchor,
+        "source_session_ceiling": ceiling, "calendar_id": content_hash({
+            "days": list(calendar.days), "observed_through": calendar.observed_through})}
+    return {**identity, "cutoff_id": content_hash(identity)}
+
+
+def _label_before(rows, event, cutoff):
+    """Check the recorded clock before consuming its numeric outcome."""
+    try:
+        if len(rows) != 1 or _calendar_date(rows[0]["available_as_of_date"]) >= cutoff:
+            raise ValueError
+    except (ValueError, TypeError, OverflowError):
+        raise errors.fail("EXPERIMENT_VARIANT_FAILED", "magnitude label is not available before cutoff") from None
+    return _parse_target(rows, event.event_date.date())
+
+
+def load_magnitude_targets(repository, snapshot, *, as_of_month, labels_before,
+                           purpose="selection", event_ids=None):
+    """Admit metadata and every physical object before reading any magnitude label."""
+    try:
+        cutoff = _calendar_date(labels_before)
+    except (ValueError, TypeError, OverflowError):
+        raise errors.fail("CONTRACT_MISMATCH", "an explicit label-availability cutoff is required") from None
+    population = load_population(repository, snapshot, as_of_month=as_of_month,
+                                 purpose=purpose, event_ids=event_ids)
+    eligible = population.event_date.dt.date < cutoff
+    if event_ids is not None and not eligible.all():
+        raise errors.fail("CONTRACT_MISMATCH", "requested magnitude events must precede label cutoff")
+    rows = population[eligible].sort_values(["event_date", "event_id"]).reset_index(drop=True)
+    if rows.empty:
+        raise errors.fail("POPULATION_COLLAPSED", "no magnitude events precede label cutoff")
+    contract = repository.table_contract(snapshot, "computed_moves")
+    if contract != COMPUTED_MOVES_CONTRACT:
+        raise errors.fail("CONTRACT_MISMATCH", "magnitude labels require native computed moves")
+    plans = _plans(repository, snapshot, rows, contract)
+    signed, available, consumed = [], [], []
+    for event, request, record in plans:
+        decoded = [row for batch in repository.scan(request, table_name="computed_moves")
+                   for row in batch.to_pylist()]
+        value, _, known = _label_before(decoded, event, cutoff)
+        signed.append(value)
+        available.append(known)
+        consumed.append({"event_id": event.event_id, "fragment_id": record.fragment_id,
+            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash})
+    rows["realized_move_pct"], rows["absolute_move_pct"] = signed, [abs(value) for value in signed]
+    rows["target_available_on"] = available
+    rows["target_object_id"] = [item["object_id"] for item in consumed]
+    recipe = magnitude_recipe()
+    identity = {"schema_version": "research_magnitude_targets.v1",
+        **{name: rows.iloc[0][name] for name in _CONTEXT}, "purpose": purpose,
+        "computed_moves_version": snapshot.table_versions["computed_moves"].dataset_version_id,
+        "labels_before": cutoff.isoformat(), "target_recipe": recipe,
+        "target_recipe_id": content_hash(recipe), "consumed_inputs": consumed,
+        "excluded_future_events": sorted(population.loc[~eligible, "event_id"].tolist())}
+    rows.attrs.update(identity, inputs_id=content_hash(identity))
+    return rows
