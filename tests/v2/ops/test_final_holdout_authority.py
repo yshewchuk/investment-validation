@@ -477,7 +477,7 @@ def test_recovery_rejects_revocation_between_death_check_and_commit(context, mon
 
 
 def test_real_owner_exit_is_proven_dead_without_a_timeout(context, monkeypatch):
-    _authorize(context)
+    authorization = _authorize(context)
     _state_assent(monkeypatch, context, "START")
     ctx = multiprocessing.get_context("fork")
 
@@ -499,6 +499,8 @@ def test_real_owner_exit_is_proven_dead_without_a_timeout(context, monkeypatch):
             context.conn, context.request.experiment_id, clock=context.clock)
         assert recovered["state"] == "indeterminate"
         assert recovered["fence"] == started["fence"]
+        assert recovered["request_digest"] == authorization["request_digest"]
+        assert recovered["occurred_at"] == context.clock.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         assert not authority.final_holdout_fence_current(
             context.conn, context.request.experiment_id, started["request_digest"], started["fence"])
         _state_assent(monkeypatch, context, "START")
@@ -589,7 +591,7 @@ def test_start_and_revoke_serialize_to_a_revoked_fence(context, monkeypatch):
 
 
 def test_boot_change_proves_the_old_process_dead(context, monkeypatch):
-    _authorize(context)
+    authorization = _authorize(context)
     monkeypatch.setattr(authority, "read_boot_id", lambda: "synthetic-old-boot")
     _state_assent(monkeypatch, context, "START")
     started = _start(context)
@@ -599,6 +601,8 @@ def test_boot_change_proves_the_old_process_dead(context, monkeypatch):
     recovered = authority.recover_interrupted_final_holdout_read(
         context.conn, context.request.experiment_id, clock=context.clock)
     assert recovered["state"] == "indeterminate"
+    assert recovered["request_digest"] == authorization["request_digest"]
+    assert recovered["occurred_at"] == context.clock.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def test_start_refuses_malformed_owner_identity_before_spending(context, monkeypatch):
