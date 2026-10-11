@@ -109,7 +109,7 @@ This receipt is not an evaluation report or promotion evidence.
 | Unresolved pin or non-sweep purpose | `SNAPSHOT_UNRESOLVED` or `HOLDOUT_ACCESS_DENIED`; no pricing receipt or partial report. |
 | Incomplete/nonfinite pricing or pinned-data failure | Incomplete/nonfinite pricing yields `EXPERIMENT_VARIANT_FAILED`. Data codes registered with ops retain their code; others use that fallback. The original data code remains only in private `data_failure_code` details; no success receipt. |
 | Retry/cache/transaction | One attempt; cross-job cache reuse is disabled so admission is checked again. No worker catalog transaction or CSV access. |
-| Existing receipt destination or receipt I/O failure | Non-retryable `INPUT_CHANGED`; private partial attempt bytes may remain, but no successful output is published. |
+| Existing receipt destination or receipt I/O failure | Non-retryable `INPUT_CHANGED`; failed writes best-effort remove only the newly created receipt, preserving the original failure. Cleanup failure may leave private partial bytes; no successful output is published. |
 | Successful smoke | Operations job/output artifact rows only; no reusable checkpoint is stored. Native registration/outcome and experiment ledger rows stay unchanged. |
 
 This admitted path does not fit gates, record outcomes or orchestrate sweeps.

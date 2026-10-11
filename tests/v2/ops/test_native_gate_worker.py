@@ -654,7 +654,7 @@ else:
     if kind == "file":
         assert path.read_bytes() == b"existing sentinel"
     elif kind == "write-error":
-        assert path.read_bytes() == b""
+        assert not path.exists()
     elif kind == "directory":
         assert path.is_dir() and list(path.iterdir()) == []
     elif kind == "symlink":

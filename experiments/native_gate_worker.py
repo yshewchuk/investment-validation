@@ -53,6 +53,12 @@ def _write_receipt(path, receipt):
     try:
         with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as stream:
             stream.write(canonical_json(receipt))
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
     finally:
         os.close(fd)
 
