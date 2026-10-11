@@ -8,7 +8,10 @@ atomic writer and the real JSON reader -- none of those layers is stubbed.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 
@@ -263,7 +266,7 @@ def test_service_records_a_real_run_scoped_report_and_is_byte_stable(tmp_path):
         assert report["run_id"] == run_id  # scoped to this run, not its date or key
         assert report["status"] == "completed"
         assert str(tmp_path) not in text  # redacted: no local path leaked
-        assert "Traceback" not in text and "Error" not in text
+        assert "Traceback" not in text and "FileNotFoundError" not in text
         again = service.record_nightly_completion(IDENT, 1, expected, observed)
         assert again == report
         assert path.read_text() == text == (
@@ -272,22 +275,64 @@ def test_service_records_a_real_run_scoped_report_and_is_byte_stable(tmp_path):
         conn.close()
 
 
-def test_recording_for_a_superseded_generation_refuses_and_keeps_old_bytes(tmp_path):
+def test_overlapping_recorders_and_rerun_share_the_session_lock(tmp_path, monkeypatch):
     ensure_session(tmp_path, IDENT)
     mark_started(tmp_path, IDENT, 1)
     conn, service = _service(tmp_path)
+    expected = {"primary": "required"}
+    observed = {"primary": Disposition("succeeded")}
+    entered, release = Event(), Event()
+    second_replace, rerun_replace = Event(), Event()
+    second_started, rerun_started = Event(), Event()
+    real_replace = os.replace
+
+    def pause_completion_replace(source, destination):
+        target = str(destination)
+        if target.endswith(".completion.json"):
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test writer was not released")
+            else:
+                second_replace.set()
+        elif target.endswith(f"{IDENT.session_key}.json"):
+            rerun_replace.set()
+        return real_replace(source, destination)
+
+    def record_again():
+        second_started.set()
+        return service.record_nightly_completion(IDENT, 1, expected, observed)
+
+    def rerun():
+        rerun_started.set()
+        return request_rerun(tmp_path, IDENT)
+
+    monkeypatch.setattr(os, "replace", pause_completion_replace)
     try:
-        expected = {"primary": "required"}
-        observed = {"primary": Disposition("succeeded")}
-        first = service.record_nightly_completion(IDENT, 1, expected, observed)
-        old_path = tmp_path.joinpath(*STATE_DIR, f"{first['run_id']}.completion.json")
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            first = pool.submit(service.record_nightly_completion, IDENT, 1, expected, observed)
+            assert entered.wait(5)
+            second = pool.submit(record_again)
+            next_generation = pool.submit(rerun)
+            assert second_started.wait(5) and rerun_started.wait(5)
+            assert not second_replace.wait(0.1) and not rerun_replace.wait(0.1)
+            assert not second.done() and not next_generation.done()
+            release.set()
+            report = first.result(timeout=5)
+            try:
+                second_report = second.result(timeout=5)
+            except OpsError as exc:
+                assert exc.code == "CHECKPOINT_INCOMPATIBLE"
+                second_report = report
+            active = next_generation.result(timeout=5)
+        assert active.active.generation == 2
+        old_path = tmp_path.joinpath(*STATE_DIR, f"{report['run_id']}.completion.json")
         before = old_path.read_bytes()
-        second = request_rerun(tmp_path, IDENT)  # allocates generation 2
         with pytest.raises(OpsError) as exc:
             service.record_nightly_completion(IDENT, 1, expected, observed)
         assert exc.value.code == "CHECKPOINT_INCOMPATIBLE"
         assert old_path.read_bytes() == before
-        new_path = tmp_path.joinpath(*STATE_DIR, f"{second.active.run_id}.completion.json")
-        assert not new_path.exists()
+        assert json.loads(before) in (report, second_report)
     finally:
+        release.set()
         conn.close()

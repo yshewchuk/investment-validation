@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -20,7 +21,7 @@ from engine.v2.ops.errors import fail
 
 __all__ = ["Generation", "SessionIdentity", "SessionState", "atomic_write", "compare_and_swap",
            "ensure_session", "load_session", "mark_started", "request_rerun",
-           "session_path"]
+           "session_path", "session_transition_lock"]
 
 SCHEMA = "nightly_session.v1"
 KEY_VERSION = "nightly_session_key.v1"
@@ -157,14 +158,22 @@ def atomic_write(path: Path, text: str) -> None:
         os.close(dir_fd)
 
 
+@contextmanager
+def session_transition_lock(root: Path, identity: SessionIdentity):
+    """Hold the per-session lock used for transitions and run-scoped publications."""
+    path = session_path(root, identity)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(path.name + ".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def compare_and_swap(root: Path, identity: SessionIdentity, expected_revision: int,
                      generations: tuple[Generation, ...]) -> SessionState | None:
     """Write ``generations`` at ``expected_revision + 1`` iff the stored revision is
     ``expected_revision`` (0 = no file). Returns ``None`` when the swap was lost."""
     path = session_path(root, identity)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.with_name(path.name + ".lock"), "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with session_transition_lock(root, identity):
         current = load_session(root, identity)
         if (current.revision if current else 0) != expected_revision:
             return None

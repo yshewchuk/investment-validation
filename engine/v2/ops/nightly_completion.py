@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 from engine.v2.ops.errors import OpsError, make_problem
-from engine.v2.ops.nightly_session import STATE_DIR, SessionIdentity, atomic_write, load_session
+from engine.v2.ops.nightly_session import (
+    STATE_DIR,
+    SessionIdentity,
+    atomic_write,
+    load_session,
+    session_transition_lock,
+)
 
 SCHEMA = "nightly_completion.v1"
 _ROLES = {"required", "optional", "qualification"}
@@ -148,13 +154,14 @@ def build_completion_report(run_id: str, expected: Mapping[str, str],
 
 def record_completion(root: Path, identity: SessionIdentity, generation: int,
                       expected: Mapping[str, str], observed: Mapping[str, Disposition]) -> dict:
-    """Atomically write one report only for the active started session generation."""
-    state = load_session(root, identity)
-    if (type(generation) is not int or state is None
-            or state.active.generation != generation or state.active.status != "started"):
-        raise OpsError(make_problem("CHECKPOINT_INCOMPATIBLE",
-                                    "completion generation is not the active started run"))
-    report = build_completion_report(state.active.run_id, expected, observed)
-    path = Path(root).joinpath(*STATE_DIR, f"{state.active.run_id}.completion.json")
-    atomic_write(path, json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n")
-    return report
+    """Write only for the active started generation, under the session-transition lock."""
+    with session_transition_lock(root, identity):
+        state = load_session(root, identity)
+        if (type(generation) is not int or state is None
+                or state.active.generation != generation or state.active.status != "started"):
+            raise OpsError(make_problem("CHECKPOINT_INCOMPATIBLE",
+                                        "completion generation is not the active started run"))
+        report = build_completion_report(state.active.run_id, expected, observed)
+        path = Path(root).joinpath(*STATE_DIR, f"{state.active.run_id}.completion.json")
+        atomic_write(path, json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n")
+        return report
