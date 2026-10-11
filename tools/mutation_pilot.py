@@ -1395,7 +1395,13 @@ def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
                   if _REGISTRATION_CONFIG in changed_set else None)
     for path in changed_set:
         if path == _REGISTRATION_CONFIG and registered is not None:
+            # A newly registered file is not yet in any import edge, so modules whose
+            # tests scan a whole tree (scans_tree = "<prefix>", #672) are added when a
+            # changed Python file sits under their prefix.
             owned.update(registered)
+            owned.update(n for n in enabled if cfg["modules"][n].get("scans_tree")
+                         and any(p.endswith(".py") and p.startswith(cfg["modules"][n]["scans_tree"])
+                                 for p in changed_set))
             continue
         selectors = {n for n in enabled
                      if module_owns_changed_path(cfg, n, path) or path in dep_sets[n]}
@@ -1854,14 +1860,14 @@ def registration_tests(cfg: dict, base: dict | None, changed: set[str],
                 return None
             for mod in config["modules"].values():
                 if (not isinstance(mod, dict) or "mutate" not in mod
-                        or set(mod) - {"mutate", "tests", "skip", "excluded", "why"}):
+                        or set(mod) - {"mutate", "tests", "skip", "excluded", "why", "scans_tree"}):
                     return None
                 for field, value in mod.items():
                     if field in {"mutate", "tests", "skip"}:
                         if (not isinstance(value, list) or not all(isinstance(p, str) for p in value)
                                 or len(value) != len(set(value))):
                             return None
-                    elif not isinstance(value, str):
+                    elif not isinstance(value, str) or (field == "scans_tree" and not value):
                         return None
         if list(base["modules"]) != list(cfg["modules"]):
             return None

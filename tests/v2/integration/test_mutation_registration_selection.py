@@ -318,26 +318,62 @@ def test_architecture_documents_resource_and_coverage_fallbacks():
     assert "without nonempty base and head test expansions selects the full suite" in contract
 
 
-def test_verified_registration_selects_only_the_registered_module(case):
+def _with_scanner(base, cfg, graph):
+    # A module whose tests scan a whole tree (see issue #672): the import graph never links it.
+    for config in (base, cfg):
+        config["modules"]["scan"] = {"mutate": ["engine/scan.py"], "tests": ["tests/test_scan.py"],
+                                     "scans_tree": "engine/"}
+    graph.update({"engine/scan.py": set(), "tests/test_scan.py": set(),
+                  "engine/newb.py": set(), "tests/test_newb.py": {"engine/newb.py"}})
+
+
+@pytest.mark.parametrize("which, expected", [
+    ("alpha", ["alpha", "scan"]),
+    ("beta", ["beta", "scan"]),
+])
+def test_registration_selects_exactly_the_registered_module_plus_tree_scanners(
+        case, which, expected):
     base, cfg, changed, graph = case
-    got = pilot.changed_modules(cfg, ["alpha", "beta"], changed, graph=graph, base_cfg=base)
-    assert got == ["alpha"]
+    _with_scanner(base, cfg, graph)
+    if which == "beta":
+        cfg["modules"]["alpha"] = copy.deepcopy(base["modules"]["alpha"])
+        cfg["modules"]["beta"]["mutate"].append("engine/newb.py")
+        cfg["modules"]["beta"]["tests"].append("tests/test_newb.py")
+        changed = [CONFIG, "engine/newb.py", "tests/test_newb.py"]
+    got = pilot.changed_modules(cfg, ["alpha", "beta", "scan"], changed, graph=graph, base_cfg=base)
+    assert got == expected
+
+
+@pytest.mark.parametrize("path, expected", [
+    ("engine/beta.py", ["beta"]),
+    ("tests/test_beta.py", ["beta"]),
+])
+def test_ordinary_change_does_not_pull_in_tree_scanners(case, path, expected):
+    base, cfg, _, graph = case
+    _with_scanner(base, cfg, graph)
+    got = pilot.changed_modules(cfg, ["alpha", "beta", "scan"], [path], graph=graph)
+    assert got == expected
 
 
 def test_registration_plus_other_changed_path_unions_their_selections(case):
     base, cfg, changed, graph = case
-    got = pilot.changed_modules(cfg, ["alpha", "beta"], [*changed, "engine/beta.py"],
+    for config in (base, cfg):
+        config["modules"]["gamma"] = {"mutate": ["engine/gamma.py"], "tests": ["tests/test_gamma.py"]}
+    graph.update({"engine/gamma.py": set(), "tests/test_gamma.py": set()})
+    got = pilot.changed_modules(cfg, ["alpha", "beta", "gamma"], [*changed, "engine/beta.py"],
                                 graph=graph, base_cfg=base)
     assert got == ["alpha", "beta"]
 
 
-@pytest.mark.parametrize("edit", ["defaults", "no_base"])
+@pytest.mark.parametrize("edit", ["defaults", "no_base", "scans_int", "scans_empty"])
 def test_unverified_config_change_still_selects_every_module(case, edit):
     base, cfg, changed, graph = case
     if edit == "defaults":
         cfg["defaults"]["max_children"] = 3
-    else:
+    elif edit == "no_base":
         base = None
+    else:
+        cfg["modules"]["beta"]["scans_tree"] = 5 if edit == "scans_int" else ""
     got = pilot.changed_modules(cfg, ["alpha", "beta"], changed, graph=graph, base_cfg=base)
     assert got == ["alpha", "beta"]
 

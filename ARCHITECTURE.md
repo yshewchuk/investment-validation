@@ -251,7 +251,11 @@ evidence. See the models and data component contracts.
     `registration_tests` verifies as add-only selects just the modules whose
     `mutate`/`tests` lists grew, plus whatever the other changed paths select. An
     unverified config change (no or unreadable base, any other edit) still selects
-    every module. The selection rule (leaf,
+    every module. A module whose tests scan a whole tree declares
+    `scans_tree = "<prefix>"` in the config and is also selected by a verified
+    registration that changes a Python file under that prefix, since a newly added
+    file has no import edge to it
+    ([#672](https://github.com/yshewchuk/investment-validation/issues/672)). The selection rule (leaf,
     taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
