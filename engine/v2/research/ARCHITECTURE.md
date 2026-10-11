@@ -94,11 +94,12 @@ an as-of month later than the current UTC month,
 unknown purposes and an entirely excluded population receive the same refusal.
 There is no date fallback, partial returned frame, report write or retry here.
 Final holdout reads are unavailable. The loaders write nothing themselves; the
-recorded native prediction runner writes one plain `refused` outcome ledger row
-(`native_outcomes.STAGES`; no metrics) when a `run` hits `HOLDOUT_ACCESS_DENIED`,
-unless a saved success exists (ledger unchanged); `register` and `--no-ledger`
-smoke write none.
-`ledger_context` excludes `refused*` rows from specs tried.
+recorded native prediction runner appends one plain `refused` row (no metrics;
+replay adds no second) when a `run` on an admitted registration hits
+`HOLDOUT_ACCESS_DENIED`, unless a different immutable outcome for that variant is
+already saved, success or failure: identity conflict, ledger unchanged.
+`register`, a run with no admitted registration, and `--no-ledger` smoke write
+none. `ledger_context` excludes `refused*` rows from specs tried.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout
