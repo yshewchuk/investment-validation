@@ -77,30 +77,37 @@ def mutate_receipt(cache, record, field, value):
     conn.commit()
 
 
-def test_descriptors_and_budgets_are_canonical_and_explicit():
-    result = inventory(tickers=["TEST.B", "TEST.A", "TEST.A"])
-    assert result == inventory(tickers=["TEST.A", "TEST.B"])
+@pytest.mark.parametrize("ticker,start,end,adjustment,adjusted", [
+    ("TEST.A", "2026-01-01", "2026-01-31", "raw", False),
+    ("test.b", "2025-03-07", "2025-04-09", "split_adjusted", True),
+    ("BRK.B", "2026-07-08", "2026-08-19", "raw", False),
+])
+def test_descriptors_and_budgets_are_canonical_and_explicit(ticker, start, end, adjustment, adjusted):
+    scope = {"start": start, "end": end, "adjustment": adjustment}
+    result = inventory(tickers=["ZZZ", ticker, ticker], **scope)
+    assert result == inventory(tickers=[ticker, "ZZZ"], **scope)
     assert result["schema_version"] == "massive_cache_plan.v1"
     assert result["policy_version"] == "massive_stocks_basic.2026-10-10"
     assert result["requests_per_minute"] == 5
     assert result["minimum_initial_calls"] == 6
     assert result["maximum_http_attempts"] == 42
-    requests = {u["request"]["dataset"]: u["request"] for u in result["units"][:3]}
+    requests = {u["request"]["dataset"]: u["request"] for u in result["units"]
+                if u["request"]["ticker"] == ticker}
     common = {"schema_version": "massive_request.v1", "source": "massive-stocks",
-              "transport": "rest", "ticker": "TEST.A", "start": "2026-01-01", "end": "2026-01-31"}
+              "transport": "rest", "ticker": ticker, "start": start, "end": end}
     assert requests == {
-        "daily": common | {"dataset": "daily", "adjustment_basis": "raw",
-                            "endpoint": "/v2/aggs/ticker/TEST.A/range/1/day/2026-01-01/2026-01-31",
-                            "params": {"adjusted": False, "sort": "asc", "limit": 50000}},
+        "daily": common | {"dataset": "daily", "adjustment_basis": adjustment,
+                            "endpoint": f"/v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}",
+                            "params": {"adjusted": adjusted, "sort": "asc", "limit": 50000}},
         "splits": common | {"dataset": "splits", "adjustment_basis": "corporate_action",
                              "endpoint": "/stocks/v1/splits",
-                             "params": {"ticker": "TEST.A", "execution_date.gte": "2026-01-01",
-                                        "execution_date.lte": "2026-01-31",
+                             "params": {"ticker": ticker, "execution_date.gte": start,
+                                        "execution_date.lte": end,
                                         "sort": "execution_date.asc", "limit": 5000}},
         "dividends": common | {"dataset": "dividends", "adjustment_basis": "corporate_action",
                                 "endpoint": "/stocks/v1/dividends",
-                                "params": {"ticker": "TEST.A", "ex_dividend_date.gte": "2026-01-01",
-                                           "ex_dividend_date.lte": "2026-01-31",
+                                "params": {"ticker": ticker, "ex_dividend_date.gte": start,
+                                           "ex_dividend_date.lte": end,
                                            "sort": "ex_dividend_date.asc", "limit": 5000}},
     }
     text = json.dumps(result)
@@ -125,6 +132,7 @@ def test_calendar_year_boundaries_and_no_same_day_claim():
     leap = inventory(as_of="2024-02-29", start="2022-02-28", end="2024-02-28")
     assert leap["as_of"] == "2024-02-29"
     assert leap["earliest_date"] == "2022-02-28"
+    assert leap["latest_date"] == "2024-02-28"
 
 
 @pytest.mark.parametrize("change", [

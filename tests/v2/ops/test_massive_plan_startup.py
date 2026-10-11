@@ -1,5 +1,6 @@
 """Fresh-process planning with permitted, synthetic-only ambient dotenv loading."""
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -64,7 +65,9 @@ def _run(root, arguments, revision):
     return json.loads(result.stdout), markers
 
 
-@pytest.mark.parametrize("mode", ["help", "invalid", "s3", "missing", "empty", "cached"])
+@pytest.mark.parametrize("mode", [
+    "help", "invalid", "s3", "missing", "empty", "cached", "fifo", "nul_catalog", "nul_store",
+])
 def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, mode):
     conn, _, root = cache
     if mode == "cached":
@@ -79,6 +82,14 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         arguments = cli_args(root, transport="s3")
     elif mode == "missing":
         arguments = cli_args(root, catalog=root / "missing.sqlite")
+    elif mode == "fifo":
+        fifo = root / "catalog.fifo"
+        os.mkfifo(fifo)
+        arguments = cli_args(root, catalog=fifo)
+    elif mode == "nul_catalog":
+        arguments = cli_args(root, catalog=str(root / "bad") + "\0")
+    elif mode == "nul_store":
+        arguments = cli_args(root, **{"store-root": str(root / "bad") + "\0"})
     before = tuple(conn.iterdump())
     objects = {str(path.relative_to(root)): path.read_bytes()
                for path in (root / "store").rglob("*") if path.is_file()}
@@ -93,8 +104,9 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         if mode == "cached":
             assert all(unit["raw_receipt_id"] for unit in plan["units"])
             assert plan["maximum_http_attempts"] == 0
-    if mode == "missing":
+    if mode in ("missing", "fifo", "nul_catalog", "nul_store"):
         assert json.loads(first["stdout"]) == {"refused": "RESOURCE_UNAVAILABLE"}
+        assert first["stderr"] == ""
         assert not (root / "missing.sqlite").exists()
     if mode == "s3":
         assert json.loads(first["stdout"]) == {

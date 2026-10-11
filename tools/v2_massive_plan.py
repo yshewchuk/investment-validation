@@ -29,6 +29,8 @@ def main(argv=None):
     catalog, root = args.pop("catalog"), args.pop("store_root")
     try:
         plan(None, None, **args)
+        if "\0" in str(catalog) or "\0" in str(root) or not catalog.is_file():
+            raise OSError("planning paths require a regular catalog and no NUL characters")
         with closing(sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only=ON")
