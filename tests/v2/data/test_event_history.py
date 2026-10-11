@@ -188,3 +188,84 @@ def test_numpy_nan_is_null_everywhere(nan):
     out = strict_prior_mean(event_sequence(DAYS, warmup=0), [1.0, nan, 3.0, 5.0, 7.0, 9.0],
                             population="all")
     assert out[2] == (1.0, 1)
+
+
+def _series(**kwargs):
+    base = dict(eligible=("src_iv",), value="implied_move", on_missing="null")
+    return AsofSeries(_rows(("2020-01-01", 0.5, 4.0)), **{**base, **kwargs})
+
+
+@pytest.mark.parametrize("warmup", [1.5, math.nan, True, "4", None, -1])
+def test_bad_warmup_refuses_with_code(warmup):
+    with pytest.raises(DataError) as err:
+        event_sequence(DAYS, warmup=warmup)
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+def test_numpy_integer_warmup_is_accepted():
+    assert event_sequence(DAYS, warmup=np.int64(4))[4].admitted
+
+
+@pytest.mark.parametrize("stale", [1.5, math.nan, True, "5", -1])
+def test_bad_staleness_refuses_with_code(stale):
+    with pytest.raises(DataError) as err:
+        _series(max_staleness_days=stale)
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"eligible": "src_iv"}, {"eligible": None}, {"eligible": (1,)}, {"value": None},
+    {"on_missing": None},
+])
+def test_bad_declarations_refuse_with_code(kwargs):
+    with pytest.raises(DataError) as err:
+        _series(**kwargs)
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("rows", [None, 5, "abc", {"date": "2020-01-01"}, [1], [None]])
+def test_bad_rows_refuse_with_code(rows):
+    with pytest.raises(DataError) as err:
+        AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("bad", [None, 20200110, b"2020-01-10"])
+def test_bad_lookup_date_type_refuses_with_code(bad):
+    with pytest.raises(DataError) as err:
+        _series().at(bad)
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("bad", ["abc", True, math.inf, 10**400, [1]])
+def test_non_numeric_anchor_value_refuses_with_code(bad):
+    series = AsofSeries(_rows(("2020-01-01", 0.5, bad)), eligible=("src_iv",),
+                        value="implied_move", on_missing="null")
+    with pytest.raises(DataError) as err:
+        series.at("2020-02-01")
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("bad", ["abc", True, math.inf, 10**400, [1]])
+def test_non_numeric_contribution_refuses_with_code(bad):
+    seq = event_sequence(DAYS, warmup=0)
+    with pytest.raises(DataError) as err:
+        strict_prior_mean(seq, [bad, 1.0, 1.0, 1.0, 1.0, 1.0], population="all")
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("dates", [None, 5, "2020-01-10", [None], [20200110]])
+def test_bad_event_dates_refuse_with_code(dates):
+    with pytest.raises(DataError) as err:
+        event_sequence(dates, warmup=0)
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("events, values", [
+    (None, [1.0]), (5, [1.0]), ("ab", [1.0]), ([1, 2], [1.0, 2.0]),
+    (event_sequence(DAYS, warmup=0), None), (event_sequence(DAYS, warmup=0), 5),
+])
+def test_bad_aggregate_inputs_refuse_with_code(events, values):
+    with pytest.raises(DataError) as err:
+        strict_prior_mean(events, values, population="all")
+    assert err.value.code == "CONTRACT_MISMATCH"

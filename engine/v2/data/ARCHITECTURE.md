@@ -256,7 +256,11 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
   `CONTRACT_MISMATCH` under `"refuse"`. `on_missing` has no default. Rows must
   be date-ascending (refused otherwise); a missing eligibility or value column,
   a date that is not exactly canonical `YYYY-MM-DD` (rows, event dates,
-  `first_known`, lookup date), or a non-numeric anchor value refuses.
+  `first_known`, lookup date), or a non-numeric or non-finite anchor value
+  refuses. Every malformed input to any entry point (wrong type, container,
+  `warmup`/`max_staleness_days` not a non-negative integer, bad column names, a
+  non-numeric aggregate contribution) refuses with `CONTRACT_MISMATCH`, never a
+  bare exception.
 - `strict_prior_mean(events, values, population=)` returns `(mean, count)` per
   event over earlier-ordinal events whose value is non-null, within
   `population` (`"admitted"` or `"all"`). Under `"admitted"` a non-admitted
