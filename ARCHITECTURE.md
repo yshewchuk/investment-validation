@@ -245,8 +245,13 @@ evidence. See the models and data component contracts.
     existing tooling-reader tests plus the selector's integration regression listed
     in `_REGISTRATION_READERS`; bare tool imports
     make relying on graph reachability alone unsafe. Other full-suite triggers and
-    the dynamic-loading fail-safe remain unchanged. Mutation-CI module selection is
-    unchanged. The selection rule (leaf,
+    the dynamic-loading fail-safe remain unchanged. Mutation-CI module selection
+    (`changed_modules`, via either `matrix` command, which read the plan step's
+    `BASE_SHA`) reuses the same proof: a `tools/mutation_pilot.toml` change that
+    `registration_tests` verifies as add-only selects just the modules whose
+    `mutate`/`tests` lists grew, plus whatever the other changed paths select. An
+    unverified config change (no or unreadable base, any other edit) still selects
+    every module. The selection rule (leaf,
     taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.

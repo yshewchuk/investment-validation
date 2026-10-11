@@ -379,7 +379,12 @@ def select_modules(cfg: dict, only: str = "", changed_files: str = "") -> list[s
             sys.exit(f"not enabled modules: {bad}; enabled: {', '.join(names)}")
         names = [n for n in names if n in wanted]
     if changed_files and changed_files.strip():
-        names = pilot.changed_modules(cfg, names, pilot.read_changed_files(changed_files))
+        changed = pilot.read_changed_files(changed_files)
+        # The plan step exports BASE_SHA; a verified add-only registration in the
+        # selector config then selects only the registered modules.
+        base = (pilot.registration_base_config(os.environ.get("BASE_SHA", ""), cfg, changed)
+                if pilot._REGISTRATION_CONFIG in changed else None)
+        names = pilot.changed_modules(cfg, names, changed, base_cfg=base)
     return names
 
 

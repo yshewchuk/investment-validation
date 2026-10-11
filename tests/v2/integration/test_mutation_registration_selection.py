@@ -316,3 +316,46 @@ def test_architecture_documents_resource_and_coverage_fallbacks():
     contract = " ".join((root / "ARCHITECTURE.md").read_text().split())
     assert "size/time limits; exceeding either limit selects the full suite" in contract
     assert "without nonempty base and head test expansions selects the full suite" in contract
+
+
+def test_verified_registration_selects_only_the_registered_module(case):
+    base, cfg, changed, graph = case
+    got = pilot.changed_modules(cfg, ["alpha", "beta"], changed, graph=graph, base_cfg=base)
+    assert got == ["alpha"]
+
+
+def test_registration_plus_other_changed_path_unions_their_selections(case):
+    base, cfg, changed, graph = case
+    got = pilot.changed_modules(cfg, ["alpha", "beta"], [*changed, "engine/beta.py"],
+                                graph=graph, base_cfg=base)
+    assert got == ["alpha", "beta"]
+
+
+@pytest.mark.parametrize("edit", ["defaults", "no_base"])
+def test_unverified_config_change_still_selects_every_module(case, edit):
+    base, cfg, changed, graph = case
+    if edit == "defaults":
+        cfg["defaults"]["max_children"] = 3
+    else:
+        base = None
+    got = pilot.changed_modules(cfg, ["alpha", "beta"], changed, graph=graph, base_cfg=base)
+    assert got == ["alpha", "beta"]
+
+
+def test_gremlin_matrix_reads_base_sha_from_environment(case, tmp_path, monkeypatch):
+    import gremlin_pilot
+
+    base, cfg, changed, graph = case
+    path = tmp_path / "changed"
+    path.write_bytes("\0".join(changed).encode())
+    monkeypatch.setattr(gremlin_pilot.pilot, "build_import_graph", lambda: graph)
+    seen = []
+
+    def fake_base(sha, config, paths):
+        seen.append(sha)
+        return base
+
+    monkeypatch.setattr(gremlin_pilot.pilot, "registration_base_config", fake_base)
+    monkeypatch.setenv("BASE_SHA", "a" * 40)
+    assert gremlin_pilot.select_modules(cfg, "", str(path)) == ["alpha"]
+    assert seen == ["a" * 40]
