@@ -259,7 +259,7 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
 | Condition | Outcome |
 |---|---|
 | no anchor, stale anchor, or null anchor value | `None` under `on_missing="null"`, `CONTRACT_MISMATCH` under `"refuse"` |
-| any other malformed input: wrong type, or a container that is not a list or tuple (str, bytes, range, array, generator), non-canonical date, unsorted or duplicate dates, `first_known` not the first event, missing column, negative or non-integer declaration, unknown `on_missing`/`population`, non-numeric or non-finite value (every value is checked whatever the population or row eligibility; `AsofSeries` checks all rows at construction), length mismatch | `CONTRACT_MISMATCH`, never a bare exception |
+| any other malformed input: wrong type, or a container that is not a list or tuple (str, bytes, range, array, generator), non-canonical date, unsorted or duplicate dates, `first_known` not the first event, missing column, negative, non-integer or omitted declaration (`warmup`, `eligible`, `value`, `on_missing`, `population` have no default), unknown `on_missing`/`population`, non-numeric or non-finite value (every value is checked whatever the population or row eligibility; `AsofSeries` checks all rows at construction), length mismatch | `CONTRACT_MISMATCH`, never a bare exception |
 
 ## Dependencies
 

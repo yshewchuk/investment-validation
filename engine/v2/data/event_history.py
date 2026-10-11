@@ -102,7 +102,7 @@ class SequencedEvent:
             raise _refuse("admitted must be a bool")
 
 
-def event_sequence(event_dates: Sequence[str], *, warmup: int,
+def event_sequence(event_dates: Sequence[str], *, warmup: int | None = None,
                    first_known: str | None = None) -> tuple[SequencedEvent, ...]:
     """One ticker's FULL ordered event list; ordinal counts every earlier event."""
     warmup = _count(warmup, "warmup")
@@ -123,8 +123,10 @@ def event_sequence(event_dates: Sequence[str], *, warmup: int,
 class AsofSeries:
     """Last eligible row strictly before an event date; never reaches back past it."""
 
-    def __init__(self, rows: Sequence[Mapping[str, Any]], *, eligible: Sequence[str],
-                 value: str, on_missing: str, max_staleness_days: int | None = None) -> None:
+    def __init__(self, rows: Sequence[Mapping[str, Any]], *,
+                 eligible: Sequence[str] | None = None, value: str | None = None,
+                 on_missing: str | None = None,
+                 max_staleness_days: int | None = None) -> None:
         self._on_missing = _choice(on_missing, _ON_MISSING, "on_missing")
         eligible = _names(eligible, "eligible")
         if not isinstance(value, str):
@@ -188,7 +190,7 @@ def _check_aggregate_inputs(events: Any, values: Any, population: Any) -> None:
 
 
 def strict_prior_mean(events: Sequence[SequencedEvent], values: Sequence[Any], *,
-                      population: str) -> tuple[tuple[float | None, int], ...]:
+                      population: str | None = None) -> tuple[tuple[float | None, int], ...]:
     """Per event: mean and count of non-null values of earlier-ordinal events.
 
     The mean is a running mean (``mean += x / n - mean / n``) so a finite input

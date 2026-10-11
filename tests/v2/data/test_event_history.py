@@ -55,9 +55,13 @@ def _series(**kwargs):
     return _asof(_rows(("2020-01-01", 0.5, 4.0)), **kwargs)
 
 
-def _events(admitted):
-    return tuple(SequencedEvent(day, i, flag)
-                 for i, (day, flag) in enumerate(zip(DAYS, admitted)))
+def _expected(admitted):
+    """Plain (event_date, ordinal, admitted) literals built from the DAYS literal."""
+    return [(day, i, flag) for i, (day, flag) in enumerate(zip(DAYS, admitted))]
+
+
+def _fields(events):
+    return [(e.event_date, e.ordinal, e.admitted) for e in events]
 
 
 def _assert_means(out, expected):
@@ -74,11 +78,11 @@ def _assert_means(out, expected):
 # ---- event_sequence ------------------------------------------------------------------
 
 def test_event_sequence_full_expected_tuple_with_warmup_4():
-    assert event_sequence(DAYS, warmup=4) == (
-        SequencedEvent("2020-01-10", 0, False), SequencedEvent("2020-04-10", 1, False),
-        SequencedEvent("2020-07-10", 2, False), SequencedEvent("2020-10-09", 3, False),
-        SequencedEvent("2021-01-08", 4, True), SequencedEvent("2021-04-09", 5, True),
-    )
+    assert _fields(event_sequence(DAYS, warmup=4)) == [
+        ("2020-01-10", 0, False), ("2020-04-10", 1, False),
+        ("2020-07-10", 2, False), ("2020-10-09", 3, False),
+        ("2021-01-08", 4, True), ("2021-04-09", 5, True),
+    ]
 
 
 @pytest.mark.parametrize("warmup, admitted", [
@@ -92,13 +96,16 @@ def test_event_sequence_full_expected_tuple_with_warmup_4():
     (np.uint8(0), [True] * 6),
 ])
 def test_warmup_is_declared_and_admission_vector_is_complete(warmup, admitted):
-    assert event_sequence(DAYS, warmup=warmup) == _events(admitted)
+    assert _fields(event_sequence(DAYS, warmup=warmup)) == _expected(admitted)
 
 
 def test_event_sequence_empty_and_tuple_inputs():
-    assert event_sequence([], warmup=0) == ()
-    assert event_sequence(tuple(DAYS), warmup=4, first_known="2020-01-10") == _events(
-        [False] * 4 + [True] * 2)
+    assert _fields(event_sequence([], warmup=0)) == []
+    assert _fields(event_sequence(tuple(DAYS), warmup=4, first_known="2020-01-10")) == [
+        ("2020-01-10", 0, False), ("2020-04-10", 1, False),
+        ("2020-07-10", 2, False), ("2020-10-09", 3, False),
+        ("2021-01-08", 4, True), ("2021-04-09", 5, True),
+    ]
 
 
 @pytest.mark.parametrize("warmup", [1.5, 0.5, math.nan, True, False, "4", None, -1, -5])
@@ -507,3 +514,18 @@ def test_every_container_input_allows_only_list_or_tuple(bad):
         strict_prior_mean(bad, [1.0] * 6, population="all")
     with _mismatch("values must be a list or tuple"):
         strict_prior_mean(seq, bad, population="all")
+
+
+@pytest.mark.parametrize("call, message", [
+    (lambda: event_sequence(DAYS), WARMUP_MSG),
+    (lambda: AsofSeries(_rows(("2020-01-01", 0.5, 4.0)), eligible=("src_iv",),
+                        value="implied_move"), ON_MISSING_MSG),
+    (lambda: AsofSeries(_rows(("2020-01-01", 0.5, 4.0)), value="implied_move",
+                        on_missing="null"), "eligible must be a list or tuple"),
+    (lambda: AsofSeries(_rows(("2020-01-01", 0.5, 4.0)), eligible=("src_iv",),
+                        on_missing="null"), "value must be a column name"),
+    (lambda: strict_prior_mean(event_sequence(DAYS, warmup=0), [1.0] * 6), POPULATION_MSG),
+])
+def test_omitting_a_mandatory_declaration_refuses_with_no_silent_default(call, message):
+    with _mismatch(message):
+        call()
