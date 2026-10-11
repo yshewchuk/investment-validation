@@ -60,15 +60,15 @@ def _events(admitted):
                  for i, (day, flag) in enumerate(zip(DAYS, admitted)))
 
 
-def _assert_means(out, expected, abs_tol=None):
+def _assert_means(out, expected):
+    """Counts exact; means to a 1e-9 relative tolerance with NO absolute slack."""
     assert len(out) == len(expected)
     for (mean, n), (exp_mean, exp_n) in zip(out, expected):
         assert n == exp_n
         if exp_mean is None:
             assert mean is None
         else:
-            assert mean == (pytest.approx(exp_mean, abs=abs_tol) if abs_tol
-                            else pytest.approx(exp_mean))
+            assert mean == pytest.approx(exp_mean, rel=1e-9, abs=0)
 
 
 # ---- event_sequence ------------------------------------------------------------------
@@ -429,8 +429,7 @@ def test_mean_does_not_overflow_on_large_finite_values():
     _assert_means(big, [(None, 0), (1e308, 1), (1e308, 2), (6.666666666666667e307, 3),
                         (5e307, 4), (4e307, 5)])
     mixed = strict_prior_mean(seq, [1e308, -1e308, 0.0, 1.0, 1.0, 1.0], population="all")
-    _assert_means(mixed, [(None, 0), (1e308, 1), (0.0, 2), (0.0, 3), (0.0, 4), (0.0, 5)],
-                  abs_tol=1e293)
+    _assert_means(mixed, [(None, 0), (1e308, 1), (0.0, 2), (0.0, 3), (0.25, 4), (0.4, 5)])
 
 
 def test_tuples_are_accepted_as_containers():
