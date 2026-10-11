@@ -32,17 +32,19 @@ same-session settlement rerun.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import stat
 from datetime import date
 from pathlib import Path
 
 from engine.v2.foundation import format_timestamp
 from engine.v2.ledger.decisions import DecisionConflict, import_lines, set_authority
 from engine.v2.ops.errors import fail
-from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.recovery import SupervisorLock
 
-__all__ = ["import_history"]
+__all__ = ["import_history", "discover_history_files"]
 
 #: (family name, directory under source_root, decisions.kind, row date field).
 #: The date field is read from the row itself, never inferred from the
@@ -69,13 +71,41 @@ def _row_date(date_field, payload):
                    details={"field": date_field}) from None
 
 
-def _read_lines(path):
+def _read_pinned_bytes(source_root, path):
+    path = Path(path)
     try:
-        text = path.read_text()
+        root = Path(source_root).resolve(strict=True)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = Path(os.readlink(f"/proc/self/fd/{stream.fileno()}")).resolve(strict=True)
+            if not opened.is_relative_to(root):
+                raise fail("INPUT_CHANGED", "pinned legacy ledger file escapes source root",
+                           details={"file": path.name})
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise fail("INPUT_CHANGED", "pinned legacy ledger file is not regular",
+                           details={"file": path.name})
+            return stream.read()
+    except OSError:
+        raise fail("INPUT_CHANGED", "pinned legacy ledger file is unavailable",
+                   details={"file": path.name}) from None
+
+
+def _read_lines(path, *, expected_sha256=None, source_root=None):
+    if expected_sha256 is None:
+        data = path.read_bytes()
+    else:
+        data = _read_pinned_bytes(source_root, path)
+    content_sha256 = hashlib.sha256(data).hexdigest()
+    if expected_sha256 is not None and content_sha256 != expected_sha256:
+        raise fail("INPUT_CHANGED", "pinned legacy ledger file changed",
+                   details={"file": path.name})
+    try:
+        text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise fail("VALIDATION_FAILED", "legacy ledger file is not valid UTF-8 text",
                    details={"file": path.name}) from None
-    return [line.strip() for line in text.splitlines() if line.strip()]
+    source_hash = f"sha256:{content_sha256}"
+    return [line.strip() for line in text.splitlines() if line.strip()], source_hash
 
 
 def _included_prefix(lines, date_field, through):
@@ -130,7 +160,8 @@ def _file_transaction(conn, *, dry_run):
     return _scope()
 
 
-def import_history(conn, root, source_root, *, through=None, dry_run=False, clock):
+def import_history(conn, root, source_root, *, through=None, dry_run=False, clock,
+                   pinned_files=None):
     """Import legacy ledger history into ``root``'s catalog.
 
     ``root`` is the operations root (holding ``supervisor.lock``, acquired
@@ -140,6 +171,9 @@ def import_history(conn, root, source_root, *, through=None, dry_run=False, cloc
     ``ledger/outcomes`` from, read-only. ``through`` (a ``datetime.date``,
     optional) excludes any row dated after it. ``dry_run`` writes nothing
     (every file's transaction rolls back) but reports the same counts.
+    ``pinned_files=None`` keeps discovery behavior; a supplied sequence must contain
+    every discovered relative JSONL path and its raw lowercase SHA-256 digest.
+    An empty sequence explicitly pins an empty file set.
 
     Returns a JSON-safe summary dict; raises a typed :class:`OpsError`
     (``engine.v2.ops.errors.fail``) refusal on a bad ``source_root``, a lost
@@ -153,7 +187,8 @@ def import_history(conn, root, source_root, *, through=None, dry_run=False, cloc
     if not lock.acquire():
         raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
     try:
-        return _run(conn, source_root, through=through, dry_run=dry_run, clock=clock)
+        return _run(conn, source_root, through=through, dry_run=dry_run, clock=clock,
+                    pinned_files=pinned_files)
     finally:
         lock.release()
 
@@ -201,7 +236,8 @@ def _new_divergences(conn, before_ids):
 
 
 def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, clock,
-                     committed_owner, totals, divergent_ids, summary):
+                     committed_owner, totals, divergent_ids, summary, source_root=None,
+                     expected_sha256=None):
     """Import one legacy ledger file's leading in-scope prefix, mutating
     ``totals`` (this family's running counters, already installed in
     ``summary``) and ``divergent_ids`` (this family's distinct diverged
@@ -221,12 +257,13 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
     provenance conflict, not a legacy duplicate -- still refuses typed.
     """
     totals["files"] += 1
-    included = _included_prefix(_read_lines(path), date_field, through)
+    lines, source_hash = _read_lines(
+        path, expected_sha256=expected_sha256, source_root=source_root)
+    included = _included_prefix(lines, date_field, through)
     totals["lines"] += len(included)
     low, high = _date_span(included, date_field)
     if not included:
         return committed_owner, low, high
-    source_hash = file_hash(path)
     stamp = format_timestamp(clock.now())
     existing_before = {row[0] for row in conn.execute(
         "SELECT line_number FROM decision_imports WHERE source_hash=?",
@@ -259,27 +296,93 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
     return committed_owner, low, high
 
 
-def _run(conn, source_root, *, through, dry_run, clock):
+def discover_history_files(source_root):
+    if ((source_root / "ledger").is_symlink()
+            or any((source_root / subdir).is_symlink()
+                   for _, subdir, _, _ in _FAMILIES)):
+        raise fail("INPUT_CHANGED", "ledger history directory is a symlink")
+    discovered = {path.relative_to(source_root).as_posix(): path
+                  for _, subdir, _, _ in _FAMILIES
+                  for path in (source_root / subdir).glob("*.jsonl")}
+    if any(path.is_symlink() or not path.is_file() for path in discovered.values()):
+        raise fail("INPUT_CHANGED", "ledger history file is not a regular file")
+    return discovered
+
+
+def _validate_history_pins(pinned_files, discovered):
+    if not isinstance(pinned_files, (tuple, list)):
+        raise fail("INVALID_REQUEST", "pinned_files must be a sequence of pairs")
+    pins = {}
+    for pair in pinned_files:
+        if not (isinstance(pair, (tuple, list)) and len(pair) == 2
+                and isinstance(pair[0], str) and isinstance(pair[1], str)):
+            raise fail("INVALID_REQUEST", "pinned_files must be pairs of (path, sha256)")
+        rel, digest = pair
+        if rel in pins:
+            raise fail("INVALID_REQUEST", "duplicate pinned file path")
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise fail("INVALID_REQUEST", "pinned file hash must be 64 lowercase hex")
+        pins[rel] = digest
+    if set(pins) != set(discovered):
+        raise fail("INPUT_CHANGED", "pinned legacy ledger file set differs from source",
+                   details={"missing": sorted(set(pins) - set(discovered)),
+                            "added": sorted(set(discovered) - set(pins))})
+    return pins
+
+
+def _validate_pinned_history_files(source_root, pinned_files):
+    discovered = discover_history_files(source_root)
+    pins = _validate_history_pins(pinned_files, discovered)
+    for relative, digest in pins.items():
+        data = _read_pinned_bytes(source_root, discovered[relative])
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise fail("INPUT_CHANGED", "pinned legacy ledger file changed",
+                       details={"file": discovered[relative].name})
+
+
+def _history_files_by_family(source_root, pinned_files):
+    groups = {family: [] for family, _, _, _ in _FAMILIES}
+    if pinned_files is None:
+        for family, subdir, _, _ in _FAMILIES:
+            directory = source_root / subdir
+            groups[family] = [(path, None) for path in sorted(directory.glob("*.jsonl"))] \
+                if directory.is_dir() else []
+        return groups
+    discovered = discover_history_files(source_root)
+    for rel, digest in _validate_history_pins(pinned_files, discovered).items():
+        path = discovered[rel]
+        family = next(f for f, subdir, _, _ in _FAMILIES
+                      if rel.startswith(subdir + "/"))
+        groups[family].append((path, digest))
+    for files in groups.values():
+        files.sort(key=lambda item: item[0].name)
+    return groups
+
+
+def _run(conn, source_root, *, through, dry_run, clock, pinned_files=None):
     summary = {"schema_version": "ledger_history_import.v1.0", "dry_run": dry_run,
-              "through": through.isoformat() if through else None, "families": {}}
+               "through": through.isoformat() if through else None, "families": {}}
     committed_owner_row = conn.execute(
         "SELECT owner FROM decision_authority WHERE singleton=1").fetchone()
     committed_owner = committed_owner_row[0] if committed_owner_row else None
     seen_min, seen_max = None, None
+    by_family = _history_files_by_family(source_root, pinned_files)
     for family, subdir, kind, date_field in _FAMILIES:
-        directory = source_root / subdir
-        files = sorted(directory.glob("*.jsonl")) if directory.is_dir() else []
+        files = by_family[family]
         totals = {"files": 0, "lines": 0, "imported": 0, "already_present": 0, "conflicts": [],
                   "divergences": 0, "divergent_row_ids": 0}
         summary["families"][family] = totals
         divergent_ids = set()
-        for path in files:
+        for path, expected_sha256 in files:
             committed_owner, low, high = _import_one_file(
                 conn, path, family, kind, date_field, through=through, dry_run=dry_run,
                 clock=clock, committed_owner=committed_owner, totals=totals,
-                divergent_ids=divergent_ids, summary=summary)
+                divergent_ids=divergent_ids, summary=summary, source_root=source_root,
+                expected_sha256=expected_sha256)
             seen_min = _merge_bound(seen_min, low, keep_lower=True)
             seen_max = _merge_bound(seen_max, high, keep_lower=False)
+    if pinned_files is not None:
+        _validate_pinned_history_files(source_root, pinned_files)
     summary["date_range"] = {"min": seen_min.isoformat() if seen_min else None,
                              "max": seen_max.isoformat() if seen_max else None}
     return summary

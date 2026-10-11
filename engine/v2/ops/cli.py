@@ -30,6 +30,7 @@ from engine.v2.ops.fingerprints import environment_identity, worker_source_manif
 from engine.v2.ops.health import health, write_health
 from engine.v2.ops.lifecycle import attempt_receipts, request_cancel
 from engine.v2.ops.profiles import DEFAULT_POLICY
+from engine.v2.ops.reclaim import reclaim
 from engine.v2.ops.recovery import (
     SupervisorLock,
     prove_ownership_gone,
@@ -169,6 +170,13 @@ def _add_price_refresh_command(commands):
     price_refresh.add_argument("--dry-run", action="store_true",
                                help="print plan counts only; touches disk (Tier-2 events, "
                                     "the Tier-1 fetch store) but never the network")
+    # SUPPRESS keeps the default namespace unchanged when the flags are absent.
+    price_refresh.add_argument("--tickers", default=argparse.SUPPRESS,
+                               help="comma list or @file: plan exactly these names plus the "
+                                    "calendar ticker (requires --source-root)")
+    price_refresh.add_argument("--source-root", default=argparse.SUPPRESS,
+                               help="source tree whose data/raw/fetch holds fetch history "
+                                    "(requires --tickers)")
 
 
 def _add_refresh_mode_arguments(plan):
@@ -227,6 +235,15 @@ def _add_reconcile_command(commands):
     reconcile.add_argument("--root", default=argparse.SUPPRESS)
     reconcile.add_argument("job_id")
     reconcile.add_argument("--expected-attempt", required=True)
+
+
+def _add_reclaim_command(commands):
+    """``ops reclaim [--apply]``: list (default) or remove the read-once staging of
+    terminal attempts and their orphan partial materialization roots (#609, #467)."""
+    reclaim_p = commands.add_parser("reclaim")
+    reclaim_p.add_argument("--root", default=argparse.SUPPRESS)
+    reclaim_p.add_argument("--apply", action="store_true",
+                           help="remove the listed entries (default: dry run)")
 
 
 def _add_provider_account_command(commands):
@@ -348,6 +365,7 @@ def parser():
     capture.add_argument("--source-root", required=True, type=Path)
     capture.add_argument("--output", required=True, type=Path)
     _add_reconcile_command(commands)
+    _add_reclaim_command(commands)
     _add_provider_account_command(commands)
     _add_snapshot_commands(commands)
     _add_ledger_commands(commands)
@@ -475,18 +493,12 @@ def dispatch(args, root, conn, clock):
         return _plan_command(args, root, conn, clock)
     if args.command == "submit":
         return _submit_command(args, root, conn, clock, DEFAULT_POLICY)
-    if args.command == "reconcile":
-        return reconcile_command(args, root, conn, clock)
-    if args.command == "snapshot":
-        return snapshot_command(args, root, conn, clock)
-    if args.command == "ledger":
-        return ledger_command(args, root, conn, clock)
-    if args.command == "decisions":
-        return decisions_command(args, root, conn, clock)
-    if args.command == "price-history":
-        return price_history_command(args, root, conn, clock)
-    if args.command == "computed-moves":
-        return computed_moves_command(args, root, conn, clock)
+    handlers = {"reconcile": reconcile_command, "reclaim": reclaim_command,
+                "snapshot": snapshot_command, "ledger": ledger_command,
+                "decisions": decisions_command, "price-history": price_history_command,
+                "computed-moves": computed_moves_command}
+    if args.command in handlers:
+        return handlers[args.command](args, root, conn, clock)
     if args.command == "provider-account":
         return provider_account_command(args, conn)
     return job_command(args, conn, clock, root)
@@ -912,6 +924,15 @@ def provider_account_command(args, conn):
     return dict(_provider_account_row(conn, args.account))
 
 
+def reclaim_command(args, root, conn, clock):
+    """Same eligibility rule as the supervisor's per-tick pass; a failed entry is
+    reported in its own ``error`` field and never raises."""
+    entries = reclaim(conn, root, apply=args.apply)
+    return {"dry_run": not args.apply, "count": len(entries),
+            "bytes": sum(entry["bytes"] for entry in entries),
+            "removed": sum(entry["removed"] for entry in entries), "entries": entries}
+
+
 def reconcile_command(args, root, conn, clock):
     """Settle one ``recovery_pending`` attempt by hand, when no supervisor is ticking.
 
@@ -961,7 +982,22 @@ def price_refresh_command(args, root):
     ``<root>/price_refresh/<session>.json``."""
     from engine.v2.ops.legacy_adapter import invoke_price_refresh
 
-    result = invoke_price_refresh(args.session, dry_run=args.dry_run)
+    tickers_arg = getattr(args, "tickers", None)
+    source_root = getattr(args, "source_root", None)
+    if source_root is not None and not source_root.strip():
+        raise fail("INVALID_REQUEST", "--source-root must not be blank")
+    if (tickers_arg is None) != (source_root is None):
+        raise fail("INVALID_REQUEST", "--tickers and --source-root must be given together")
+    if source_root is not None:
+        source_root = Path(source_root)
+    if tickers_arg is None:
+        result = invoke_price_refresh(args.session, dry_run=args.dry_run)
+    else:
+        planned = _ticker_list(tickers_arg)
+        if not planned:
+            raise fail("INVALID_REQUEST", "--tickers names no tickers")
+        result = invoke_price_refresh(args.session, dry_run=args.dry_run,
+                                      planned_tickers=planned, source_root=source_root)
     plan = result["plan"]
     if args.dry_run:
         return {"session": plan["session"], "dry_run": True,

@@ -28,7 +28,7 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.ops.legacy_adapter import invoke_price_refresh
 from tests.data_scan_support import commit_tables, publish_and_inspect
 from tests.ops_support import FakeClock
-from tests.test_v2_ops_price_history import (
+from tests.v2.ops.test_v2_ops_price_history import (
     _SEC,
     _SEC_REF,
     _scan_price_history,

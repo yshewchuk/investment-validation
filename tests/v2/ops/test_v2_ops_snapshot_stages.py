@@ -231,7 +231,7 @@ def record_reference_inputs(case, snapshot_id, receipt_id, *, registry=b'{"model
     # pnl_sim_history/recalibration_pairs (task brief 2026-09-14): required
     # kinds `pinned_materialization_refs` now refuses a plan without --
     # fold="202401" mirrors the value every other synthetic-fixture writer in
-    # this repo uses (tests/test_v2_data_import.py::write_reference_inputs).
+    # this repo uses (tests/v2/ops/test_v2_data_import.py::write_reference_inputs).
     published = (("calendar", b"date\n2020-01-02\n2021-01-04\n"), ("model_registry", registry),
                 ("pnl_sim_history", _PNL_SIM_HISTORY_BYTES),
                 ("recalibration_pairs", _RECALIBRATION_PAIRS_BYTES))
@@ -898,7 +898,7 @@ def test_materialize_worker_declares_px_files_and_a_reused_root_still_verifies(c
     from engine.v2.ops.price_history_store import capture
     from engine.v2.ops.snapshot_roots import verify_root
     from engine.v2.ops.snapshot_stages import request_mismatches
-    from tests.test_v2_ops_price_history import _write_px
+    from tests.v2.ops.test_v2_ops_price_history import _write_px
 
     source_root = case.tmp / "px_source"
     _write_px(source_root, "AAA", {"2020-01-01": 100.0, "2020-01-02": 101.0})

@@ -519,11 +519,12 @@ class PriceQuery:
     """A bounded, decision-time-eligible ``price_history`` request for one
     ticker (task brief 2026-09-14, modeled on :class:`ChainQuery`).
 
-    ``session_date`` is the last date the caller may see; ``observation_ceiling``
-    bounds which retrieved *versions* of a date's price may be used (the same
-    per-ticker rule ``price_history.as_of_view`` implements: the latest
-    version with ``retrieved_at <= observation_ceiling``, or, if none exists,
-    the ticker's earliest retrieval). ``lookback_sessions`` bounds how many
+    ``session_date`` is the last data date the caller may see. The reader
+    requires it not to be later than ``observation_ceiling``. The ceiling
+    does not filter ``retrieved_at``: the reader reconstructs row versions
+    through the latest retrieval in the pinned snapshot, then exposes only
+    rows dated on or before ``session_date``. Retrieval time is provenance
+    and may be later than the ceiling. ``lookback_sessions`` bounds how many
     trading sessions strictly before (and including) ``session_date`` a
     caller may request — a query planner's cap, not a guarantee that many
     rows exist.

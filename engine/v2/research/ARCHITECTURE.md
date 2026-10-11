@@ -93,8 +93,13 @@ before returning a frame to metric/report writers. Missing/invalid context,
 an as-of month later than the current UTC month,
 unknown purposes and an entirely excluded population receive the same refusal.
 There is no date fallback, partial returned frame, report write or retry here.
-Final holdout reads are unavailable. This read-only interface does not write
-durable refusal receipts or ledger rows.
+Final holdout reads are unavailable. The loaders write nothing themselves; the
+recorded native prediction runner appends one plain `refused` row (no metrics;
+replay adds no second) when a `run` on an admitted registration hits
+`HOLDOUT_ACCESS_DENIED`, unless a different immutable outcome for that variant is
+already saved, success or failure: identity conflict, ledger unchanged.
+`register`, a run with no admitted registration, and `--no-ledger` smoke write
+none. `ledger_context` excludes `refused*` rows from specs tried.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout
@@ -125,8 +130,77 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
 | Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
 
-These readers preserve no durable refusal receipt or economic variant identity
-and cannot authorize the separate user-only final holdout read.
+These readers preserve no economic variant identity and cannot authorize the
+separate user-only final holdout read.
+
+`event_history.load_event_history(repository, snapshot, *, event_id, as_of_month,
+decision_session, history_start, purpose="selection")` constructs prior-event
+features for one admitted canonical target. Both dates are explicit calendar
+days with `history_start <= decision_session <= target event day`. Shared
+`load_population` admits the target and excludes random, rolling and ambiguous
+history identities before any outcome access. Candidates are the same ticker's
+events in `[history_start, min(target day, decision_session))`.
+
+Every candidate query is planned before any outcome scan, using the same
+fragment planner as Repository. Preflight loads fragment metadata once and
+reuses each planned bound for query construction, avoiding a second bound lookup.
+Its entire surviving membership must be one
+inspected singleton with the exact ticker/day key, partition and time bounds.
+The resolved committed catalog/manifest identity is the metadata trust anchor;
+this trusts native producer inspection, not adversarially forged metadata.
+Caller rows, implicit latest, and another experiment's outputs are not inputs.
+Mixed, missing or unprovable membership refuses `HOLDOUT_ACCESS_DENIED` before
+opening outcome objects. This intentionally refuses old whole-ticker layouts;
+it neither migrates them nor treats row predicates as physical isolation.
+
+Skipped or null-availability historical labels are explicitly omitted. A valid
+availability day must follow its event and be on or before the decision day;
+later labels are omitted before numeric validation or feature arithmetic. Their
+admitted objects are decoded; protected event objects have a no-read guarantee.
+Malformed availability or invalid eligible values refuse
+`EXPERIMENT_VARIANT_FAILED`; repository failures propagate. The date bound is reconstructed source availability, not a claim of
+intraday publication/finality evidence. Pure `panel_math.history_features` owns
+the arithmetic: empty history and undersized EMAs retain `None`, never zero fill.
+Results carry features, `available`/`empty` status, ordered consumed event/object
+identities and availability, omitted-history reasons, snapshot/dataset/month/
+membership-version/cutoff pins and their deterministic history digest.
+No cache, automatic retry, transaction, write or partial return occurs. This
+library seam has no supervisor, provider, market-price, report or ledger caller;
+production panel reads and final-read authority remain unchanged.
+
+`magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
+pure contract over native `CalendarSessions`: horizons are five, three or one
+full intervening sessions, counted backward from the shared last-pre-print
+close. Wednesday AMC at one uses Tuesday close; Wednesday BMO uses Monday.
+Invalid dates/sessions/horizons/calendars, projected anchors, gaps in the
+required session window or insufficient history refuse `CONTRACT_MISMATCH`.
+Its identity binds event/session/horizon, calendar contents, pre-print close
+and source-session ceiling. It does not assert an intraday issue time, source
+publication/finality or that the earnings schedule was known at that cutoff.
+An experiment caller must bind the calendar to its pinned native snapshot;
+this pure helper does not load a calendar or select a forecast horizon.
+
+`magnitude_inputs.load_magnitude_targets(repository, snapshot, *, as_of_month,
+labels_before, purpose="selection", event_ids=None)` is the separate label
+view. The fixed target recipe is absolute split-neutral, non-dividend-adjusted
+earnings close-to-close return in percentage points; the native signed
+`computed_moves` value is retained, never rescaled, clipped or adjusted again.
+Its primary prediction estimand is conditional mean, selected by pooled RMSE;
+MAE and quantile calibration are secondary, not implemented metric writers.
+Shared population admission precedes label access. Bulk reads exclude events
+on/after `labels_before`; explicit requests containing one refuse. All
+remaining objects pass `event_history`'s shared singleton preflight before
+any is opened; mixed inherited snapshots refuse. Decoded label availability
+must be strictly before `labels_before`; missing, skipped, malformed or
+non-finite labels refuse the whole call, with zero remaining a valid value.
+Earlier events with late availability can be decoded to check their recorded
+date; this is reconstructed availability, not verified publication evidence.
+Output rows carry target/object identity; frame attributes bind recipe,
+label cutoff, snapshot/dataset/month/membership versions and consumed inputs.
+Forecast cutoff and training/evaluation label cutoff are distinct contracts;
+this seam neither fits a model nor joins labels into forecast features.
+Repository failures propagate; no cache, retry, write or partial return.
+These library prerequisites have no CLI, supervisor or final-read caller.
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
@@ -173,12 +247,12 @@ snapshot-read helpers), `_pricing.py` (except the names carved out above),
 
 ### Proposed authorized final read (#490)
 
-Design only; existing interfaces still deny final reads. Depends on [#555](https://github.com/yshewchuk/investment-validation/pull/555)'s refusal receipts/recovery, not its review status; extends #445's union exclusion.
+Request preparation and the private ops authorization/spend primitive are implemented; no production authorization entrypoint, final read or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
 The [user decision](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6072905454)
 permits agents/supervisors to prepare requests, never to authorize them.
 
-**Request.** Canonical versioned bytes bind a stable research `decision_id`, its
-immutable selected-winner record, registered `variant_id`/registration reference,
+**Request.** Canonical versioned bytes use the existing `experiment_id` as the decision identity, without a question record or alias detection, per the [user decisions](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6101284544).
+They bind the selected registered `variant_id`/registration reference,
 resolved plan/source/evaluation-recipe and applicable frozen-model hashes, exact committed
 `snapshot_id`, `holdout_as_of_month`, `random_membership_version` and
 `rolling_membership_version`. No latest-head resolution, caller population override,
@@ -186,10 +260,13 @@ alternate arm, fitting, threshold search or evaluator callback is accepted.
 Membership stays in `foundation.experiment_holdouts`: random and rolling sets under
 its versioned as-of-month contract, with ambiguous identities refused, never admitted.
 Both sets are bound together; changing month, version, snapshot or winner cannot reset a decision's spend. The request digest identifies bytes, not a new decision.
+`native_registration.prepare_final_holdout_request` verifies existing catalog/artifact registration metadata only; it never resolves a head, scans a population or reads results.
+Native registration's optional `final_read` declaration seals recipe, completeness-bar and frozen-model artifact references before authorization; preparation derives them, never accepts replacements. Registrations without that declaration refuse preparation.
+Request validity proves neither winner selection nor read eligibility. The later metadata-only preflight must verify the preregistered completeness artifact and refuse an unmet bar before any holdout outcome read; declared references alone do not prove completeness.
 
 **Authority/ownership.** A proposed `tools/v2_final_holdout.py` leaf composes ops'
 private authorization/state owner with a private research final evaluator. It is
-the sole supported evaluator caller; ops/research remain layer-7 peers with no imports between them. Foundation supplies membership only, never grants or state.
+the sole supported evaluator caller; ops/research remain layer-7 peers with no imports between them. Foundation supplies membership and pure request validation, never grants or state.
 Training's lower layer cannot import either owner. Selection/sweep/loaders gain no
 grant argument, final purpose, environment bypass or returned holdout frame.
 Import/call-site regression guards also cover unlayered tools/experiments, which
@@ -201,14 +278,15 @@ No reusable grant escapes that invocation. This is procedural/audited, not a sec
 one transaction records who, UTC when, explicit confirmation, request digest and
 the permanent decision spend. An interactive terminal and fresh explicit user
 confirmation of the displayed binding are required; flags/piped input/agents cannot assent.
-Unique `decision_id` plus compare-and-swap state serialize authorization and reads.
-States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or terminal `revoked`/`indeterminate`; every transition appends evidence, never refunds. Proposed default: `authorized_unread` has no automatic expiry; explicit revocation or a changed winner ends eligibility with `HOLDOUT_ACCESS_DENIED`, retaining the spend. No renewal can reset the spend.
+`ops.final_holdout.authorize_final_holdout` is currently test-consumed only: it verifies the exact catalog-owned registration, displays canonical request bytes and requires a terminal-entered phrase containing the digest and recorded process OS identity. This is procedural confirmation, not authentication of the human at the terminal. Its persisted acknowledgement is not a read grant or completeness verdict; the later fenced reader must still verify winner/revocation and the preregistered completeness artifact before scans.
+Unique `experiment_id` plus compare-and-swap state serialize authorization and reads.
+States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or terminal `revoked`/`indeterminate`; every transition appends evidence, never refunds. Authorization has no expiry; revocation or a changed winner ends eligibility with `HOLDOUT_ACCESS_DENIED`, retaining the spend. Interrupted reads stay spent with no continuation; no renewal resets spend.
 
 | Proposed condition | Required outcome before any returned metric/report |
 |---|---|
 | Missing user record, noninteractive authorization, tuning/training/selection/sweep, new read after `read_started`, or revoked/changed winner | Non-retryable `HOLDOUT_ACCESS_DENIED`, before holdout outcome scans or metrics; no partial result. Recheck winner/revocation at the fenced start and publication. Revocation after start but before completion burns the read and withholds its result. |
 | Duplicate authorization | Identical request returns the original acknowledgement only after the same interactive checks; never another grant/spend. Changed bytes under the same decision refuse `IDEMPOTENCY_CONFLICT`; changed registration refuses `EXPERIMENT_IDENTITY_CONFLICT`. |
-| Crash after authorization, before read | Resume the same `authorized_unread` request only; atomically commit `read_started` with one owner/fence before any holdout outcome scan. No second owner starts; missing/corrupt state never means unspent. |
+| Authorization recorded, no read started | A first user-invoked read may atomically commit `read_started` with one owner/fence before any holdout outcome scan. This never continues an interrupted read; missing/corrupt state never means unspent. |
 | Crash after `read_started`, before durable `result_staged` | Once ownership is proven gone, mark `indeterminate`; never reread, even if the crash might precede the first scan. No result is released and the spend remains. |
 | Crash after durable result, before completion receipt | Only a catalog-bound `result_staged` reference to fully synced immutable result bytes permits artifact-only reconciliation. Verify hashes/pins and the current fence/winner, then commit the receipt reference; never evaluate again. Unbound files cannot prove completion. |
 | Receipt/diagnostic/ledger publication failure | Preserve the original refusal and durable state; no success output. Retry storage reconciliation only. Missing/malformed evidence is `VALIDATION_FAILED`, conflicting identities `IDEMPOTENCY_CONFLICT`, transient storage `RESOURCE_UNAVAILABLE`; a visible file alone, including failed sync/rollback residue, is not committed evidence. |
@@ -216,7 +294,7 @@ States are `authorized_unread`, `read_started`, `result_staged`, `complete`, or 
 
 Results remain private until completion binds the request, authorizing act, spend, both memberships, per-set counts/metrics and overlap count; never average the sets.
 Random-set temporal-neighbour correlation and post-release-selection provenance remain disclosed (#373).
-Proposed retrieval default: only the dedicated leaf serves a completed report to its recorded authorizing user, using the same procedural actor/interactive checks plus fresh explicit view confirmation. Other callers refuse `HOLDOUT_ACCESS_DENIED` before report output.
+Only the authorizing user may view results through the dedicated tool, with fresh interactive confirmation. Results belong in a separate namespace excluded from agent-facing tools and covered by an agent read-deny rule; no encryption or OS containment. Other callers refuse `HOLDOUT_ACCESS_DENIED` before output.
 Ops durably audits the viewing actor, UTC when, verified request/report references and checked revocation-history revision before output; failed checks/audit publication release nothing. Retrieval returns unchanged verified artifacts with that history alongside them; it never scans, recomputes, tunes, reauthorizes or spends again.
 Agent reconciliation may verify private artifacts but cannot return their metrics/report. No loader, training, selection or sweep report interface or `--no-ledger` final read is available.
 Completion is the release point: later revocation appends audit history and accompanies retrieval; it cannot erase the completed report or renew read access.
@@ -275,6 +353,13 @@ This bounds retained unmatched rows, not total process RSS.
 - `--since`, `--min-date`, `--years`, `--strategy` (repeatable, from
   `_pricing.STRUCTURES`): per-tool read/filter narrowing; never widen a read
   past the resolved snapshot.
+- `tools/v2_replay.py --alpha A` is repeatable. When supplied, the ordered
+  values replace replay's default `ALPHA_GRID`; repeated values remain
+  separate requests, and each priced event produces one row per requested
+  fill alpha. Values must be finite and in `[0, 1]`. When omitted,
+  `_replay_run.run` uses its default `ALPHA_GRID`. The CLI continues to
+  derive its calendar from the pinned snapshot rather than accepting an
+  external calendar.
 - `--dry-run` (build-trades, reconcile-trades): compute the candidate
   changeset, skip `commit_generic_table_candidate`.
 
@@ -333,22 +418,19 @@ resolution, its own no-partition refusal, and its own empty-result frame
 shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
 
-Callers: nothing inside `engine/` imports this package (checked against
-`checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
-listed above are one consumer; `experiments/common_v2.py` is another, for
-`experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
-and `_chains.load_chain_index`; its archived trade-read caller omits the now-required
-holdout context and is refused. The historical EXP-147 confirmatory-validation
-runner is a third, for `experiment_trades.PROVENANCE` alone (its native
-replay tag, selecting that runner's analog population).
+Callers: no `engine/` modules import this package (checked by `checks/import_layers.py`).
+Consumers are `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
+trade, calendar, and chain inputs from pinned v2 data. The archived
+trade-read caller omits required holdout context and is refused.
+Historical EXP-147 reads its native replay tag from `experiment_trades.PROVENANCE`.
 `experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266
-slice 2) is a fourth: it reads
+slice 2) reads
 `_chains.filter_plan_by_availability`/`read_chain_keys_for`, `_plan.plan_events`,
 `_pricing.STRUCTURES`/`execution_variant_label`/`trading_calendar_from_snapshot`,
 and `replay.ALPHA_GRID`/`replay_one` to price one strategy family across a
 grid-position sweep on one pinned snapshot. `experiments/EXP-186_.../run.py`
-is a fifth, reading `_replay_run.events_frame` for its known-session event
-universe before handing it to `price_candidate_grid`. None of the five are
+reads `_replay_run.events_frame` for its known-session event universe before
+handing it to `price_candidate_grid`. None of these research callers are
 parsed by the layering hook (it only parses `engine*` importers, and
 `experiments/` is outside it too).
 
@@ -381,14 +463,19 @@ else it reads (see Failure semantics, Invariants). No third-party service.
 
 ## Failure semantics
 
-The 4c R1–R6 template. Every refusal is meant to be a `DataError`
+The 4c R1–R6 template covers data-boundary refusals, which generally use `DataError`
 (`engine.v2.data.errors.DataError`) carrying one of the registered
 `DATA_FAILURE_CODES`, which a CLI catches at `main()` and exits 2 with the
-code and message on stderr rather than a bare traceback — with one
-pre-existing exception, called out below where it applies
-(`_snapshot.py`'s bare `ValueError`, issue #70), that escapes as an
-uncaught traceback instead.
+code and message on stderr rather than a bare traceback. CLI argument
+validation is described separately because it can refuse before `main()`
+reaches that handler. One pre-existing data-path exception, called out below
+where it applies (`_snapshot.py`'s bare `ValueError`, issue #70), escapes as
+an uncaught traceback instead.
 
+- **CLI argument parsing (before R1–R6).**
+  - **A supplied replay `--alpha` is non-finite or outside `[0, 1]`.**
+    The CLI parser exits 2 before `open_catalog` or `ArtifactStore` is
+    called, so no replay runs.
 - **R1, missing input.**
   - **No committed scope head, and no explicit `--snapshot-id`.**
     `resolve_pinned(scope)` (or, for the `_snapshot.py`-backed tools,
@@ -522,6 +609,9 @@ uncaught traceback instead.
   and written into every output
   (root doc §5's "no silent default" invariant, applied to research reads) —
   including the experiment loader's returned context columns (see Outputs).
+- Every experiment runner reads from its pinned v2 snapshot, applying shared random/rolling holdout enforcement through the reader appropriate to its inputs:
+  `experiment_trades.load_trades` for trades; `experiment_population.load_population` for populations and its prediction/history consumers. Inadmissible reads refuse.
+  Direct parquet/file reads bypass snapshot pinning and both holdout sets and are inadmissible.
 - Never reads the legacy mutable Tier-2 store (`engine.data.store`) —
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.

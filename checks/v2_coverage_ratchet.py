@@ -182,11 +182,14 @@ PHASE1_SUITE_VERSION = "phase1_coverage_suite.v10"
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
 PHASE1_RENAMED = {
+    "tests/test_v2_ops_experiment_reports.py": "tests/v2/ops/test_experiment_reports.py",
     "tests/test_v2_ops_legacy_defects.py": "tests/v2/ops/test_legacy_defects.py",
+    "tests/test_v2_ops_price_history.py": "tests/v2/ops/test_v2_ops_price_history.py",
 }
-# Relocated tests that are in the suite but were never in the baseline's test_files.
+# Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (
     "tests/v2/ops/test_cli_rescore.py",
+    "tests/v2/ops/test_experiment_reports.py",
     "tests/v2/ops/test_forward_calendar_store.py",
     "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py",
     "tests/v2/ops/test_v2_ops_refresh_staging.py",

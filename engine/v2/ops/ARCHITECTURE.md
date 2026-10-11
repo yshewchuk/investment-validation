@@ -41,12 +41,12 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `submit --plan --idempotency-key`
 - `rescore --request --native-inputs` — read-only, no provider pulls, no fitting
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
-- `reconcile <job_id> --expected-attempt`
+- `reconcile <job_id> --expected-attempt`; `reclaim [--apply]` (dry run by default; see "Attempt staging reclaim")
 - `provider-account --account --remaining --live-reserve`
 - `snapshot {plan-import,submit,promote,rollback}`
 - `ledger {import-history,status,calibrate,book}` — history summaries count new provenance writes as `imported` (excluding new divergences), and remaining lines as `already_present`; identical committed content under another purpose writes no provenance. Dry runs report the same projected counts and roll back writes.
 - `decisions supersede --row-id --reason --from-json`
-- `price-refresh --session [--dry-run]`
+- `price-refresh --session [--dry-run] [--tickers @file --source-root]` (`--tickers` plans exactly those names plus SPY from `<source-root>` fetch history, like the nightly; each flag requires the other, else `INVALID_REQUEST`; without them the legacy universe)
 - `price-history capture --source-root --scope [--dry-run]` (refuses `SOURCE_NOT_FOUND` without a usable calendar ticker, SPY; rebuild: [guide](../../../guides/native_board_rebuild_runbook.md))
 - `computed-moves capture --source-root --scope --as-of [--dry-run]`
 - `get`/`logs`/`cancel`/`resume`/`explain <job_id>`
@@ -77,7 +77,7 @@ turns one release binding (`ScoringReleaseBinding`) plus a sequence of already-s
 `records.json`/`refusals.json`. **Supports `STR-THRU` only** — any other
 strategy refuses per-row. The tick sidecar only submits the shadow job for a
 new eligible snapshot-pinned identity (`producer_mode="snapshot"`); direct
-worker callers default to staged `events.json`; snapshot mode derives `calendar_revision` from pinned earnings data, while staged mode uses its parameter.
+worker callers default to staged `events.json`; snapshot mode derives `calendar_revision` from pinned earnings data, while staged mode uses its parameter. The snapshot producer's `Repository` is opened with `pin_snapshots=True` (resolution and scan/bound membership are memoized per instance; `fragment_records` is not) and each admitted row runs inside a `compose_event_<done>_of_<total>` progress step.
 The production-default `legacy`/unpinned path stays a no-op; production uses `projection` (3 GiB, 2 CPUs). A producer exception fails the native attempt
 before writing that attempt's event/refusal or score outputs; reused-root files
 may remain as untrusted residue. The worker job has five bounded attempts, with delays of 30s, 2m, 10m and 30m. Worker production cannot stall supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.
@@ -525,15 +525,15 @@ The report is replaced atomically after capture; a report-write failure leaves t
 
 ### Nightly session identity (`nightly_session.py`, slice 1 of #564)
 
-Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` receipts keep their meaning. `session_key = H(version, as_of, scope, selection_identity, catalog_identity)` and `run_id = H(session_key, generation)`. Callers cannot supply the session key or choose the generation an ordinary call or rerun allocates. An ordinary call resumes the one derived session; only an explicit rerun allocates a generation, so a deployed-code change alone never does. State is one per-session document under the supplied root: `revision`, plus per generation `run_id`, `reason` (`initial`/`rerun`), `status` (`allocated`/`started`) and the rerun's `invalidation` step names. Updates use revision-based compare-and-swap, serialize per session, and publish the document atomically.
+Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` receipts keep their meaning. `session_key = H(version, as_of, scope, selection_identity, catalog_identity)` and `run_id = H(session_key, generation)`. Callers cannot supply either identity or choose the generation an ordinary call or rerun allocates. An ordinary call resumes the one derived session; only an explicit rerun allocates a generation, so code changes alone never do. State is one per-session document under the supplied root: `revision`, plus each generation's `run_id`, `reason` (`initial`/`rerun`), `status` (`allocated`/`started`) and explicit invalidation roots. Updates use revision-based compare-and-swap, serialize per session and publish atomically. The read-only `nightly_repair.py` planner builds a generation-specific plan from a started generation, stage graph, invalidation roots, and prior output bindings. It returns the plan identity, stages to execute, and inherited bindings; it writes no receipts or decisions and runs no decision/publication gates.
 
 | Condition | Outcome |
 |---|---|
-| First ordinary call | Creates generation 1 `allocated`; later calls return that state and never allocate. |
-| Explicit rerun | Appends generation n+1 and its invalidation cone in one swap: the intent is the allocated generation. A crash before the swap records nothing and the request repeats; after it, a repeated rerun reattaches to that still-`allocated` generation. Once started, a rerun allocates the next. The caller's lock decides when the older owner is gone. |
-| Concurrent callers | One swap wins. A loser re-reads: ordinary calls return the winner's state, reruns reattach to the winner's generation. Exhausting the bounded swap retries raises retryable `LEASE_LOST`. A returned state is the revision read; a later swap makes it stale. A superseded generation marking itself started is `CHECKPOINT_INCOMPATIBLE`. |
-| Unparseable JSON, wrong key, run_id or numbering | `INTEGRITY_FAILED`, never treated as absent (that would restart numbering). Another schema is `CHECKPOINT_INCOMPATIBLE`; the operator moves it aside. Old per-date `<as_of>.json` receipts (another path) are never read: no migration, no completed step inferred. |
-| Empty or malformed identity field, or a rerun of a session with no state | `INVALID_REQUEST`; nothing is written. |
+| Calls, reruns, or concurrent callers | A first ordinary call creates generation 1 `allocated`; later ordinary calls return it and never allocate. Explicit rerun appends generation n+1 and roots in one swap; a pre-swap crash writes nothing, a post-swap retry reattaches to `allocated`, and a started generation makes the next rerun allocate. One swap wins; losers re-read; bounded retries raise `LEASE_LOST`; a returned revision may become stale; a superseded generation marking itself started raises `CHECKPOINT_INCOMPATIBLE`. The caller's lock decides when the older owner is gone. |
+| Invalid session state or malformed session/repair input | Unparseable JSON or wrong key/run ID/numbering raises `INTEGRITY_FAILED`; another schema raises `CHECKPOINT_INCOMPATIBLE`. Old per-date receipts are never read. Empty/malformed session identity or rerun without state raises `INVALID_REQUEST`; malformed/unknown repair invalidation roots or malformed effects also raise `INVALID_REQUEST`; no state is written. |
+| Prior binding is missing or unsuccessful, its stage/dependency identity or request/implementation digest differs, or its effect is unprovable | Recompute its stage and affected dependents; inherit only succeeded bindings with matching identities and verified effects, preserving their producer `run_id`. |
+| A stage is absent from the current graph or explicitly invalidated | Drop an absent-stage binding and ignore its persisted invalidation root; execute an explicitly invalidated stage and its dependents. |
+| Prior output has an external effect | Do not inherit the binding. |
 
 ### Nightly step receipts (`nightly_receipts.py`, slice 2 of #564)
 
@@ -548,13 +548,12 @@ Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `
 | `complete_step` with no intent or an incomplete effect; malformed step, request digest (also in `reconcile_step`) or effect (an artifact needs a 64-hex sha256; no ref may contain NUL; a stored effect failing this is `INTEGRITY_FAILED`); a `catalog_job` probe (`complete_step`, `reconcile_step`) without the catalog connection | `INVALID_REQUEST`. Unparseable or foreign receipt files: `INTEGRITY_FAILED` / `CHECKPOINT_INCOMPATIBLE`. |
 
 ### Nightly snapshot chain (`nightly_chain.py`, slice 4 of #564)
-
-Leaf, not yet called by `nightly_trigger`; it imports no CLI or store. `run_snapshot_chain` walks caller-supplied `ChainStep`s serially (planned order: import, planned-price refresh, computed moves, price-history capture). Each step gets the exact snapshot id its predecessor committed, never the mutable head, and a step receipt (`request_digest = H(name, predecessor)`). A step supplies `effect(pred)` (the receipt effect), `run(pred)` (atomic; idempotent under its deterministic job id) and `successor(pred)` (the snapshot it committed, else `None`). Refresh commits no snapshot: the caller's `successor` must return the predecessor, proven by the refresh's own atomic report (not enforced here).
+Leaf, not yet called by `nightly_trigger`; it imports no CLI or store. The pinned-history helper is test-only until a later orchestration slice wires it into `nightly_trigger`. `run_snapshot_chain` walks caller-supplied `ChainStep`s serially; callers place planned-ticker refresh before price-history capture. Each step gets its predecessor's exact committed snapshot id, never the mutable head, and a receipt (`request_digest = H(name, predecessor)`). A step supplies `effect(pred)`, `run(pred)` and `successor(pred)`; a no-snapshot step's caller returns its predecessor only after proving the effect. History imports the validated, pinned ledger file set through D-1; pin capture and reads reject symlinked paths, nonregular files and opened files outside `source_root`. Same-run history calls serialize pin preparation through receipt completion, and resume reuses pins. Before receipt completion, the pinned path set and hashes are revalidated; drift raises `INPUT_CHANGED` after any earlier per-file commits. After a succeeded history receipt, a same-generation rerun re-proves the receipt and skips without rereading source files. History keeps its existing per-file transactions and conflict authority.
 
 | Condition | Outcome |
 |---|---|
 | Successor already committed (finished step, or crash between commit and receipt) | Receipt completed, `run` not called, step `skipped`. No successor: `run` once, re-read, complete; still none is `DEPENDENCY_FAILED`. A succeeded receipt is re-proved first (`reconcile_step`): with its effect no longer holding, or no successor, it is `INTEGRITY_FAILED` and nothing downstream runs. A `catalog_job` effect not yet `succeeded` is `INVALID_REQUEST` from completion: `run` returns only once its job is terminal, and a rerun reattaches. |
-| Recorded step with another predecessor or effect | `IDEMPOTENCY_CONFLICT`; a rerun generation is the way forward. |
+| Recorded step with another predecessor/effect, or history file-set/hash drift while import is pending | `IDEMPOTENCY_CONFLICT` or `INPUT_CHANGED`. Added/missing files refuse before import; later drift refuses before receipt completion, leaving earlier per-file commits intact. A succeeded receipt is re-proved and skips without rereading sources. Pins belong to the session run ID; changed history inputs require a new session/run ID to capture a new pin set. |
 | A callback raises | Propagates; later steps do not run. `effect` runs before `begin_step`, so a raise leaves no receipt; `successor` or `run` raise after it, leaving a new step's receipt `intent` and a `succeeded` one `succeeded`. A malformed `successor` value is `INTEGRITY_FAILED`. |
 
 ### Nightly legacy readiness (`nightly_readiness.py`)
@@ -942,12 +941,11 @@ waits without submitting until its paired succeeded inputs are ready.
   (the full event-date instant is in the key, so distinct instants remain distinct),
   the worker raises before either output file is written, rather than silently
   dropping one row.
-- `computed_moves_store.py` commits only changed content, one fragment per ticker, carrying other tables and parent pins forward. New job parameters
-  pin the parent receipt before execution; commits use it for reference inputs
-  and lineage. Legacy unpinned jobs resolve a receipt at commit for compatibility.
-  Lineage uses `price_history_capture`; captures are append-only and deduped by
-  `capture_id`; no-fragment runs persist attempts only after fence and parent receipt validation, without a generation.
-  `computed_at` derives from `as_of`; identical same-`as_of` inputs resolve to the parent without a generation.
+- `computed_moves_store.py` publishes one object/fragment per event inside each rewritten ticker partition; inspected singleton key/time bounds bind its identity. Shared streamed partition hashes preserve logical content independently of layout.
+  Other tables and untouched ticker fragments/hashes remain pinned; existing snapshots are never rewritten. A refreshed old whole-ticker partition gains a new physical version even when its logical rows agree.
+  Parameters pin the parent receipt for reference inputs/lineage; legacy unpinned jobs resolve it at commit. Lineage uses `price_history_capture`; append-only captures dedupe by `capture_id`.
+  All event objects and hashes are prepared before the atomic catalog/head/capture-log commit. A failed preparation leaves no partial generation; immutable objects and completed raw receipts may remain for retry.
+  No-fragment runs persist attempts only after fence and parent receipt validation. `computed_at` derives from `as_of`; unchanged same-layout, same-`as_of` retries resolve to the parent without a generation.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
   here since the list can drift) — catalog/outbox/filesystem writes
@@ -1118,16 +1116,17 @@ strategies by construction, so no legacy read is needed; it is instead
 checked against `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset
 assertion paid once at import time, no I/O, no legacy dependency).
 
-**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops.
-The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
-`experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, and `fingerprints.environment_identity`/`source_closure`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
-`experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Other modules stay internal. `experiments.native_gate_worker` also consumes `executor.THREAD_VARIABLES`; its required immutable `economic_params.strategy` is independent of arm IDs. Ops registers the data holdout refusal code so R5 survives the supervisor result pipe.
+**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
+`experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, `fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
+`experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Prediction reporting consumes public `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Other modules stay internal.
+`experiments.native_gate_worker` also consumes `executor.THREAD_VARIABLES`; its required immutable `economic_params.strategy` is independent of arm IDs. The registered holdout refusal code preserves R5 through the supervisor result pipe.
 
-### Proposed final-holdout authority (#490)
+### Final-holdout authorization (#490)
 
-Design only: ops will own the private durable user-authorization/spend ledger and fenced lifecycle in the [research final-read contract](../research/ARCHITECTURE.md#proposed-authorized-final-read-490). Only an interactive user act can create authorization; agents and the supervisor may prepare a request or reconcile saved evidence, never authorize it. The dedicated tool leaf composes the peer packages; ops gains no research import or generic final-read job/bypass.
-Authorization facts and the unique decision spend commit together in the catalog before reading. Filesystem receipts/results publish outside SQL; a later transaction binds their verified references. Reconciliation never repeats a started read. Revocation and winner changes serialize with read start and completion; spend survives both.
-Final-read records use their own versioned decision/request namespace, not #555's `(experiment_id, refused)` slot or #565's existing experiment/variant outcome slot. Reuse #555's private pin-bound refusal evidence, fenced reconciliation, redaction and fail-closed publication rules without treating a refusal receipt as authorization; ordinary experiment `--no-ledger` semantics remain unchanged. `HOLDOUT_ACCESS_DENIED` depends on #555's ops-code registration; other named refusals already exist. No new refusal code is proposed.
+| Condition | Outcome |
+| --- | --- |
+| New authorization | `final_holdout.authorize_final_holdout(conn, store, request, *, clock)` is private with no production caller or result-read capability. It requires exact terminal assent and records the process OS identity; the confirmation does not authenticate the human at the terminal. It verifies catalog registration and rechecks the exact request in the committing transaction. Migration 10 stores an immutable, permanent row keyed by `experiment_id` with request, registration, actor, timestamp, and confirmation. This final-read record is separate from ordinary experiment/variant outcomes. Ops does not import research. |
+| Repeat, conflict, or failure | The catalog uses `BEGIN IMMEDIATE` to serialize competing spends; the same UID confirming an identical request gets the original acknowledgement, including after an account rename.<br>Changed request bytes → `IDEMPOTENCY_CONFLICT`; mismatch with registration → `EXPERIMENT_IDENTITY_CONFLICT`.<br>Noninteractive/cancelled assent or another UID → `HOLDOUT_ACCESS_DENIED`; storage failure → `RESOURCE_UNAVAILABLE`.<br>Uncertain commit → no acknowledgement; reconcile with an identical interactive retry. |
 
 ## External systems and libraries
 
@@ -1160,7 +1159,7 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 |---|---|
 | Unknown/unused spec field, invalid fixed-day or target/stop exit recipe/source/fill, mismatched resolved plan, economics without `execution_plan`, malformed fold rows/labels/rule, numeric overflow, mismatched named columns, or mixed named/positional features | `INVALID_EXPERIMENT_SPEC`; refuse before work, return no result, and write no artifact, report, or ledger row. Target/stop recipes are refused during plan resolution, require positive target P&L, negative stop P&L, and positive `trading_days`, and retain every recipe field in canonical plan identity. |
 | Plan write, later runner failure, or fold clone/fit/score/threshold failure, including absent or malformed fitted `classes_` | Typed attempt failure; candidate stays unpublished. A failed plan write may leave partial bytes in the failed attempt root. Worker exit status determines `WORKER_FAILED`; fold scoring failure is non-retryable `EXPERIMENT_VARIANT_FAILED`, with no fitted result retained, no artifact, report, or ledger row written, and the source estimator unchanged. |
-| Spec names a retired registered runner (EXP-184/EXP-185; absent from `RUNNER_INVENTORY` and `REGISTERED_RUNNERS`) | Admitted at plan time. Refused before any subprocess: `worker.dispatch` raises non-retryable `INVALID_EXPERIMENT_SPEC`. `runner_manifest` and `legacy_adapter.run_legacy_script` raise `INVALID_REQUEST`. No resolved plan, report, or ledger row is written. |
+| Disabled registered runner (EXP-182)<br>Retired registered runner (EXP-184/EXP-185; absent from `RUNNER_INVENTORY` and `REGISTERED_RUNNERS`) | **Disabled:** `experiment_plan` refuses `INVALID_REQUEST` before plan construction; primary CLI planning creates no job/attempt rows; `_registered_runner_manifest` preserves the refusal before source binding. `worker.dispatch` refuses non-retryable `INVALID_EXPERIMENT_SPEC` before adapter launch; `runner_manifest`, `legacy_adapter.run_legacy_script`, and direct `run.py` refuse `INVALID_REQUEST` before manifest use, rooted import, or source loading.<br>**Retired:** admitted at plan time, then refused before subprocess by `worker.dispatch` with non-retryable `INVALID_EXPERIMENT_SPEC`; `runner_manifest` and `legacy_adapter.run_legacy_script` raise `INVALID_REQUEST`. No resolved plan, report, or ledger row is written. |
 | Feature read: snapshot mismatch; no match; any post-entry match; conflicting tie at latest eligible instant<br>Successful fold helper call | `SNAPSHOT_UNRESOLVED`; `FEATURES_MISSING`; non-retryable `FEATURE_LOOKAHEAD` (no clipping, shifting, or dropping); `INVALID_EXPERIMENT_SPEC`, respectively. Refusal returns no feature value and writes no artifact or report.<br>Returns only an in-memory result; writes no artifact, report, or ledger row. |
 
 Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row supplies the retry receipt and short-circuits the effect. Two distinct heartbeats govern a live attempt: `attempts.heartbeat_at` is the fenced lease-renewal stamp (`lifecycle.heartbeat`), while a `progress_events` row of `kind="heartbeat"` is only a throttled supervisor observation event (`HEARTBEAT_EVENT_SECONDS` or a state change) and never a lease signal; failure diagnostics expose the lease heartbeat stamp and the worker process-family liveness (recorded launch `ProcessIdentity`, ownership proof) separately from the latest progress event/step.<br>`fit_walk_forward_fold(estimator, train_features, train_labels, test_features, threshold_rule: TrainFoldRule) -> WalkForwardFoldFit` and `TrainFoldRule.fit_threshold(scores, labels) -> float` are pure fold-local helpers; `TrainFoldRule` accepts an optional `top_fraction`. The threshold uses training-fold scores and binary labels only; the estimator fits only on training rows, then scores test rows. Positive scores use the probability column whose fitted `classes_` label is `1`; `classes_` must be exactly binary `{0, 1}` in either order. Test labels are not accepted. Feature matrices are copied before estimator calls so caller-owned rows remain unchanged across folds, and threshold scoring uses original-value training rows even if fitting mutates its input. Named train/test frames require identical column names in identical order; unnamed arrays use positional columns, and mixed named/positional inputs are refused. Callers must apply `ExperimentFeatureContext` while building feature rows to enforce `FEATURE_LOOKAHEAD`; `fit_walk_forward_fold` does not inspect temporal metadata. Test-owned job polling in `tests/ops_support.py` is bounded by the test's own deadline. If that budget or an earlier helper deadline expires before the job is terminal, polling raises a typed timeout that identifies the last observed job state and reports its queue/admission reason, attempt count, and last heartbeat. The admission watch shares the polling deadline and cannot defer those diagnostics beyond it. A timeout is observational: it does not retry the job or extend the polling budget.
@@ -1230,9 +1229,9 @@ Per row (collected as a refusal, never sinks the batch):
 | `POST_AS_OF_ROW` | the row's panel anchor is dated after `as_of` |
 | re-wrapped | any other source-bundle refusal, or an input-assembly `ValueError` |
 
-The four re-wrapped/malformed codes above always carry a fixed `detail`
-string, never staged input or an exception message (`refusals.json` is a
-published output). The release is resolved once per attempt and reused for
+Re-wrapped/malformed codes carry a fixed `detail`; `NATIVE_INPUT_BUILD_FAILED`
+adds the exception class and, for `AnswerFieldsInSource` (bundle or assembly: refuses only that row), answer-field names,
+never staged keys, values or messages (`refusals.json` is published). The release is resolved once per attempt and reused for
 every row. Assembly is a pure function of its inputs (no clock, no RNG) —
 a newly promoted release genuinely changing the output is by design.
 
@@ -1274,6 +1273,16 @@ job.
 | a coordinator effect or launch pre-work (hashing/copying a large read set, a long subprocess) outlives one lease period | every OTHER running attempt's lease is renewed periodically through the same keepalive primitive; a renewal failure for another attempt is swallowed, not raised. The CLAIMED attempt's own lease, which `_poll` cannot renew before it is in `running` (read-set pin and copy in `_launch`), is renewed first through the same fenced `heartbeat`, throttled to once per `LEASE_SECONDS / 4` (one throttle across the pin and copy phases), so staging of any duration reaches `record_launch` with a live lease |
 | the CURRENT or claimed attempt's own renewal fails (fence void, job cancelling, lease already expired), or the supervisor crashes mid-staging | a failed renewal raises `LEASE_LOST`: staging stops, nothing is launched, and the refusal is recorded through the fence-aware `_commit_failure` path (a lost lease is handed to recovery); a heartbeat never extends a lease whose fence is gone (it verifies the fence first and writes nothing on refusal). A crash stops renewal, the lease expires, and the existing recovery path (`expire_leases`, reconcile) settles the attempt as before |
 | a long subprocess (e.g. the engineering gate) exceeds its own deadline, or the keepalive call itself fails mid-run | killed and reaped before the failure propagates; refused as before |
+
+### Attempt staging reclaim (`reclaim.py`, #609, #467)
+
+| Condition | Outcome |
+|---|---|
+| durable vs read-once, under `attempts/<id>/staging/` | only `legacy/` (the read-set copy, or the overlay of symlinks into a verified materialization root) is read-once: the worker reads it during the attempt and nothing afterwards. Kept: `diagnostics/` (read by `ops explain`/`logs`), candidate outputs, bound-input copies, and every catalog row and object. A retry or `resume` is a NEW attempt with its own staging and reads catalog outputs, never an earlier attempt's staging |
+| eligible | `state` in `succeeded`/`failed`/`cancelled` and `process_state` in `unlaunched`/`exited`/`verified_dead`; `starting`, `running`, `cancelling`, `recovery_pending` and any other process state are never touched. An orphan `<ops>.materializations/.<hex>.partial-<attempt_id>` of an eligible attempt follows the same rule (finished roots never). A target with a symlinked ancestor (`attempts/<id>`, `staging`, or the materialization base) is refused before sizing or traversal and reported as `SymlinkedAncestor`; nothing is touched |
+| when | the supervisor tick removes one eligible entry per pass, idling when none is left and resuming at once when an attempt ends; `ops reclaim` is a dry run listing entries with bytes unless `--apply` is given. Symlinked entries are only unlinked, never sized or traversed. Tick cleanup renews other attempts' leases during both sizing and removal; `ops reclaim` does not, so it is meant for a stopped or idle supervisor |
+| crash mid-reclaim | eligibility is the entry's existence, so a partly removed tree is finished by the next pass; nothing is recorded |
+| reclaim fails | an entry's `OSError` is reported (tick: one JSON line per distinct failed (kind, attempt) entry for the process lifetime; CLI: that entry's `error`) and the other entries still run; a catalog read or materialization-base listing error aborts the pass (tick: reported once, swallowed; CLI: the usual redacted error). Nested stat or scan errors inside an entry do not abort: sizing skips what it cannot stat (bytes may undercount), and removal of a tree it could not fully scan fails at the non-empty parent and is reported as that entry's error. No job or attempt state ever changes, so a job is never failed or rolled back; the entry is retried after the 30 s idle interval |
 
 ### `legacy_features` / `legacy_score`: the features receipt (`legacy_adapter.py`, `features_compare.py`)
 
@@ -1343,18 +1352,7 @@ The finality receipt's `covered_tickers` (from `finality_coverage.json`) lists o
 
 ## Invariants
 Score-plan validation shares `foundation.score_population.population_difference` with serving: only an extra `DYN-SV` key with an exact planned non-chooser ticker/date is allowed. Every planned key remains required; other differences retain `VALIDATION_FAILED` before score output.
-Enforces or is bound by, from the root doc §5: missing-input typed refusal;
-no parity-only mode (`native_parity` runs the real code, never a
-legacy-shaped branch); one shared parity comparator (`native_parity_report.py`
-calls `engine/v2/parity`, never a second comparator); snapshot/root
-isolation (data and artifact paths resolve through `engine.paths`/the v2
-foundation, never a module's own `Path(__file__)`-derived root); a root-doc
-requirement, not something this package mechanically enforces everywhere,
-is that nothing published carries a local path, raw exception text, or an
-unsanitised free-text field. `worker.py` keeps a caught traceback in a
-private per-attempt file, never the result pipe, which is the model other
-stages follow — but that one convention does not by itself cover every
-diagnostic or native batch output writer in this package.
+Enforces or is bound by, from the root doc §5: missing-input typed refusal; no parity-only mode (`native_parity` runs the real code, never a legacy-shaped branch); one shared parity comparator (`native_parity_report.py` calls `engine/v2/parity`, never a second comparator); snapshot/root isolation (data and artifact paths resolve through `engine.paths`/the v2 foundation, never a module's own `Path(__file__)`-derived root); a root-doc requirement, not something this package mechanically enforces everywhere, is that nothing published carries a local path, raw exception text, or an unsanitised free-text field. `worker.py` keeps a caught traceback in a private per-attempt file, never the result pipe, which is the model other stages follow — but that one convention does not by itself cover every diagnostic or native batch output writer in this package.
 
 **The one documented root-isolation exemption is worker-*source*
 fingerprinting**, and it applies only to that — never to a data or artifact
@@ -1512,8 +1510,3 @@ flowchart LR
 ```
 
 `board_requests` itself only consumes an `events_table` a caller passes in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a real shadow-scope snapshot via `import_snapshot.plan_import`/`submit_import` only — never a `Repository.scan("earnings_events")` call, which belongs to `computed_moves_store._scan_once` instead, a different boundary. It is reachable today for `nightly_trigger._default_plan`'s scheduled `"score"` job specifically (see "Primary contracts"); a plan built directly with the lower-level plan builder can still default to `legacy` input mode instead. The raw-row producer consumes these requests in the native batch worker. Slice 1's `carried_set.resolve_carried_set` reads the per-table ticker sets from one pinned snapshot, using `daily_market.date` and `option_chains.obs_date` in the inclusive January 1 of the prior calendar year through `as_of` window; `computed_at` and future data dates do not count. `build_uncarried_exclusions` emits one ticker-sorted `UNCARRIED_TICKER` per supplied non-carried candidate, with sorted missing-table names. Missing or unreadable tables propagate the Repository's typed refusal. Slice 2 applies this resolver while building the supervised nightly population, carries the exclusion records in the saved plan, and passes the filtered ticker set to both the legacy score parameters and native board enumerator. The ordinary live legacy dashboard keeps its current population; An uncarried ticker is absent from the decision candidates and so never enters the `candidate_tickers ⊆ covered_tickers` check, while a carried ticker without final coverage still refuses `VALIDATION_FAILED`. The exclusions live in the saved plan only; `decision_plan`/`decision_evidence` documents do not carry them.
-
-### Native nightly pool/residual refresh (Cutover PR-13a)
-
-Design only, not yet implemented — see
-[#192](https://github.com/yshewchuk/investment-validation/issues/192).

@@ -47,6 +47,10 @@ wiring anything to call it.
 | `add_implied_history(df) -> pd.DataFrame` | DataFrame in, DataFrame out | byte-identical copy of `engine.data.features.panel.add_implied_history` — the one function in this module that is pandas-shaped, because its ported body is itself pandas code (`groupby`/`shift`/`expanding`) |
 | `daily_state_lookup(rows, decision_date) -> dict` | plain sequence of mappings + a date in, plain mapping out | new: factors the per-`(ticker, as_of)` extraction rule out of `engine.features.daily_state_frame`, which is batched (DataFrame-in/DataFrame-out) and stays in legacy unchanged |
 
+Research's `event_history.load_event_history` feeds `history_features` only
+after canonical holdout, physical object-isolation and availability admission.
+That read boundary owns provenance and missing-history status; the math is unchanged.
+
 ### Runup feature math
 
 `runup_math.add_runup_features(frame, prices_by_ticker, as_of_column)`
@@ -149,6 +153,16 @@ source date could pass that cutoff while a later contributing date would
 not. A missing or null contributor never advances the max; empty history
 contributes none, yet computed history contributes even when `runup_asof`
 cannot resolve.
+`panel_row` also carries the legacy-named model inputs that the panel math
+does not produce, derived with legacy semantics: `or_implied` and `or_rvol30`
+are the daily-state `im` and `rvol30` (absent when those are absent;
+`engine/data/features/panel.py` `ORATS_FEATURES`); `abs_dist_high` and
+`abs_dist_ema` are `abs(dist_high)` and `abs(dist_ema)`, NaN where the source
+is NaN (`engine/features.py` `add_absolute_features`); `has_implied_quote`
+is 1.0 when `or_implied` is present and above 0, else 0.0
+(`add_quote_indicators`). `mean_prior_or_implied` is deliberately NOT
+produced: `computed_moves` cannot reproduce legacy's admission (first four
+events per ticker excluded) or its `src_iv` row selection (tracked in an issue).
 It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
 (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never

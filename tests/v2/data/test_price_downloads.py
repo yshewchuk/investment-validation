@@ -507,36 +507,51 @@ def _commit_price_history_snapshot(conn, clock, store, ticker_rows: dict[str, pd
                          {PRICE_HISTORY_TABLE_NAME: PRICE_HISTORY_CONTRACT}, scope="test")
 
 
-def test_get_price_series_value_before_and_after_a_changed_retrieval(tmp_path):
+def test_get_price_series_uses_latest_pinned_retrieval_regardless_of_ceiling(tmp_path):
     stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.0)},
                        retrieved_at="2024-01-02T00:00:00Z", source_hash="h0")
-    stored, _ = _apply(stored, {"2024-01-01": (5.0, 5.0, 5.0)}, retrieved_at="2024-01-08T00:00:00Z",
-                       source_hash="h1")
+    stored, _ = _apply(stored, {"2023-12-31": (4.0, 4.0, 4.0),
+                                "2024-01-01": (5.0, 5.0, 5.0),
+                                "2024-01-02": (6.0, 6.0, 6.0)},
+                       retrieved_at="2024-01-08T00:00:00Z", source_hash="h1")
     conn, clock, store = catalog_and_store(tmp_path)
     snapshot = _commit_price_history_snapshot(conn, clock, store, {"AAPL": stored})
     repository = Repository(conn, store)
 
     before = repository.get_price_series(
-        _price_query(session_date="2024-01-01", ceiling="2024-01-05T00:00:00Z"), snapshot)
-    assert before[-1].close_adj == 1.0
-    assert before[-1].source_hash == "h0"
+        _price_query(session_date="2024-01-01", ceiling="2024-01-01T23:59:59Z"), snapshot)
+    assert [row.date for row in before] == ["2023-12-31", "2024-01-01"]
+    assert before[0].close_adj == 4.0
+    assert before[0].retrieved_at == "2024-01-08T00:00:00Z"
+    assert before[0].source_hash == "h1"
+    assert before[-1].close_adj == 5.0
+    assert before[-1].source_hash == "h1"
+    guard_rows = pd.DataFrame({"retrieved_at": ["2024-01-08T00:00:00Z"]})
+    with pytest.raises(ValueError, match="cutoff is required"):
+        price_history._chosen_retrieved_at(guard_rows, None)
+    with pytest.raises(ValueError, match="cutoff must be omitted"):
+        price_history._chosen_retrieved_at(
+            guard_rows, "2024-01-01T23:59:59Z", latest_snapshot=True)
+    close = repository.get_close("AAPL", "2024-01-01", "2024-01-01T23:59:59Z", snapshot)
+    assert close.close_adj == 5.0
+    assert close.retrieved_at == "2024-01-08T00:00:00Z"
+    assert close.source_hash == "h1"
 
-    after = repository.get_price_series(_price_query(ceiling="2024-01-10T00:00:00Z"), snapshot)
-    assert after[-1].close_adj == 5.0
-    assert after[-1].source_hash == "h1"
 
-
-def test_get_price_series_ceiling_before_any_retrieval_uses_earliest(tmp_path):
+def test_get_price_series_uses_latest_retrieval_when_ceiling_precedes_all(tmp_path):
     stored, _ = _apply(_empty_stored(), {"2020-01-01": (1.0, 1.0, 1.0), "2020-01-02": (2.0, 2.0, 2.0),
                                         "2020-01-03": (3.0, 3.0, 3.0)},
                        retrieved_at="2024-06-05T00:00:00Z", source_hash="h0")
+    stored, _ = _apply(stored, {"2020-01-01": (4.0, 4.0, 4.0), "2020-01-02": (5.0, 5.0, 5.0),
+                                "2020-01-03": (6.0, 6.0, 6.0)},
+                       retrieved_at="2024-06-06T00:00:00Z", source_hash="h1")
     conn, clock, store = catalog_and_store(tmp_path)
     snapshot = _commit_price_history_snapshot(conn, clock, store, {"AAPL": stored})
     repository = Repository(conn, store)
     result = repository.get_price_series(
         _price_query(session_date="2020-01-02", ceiling="2020-01-02T00:00:00Z", lookback=10), snapshot)
-    assert [r.close_adj for r in result] == [1.0, 2.0]
-    assert result[-1].source_hash == "h0"
+    assert [r.close_adj for r in result] == [4.0, 5.0]
+    assert result[-1].source_hash == "h1"
 
 
 def test_get_price_series_drops_a_tombstoned_date(tmp_path):
@@ -551,7 +566,7 @@ def test_get_price_series_drops_a_tombstoned_date(tmp_path):
     assert [r.date for r in result] == ["2024-01-01"]
 
 
-def test_get_price_series_refuses_query_not_bounded(tmp_path):
+def test_get_price_series_refuses_session_after_observation_ceiling(tmp_path):
     stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.0)},
                        retrieved_at="2024-01-02T00:00:00Z")
     conn, clock, store = catalog_and_store(tmp_path)

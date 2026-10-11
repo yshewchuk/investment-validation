@@ -10,7 +10,7 @@
 #
 # `mutate` and `tests` entries are tracked paths or globs (fnmatch: `*` also
 # matches `/`); `skip` removes paths from `mutate`. A pattern that matches
-# nothing is an error. tests/test_mutation_ci.py checks that every
+# nothing is an error. tests/v2/integration/test_mutation_ci.py checks that every
 # engine/v2 file sits in exactly one module.
 #
 # Each [modules.<name>] mutates only its `mutate` files and runs only its
@@ -30,7 +30,7 @@
 # expansion and `[defaults]
 # deselect` unchanged -- it only changes how the mutants are executed (parallel
 # gremlin workers in the repo checkout, not mutmut in a work copy). Keeping one
-# map means the exhaustive module-ownership test (tests/test_mutation_ci.py:
+# map means the exhaustive module-ownership test (tests/v2/integration/test_mutation_ci.py:
 # every engine/v2 file in exactly one module) governs both backends. The gremlins
 # CI cache key folds in the SAME per-module config-hash (defaults plus that
 # module's own section) mutmut uses, but that is only PART of the gremlins
@@ -224,6 +224,7 @@ skip = [
     "*/canonical.py",
 ]
 tests = [
+    "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/serving/test_score_population.py",
     "tests/v2/foundation/test_experiment_holdouts.py",
     "tests/test_phase4_analog_recipe_cache.py",
@@ -328,11 +329,11 @@ tests = [
     "tests/test_v2_data_manifests.py",
     "tests/test_v2_data_objects.py",
     "tests/test_v2_data_partitions.py",
-    "tests/test_v2_data_price_downloads.py",
+    "tests/v2/data/test_price_downloads.py",
     "tests/test_v2_data_query.py",
     "tests/test_v2_data_repository.py",
     "tests/test_v2_data_roundtrip.py",
-    "tests/test_v2_ops_price_history.py",
+    "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/serving/test_v2_serving_api.py",
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
@@ -388,7 +389,7 @@ tests = [
 # CI run 35458557499 (2026-09-19, push/incremental) shows its mutmut step ran the
 # full 330-minute cap and was killed (run_exit_code -1, 3097/4280 mutants checked
 # before the cutoff) -- exactly the "full run times out after 5.5 hours" symptom.
-# Still listed (never run) so `tests/test_mutation_ci.py` keeps every engine/v2 file
+# Still listed (never run) so `tests/v2/integration/test_mutation_ci.py` keeps every engine/v2 file
 # owned by exactly one module.
 excluded = "legacy materialization/mapping/reference bridge the rearchitecture deletes on cutover; also the module whose 330-minute mutmut step timeout (CI run 35458557499, 2026-09-19) caused the whole weekly run to time out at 5.5 hours."
 why = "Legacy materialization, mapping, reference inputs and price history: the bridge that feeds legacy-shaped inputs into v2."
@@ -403,10 +404,10 @@ tests = [
     "tests/v2/data/test_legacy_reader_lifetime.py",
     "tests/test_v2_data_legacy_adapter.py",
     "tests/test_v2_data_legacy_materialization.py",
-    "tests/test_v2_data_price_downloads.py",
+    "tests/v2/data/test_price_downloads.py",
     "tests/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_tier4_coverage.py",
-    "tests/test_v2_ops_price_history.py",
+    "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/ops/test_v2_ops_tier4_coverage.py",
 ]
 
@@ -599,7 +600,7 @@ tests = [
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
-    # A glob, not a new literal line: tests/test_mutation_ci.py expands the
+    # A glob, not a new literal line: tests/v2/integration/test_mutation_ci.py expands the
     # pattern list against `git ls-files`, so a literal for a file not yet
     # committed would fail as "matches no tracked file". This keeps every
     # tests/test_v2_serving_*.py (native_render included) in the module's pool
@@ -623,9 +624,12 @@ mutate = [
     "engine/v2/ops/experiments.py",
 ]
 tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
+    "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
     "tests/v2/ops/test_native_gate_worker.py",
     "tests/v2/research/test_native_outcomes.py",
+    "tests/v2/research/test_v2_prediction_cli.py",
     "tests/v2/research/test_native_outcome_validation.py",
     "tests/test_v2_ops_authority.py",
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
@@ -649,7 +653,7 @@ tests = [
 [modules.ops_experiment_folds]
 why = "Fold-local experiment fitting: an experiment's fit must stay inside its own fold boundaries; a leaked boundary or wrong fold map contaminates the out-of-sample result."
 mutate = ["engine/v2/ops/experiment_folds.py"]
-tests = ["tests/test_v2_ops_experiment_folds.py"]
+tests = ["tests/test_v2_ops_experiment_folds.py", "tests/v2/research/test_prediction_report.py"]
 
 [modules.ops_runtime]
 why = "Supervisor, workers, executors, resources, recovery and provider budget: job execution and admission."
@@ -665,6 +669,7 @@ mutate = [
     "engine/v2/ops/provider_budget.py",
     "engine/v2/ops/provider_requirements.py",
     "engine/v2/ops/refresh_staging.py",
+    "engine/v2/ops/reclaim.py",
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
@@ -689,6 +694,7 @@ tests = [
     "tests/test_v2_ops_recovery_ownership.py",
     "tests/test_v2_ops_recovery_reboot.py",
     "tests/v2/ops/test_v2_ops_refresh_staging.py",
+    "tests/v2/ops/test_ops_reclaim.py",
     "tests/v2/ops/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_worker_typed_failures.py",
@@ -718,6 +724,8 @@ mutate = [
     "engine/v2/ops/schema_runtime.py",
 ]
 tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
+    "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
@@ -750,6 +758,7 @@ mutate = [
     "engine/v2/ops/errors.py",
 ]
 tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_catalog.py",
@@ -772,6 +781,15 @@ tests = [
     "tests/v2/ops/test_v2_ops_same_session_replan.py",
     "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
+]
+
+[modules.ops_final_holdout]
+why = "Catalog-bound native registration verification and immutable user-only final-read spend: forged metadata or a duplicate act must never create authority."
+mutate = ["engine/v2/ops/native_registration.py", "engine/v2/ops/final_holdout.py"]
+tests = [
+    "tests/v2/ops/test_final_holdout_authority.py",
+    "tests/v2/research/test_final_holdout_requests.py",
+    "tests/v2/research/test_native_registration.py",
 ]
 
 [modules.ops_catalog_sched]
@@ -921,6 +939,7 @@ tests = [
 
 [modules.ops_nightly]
 why = "Nightly DAG, stage map, plans, fingerprints and incremental data wiring."
+skip = ["engine/v2/ops/native_registration.py"]
 mutate = [
     # ``n*.py`` keeps nightly.py and nightly_trigger.py (phase 6 slice 12)
     # owned and lands native_shadow_render.py (the spec_ns_b ops half of the
@@ -959,6 +978,7 @@ tests = [
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",
     "tests/test_v2_ops_computed_moves_store.py",
+    "tests/v2/ops/test_computed_moves_event_fragments.py",
     "tests/test_v2_ops_partition_consumer.py",
     "tests/test_v2_ops_coordinator_lease.py",
     "tests/test_v2_ops_effect_receipt_collision.py",
@@ -1007,7 +1027,7 @@ tests = [
     "tests/test_v2_data_rebuild_rollback.py",
     "tests/test_v2_data_repository.py",
     "tests/v2/ops/test_v2_ops_generation_binding_lineage.py",
-    "tests/test_v2_ops_price_history.py",
+    "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/ops/test_v2_ops_snapshot_stages.py",
     "tests/v2/ops/test_calendar_ticker_price_history.py",
 ]
@@ -1020,6 +1040,8 @@ mutate = [
 tests = [
     "tests/v2/research/test_gate_variant.py",
     "tests/v2/research/test_prediction_inputs.py",
+    "tests/v2/research/test_event_history.py",
+    "tests/v2/research/test_magnitude_inputs.py",
     "tests/v2/research/test_experiment_trades.py",
     "tests/v2/research/test_exp144_v2_trades.py",
     "tests/v2/research/test_experiments_common_v2_store_root.py",

@@ -22,7 +22,7 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly_calendar_inputs import scan_decision_calendar
 from engine.v2.ops.price_history_store import capture
 from engine.v2.ops.supervisor import Service
-from tests.test_v2_ops_price_history import (
+from tests.v2.ops.test_v2_ops_price_history import (
     _base_snapshot,
     _epoch,
     _px_dir,

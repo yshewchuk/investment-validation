@@ -411,6 +411,13 @@ def _is_null_forecast_value(value: Any) -> bool:
     )
 
 
+#: Names a frozen model may list in its feature_order that the scorer itself
+#: computes from staged quotes (engine/v2/scoring/stages.py
+#: _check_pricing_boundary). They are answer fields, so source_inputs forbids
+#: them in source inputs; projecting them would make every row refuse.
+_SCORER_COMPUTED_FEATURES = frozenset({"entry_cost_pct"})
+
+
 def _project_features(
     tier4_row: Mapping[str, Any],
     panel_row: Mapping[str, Any],
@@ -450,6 +457,8 @@ def _project_features(
     feature_vector: dict[str, Any] = {}
     feature_missing_mask: dict[str, bool] = {}
     for name in sorted(feature_names):
+        if name in _SCORER_COMPUTED_FEATURES:
+            continue
         if name in tier4_row:
             value = tier4_row[name]
             if not _is_null_forecast_value(value):

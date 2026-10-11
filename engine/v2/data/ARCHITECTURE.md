@@ -50,9 +50,7 @@ interface section; this names only the load-bearing entry points.
   planned-unit key validation, `normalizer_id` versioning, coverage
   completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
-  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`), a bounded
-  Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/
-  `get_close`, and `explain_dependencies`.
+  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached, each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
   fragments of the supplied snapshot, with no head fallback or object reads,
   through the same membership-bound planner behind `scan` and
@@ -127,7 +125,16 @@ interface section; this names only the load-bearing entry points.
   resolution, the latter legacy-free); `import_snapshot.py`; `tier4_coverage.py`.
 - **`computed_moves`/`price_history`** — pure math + each family's
   `TableContract`; `price_history_query.py` also exposed as
-  `Repository.get_price_series`/`.get_close`.
+  `Repository.get_price_series`/`.get_close`. A price-history read
+  reconstructs row versions through the latest retrieval present in its
+  pinned snapshot; `retrieved_at` is provenance, not an observation ceiling.
+  The reader exposes only bars dated
+  on or before the decision session. This permits a session close fetched
+  after midnight to be used for that session, while a later-dated bar remains
+  unavailable. A vendor may revise historical values in a later retrieval,
+  including split or dividend adjustments, or backfill a previously absent
+  date; using the latest pinned retrieval accepts that vendor-revision risk
+  rather than treating retrieval time as causal availability.
 - **Errors** — `errors.DataError`, built only from a registered
   `DATA_FAILURE_CODES` entry.
 - **Contract changes** — Recalculate data tables through the standard import
@@ -209,13 +216,20 @@ global primary-key order; typed results (`EarningsEvent`, `ChainSnapshot`,
 (new manifest, changeset, receipt, coverage/revision rows — one transaction
 with the head CAS; a reused fragment's changeset is reconciled against the
 truly-stored dataset-version row — Invariants); a `computed_moves`/
-`price_history` fragment per ticker (whole-partition rewrite — Invariants),
+`price_history` ticker partition (whole-partition rewrite — Invariants),
 committed by `engine.v2.ops.computed_moves_store.py`/
 `.price_history_store.py` (this package supplies only the math and the
 `TableContract`); refusals created through `errors.fail` use a
 `DataError`/`Problem` from `DATA_FAILURE_CODES`, intended to carry no local
 path or row value — not fully enforced today (Invariants). Strict document
 decoding can instead raise `DocumentError` directly.
+
+New native `computed_moves` captures publish singleton event objects within each
+ticker partition, with inspected key/time bounds and the existing streamed
+logical-partition hash. Row values and table contracts are unchanged; object
+layout changes physical version identity. Old pinned fragments remain unchanged.
+Repository predicates filter decoded rows, not arbitrary bytes within a surviving
+object: research must prove object isolation from metadata before reading labels.
 
 **`computed_moves.v3` — point-in-time availability.** `available_as_of_date`
 is the calendar day following the close that made `realized_move_pct`
@@ -393,7 +407,7 @@ the prior receipt even if the head moved since).
 
 **`repository.py` reads (summary).** Missing input maps to the codes above;
 a corrupt id is `MANIFEST_CORRUPT`; a re-hash mismatch is `OBJECT_CORRUPT`.
-`resolve` rebuilds from catalog rows every call (no cache). `objects.verify_object_path`
+`resolve` rebuilds from catalog rows every call by default; `pin_snapshots=True` reuses per instance, with defensive copies, never caching failures. `objects.verify_object_path`
 fully re-hashes an object on its first open in a process and skips the re-hash
 on a later open only while the file's stat tuple (device, inode, size, mtime
 and ctime, in nanoseconds) equals the one recorded when its hash last matched
@@ -494,9 +508,11 @@ Root doc §5 invariants this package is responsible for:
 - **Native vs. legacy provenance** — this package never mints a "native"
   answer from a legacy-derived value; a native verdict is computed at
   `engine/v2/scoring` (layer 5), not here.
-- **Whole-partition rewrite, no legacy append order** — `price_history_table.py`/
-  `computed_moves_table.py` each cover one ticker's whole history in one
-  fragment, so a correction rewrites it rather than appending a byte.
+- **Whole-partition rewrite, no legacy append order** — a correction rewrites
+  the entire ticker partition: `price_history` uses one fragment, while new
+  `computed_moves` captures use ordered, non-overlapping singleton event fragments.
+  Older snapshots may retain one whole-ticker fragment; neither layout appends
+  corrections to the existing fragment membership.
 - **The calendar ticker is a declared `price_history` dependency.** The native
   nightly derives its session calendar from the pinned `price_history` series of
   `price_history_table.CALENDAR_TICKER` (`SPY`), independent of any scoring

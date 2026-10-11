@@ -88,7 +88,7 @@ old = ["nightly:legacy refresh", "nightly:legacy backfill", "nightly:legacy move
 new = ["nightly:v2 refresh", "nightly:v2 materialize", "nightly:v2 computed_moves_refresh", "cli:ops price-refresh", "cli:ops price-history", "cli:ops price-history capture", "cli:ops snapshot", "cli:ops snapshot plan-import", "cli:ops snapshot submit", "cli:ops snapshot promote", "cli:ops snapshot rollback", "cli:ops capture-inputs", "cli:ops computed-moves", "cli:ops computed-moves capture", "job:computed_moves_refresh", "job:forward_calendar_refresh"]
 producer = "supervisor.Service tick loop submits the native computed_moves_refresh job after a succeeded incremental_refresh job selected by --refresh-mode native; snapshot import/promote; default refresh_mode stays legacy"
 identity = "snapshot manifest id / promoted snapshot head; RefreshPlan document hash"
-tests = ["tests/test_v2_ops_incremental_refresh_wiring.py", "tests/v2/ops/test_v2_ops_snapshot_stages.py", "tests/test_v2_ops_price_history.py", "tests/test_data_price_refresh.py", "tests/v2/integration/test_computed_moves.py", "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py", "tests/test_v2_ops_computed_moves_nightly_wiring.py"]
+tests = ["tests/test_v2_ops_incremental_refresh_wiring.py", "tests/v2/ops/test_v2_ops_snapshot_stages.py", "tests/v2/ops/test_v2_ops_price_history.py", "tests/test_data_price_refresh.py", "tests/v2/integration/test_computed_moves.py", "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py", "tests/test_v2_ops_computed_moves_nightly_wiring.py"]
 disposition = "compatibility-adapter"
 owner = "P6-2"
 notes = "Native refresh exists but is opt-in; ops price-refresh wraps legacy price_refresh (adapter edges). supervisor.Service.tick() submits computed_moves_refresh only after a native refresh succeeds; nightly.py's GRAPH/OPTIONAL node documents graph order but is excluded from saved-plan job construction. A legacy plan's DAG is unchanged; forward_calendar_refresh now has a JobKind too (issue #52's prerequisite landed in #55) but is reachable only through direct job submission (e.g. ops submit) -- no supervisor.Service submitter or nightly GRAPH node yet."
@@ -324,12 +324,12 @@ area = "research"
 capability = "Preregistered experiment runs through evaluate(): run log, testing ledger, --no-ledger smoke"
 old = ["cli-family:experiments/*/run.py", "writer:engine/evaluate.py::evaluate", "writer:engine/evaluate.py::append_run_log"]
 new = ["cli:ops plan", "py:engine/v2/ops/experiments.py::run_experiment", "effect:experiment_effect"]
-producer = "supervised experiment job: legacy runner via the declared command adapter (EXP-182 only)"
+producer = "EXP-182 disabled; no registered legacy runner is currently admissible"
 identity = "spec_hash + input manifest + runner manifest"
-tests = ["tests/test_experiments.py", "tests/v2/ops/test_v2_ops_runner_onboarding.py", "tests/test_evaluate.py", "tests/test_v2_ops_experiment_reports.py::test_primary_run_produces_a_real_engine_report"]
+tests = ["tests/test_experiments.py", "tests/v2/ops/test_v2_ops_runner_onboarding.py", "tests/test_evaluate.py", "tests/v2/ops/test_experiment_reports.py::test_primary_run_produces_a_real_engine_report"]
 disposition = "compatibility-adapter"
 owner = "P6-2"
-notes = "EXP-182 is the only onboarded legacy runner; a primary-mode activation now requires a PLANNED ledger row (engine/v2/ops/experiments.py::require_preregistration) and appends its ledger row through the experiment coordinator effect, not a worker-subprocess write. Other runners still run by filesystem path outside the supervisor. Reached at runtime, not just by symbol resolution: tests/test_v2_ops_experiment_reports.py::test_primary_run_produces_a_real_engine_report calls run_experiment with mode=primary through invoke_evaluate. p6/slice11 will rename these rows' identity from filesystem `new` entrypoints to `job:experiment` (both rows share the one job kind -- there is no separate research_report job kind; a report is always evidence attached to an experiment job's receipt)."
+notes = "EXP-182 is disabled because its runner read EXP-179 parquet directly without a v2_snapshot_id, bypassing holdouts. The runtime report-reachability probe uses a synthetic identity and calls run_experiment with mode=primary through invoke_evaluate; it does not launch EXP-182. Other runners still run by filesystem path outside the supervisor. p6/slice11 will rename these rows' identity from filesystem `new` entrypoints to `job:experiment` (both rows share the one job kind -- there is no separate research_report job kind; a report is always evidence attached to an experiment job's receipt)."
 
 [[row]]
 id = "research-reports"
@@ -340,10 +340,10 @@ old = ["writer:engine/report.py::Report.write", "writer:engine/report.py::fig_eq
 new = ["py:engine/v2/ops/experiments.py::run_experiment"]
 producer = "legacy engine.report inside the runner; the v2 job records the report as evidence"
 identity = "report bytes hash in the experiment receipt"
-tests = ["tests/test_report.py", "tests/test_experiments.py", "tests/test_v2_ops_experiment_reports.py::test_primary_run_produces_a_real_engine_report", "tests/test_v2_ops_experiment_reports.py::test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger"]
+tests = ["tests/test_report.py", "tests/test_experiments.py", "tests/v2/ops/test_experiment_reports.py::test_primary_run_produces_a_real_engine_report"]
 disposition = "compatibility-adapter"
 owner = "P6-2"
-notes = "Reached at runtime by tests/test_v2_ops_experiment_reports.py::test_primary_run_produces_a_real_engine_report: a primary-mode run whose REPORT.md is produced by engine.evaluate -> engine.report through the declared invoke_evaluate adapter, not the synthetic fixture. The registered EXP-182 wrapper delegates to experiments/EXP-181_d_1_gated_execution_parity/run.py, which calls evaluate(..., write_report=True), so the producer statement holds for the legacy path too. Also reached through the production wiring by tests/test_v2_ops_experiment_reports.py::test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger: ops plan -> worker.dispatch -> run_legacy_script -> REPORT.md verified into the experiment receipt -> the coordinator's ran row in the checkout ledger, with the planned and ran rows joining on the legacy spec_hash. p6/slice11 will rename this row's identity from filesystem `new` entrypoints to `job:experiment` (both research rows share the one job kind -- there is no separate research_report job kind; a report is always evidence attached to an experiment job's receipt)."
+notes = "Reached at runtime by tests/v2/ops/test_experiment_reports.py::test_primary_run_produces_a_real_engine_report: a primary-mode run whose REPORT.md is produced by engine.evaluate -> engine.report through the declared invoke_evaluate adapter, not the synthetic fixture. Its runner uses a synthetic identity; EXP-182 is disabled. p6/slice11 will rename this row's identity from filesystem `new` entrypoints to `job:experiment` (both research rows share the one job kind -- there is no separate research_report job kind; a report is always evidence attached to an experiment job's receipt)."
 
 [[row]]
 id = "research-replay"
@@ -645,7 +645,7 @@ evidence = "cli:ops get"
 area = "operations"
 capability = "Job inspection and control: get, logs, explain, cancel, resume, reconcile"
 old = ["py:engine/dashboard/nightly.py::single_run_lock"]
-new = ["cli:ops get", "cli:ops logs", "cli:ops explain", "cli:ops cancel", "cli:ops resume", "cli:ops reconcile", "cli:engine/v2/ops/worker.py"]
+new = ["cli:ops get", "cli:ops logs", "cli:ops explain", "cli:ops cancel", "cli:ops resume", "cli:ops reconcile", "cli:ops reclaim", "cli:engine/v2/ops/worker.py"]
 producer = "catalog jobs/attempts tables"
 identity = "job_id / attempt_id / fence"
 tests = ["tests/test_v2_ops_explain_from_logs.py", "tests/test_v2_ops_recovery_ownership.py", "tests/test_dashboard.py"]

@@ -108,15 +108,18 @@ def _phase1_root(tmp_path, listed, present, extra=()):
 
 _PHASE1_EXTRA = ("tests/v2/ops/test_cli_rescore.py", "tests/v2/ops/test_forward_calendar_store.py",
                  "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py",
-                 "tests/v2/ops/test_v2_ops_refresh_staging.py")
+                 "tests/v2/ops/test_v2_ops_refresh_staging.py",
+                 "tests/v2/ops/test_experiment_reports.py")
 
 
 def test_real_phase1_suite_keeps_the_relocated_refresh_tests():
     from checks.v2_coverage_ratchet import phase1_suite
 
     suite = phase1_suite()
+    assert "tests/v2/data/test_price_downloads.py" in suite
     assert "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py" in suite
     assert "tests/v2/ops/test_v2_ops_refresh_staging.py" in suite
+    assert suite.count("tests/v2/ops/test_experiment_reports.py") == 1
 
 
 def test_phase1_suite_finds_a_baseline_test_that_moved(tmp_path):
@@ -134,6 +137,12 @@ def test_phase1_suite_keeps_a_baseline_test_that_did_not_move(tmp_path):
     root = _phase1_root(tmp_path, ["tests/test_still_root.py"],
                         ["tests/test_still_root.py"], _PHASE1_EXTRA)
     assert "tests/test_still_root.py" in phase1_suite(root)
+
+
+def test_phase1_suite_keeps_relocated_price_history_test():
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    assert "tests/v2/ops/test_v2_ops_price_history.py" in phase1_suite(ROOT)
 
 
 def test_phase1_baseline_inventory_matches_active_suite():
@@ -227,7 +236,8 @@ def test_phase1_suite_raises_for_an_ambiguous_basename(tmp_path):
 def test_phase1_suite_raises_for_a_missing_extra_test(tmp_path):
     from checks.v2_coverage_ratchet import phase1_suite
 
-    root = _phase1_root(tmp_path, [], [], [_PHASE1_EXTRA[0]])
+    present = [path for path in _PHASE1_EXTRA if path != "tests/v2/ops/test_forward_calendar_store.py"]
+    root = _phase1_root(tmp_path, [], [], present)
     with pytest.raises(FileNotFoundError, match="test_forward_calendar_store.py"):
         phase1_suite(root)
 
@@ -381,6 +391,13 @@ def test_r2_root_growth_fails(tmp_path):
     report = tb.check_layout({"tests/test_a.py"}, {"tests/test_a.py", "tests/test_b.py"},
                              1, 2, tmp_path)
     assert any(finding.startswith("root test set grew") for finding in report.findings)
+
+
+def test_r3_budget_can_reconcile_down_without_test_moves(tmp_path):
+    paths = {"tests/test_a.py", "tests/test_b.py"}
+    assert tb.check_layout(paths, paths, 3, 2, tmp_path).ok
+    assert any("budget 1 != root test count 2" in finding
+               for finding in tb.check_layout(paths, paths, 3, 1, tmp_path).findings)
 
 
 def test_r3_stale_or_increased_budget_fails(tmp_path):

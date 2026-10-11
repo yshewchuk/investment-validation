@@ -37,7 +37,11 @@ from engine.v2.scoring.nightly_source_bundle import (
     validated_as_of,
 )
 from engine.v2.scoring.release_bindings import ScoringReleaseBinding
-from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
+from engine.v2.scoring.source_inputs import (
+    AnswerFieldsInSource,
+    SourceBundle,
+    build_native_score_inputs,
+)
 from engine.v2.scoring.stages import NativeScoreInputs
 
 __all__ = [
@@ -332,6 +336,15 @@ def _with_release_artifacts(
     )
 
 
+def _input_build_refusal(key: BoardRequest, exc: ValueError) -> NativeScoreBatchRowRefusal:
+    """NATIVE_INPUT_BUILD_FAILED with the exception class and, for
+    AnswerFieldsInSource, fixed-vocabulary field names; never str(exc) (CWE-209)."""
+    detail = f"native input build failed: {type(exc).__name__}"
+    if isinstance(exc, AnswerFieldsInSource):
+        detail += f" {exc.fields}"
+    return NativeScoreBatchRowRefusal(key, "NATIVE_INPUT_BUILD_FAILED", detail)
+
+
 def _bundle_or_refusal(
     key: BoardRequest,
     event: NightlyEventInputs,
@@ -373,6 +386,9 @@ def _bundle_or_refusal(
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
             key, exc.code, f"nightly_source_bundle refused: {exc.code}")
+    except AnswerFieldsInSource as exc:
+        # One row carrying a calculated answer field refuses that row only (#630).
+        return _input_build_refusal(key, exc)
 
 
 def _assemble_one_event(
@@ -436,12 +452,10 @@ def _assemble_one_event(
         return bundle
     try:
         native_inputs = build_native_score_inputs(bundle)
-    except ValueError:
-        # CodeRabbit round 4 (PR #66, CWE-209): a fixed message, not str(exc)
-        # -- build_native_score_inputs' own ValueError text can name staged
-        # recipe/field shapes, and refusals.json is a published output.
-        return NativeScoreBatchRowRefusal(
-            key, "NATIVE_INPUT_BUILD_FAILED", "native input build failed")
+    except ValueError as exc:
+        # CWE-209: never str(exc) (refusals.json is published). Only the class
+        # and, for AnswerFieldsInSource, fixed-vocabulary answer-field names.
+        return _input_build_refusal(key, exc)
     request = ScoreRequest(
         event_id=str(event_id), calendar_revision=str(calendar_revision),
         strategy_version=strategy, deployment_id=binding.model_release.deployment_id,
@@ -853,7 +867,10 @@ def _worker_event_documents(parameters: Mapping[str, Any], root: Path):
 
     conn = connect(parameters["catalog_path"], must_exist=True)
     try:
-        repository = Repository(conn, ArtifactStore(parameters["objects_root"]))
+        # One snapshot is pinned for the whole build: memoise its resolution and
+        # table membership instead of re-reading the catalog on every scan.
+        repository = Repository(
+            conn, ArtifactStore(parameters["objects_root"]), pin_snapshots=True)
         snapshot = repository.resolve(parameters["snapshot_id"])
         events_doc, producer_doc = build_native_score_batch_events(
             repository, snapshot, as_of=parameters["as_of"],

@@ -47,9 +47,11 @@ underscore convention, and an import of a name absent from this list fails
 | `score_population.population_key`, `score_population.population_difference` | Shared legacy score population identity and planned-versus-observed rule for ops and serving. |
 | `experiment_holdouts.ExperimentHoldouts` | Shared deterministic, versioned random/rolling membership; no final-read authority. |
 
-<!-- public-interface: canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts -->
+<!-- public-interface: final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts -->
 
 ## Consumers
+
+`final_holdout` provides pure declaration/request decoders and registration projection for `experiments.native_registration`; it grants no read or authorization capability.
 
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a

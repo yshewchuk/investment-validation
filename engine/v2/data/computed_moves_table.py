@@ -16,8 +16,9 @@ capture/store path in :mod:`engine.v2.ops.computed_moves_store`.
 Layout: ``ticker, event_date, realized_move_pct, available_as_of_date,
 implied_move_pct, quarter_ordinal, skipped, computed_at, source_hash,
 capture_id``, primary key
-``(ticker, event_date)``, one fragment per ticker (``partition_columns =
-("ticker",)``) holding that ticker's whole event history -- the same
+``(ticker, event_date)``, one partition per ticker (``partition_columns =
+("ticker",)``). New captures use one fragment per event; older snapshots may
+hold a whole ticker in one fragment. Both layouts use the same
 whole-partition-rewrite reasoning ``price_history_table.py``'s docstring
 gives: a later capture can correct an already-past event, which the catalog's
 non-overlapping-fragment-range invariant cannot accept as an append.
