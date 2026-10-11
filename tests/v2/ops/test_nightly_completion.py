@@ -365,6 +365,31 @@ def test_service_records_a_real_run_scoped_report_and_is_byte_stable(tmp_path):
         conn.close()
 
 
+def test_service_persists_expected_roles_and_evidence_validity(tmp_path):
+    ensure_session(tmp_path, IDENT)
+    state = mark_started(tmp_path, IDENT, 1)
+    conn, service = _service(tmp_path)
+    expected = {"primary": "required", "side": "optional",
+                "quality": "qualification"}
+    observed = {"primary": Disposition("succeeded"),
+                "side": Disposition("succeeded", evidence_valid=False),
+                "quality": Disposition("succeeded")}
+    try:
+        service.record_nightly_completion(IDENT, 1, expected, observed)
+        path = tmp_path.joinpath(*STATE_DIR, f"{state.active.run_id}.completion.json")
+        persisted = json.loads(path.read_text())
+        assert persisted["dispositions"] == [
+            {"name": "primary", "role": "required", "status": "succeeded",
+             "reason_code": None, "count": 0, "evidence_valid": True},
+            {"name": "quality", "role": "qualification", "status": "succeeded",
+             "reason_code": None, "count": 0, "evidence_valid": True},
+            {"name": "side", "role": "optional", "status": "succeeded",
+             "reason_code": None, "count": 0, "evidence_valid": False},
+        ]
+    finally:
+        conn.close()
+
+
 def test_same_generation_record_rebuilds_instead_of_using_report_cache(tmp_path):
     ensure_session(tmp_path, IDENT)
     state = mark_started(tmp_path, IDENT, 1)
