@@ -97,8 +97,8 @@ the final symlink, and checked as a regular file on the open descriptor. A
 replacement after opening cannot redirect the bytes; growth past the cap refuses.
 The supervisor publishes one `native_gate_consumption.v1.0` receipt after complete pricing,
 including the immutable plan, stage inputs and per-event mark-based cash flows.
-Its staging file is created exclusively with a nonblocking, no-follow descriptor;
-existing destinations are never opened or overwritten.
+Bytes are written and closed in a private staging directory, then installed
+create-only; existing destinations are never opened, overwritten or unlinked.
 This receipt is not an evaluation report or promotion evidence.
 
 | Native worker condition | Outcome |
@@ -109,7 +109,7 @@ This receipt is not an evaluation report or promotion evidence.
 | Unresolved pin or non-sweep purpose | `SNAPSHOT_UNRESOLVED` or `HOLDOUT_ACCESS_DENIED`; no pricing receipt or partial report. |
 | Incomplete/nonfinite pricing or pinned-data failure | Incomplete/nonfinite pricing yields `EXPERIMENT_VARIANT_FAILED`. Data codes registered with ops retain their code; others use that fallback. The original data code remains only in private `data_failure_code` details; no success receipt. |
 | Retry/cache/transaction | One attempt; cross-job cache reuse is disabled so admission is checked again. No worker catalog transaction or CSV access. |
-| Existing receipt destination or receipt I/O failure | Non-retryable `INPUT_CHANGED`; failed writes best-effort remove only the newly created receipt, preserving the original failure. Cleanup failure may leave private partial bytes; no successful output is published. |
+| Existing receipt destination or receipt I/O failure | Non-retryable `INPUT_CHANGED`; cleanup touches only private temporary names and preserves the original failure. Cleanup failure may retain private partial bytes, never a partial assigned receipt; no successful output is published. |
 | Successful smoke | Operations job/output artifact rows only; no reusable checkpoint is stored. Native registration/outcome and experiment ledger rows stay unchanged. |
 
 This admitted path does not fit gates, record outcomes or orchestrate sweeps.

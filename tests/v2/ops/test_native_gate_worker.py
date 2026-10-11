@@ -613,13 +613,15 @@ def test_staged_growth_is_bounded_after_descriptor_validation(tmp_path, monkeypa
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
-@pytest.mark.parametrize("kind", ["file", "directory", "symlink", "hardlink", "fifo", "write-error"])
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink", "hardlink", "fifo", "write-error",
+                                 "replacement-write-error", "cleanup-error"])
 def test_receipt_destination_refuses_without_truncation_or_blocking(source, tmp_path, single_thread, kind):
     """Real dispatch and OS writes preserve foreign targets and typed I/O failure."""
     document, registration, parameters = _registered(source)
     stage = _stage(tmp_path / "staging", document, registration)
     path, outside = stage / "native_gate_consumption.json", tmp_path / "foreign.json"
     outside.write_bytes(b"foreign sentinel")
+    replacement = tmp_path / "replacement.json"
     if kind == "file":
         path.write_bytes(b"existing sentinel")
     elif kind == "directory":
@@ -628,25 +630,49 @@ def test_receipt_destination_refuses_without_truncation_or_blocking(source, tmp_
         path.symlink_to(outside)
     elif kind == "hardlink":
         path.hardlink_to(outside)
+        original_link = path.stat()
     elif kind == "fifo":
         os.mkfifo(path)
+    elif kind == "replacement-write-error":
+        replacement.write_bytes(b"replacement sentinel")
+        replacement_stat = replacement.stat()
     before = _catalog(source[0])
     program = """
-import json, resource, signal, sys
+import errno, json, os, resource, signal, sys
 from pathlib import Path
 from engine.v2.ops.worker import dispatch
 from engine.v2.ops.errors import OpsError
-if sys.argv[3] == 'write-error':
+from experiments import native_gate_worker as native
+replacements = []
+if sys.argv[3] == 'cleanup-error':
+    unlink = os.unlink
+    def deny_private_cleanup(target, *args, **kwargs):
+        if Path(target).name == 'receipt.json':
+            raise PermissionError(errno.EACCES, 'injected private cleanup denial')
+        return unlink(target, *args, **kwargs)
+    native.os.unlink = deny_private_cleanup
+if sys.argv[3] == 'replacement-write-error':
+    encode = native.canonical_json
+    def replace_destination(value):
+        if value.get('schema_version') == 'native_gate_consumption.v1.0':
+            os.replace(sys.argv[4], Path(sys.argv[2]) / 'native_gate_consumption.json')
+            replacements.append(True)
+        return encode(value)
+    native.canonical_json = replace_destination
+if sys.argv[3] in ('write-error', 'replacement-write-error'):
     signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
-    resource.setrlimit(resource.RLIMIT_FSIZE, (0, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
+    limit = 64 if sys.argv[3] == 'replacement-write-error' else 0
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
 try:
     dispatch('native_gate_pricing', json.loads(sys.argv[1]), Path(sys.argv[2]))
 except OpsError as error:
+    assert len(replacements) == (sys.argv[3] == 'replacement-write-error')
     print(json.dumps({'code': error.code, 'retryable': error.problem.retryable}))
 else:
     raise AssertionError('unsafe receipt destination was accepted')
 """
-    child = subprocess.run([sys.executable, "-c", program, json.dumps(parameters), str(stage), kind],
+    child = subprocess.run([sys.executable, "-c", program, json.dumps(parameters), str(stage), kind,
+                            str(replacement)],
                            capture_output=True, text=True, timeout=10, check=True)
     assert json.loads(child.stdout.strip().splitlines()[-1]) == {"code": "INPUT_CHANGED", "retryable": False}
     assert _catalog(source[0]) == before
@@ -655,6 +681,22 @@ else:
         assert path.read_bytes() == b"existing sentinel"
     elif kind == "write-error":
         assert not path.exists()
+    elif kind == "replacement-write-error":
+        assert path.read_bytes() == b"replacement sentinel"
+        current = path.stat()
+        assert (current.st_dev, current.st_ino, current.st_nlink) == (
+            replacement_stat.st_dev, replacement_stat.st_ino, replacement_stat.st_nlink)
+        assert not replacement.exists()
+        assert list(stage.glob(".native-gate-*")) == []
+    elif kind == "hardlink":
+        current = path.stat()
+        assert path.read_bytes() == b"foreign sentinel" and path.samefile(outside)
+        assert (current.st_dev, current.st_ino, current.st_nlink) == (
+            original_link.st_dev, original_link.st_ino, original_link.st_nlink)
+    elif kind == "cleanup-error":
+        assert json.loads(path.read_bytes())["schema_version"] == "native_gate_consumption.v1.0"
+        private = list(stage.glob(".native-gate-*/receipt.json"))
+        assert len(private) == 1 and private[0].samefile(path)
     elif kind == "directory":
         assert path.is_dir() and list(path.iterdir()) == []
     elif kind == "symlink":
@@ -708,15 +750,18 @@ from experiments import native_gate_worker as native
 path = Path(sys.argv[1])
 cleanup_fails = sys.argv[2] == 'True'
 real_open, real_unlink = os.open, os.unlink
-fds, failures, partials = [], [], []
+fds, failures, partials, private_paths = [], [], [], []
 def observe_open(*args, **kwargs):
     fd = real_open(*args, **kwargs)
     fds.append(fd)
     return fd
 def cleanup(target):
-    assert target == path
+    target = Path(target)
+    assert target != path and target.parent.parent == path.parent
+    assert target.parent.stat().st_mode & 0o777 == 0o700
+    private_paths.append(target)
     failures.append(sys.exception())
-    partials.append(path.read_bytes())
+    partials.append(target.read_bytes())
     if cleanup_fails:
         raise PermissionError(errno.EACCES, 'injected cleanup denial')
     real_unlink(target)
@@ -738,9 +783,12 @@ except OSError as error:
 else:
     raise AssertionError('receipt descriptor was not closed')
 assert partials == [b'{"padding":"' + b'x' * 52]
-assert path.exists() is cleanup_fails
+assert not path.exists()
+assert private_paths[0].exists() is cleanup_fails
 if cleanup_fails:
-    assert path.read_bytes() == partials[0]
+    assert private_paths[0].read_bytes() == partials[0]
+else:
+    assert not private_paths[0].parent.exists()
 print(json.dumps({'partial_bytes': len(partials[0]), 'cleanup_failed': cleanup_fails}))
 """
     child = subprocess.run([sys.executable, "-c", program, str(path), str(cleanup_fails)],

@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from math import isfinite
 from pathlib import Path
+from tempfile import mkdtemp
 
 from engine.v2.contracts import FAILURE_CODES
 from engine.v2.contracts.data import SnapshotRef
@@ -48,19 +49,24 @@ def _read_staged(path):
 
 
 def _write_receipt(path, receipt):
-    """Create once without following or blocking on an existing destination."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    """Install complete bytes create-only; clean only private temporary names."""
+    directory = Path(mkdtemp(prefix=".native-gate-", dir=path.parent))
+    private = directory / "receipt.json"
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as stream:
-            stream.write(canonical_json(receipt))
-    except BaseException:
+        fd = os.open(private, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         try:
-            os.unlink(path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as stream:
+                stream.write(canonical_json(receipt))
+        finally:
+            os.close(fd)
+        os.link(private, path)
+        private.unlink()
     finally:
-        os.close(fd)
+        for cleanup in (private.unlink, directory.rmdir):
+            try:
+                cleanup()
+            except OSError:
+                pass
 
 
 def _admit(parameters, root, conn, store):
