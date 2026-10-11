@@ -51,7 +51,8 @@ class RepairPlan:
 
 
 def _valid_effect(effect: Effect) -> bool:
-    if not isinstance(effect, Effect) or effect.kind not in {"catalog_job", "artifact", "external"}:
+    if (not isinstance(effect, Effect) or not isinstance(effect.kind, str)
+            or effect.kind not in {"catalog_job", "artifact", "external"}):
         return False
     if not isinstance(effect.ref, str) or not isinstance(effect.sha256, str) or "\0" in effect.ref:
         return False
@@ -91,11 +92,11 @@ def _validate_stages(stages: Sequence[StageSpec],
 
 
 def _valid_binding_identity(binding: OutputBinding, bindings: dict[str, OutputBinding],
-                            previous_run_id: str | None) -> bool:
+                            active_run_id: str) -> bool:
     return (isinstance(binding, OutputBinding) and isinstance(binding.stage, str)
             and bool(binding.stage.strip()) and binding.stage not in bindings
             and isinstance(binding.source_run_id, str) and bool(binding.source_run_id.strip())
-            and binding.source_run_id == previous_run_id)
+            and binding.source_run_id != active_run_id)
 
 
 def _valid_binding_content(binding: OutputBinding) -> bool:
@@ -117,7 +118,7 @@ def _validate_prior(previous: Sequence[OutputBinding], previous_run_id: str | No
         raise fail("INVALID_REQUEST", "prior bindings need a distinct source generation ID")
     bindings: dict[str, OutputBinding] = {}
     for binding in previous:
-        if (not _valid_binding_identity(binding, bindings, previous_run_id)
+        if (not _valid_binding_identity(binding, bindings, active_run_id)
                 or not _valid_binding_content(binding)):
             raise fail("INVALID_REQUEST", "prior output binding is malformed or from another run")
         bindings[binding.stage] = binding
@@ -131,6 +132,8 @@ def _validate(stages: Sequence[StageSpec], generation: Generation,
             or generation.generation < 1 or not isinstance(generation.run_id, str)
             or not generation.run_id.strip() or generation.status != "started"
             or not isinstance(generation.invalidation, tuple)
+            or not all(isinstance(name, str) and name.strip()
+                       for name in generation.invalidation)
             or not isinstance(invalidation, (tuple, list))):
         raise fail("INVALID_REQUEST", "repair planning needs a started generation and valid invalidation roots")
     graph = _validate_stages(stages, invalidation)

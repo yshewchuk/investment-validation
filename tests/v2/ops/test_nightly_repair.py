@@ -119,6 +119,28 @@ def test_matching_verified_outputs_inherit_without_rewriting_source_bindings(tmp
         plan.inherited[0].source_run_id = "run-2"
 
 
+def test_three_generation_partial_repair_preserves_original_binding_provenance(tmp_path):
+    graph = _graph()
+    generation_one = _outputs(graph, tmp_path, "run-1")
+    second = _plan(_gen(2, ("score",)), graph, generation_one,
+                   previous_run_id="run-1")
+    assert second.execute == ("score", "decision_commit", "publication")
+    generation_two_outputs = _outputs(graph, tmp_path, "run-2")
+    bindings = {item.stage: item for item in second.inherited}
+    bindings.update({item.stage: item for item in generation_two_outputs
+                     if item.stage in second.execute})
+    third_prior = tuple(bindings[stage.name] for stage in graph)
+
+    third = _plan(_gen(3), graph, third_prior, previous_run_id="run-2",
+                  invalidation=("publication",))
+
+    assert third.execute == ("publication",)
+    assert {item.stage: item.source_run_id for item in third.inherited} == {
+        "import": "run-1", "score": "run-2", "decision_commit": "run-2",
+        "audit": "run-1",
+    }
+
+
 def test_changed_request_digest_invalidates_its_dependent_cone_only(tmp_path):
     old = _graph()
     prior = _outputs(old, tmp_path, "run-1")
@@ -250,15 +272,19 @@ def test_invalid_generation_and_unknown_invalidation_are_refused():
     with pytest.raises(OpsError) as exc:
         _plan(_gen(2), graph, invalidation=(" ",))
     assert _code(exc) == "INVALID_REQUEST"
+    for malformed in (Generation(2, "run-2", "rerun", "started", (["score"],)),
+                      Generation(2, "run-2", "rerun", "started", ({"score": True},))):
+        with pytest.raises(OpsError) as exc:
+            _plan(malformed, graph)
+        assert _code(exc) == "INVALID_REQUEST"
 
 
-@pytest.mark.parametrize("source_id,prior_id", [("run-0", "run-1"), (None, "run-1"),
-                                               ("", "run-1"), ("run-2", "run-2")])
-def test_prior_binding_needs_the_caller_selected_source_generation(tmp_path, source_id, prior_id):
+@pytest.mark.parametrize("previous_run_id", [None, "", "run-2"])
+def test_previous_generation_id_must_be_valid_and_distinct(tmp_path, previous_run_id):
     graph = _graph()
-    prior = _outputs(graph, tmp_path, prior_id)
+    prior = _outputs(graph, tmp_path, "run-1")
     with pytest.raises(OpsError) as exc:
-        _plan(_gen(2), graph, prior, previous_run_id=source_id)
+        _plan(_gen(2), graph, prior, previous_run_id=previous_run_id)
     assert _code(exc) == "INVALID_REQUEST"
 
 
@@ -281,10 +307,11 @@ def test_malformed_or_non_topological_graph_is_refused():
 
 
 @pytest.mark.parametrize("changes", [
-    {"stage": 1}, {"source_run_id": 1},
+    {"stage": 1}, {"source_run_id": 1}, {"source_run_id": "run-2"},
     {"effect": Effect("artifact", "relative", "a" * 64)},
     {"effect": Effect("artifact", "/absolute/output", "not-hex")},
     {"effect": Effect("catalog_job", "bad\0id")}, {"effect": Effect("external", "")},
+    {"effect": Effect([], "external")}, {"effect": Effect({}, "external")},
     {"dependencies": (1,)},
 ])
 def test_malformed_prior_binding_or_effect_is_invalid_request(tmp_path, changes):
