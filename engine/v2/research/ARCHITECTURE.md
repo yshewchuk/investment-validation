@@ -557,9 +557,9 @@ uncaught traceback instead.
   and written into every output
   (root doc §5's "no silent default" invariant, applied to research reads) —
   including the experiment loader's returned context columns (see Outputs).
-- Every experiment runner reads inputs only through a pinned v2 snapshot and
-  `experiment_trades.load_trades` (the holdout-excluding refusal path); direct
-  parquet or other file reads bypass random and rolling holdouts and are inadmissible.
+- Every experiment runner reads from its pinned v2 snapshot, applying shared random/rolling holdout enforcement through the reader appropriate to its inputs:
+  `experiment_trades.load_trades` for trades; `experiment_population.load_population` for populations and its prediction/history consumers. Inadmissible reads refuse.
+  Direct parquet/file reads bypass snapshot pinning and both holdout sets and are inadmissible.
 - Never reads the legacy mutable Tier-2 store (`engine.data.store`) —
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.

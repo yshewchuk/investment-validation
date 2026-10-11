@@ -549,7 +549,6 @@ Leaf, not yet called by `nightly_trigger`; it runs no effect. One document per `
 | `complete_step` with no intent or an incomplete effect; malformed step, request digest (also in `reconcile_step`) or effect (an artifact needs a 64-hex sha256; no ref may contain NUL; a stored effect failing this is `INTEGRITY_FAILED`); a `catalog_job` probe (`complete_step`, `reconcile_step`) without the catalog connection | `INVALID_REQUEST`. Unparseable or foreign receipt files: `INTEGRITY_FAILED` / `CHECKPOINT_INCOMPATIBLE`. |
 
 ### Nightly snapshot chain (`nightly_chain.py`, slice 4 of #564)
-
 Leaf, not yet called by `nightly_trigger`; it imports no CLI or store. `run_snapshot_chain` walks caller-supplied `ChainStep`s serially (planned order: import, planned-price refresh, computed moves, price-history capture). Each step gets the exact snapshot id its predecessor committed, never the mutable head, and a step receipt (`request_digest = H(name, predecessor)`). A step supplies `effect(pred)` (the receipt effect), `run(pred)` (atomic; idempotent under its deterministic job id) and `successor(pred)` (the snapshot it committed, else `None`). Refresh commits no snapshot: the caller's `successor` must return the predecessor, proven by the refresh's own atomic report (not enforced here).
 
 | Condition | Outcome |
