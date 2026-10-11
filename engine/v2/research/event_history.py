@@ -26,7 +26,7 @@ def _window(history_start, decision_session):
 
 
 def _plans(repository, snapshot, candidates, contract):
-    """Prove every query's complete object membership before any outcome opens."""
+    """Shared history/target guard: prove all object membership before any opens."""
     records = repository.fragment_records(snapshot, "computed_moves")
     plans = []
     for event in candidates.itertuples(index=False):
@@ -36,12 +36,12 @@ def _plans(repository, snapshot, candidates, contract):
         day = event.event_date.date().isoformat()
         key = (event.ticker, day)
         if len(population.records) != 1 or population.row_count != 1:
-            raise errors.fail("HOLDOUT_ACCESS_DENIED", "history requires event-isolated outcome fragments")
+            raise errors.fail("HOLDOUT_ACCESS_DENIED", "research requires event-isolated outcome fragments")
         record = population.records[0]
         if (record.primary_key_min != key or record.primary_key_max != key
                 or record.partition_key != event.ticker
                 or record.time_min != day or record.time_max != day):
-            raise errors.fail("HOLDOUT_ACCESS_DENIED", "history outcome isolation cannot be proven")
+            raise errors.fail("HOLDOUT_ACCESS_DENIED", "research outcome isolation cannot be proven")
         request = _target_query(repository, snapshot, contract, event,
                                 population_bound=population.row_count)
         plans.append((event, request, record))
