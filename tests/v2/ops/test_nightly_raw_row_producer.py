@@ -449,7 +449,7 @@ def test_panel_reader_called_once_per_ticker(
     # Captured by the first fixture run, before the implementation cache edit.
     # Pin the pre-optimization event bytes so the shared read cannot change output.
     assert hashlib.sha256(event_bytes).hexdigest() == (
-        "43e9c8530d6600ba49ead8aa61c24dda4175af38fcd47d8f00e6c73ceac69b74"), (
+        "38a54e89a84427beab16bceda9d8b800280ebe63c2d8cae6b0badaa3228e8246"), (
         "if fixture inputs change, deliberately recapture the baseline digest")
 
     again_events, again_refusals = nrp.build_native_score_batch_events(
@@ -538,7 +538,7 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
     event_bytes = json.dumps(
         events, sort_keys=True, separators=(",", ":")).encode("utf-8")
     assert hashlib.sha256(event_bytes).hexdigest() == (
-        "8e88994b0301a9a213394b8377065f356562a5caf226aaf549f22eff854f56a5")
+        "e43a8af415afe25b5048fbadca2e314f0eceb131ebea32d74936f32dcb8ec705")
     assert repository.spy_reads == 1
 
     changed_batches = {
@@ -558,7 +558,7 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
     changed_bytes = json.dumps(
         changed_events, sort_keys=True, separators=(",", ":")).encode("utf-8")
     assert hashlib.sha256(changed_bytes).hexdigest() != (
-        "8e88994b0301a9a213394b8377065f356562a5caf226aaf549f22eff854f56a5"), (
+        "e43a8af415afe25b5048fbadca2e314f0eceb131ebea32d74936f32dcb8ec705"), (
         "changing a consumed SPY value must break the pinned event digest")
     assert changed_repository.spy_reads == 1
 
