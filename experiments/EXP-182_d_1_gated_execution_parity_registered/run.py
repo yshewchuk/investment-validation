@@ -16,6 +16,14 @@ SOURCE = (Path(PINNED_SOURCE) if IS_STAGED_RUNNER else
           ROOT / "experiments" / "EXP-181_d_1_gated_execution_parity" / "run.py")
 sys.path.insert(0, str(ROOT))
 
+if __name__ == "__main__":
+    from engine.v2.ops.errors import fail
+
+    raise fail(
+        "INVALID_REQUEST",
+        "EXP-182 disabled: reads EXP-179 parquet directly (no v2_snapshot_id), bypassing holdouts",
+    )
+
 loader = importlib.machinery.SourceFileLoader("exp182_runner", str(SOURCE))
 spec = importlib.util.spec_from_loader("exp182_runner", loader)
 module = importlib.util.module_from_spec(spec)
@@ -23,6 +31,3 @@ assert spec.loader is not None
 spec.loader.exec_module(module)
 module.HERE = HERE
 module.RESULTS = HERE / "results"
-
-if __name__ == "__main__":
-    module.main()

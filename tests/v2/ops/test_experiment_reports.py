@@ -164,9 +164,3 @@ def test_ran_row_records_metrics_source_unavailable_when_the_runner_wrote_none(t
         assert evidence["metrics_source"] == "unavailable"
     finally:
         conn.close()
-
-
-def test_relocated_experiment_reports_file_is_in_phase1_suite():
-    from checks.v2_coverage_ratchet import phase1_suite
-
-    assert "tests/v2/ops/test_experiment_reports.py" in phase1_suite()

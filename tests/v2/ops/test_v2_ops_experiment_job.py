@@ -364,10 +364,40 @@ def test_legacy_adapter_refuses_exp182_fixed_arm_before_subprocess(
     assert not invoked
 
 
+def test_exp182_script_entrypoint_refuses_direct_invocation_before_loading_source(tmp_path):
+    import subprocess
+    import sys
+
+    script = Path(__file__).resolve().parents[3] / REGISTERED_RUNNER
+    result = subprocess.run(
+        [sys.executable, str(script)], cwd=tmp_path,
+        capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "INVALID_REQUEST" in result.stderr
+    assert "EXP-182 disabled: reads EXP-179 parquet directly" in result.stderr
+    assert not list(tmp_path.iterdir())
+
+
 def test_disabled_runner_registry_matches_adapter_registry():
     from engine.v2.ops import experiments, legacy_adapter
 
     assert experiments.DISABLED_RUNNERS == legacy_adapter.DISABLED_RUNNERS
+
+
+@pytest.mark.parametrize("runner_id", (
+    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+    "./experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+    "experiments/unused/../EXP-182_d_1_gated_execution_parity_registered/run.py",
+))
+def test_primary_submit_recheck_refuses_exp182_before_source_resolution(tmp_path, runner_id):
+    from engine.v2.ops.workflows import commands
+
+    plan = {"spec_document": {"runner": runner_id},
+            "preregistration_root": str(tmp_path)}
+    with pytest.raises(OpsError) as excinfo:
+        commands._registered_runner_manifest(plan)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert "EXP-182 disabled" in str(excinfo.value)
 
 
 def test_run_legacy_script_clears_inherited_pinned_source_without_sources(

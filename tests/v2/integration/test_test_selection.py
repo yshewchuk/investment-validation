@@ -118,7 +118,7 @@ def test_real_phase1_suite_keeps_the_relocated_refresh_tests():
     suite = phase1_suite()
     assert "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py" in suite
     assert "tests/v2/ops/test_v2_ops_refresh_staging.py" in suite
-    assert "tests/v2/ops/test_experiment_reports.py" in suite
+    assert suite.count("tests/v2/ops/test_experiment_reports.py") == 1
 
 
 def test_phase1_suite_finds_a_baseline_test_that_moved(tmp_path):
