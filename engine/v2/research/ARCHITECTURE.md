@@ -249,6 +249,7 @@ boundary; later label admission must separately require recorded availability
 strictly before it. Candidates are not certified usable labels. Earlier folds'
 events may train later folds; issuer overlap across time is intentional, not a
 held-out-issuer evaluation. These annual outer folds define no inner HPO split.
+An annual fold contains admitted events only, not guaranteed full-year coverage.
 
 The result binds the target recipe, fold rules, ordered event/session/cutoff
 metadata, train/evaluation membership, holdout versions, exact snapshot and all
@@ -256,7 +257,10 @@ calendar/population objects into a deterministic plan digest. It reads no
 computed-move object, label or history feature, even for training candidates.
 Invalid declarations/windows refuse `CONTRACT_MISMATCH`, empty folds refuse
 `POPULATION_COLLAPSED`, and shared snapshot/admission/calendar errors propagate.
-No cache, retry, write, partial return, fitting, registration or final-read
+Native announcement-date anchoring is preserved, including non-session dates;
+the event date itself is not certified to be an observed trading session.
+Identical date/session/horizon clocks are reused within one call only.
+No cross-call cache, retry, write, partial return, fitting, registration or final-read
 authority is added. A future runner must preregister this plan and bind stored,
 holdout-context-qualified feature inputs before execution; production aggregates
 are not interchangeable with research history. Schedule/publication evidence
