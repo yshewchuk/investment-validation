@@ -125,7 +125,16 @@ interface section; this names only the load-bearing entry points.
   resolution, the latter legacy-free); `import_snapshot.py`; `tier4_coverage.py`.
 - **`computed_moves`/`price_history`** — pure math + each family's
   `TableContract`; `price_history_query.py` also exposed as
-  `Repository.get_price_series`/`.get_close`.
+  `Repository.get_price_series`/`.get_close`. A price-history read
+  reconstructs row versions through the latest retrieval present in its
+  pinned snapshot; `retrieved_at` is provenance, not an observation ceiling.
+  The reader exposes only bars dated
+  on or before the decision session. This permits a session close fetched
+  after midnight to be used for that session, while a later-dated bar remains
+  unavailable. A vendor may revise historical values in a later retrieval,
+  including split or dividend adjustments, or backfill a previously absent
+  date; using the latest pinned retrieval accepts that vendor-revision risk
+  rather than treating retrieval time as causal availability.
 - **Errors** — `errors.DataError`, built only from a registered
   `DATA_FAILURE_CODES` entry.
 - **Contract changes** — Recalculate data tables through the standard import

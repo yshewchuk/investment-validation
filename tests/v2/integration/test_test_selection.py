@@ -116,6 +116,7 @@ def test_real_phase1_suite_keeps_the_relocated_refresh_tests():
     from checks.v2_coverage_ratchet import phase1_suite
 
     suite = phase1_suite()
+    assert "tests/v2/data/test_price_downloads.py" in suite
     assert "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py" in suite
     assert "tests/v2/ops/test_v2_ops_refresh_staging.py" in suite
     assert suite.count("tests/v2/ops/test_experiment_reports.py") == 1

@@ -19,7 +19,7 @@
     "tests/test_v2_data_manifests.py",
     "tests/test_v2_data_objects.py",
     "tests/test_v2_data_partitions.py",
-    "tests/test_v2_data_price_downloads.py",
+    "tests/v2/data/test_price_downloads.py",
     "tests/test_v2_data_query.py",
     "tests/test_v2_data_rebuild_rollback.py",
     "tests/test_v2_data_reference_inputs.py",
@@ -1789,119 +1789,119 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_diff_retrieval_first_capture_adds_every_row",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_diff_retrieval_first_capture_adds_every_row",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_diff_retrieval_unchanged_is_empty",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_diff_retrieval_unchanged_is_empty",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_diff_retrieval_changed_value_adds_one_row",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_diff_retrieval_changed_value_adds_one_row",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_diff_retrieval_nan_equal_to_nan_is_unchanged",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_diff_retrieval_nan_equal_to_nan_is_unchanged",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_diff_retrieval_missing_date_tombstones",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_diff_retrieval_missing_date_tombstones",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_diff_retrieval_reversion_to_earlier_value_diffs_against_latest_state",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_diff_retrieval_reversion_to_earlier_value_diffs_against_latest_state",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_diff_retrieval_no_change_against_latest_is_empty_regardless_of_source_hash",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_diff_retrieval_no_change_against_latest_is_empty_regardless_of_source_hash",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_as_of_view_reversion_sequence_reads_return_a_then_b_then_a",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_as_of_view_reversion_sequence_reads_return_a_then_b_then_a",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_diff_retrieval_partial_window_refused",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_diff_retrieval_partial_window_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_check_not_backdated_refuses",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_check_not_backdated_refuses",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_check_not_backdated_allows_strictly_later",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_check_not_backdated_allows_strictly_later",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_as_of_view_picks_version_at_cutoff_and_drops_tombstones",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_as_of_view_picks_version_at_cutoff_and_drops_tombstones",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_as_of_view_before_any_capture_uses_earliest",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_as_of_view_before_any_capture_uses_earliest",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_as_of_view_never_filters_by_source_kind_across_restatement_and_tombstone",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_as_of_view_never_filters_by_source_kind_across_restatement_and_tombstone",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_as_of_view_property_full_history_equals_own_retrieval_and_is_stable",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_as_of_view_property_full_history_equals_own_retrieval_and_is_stable",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_read_legacy_px_csv",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_read_legacy_px_csv",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_write_then_read_legacy_px_csv_round_trips_full_float64_precision",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_write_then_read_legacy_px_csv_round_trips_full_float64_precision",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_default_pandas_read_csv_loses_precision_on_some_float64_values",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_default_pandas_read_csv_loses_precision_on_some_float64_values",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_normalize_px_csv_reshapes_and_fills_missing_columns",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_normalize_px_csv_reshapes_and_fills_missing_columns",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_read_tier1_body_parses_all_three_columns_correctly",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_read_tier1_body_parses_all_three_columns_correctly",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_read_tier1_body_refuses_when_adj_close_column_is_missing",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_read_tier1_body_refuses_when_adj_close_column_is_missing",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_read_tier1_body_refuses_when_a_column_parses_entirely_nan",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_read_tier1_body_refuses_when_a_column_parses_entirely_nan",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_tier1_close_column_matches_legacy_panels_close_adj",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_tier1_close_column_matches_legacy_panels_close_adj",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_get_price_series_value_before_and_after_a_changed_retrieval",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_get_price_series_uses_latest_pinned_retrieval_regardless_of_ceiling",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_get_price_series_ceiling_before_any_retrieval_uses_earliest",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_get_price_series_uses_latest_retrieval_when_ceiling_precedes_all",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_get_price_series_drops_a_tombstoned_date",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_get_price_series_drops_a_tombstoned_date",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_get_price_series_refuses_query_not_bounded",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_get_price_series_refuses_session_after_observation_ceiling",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_get_price_series_refuses_unknown_ticker",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_get_price_series_refuses_unknown_ticker",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_price_downloads.py::test_get_close_returns_provenance",
+      "nodeid": "tests/v2/data/test_price_downloads.py::test_get_close_returns_provenance",
       "outcome": "passed"
     },
     {
