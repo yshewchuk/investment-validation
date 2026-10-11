@@ -43,7 +43,7 @@ ratio (``checked_effective``), so: (a) triaging a real survivor as
 EQUIVALENT/LOW-VALUE can only ever hold or improve the ratio, never look
 like a regression; (b) a stale entry (the function changed since the entry
 was written) stops excluding its mutant, and that mutant counts as live
-again -- exactly ``tests/test_mutation_ci.py``'s existing staleness contract
+again -- exactly ``tests/v2/integration/test_mutation_ci.py``'s existing staleness contract
 for the triage file, reused rather than reinvented. mutmut's own mutant
 naming (``pkg.mod.x_func__mutmut_N`` / ``xǁClassǁmethod__mutmut_N``) is an
 ordinal within one function, not a line number, so it survives unrelated

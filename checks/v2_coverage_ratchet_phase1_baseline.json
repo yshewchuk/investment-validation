@@ -31,7 +31,7 @@
     "tests/test_v2_data_normalizations_v13_recreate.py",
     "tests/test_v2_data_objects.py",
     "tests/test_v2_data_partitions.py",
-    "tests/test_v2_data_price_downloads.py",
+    "tests/v2/data/test_price_downloads.py",
     "tests/test_v2_data_query.py",
     "tests/test_v2_data_rebuild_rollback.py",
     "tests/test_v2_data_reference_inputs.py",

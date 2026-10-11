@@ -7,7 +7,11 @@ the same way ``get_chain`` is -- modeled directly on
 Both functions here do one bounded ``price_history`` scan for ``query.ticker``
 (every date, every ``retrieved_at`` -- the whole bitemporal history the as-of
 reconstruction needs), then hand the fetched rows to the pure
-``price_history.as_of_view``/``_provenance_by_date`` logic unchanged. No
+``price_history.as_of_view``/``_provenance_by_date`` logic unchanged. The
+reconstruction includes row versions through the latest retrieval present
+in the pinned snapshot; ``retrieved_at`` remains provenance.
+``get_price_series`` then keeps only bars dated on or before
+``query.session_date``. No
 ``QUERY_NOT_BOUNDED``/``RESULT_LIMIT_EXCEEDED`` escape hatch beyond what
 ``Repository.scan`` itself already enforces: the scan's result limit is this
 caller's explicit ``_RESULT_CAP`` lowered to the selected pinned membership
@@ -16,10 +20,6 @@ bound ``Repository.scan_population_bound`` reports for the SAME ticker predicate
 ``_BATCH_CAP`` follows that limit down, staying positive when the bound is
 zero (the query contract requires a positive batch limit; a zero bound is a
 zero-row membership, not an unbounded query).
-
-One read rule, no policy choice (user decision 2026-09-14, replacing an
-earlier two-policy design): the latest retrieval of any source at or before
-``observation_ceiling``, else the ticker's earliest.
 """
 from __future__ import annotations
 
@@ -66,6 +66,7 @@ def get_price_series(repository, query: PriceQuery, snapshot_ref: SnapshotRef
     table."
     """
     ceiling_date = query.observation_ceiling[:10]
+    # The ceiling bounds the requested data session; retrieval time is provenance.
     if query.session_date > ceiling_date:
         raise errors.fail("QUERY_NOT_BOUNDED", "session_date is after the observation ceiling")
     if PRICE_HISTORY_TABLE_NAME not in snapshot_ref.table_versions:
@@ -74,12 +75,12 @@ def get_price_series(repository, query: PriceQuery, snapshot_ref: SnapshotRef
     if stored_rows.empty:
         raise errors.fail("CONTRACT_MISMATCH", "no price_history for this ticker",
                           details={"ticker": query.ticker})
-    view = as_of_view(stored_rows, query.observation_ceiling)
+    view = as_of_view(stored_rows, latest_snapshot=True)
     view = view[view["date"].astype(str).str.slice(0, 10) <= query.session_date]
     view = view.sort_values("date")
     if query.lookback_sessions > 0:
         view = view.tail(query.lookback_sessions)
-    provenance = _provenance_by_date(stored_rows, query.observation_ceiling)
+    provenance = _provenance_by_date(stored_rows)
     rows = []
     for row in view.itertuples(index=False):
         date_str = str(row.date)[:10]
@@ -197,13 +198,9 @@ def _fetch_rows(repository, snapshot_ref: SnapshotRef, ticker: str) -> pd.DataFr
     return pd.DataFrame(rows, columns=list(_COLUMNS))
 
 
-def _provenance_by_date(stored_rows: pd.DataFrame, cutoff: str) -> dict[str, tuple[str, str]]:
-    """Per date: the ``(retrieved_at, source_hash)`` of the version
-    ``as_of_view`` actually selected -- ``price_history.resolve_pool``'s own
-    pool, kept here only for the two extra columns ``as_of_view`` itself
-    drops. The SAME resolution, never a second one.
-    """
-    pool = price_history.resolve_pool(stored_rows, cutoff)
+def _provenance_by_date(stored_rows: pd.DataFrame) -> dict[str, tuple[str, str]]:
+    """Provenance for the latest pinned-snapshot row version per date."""
+    pool = price_history.resolve_pool(stored_rows, latest_snapshot=True)
     return {str(row.date)[:10]: (row.retrieved_at, row.source_hash)
            for row in pool.itertuples(index=False)}
 

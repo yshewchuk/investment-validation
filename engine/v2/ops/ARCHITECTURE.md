@@ -46,7 +46,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `snapshot {plan-import,submit,promote,rollback}`
 - `ledger {import-history,status,calibrate,book}` — history summaries count new provenance writes as `imported` (excluding new divergences), and remaining lines as `already_present`; identical committed content under another purpose writes no provenance. Dry runs report the same projected counts and roll back writes.
 - `decisions supersede --row-id --reason --from-json`
-- `price-refresh --session [--dry-run]`
+- `price-refresh --session [--dry-run] [--tickers @file --source-root]` (`--tickers` plans exactly those names plus SPY from `<source-root>` fetch history, like the nightly; each flag requires the other, else `INVALID_REQUEST`; without them the legacy universe)
 - `price-history capture --source-root --scope [--dry-run]` (refuses `SOURCE_NOT_FOUND` without a usable calendar ticker, SPY; rebuild: [guide](../../../guides/native_board_rebuild_runbook.md))
 - `computed-moves capture --source-root --scope --as-of [--dry-run]`
 - `get`/`logs`/`cancel`/`resume`/`explain <job_id>`
@@ -526,15 +526,15 @@ The report is replaced atomically after capture; a report-write failure leaves t
 
 ### Nightly session identity (`nightly_session.py`, slice 1 of #564)
 
-Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` receipts keep their meaning. `session_key = H(version, as_of, scope, selection_identity, catalog_identity)` and `run_id = H(session_key, generation)`. Callers cannot supply the session key or choose the generation an ordinary call or rerun allocates. An ordinary call resumes the one derived session; only an explicit rerun allocates a generation, so a deployed-code change alone never does. State is one per-session document under the supplied root: `revision`, plus per generation `run_id`, `reason` (`initial`/`rerun`), `status` (`allocated`/`started`) and the rerun's `invalidation` step names. Updates use revision-based compare-and-swap, serialize per session, and publish the document atomically.
+Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` receipts keep their meaning. `session_key = H(version, as_of, scope, selection_identity, catalog_identity)` and `run_id = H(session_key, generation)`. Callers cannot supply either identity or choose the generation an ordinary call or rerun allocates. An ordinary call resumes the one derived session; only an explicit rerun allocates a generation, so code changes alone never do. State is one per-session document under the supplied root: `revision`, plus each generation's `run_id`, `reason` (`initial`/`rerun`), `status` (`allocated`/`started`) and explicit invalidation roots. Updates use revision-based compare-and-swap, serialize per session and publish atomically. The read-only `nightly_repair.py` planner builds a generation-specific plan from a started generation, stage graph, invalidation roots, and prior output bindings. It returns the plan identity, stages to execute, and inherited bindings; it writes no receipts or decisions and runs no decision/publication gates.
 
 | Condition | Outcome |
 |---|---|
-| First ordinary call | Creates generation 1 `allocated`; later calls return that state and never allocate. |
-| Explicit rerun | Appends generation n+1 and its invalidation cone in one swap: the intent is the allocated generation. A crash before the swap records nothing and the request repeats; after it, a repeated rerun reattaches to that still-`allocated` generation. Once started, a rerun allocates the next. The caller's lock decides when the older owner is gone. |
-| Concurrent callers | One swap wins. A loser re-reads: ordinary calls return the winner's state, reruns reattach to the winner's generation. Exhausting the bounded swap retries raises retryable `LEASE_LOST`. A returned state is the revision read; a later swap makes it stale. A superseded generation marking itself started is `CHECKPOINT_INCOMPATIBLE`. |
-| Unparseable JSON, wrong key, run_id or numbering | `INTEGRITY_FAILED`, never treated as absent (that would restart numbering). Another schema is `CHECKPOINT_INCOMPATIBLE`; the operator moves it aside. Old per-date `<as_of>.json` receipts (another path) are never read: no migration, no completed step inferred. |
-| Empty or malformed identity field, or a rerun of a session with no state | `INVALID_REQUEST`; nothing is written. |
+| Calls, reruns, or concurrent callers | A first ordinary call creates generation 1 `allocated`; later ordinary calls return it and never allocate. Explicit rerun appends generation n+1 and roots in one swap; a pre-swap crash writes nothing, a post-swap retry reattaches to `allocated`, and a started generation makes the next rerun allocate. One swap wins; losers re-read; bounded retries raise `LEASE_LOST`; a returned revision may become stale; a superseded generation marking itself started raises `CHECKPOINT_INCOMPATIBLE`. The caller's lock decides when the older owner is gone. |
+| Invalid session state or malformed session/repair input | Unparseable JSON or wrong key/run ID/numbering raises `INTEGRITY_FAILED`; another schema raises `CHECKPOINT_INCOMPATIBLE`. Old per-date receipts are never read. Empty/malformed session identity or rerun without state raises `INVALID_REQUEST`; malformed/unknown repair invalidation roots or malformed effects also raise `INVALID_REQUEST`; no state is written. |
+| Prior binding is missing or unsuccessful, its stage/dependency identity or request/implementation digest differs, or its effect is unprovable | Recompute its stage and affected dependents; inherit only succeeded bindings with matching identities and verified effects, preserving their producer `run_id`. |
+| A stage is absent from the current graph or explicitly invalidated | Drop an absent-stage binding and ignore its persisted invalidation root; execute an explicitly invalidated stage and its dependents. |
+| Prior output has an external effect | Do not inherit the binding. |
 
 ### Nightly step receipts (`nightly_receipts.py`, slice 2 of #564)
 
@@ -1117,16 +1117,16 @@ strategies by construction, so no legacy read is needed; it is instead
 checked against `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset
 assertion paid once at import time, no I/O, no legacy dependency).
 
-**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops.
-The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
-`experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, and `fingerprints.environment_identity`/`source_closure`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
+**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
+`experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, `fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
 `experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Prediction reporting consumes public `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Other modules stay internal.
 
-### Proposed final-holdout authority (#490)
+### Final-holdout authorization (#490)
 
-Design only: ops will own the private durable user-authorization/spend ledger and fenced lifecycle in the [research final-read contract](../research/ARCHITECTURE.md#proposed-authorized-final-read-490). Only an interactive user act can create authorization; agents and the supervisor may prepare a request or reconcile saved evidence, never authorize it. The dedicated tool leaf composes the peer packages; ops gains no research import or generic final-read job/bypass.
-Authorization facts and the unique decision spend commit together in the catalog before reading. Filesystem receipts/results publish outside SQL; a later transaction binds their verified references. Reconciliation never repeats a started read. Revocation and winner changes serialize with read start and completion; spend survives both.
-Final-read records use their own versioned decision/request namespace, not #555's `(experiment_id, refused)` slot or #565's existing experiment/variant outcome slot. Reuse #555's private pin-bound refusal evidence, fenced reconciliation, redaction and fail-closed publication rules without treating a refusal receipt as authorization; ordinary experiment `--no-ledger` semantics remain unchanged. `HOLDOUT_ACCESS_DENIED` depends on #555's ops-code registration; other named refusals already exist. No new refusal code is proposed.
+| Condition | Outcome |
+| --- | --- |
+| New authorization | `final_holdout.authorize_final_holdout(conn, store, request, *, clock)` is private with no production caller or result-read capability. It requires exact terminal assent and records the process OS identity; the confirmation does not authenticate the human at the terminal. It verifies catalog registration and rechecks the exact request in the committing transaction. Migration 10 stores an immutable, permanent row keyed by `experiment_id` with request, registration, actor, timestamp, and confirmation. This final-read record is separate from ordinary experiment/variant outcomes. Ops does not import research. |
+| Repeat, conflict, or failure | The catalog uses `BEGIN IMMEDIATE` to serialize competing spends; the same UID confirming an identical request gets the original acknowledgement, including after an account rename.<br>Changed request bytes → `IDEMPOTENCY_CONFLICT`; mismatch with registration → `EXPERIMENT_IDENTITY_CONFLICT`.<br>Noninteractive/cancelled assent or another UID → `HOLDOUT_ACCESS_DENIED`; storage failure → `RESOURCE_UNAVAILABLE`.<br>Uncertain commit → no acknowledgement; reconcile with an identical interactive retry. |
 
 ## External systems and libraries
 

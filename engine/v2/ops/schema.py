@@ -211,4 +211,21 @@ MIGRATIONS = (
     Migration(version=9, name="health_observation_retries", statements=(
         "ALTER TABLE health_observations ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
     )),
+    Migration(version=10, name="final_holdout_authorizations", statements=(
+        """CREATE TABLE final_holdout_authorizations (
+            experiment_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL CHECK(schema_version='final_holdout_authorization.v1.0'),
+            registration_run_id TEXT NOT NULL REFERENCES experiment_runs(run_id),
+            request_digest TEXT NOT NULL, request_json TEXT NOT NULL,
+            actor TEXT NOT NULL CHECK(length(actor)>0), authorized_at TEXT NOT NULL,
+            confirmation TEXT NOT NULL CHECK(length(confirmation)>0)
+        ) STRICT""",
+        """CREATE TRIGGER final_holdout_authorizations_no_update BEFORE UPDATE ON final_holdout_authorizations
+        BEGIN SELECT RAISE(ABORT, 'final holdout authorizations are immutable'); END""",
+        """CREATE TRIGGER final_holdout_authorizations_no_delete BEFORE DELETE ON final_holdout_authorizations
+        BEGIN SELECT RAISE(ABORT, 'final holdout authorizations are immutable'); END""",
+        """CREATE TRIGGER final_holdout_authorizations_no_replace BEFORE INSERT ON final_holdout_authorizations
+        WHEN EXISTS (SELECT 1 FROM final_holdout_authorizations WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'final holdout authorizations are immutable'); END""",
+    )),
 )

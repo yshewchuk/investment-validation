@@ -250,6 +250,7 @@ def ledger_append(rows: Sequence[Mapping[str, Any]], path: Path | None = None,
 def ledger_context(spec_hash_value: str, path: Path | None = None) -> dict[str, Any]:
     """The multiple-testing context a promotion report cites."""
     frame = ledger_read(path)
+    frame = frame[~frame["stage"].astype(str).str.startswith("refused")]
     if frame.empty:
         return {"specs_tried": 0, "this_spec_rows": 0, "promotions": 0}
     return {

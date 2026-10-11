@@ -116,6 +116,7 @@ def test_real_phase1_suite_keeps_the_relocated_refresh_tests():
     from checks.v2_coverage_ratchet import phase1_suite
 
     suite = phase1_suite()
+    assert "tests/v2/data/test_price_downloads.py" in suite
     assert "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py" in suite
     assert "tests/v2/ops/test_v2_ops_refresh_staging.py" in suite
     assert suite.count("tests/v2/ops/test_experiment_reports.py") == 1
@@ -136,6 +137,12 @@ def test_phase1_suite_keeps_a_baseline_test_that_did_not_move(tmp_path):
     root = _phase1_root(tmp_path, ["tests/test_still_root.py"],
                         ["tests/test_still_root.py"], _PHASE1_EXTRA)
     assert "tests/test_still_root.py" in phase1_suite(root)
+
+
+def test_phase1_suite_keeps_relocated_price_history_test():
+    from checks.v2_coverage_ratchet import phase1_suite
+
+    assert "tests/v2/ops/test_v2_ops_price_history.py" in phase1_suite(ROOT)
 
 
 def test_phase1_baseline_inventory_matches_active_suite():

@@ -4,7 +4,7 @@ design -- ``engine.v2.data.price_downloads``, which held that original
 design's resolution/pin/replay primitives, was removed by the 2026-09-14
 SEND-BACK once :func:`as_of_view` below was confirmed to cover the same
 resolution rule at the row-version grain; its stability property test now
-lives in ``tests/test_v2_data_price_downloads.py``).
+lives in ``tests/v2/data/test_price_downloads.py``).
 
 ``price_history`` is a normalized table of per-``(ticker, date)`` price
 versions: ``ticker, date, close_adj, close_raw, high_raw, retrieved_at,
@@ -20,22 +20,26 @@ Two operations:
 * :func:`diff_retrieval` -- one capture's delta against a ticker's current
   latest state (design doc §2's capture rules, including the
   full-history-only / no-partial-window refusal).
-* :func:`as_of_view` -- the design doc §3 as-of reconstruction for one ticker
-  at one cutoff, decided once for the whole ticker (never per row/date) so a
-  cutoff before the ticker's first capture cannot accidentally splice a later
-  capture's data in for one date and an earlier capture's for another. Built
-  on :func:`resolve_pool`, the shared "pick one retrieval to view the ticker
-  as of, then reconstruct every row up to it" implementation both
-  ``as_of_view`` and ``engine.v2.data.price_history_query._provenance_by_date``
-  use (SEND-BACK 2026-09-14 items 1 and 3 -- see :data:`_STORED_ROW_COLUMNS`'s
-  own comment for the single read rule).
+* :func:`as_of_view` -- the design doc §3 reconstruction for one ticker,
+  decided once for the whole ticker, never per row/date. A string cutoff
+  preserves retrieval-time replay; ``latest_snapshot=True`` selects the
+  latest retrieval in the pinned snapshot. Built on :func:`resolve_pool`,
+  the shared
+  "pick one retrieval boundary, then reconstruct every row through it"
+  implementation both ``as_of_view`` and
+  ``engine.v2.data.price_history_query._provenance_by_date`` use. The price
+  history reader uses the latest pinned retrieval and applies its decision
+  session ceiling to bar dates after reconstruction.
 
-**Leakage invariant for ``close_adj`` (added 2026-09-15).** ``close_adj`` is
-dividend/split-adjusted, which means a corporate action AFTER a given date
-retroactively rescales every close ON OR BEFORE it by one constant factor
-(one retrieval's `Adj Close` restates its own whole history uniformly, not
-per-date) -- the later a retrieval, the more of that future-conditioned
-rescaling its historical rows carry. That is safe to use ONLY for a feature
+**Vendor revision risk and leakage discipline for ``close_adj``.** A later
+corporate action may retroactively rescale every close ON OR BEFORE it. The
+price-history reader selects the latest retrieval in its pinned snapshot,
+even when retrieval is after the observation ceiling, and filters by bar
+date. This admits a session close fetched after midnight, but the data-date
+filter cannot prevent a later vendor revision from changing an eligible
+historical value; the reader accepts this residual split/dividend-adjustment
+risk. Within one retrieval, a corporate action rescales its history
+uniformly, not per-date. So ``close_adj`` is safe to use ONLY for a feature
 that is scale-invariant within ONE retrieval's own view: a ratio of two
 closes drawn from the SAME ``retrieved_at`` (``engine.data.features.panel.
 add_runup_features``'s ``dist_high``/``dist_ema``/``ret5``/``ret10``/``ret20``,
@@ -192,18 +196,23 @@ def diff_retrieval(stored_rows: pd.DataFrame, retrieval: pd.DataFrame, *, retrie
     return pd.DataFrame(new_rows, columns=list(_STORED_ROW_COLUMNS))
 
 
-def _chosen_retrieved_at(stored_rows: pd.DataFrame, cutoff: str) -> str:
-    """The single ``retrieved_at`` value to view the ticker as of, at
-    ``cutoff``: the latest retrieval of ANY source at or before the cutoff,
-    else the ticker's globally earliest retrieval (user decision 2026-09-14
-    -- one rule, no source_kind filter, no policy choice)."""
+def _chosen_retrieved_at(stored_rows: pd.DataFrame, cutoff: str | None, *,
+                         latest_snapshot: bool = False) -> str:
+    """Choose latest pinned retrieval explicitly, or replay a required cutoff."""
+    if latest_snapshot:
+        if cutoff is not None:
+            raise ValueError("cutoff must be omitted when latest_snapshot=True")
+        return stored_rows["retrieved_at"].max()
+    if cutoff is None:
+        raise ValueError("cutoff is required unless latest_snapshot=True")
     eligible = stored_rows.loc[stored_rows["retrieved_at"] <= cutoff, "retrieved_at"]
     if len(eligible):
         return eligible.max()
     return stored_rows["retrieved_at"].min()
 
 
-def resolve_pool(stored_rows: pd.DataFrame, cutoff: str) -> pd.DataFrame:
+def resolve_pool(stored_rows: pd.DataFrame, cutoff: str | None = None, *,
+                 latest_snapshot: bool = False) -> pd.DataFrame:
     """Design doc §3 as-of reconstruction: every stored column (tombstones,
     ``retrieved_at``, ``source_hash`` included) for the view ``cutoff``
     resolves to -- the ONE reconstruction both :func:`as_of_view` (drops
@@ -211,29 +220,33 @@ def resolve_pool(stored_rows: pd.DataFrame, cutoff: str) -> pd.DataFrame:
     ``price_history_query._provenance_by_date`` (keeps them, for per-date
     provenance) share.
 
-    First, :func:`_chosen_retrieved_at` picks ONE ``retrieved_at`` value --
-    the latest retrieval of any source at or before ``cutoff``, else the
-    earliest. Then every row with ``retrieved_at`` at or before that chosen
-    value is included, latest version per date winning -- a forward-fill
-    reconstruction across ALL sources. Never source_kind-filtered: rows are
-    diff-only, so an unchanged value across two different-source retrievals
-    is stored only once, under whichever retrieval first saw it; filtering by
-    source_kind would silently drop it.
+    First, :func:`_chosen_retrieved_at` selects the latest retrieval in the
+    pinned snapshot only when ``latest_snapshot=True`` and ``cutoff`` is
+    omitted. Otherwise a string cutoff is required for retrieval-time as-of
+    replay. Every stored row through the selected retrieval is included,
+    latest version per date winning -- a forward-fill reconstruction across
+    ALL sources. The price-history reader requests the latest pinned retrieval
+    and applies its data-date ceiling after reconstruction. Never
+    source_kind-filtered: rows are diff-only, so an unchanged value across
+    two different-source retrievals is stored only once, under whichever
+    retrieval first saw it; filtering by source_kind would silently drop it.
     """
     if stored_rows.empty:
         return stored_rows.reindex(columns=_STORED_ROW_COLUMNS)
-    chosen = _chosen_retrieved_at(stored_rows, cutoff)
+    chosen = _chosen_retrieved_at(stored_rows, cutoff, latest_snapshot=latest_snapshot)
     eligible = stored_rows[stored_rows["retrieved_at"] <= chosen]
     idx = eligible.groupby("date")["retrieved_at"].idxmax()
     return eligible.loc[idx].reset_index(drop=True)
 
 
-def as_of_view(stored_rows: pd.DataFrame, cutoff: str) -> pd.DataFrame:
+def as_of_view(stored_rows: pd.DataFrame, cutoff: str | None = None, *,
+               latest_snapshot: bool = False) -> pd.DataFrame:
     """The reconstructed ``(date, close_adj, close_raw, high_raw)`` series
-    for one ticker at cutoff ``cutoff`` (design doc §3), tombstones dropped.
-    See :func:`resolve_pool` for the shared reconstruction; this just drops
-    tombstones and the provenance columns.
+    for one ticker, tombstones dropped. A string ``cutoff`` replays a
+    retrieval-time as-of view; ``latest_snapshot=True`` selects the
+    latest retrieval in the pinned snapshot. See :func:`resolve_pool` for the
+    shared reconstruction; this drops tombstones and the provenance columns.
     """
-    pool = resolve_pool(stored_rows, cutoff)
+    pool = resolve_pool(stored_rows, cutoff, latest_snapshot=latest_snapshot)
     view = pool[~pool["deleted"].astype(bool)].sort_values("date").reset_index(drop=True)
     return view[["date", "close_adj", "close_raw", "high_raw"]]
