@@ -1118,12 +1118,7 @@ checked against `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset
 assertion paid once at import time, no I/O, no legacy dependency).
 
 **Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
-`experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, `fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
-The shared verifier accepts magnitude registration v1.2 only with its closed
-request/plan envelope, valid plan digest and matching snapshot, holdout, event
-and fold identities. Magnitude fields on older schemas and v1.2 final-read
-hybrids refuse `EXPERIMENT_IDENTITY_CONFLICT`. This is stored integrity validation,
-not current-plan reconstruction or read authority; ops imports no research code.
+`experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, `fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`. The shared verifier accepts magnitude v1.2 only with a closed request/plan envelope, intact digests and matching snapshot/holdout/event/fold identities; malformed plans, magnitude fields on older schemas and v1.2 final-read hybrids refuse `EXPERIMENT_IDENTITY_CONFLICT`. Stored integrity is not current-plan reconstruction or read authority; ops imports no research code.
 `experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Prediction reporting consumes public `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Other modules stay internal.
 
 ### Final-holdout authorization (#490)

@@ -627,6 +627,7 @@ tests = [
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
+    "tests/v2/research/test_magnitude_registration.py",
     "tests/v2/research/test_native_outcomes.py",
     "tests/v2/research/test_v2_prediction_cli.py",
     "tests/v2/research/test_native_outcome_validation.py",
@@ -788,6 +789,7 @@ tests = [
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
+    "tests/v2/research/test_magnitude_registration.py",
 ]
 
 [modules.ops_catalog_sched]
@@ -1041,6 +1043,7 @@ tests = [
     "tests/v2/research/test_magnitude_inputs.py",
     "tests/v2/research/test_magnitude_features.py",
     "tests/v2/research/test_magnitude_folds.py",
+    "tests/v2/research/test_magnitude_registration.py",
     "tests/v2/research/test_experiment_trades.py",
     "tests/v2/research/test_exp144_v2_trades.py",
     "tests/v2/research/test_experiments_common_v2_store_root.py",
