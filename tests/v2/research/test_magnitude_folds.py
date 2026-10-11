@@ -228,8 +228,16 @@ def test_equivalent_explicit_population_order_and_call_local_clock_reuse(tmp_pat
         selected = _plan(repository, snapshot, event_ids=[second["event_id"], first["event_id"], train["event_id"]])
         assert len(calls) == 12  # There is no cross-call cache.
         assert bulk == selected
+        assert [{key: value for key, value in event.items() if key != "forecasts"}
+                for event in bulk["events"]] == [
+            {"event_id": event["event_id"], "ticker": event["ticker"],
+             "event_date": event["event_date"].date().isoformat(), "session": event["session"],
+             "population_use": "post-release selection"}
+            for event in (train, first, second)]
         a, b = bulk["events"][1:]
         assert a["forecasts"] == b["forecasts"]
+        assert [clock["source_session_ceiling"] for clock in a["forecasts"]] == [
+            "2023-12-26", "2023-12-28", "2024-01-02"]
         assert a["forecasts"][0] is not b["forecasts"][0]
     finally:
         conn.close()
