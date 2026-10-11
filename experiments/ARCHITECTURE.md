@@ -39,7 +39,12 @@ Magnitude admission verifies the catalog-owned original even without `expected`.
 Mode, request, source/environment/scope/snapshot and holdout-month conflicts
 refuse before population/calendar scans; current plan reconstruction must then
 match the complete stored binding. Stored verification alone proves integrity,
-not current semantic admission. This library prerequisite has no magnitude CLI
+not current semantic admission. Its closed nested schema requires canonical
+dates, nonempty ordered years, fixed recipe/policy/availability declarations,
+and well-typed source identities linked to the enclosing snapshot. Rehashed
+malformed metadata refuses before any repository scan; calendar arithmetic and
+fold-boundary reconstruction remain the planner's responsibility.
+This library prerequisite has no magnitude CLI
 or production caller, performs no feature/label read or fitting, and adds no
 aggregate materialization or final-read authority.
 
