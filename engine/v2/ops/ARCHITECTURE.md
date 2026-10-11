@@ -532,8 +532,8 @@ Leaf module, not yet called by `nightly_trigger`; the per-date `<as_of>.json` re
 |---|---|
 | Calls, reruns, or concurrent callers | A first ordinary call creates generation 1 `allocated`; later ordinary calls return it and never allocate. Explicit rerun appends generation n+1 and roots in one swap; a pre-swap crash writes nothing, a post-swap retry reattaches to `allocated`, and a started generation makes the next rerun allocate. One swap wins; losers re-read; bounded retries raise `LEASE_LOST`; a returned revision may become stale; a superseded generation marking itself started raises `CHECKPOINT_INCOMPATIBLE`. The caller's lock decides when the older owner is gone. |
 | Invalid session state or malformed session/repair input | Unparseable JSON or wrong key/run ID/numbering raises `INTEGRITY_FAILED`; another schema raises `CHECKPOINT_INCOMPATIBLE`. Old per-date receipts are never read. Empty/malformed session identity or rerun without state raises `INVALID_REQUEST`; malformed/unknown repair invalidation roots or malformed effects also raise `INVALID_REQUEST`; no state is written. |
-| Prior artifact is missing, mismatched, oversized, non-regular, or otherwise unprovable | Recompute its stage and affected dependents; no binding is inherited. |
-| A stage is absent from the current graph | Drop its binding and ignore its persisted invalidation root. |
+| Prior binding is missing or unsuccessful, its stage/dependency identity or request/implementation digest differs, or its effect is unprovable | Recompute its stage and affected dependents; inherit only succeeded bindings with matching identities and verified effects, preserving their producer `run_id`. |
+| A stage is absent from the current graph or explicitly invalidated | Drop an absent-stage binding and ignore its persisted invalidation root; execute an explicitly invalidated stage and its dependents. |
 | Prior output has an external effect | Do not inherit the binding. |
 
 ### Nightly step receipts (`nightly_receipts.py`, slice 2 of #564)
