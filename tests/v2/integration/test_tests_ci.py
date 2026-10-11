@@ -1,8 +1,7 @@
 """Validate CI workflow configuration against conftest LOCAL_ONLY_MARKERS.
 
-Steps are looked up by name across every job, so these checks hold for the
-single-job workflow and for the sharded one (plan -> shard matrix -> `test`
-aggregator; tests/shards.toml, tools/ci_shards.py).
+Steps are looked up by name across every job of the sharded workflow
+(plan -> shard matrix -> `test` aggregator; tests/shards.toml, tools/ci_shards.py).
 """
 from __future__ import annotations
 
@@ -124,8 +123,10 @@ def _stub_bin(tmp_path: Path, python3_script: str) -> dict[str, str]:
     """Env whose `python3` is a stub (the shard tool) and `python` records its argv."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "python3").write_text("#!/bin/sh\n" + python3_script + "\n")
-    (bin_dir / "python").write_text(f'#!/bin/sh\necho "$@" >> "{tmp_path}/pytest_calls"\n')
+    (bin_dir / "python3").write_text(
+        f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> "{tmp_path}/python3_calls"\n' + python3_script + "\n")
+    (bin_dir / "python").write_text(
+        f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> "{tmp_path}/pytest_calls"\nexit "${{STUB_PYTEST_EXIT:-0}}"\n')
     for stub in ("python3", "python"):
         (bin_dir / stub).chmod(0o755)
     return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
@@ -161,7 +162,35 @@ def test_empty_shard_list_skips_pytest_and_a_nonempty_one_runs_it(tmp_path):
     other.mkdir()
     env = dict(_stub_bin(other, "echo tests/a/test_x.py"), SHARD="ops", SELECTION_FILE="")
     assert _run_bash(run, env).returncode == 0
+    assert (other / "python3_calls").read_text().splitlines() == [
+        "tools/ci_shards.py", "files", "ops"]
     assert "tests/a/test_x.py" in (other / "pytest_calls").read_text()
+
+
+PYTEST_FLAGS = ["-n", "auto", "--dist", "loadgroup", "-m",
+                "not needs_data and not needs_corpus and not heavy_host and not browser",
+                "-rfE", "--durations=25", "--junitxml=junit.xml"]
+
+
+def test_shard_run_forwards_the_selection_and_passes_every_file_to_pytest(tmp_path):
+    run = _step(_workflow(), "Run pytest")["run"]
+    selection = tmp_path / "sel.txt"
+    selection.write_text("tests/a/test_x.py\n")
+    files = ["tests/a/test_x.py", "tests/b/test_y.py", "tests/c/test_z.py"]
+    stub = "printf '%s\\n' " + " ".join(files)
+    env = dict(_stub_bin(tmp_path, stub), SHARD="ops", SELECTION_FILE=str(selection))
+    assert _run_bash(run, env).returncode == 0
+    assert (tmp_path / "python3_calls").read_text().splitlines() == [
+        "tools/ci_shards.py", "files", "ops", "--selection", str(selection)]
+    assert (tmp_path / "pytest_calls").read_text().splitlines() == [
+        "-m", "pytest", *PYTEST_FLAGS, *files]
+
+
+def test_a_failing_pytest_fails_the_shard_step(tmp_path):
+    run = _step(_workflow(), "Run pytest")["run"]
+    env = dict(_stub_bin(tmp_path, "echo tests/a/test_x.py"), SHARD="ops", SELECTION_FILE="",
+               STUB_PYTEST_EXIT="1")
+    assert _run_bash(run, env).returncode != 0
 
 
 def test_failing_matrix_command_fails_the_plan_step(tmp_path):
@@ -170,6 +199,19 @@ def test_failing_matrix_command_fails_the_plan_step(tmp_path):
     env = dict(_stub_bin(tmp_path, "exit 3"), GITHUB_OUTPUT=str(output))
     assert _run_bash(run, env).returncode != 0
     assert not output.exists() or "matrix=" not in output.read_text()
+
+
+def test_successful_matrix_command_publishes_the_plan_output(tmp_path):
+    workflow = _workflow()
+    step = _step(workflow, "Print shard matrix")
+    assert step["id"] == "matrix"
+    assert workflow["jobs"]["plan"]["outputs"]["matrix"] == "${{ steps.matrix.outputs.matrix }}"
+    output = tmp_path / "out"
+    stub = "echo '{\"include\":[{\"shard\":\"ops\"}]}'"
+    env = dict(_stub_bin(tmp_path, stub), GITHUB_OUTPUT=str(output))
+    assert _run_bash(step["run"], env).returncode == 0
+    assert output.read_text() == 'matrix={"include":[{"shard":"ops"}]}\n'
+    assert (tmp_path / "python3_calls").read_text().splitlines() == ["tools/ci_shards.py", "matrix"]
 
 
 def test_upload_step_warns_instead_of_failing_on_no_junit():

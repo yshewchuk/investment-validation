@@ -109,23 +109,69 @@ def test_first_matching_shard_owns_a_file_two_shards_match(tmp_path):
     assert ci_shards.owner("tests/x/test_y.py", shards) == "a"
 
 
-@pytest.mark.parametrize("text", [
-    '[[shard]]\nname="a"\npatterns=["x"]\n',
-    '[[shard]]\nname="a"\nremainder=true\n[[shard]]\nname="b"\npatterns=["x"]\n',
-    '[[shard]]\nname="a"\npatterns=["x"]\n[[shard]]\nname="a"\nremainder=true\n',
-    '[[shard]]\nname="a"\nremainder=true\n[[shard]]\nname="b"\nremainder=true\n',
-    '[[shard]]\nname="a"\n[[shard]]\nname="r"\nremainder=true\n',
-    '[[shard]]\nname="a"\npatterns=["x"]\nremainder=true\n',
-    '[[shard]]\npatterns=["x"]\n[[shard]]\nname="r"\nremainder=true\n',
-    'shard=["bad"]\n',
-    'shard="bad"\n',
-    '[[shard]]\nname="a"\npatterns="x"\n[[shard]]\nname="r"\nremainder=true\n',
-    '[[shard]]\nname="a"\npatterns=["x"]\n[[shard]]\nname="r"\nremainder="false"\n',
-    '[[shard]]\nname="a"\npatterns=["x"]\nextra=1\n[[shard]]\nname="r"\nremainder=true\n',
+R = '[[shard]]\nname="r"\nremainder=true\n'
+
+
+@pytest.mark.parametrize(("text", "message"), [
+    ('[[shard]]\nname="a"\npatterns=["x"]\n', "exactly one remainder shard is required"),
+    ('[[shard]]\nname="a"\nremainder=true\n[[shard]]\nname="b"\npatterns=["x"]\n',
+     "exactly one remainder shard is required"),
+    ('[[shard]]\nname="a"\npatterns=["x"]\n[[shard]]\nname="a"\nremainder=true\n',
+     "duplicate shard names"),
+    ('[[shard]]\nname="a"\nremainder=true\n[[shard]]\nname="b"\nremainder=true\n',
+     "exactly one remainder shard is required"),
+    ('[[shard]]\nname="a"\n' + R, "shard 'a' has no patterns and is not the remainder"),
+    ('[[shard]]\nname="a"\npatterns=["x"]\nremainder=true\n',
+     "remainder shard 'a' must not list patterns"),
+    ('[[shard]]\npatterns=["x"]\n' + R, "shard #0 has no name"),
+    ('shard=["bad"]\n', "shard #0 must be a table"),
+    ('shard="bad"\n', "`shard` must be an array"),
+    ('[[shard]]\nname="a"\npatterns="x"\n' + R, "shard 'a': patterns must be a list of strings"),
+    ('[[shard]]\nname="a"\npatterns=["x"]\n[[shard]]\nname="r"\nremainder="false"\n',
+     "shard 'r': remainder must be a boolean"),
+    ('[[shard]]\nname="a"\npatterns=["x"]\nextra=1\n' + R, "shard #0 has unknown keys: ['extra']"),
 ])
-def test_loader_rejects_a_bad_declaration(tmp_path, text):
-    with pytest.raises(ValueError):
+def test_loader_rejects_a_bad_declaration_with_the_specific_refusal(tmp_path, text, message):
+    with pytest.raises(ValueError) as excinfo:
         ci_shards.load_shards(_toml(tmp_path, text))
+    assert message in str(excinfo.value)
+
+
+def test_ownership_matches_an_independently_written_table(tmp_path):
+    shards = ci_shards.load_shards(_toml(
+        tmp_path,
+        '[[shard]]\nname="a"\npatterns=["tests/a/*", "tests/shared/*"]\n'
+        '[[shard]]\nname="b"\npatterns=["tests/b/*", "tests/shared/*", "tests/*_x.py"]\n' + R))
+    expected = {
+        "tests/a/test_1.py": "a",
+        "tests/shared/test_2.py": "a",  # second pattern of a, also matched by b: a is first
+        "tests/b/test_3.py": "b",
+        "tests/test_q_x.py": "b",  # third pattern of b
+        "tests/c/test_4.py": "r",  # unclaimed: remainder
+    }
+    for path, shard in expected.items():
+        assert ci_shards.owner(path, shards) == shard, path
+    assert ci_shards.assign(list(expected), shards) == {
+        "a": ["tests/a/test_1.py", "tests/shared/test_2.py"],
+        "b": ["tests/b/test_3.py", "tests/test_q_x.py"],
+        "r": ["tests/c/test_4.py"],
+    }
+
+
+@pytest.mark.parametrize(("path", "shard"), [
+    ("tests/v2/ops/test_a.py", "ops"),
+    ("tests/v2/ops/deep/test_a.py", "ops"),
+    ("tests/test_v2_ops_foo.py", "ops"),
+    ("tests/v2/research/test_a.py", "research"),
+    ("tests/v2/integration/test_a.py", "research"),
+    ("tests/test_v2_research_foo.py", "research"),
+    ("tests/test_checks_phase2_gate.py", "checks"),
+    ("tests/test_v2_data_foo.py", "rest"),
+    ("tests/v2/serving/test_a.py", "rest"),
+    ("tests/test_audit.py", "rest"),
+])
+def test_real_declaration_owns_representative_paths_as_documented(path, shard):
+    assert ci_shards.owner(path, REAL_SHARDS) == shard
 
 
 def test_matrix_lists_every_shard_name(capsys):
@@ -142,7 +188,7 @@ def test_files_prints_the_shard_files(capsys):
 
 def test_unknown_shard_exits_2(capsys):
     assert ci_shards.main(["files", "nope"]) == 2
-    assert "unknown shard" in capsys.readouterr().err
+    assert capsys.readouterr().err == "unknown shard 'nope'\n"
 
 
 def test_selection_all_empty_and_subset(tmp_path, capsys):
