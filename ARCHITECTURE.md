@@ -257,7 +257,7 @@ narrowed test selection, its result includes the configured
 `[pr_selection].always_run` paths present in the tracked test set, even when
 the diff changes only an unrelated test file; full-suite results include all
 tests. The layout ratchet's regression test,
-`tests/test_mutation_ci.py::test_select_pr_tests_always_runs_ratchet_for_unrelated_test_only_diff`,
+`tests/v2/integration/test_mutation_ci.py::test_select_pr_tests_always_runs_ratchet_for_unrelated_test_only_diff`,
 covers that selection. The package-layout selector in `checks/test_selection.py`
 is separate from the active workflow; see [package test selection by
 layer](guides/test_selection_by_layer.md). The checked-in test-layout ratchet

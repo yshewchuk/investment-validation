@@ -2,6 +2,7 @@
 
 # packages: ops
 """
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -19,8 +20,12 @@ def _write(root, path, text):
 
 
 @pytest.fixture
-def repo(tmp_path):
+def repo(tmp_path, monkeypatch):
     """Create a real diff base; clean disposable repository bytes afterward."""
+    local_vars = subprocess.run(["git", "rev-parse", "--local-env-vars"], check=True,
+                                capture_output=True, text=True).stdout.splitlines()
+    for name in local_vars:
+        monkeypatch.delenv(name, raising=False)
     with tempfile.TemporaryDirectory(dir=tmp_path) as directory:
         root = Path(directory)
 
@@ -37,6 +42,21 @@ def repo(tmp_path):
             return root
 
         yield seed
+
+
+def test_fixture_isolates_git_repository_environment(request, monkeypatch, tmp_path):
+    """Fixture setup and real discovery ignore inherited Git repository locations."""
+    redirected = tmp_path / "caller-repository"
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                 "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+        monkeypatch.setenv(name, str(redirected))
+    monkeypatch.setenv("OC_CHECK_FIXTURE_SENTINEL", "preserved")
+    seed = request.getfixturevalue("repo")
+    root = seed({"tests/v2/ops/test_changed.py": "# before\n"})
+    _write(root, "tests/v2/ops/test_changed.py", "# after\n")
+    assert oc_check.changed_tests(root) == ["tests/v2/ops/test_changed.py"]
+    assert os.environ["OC_CHECK_FIXTURE_SENTINEL"] == "preserved"
+    assert not redirected.exists()
 
 
 @pytest.mark.parametrize("location", ["tests", "tests/v2/ops", "tests/v2/integration",

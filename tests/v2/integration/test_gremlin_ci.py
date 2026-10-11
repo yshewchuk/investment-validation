@@ -7,9 +7,10 @@ stubbed. The cache-fingerprint tests ``git init`` a synthetic tree in ``tmp_path
 so "tracked" is real there -- git is a declared tool input the fingerprint reads,
 not the runner under test -- and never touch the repo working tree. The candidate
 workflow (``tools/gremlin_workflow_candidate.yml``) is parsed as YAML only. The
-exhaustive engine/v2 module-ownership test lives in ``tests/test_mutation_ci.py``
+exhaustive engine/v2 module-ownership test lives in ``tests/v2/integration/test_mutation_ci.py``
 and is unchanged -- gremlin_pilot reuses the same ``mutation_pilot.toml``
 partition, so that single ownership test governs both backends.
+# packages: engine.v2.contracts, engine.v2.foundation, engine.v2.data, engine.v2.features, engine.v2.models, engine.v2.registry, engine.v2.domain.generation, engine.v2.domain.scenarios, engine.v2.domain.valuation, engine.v2.domain.simulation, engine.v2.scoring, engine.v2.evaluation, engine.v2.research, engine.v2.ledger, engine.v2.models.training, engine.v2.serving, engine.v2.ops, engine.v2.dashboard, engine.v2.diagnosis, engine.v2.parity
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import gremlin_pilot as gp  # noqa: E402
@@ -525,7 +526,7 @@ def test_cmd_matrix_prints_the_json_list(monkeypatch, capsys):
 # unchanged (same shared-input rule governs both backends' matrices, exactly
 # as it already reuses the module partition). These tests pin the WIRING --
 # that select_modules/cmd_matrix pass the flag through -- not the selection
-# rule itself, which tests/test_mutation_ci.py already covers in full.
+# rule itself, which tests/v2/integration/test_mutation_ci.py already covers in full.
 
 def test_select_modules_without_changed_files_is_unaffected(monkeypatch):
     monkeypatch.setattr(gp.pilot, "enabled_modules", lambda cfg_: ["foundation", "canonical"])

@@ -184,6 +184,7 @@ PHASE1_SUITE_VERSION = "phase1_coverage_suite.v10"
 PHASE1_RENAMED = {
     "tests/test_v2_ops_experiment_reports.py": "tests/v2/ops/test_experiment_reports.py",
     "tests/test_v2_ops_legacy_defects.py": "tests/v2/ops/test_legacy_defects.py",
+    "tests/test_v2_ops_price_history.py": "tests/v2/ops/test_v2_ops_price_history.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (

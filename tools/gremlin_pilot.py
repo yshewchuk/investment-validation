@@ -9,7 +9,7 @@ enabled/excluded modules, the same ``mutate``/``skip``/``tests`` fnmatch
 expansion (via ``mutation_pilot``'s reliable ``load_config``, ``expand``,
 ``mutate_files``, ``test_files`` and ``_tracked`` helpers) and the same
 ``[defaults] deselect`` list. Only the execution backend differs, so
-``tests/test_mutation_ci.py``'s exhaustive "every engine/v2 file sits in exactly
+``tests/v2/integration/test_mutation_ci.py``'s exhaustive "every engine/v2 file sits in exactly
 one module" ownership test governs both runners.
 
 Unlike mutmut 3 (which forks a mutated copy of ``engine/`` into a work copy OUTSIDE
@@ -36,7 +36,7 @@ pytest-gremlins' own keys.
         --gremlin-workers=N --gremlin-cache --gremlin-report=json \\
         -p no:cacheprovider --deselect=... <expanded test files>
 
-Rules this tool encodes, all pinned by ``tests/test_gremlin_ci.py``:
+Rules this tool encodes, all pinned by ``tests/v2/integration/test_gremlin_ci.py``:
 
 * Workers are explicit and capped. Default 2 locally; under CI (``GITHUB_ACTIONS``)
   ``min(nproc, 4)``. A ``--workers`` request is never honored above that ceiling.
