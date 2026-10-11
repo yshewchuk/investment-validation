@@ -1,4 +1,5 @@
 """Event-history primitives on the real path (design #651)."""
+import contextlib
 import math
 
 import numpy as np
@@ -13,6 +14,14 @@ from engine.v2.data.event_history import (
 )
 
 DAYS = ["2020-01-10", "2020-04-10", "2020-07-10", "2020-10-09", "2021-01-08", "2021-04-09"]
+
+
+@contextlib.contextmanager
+def _mismatch():
+    """Every refusal in this module is exactly CONTRACT_MISMATCH, never another code."""
+    with pytest.raises(DataError) as err:
+        yield
+    assert err.value.code == "CONTRACT_MISMATCH"
 
 
 def _rows(*items):
@@ -43,7 +52,7 @@ def test_event_sequence_refuses_bad_lists(days, kwargs):
 
 
 def test_event_sequence_refuses_negative_warmup():
-    with pytest.raises(DataError):
+    with _mismatch():
         event_sequence(DAYS, warmup=-1)
 
 
@@ -75,7 +84,7 @@ def test_no_prior_row_follows_on_missing():
     rows = _rows(("2020-01-10", 0.5, 4.0))
     assert AsofSeries(rows, eligible=("src_iv",), value="implied_move",
                       on_missing="null").at("2020-01-10") is None
-    with pytest.raises(DataError):
+    with _mismatch():
         AsofSeries(rows, eligible=("src_iv",), value="implied_move",
                    on_missing="refuse").at("2020-01-10")
 
@@ -90,11 +99,11 @@ def test_max_staleness_makes_an_old_anchor_a_miss():
 
 def test_asof_series_refuses_bad_declarations_and_rows():
     good = _rows(("2020-01-01", 0.5, 4.0))
-    with pytest.raises(DataError):
+    with _mismatch():
         AsofSeries(good, eligible=("src_iv",), value="implied_move", on_missing="default")
-    with pytest.raises(DataError):
+    with _mismatch():
         AsofSeries(good, eligible=("missing",), value="implied_move", on_missing="null")
-    with pytest.raises(DataError):
+    with _mismatch():
         AsofSeries(_rows(("2020-01-02", 0.5, 1.0), ("2020-01-01", 0.5, 1.0)),
                    eligible=("src_iv",), value="implied_move", on_missing="null")
 
@@ -129,11 +138,11 @@ def test_strict_prior_mean_skips_null_contributions():
 
 def test_strict_prior_mean_refuses_bad_inputs():
     seq = event_sequence(DAYS, warmup=4)
-    with pytest.raises(DataError):
+    with _mismatch():
         strict_prior_mean(seq, [1.0], population="all")
-    with pytest.raises(DataError):
+    with _mismatch():
         strict_prior_mean(seq, [1.0] * 6, population="recent")
-    with pytest.raises(DataError):
+    with _mismatch():
         strict_prior_mean(seq[1:], [1.0] * 5, population="all")
 
 
@@ -144,7 +153,7 @@ def test_eligible_nan_row_is_ineligible_not_an_anchor():
 
 
 def test_missing_value_column_refuses():
-    with pytest.raises(DataError):
+    with _mismatch():
         AsofSeries([dict(date="2020-01-01", src_iv=0.5)], eligible=("src_iv",),
                    value="implied_move", on_missing="null")
 
@@ -152,14 +161,14 @@ def test_missing_value_column_refuses():
 def test_non_iso_dates_and_non_numeric_values_refuse():
     series = AsofSeries(_rows(("2020-01-01", 0.5, 4.0)), eligible=("src_iv",),
                         value="implied_move", on_missing="null")
-    with pytest.raises(DataError):
+    with _mismatch():
         series.at("not-a-date")
-    with pytest.raises(DataError):
+    with _mismatch():
         AsofSeries(_rows(("01/02/2020", 0.5, 4.0)), eligible=("src_iv",),
                    value="implied_move", on_missing="null")
     bad = AsofSeries(_rows(("2020-01-01", 0.5, "abc")), eligible=("src_iv",),
                      value="implied_move", on_missing="null")
-    with pytest.raises(DataError):
+    with _mismatch():
         bad.at("2020-02-01")
 
 
@@ -171,14 +180,14 @@ def test_matching_first_known_is_accepted():
 def test_non_canonical_dates_refuse_everywhere(bad):
     series = AsofSeries(_rows(("2020-01-11", 0.5, 4.0)), eligible=("src_iv",),
                         value="implied_move", on_missing="null")
-    with pytest.raises(DataError):
+    with _mismatch():
         series.at(bad)
-    with pytest.raises(DataError):
+    with _mismatch():
         AsofSeries(_rows((bad, 0.5, 4.0)), eligible=("src_iv",),
                    value="implied_move", on_missing="null")
-    with pytest.raises(DataError):
+    with _mismatch():
         event_sequence([bad], warmup=0)
-    with pytest.raises(DataError):
+    with _mismatch():
         event_sequence(DAYS, warmup=0, first_known=bad)
 
 
@@ -413,3 +422,11 @@ def test_tuples_are_accepted_as_containers():
     series = AsofSeries(tuple(_rows(("2020-01-01", 0.5, 4.0))), eligible=("src_iv",),
                         value="implied_move", on_missing="null")
     assert series.at("2020-01-02") == 4.0
+
+
+@pytest.mark.parametrize("missing", ["date", "src_iv", "implied_move"])
+def test_missing_date_eligibility_or_value_column_refuses_exact_code(missing):
+    row = dict(date="2020-01-01", src_iv=0.5, implied_move=4.0)
+    del row[missing]
+    with _mismatch():
+        AsofSeries([row], eligible=("src_iv",), value="implied_move", on_missing="null")
