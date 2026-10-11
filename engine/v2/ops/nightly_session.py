@@ -336,6 +336,8 @@ def _cleanup_publication_temp(dir_fd: int, fd: int, temporary_name: str,
 def atomic_write(path: Path, text: str, *, max_bytes: int | None = None,
                  size_error: str = "publication data is too large") -> None:
     """Durably replace ``path``, optionally enforcing its owner's size limit."""
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise fail("INVALID_REQUEST", "publication byte limit must be a nonnegative integer")
     data = text.encode("utf-8")
     if max_bytes is not None and len(data) > max_bytes:
         raise fail("INTEGRITY_FAILED", size_error)
@@ -368,6 +370,8 @@ def atomic_write(path: Path, text: str, *, max_bytes: int | None = None,
 @contextmanager
 def session_transition_lock(root: Path, identity: SessionIdentity):
     """Hold the per-session lock used for transitions and run-scoped publications."""
+    if not isinstance(identity, SessionIdentity):
+        raise fail("INVALID_REQUEST", "session transition lock needs a session identity")
     path = session_path(root, identity)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

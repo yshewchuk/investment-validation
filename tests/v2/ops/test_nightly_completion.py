@@ -323,6 +323,34 @@ def test_nonmapping_inputs_take_the_typed_mapping_refusal(expected, observed):
     assert exc.value.problem.message == "completion dispositions must be mappings"
 
 
+@pytest.mark.parametrize("identity", [None, "bad", {}])
+def test_session_transition_lock_rejects_bad_identity_before_filesystem(identity, tmp_path):
+    with pytest.raises(OpsError) as exc:
+        with nightly_session.session_transition_lock(tmp_path, identity):
+            pass
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.problem.message == "session transition lock needs a session identity"
+    assert not tmp_path.joinpath(*STATE_DIR).exists()
+
+
+@pytest.mark.parametrize("max_bytes", [True, -1, 1.5, "5", []])
+def test_atomic_writer_rejects_malformed_size_limit_before_filesystem(max_bytes, tmp_path):
+    path = tmp_path / "missing" / "payload.json"
+    with pytest.raises(OpsError) as exc:
+        atomic_write(path, "payload", max_bytes=max_bytes)
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.problem.message == "publication byte limit must be a nonnegative integer"
+    assert not path.parent.exists()
+
+
+def test_atomic_writer_accepts_payload_at_exact_size_limit(tmp_path):
+    path = tmp_path / "exact-limit.json"
+    payload = "x" * MAX_SESSION_BYTES
+    atomic_write(path, payload, max_bytes=MAX_SESSION_BYTES)
+    assert path.stat().st_size == MAX_SESSION_BYTES
+    assert path.read_text() == payload
+
+
 def test_shared_atomic_writer_default_preserves_large_sibling_artifact_capacity(tmp_path):
     path = tmp_path / "history-manifest.json"
     payload = "x" * (MAX_SESSION_BYTES + 1)
@@ -642,6 +670,53 @@ def test_service_rejects_unsafe_session_and_lock_files_without_blocking(
         if unsafe == "symlink":
             assert unsafe_path.is_symlink()
             assert sentinel.exists()
+    finally:
+        conn.close()
+
+
+def test_session_reader_accepts_valid_state_at_exact_size_limit(tmp_path):
+    state = ensure_session(tmp_path, IDENT)
+    path = session_path(tmp_path, IDENT)
+    encoded = path.read_bytes()
+    assert len(encoded) < MAX_SESSION_BYTES
+    path.write_bytes(encoded + b" " * (MAX_SESSION_BYTES - len(encoded)))
+    assert path.stat().st_size == MAX_SESSION_BYTES
+    assert nightly_session.load_session(tmp_path, IDENT) == state
+
+
+def test_service_rejects_session_that_grows_after_size_stat_without_report(
+        tmp_path, monkeypatch):
+    ensure_session(tmp_path, IDENT)
+    state = mark_started(tmp_path, IDENT, 1)
+    state_file = session_path(tmp_path, IDENT)
+    original = state_file.read_bytes()
+    conn, service = _service(tmp_path)
+    report_path = tmp_path.joinpath(
+        *STATE_DIR, f"{state.active.run_id}.completion.json")
+    real_read = os.read
+    grew = False
+
+    def grow_before_real_read(fd, size):
+        nonlocal grew
+        if not grew:
+            assert os.fstat(fd).st_size == len(original)
+            state_file.write_bytes(
+                original + b" " * (MAX_SESSION_BYTES + 1 - len(original)))
+            grew = True
+        return real_read(fd, size)
+
+    monkeypatch.setattr(os, "read", grow_before_real_read)
+    try:
+        with pytest.raises(OpsError) as exc:
+            service.record_nightly_completion(
+                IDENT, 1, {"primary": "required"},
+                {"primary": Disposition("succeeded")})
+        assert grew
+        assert exc.value.code == "INTEGRITY_FAILED"
+        assert exc.value.problem.message == "session state is too large"
+        assert state_file.stat().st_size == MAX_SESSION_BYTES + 1
+        assert not report_path.exists()
+        assert not report_path.with_name(report_path.name + ".tmp").exists()
     finally:
         conn.close()
 
