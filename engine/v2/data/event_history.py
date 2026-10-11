@@ -63,9 +63,15 @@ def _choice(value: Any, allowed: tuple[str, ...], name: str) -> str:
     return value
 
 
+def _seq(value: Any, what: str) -> Any:
+    """The one container allow-list: list or tuple only (not str, bytes, range, ...)."""
+    if not isinstance(value, (list, tuple)):
+        raise _refuse(f"{what} must be a list or tuple")
+    return value
+
+
 def _names(value: Any, what: str) -> tuple[str, ...]:
-    if isinstance(value, str) or not isinstance(value, Sequence):
-        raise _refuse(f"{what} must be a sequence of column names")
+    _seq(value, what)
     if not all(isinstance(item, str) for item in value):
         raise _refuse(f"{what} must be a sequence of column names")
     return tuple(value)
@@ -100,8 +106,7 @@ def event_sequence(event_dates: Sequence[str], *, warmup: int,
                    first_known: str | None = None) -> tuple[SequencedEvent, ...]:
     """One ticker's FULL ordered event list; ordinal counts every earlier event."""
     warmup = _count(warmup, "warmup")
-    if isinstance(event_dates, str) or not isinstance(event_dates, Sequence):
-        raise _refuse("event_dates must be a sequence of dates")
+    _seq(event_dates, "event_dates")
     days = list(event_dates)
     for day in days:
         _day(day)
@@ -126,8 +131,7 @@ class AsofSeries:
             raise _refuse("value must be a column name")
         if max_staleness_days is not None:
             max_staleness_days = _count(max_staleness_days, "max_staleness_days")
-        if isinstance(rows, (str, Mapping)) or not isinstance(rows, Sequence):
-            raise _refuse("rows must be a sequence of mappings")
+        _seq(rows, "rows")
         self._max_staleness = max_staleness_days
         self._dates: list[str] = []
         self._values: list[Any] = []
@@ -170,10 +174,8 @@ def _check_ascending(events: Sequence[SequencedEvent]) -> None:
 
 def _check_aggregate_inputs(events: Any, values: Any, population: Any) -> None:
     _choice(population, _POPULATIONS, "population")
-    if isinstance(events, str) or not isinstance(events, Sequence):
-        raise _refuse("events must be a sequence of SequencedEvent")
-    if isinstance(values, str) or not isinstance(values, Sequence):
-        raise _refuse("values must be a sequence")
+    _seq(events, "events")
+    _seq(values, "values")
     if not all(isinstance(ev, SequencedEvent) for ev in events):
         raise _refuse("events must be SequencedEvent items")
     if len(events) != len(values):

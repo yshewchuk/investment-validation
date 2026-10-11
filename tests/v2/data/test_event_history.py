@@ -383,3 +383,33 @@ def test_every_eligible_field_must_be_present():
             dict(date="2020-01-08", a=1.0, b=None, v=9.0)]
     series = AsofSeries(rows, eligible=("a", "b"), value="v", on_missing="null")
     assert series.at("2020-01-10") == 4.0
+
+
+_NOT_LIST_OR_TUPLE = [b"\x01\x03", "2020-01-10", range(3), np.array([1.0, 2.0]), {1.0, 2.0},
+                      (x for x in [1.0])]
+
+
+@pytest.mark.parametrize("bad", _NOT_LIST_OR_TUPLE)
+def test_every_container_input_allows_only_list_or_tuple(bad):
+    seq = event_sequence(DAYS, warmup=0)
+    calls = [
+        lambda: event_sequence(bad, warmup=0),
+        lambda: AsofSeries(bad, eligible=("src_iv",), value="implied_move",
+                           on_missing="null"),
+        lambda: AsofSeries(_rows(("2020-01-01", 0.5, 4.0)), eligible=bad,
+                           value="implied_move", on_missing="null"),
+        lambda: strict_prior_mean(bad, [1.0] * 6, population="all"),
+        lambda: strict_prior_mean(seq, bad, population="all"),
+    ]
+    for call in calls:
+        with pytest.raises(DataError) as err:
+            call()
+        assert err.value.code == "CONTRACT_MISMATCH"
+
+
+def test_tuples_are_accepted_as_containers():
+    seq = event_sequence(tuple(DAYS), warmup=0)
+    assert strict_prior_mean(seq, tuple([1.0] * 6), population="all")[1] == (1.0, 1)
+    series = AsofSeries(tuple(_rows(("2020-01-01", 0.5, 4.0))), eligible=("src_iv",),
+                        value="implied_move", on_missing="null")
+    assert series.at("2020-01-02") == 4.0
