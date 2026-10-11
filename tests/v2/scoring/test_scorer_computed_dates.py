@@ -15,7 +15,7 @@ from engine.v2.scoring.frozen_executor import FrozenStageExecutor
 from engine.v2.scoring.nightly_source_bundle import assemble_nightly_source_bundle
 from engine.v2.scoring.source_inputs import build_native_score_inputs
 from engine.v2.scoring.stages import (
-    NativeScoreInputs, STAGE_NAMES, StageReceipt, _facts,
+    NativeScoreInputs, STAGE_NAMES, StageReceipt, _facts, _priced_dte_entry,
     assemble_native_values)
 
 _RECEIPTS = tuple(
@@ -26,13 +26,19 @@ _QUOTES = {r: {"bid": 1.9, "ask": 2.1}
 
 
 def _inputs(*, gate=None, quotes=None, forecast_coefficients=None,
+            diagnostics=None, expiry=None, event_date=None,
             drop_decision=False) -> NativeScoreInputs:
+    resolved_expiry = "2026-11-20" if expiry is None else expiry
+    if quotes is None:
+        quotes = {(right, strike, resolved_expiry): dict(value)
+                  for (right, strike, _), value in _QUOTES.items()}
     context = {"ticker": "AAA", "strategy": "STR-THRU",
-               "event_date": "2026-10-27", "entry_date": "2026-10-08",
+               "event_date": "2026-10-27" if event_date is None else event_date,
+               "entry_date": "2026-10-08",
                "quote_date": "2026-10-08", "exit_date": "2026-10-27",
-               "expiry": "2026-11-20", "strike": 100.0, "spot": 100.0,
+               "expiry": resolved_expiry, "strike": 100.0, "spot": 100.0,
                "as_of": "2026-10-07",
-               "quotes": dict(_QUOTES) if quotes is None else quotes}
+               "quotes": quotes}
     if drop_decision:
         del context["as_of"]
     coefficients = ({} if forecast_coefficients is None
@@ -46,7 +52,7 @@ def _inputs(*, gate=None, quotes=None, forecast_coefficients=None,
         geometry=None, pricing=None, analogs={"recipe": None},
         simulation={"mode": "not_applicable"},
         gate=gate if gate is not None else {"mode": "not_applicable"},
-        chooser={}, diagnostics={},
+        chooser={}, diagnostics=diagnostics if diagnostics is not None else {},
         source_ref="scorer-computed-dates-fixture",
         stage_receipts=_RECEIPTS,
     )
@@ -276,3 +282,44 @@ def test_helpers_match_legacy_arithmetic():
     assert financial.days_to_print("not-a-date", b) is None
     assert financial.dte_entry(None, b) is None
     assert financial.dte_entry("not-a-date", b) is None
+
+
+def test_diagnostics_cannot_overwrite_computed_dates():
+    values = assemble_native_values(
+        _inputs(diagnostics={"days_to_print": 99.0, "dte_entry": 99}))
+    assert values["days_to_print"] == 20.0
+    assert values["dte_entry"] == 43
+
+    refused = assemble_native_values(
+        _inputs(quotes={},
+                diagnostics={"days_to_print": 99.0, "dte_entry": 99}))
+    assert "dte_entry" not in refused
+
+
+def test_dte_entry_follows_the_priced_expiry(tmp_path):
+    gate = _frozen_gate(tmp_path, ("dte_entry", "entry_cost_pct"))
+    values = assemble_native_values(_inputs(gate=gate, expiry="2026-12-18"))
+    assert values["dte_entry"] == 71
+    assert values.get("entry_cost") is not None
+
+
+def test_priced_leg_expiry_wins_over_context_expiry():
+    priced = {"legs": ({"expiry": "2026-12-18"},), "entry_cost": 1.0,
+              "quote_date": "2026-10-08", "expiry": "2026-11-20"}
+    assert _priced_dte_entry(priced) == 71
+    assert _priced_dte_entry({**priced, "entry_cost": None}) is None
+    assert _priced_dte_entry({**priced, "legs": ()}) is None
+
+
+def test_days_to_print_second_value():
+    values = assemble_native_values(
+        _inputs(event_date="2026-11-05",
+                forecast_coefficients={"days_to_print": 1.0}))
+    assert values["days_to_print"] == 29.0
+
+
+def test_helper_edge_cases():
+    assert financial.dte_entry(float("nan"), "2026-10-08") is None
+    assert financial.dte_entry(True, "2026-10-08") is None
+    assert financial.dte_entry("2026-12-18", "2026-10-08") == 71
+    assert financial.days_to_print("2026-11-05", "2026-10-07") == 29.0

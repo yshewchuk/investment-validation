@@ -183,7 +183,10 @@ _OWNED_OUTPUTS = (
     _PRICING_OUTPUTS | _FORECAST_OUTPUTS | _SIMULATION_OUTPUTS
     | _GATE_OUTPUTS | _ANALOG_OUTPUTS | _MODEL_OUTPUTS
 )
-_DIAGNOSTIC_PROTECTED = _OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
+# days_to_print / dte_entry are scorer-computed (see _check_pricing_boundary and
+# _stage_days_to_print): a diagnostics block must never replace or install them.
+_DIAGNOSTIC_PROTECTED = (_OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
+                         | frozenset({"days_to_print", "dte_entry"}))
 _ROLE_OUTPUTS = {
     "driver": ("driver_prediction",),
     "size": ("forecast_abs_move",),
