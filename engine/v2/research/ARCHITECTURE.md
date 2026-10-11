@@ -128,6 +128,41 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 These readers preserve no durable refusal receipt or economic variant identity
 and cannot authorize the separate user-only final holdout read.
 
+`event_history.load_event_history(repository, snapshot, *, event_id, as_of_month,
+decision_session, history_start, purpose="selection")` constructs prior-event
+features for one admitted canonical target. Both dates are explicit calendar
+days with `history_start <= decision_session <= target event day`. Shared
+`load_population` admits the target and excludes random, rolling and ambiguous
+history identities before any outcome access. Candidates are the same ticker's
+events in `[history_start, min(target day, decision_session))`.
+
+Every candidate query is planned before any outcome scan, using the same
+fragment planner as Repository. Preflight loads fragment metadata once and
+reuses each planned bound for query construction, avoiding a second bound lookup.
+Its entire surviving membership must be one
+inspected singleton with the exact ticker/day key, partition and time bounds.
+The resolved committed catalog/manifest identity is the metadata trust anchor;
+this trusts native producer inspection, not adversarially forged metadata.
+Caller rows, implicit latest, and another experiment's outputs are not inputs.
+Mixed, missing or unprovable membership refuses `HOLDOUT_ACCESS_DENIED` before
+opening outcome objects. This intentionally refuses old whole-ticker layouts;
+it neither migrates them nor treats row predicates as physical isolation.
+
+Skipped or null-availability historical labels are explicitly omitted. A valid
+availability day must follow its event and be on or before the decision day;
+later labels are omitted before numeric validation or feature arithmetic. Their
+admitted objects are decoded; protected event objects have a no-read guarantee.
+Malformed availability or invalid eligible values refuse
+`EXPERIMENT_VARIANT_FAILED`; repository failures propagate. The date bound is reconstructed source availability, not a claim of
+intraday publication/finality evidence. Pure `panel_math.history_features` owns
+the arithmetic: empty history and undersized EMAs retain `None`, never zero fill.
+Results carry features, `available`/`empty` status, ordered consumed event/object
+identities and availability, omitted-history reasons, snapshot/dataset/month/
+membership-version/cutoff pins and their deterministic history digest.
+No cache, automatic retry, transaction, write or partial return occurs. This
+library seam has no supervisor, provider, market-price, report or ledger caller;
+production panel reads and final-read authority remain unchanged.
+
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
 economics with `price_source="option_chains"` and explicit numeric `fill` in
@@ -336,22 +371,19 @@ resolution, its own no-partition refusal, and its own empty-result frame
 shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
 
-Callers: nothing inside `engine/` imports this package (checked against
-`checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
-listed above are one consumer; `experiments/common_v2.py` is another, for
-`experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
-and `_chains.load_chain_index`; its archived trade-read caller omits the now-required
-holdout context and is refused. The historical EXP-147 confirmatory-validation
-runner is a third, for `experiment_trades.PROVENANCE` alone (its native
-replay tag, selecting that runner's analog population).
+Callers: no `engine/` modules import this package (checked by `checks/import_layers.py`).
+Consumers are `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
+trade, calendar, and chain inputs from pinned v2 data. The archived
+trade-read caller omits required holdout context and is refused.
+Historical EXP-147 reads its native replay tag from `experiment_trades.PROVENANCE`.
 `experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266
-slice 2) is a fourth: it reads
+slice 2) reads
 `_chains.filter_plan_by_availability`/`read_chain_keys_for`, `_plan.plan_events`,
 `_pricing.STRUCTURES`/`execution_variant_label`/`trading_calendar_from_snapshot`,
 and `replay.ALPHA_GRID`/`replay_one` to price one strategy family across a
 grid-position sweep on one pinned snapshot. `experiments/EXP-186_.../run.py`
-is a fifth, reading `_replay_run.events_frame` for its known-session event
-universe before handing it to `price_candidate_grid`. None of the five are
+reads `_replay_run.events_frame` for its known-session event universe before
+handing it to `price_candidate_grid`. None of these research callers are
 parsed by the layering hook (it only parses `engine*` importers, and
 `experiments/` is outside it too).
 
@@ -525,6 +557,9 @@ uncaught traceback instead.
   and written into every output
   (root doc §5's "no silent default" invariant, applied to research reads) —
   including the experiment loader's returned context columns (see Outputs).
+- Every experiment runner reads from its pinned v2 snapshot, applying shared random/rolling holdout enforcement through the reader appropriate to its inputs:
+  `experiment_trades.load_trades` for trades; `experiment_population.load_population` for populations and its prediction/history consumers. Inadmissible reads refuse.
+  Direct parquet/file reads bypass snapshot pinning and both holdout sets and are inadmissible.
 - Never reads the legacy mutable Tier-2 store (`engine.data.store`) —
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.

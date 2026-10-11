@@ -321,20 +321,16 @@ def _recheck_experiment_preregistration(plan):
 
 def _registered_runner_manifest(plan):
     """Resolve the primary plan's registered runner and staged source set."""
+    import posixpath
+
     from engine.v2.ops.experiments import (
+        DISABLED_RUNNERS,
         RUNNER_INVENTORY,
         default_checkout_root,
         runner_manifest,
     )
 
     runner = plan["spec_document"].get("runner")
-    entry = RUNNER_INVENTORY.get(runner) if isinstance(runner, str) else None
-    declared = entry.get("declared_runtime_sources") if isinstance(entry, dict) else None
-    if (not isinstance(declared, (list, tuple)) or not declared
-            or not all(isinstance(item, str) and item for item in declared)):
-        raise fail("INVALID_EXPERIMENT_SPEC",
-                   "experiment runner registration has no declared runtime sources",
-                   details={"runner": runner})
     recorded = plan.get("preregistration_root")
     checkout_root = Path(recorded) if recorded else default_checkout_root()
     try:
@@ -344,8 +340,18 @@ def _registered_runner_manifest(plan):
             raise fail("VALIDATION_FAILED",
                        "registered runner source is missing or indirect",
                        details={"runner": runner}) from exc
+        if (exc.code == "INVALID_REQUEST"
+                and posixpath.normpath(str(runner)) in DISABLED_RUNNERS):
+            raise
         raise fail("INVALID_EXPERIMENT_SPEC", "experiment runner is not registered",
                    details={"runner": runner}) from exc
+    entry = RUNNER_INVENTORY.get(runner) if isinstance(runner, str) else None
+    declared = entry.get("declared_runtime_sources") if isinstance(entry, dict) else None
+    if (not isinstance(declared, (list, tuple)) or not declared
+            or not all(isinstance(item, str) and item for item in declared)):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment runner registration has no declared runtime sources",
+                   details={"runner": runner})
     return declared, Path(checkout_root).resolve(), manifest
 
 
