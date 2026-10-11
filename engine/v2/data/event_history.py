@@ -147,6 +147,8 @@ class AsofSeries:
             if prev is not None and day <= prev:
                 raise _refuse("rows must be strictly date-ascending")
             prev = day
+            if _present(row[value]):
+                _number(row[value])  # every present value is checked, eligible or not
             if all(_present(row[c]) for c in eligible):
                 self._dates.append(day)
                 self._values.append(row[value])

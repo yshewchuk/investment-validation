@@ -166,10 +166,9 @@ def test_non_iso_dates_and_non_numeric_values_refuse():
     with _mismatch():
         AsofSeries(_rows(("01/02/2020", 0.5, 4.0)), eligible=("src_iv",),
                    value="implied_move", on_missing="null")
-    bad = AsofSeries(_rows(("2020-01-01", 0.5, "abc")), eligible=("src_iv",),
-                     value="implied_move", on_missing="null")
     with _mismatch():
-        bad.at("2020-02-01")
+        AsofSeries(_rows(("2020-01-01", 0.5, "abc")), eligible=("src_iv",),
+                   value="implied_move", on_missing="null")
 
 
 def test_matching_first_known_is_accepted():
@@ -253,10 +252,9 @@ def test_bad_lookup_date_type_refuses_with_code(bad):
 
 @pytest.mark.parametrize("bad", ["abc", True, math.inf, 10**400, [1]])
 def test_non_numeric_anchor_value_refuses_with_code(bad):
-    series = AsofSeries(_rows(("2020-01-01", 0.5, bad)), eligible=("src_iv",),
-                        value="implied_move", on_missing="null")
     with pytest.raises(DataError) as err:
-        series.at("2020-02-01")
+        AsofSeries(_rows(("2020-01-01", 0.5, bad)), eligible=("src_iv",),
+                   value="implied_move", on_missing="null")
     assert err.value.code == "CONTRACT_MISMATCH"
 
 
@@ -288,10 +286,9 @@ def test_bad_aggregate_inputs_refuse_with_code(events, values):
 @pytest.mark.parametrize("bad", ["1.5", b"1", np.array([1.0]), np.bool_(True), True, [1.0],
                                  {"a": 1}, 1 + 2j, object()])
 def test_numeric_inputs_are_an_allow_list(bad):
-    series = AsofSeries(_rows(("2020-01-01", 0.5, bad)), eligible=("src_iv",),
-                        value="implied_move", on_missing="null")
     with pytest.raises(DataError) as err:
-        series.at("2020-02-01")
+        AsofSeries(_rows(("2020-01-01", 0.5, bad)), eligible=("src_iv",),
+                   value="implied_move", on_missing="null")
     assert err.value.code == "CONTRACT_MISMATCH"
     with pytest.raises(DataError) as err:
         strict_prior_mean(event_sequence(DAYS, warmup=0), [bad] + [1.0] * 5, population="all")
@@ -430,3 +427,19 @@ def test_missing_date_eligibility_or_value_column_refuses_exact_code(missing):
     del row[missing]
     with _mismatch():
         AsofSeries([row], eligible=("src_iv",), value="implied_move", on_missing="null")
+
+
+@pytest.mark.parametrize("bad", ["abc", math.inf, True, [1]])
+def test_malformed_value_is_refused_on_ineligible_and_non_selected_rows(bad):
+    ineligible = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-05", None, bad))
+    non_selected = _rows(("2020-01-01", 0.5, bad), ("2020-01-05", 0.5, 4.0))
+    for rows in (ineligible, non_selected):
+        with _mismatch():
+            AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
+
+
+def test_null_values_on_any_row_are_still_accepted():
+    rows = _rows(("2020-01-01", None, None), ("2020-01-05", 0.5, math.nan),
+                 ("2020-01-06", 0.5, 4.0))
+    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
+    assert series.at("2020-01-10") == 4.0
