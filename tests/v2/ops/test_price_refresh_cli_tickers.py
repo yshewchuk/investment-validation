@@ -14,6 +14,7 @@ from io import StringIO
 import pytest
 
 from engine.data import fetch
+from engine.data.pulls import price_refresh
 from engine.v2.ops import cli
 
 SESSION = "2026-09-11"
@@ -82,6 +83,16 @@ def test_tickers_file_dry_run_plans_without_writing(tmp_path, monkeypatch):
     monkeypatch.setattr("engine.data.pulls.price_refresh.load_price_universe",
                         lambda: pytest.fail("legacy inventory universe read"))
 
+    original_plan_refresh = price_refresh.plan_refresh
+    always_daily_calls = []
+
+    def spy_plan_refresh(*args, **kwargs):
+        always_daily_calls.append(kwargs["always_daily"])
+        return original_plan_refresh(*args, **kwargs)
+
+    monkeypatch.setattr("engine.data.pulls.price_refresh.plan_refresh",
+                        spy_plan_refresh)
+
     document = run(["--session", SESSION, "--dry-run",
                     "--tickers", f"@{tickers_file}",
                     "--source-root", str(source_root)],
@@ -91,6 +102,7 @@ def test_tickers_file_dry_run_plans_without_writing(tmp_path, monkeypatch):
     assert document["dry_run"] is True
     assert document["counts"] == {"daily": 3, "monthly": 0,
                                   "skipped_already_fetched": 0}
+    assert always_daily_calls == [("ZZNEW", "AAPL", "SPY")]
     assert not (source_root / "data").exists()
 
 
@@ -108,6 +120,16 @@ def test_tickers_dry_run_counts_names_plus_calendar(tmp_path, monkeypatch, capsy
     monkeypatch.setattr("engine.data.pulls.price_refresh.load_price_universe",
                         lambda: pytest.fail("legacy inventory universe read"))
 
+    original_plan_refresh = price_refresh.plan_refresh
+    always_daily_calls = []
+
+    def spy_plan_refresh(*args, **kwargs):
+        always_daily_calls.append(kwargs["always_daily"])
+        return original_plan_refresh(*args, **kwargs)
+
+    monkeypatch.setattr("engine.data.pulls.price_refresh.plan_refresh",
+                        spy_plan_refresh)
+
     document = run(["--session", SESSION, "--dry-run",
                     "--tickers", "ZZNEW,AAPL",
                     "--source-root", str(source_root)],
@@ -117,6 +139,7 @@ def test_tickers_dry_run_counts_names_plus_calendar(tmp_path, monkeypatch, capsy
     assert document["dry_run"] is True
     assert document["counts"] == {"daily": 3, "monthly": 0,
                                   "skipped_already_fetched": 0}
+    assert always_daily_calls == [("ZZNEW", "AAPL", "SPY")]
     assert not (source_root / "data").exists()
 
 
@@ -136,6 +159,23 @@ def test_empty_tickers_file_is_invalid_request(tmp_path, monkeypatch):
                            "--session", SESSION, "--dry-run",
                            "--tickers", "@" + str(tickers_file),
                            "--source-root", str(tmp_path / "src")])
+    printed = buffer.getvalue()
+    assert result == 2
+    assert json.loads(printed)["code"] == "INVALID_REQUEST"
+
+
+def test_blank_source_root_is_invalid_request(tmp_path, monkeypatch):
+    """A blank ``--source-root`` refuses before any provider work."""
+    def unexpected_fetcher(*args, **kwargs):
+        pytest.fail("Fetcher constructed")
+
+    monkeypatch.setattr(fetch, "Fetcher", unexpected_fetcher)
+
+    buffer = StringIO()
+    with contextlib.redirect_stdout(buffer):
+        result = cli.main(["--root", str(tmp_path / "ops-root"), "price-refresh",
+                           "--session", SESSION, "--dry-run",
+                           "--tickers", "AAPL", "--source-root", "  "])
     printed = buffer.getvalue()
     assert result == 2
     assert json.loads(printed)["code"] == "INVALID_REQUEST"

@@ -173,7 +173,7 @@ def _add_price_refresh_command(commands):
     price_refresh.add_argument("--tickers", default=argparse.SUPPRESS,
                                help="comma list or @file: plan exactly these names plus the "
                                     "calendar ticker (requires --source-root)")
-    price_refresh.add_argument("--source-root", type=Path, default=argparse.SUPPRESS,
+    price_refresh.add_argument("--source-root", default=argparse.SUPPRESS,
                                help="source tree whose data/raw/fetch holds fetch history "
                                     "(requires --tickers)")
 
@@ -970,8 +970,12 @@ def price_refresh_command(args, root):
 
     tickers_arg = getattr(args, "tickers", None)
     source_root = getattr(args, "source_root", None)
+    if source_root is not None and not source_root.strip():
+        raise fail("INVALID_REQUEST", "--source-root must not be blank")
     if (tickers_arg is None) != (source_root is None):
         raise fail("INVALID_REQUEST", "--tickers and --source-root must be given together")
+    if source_root is not None:
+        source_root = Path(source_root)
     if tickers_arg is None:
         result = invoke_price_refresh(args.session, dry_run=args.dry_run)
     else:
