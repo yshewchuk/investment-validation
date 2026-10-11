@@ -336,6 +336,15 @@ def _with_release_artifacts(
     )
 
 
+def _input_build_refusal(key: BoardRequest, exc: ValueError) -> NativeScoreBatchRowRefusal:
+    """NATIVE_INPUT_BUILD_FAILED with the exception class and, for
+    AnswerFieldsInSource, fixed-vocabulary field names; never str(exc) (CWE-209)."""
+    detail = f"native input build failed: {type(exc).__name__}"
+    if isinstance(exc, AnswerFieldsInSource):
+        detail += f" {exc.fields}"
+    return NativeScoreBatchRowRefusal(key, "NATIVE_INPUT_BUILD_FAILED", detail)
+
+
 def _bundle_or_refusal(
     key: BoardRequest,
     event: NightlyEventInputs,
@@ -377,6 +386,9 @@ def _bundle_or_refusal(
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
             key, exc.code, f"nightly_source_bundle refused: {exc.code}")
+    except AnswerFieldsInSource as exc:
+        # One row carrying a calculated answer field refuses that row only (#630).
+        return _input_build_refusal(key, exc)
 
 
 def _assemble_one_event(
@@ -443,10 +455,7 @@ def _assemble_one_event(
     except ValueError as exc:
         # CWE-209: never str(exc) (refusals.json is published). Only the class
         # and, for AnswerFieldsInSource, fixed-vocabulary answer-field names.
-        detail = f"native input build failed: {type(exc).__name__}"
-        if isinstance(exc, AnswerFieldsInSource):
-            detail += f" {exc.fields}"
-        return NativeScoreBatchRowRefusal(key, "NATIVE_INPUT_BUILD_FAILED", detail)
+        return _input_build_refusal(key, exc)
     request = ScoreRequest(
         event_id=str(event_id), calendar_revision=str(calendar_revision),
         strategy_version=strategy, deployment_id=binding.model_release.deployment_id,
