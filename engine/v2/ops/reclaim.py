@@ -63,9 +63,18 @@ def _remove(path, keepalive):
     path.rmdir()
 
 
-def _entry(kind, path, attempt_id, apply, out, keepalive):
+def _entry(kind, path, attempt_id, apply, out, keepalive, top):
+    """``top`` is the trusted directory above the target's ancestors: a symlink on
+    any component between it and the target is refused before sizing or traversal."""
     if not os.path.lexists(path):
         return
+    probe = path.parent
+    while probe != top and probe != probe.parent:
+        if probe.is_symlink():
+            out.append({"kind": kind, "attempt_id": attempt_id, "path": str(path),
+                        "bytes": 0, "removed": False, "error": "SymlinkedAncestor"})
+            return
+        probe = probe.parent
     record = {"kind": kind, "attempt_id": attempt_id, "path": str(path),
               "bytes": _size(path, keepalive), "removed": False}
     if apply:
@@ -98,7 +107,7 @@ def reclaim(conn, root, *, apply=False, limit=None, materialization_base=None,
             continue
         for name in READ_ONCE:
             _entry("staging", root / "attempts" / attempt_id / "staging" / name,
-                   attempt_id, apply, out, keepalive)
+                   attempt_id, apply, out, keepalive, root)
     base = (Path(materialization_base) if materialization_base
             else default_materialization_base(root))
     try:
@@ -111,5 +120,6 @@ def reclaim(conn, root, *, apply=False, limit=None, materialization_base=None,
         if match and match["attempt"] in eligible:
             if full():
                 break
-            _entry("partial_materialization", entry, match["attempt"], apply, out, keepalive)
+            _entry("partial_materialization", entry, match["attempt"], apply, out, keepalive,
+                   base.parent)
     return out

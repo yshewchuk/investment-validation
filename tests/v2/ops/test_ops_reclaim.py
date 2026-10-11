@@ -287,3 +287,31 @@ def test_an_inaccessible_materialization_base_raises_but_a_missing_one_is_absent
     monkeypatch.setattr(type(base), "iterdir", denied)
     with pytest.raises(PermissionError):
         reclaim(world.conn, world.root)
+
+
+def test_a_terminal_attempt_whose_staging_is_a_symlink_to_a_live_one_is_skipped(world):
+    failed = world.root / "attempts" / world.ids["failed"]
+    (failed / "staging").rename(failed / "moved")
+    live_staging = world.root / "attempts" / world.ids["starting"] / "staging"
+    (failed / "staging").symlink_to(live_staging, target_is_directory=True)
+    dry = [e for e in reclaim(world.conn, world.root) if e["attempt_id"] == world.ids["failed"]]
+    assert [(e["error"], e["bytes"]) for e in dry] == [("SymlinkedAncestor", 0)]
+    entries = reclaim(world.conn, world.root, apply=True)
+    refused = [e for e in entries if e["attempt_id"] == world.ids["failed"]]
+    assert [e["error"] for e in refused] == ["SymlinkedAncestor"]
+    assert (live_staging / "legacy" / "data" / "px.csv").read_bytes() == b"x" * 100
+    assert (live_staging / "legacy" / "data").stat().st_mode & 0o777 == 0o555
+    assert not _legacy(world, "succeeded").exists()
+
+
+def test_a_symlinked_materialization_base_is_refused_not_followed(world, tmp_path):
+    target = tmp_path / "elsewhere"
+    partial = target / f".{HEX}.partial-{world.ids['failed']}"
+    (partial / "tables").mkdir(parents=True)
+    (partial / "tables" / "t.csv").write_bytes(b"1")
+    base = default_materialization_base(world.root)
+    base.symlink_to(target, target_is_directory=True)
+    entries = [e for e in reclaim(world.conn, world.root, apply=True)
+               if e["kind"] == "partial_materialization"]
+    assert [e["error"] for e in entries] == ["SymlinkedAncestor"]
+    assert (partial / "tables" / "t.csv").is_file()
