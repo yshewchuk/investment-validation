@@ -182,14 +182,15 @@ def test_real_declaration_owns_representative_paths_as_documented(path, shard):
 
 def test_matrix_lists_every_shard_name(capsys):
     assert ci_shards.main(["matrix"]) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data == {"include": [{"shard": s.name} for s in REAL_SHARDS]}
+    expected = ",".join('{"shard":"%s"}' % s.name for s in REAL_SHARDS)
+    assert capsys.readouterr().out == '{"include":[' + expected + ']}\n'
 
 
 def test_files_prints_the_shard_files(capsys):
     name = REAL_SHARDS[0].name
     assert ci_shards.main(["files", name]) == 0
-    assert capsys.readouterr().out.split() == ci_shards.assign(REAL_FILES, REAL_SHARDS)[name]
+    expected = ci_shards.assign(REAL_FILES, REAL_SHARDS)[name]
+    assert capsys.readouterr().out == "".join(f + "\n" for f in expected)
 
 
 def test_selection_lines_are_stripped_and_blank_lines_ignored(tmp_path, capsys):
@@ -224,17 +225,17 @@ def test_investing_plan_root_override_is_where_the_cli_reads_shards_and_tests(tm
         (tmp_path / rel).write_text("")
     matrix = _cli(["matrix"], tmp_path)
     assert matrix.returncode == 0, matrix.stderr
-    assert json.loads(matrix.stdout) == {
-        "include": [{"shard": "only_pkg"}, {"shard": "everything_else"}]}
+    assert matrix.stdout == '{"include":[{"shard":"only_pkg"},{"shard":"everything_else"}]}\n'
     pkg = _cli(["files", "only_pkg"], tmp_path)
-    assert pkg.stdout.split() == ["tests/pkg/c_test.py", "tests/pkg/test_b.py"]
+    assert pkg.stdout == "tests/pkg/c_test.py\ntests/pkg/test_b.py\n"
     rest = _cli(["files", "everything_else"], tmp_path)
-    assert rest.stdout.split() == ["tests/test_a.py"]
+    assert rest.stdout == "tests/test_a.py\n"
     # Without the override the same CLI reads the real checkout's declaration.
     real = subprocess.run([sys.executable, str(ROOT / "tools" / "ci_shards.py"), "matrix"],
                           env={k: v for k, v in os.environ.items() if k != "INVESTING_PLAN_ROOT"},
                           capture_output=True, text=True, timeout=60, cwd=ROOT)
-    assert json.loads(real.stdout) == {"include": [{"shard": s.name} for s in REAL_SHARDS]}
+    names = ",".join('{"shard":"%s"}' % s.name for s in REAL_SHARDS)
+    assert real.stdout == '{"include":[' + names + ']}\n'
 
 
 def test_unknown_shard_exits_2(capsys):
@@ -248,13 +249,13 @@ def test_selection_all_empty_and_subset(tmp_path, capsys):
     sel = tmp_path / "sel.txt"
     sel.write_text("__ALL__\n")
     assert ci_shards.main(["files", first, "--selection", str(sel)]) == 0
-    assert capsys.readouterr().out.split() == parts[first]
+    assert capsys.readouterr().out == "".join(f + "\n" for f in parts[first])
     sel.write_text("")
     assert ci_shards.main(["files", first, "--selection", str(sel)]) == 0
     assert capsys.readouterr().out == ""
     picked = [parts[first][0], parts[last][0]]
     sel.write_text("\n".join(picked) + "\n")
     assert ci_shards.main(["files", first, "--selection", str(sel)]) == 0
-    assert capsys.readouterr().out.split() == [picked[0]]
+    assert capsys.readouterr().out == picked[0] + "\n"
     assert ci_shards.main(["files", last, "--selection", str(sel)]) == 0
-    assert capsys.readouterr().out.split() == [picked[1]]
+    assert capsys.readouterr().out == picked[1] + "\n"
