@@ -110,22 +110,41 @@ def _supervise(tmp_path, source, document, registration, parameters, *, key="smo
 
 def test_supervised_arms_consume_independent_fill_and_never_record(source, tmp_path):
     """Two real child processes price independent registered economics, not shared trades."""
+    from tests.test_v2_research_replay import _chain_rows, _commit, _event_rows
+
+    other = "OTHER_2024-05-02"
+    snapshot = _commit(
+        source[0], source[1], source[2],
+        chain_rows=[{**row, "ticker": "OTHER"} for row in _chain_rows(exit_call=(4.0, 4.4))]
+                   + _chain_rows(),
+        event_rows=[{**_event_rows()[0], "event_id": other, "ticker": "OTHER"}] + _event_rows(),
+        receipt_id="two-event-provenance", expected_head=source[4].snapshot_id, generation=1)
+    source = (*source[:4], snapshot)
     requests = [_registered(source, alpha) for alpha in (0.0, 1.0)]
     before = _catalog(source[0])
     ledger = source[2].root / "LEDGER.csv"
     ledger.write_bytes(b"sentinel legacy ledger\n")
     results = [_supervise(tmp_path, source, *request, key=f"arm-{i}")
                for i, request in enumerate(requests)]
-    for result, alpha, cost, exit_value, pnl in zip(results, (0.0, 1.0), (3.8, 3.0), (5.0, 5.8), (1.2, 2.8)):
-        assert result["recording_mode"] == "no-ledger"
-        assert result["stage_inputs"]["fill_alpha"] == alpha
-        assert result["execution_plan"]["economic_params"] == {"fill": alpha, "strategy": "STR-THRU"}
-        assert result["stage_inputs"]["snapshot_id"] == source[4].snapshot_id
-        assert result["stage_inputs"]["strategy"] == "STR-THRU"
-        row, = result["mark_based_cashflows"]
-        assert row["entry_cost"] == pytest.approx(cost)
-        assert row["exit_value"] == pytest.approx(exit_value)
-        assert row["pnl"] == pytest.approx(pnl)
+    for result, request, alpha, cost, exits, profits in zip(
+            results, requests, (0.0, 1.0), (3.8, 3.0), ((6.0, 5.0), (6.8, 5.8)),
+            ((2.2, 1.2), (3.8, 2.8))):
+        _, registration, _ = request
+        expected_cashflows = [
+            {"event_id": event, "fill_alpha": alpha, "entry_cost": pytest.approx(cost),
+             "exit_value": pytest.approx(exit_value), "pnl": pytest.approx(profit)}
+            for event, exit_value, profit in zip((other, "TEST_2024-05-02"), exits, profits)]
+        assert {**result, "mark_based_cashflows": sorted(
+            result["mark_based_cashflows"], key=lambda row: row["event_id"])} == {
+            "schema_version": "native_gate_consumption.v1.0",
+            "variant_id": registration.variant_id, "run_id": registration.run_id,
+            "recording_mode": "no-ledger", "execution_plan": registration.document["execution_plan"],
+            "stage_inputs": {"snapshot_id": snapshot.snapshot_id, "strategy": "STR-THRU",
+                             "fill_alpha": alpha, "event_ids": [other, "TEST_2024-05-02"],
+                             "holdout_as_of_month": "2025-01",
+                             "random_membership_version": "canonical-event-sha256.v1",
+                             "rolling_membership_version": "calendar-months.v1"},
+            "mark_based_cashflows": expected_cashflows}
     assert results[0]["variant_id"] != results[1]["variant_id"]
     assert {result["execution_plan"]["experiment_id"] for result in results} == {"synthetic-worker"}
     assert {result["execution_plan"]["arms"][0] for result in results} == {"candidate", "control"}
