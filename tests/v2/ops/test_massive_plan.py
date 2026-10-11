@@ -115,14 +115,13 @@ def test_calendar_year_boundaries_and_no_same_day_claim():
 
 
 @pytest.mark.parametrize("change", [
-    {"start": "2024-10-09"}, {"end": "2026-10-10"}, {"end": "2026-10-11"},
-    {"start": "2026-02-01"}, {"start": "20260101"}, {"start": None},
+    {"start": "20260101"}, {"start": None},
     {"as_of": "0002-01-01"}, {"as_of": "2026-02-30"}, {"adjustment": None},
-    {"adjustment": "total_return"}, {"transport": "s3"}, {"transport": "other"},
+    {"adjustment": "total_return"},
     {"tickers": []}, {"tickers": "TEST"}, {"tickers": ["TEST"] * 101},
     {"tickers": [1]}, {"tickers": ["TEST?apiKey=secret"]}, {"tickers": ["../TEST"]},
-    {"tickers": [""]}, {"tickers": ["TEST\n"]}, {"datasets": ["minute"]},
-    {"datasets": []}, {"datasets": "daily"}, {"datasets": [None]},
+    {"tickers": [""]}, {"tickers": ["TEST\n"]},
+    {"datasets": []}, {"datasets": "daily"},
     {"datasets": ["daily"] * 4}, {"max_calls_per_request": 0},
     {"max_calls_per_request": 101}, {"max_calls_per_request": True},
     {"max_calls_per_request": 1.5}, {"max_calls_per_request": float("nan")},
@@ -134,6 +133,27 @@ def test_invalid_inputs_refuse_before_catalog_access(change):
 
     with pytest.raises(OpsError, match="INVALID_REQUEST"):
         massive_plan.plan(Poison(), None, **(PARAMS | change))
+
+
+@pytest.mark.parametrize("change,reason", [
+    ({"start": "2024-10-09"}, "HISTORY_UNAVAILABLE"),
+    ({"end": "2026-10-10"}, "HISTORY_UNAVAILABLE"),
+    ({"end": "2026-10-11"}, "HISTORY_UNAVAILABLE"),
+    ({"start": "2026-02-01"}, "HISTORY_UNAVAILABLE"),
+    ({"transport": "s3"}, "CAPABILITY_UNAVAILABLE"),
+    ({"transport": "other"}, "CAPABILITY_UNAVAILABLE"),
+    ({"datasets": ["minute"]}, "CAPABILITY_UNAVAILABLE"),
+    ({"datasets": [None]}, "CAPABILITY_UNAVAILABLE"),
+])
+def test_policy_refusals_preserve_exact_reason_before_catalog_access(change, reason):
+    class Poison:
+        def execute(self, *args):
+            raise AssertionError("unavailable capability reached the catalog")
+
+    with pytest.raises(OpsError) as error:
+        massive_plan.plan(Poison(), None, **(PARAMS | change))
+    assert error.value.code == "INVALID_REQUEST"
+    assert error.value.problem.details == {"reason": reason}
 
 
 def test_real_cache_hits_are_read_only_and_do_not_fetch(cache):

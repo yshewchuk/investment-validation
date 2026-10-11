@@ -111,6 +111,11 @@ def test_multiple_histories_union_alias_cutoff_provenance_and_determinism(tmp_pa
         assert result["features"]["ema2_prior_abs_move"] == pytest.approx(46 / 9)
         assert result["features"]["ema4_prior_move"] is None
         assert result["history_status"] == "available"
+        assert result["schema_version"] == "research_event_history.v2"
+        assert [row["event_id"] for row in result["read_inputs"]] == [
+            e["event_id"] for e in (prior[0], skipped, delayed, prior[1], prior[2])]
+        assert all(row["fragment_id"] and row["content_hash"].startswith("sha256:")
+                   for row in result["read_inputs"])
         assert [row["event_id"] for row in result["history"]] == [e["event_id"] for e in prior]
         assert result["history"][0]["target_available_on"] == DECISION
         assert all(row["fragment_id"] and row["content_hash"].startswith("sha256:") for row in result["history"])
