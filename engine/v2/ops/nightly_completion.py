@@ -9,6 +9,7 @@ from pathlib import Path
 
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.nightly_session import (
+    MAX_SESSION_BYTES,
     STATE_DIR,
     SessionIdentity,
     atomic_write,
@@ -22,6 +23,7 @@ _STATES = {"pending", "succeeded", "degraded", "failed", "timed_out", "recovery_
 _CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _RUN_ID = re.compile(r"^[0-9a-f]{64}$")
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_MAX_DISPOSITION_COUNT = 2**63 - 1
 _TERMINAL = {"succeeded", "degraded", "failed", "timed_out"}
 
 
@@ -50,7 +52,7 @@ def _valid_disposition(item: object) -> bool:
     if item.reason_code is not None and (
             not isinstance(item.reason_code, str) or not _CODE.fullmatch(item.reason_code)):
         return False
-    if type(item.count) is not int or item.count < 0:
+    if type(item.count) is not int or not 0 <= item.count <= _MAX_DISPOSITION_COUNT:
         return False
     return type(item.evidence_valid) is bool
 
@@ -164,5 +166,7 @@ def record_completion(root: Path, identity: SessionIdentity, generation: int,
                                         "completion generation is not the active started run"))
         report = build_completion_report(state.active.run_id, expected, observed)
         path = Path(root).joinpath(*STATE_DIR, f"{state.active.run_id}.completion.json")
-        atomic_write(path, json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n")
+        atomic_write(path, json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n",
+                     max_bytes=MAX_SESSION_BYTES,
+                     size_error="completion report is too large")
         return report

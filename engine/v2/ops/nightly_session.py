@@ -56,7 +56,8 @@ def _open_regular(path: Path, flags: int, description: str,
     try:
         _require_regular_fd(fd, description)
     except Exception:
-        os.close(fd)
+        _close_publication_fd(
+            fd, f"{description} close failed", preserve_error=True)
         raise
     return fd
 
@@ -188,7 +189,9 @@ def load_session(root: Path, identity: SessionIdentity) -> SessionState | None:
     except (OSError, UnicodeDecodeError) as exc:
         raise fail("INTEGRITY_FAILED", "session state is unreadable") from exc
     finally:
-        os.close(fd)
+        active_error = sys.exc_info()[0] is not None
+        _close_publication_fd(
+            fd, "session state close failed", preserve_error=active_error)
     return _decode(text, identity)
 
 
@@ -330,11 +333,12 @@ def _cleanup_publication_temp(dir_fd: int, fd: int, temporary_name: str,
                 raise fail("INTEGRITY_FAILED", "session publication cleanup failed") from exc
 
 
-def atomic_write(path: Path, text: str) -> None:
-    """Durably replace ``path``: temp file, fsync, rename, directory fsync."""
+def atomic_write(path: Path, text: str, *, max_bytes: int | None = None,
+                 size_error: str = "publication data is too large") -> None:
+    """Durably replace ``path``, optionally enforcing its owner's size limit."""
     data = text.encode("utf-8")
-    if len(data) > MAX_SESSION_BYTES:
-        raise fail("INTEGRITY_FAILED", "session state is too large")
+    if max_bytes is not None and len(data) > max_bytes:
+        raise fail("INTEGRITY_FAILED", size_error)
     dir_fd = _open_publication_directory(path.parent)
     published = False
     temp_created = False
@@ -400,7 +404,8 @@ def compare_and_swap(root: Path, identity: SessionIdentity, expected_revision: i
             return None
         state = SessionState(identity, expected_revision + 1, generations)
         _decode(_encode(state), identity)  # the loader's own rules; raises before any write
-        atomic_write(path, _encode(state))
+        atomic_write(path, _encode(state), max_bytes=MAX_SESSION_BYTES,
+                     size_error="session state is too large")
         return state
 
 

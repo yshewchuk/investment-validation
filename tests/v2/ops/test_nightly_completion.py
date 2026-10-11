@@ -22,6 +22,7 @@ from engine.v2.ops.nightly_completion import Disposition, build_completion_repor
 from engine.v2.ops import nightly_session
 from engine.v2.ops.nightly_session import (
     MAX_SESSION_BYTES,
+    atomic_write,
     STATE_DIR,
     SessionIdentity,
     ensure_session,
@@ -210,6 +211,50 @@ def test_malformed_no_required_extra_or_unselected_inputs_refuse(expected, obser
     assert exc.value.code == "INVALID_REQUEST"
 
 
+@pytest.mark.parametrize("run_id,expected,observed", [
+    pytest.param(RUN_ID, {"primary": "required"}, {"primary": Disposition("unknown")},
+                 id="unknown-status"),
+    pytest.param(RUN_ID, {"primary": "required"}, {"primary": Disposition(None)},
+                 id="nonstring-status"),
+    pytest.param(RUN_ID, {"primary": "required"},
+                 {"primary": Disposition("succeeded", count=-1)}, id="negative-count"),
+    pytest.param(RUN_ID, {"primary": "required"},
+                 {"primary": Disposition("succeeded", count=1.5)}, id="noninteger-count"),
+    pytest.param(RUN_ID, {"primary": "required"},
+                 {"primary": Disposition("succeeded", count=10**5000)},
+                 id="count-exceeds-json-integer-limit"),
+    pytest.param(RUN_ID, {"primary": "required"},
+                 {"primary": Disposition("failed", reason_code=7)}, id="nonstring-reason"),
+    pytest.param(RUN_ID, None, {}, id="nonmapping-expected"),
+    pytest.param(RUN_ID, {"primary": "required"}, None, id="nonmapping-observed"),
+    pytest.param(RUN_ID, {}, {}, id="empty-expected-work"),
+    pytest.param(RUN_ID, {7: "required"}, {}, id="nonstring-work-name"),
+    pytest.param(RUN_ID, {"primary": 7}, {}, id="nonstring-work-role"),
+    pytest.param("a" * 63, {"primary": "required"}, {}, id="short-run-id"),
+    pytest.param("a" * 65, {"primary": "required"}, {}, id="long-run-id"),
+    pytest.param(RUN_ID, {"n" * 65: "required"}, {}, id="long-work-name"),
+])
+def test_each_independent_validation_guard_returns_invalid_request(
+        run_id, expected, observed):
+    with pytest.raises(OpsError) as exc:
+        _report(expected, observed, run_id=run_id)
+    assert exc.value.code == "INVALID_REQUEST"
+
+
+def test_64_character_run_and_work_names_are_valid():
+    name = "n" * 64
+    report = _report({name: "required"}, {}, run_id=RUN_ID)
+    assert report["status"] == "waiting"
+    assert report["dispositions"][0]["name"] == name
+
+
+def test_shared_atomic_writer_default_preserves_large_sibling_artifact_capacity(tmp_path):
+    path = tmp_path / "history-manifest.json"
+    payload = "x" * (MAX_SESSION_BYTES + 1)
+    atomic_write(path, payload)
+    assert path.read_text() == payload
+
+
 @pytest.mark.parametrize("raw", ["/tmp/secret path", "FileNotFoundError: it broke", "lowercase"])
 def test_raw_message_or_path_is_not_a_valid_reason_code(raw):
     expected = {"primary": "required"}
@@ -288,6 +333,24 @@ def test_invalid_work_names_and_roles_have_a_named_work_refusal(expected):
         _report(expected, {})
     assert exc.value.code == "INVALID_REQUEST"
     assert exc.value.problem.message == "completion needs named expected work"
+
+
+def test_real_recording_rejects_integer_beyond_json_limit_before_publication(tmp_path):
+    ensure_session(tmp_path, IDENT)
+    state = mark_started(tmp_path, IDENT, 1)
+    report_path = tmp_path.joinpath(
+        *STATE_DIR, f"{state.active.run_id}.completion.json")
+    conn, service = _service(tmp_path)
+    try:
+        with pytest.raises(OpsError) as exc:
+            service.record_nightly_completion(
+                IDENT, 1, {"primary": "required"},
+                {"primary": Disposition("succeeded", count=10**5000)})
+        assert exc.value.code == "INVALID_REQUEST"
+        assert not report_path.exists()
+        assert not report_path.with_name(report_path.name + ".tmp").exists()
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("identity", [None, "bad", {}])
@@ -806,11 +869,65 @@ def test_cleanup_failure_does_not_mask_publication_failure(tmp_path, monkeypatch
                 IDENT, 1, {"primary": "required"},
                 {"primary": Disposition("succeeded")})
         assert exc.value.code == "INTEGRITY_FAILED"
+        assert exc.value.problem.message == "session publication destination is unsafe"
         assert "private" not in str(exc.value)
         assert not report_path.exists()
         assert temp_path.exists()  # injected cleanup failure did not mask replace failure
     finally:
         conn.close()
+
+
+def test_session_reader_standalone_close_failure_is_typed(tmp_path, monkeypatch):
+    ensure_session(tmp_path, IDENT)
+    real_close = os.close
+
+    def fail_close(fd):
+        real_close(fd)
+        raise OSError("private close detail")
+
+    monkeypatch.setattr(os, "close", fail_close)
+    with pytest.raises(OpsError) as exc:
+        nightly_session.load_session(tmp_path, IDENT)
+    assert exc.value.code == "INTEGRITY_FAILED"
+    assert exc.value.problem.message == "session state close failed"
+    assert "private" not in str(exc.value)
+
+
+def test_session_reader_close_failure_does_not_mask_read_error(tmp_path, monkeypatch):
+    ensure_session(tmp_path, IDENT)
+    real_close = os.close
+
+    def fail_read(fd, size):
+        raise OSError("private read detail")
+
+    def fail_close(fd):
+        real_close(fd)
+        raise OSError("private close detail")
+
+    monkeypatch.setattr(os, "read", fail_read)
+    monkeypatch.setattr(os, "close", fail_close)
+    with pytest.raises(OpsError) as exc:
+        nightly_session.load_session(tmp_path, IDENT)
+    assert exc.value.code == "INTEGRITY_FAILED"
+    assert exc.value.problem.message == "session state is unreadable"
+    assert "private" not in str(exc.value)
+
+
+def test_failed_open_cleanup_close_does_not_mask_regular_file_refusal(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_session, "session_path", lambda *_: tmp_path)
+    real_close = os.close
+
+    def fail_close(fd):
+        real_close(fd)
+        raise OSError("private cleanup close detail")
+
+    monkeypatch.setattr(os, "close", fail_close)
+    with pytest.raises(OpsError) as exc:
+        nightly_session.load_session(tmp_path, IDENT)
+    assert exc.value.code == "INTEGRITY_FAILED"
+    assert exc.value.problem.message == "session state is not a regular file"
+    assert "private" not in str(exc.value)
 
 
 def test_standalone_publication_directory_close_failure_is_typed(tmp_path, monkeypatch):
