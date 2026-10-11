@@ -4,6 +4,7 @@ bundle: ``days_to_print`` (legacy ``engine/features.py:1166-1168``) and
 """
 import hashlib
 import json
+import types
 from dataclasses import replace
 
 import pandas as pd
@@ -15,19 +16,21 @@ from engine.v2.scoring.frozen_executor import FrozenStageExecutor
 from engine.v2.scoring.nightly_source_bundle import assemble_nightly_source_bundle
 from engine.v2.scoring.source_inputs import build_native_score_inputs
 from engine.v2.scoring.stages import (
-    NativeScoreInputs, STAGE_NAMES, StageReceipt, _facts, _priced_dte_entry,
-    assemble_native_values)
+    NativeScoreInputs, STAGE_NAMES, StageReceipt, _check_pricing_boundary,
+    _facts, _priced_dte_entry, assemble_native_values)
 
 _RECEIPTS = tuple(
     StageReceipt(s, "declared-input", "declared-output")
     for s in STAGE_NAMES if s != "diagnostics")
 _QUOTES = {r: {"bid": 1.9, "ask": 2.1}
            for r in (("C", 100.0, "2026-11-20"), ("P", 100.0, "2026-11-20"))}
+#: Context-override sentinel: a value of ``_DROP`` removes the key entirely.
+_DROP = object()
 
 
 def _inputs(*, gate=None, quotes=None, forecast_coefficients=None,
             diagnostics=None, expiry=None, event_date=None,
-            drop_decision=False) -> NativeScoreInputs:
+            drop_decision=False, context_overrides=None) -> NativeScoreInputs:
     resolved_expiry = "2026-11-20" if expiry is None else expiry
     if quotes is None:
         quotes = {(right, strike, resolved_expiry): dict(value)
@@ -41,6 +44,11 @@ def _inputs(*, gate=None, quotes=None, forecast_coefficients=None,
                "quotes": quotes}
     if drop_decision:
         del context["as_of"]
+    for key, value in (context_overrides or {}).items():
+        if value is _DROP:
+            context.pop(key, None)
+        else:
+            context[key] = value
     coefficients = ({} if forecast_coefficients is None
                     else forecast_coefficients)
     return NativeScoreInputs(
@@ -323,3 +331,128 @@ def test_helper_edge_cases():
     assert financial.dte_entry(True, "2026-10-08") is None
     assert financial.dte_entry("2026-12-18", "2026-10-08") == 71
     assert financial.days_to_print("2026-11-05", "2026-10-07") == 29.0
+
+
+def _days_surfaces(inputs):
+    """The three surfaces the staged decision date must reach.
+
+    Returns ``(values, receipt_values, overlay)``: the computed
+    ``values["days_to_print"]``, the forecast receipt's recorded input values,
+    and the frozen-role overlay ``_facts(...)["_native_stage_facts"]`` the
+    frozen executor's role row consumes.
+    """
+    seen: list = []
+    values = assemble_native_values(inputs, observer=seen.append)
+    forecast = [o for o in seen if o.receipt.stage == "forecast"]
+    assert len(forecast) == 1
+    facts = _facts(inputs, values)
+    return values, forecast[0].input_document["values"], \
+        facts["_native_stage_facts"]
+
+
+def _assert_days_on_all_surfaces(tmp_path, inputs, expected):
+    values, receipt_values, overlay = _days_surfaces(inputs)
+    assert values["days_to_print"] == expected
+    assert receipt_values["days_to_print"] == expected
+    assert overlay["days_to_print"] == expected
+    gate = _frozen_gate(tmp_path, ("days_to_print", "signal"))
+    executor = gate["executors"]["gate_score"]._executor
+    result = executor.execute({
+        "role_model_inputs": {"gate": {"signal": 2.0}},
+        "_native_stage_facts": overlay,
+    })
+    assert result.request.rows == ((expected, 2.0),)
+
+
+def _assert_days_absent(inputs):
+    values, receipt_values, overlay = _days_surfaces(inputs)
+    assert "days_to_print" not in values
+    assert "days_to_print" not in receipt_values
+    assert "days_to_print" not in overlay
+
+
+def test_only_requested_as_of_is_used(tmp_path):
+    # No as_of at all: the identity requested_as_of is the decision date.
+    _assert_days_on_all_surfaces(
+        tmp_path,
+        _inputs(context_overrides={"as_of": _DROP,
+                                   "requested_as_of": "2026-10-07"}),
+        20.0)
+
+
+def test_as_of_wins_over_conflicting_requested_as_of(tmp_path):
+    # as_of 2026-10-07 -> 20.0; the stale requested_as_of 2026-10-01 -> 26.0.
+    _assert_days_on_all_surfaces(
+        tmp_path,
+        _inputs(context_overrides={"requested_as_of": "2026-10-01"}),
+        20.0)
+
+
+def test_neither_decision_date_leaves_it_absent():
+    _assert_days_absent(_inputs(context_overrides={"as_of": _DROP}))
+
+
+def test_missing_event_date_leaves_days_absent():
+    _assert_days_absent(_inputs(context_overrides={"event_date": _DROP}))
+
+
+def test_entry_cost_pct_overlay():
+    inputs = _inputs()
+    values = assemble_native_values(inputs)
+    overlay = _facts(inputs, values)["_native_stage_facts"]
+    assert values["entry_cost_pct"] is not None
+    assert overlay["entry_cost_pct"] == values["entry_cost_pct"]
+
+    refused = _inputs(quotes={})
+    refused_values = assemble_native_values(refused)
+    refused_overlay = _facts(refused, refused_values)["_native_stage_facts"]
+    assert "entry_cost_pct" not in refused_overlay
+
+
+def test_missing_quote_date_keeps_captured_dte_entry():
+    values = assemble_native_values(_inputs(
+        context_overrides={"dte_entry": 55, "quote_date": _DROP}))
+    # No quote_date means no computed dte_entry, so the captured primitive
+    # survives: it must not be overwritten with None.
+    assert values["dte_entry"] == 55
+
+
+def _pricing_stand_ins(*, pricing_refusal=None, geometry_refusal=None,
+                       pricing_legs=None, geometry_legs=None):
+    leg = types.SimpleNamespace(bid=1.9, ask=2.1, strike=100.0,
+                                expiry="2026-12-18")
+    pricing = types.SimpleNamespace(
+        refusal=pricing_refusal,
+        legs=(leg,) if pricing_legs is None else pricing_legs,
+        spot=100.0, entry_cost=1.0)
+    geometry = types.SimpleNamespace(
+        refusal=geometry_refusal,
+        legs=(leg,) if geometry_legs is None else geometry_legs,
+        spot=100.0)
+    return geometry, pricing
+
+
+def test_geometry_or_pricing_refusal_blocks_dte_write():
+    boundary_values = {"entry_cost": 1.0, "spot": 100.0,
+                       "quote_date": "2026-10-08"}
+    geometry, pricing = _pricing_stand_ins(pricing_refusal="X")
+    _check_pricing_boundary(boundary_values, geometry, pricing, [])
+    assert "dte_entry" not in boundary_values
+
+    boundary_values = {"entry_cost": 1.0, "spot": 100.0,
+                       "quote_date": "2026-10-08"}
+    geometry, pricing = _pricing_stand_ins(geometry_refusal="Y")
+    _check_pricing_boundary(boundary_values, geometry, pricing, [])
+    assert "dte_entry" not in boundary_values
+
+    boundary_values = {"entry_cost": 1.0, "spot": 100.0,
+                       "quote_date": "2026-10-08"}
+    geometry, pricing = _pricing_stand_ins(pricing_legs=())
+    _check_pricing_boundary(boundary_values, geometry, pricing, [])
+    assert "dte_entry" not in boundary_values
+
+    boundary_values = {"entry_cost": 1.0, "spot": 100.0,
+                       "quote_date": "2026-10-08"}
+    geometry, pricing = _pricing_stand_ins()
+    _check_pricing_boundary(boundary_values, geometry, pricing, [])
+    assert boundary_values["dte_entry"] == 71
