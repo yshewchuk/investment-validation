@@ -15,7 +15,8 @@ from engine.v2.scoring.frozen_executor import FrozenStageExecutor
 from engine.v2.scoring.nightly_source_bundle import assemble_nightly_source_bundle
 from engine.v2.scoring.source_inputs import build_native_score_inputs
 from engine.v2.scoring.stages import (
-    NativeScoreInputs, STAGE_NAMES, StageReceipt, assemble_native_values)
+    NativeScoreInputs, STAGE_NAMES, StageReceipt, _facts,
+    assemble_native_values)
 
 _RECEIPTS = tuple(
     StageReceipt(s, "declared-input", "declared-output")
@@ -137,6 +138,55 @@ def test_days_to_print_never_falls_back_to_entry_date():
         _inputs(forecast_coefficients={"days_to_print": 1.0}, drop_decision=True))
     assert "days_to_print" not in values
     assert "MISSING_FORECAST_INPUT:days_to_print" in values["flags"]
+
+
+def test_forecast_receipt_input_records_days_to_print():
+    seen: list = []
+    assemble_native_values(
+        _inputs(forecast_coefficients={"days_to_print": 1.0}),
+        observer=seen.append)
+    forecast = [o for o in seen if o.receipt.stage == "forecast"]
+    assert len(forecast) == 1
+    assert forecast[0].input_document["values"]["days_to_print"] == 20.0
+
+    dropped: list = []
+    assemble_native_values(
+        _inputs(forecast_coefficients={"days_to_print": 1.0}, drop_decision=True),
+        observer=dropped.append)
+    dropped_forecast = [o for o in dropped if o.receipt.stage == "forecast"]
+    assert len(dropped_forecast) == 1
+    assert "days_to_print" not in dropped_forecast[0].input_document["values"]
+    # the staged date is part of the declared forecast input, so the receipt moves
+    assert forecast[0].receipt.input_hash != dropped_forecast[0].receipt.input_hash
+
+
+def test_frozen_role_row_receives_computed_days_to_print(tmp_path):
+    gate = _frozen_gate(tmp_path, ("days_to_print", "signal"))
+    executor = gate["executors"]["gate_score"]._executor
+    result = executor.execute({
+        "role_model_inputs": {"gate": {"signal": 2.0}},
+        "_native_stage_facts": {"days_to_print": 20.0},
+    })
+    # the captured role row omits days_to_print; the staged fact supplies it
+    assert result.request.rows == ((20.0, 2.0),)
+
+    facts = _facts(_inputs(), {})
+    assert facts["days_to_print"] == 20.0
+    assert facts["_native_stage_facts"]["days_to_print"] == 20.0
+    dropped = _facts(_inputs(drop_decision=True), {})
+    assert "days_to_print" not in dropped
+    assert "days_to_print" not in dropped["_native_stage_facts"]
+
+
+def test_computed_days_to_print_overrides_captured_role_row(tmp_path):
+    gate = _frozen_gate(tmp_path, ("days_to_print", "signal"))
+    executor = gate["executors"]["gate_score"]._executor
+    result = executor.execute({
+        "role_model_inputs": {"gate": {"days_to_print": 99.0, "signal": 2.0}},
+        "_native_stage_facts": {"days_to_print": 20.0},
+    })
+    # the staged fact overrides the captured role-row value
+    assert result.request.rows == ((20.0, 2.0),)
 
 
 def test_dte_entry_not_written_when_pricing_refuses():

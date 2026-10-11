@@ -687,6 +687,10 @@ def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, An
     facts["_native_stage_facts"] = {
         key: values[key] for key in _OWNED_OUTPUTS if key in values
     }
+    computed_days = _decision_days_to_print(inputs)
+    if computed_days is not None:
+        facts["days_to_print"] = computed_days
+        facts["_native_stage_facts"]["days_to_print"] = computed_days
     return facts
 
 
@@ -1172,6 +1176,14 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
     return output
 
 
+def _decision_days_to_print(inputs: NativeScoreInputs) -> float | None:
+    """The scorer-computed days_to_print (decision date `as_of`, else `requested_as_of`;
+    never entry_date), or None. Never a captured value."""
+    context = inputs.context
+    decision = context.get("as_of") or context.get("requested_as_of")
+    return financial.days_to_print(context.get("event_date"), decision)
+
+
 def _stage_days_to_print(inputs: NativeScoreInputs, values: dict[str, Any]) -> None:
     """days_to_print = calendar days from the DECISION date to the announcement
     (legacy engine/features.py:1166-1168 with as_of_column="decision_date",
@@ -1179,9 +1191,7 @@ def _stage_days_to_print(inputs: NativeScoreInputs, values: dict[str, Any]) -> N
     before the forecast models run (legacy computes it before them too). The
     decision date is the context's `as_of`, else the identity `requested_as_of`;
     with neither, nothing is written (never fall back to entry_date)."""
-    context = inputs.context
-    decision = context.get("as_of") or context.get("requested_as_of")
-    computed = financial.days_to_print(context.get("event_date"), decision)
+    computed = _decision_days_to_print(inputs)
     if computed is not None:
         values["days_to_print"] = computed
 
@@ -1221,6 +1231,7 @@ def _initial_values(
         # forecast stage's INPUT rather than its OUTPUT.
         prior = {"prior": executed[-1].output_hash, "values": dict(values)}
     _stage_days_to_print(inputs, values)
+    prior = {**prior, "values": dict(values)}  # the receipt records the days_to_print the forecast consumes
     if compatibility:
         values.update(inputs.forecast)
         forecast_output = dict(inputs.forecast)
