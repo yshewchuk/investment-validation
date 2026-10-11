@@ -2964,6 +2964,16 @@ def _check_pricing_boundary(
     values["entry_cost_pct"] = financial.entry_cost_pct(
         values.get("entry_cost"), values.get("spot"),
     )
+    # Computed only when the staged dates allow it: a captured primitive
+    # (the chooser stages dte_entry) is never overwritten with None.
+    for name, computed in (
+        ("days_to_print", financial.days_to_print(
+            values.get("event_date"), values.get("entry_date"))),
+        ("dte_entry", financial.dte_entry(
+            values.get("expiry"), values.get("quote_date"))),
+    ):
+        if computed is not None:
+            values[name] = computed
     _check_wide_market(pricing, flags)
     _check_bad_quote(pricing, flags)
     _check_extrapolated(geometry, pricing, flags)

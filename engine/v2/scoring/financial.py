@@ -1,12 +1,14 @@
 """Financial values owned by scoring, independent of display formatting."""
 from __future__ import annotations
 
+from datetime import date
 from math import exp, fsum, log
 from typing import Any, Mapping
 
 from engine.v2.domain.valuation import multi_expiry_refusal, planned_exit_label
 
-__all__ = ["entry_cost_pct", "financial_diagnostics"]
+__all__ = ["days_to_print", "dte_entry", "entry_cost_pct",
+           "financial_diagnostics"]
 
 ORATS_EMOVE_FACTOR = 0.645
 
@@ -23,6 +25,32 @@ def entry_cost_pct(cost: Any, spot: Any) -> float | None:
     if cost is None or spot is None or float(spot) == 0.0:
         return None
     return float(cost) / float(spot) * 100.0
+
+
+def days_to_print(event_date: Any, entry_date: Any) -> float | None:
+    """Calendar days from the decision (entry) date to the announcement: legacy
+    engine/features.py entry_feature_frame, (event_date - entry_date).dt.days as float."""
+    if event_date is None or entry_date is None:
+        return None
+    try:
+        event = date.fromisoformat(str(event_date)[:10])
+        entry = date.fromisoformat(str(entry_date)[:10])
+    except (TypeError, ValueError):
+        return None
+    return float((event - entry).days)
+
+
+def dte_entry(expiry: Any, quote_date: Any) -> int | None:
+    """Calendar days from the quote date to the expiry: legacy chain `dte`
+    (engine/score.py:2451 `int(priced.legs[0].dte)`), as int."""
+    if expiry is None or quote_date is None:
+        return None
+    try:
+        end = date.fromisoformat(str(expiry)[:10])
+        start = date.fromisoformat(str(quote_date)[:10])
+    except (TypeError, ValueError):
+        return None
+    return int((end - start).days)
 
 
 def _base(record: Mapping[str, Any]) -> dict[str, Any]:

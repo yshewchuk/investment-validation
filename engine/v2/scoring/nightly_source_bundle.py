@@ -412,10 +412,15 @@ def _is_null_forecast_value(value: Any) -> bool:
 
 
 #: Names a frozen model may list in its feature_order that the scorer itself
-#: computes from staged quotes (engine/v2/scoring/stages.py
-#: _check_pricing_boundary). They are answer fields, so source_inputs forbids
-#: them in source inputs; projecting them would make every row refuse.
-_SCORER_COMPUTED_FEATURES = frozenset({"entry_cost_pct"})
+#: computes (engine/v2/scoring/stages.py _check_pricing_boundary): entry_cost_pct
+#: from quotes, days_to_print/dte_entry from staged dates. They are not
+#: projected from tier4/panel rows. Only entry_cost_pct is also an answer field
+#: that source_inputs forbids (projecting it would make every row refuse);
+#: dte_entry stays allowed in source inputs because the chooser stages it as a
+#: captured primitive.
+_SCORER_COMPUTED_FEATURES = frozenset({
+    "entry_cost_pct", "days_to_print", "dte_entry",
+})
 
 
 def _project_features(
