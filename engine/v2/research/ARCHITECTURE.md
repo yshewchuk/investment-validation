@@ -95,9 +95,9 @@ unknown purposes and an entirely excluded population receive the same refusal.
 There is no date fallback, partial returned frame, report write or retry here.
 Final holdout reads are unavailable. The loaders write nothing themselves; the
 recorded native prediction runner writes one plain `refused` outcome ledger row
-(`native_outcomes.STAGES`; no metrics) on `HOLDOUT_ACCESS_DENIED`, and the
-`--no-ledger` smoke paths write none. `ledger_context` excludes every
-`refused*` row from specs tried.
+(`native_outcomes.STAGES`; no metrics) on `HOLDOUT_ACCESS_DENIED`, unless a
+saved success exists (ledger unchanged); `--no-ledger` smoke writes none.
+`ledger_context` excludes `refused*` rows from specs tried.
 
 `experiment_population.load_population` validates an exact committed
 `SnapshotRef` and returns canonical event metadata under that same holdout
