@@ -251,22 +251,27 @@ Three generic primitives; a feature declares its parameters, none is hard-coded.
   is invalid. A missing source table or column always refuses.
 - *Aggregate.* Declared as strict-prior (events with a smaller ordinal),
   `population` (`admitted` or `all`), and null handling (`skip`). With no prior
-  contribution the result is null and the count is reported.
+  contribution the value is null and the count is stored. **History aggregates
+  are materialised at build time as table columns and rebuilt by the standard
+  rebuild; a reader only reads them and never computes one per run** (user
+  2026-10-11: per-run compute cost accumulates).
 - *Causality is by data dates only.* `retrieved_at` and `computed_at` are
   provenance and never filter; a realised value joins an aggregate only when its
   `available_as_of_date <= decision_session` (above).
 
-`computed_moves.v4` adds `event_ordinal` and `admitted` (warm-up 4), and
+`computed_moves.v4` adds `event_ordinal`, `admitted` (warm-up 4), and the stored
+aggregate `mean_prior_or_implied` with its count `n_prior_implied` (strict-prior,
+`population=admitted`, nulls skipped; null on non-admitted rows).
 `implied_move_pct` is the as-of observation over `daily_market` rows with
 `requires=(implied_move, src_iv)`, `on_missing=null`, filled for skipped events
-too. `quarter_ordinal` (a per-year counter) is not the event ordinal. v4 is
-reached only by the standard rebuild, which rewrites whole ticker partitions;
-there is no in-place migration or dual read, and a reader needing v4 columns on
-a v3 snapshot gets the repository's typed contract refusal. The implied-history
-mean (`mean_prior_or_implied`) is derived by a reader with the primitives and is
-not stored. `computed_moves` is built natively (`computed_moves_store.py`) from
-Tier-1 price history, pinned `earnings_events` and `daily_market`, not captured
-from legacy output.
+too. `quarter_ordinal` is dropped. A stored aggregate over realised values would
+carry its own knowable-by date; the implied mean needs none, since every
+contributor's anchor precedes its event. v4 is reached only by the standard
+rebuild, which rewrites whole ticker partitions; there is no in-place migration
+or dual read, and a reader needing v4 columns on a v3 snapshot gets the
+repository's typed contract refusal. `computed_moves` is built natively
+(`computed_moves_store.py`) from Tier-1 price history, pinned `earnings_events`
+and `daily_market`, not captured from legacy output.
 
 ## Dependencies
 
