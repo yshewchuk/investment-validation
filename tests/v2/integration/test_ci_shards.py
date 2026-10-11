@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -25,6 +26,18 @@ def _toml(tmp_path: Path, text: str) -> Path:
     path = tmp_path / "shards.toml"
     path.write_text(text)
     return path
+
+
+def test_discovery_matches_the_git_tracked_test_inventory():
+    # Independent oracle: git's own file list, not the discovery being checked.
+    tracked = subprocess.run(
+        ["git", "ls-files", "tests/**/test_*.py", "tests/test_*.py"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout.split()
+    tracked = [p for p in tracked if Path(p).name.startswith("test_") and p.endswith(".py")]
+    if not tracked:
+        pytest.skip("not a git checkout")
+    assert set(REAL_FILES) >= set(tracked), sorted(set(tracked) - set(REAL_FILES))
 
 
 def test_every_test_file_is_in_exactly_one_shard():
@@ -69,6 +82,11 @@ def test_first_matching_shard_owns_a_file_two_shards_match(tmp_path):
     '[[shard]]\nname="a"\n[[shard]]\nname="r"\nremainder=true\n',
     '[[shard]]\nname="a"\npatterns=["x"]\nremainder=true\n',
     '[[shard]]\npatterns=["x"]\n[[shard]]\nname="r"\nremainder=true\n',
+    'shard=["bad"]\n',
+    'shard="bad"\n',
+    '[[shard]]\nname="a"\npatterns="x"\n[[shard]]\nname="r"\nremainder=true\n',
+    '[[shard]]\nname="a"\npatterns=["x"]\n[[shard]]\nname="r"\nremainder="false"\n',
+    '[[shard]]\nname="a"\npatterns=["x"]\nextra=1\n[[shard]]\nname="r"\nremainder=true\n',
 ])
 def test_loader_rejects_a_bad_declaration(tmp_path, text):
     with pytest.raises(ValueError):

@@ -42,12 +42,21 @@ def load_shards(path: Path = SHARDS_TOML) -> list[Shard]:
     """Parse and validate the declaration; raise ValueError on a bad one."""
     with open(path, "rb") as fh:
         raw = tomllib.load(fh).get("shard", [])
+    if not isinstance(raw, list):
+        raise ValueError("`shard` must be an array of [[shard]] tables")
     shards: list[Shard] = []
     for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"shard #{i} must be a table")
+        unknown = set(entry) - {"name", "patterns", "remainder"}
+        if unknown:
+            raise ValueError(f"shard #{i} has unknown keys: {sorted(unknown)}")
         name = entry.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError(f"shard #{i} has no name")
-        remainder = bool(entry.get("remainder", False))
+        remainder = entry.get("remainder", False)
+        if not isinstance(remainder, bool):
+            raise ValueError(f"shard {name!r}: remainder must be a boolean")
         raw_patterns = entry.get("patterns", [])
         if not isinstance(raw_patterns, list) or not all(isinstance(p, str) for p in raw_patterns):
             raise ValueError(f"shard {name!r}: patterns must be a list of strings")
