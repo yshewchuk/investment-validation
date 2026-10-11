@@ -214,6 +214,34 @@ def test_successful_matrix_command_publishes_the_plan_output(tmp_path):
     assert (tmp_path / "python3_calls").read_text().splitlines() == ["tools/ci_shards.py", "matrix"]
 
 
+def test_shard_step_bindings_come_from_the_matrix_and_the_pr_selection_artifact():
+    workflow = _workflow()
+    env = _step(workflow, "Run pytest")["env"]
+    assert env["SHARD"] == "${{ matrix.shard }}"
+    assert env["SELECTION_FILE"] == (
+        "${{ github.event_name == 'pull_request' && "
+        "format('{0}/pr-test-selection.txt', runner.temp) || '' }}")
+    produce = _step(workflow, "Select PR test files")
+    assert 'pr-test-selection.txt' in produce["run"]
+    assert '"$RUNNER_TEMP/pr-test-selection.txt"' in produce["run"]
+
+
+def test_selection_artifact_is_uploaded_and_downloaded_on_pull_requests_only():
+    workflow = _workflow()
+    upload = _step(workflow, "Upload PR test selection")
+    download = _step(workflow, "Download PR test selection")
+    condition = "github.event_name == 'pull_request'"
+    assert upload["if"] == condition and download["if"] == condition
+    assert upload["uses"].startswith("actions/upload-artifact@")
+    assert download["uses"].startswith("actions/download-artifact@")
+    assert upload["with"]["name"] == download["with"]["name"] == "pr-test-selection"
+    assert upload["with"]["path"] == "${{ runner.temp }}/pr-test-selection.txt"
+    assert download["with"]["path"] == "${{ runner.temp }}"
+    assert upload["with"]["if-no-files-found"] == "error"
+    jobs = workflow["jobs"]
+    assert upload in jobs["plan"]["steps"] and download in jobs["shard"]["steps"]
+
+
 def test_upload_step_warns_instead_of_failing_on_no_junit():
     step = _step(_workflow(), "Upload test results")
     assert step["with"]["if-no-files-found"] == "warn"
@@ -226,13 +254,12 @@ def test_shard_job_needs_the_plan_job_and_runs_the_plan_matrix():
     assert "fromJSON(needs.plan.outputs.matrix)" in shard["strategy"]["matrix"]
 
 
+RESULTS = ("success", "failure", "skipped", "cancelled")
+
+
 @pytest.mark.parametrize(("plan", "shard", "ok"), [
-    ("success", "success", True),
-    ("success", "failure", False),
-    ("success", "skipped", False),
-    ("success", "cancelled", False),
-    ("failure", "success", False),
-    ("skipped", "skipped", False),
+    (plan, shard, plan == "success" and shard == "success")
+    for plan in RESULTS for shard in RESULTS
 ])
 def test_aggregator_named_test_succeeds_only_when_plan_and_every_shard_succeeded(
         plan, shard, ok):
