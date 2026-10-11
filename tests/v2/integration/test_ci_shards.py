@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -206,6 +207,34 @@ def test_all_marker_only_counts_as_the_first_selection_line(tmp_path, capsys):
     sel.write_text("tests/nope/test_x.py\n__ALL__\n")
     assert ci_shards.main(["files", shard, "--selection", str(sel)]) == 0
     assert capsys.readouterr().out == ""
+
+
+def _cli(args, root):
+    env = dict(os.environ, INVESTING_PLAN_ROOT=str(root))
+    return subprocess.run([sys.executable, str(ROOT / "tools" / "ci_shards.py"), *args],
+                          env=env, capture_output=True, text=True, timeout=60, cwd=ROOT)
+
+
+def test_investing_plan_root_override_is_where_the_cli_reads_shards_and_tests(tmp_path):
+    (tmp_path / "tests" / "pkg").mkdir(parents=True)
+    (tmp_path / "tests" / "shards.toml").write_text(
+        '[[shard]]\nname="only_pkg"\npatterns=["tests/pkg/*"]\n'
+        '[[shard]]\nname="everything_else"\nremainder=true\n')
+    for rel in ("tests/pkg/test_b.py", "tests/test_a.py", "tests/pkg/c_test.py"):
+        (tmp_path / rel).write_text("")
+    matrix = _cli(["matrix"], tmp_path)
+    assert matrix.returncode == 0, matrix.stderr
+    assert json.loads(matrix.stdout) == {
+        "include": [{"shard": "only_pkg"}, {"shard": "everything_else"}]}
+    pkg = _cli(["files", "only_pkg"], tmp_path)
+    assert pkg.stdout.split() == ["tests/pkg/c_test.py", "tests/pkg/test_b.py"]
+    rest = _cli(["files", "everything_else"], tmp_path)
+    assert rest.stdout.split() == ["tests/test_a.py"]
+    # Without the override the same CLI reads the real checkout's declaration.
+    real = subprocess.run([sys.executable, str(ROOT / "tools" / "ci_shards.py"), "matrix"],
+                          env={k: v for k, v in os.environ.items() if k != "INVESTING_PLAN_ROOT"},
+                          capture_output=True, text=True, timeout=60, cwd=ROOT)
+    assert json.loads(real.stdout) == {"include": [{"shard": s.name} for s in REAL_SHARDS]}
 
 
 def test_unknown_shard_exits_2(capsys):
