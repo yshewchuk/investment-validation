@@ -371,22 +371,19 @@ resolution, its own no-partition refusal, and its own empty-result frame
 shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
 
-Callers: nothing inside `engine/` imports this package (checked against
-`checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
-listed above are one consumer; `experiments/common_v2.py` is another, for
-`experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
-and `_chains.load_chain_index`; its archived trade-read caller omits the now-required
-holdout context and is refused. The historical EXP-147 confirmatory-validation
-runner is a third, for `experiment_trades.PROVENANCE` alone (its native
-replay tag, selecting that runner's analog population).
+Callers: no `engine/` modules import this package (checked by `checks/import_layers.py`).
+Consumers are `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
+trade, calendar, and chain inputs from pinned v2 data. The archived
+trade-read caller omits required holdout context and is refused.
+Historical EXP-147 reads its native replay tag from `experiment_trades.PROVENANCE`.
 `experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266
-slice 2) is a fourth: it reads
+slice 2) reads
 `_chains.filter_plan_by_availability`/`read_chain_keys_for`, `_plan.plan_events`,
 `_pricing.STRUCTURES`/`execution_variant_label`/`trading_calendar_from_snapshot`,
 and `replay.ALPHA_GRID`/`replay_one` to price one strategy family across a
 grid-position sweep on one pinned snapshot. `experiments/EXP-186_.../run.py`
-is a fifth, reading `_replay_run.events_frame` for its known-session event
-universe before handing it to `price_candidate_grid`. None of the five are
+reads `_replay_run.events_frame` for its known-session event universe before
+handing it to `price_candidate_grid`. None of these research callers are
 parsed by the layering hook (it only parses `engine*` importers, and
 `experiments/` is outside it too).
 
@@ -560,6 +557,9 @@ uncaught traceback instead.
   and written into every output
   (root doc §5's "no silent default" invariant, applied to research reads) —
   including the experiment loader's returned context columns (see Outputs).
+- Every experiment runner reads from its pinned v2 snapshot, applying shared random/rolling holdout enforcement through the reader appropriate to its inputs:
+  `experiment_trades.load_trades` for trades; `experiment_population.load_population` for populations and its prediction/history consumers. Inadmissible reads refuse.
+  Direct parquet/file reads bypass snapshot pinning and both holdout sets and are inadmissible.
 - Never reads the legacy mutable Tier-2 store (`engine.data.store`) —
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.
