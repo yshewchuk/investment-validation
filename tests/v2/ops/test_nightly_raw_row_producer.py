@@ -352,7 +352,7 @@ def test_panel_reader_called_once_per_ticker(
     from types import SimpleNamespace
     import hashlib
 
-    import tests.test_v2_features_panel_row_inputs as fixture
+    import tests.v2.features.test_panel_row_inputs as fixture
     from engine.v2.ops.native_board_universe import BoardRequest
 
     history = pd.bdate_range(end=fixture._DECISION, periods=300)
@@ -465,7 +465,7 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
     import hashlib
     from types import SimpleNamespace
 
-    import tests.test_v2_features_panel_row_inputs as fixture
+    import tests.v2.features.test_panel_row_inputs as fixture
     from engine.v2.ops.native_board_universe import BoardRequest
 
     history = pd.bdate_range(end=fixture._DECISION, periods=300)
@@ -568,7 +568,7 @@ def test_panel_spy_cache_key_includes_snapshot_version_and_window():
     dataset version and read window -- and never stubs the real panel path."""
     import dataclasses
 
-    import tests.test_v2_features_panel_row_inputs as fixture
+    import tests.v2.features.test_panel_row_inputs as fixture
 
     class CountingRepository(fixture._FakeRepository):
         def __init__(self, snapshot, contracts, batches_by_key) -> None:
@@ -888,7 +888,7 @@ def test_projected_decision_session_is_not_observed_history(tmp_path, monkeypatc
 
 def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
     """The real panel reader keeps available moves older than the regime window."""
-    import tests.test_v2_features_panel_row_inputs as fixture
+    import tests.v2.features.test_panel_row_inputs as fixture
     from engine.v2.ops.nightly_raw_row_producer import _shared_panel_rows
 
     history = pd.bdate_range(end=fixture._DECISION, periods=300)

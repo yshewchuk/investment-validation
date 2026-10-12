@@ -608,8 +608,8 @@ Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validat
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture`, `price-refresh`, and
   `computed-moves capture`.
-- `computed_moves_store.run_computed_moves_refresh(...)` reads `earnings_events` and `daily_market` from the pinned
-  parent. `computed-moves capture` uses the newest successful Tier-1 yfinance `history(period=max)` entry; missing
+- `computed_moves_store.run_computed_moves_refresh(...)` reads `earnings_events` and `daily_market` (`date`,
+  `implied_move`, `src_iv`) from the pinned parent and commits `computed_moves.v4` rows (data doc, "computed_moves.v4"). `computed-moves capture` uses the newest successful Tier-1 yfinance `history(period=max)` entry; missing
   history is `legitimate_empty`, it never fetches live, and dry-run reports cache coverage without writing. The selected source root is authoritative: catalog unit receipts do not substitute for missing or changed Tier-1 entries. The worker binds `as_of` and the fetcher; target selection follows the legacy ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
 - `forward_calendar_store` derives trading calendars from pinned `daily_market` (weekday fallback if absent), then uses the `catalog_path`, `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences in "Primary contracts", plus injected Nasdaq date and yfinance pending-ticker fetchers.
 - Bounded retention on the active refresh paths (the exported `daily_by_ticker` helper is unbounded and unused there): neither store accumulates scan leases into a history-sized list or frame.

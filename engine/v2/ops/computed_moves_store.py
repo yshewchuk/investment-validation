@@ -82,17 +82,19 @@ MAX_SCAN_ROWS = 2_000_000
 #: The reader's own batch ceiling; a chunk scan leases at most this, or half the guard if smaller.
 _LEASE_ALLOWANCE = 50_000
 _EVENT_COLUMNS = ("ticker", "event_date", "session", "src_orats")
-_DAILY_COLUMNS = ("ticker", "date", "implied_move")
+_DAILY_COLUMNS = ("ticker", "date", "implied_move", "src_iv")
 FRAGMENT_COLUMNS = ("ticker", "event_date", "realized_move_pct", "available_as_of_date",
-                    "implied_move_pct", "quarter_ordinal", "skipped", "computed_at",
-                    "source_hash", "capture_id")
+                    "implied_move_pct", "event_ordinal", "admitted", "mean_prior_or_implied",
+                    "n_prior_implied", "skipped", "computed_at", "source_hash", "capture_id")
 
-_EMPTY_DAILY = pd.DataFrame(columns=["date", "implied_move"])
+_EMPTY_DAILY = pd.DataFrame(columns=["date", "implied_move", "src_iv"])
 
 _ARROW_SCHEMA = pa.schema([
     ("ticker", pa.string()), ("event_date", pa.string()), ("realized_move_pct", pa.float64()),
     ("available_as_of_date", pa.string()),
-    ("implied_move_pct", pa.float64()), ("quarter_ordinal", pa.int64()), ("skipped", pa.bool_()),
+    ("implied_move_pct", pa.float64()), ("event_ordinal", pa.int64()),
+    ("admitted", pa.bool_()), ("mean_prior_or_implied", pa.float64()),
+    ("n_prior_implied", pa.int64()), ("skipped", pa.bool_()),
     ("computed_at", pa.string()), ("source_hash", pa.string()), ("capture_id", pa.string()),
 ])
 

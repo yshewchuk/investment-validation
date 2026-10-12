@@ -24,6 +24,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from .errors import fail
+from .event_history import AsofSeries, event_sequence, strict_prior_mean
+
 __all__ = [
     "MAX_GAP_CALENDAR_DAYS",
     "MIN_SCOREABLE",
@@ -44,6 +47,9 @@ MAX_GAP_CALENDAR_DAYS = 5
 
 #: Panel admission is k>=4, so fewer than this many computable events cannot score.
 ADMISSION_EVENTS = 5
+
+#: Legacy panel MIN_HISTORY: an event is admitted only when 4 or more events precede it.
+WARMUP = 4
 
 
 def _session_move_indexed(sd, sc, t, session) -> tuple[float, np.datetime64] | None:
@@ -70,7 +76,7 @@ def session_move(sd, sc, t, session) -> float | None:
 
 
 def _row(ticker: str, event_date: str, *, realized, implied, available_as_of_date,
-         quarter: int, skipped: bool,
+         ordinal: int, admitted: bool, mean_prior, n_prior: int, skipped: bool,
          computed_at: str, source_hash: str, capture_id: str) -> dict:
     return {
         "ticker": ticker,
@@ -78,7 +84,10 @@ def _row(ticker: str, event_date: str, *, realized, implied, available_as_of_dat
         "realized_move_pct": realized,
         "available_as_of_date": available_as_of_date,
         "implied_move_pct": implied,
-        "quarter_ordinal": quarter,
+        "event_ordinal": ordinal,
+        "admitted": admitted,
+        "mean_prior_or_implied": mean_prior,
+        "n_prior_implied": n_prior,
         "skipped": skipped,
         "computed_at": computed_at,
         "source_hash": source_hash,
@@ -86,55 +95,60 @@ def _row(ticker: str, event_date: str, *, realized, implied, available_as_of_dat
     }
 
 
+def _implied_by_event(dates: list[str], daily: pd.DataFrame) -> list[float | None]:
+    """Implied move per event date: the last row strictly before it whose ``src_iv`` is
+    non-null (``AsofSeries``, ``on_missing="null"``); an anchor whose ``implied_move`` is
+    null or non-finite yields None and never falls back to an older row."""
+    rows = []
+    if len(daily):
+        if not {"date", "implied_move", "src_iv"} <= set(daily.columns):
+            raise fail("CONTRACT_MISMATCH", "daily_market frame lacks date, implied_move or src_iv")
+        days = pd.to_datetime(daily["date"]).dt.strftime("%Y-%m-%d")
+        for day, im, src in zip(days, daily["implied_move"], daily["src_iv"]):
+            rows.append({
+                "date": day,
+                "implied_move": None if pd.isna(im) or not np.isfinite(im) else float(im),
+                "src_iv": None if pd.isna(src) else src})
+    series = AsofSeries(rows, eligible=("src_iv",), value="implied_move", on_missing="null")
+    return [series.at(day) for day in dates]
+
+
 def build_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *,
                computed_at: str, source_hash: str, capture_id: str) -> list[dict]:
-    """One row dict per event for ``ticker`` -- skipped events included.
+    """One ``computed_moves.v4`` row dict per event for ``ticker`` -- skipped events included.
 
-    The computation is the legacy ``build_ticker`` body verbatim: the
-    session-aware close-to-close realized move, the panel as-of implied move
-    (last EOD row strictly before the print), and a per-calendar-year ordinal.
-    A skipped row's quarter_ordinal is always 0 -- it never occupies a slot in
-    the per-year count, matching legacy's silence on skipped events; the
-    ordinal is meaningful only when skipped is False.
-    A computable row's ``available_as_of_date`` is the measured close date
-    (``session_move``'s ``sd[j_post]``) plus one calendar day, YYYY-MM-DD --
-    the earliest decision_session at which this event's move was knowable; it
-    is null exactly when ``realized_move_pct`` is null (a skipped event,
-    whatever the reason), never "always available".
-    The only changed thing is the return: a list of contract-shaped rows
-    instead of one oquants document per ticker. Fewer than five computable
-    events returns ``[]`` -- the same admission rule the legacy function
-    applies by returning ``None``, never a partial write.
+    The realised move is the legacy ``build_ticker`` computation verbatim
+    (session-aware close-to-close). ``available_as_of_date`` is the measured close
+    date (``session_move``'s ``sd[j_post]``) plus one calendar day, null exactly when
+    ``realized_move_pct`` is null. The event-history columns come from the
+    ``event_history`` primitives (design #651): ``event_ordinal``/``admitted`` count
+    every event of ``events`` (``WARMUP`` = 4); ``implied_move_pct`` is the as-of
+    ``src_iv`` anchor, filled for skipped events; ``mean_prior_or_implied`` and
+    ``n_prior_implied`` are the strict-prior mean and count over earlier admitted
+    events. Fewer than five computable events returns ``[]`` (no partial write).
     """
-    rows: list[dict] = []
-    dm_dates = daily["date"].to_numpy()
-    dm_im = daily["implied_move"].to_numpy(dtype=float)
+    dates = [pd.Timestamp(day).strftime("%Y-%m-%d") for day in events["event_date"]]
+    sequence = event_sequence(dates, warmup=WARMUP)
+    implied = _implied_by_event(dates, daily)
+    aggregates = strict_prior_mean(sequence, implied, population="admitted")
 
-    year_seen: dict[int, int] = {}
+    rows: list[dict] = []
     computable = 0
-    for r in events.itertuples():
-        t = r.event_date.to_datetime64()
-        year = int(str(r.event_date)[:4])
-        indexed = _session_move_indexed(sd, sc, t, r.session)
+    for r, ev, im, (mean_prior, n_prior) in zip(events.itertuples(), sequence, implied,
+                                                aggregates):
+        indexed = _session_move_indexed(sd, sc, r.event_date.to_datetime64(), r.session)
         if indexed is None:
-            rows.append(_row(
-                ticker, str(r.event_date)[:10], realized=None, implied=None,
-                available_as_of_date=None,
-                quarter=0, skipped=True, computed_at=computed_at,
-                source_hash=source_hash, capture_id=capture_id))
-            continue
-        m, close_date = indexed
-        available_as_of_date = str((pd.Timestamp(close_date) + pd.Timedelta(days=1)).date())
-        # panel as-of convention: the last EOD row strictly before the print
-        j = int(np.searchsorted(dm_dates, t, side="left")) - 1
-        im = float(dm_im[j]) if j >= 0 and np.isfinite(dm_im[j]) else None
-        year_seen[year] = year_seen.get(year, 0) + 1
-        computable += 1
+            realized, available_as_of_date, skipped = None, None, True
+        else:
+            realized, close_date = indexed
+            available_as_of_date = str((pd.Timestamp(close_date) + pd.Timedelta(days=1)).date())
+            skipped = False
+            computable += 1
         rows.append(_row(
-            ticker, str(r.event_date)[:10], realized=m, implied=im,
-            available_as_of_date=available_as_of_date,
-            quarter=year_seen[year], skipped=False, computed_at=computed_at,
-            source_hash=source_hash, capture_id=capture_id))
+            ticker, ev.event_date, realized=realized, implied=im,
+            available_as_of_date=available_as_of_date, ordinal=ev.ordinal,
+            admitted=ev.admitted, mean_prior=mean_prior, n_prior=n_prior, skipped=skipped,
+            computed_at=computed_at, source_hash=source_hash, capture_id=capture_id))
 
     if computable < ADMISSION_EVENTS:  # panel admission is k>=4, so fewer cannot score
         return []

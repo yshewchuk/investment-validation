@@ -10,7 +10,8 @@ from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT
 
 
 def test_contract_id_and_table_name():
-    assert COMPUTED_MOVES_CONTRACT.contract_id == "computed_moves.v3"
+    assert COMPUTED_MOVES_CONTRACT.contract_id == "computed_moves.v4"
+    assert COMPUTED_MOVES_CONTRACT.semantic_version == "4.0.0"
     assert COMPUTED_MOVES_CONTRACT.table_name == "computed_moves"
     assert COMPUTED_MOVES_TABLE_NAME == "computed_moves"
 
@@ -40,3 +41,15 @@ def test_available_as_of_date_column_is_nullable_and_documented():
     column = columns["available_as_of_date"]
     assert column.nullable is True
     assert "not available to any decision" in column.null_policy
+
+
+def test_v4_columns_match_the_store_fragment_schema_and_drop_quarter_ordinal():
+    from engine.v2.ops.computed_moves_store import _ARROW_SCHEMA, FRAGMENT_COLUMNS
+
+    names = tuple(column.name for column in COMPUTED_MOVES_CONTRACT.columns)
+    assert names == FRAGMENT_COLUMNS == tuple(_ARROW_SCHEMA.names)
+    assert "quarter_ordinal" not in names
+    columns = {column.name: column for column in COMPUTED_MOVES_CONTRACT.columns}
+    assert columns["mean_prior_or_implied"].nullable is True
+    for name in ("event_ordinal", "admitted", "n_prior_implied"):
+        assert columns[name].nullable is False
