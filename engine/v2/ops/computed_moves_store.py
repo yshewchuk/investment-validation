@@ -1176,8 +1176,9 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
             continue
         source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
         capture_id = _capture_id_for(unit, source_hash=source_hash)
-        events = events[(events["event_date"] >= pd.Timestamp(sd[0]))
-                        & (events["event_date"] < as_of_ts)]
+        # Keep events before the first close: they count in event_ordinal (the ticker's full
+        # event history) and are stored as skipped rows, never dropped.
+        events = events[events["event_date"] < as_of_ts]
         rows = _build_rows_typed(
             ticker, events, sd, sc, inputs.daily(ticker),
             computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id)

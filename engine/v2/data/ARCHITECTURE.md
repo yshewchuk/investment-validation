@@ -256,9 +256,13 @@ and never computed per run by a reader:
   `strict_prior_mean(population="admitted")` over the stored `implied_move_pct`
   of earlier admitted events, nulls skipped. A non-admitted row, or an admitted row
   with no earlier non-null implied value, is `(null, 0)`.
-- The v3 admission rule stays: a ticker with fewer than five computable events
-  emits no rows. Realised moves, `skipped` and `available_as_of_date` are
-  bit-identical to v3.
+- The ordinal counts every confirmed event dated before `as_of`, including events
+  that precede the first available close; those cannot be bracketed, so they are
+  stored as skipped rows (null realised move and `available_as_of_date`) that still
+  count in `event_ordinal`. v3 dropped them, so v4 has more rows than v3 for such
+  tickers. The v3 admission rule stays: a ticker with fewer than five computable
+  events emits no rows. For events inside the price history, realised moves,
+  `skipped` and `available_as_of_date` are bit-identical to v3.
 
 | Condition | Outcome |
 |---|---|

@@ -311,3 +311,18 @@ def test_daily_frame_without_src_iv_refuses_with_contract_mismatch():
     with pytest.raises(DataError) as err:
         _hist_build(range(10, 16), _daily_idx(40).drop(columns=["src_iv"]))
     assert err.value.code == "CONTRACT_MISMATCH"
+
+
+def test_events_before_the_first_close_count_in_the_ordinal_as_skipped_rows():
+    # price history starts at business day 10; events at 5 and 7 predate it
+    rows = _hist_build([5, 7, 12, 13, 14, 15, 16, 17], _daily_idx(40), drop_idx=range(10))
+    assert [r["event_ordinal"] for r in rows] == list(range(8))
+    assert [r["admitted"] for r in rows] == [False] * 4 + [True] * 4
+    assert [r["skipped"] for r in rows] == [True, True] + [False] * 6
+    assert all(r["realized_move_pct"] is None and r["available_as_of_date"] is None
+               for r in rows[:2])
+    # skipped pre-history events keep their as-of implied value (anchor = previous business day)
+    assert [r["implied_move_pct"] for r in rows[:2]] == [4.0, 6.0]
+    # ordinal 4 is the first admitted event: nothing earlier is admitted
+    assert (rows[4]["mean_prior_or_implied"], rows[4]["n_prior_implied"]) == (None, 0)
+    assert (rows[5]["mean_prior_or_implied"], rows[5]["n_prior_implied"]) == (13.0, 1)
