@@ -16,6 +16,7 @@ Replaces (§4.4): `new supervisor and catalog`, `dashboard/nightly.py becomes a 
 - Durable job submission, leases, retry history and dependencies.
 - Resource admission and per-job CPU placement.
 - The nightly job graph and its release boundary.
+- Explicit Massive cache-first acquisition via `python -m engine.v2.ops.massive_acquire`; [operator usage](stores/massive/README.md).
 
 ## Non-responsibilities
 
