@@ -34,9 +34,10 @@ now live and raises `FileNotFoundError` if one is missing.
 `markdown_structure.py` lints Markdown structure that renders wrongly: an ATX
 heading needs a blank line before (unless on line 1) and after (unless last);
 a table needs one before (unless at file start) and after (unless it ends the
-file); an unindented fenced block needs one before and after. Fences are
-tracked everywhere, indented or inside list items too, and every fence must be
-closed; only unindented fences get the blank-line rule. Fenced content is never
+file); an unindented fenced block needs one before and after. Indented
+and list-marker fences are tracked too, and every fence must be closed; only
+unindented fences get the blank-line rule. Blockquoted fences (`> ```)
+are not checked. Fenced content is never
 scanned as headings or tables. There is no list rule, and list content is
 skipped for the heading and table rules: only column-0 headings and tables are
 read, so indented lines and list-marker lines are never headings or table

@@ -246,3 +246,17 @@ def test_empty_base_ref_is_a_usage_error_not_staged_mode(repo, capsys):
     assert "non-empty" in capsys.readouterr().err
     assert ms.main(["--base-ref", "   ", "--quiet"]) == 2
 
+
+def test_pipeless_header_table_uses_column_count_for_rows():
+    # Rows with the header's column count stay in the table.
+    assert rules("a | b\n--|--\n1 | 2\nx | y\n\nafter\n") == []
+    # A pipe-bearing paragraph with a different column count is not a row.
+    assert rules("a | b\n--|--\n1 | 2\nsee x | y | z\n") == ["table-after"]
+    # A line with a pipe-less body is not a row either.
+    assert rules("a | b\n--|--\n1 | 2\nplain text\n") == ["table-after"]
+
+
+def test_blockquoted_fence_is_not_checked():
+    assert rules("> ```\n> # x\n") == []
+
+

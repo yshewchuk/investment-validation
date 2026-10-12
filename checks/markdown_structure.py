@@ -11,11 +11,11 @@ Rules (no style opinions):
   column count;
 * an unindented fenced code block needs a blank line before and after.
 
-Fences are tracked everywhere, indented or not (including inside list items),
-and every fence must be closed: an unclosed fence is reported for any file in
-the changed set, because it breaks rendering of the rest of the file. Only
-unindented fences get the blank-line rule. Content inside a fence is never read
-as a heading or table.
+Unindented, indented and list-marker fences (``- ```python``) are tracked, and
+every fence must be closed: an unclosed fence is reported for any file in the
+changed set, because it breaks rendering of the rest of the file. Only
+unindented fences get the blank-line rule. Blockquoted fences (``> ```)
+are not checked. Content inside a fence is never read as a heading or table.
 
 There is no list rule, and list content is skipped for the heading and table
 rules: only column-0 headings and tables are read, so an indented line or one
