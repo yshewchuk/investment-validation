@@ -285,7 +285,8 @@ evidence. See the models and data component contracts.
     main shows too) or `ok`. Only `pr_owned` modules make the state `failure`;
     infra modules are counted in the description, never red. Failure semantics:
     the tool exits 0 for every classified or degraded input (only argument errors
-    exit nonzero). A missing or unparsable merged summary yields `success`, an
+    and an unwritable `--github-output` file exit nonzero, the latter deliberately
+    so a CI step fails loudly). A missing or unparsable merged summary yields `success`, an
     "unavailable" description and a warning. An omitted, missing or undecodable
     diff, or an unreadable `results.jsonl` (malformed rows are dropped with a warning), warns and attributes no survivor to
     the PR; an unreadable baseline warns and excuses nothing. Survivors on lines
