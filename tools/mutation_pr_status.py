@@ -84,7 +84,10 @@ def baseline_failing(baseline) -> set[str]:
     out: set[str] = set()
     if not isinstance(baseline, dict):
         return out
-    for name, mod in (baseline.get("modules") or {}).items():
+    modules = baseline.get("modules")
+    if not isinstance(modules, dict):
+        return out
+    for name, mod in modules.items():
         if isinstance(mod, dict) and not mod.get("skipped_reason") \
                 and _is_test_failure_rc(mod.get("run_exit_code")):
             out.add(name)
@@ -112,9 +115,11 @@ def classify_module(name: str, mod, rows: list[dict], changed: dict[str, set[int
         return "infra", "timeout or cancelled"
     if isinstance(rc, int) and not isinstance(rc, bool) and (rc < 0 or rc >= 128):
         return "infra", f"killed by signal (exit {rc})"
-    if (mod.get("counts_backend") or {}).get("error"):
+    counts = mod.get("counts_backend")
+    if isinstance(counts, dict) and counts.get("error"):
         return "infra", "gremlin ERROR results (tool errors)"
-    if any(str(r).startswith("RAW_") for r in mod.get("failure_reasons") or []):
+    reasons = mod.get("failure_reasons")
+    if isinstance(reasons, list) and any(str(r).startswith("RAW_") for r in reasons):
         return "infra", "invalid raw report"
     if _is_test_failure_rc(rc):
         if name in failing_on_main:
@@ -133,9 +138,13 @@ def _truncate(text: str, keep_tail: str = "") -> str:
 
 def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=None) -> dict:
     """Pure verdict: ``state`` is ``failure`` only when a module is PR-owned."""
-    modules = (merged.get("modules") or {}) if isinstance(merged, dict) else {}
+    rows = [r for r in rows if _valid_row(r)]
+    modules = merged.get("modules") if isinstance(merged, dict) else None
+    modules = modules if isinstance(modules, dict) else {}
     expected = merged.get("expected_modules") if isinstance(merged, dict) else None
-    names = sorted(set(expected or []) | set(modules) | {r["module"] for r in rows if r.get("module")})
+    expected = [m for m in expected if isinstance(m, str)] if isinstance(expected, list) else []
+    names = sorted(set(expected) | {m for m in modules if isinstance(m, str)}
+                   | {r["module"] for r in rows if isinstance(r, dict) and isinstance(r.get("module"), str)})
     failing_on_main = baseline_failing(baseline)
     result: dict[str, dict] = {}
     for name in names:
@@ -163,6 +172,11 @@ def _load_json(path: str | None):
         return json.loads(Path(path).read_text())
     except (OSError, ValueError):
         return None
+
+
+def _valid_summary(s) -> bool:
+    """A merged/baseline summary: a mapping whose ``modules`` (if any) is a mapping."""
+    return isinstance(s, dict) and (s.get("modules") is None or isinstance(s["modules"], dict))
 
 
 def _valid_row(r) -> bool:
@@ -200,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
 
     merged_dir = Path(args.merged_dir)
     merged = _load_json(str(merged_dir / "summary.json"))
-    if not isinstance(merged, dict):
+    if not _valid_summary(merged):
         verdict = {"state": "success", "pr_owned": [], "infra": ["report"], "modules": {},
                    "description": _truncate("gremlins: merged report unavailable (infra); "
                                             "no PR-owned result")}
@@ -215,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
             changed = {}
             print("::warning::PR diff unavailable; survivors cannot be attributed to the PR")
         baseline = _load_json(args.baseline_summary)
+        if not _valid_summary(baseline):
+            baseline = None
         if args.baseline_summary and baseline is None:
             print("::warning::main baseline summary unreadable; no failure is excused as pre-existing")
         verdict = classify(merged, _load_rows(merged_dir / "results.jsonl"), changed, baseline)

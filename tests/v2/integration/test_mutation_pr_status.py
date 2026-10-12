@@ -322,3 +322,32 @@ def test_missing_or_undecodable_results_file_warns_unreadable(tmp_path, capsys):
     assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
                     "--github-output", str(out)]) == 0
     assert "results.jsonl unreadable" in capsys.readouterr().out
+
+
+def test_list_valued_modules_in_summary_or_baseline_never_crash(tmp_path, capsys):
+    d, diff = _write_report(tmp_path, {"modules": [], "expected_modules": ["a"]}, [])
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    assert "state=success\n" in out.read_text()
+    assert "merged mutation report unavailable" in capsys.readouterr().out
+    d2 = tmp_path / "two"
+    d2.mkdir()
+    (d2 / "summary.json").write_text(json.dumps(merged(a=mod(run_exit_code=1))))
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps({"modules": ["a"]}))
+    out2 = tmp_path / "gh_output2"
+    assert ps.main(["--merged-dir", str(d2), "--diff-file", str(diff),
+                    "--baseline-summary", str(base), "--github-output", str(out2)]) == 0
+    assert "state=failure\n" in out2.read_text()  # nothing is excused by a malformed baseline
+    assert "baseline summary unreadable" in capsys.readouterr().out
+
+
+def test_classify_tolerates_odd_shapes_in_parsed_json():
+    m = {"modules": {"a": mod(counts_backend=[1], failure_reasons=7), 5: mod()},
+         "expected_modules": ["b", 3, None]}
+    v = ps.classify(m, [row("a", "x.py", 1), 5, None, {"module": 9}], {}, baseline={"modules": 3})
+    assert v["state"] == "success"
+    assert v["modules"]["a"]["class"] == "ok" and v["modules"]["b"]["class"] == "infra"
+    v = ps.classify({"modules": {"a": mod()}, "expected_modules": "a"}, [], {}, [1])
+    assert v["modules"] == {"a": {"class": "ok", "reason": ""}}
