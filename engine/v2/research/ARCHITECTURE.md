@@ -332,7 +332,7 @@ Request validity proves neither winner selection nor read eligibility. The later
 | Invalid request object, unsupported membership version, or as-of month later than the current UTC month | Non-retryable `HOLDOUT_ACCESS_DENIED` before any scan. |
 | Snapshot unresolved, or resolved identity differs from `request.snapshot_id` | `SNAPSHOT_UNRESOLVED`; no fallback. |
 | `earnings_events` absent from the snapshot | `CONTRACT_MISMATCH`; no partial population. Present with no fragments, the scan yields no events and the empty-population row applies. |
-| Any `resolve` failure, including manifest corruption | `SNAPSHOT_UNRESOLVED` (the repository's own code is not surfaced). Integrity failures during the scan propagate as the repository's typed refusal. |
+| `resolve` raising `DataError` (including manifest corruption), `ValueError`, `TypeError` or `KeyError` | `SNAPSHOT_UNRESOLVED` (the repository's own code is not surfaced); any other exception propagates unchanged. Integrity failures during the scan propagate as the repository's typed refusal. |
 | Both sets empty after ambiguity exclusion | `POPULATION_COLLAPSED`; never an empty success. Preregistered completeness remains the later preflight's refusal. |
 | Retry, cache, write | None; read-only, identical pinned inputs return identical populations. |
 
@@ -459,7 +459,9 @@ This bounds retained unmatched rows, not total process RSS.
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`), `engine.v2.
 contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`),
-`engine.v2.foundation` (`ArtifactStore`, `SystemClock`) — the package's own
+`engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
+`engine.v2.foundation` (`ArtifactStore`, `SystemClock`, plus
+`final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
 at a lower layer" rule (`only_imports` is unset for this package in
 `checks/layer_map.py`, i.e. no narrower restriction than that generic
