@@ -11,7 +11,7 @@
 
 - The PR watcher runs the merge gate at `/root/agent-ops/gate/gate.sh`. It starts detached, once per head, in parallel with CI; only a finished failing required check holds it. It runs at most 15 automatic launches per PR, plus one per `gate-extra-round` label, which only the user or supervisor applies. Owners do not run the gate.
 - The gate has two tiers. A cheap tier runs first; a cheap BLOCK stops there, and a cheap pass runs the expensive tier. One launch covers both tiers.
-- Merge requires a gate pass and green CI. CodeRabbit is requested only after the gate passes and CI is green, as the final sign-off; it must approve and no thread may be open.
+- Merge requires green CI, a passing gate and CodeRabbit approval, with no thread open. CodeRabbit's reviews are limited, so the review scheduler serves heads that have passed the gate with green CI first. The gate does not wait for CodeRabbit.
 - Owners wake only for a BLOCK. A pass wakes nobody and auto-merge completes the PR. If a passing PR is still unmerged after 10 minutes, the owner is woken once.
 - On a BLOCK, fix real findings and push once per round. Continue independently until the launch cap, then stop and report. Deferring a finding to an issue requires the gate's agreement, as with a CodeRabbit comment. If the gate blocks on it again, fix it.
 - Every PR description starts with `## Gate notes` (about 1,000 characters maximum; the gate reads the first 4,000 description characters). Keep concise round notes and any deferral's issue link and reason there. Update the notes before each fix push. The gate takes no notes file.
