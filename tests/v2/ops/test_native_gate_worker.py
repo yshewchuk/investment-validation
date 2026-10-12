@@ -63,6 +63,14 @@ def single_thread(monkeypatch):
         monkeypatch.setenv(name, "1")
 
 
+@pytest.fixture
+def forbidden_pricing(monkeypatch):
+    """Fail if an admission refusal reaches the actual pricing boundary."""
+    def forbidden(*args, **kwargs):
+        pytest.fail("pricing ran before admission refused")
+    monkeypatch.setattr("experiments.native_gate_worker.price_variant", forbidden)
+
+
 def _supervise(tmp_path, source, document, registration, parameters, *, key="smoke",
                staged_bytes=None, expected_details=None, shared_root=None, before_start=None):
     """Submit through the production registry, launcher, child and checkpoint path."""
@@ -180,7 +188,8 @@ def test_supervised_unconsumed_economics_refuse_without_receipt(source, tmp_path
 
 @pytest.mark.parametrize("change", ["fill", "identity", "expected-ids", "run-id", "strategy",
                                     "arm", "environment", "registration"])
-def test_changed_staged_binding_refuses_before_pricing(source, tmp_path, single_thread, monkeypatch, change):
+def test_changed_staged_binding_refuses_before_pricing(
+        source, tmp_path, single_thread, forbidden_pricing, monkeypatch, change):
     """Canonical current-request differences cannot reuse another arm's registration."""
     document, registration, parameters = _registered(source)
     if change == "fill":
@@ -203,6 +212,7 @@ def test_changed_staged_binding_refuses_before_pricing(source, tmp_path, single_
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert error.value.problem.retryable is False
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -439,28 +449,42 @@ def test_smoke_opt_in_is_required_by_submission_and_worker(tmp_path, opt_in):
     assert list(stage.iterdir()) == []
 
 
-def test_registered_code_must_match_the_running_worker(source, tmp_path, single_thread):
+@pytest.mark.parametrize("change", ["bytes", "missing", "malformed", "encoding", "unreadable"])
+def test_registered_code_must_match_the_running_worker(
+        source, tmp_path, single_thread, forbidden_pricing, monkeypatch, change):
     """A real source-closure change cannot reuse a registration in another checkout."""
     from engine.v2.ops.fingerprints import source_closure
 
-    document, _, parameters = _registered(source)
+    document, registration, parameters = _registered(source)
     code = tmp_path / "changed-code"
     for name in source_closure(REPO, [RUNNER]):
         path = code / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((REPO / name).read_bytes())
     runner = code / RUNNER
-    runner.write_bytes(runner.read_bytes() + b"\n# Synthetic source identity change.\n")
-    document["experiment_id"] = "synthetic-changed-code"
-    registration = register_native(source[0], source[2], source[3],
-                                   experiment_spec_from_document(document),
-                                   code_root=code, as_of_month="2025-01")
-    parameters.update(run_id=registration.run_id, variant_id=registration.variant_id,
-                      expected_ids=[registration.variant_id])
+    if change == "bytes":
+        runner.write_bytes(runner.read_bytes() + b"\n# Synthetic source identity change.\n")
+    elif change == "missing":
+        runner.unlink()
+    elif change == "unreadable":
+        original_open = Path.open
+
+        def deny_source_open(path, *args, **kwargs):
+            if path == runner:
+                raise PermissionError("synthetic source read denial")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", deny_source_open)
+    else:
+        runner.write_bytes(b"def broken(:\n" if change == "malformed" else b"\xff")
+    monkeypatch.chdir(code)
+    before = _catalog(source[0])
     stage = _stage(tmp_path / "staging", document, registration)
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert error.value.problem.retryable is False
+    assert _catalog(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -591,6 +615,66 @@ def test_staged_replacement_cannot_bypass_no_follow(source, tmp_path, single_thr
     assert swapped == [True]
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
     assert not (stage / "native_gate_consumption.json").exists()
+
+
+@pytest.mark.parametrize("name", ["spec.json", "native_registration.json"])
+def test_staged_replacement_after_open_consumes_original_bytes(
+        source, tmp_path, single_thread, monkeypatch, name):
+    """Replacing a validated pathname cannot redirect the live descriptor."""
+    from experiments import native_gate_worker as native
+
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    path, replacement = stage / name, tmp_path / "replacement.json"
+    replacement.write_bytes(b"{}")
+    original_stat, original_fstat = path.stat(), native.os.fstat
+    swapped = []
+
+    def replace_after_open(fd):
+        info = original_fstat(fd)
+        if (info.st_dev, info.st_ino) == (original_stat.st_dev, original_stat.st_ino) and not swapped:
+            os.replace(replacement, path)
+            swapped.append(True)
+        return info
+
+    before = _catalog(source[0])
+    monkeypatch.setattr(native.os, "fstat", replace_after_open)
+    result = worker.dispatch("native_gate_pricing", parameters, stage)
+    receipt = json.loads((stage / "native_gate_consumption.json").read_bytes())
+    assert swapped == [True] and path.read_bytes() == b"{}"
+    assert result["completed_ids"] == [registration.variant_id]
+    assert receipt["execution_plan"] == registration.document["execution_plan"]
+    assert receipt["variant_id"] == registration.variant_id
+    assert receipt["stage_inputs"]["event_ids"] == registration.document["event_ids"]
+    assert _catalog(source[0]) == before
+
+
+@pytest.mark.parametrize("field", ["event_ids", "holdout_as_of_month",
+                                   "random_membership_version", "rolling_membership_version"])
+def test_consumed_provenance_must_match_registration(
+        source, tmp_path, single_thread, monkeypatch, field):
+    """Exercise genuine pinned replay, then alter only its returned provenance."""
+    from experiments import native_gate_worker as native
+
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    original_price, priced = native.price_variant, []
+
+    def mismatched(*args, **kwargs):
+        result = original_price(*args, **kwargs)
+        priced.append(result)
+        value = ("OTHER_2024-05-02",) if field == "event_ids" else "changed-provenance"
+        return replace(result, stage_inputs=replace(result.stage_inputs, **{field: value}))
+
+    before = _catalog(source[0])
+    monkeypatch.setattr(native, "price_variant", mismatched)
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert len(priced) == 1 and len(priced[0].replay.trades) == 1
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert error.value.problem.retryable is False
+    assert not (stage / "native_gate_consumption.json").exists()
+    assert _catalog(source[0]) == before
 
 
 def test_staged_growth_is_bounded_after_descriptor_validation(tmp_path, monkeypatch):

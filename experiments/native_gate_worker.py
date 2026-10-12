@@ -89,11 +89,15 @@ def _admit(parameters, root, conn, store):
                                       _read_staged(root / "native_registration.json"))
     verify_native_registration(conn, store, registration)
     binding = registration.document
+    try:
+        current_source = source_closure(Path.cwd(), [RUNNER])
+    except (OpsError, OSError, SyntaxError, ValueError, RecursionError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registered source cannot be verified") from None
     if (registration.variant_id != parameters["variant_id"]
             or list(parameters["expected_ids"]) != [registration.variant_id]
             or binding["spec_hash"] != spec.spec_hash
             or canonical_json(binding["execution_plan"]) != canonical_json(plan.as_document())
-            or binding["source_closure"] != source_closure(Path.cwd(), [RUNNER])
+            or binding["source_closure"] != current_source
             or binding["environment"] != environment_identity(1)
             or any(os.environ.get(name) != "1" for name in THREAD_VARIABLES)):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native staged execution differs from registration")
