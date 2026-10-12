@@ -9,9 +9,9 @@
 
 ## Pull requests, gates and owners
 
-- The PR watcher runs the merge gate at `/root/agent-ops/gate/gate.sh`. It starts detached, once per head, in parallel with CI; only a finished failing required check holds it. It runs at most 15 automatic launches per PR, plus one per `gate-extra-round` label, which only the user or supervisor applies. Owners do not run the gate.
+- The PR watcher runs the merge gate at `/root/agent-ops/gate/gate.sh`. It starts detached, once per head. A new head is gated while CI is still running, so in practice the gate runs alongside CI; a finished failing required check holds it, and so does any open review thread. Once CI has finished green, a new head is gated only after CodeRabbit approves it, or while CodeRabbit is out of review capacity; when the gate goes first, CodeRabbit's next review on that head is the final sign-off. It runs at most 15 automatic launches per PR, plus one per `gate-extra-round` label, which only the user or supervisor applies. Owners do not run the gate.
 - The gate has two tiers. A cheap tier runs first; a cheap BLOCK stops there, and a cheap pass runs the expensive tier. One launch covers both tiers.
-- Merge requires green CI, a passing gate and CodeRabbit approval, with no thread open. CodeRabbit's reviews are limited, so the review scheduler serves heads that have passed the gate with green CI first. The gate does not wait for CodeRabbit.
+- Merge (the repository ruleset) requires the `test` and `merge-gate` checks and one approving review. Thread resolution is not a ruleset requirement, but open threads hold the gate.
 - Owners wake only for a BLOCK. A pass wakes nobody and auto-merge completes the PR. If a passing PR is still unmerged after 10 minutes, the owner is woken once.
 - On a BLOCK, fix real findings and push once per round. Continue independently until the launch cap, then stop and report. Deferring a finding to an issue requires the gate's agreement, as with a CodeRabbit comment. If the gate blocks on it again, fix it.
 - Every PR description starts with `## Gate notes` (about 1,000 characters maximum; the gate reads the first 4,000 description characters). Keep concise round notes and any deferral's issue link and reason there. Update the notes before each fix push. The gate takes no notes file.
