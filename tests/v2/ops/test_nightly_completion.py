@@ -69,6 +69,17 @@ def _row(report, name):
     return next(row for row in report["dispositions"] if row["name"] == name)
 
 
+def _forbid_filesystem_access(monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("filesystem access occurred during malformed-input validation")
+
+    for name in ("open", "stat", "lstat", "mkdir", "unlink", "replace",
+                 "scandir", "listdir", "access"):
+        monkeypatch.setattr(nightly_session.os, name, unexpected)
+    for name in ("open", "stat", "exists", "mkdir"):
+        monkeypatch.setattr(nightly_session.Path, name, unexpected)
+
+
 def _service(root):
     conn = sqlite3.connect(":memory:")
     service = Service(conn, root, registry(), None, clock=_Clock(), code_source=root,
@@ -372,42 +383,44 @@ def test_nonmapping_inputs_take_the_typed_mapping_refusal(expected, observed):
 
 
 @pytest.mark.parametrize("identity", [None, "bad", {}])
-def test_session_transition_lock_rejects_bad_identity_before_filesystem(identity, tmp_path):
+def test_session_transition_lock_rejects_bad_identity_before_filesystem(identity, tmp_path,
+                                                                     monkeypatch):
+    _forbid_filesystem_access(monkeypatch)
     with pytest.raises(OpsError) as exc:
         with nightly_session.session_transition_lock(tmp_path, identity):
             pass
     assert exc.value.code == "INVALID_REQUEST"
     assert exc.value.problem.message == "session transition lock needs a session identity"
-    assert not tmp_path.joinpath(*STATE_DIR).exists()
 
 
 @pytest.mark.parametrize("root", [None, Path("\x00")], ids=["none", "nul"])
-def test_session_transition_lock_rejects_bad_root_before_filesystem(root, tmp_path):
+def test_session_transition_lock_rejects_bad_root_before_filesystem(root, monkeypatch):
+    _forbid_filesystem_access(monkeypatch)
     with pytest.raises(OpsError) as exc:
         with nightly_session.session_transition_lock(root, IDENT):
             pass
     assert exc.value.code == "INVALID_REQUEST"
     assert exc.value.problem.message == "session state root is invalid"
-    assert not tmp_path.joinpath(*STATE_DIR).exists()
 
 
 @pytest.mark.parametrize("root", [None, Path("\x00")], ids=["none", "nul"])
-def test_record_completion_rejects_bad_root_before_filesystem(root, tmp_path):
+def test_record_completion_rejects_bad_root_before_filesystem(root, monkeypatch):
+    _forbid_filesystem_access(monkeypatch)
     with pytest.raises(OpsError) as exc:
         record_completion(root, IDENT, 1, {"primary": "required"}, {})
     assert exc.value.code == "INVALID_REQUEST"
     assert exc.value.problem.message == "session state root is invalid"
-    assert not tmp_path.joinpath(*STATE_DIR).exists()
 
 
 @pytest.mark.parametrize("max_bytes", [True, -1, 1.5, "5", []])
-def test_atomic_writer_rejects_malformed_size_limit_before_filesystem(max_bytes, tmp_path):
+def test_atomic_writer_rejects_malformed_size_limit_before_filesystem(max_bytes, tmp_path,
+                                                                       monkeypatch):
     path = tmp_path / "missing" / "payload.json"
+    _forbid_filesystem_access(monkeypatch)
     with pytest.raises(OpsError) as exc:
         atomic_write(path, "payload", max_bytes=max_bytes)
     assert exc.value.code == "INVALID_REQUEST"
     assert exc.value.problem.message == "publication byte limit must be a nonnegative integer"
-    assert not path.parent.exists()
 
 
 def test_atomic_writer_accepts_payload_at_exact_size_limit(tmp_path):
