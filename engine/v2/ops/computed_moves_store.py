@@ -44,6 +44,7 @@ from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests, objects, reference_catalog
 from engine.v2.data.computed_moves import MIN_SCOREABLE, build_rows
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
+from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
 from engine.v2.ops.catalog import transaction
@@ -82,17 +83,19 @@ MAX_SCAN_ROWS = 2_000_000
 #: The reader's own batch ceiling; a chunk scan leases at most this, or half the guard if smaller.
 _LEASE_ALLOWANCE = 50_000
 _EVENT_COLUMNS = ("ticker", "event_date", "session", "src_orats")
-_DAILY_COLUMNS = ("ticker", "date", "implied_move")
+_DAILY_COLUMNS = ("ticker", "date", "implied_move", "src_iv")
 FRAGMENT_COLUMNS = ("ticker", "event_date", "realized_move_pct", "available_as_of_date",
-                    "implied_move_pct", "quarter_ordinal", "skipped", "computed_at",
-                    "source_hash", "capture_id")
+                    "implied_move_pct", "event_ordinal", "admitted", "mean_prior_or_implied",
+                    "n_prior_implied", "skipped", "computed_at", "source_hash", "capture_id")
 
-_EMPTY_DAILY = pd.DataFrame(columns=["date", "implied_move"])
+_EMPTY_DAILY = pd.DataFrame(columns=["date", "implied_move", "src_iv"])
 
 _ARROW_SCHEMA = pa.schema([
     ("ticker", pa.string()), ("event_date", pa.string()), ("realized_move_pct", pa.float64()),
     ("available_as_of_date", pa.string()),
-    ("implied_move_pct", pa.float64()), ("quarter_ordinal", pa.int64()), ("skipped", pa.bool_()),
+    ("implied_move_pct", pa.float64()), ("event_ordinal", pa.int64()),
+    ("admitted", pa.bool_()), ("mean_prior_or_implied", pa.float64()),
+    ("n_prior_implied", pa.int64()), ("skipped", pa.bool_()),
     ("computed_at", pa.string()), ("source_hash", pa.string()), ("capture_id", pa.string()),
 ])
 
@@ -575,14 +578,43 @@ def _fence_check_for(staged_attempt_id, staged_fence, clock):
                                            clock.now())
 
 
+def _is_other_computed_moves_contract(contract_id: str) -> bool:
+    """A computed_moves record under a contract version other than the current one."""
+    return (contract_id.startswith(COMPUTED_MOVES_TABLE_NAME + ".")
+            and contract_id != COMPUTED_MOVES_CONTRACT.contract_id)
+
+
+def _stale_partition_keys(parent) -> set:
+    """Partition keys the parent still holds under a non-current computed_moves contract."""
+    return {record.partition_key for record in parent.records
+            if _is_other_computed_moves_contract(record.table_contract_ref.contract_id)}
+
+
+def _refuse_unrebuilt_stale_partitions(parent, rewritten, attempts) -> None:
+    """Rebuild over migration: a v3 (non-v4) partition is never carried or migrated.
+
+    A generation that would drop one it neither rewrites nor attempts (an attempted but
+    unbuildable ticker is rebuilt away) refuses before any write.
+    """
+    stale = _stale_partition_keys(parent)
+    attempted = {str(attempt["ticker"]) for attempt in attempts}
+    if stale - rewritten - attempted:
+        raise fail("VALIDATION_FAILED",
+                   "computed moves full rebuild required: the parent holds non-v4 "
+                   "partitions this run does not attempt")
+
+
 def _generation_manifest(store, prior_manifest, kept, records_by_ticker):
     """Hash freshly inspected event objects; retain untouched partition evidence."""
     written = tuple(record for group in records_by_ticker.values() for record in group)
     records = tuple(sorted((*kept, *written),
                            key=lambda item: (item.partition_key, item.primary_key_min)))
+    # Only partitions whose records are kept keep a prior hash: a rewritten partition is
+    # re-hashed below, and a dropped one (e.g. a v3 ticker with no v4 rows) must not survive.
+    kept_keys = {record.partition_key for record in kept}
     partition_hashes = {key: value for key, value in
                         (prior_manifest.partition_logical_hashes.items() if prior_manifest else ())
-                        if key not in records_by_ticker}
+                        if key in kept_keys and key not in records_by_ticker}
     for ticker, group in records_by_ticker.items():
         if len(group) > 1:
             partition_hashes[ticker] = objects.partition_logical_hash(
@@ -624,6 +656,7 @@ def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records
             raise fail("VALIDATION_FAILED",
                        "computed moves refresh would inherit a committed fragment with "
                        "event dates on or after this run's as_of")
+    _refuse_unrebuilt_stale_partitions(parent, rewritten, attempts)
     manifest, new_records = _generation_manifest(store, prior_manifest, kept, records_by_ticker)
 
     table_manifests = {name: manifest_ for name, manifest_ in parent.table_manifests.items()
@@ -637,7 +670,9 @@ def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records
 
     other_records = tuple(record for record in parent.records
                           if record.table_contract_ref.contract_id
-                          != COMPUTED_MOVES_CONTRACT.contract_id)
+                          != COMPUTED_MOVES_CONTRACT.contract_id
+                          and not _is_other_computed_moves_contract(
+                              record.table_contract_ref.contract_id))
     all_records = other_records + new_records
     contracts = {item.contract_id: item for item in parent.contracts}
     contracts[COMPUTED_MOVES_CONTRACT.contract_id] = COMPUTED_MOVES_CONTRACT
@@ -692,6 +727,10 @@ def _noop_result(parameters, completed_ids) -> RefreshCallbackResult:
 
 def _no_fragment_result(conn, parameters, attempts, targets, document, parent, clock):
     """Persist fenced audit attempts without publishing a generation."""
+    if _stale_partition_keys(parent):  # a full rebuild must not leave a v3 head live
+        raise fail("VALIDATION_FAILED",
+                   "computed moves full rebuild required: no v4 rows were produced for a "
+                   "parent that still holds non-v4 partitions")
     with transaction(conn):
         _fence_check_for(document.get("attempt_id"), document.get("fence"), clock)(conn)
         _parent_receipt_id_for_commit(
@@ -1064,6 +1103,21 @@ def _capture_id_for(unit, *, source_hash: str | None = None,
     return "capture_" + content_hash(payload).removeprefix("sha256:")[:32]
 
 
+def _build_rows_typed(*args, **kwargs):
+    """``build_rows`` with its DataError refusals surfaced as a typed OpsError.
+
+    The CLI catches only OpsError and ops has no data codes, so the data code rides in the
+    message and ``details["data_code"]`` (the ``snapshot_planning`` precedent). Only the
+    builder is converted: object-store DataErrors from the fragment writer pass through.
+    """
+    try:
+        return build_rows(*args, **kwargs)
+    except DataError as exc:
+        raise fail("INPUT_CHANGED", "computed moves rows cannot be built from the pinned "
+                   f"inputs: {exc.code}: {exc.problem.message}",
+                   details={"data_code": exc.code}) from None
+
+
 def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks,
                      as_of_day: str):
     """Acquire and stage event fragments per unit, fresh or cached, exactly once.
@@ -1122,9 +1176,10 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
             continue
         source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
         capture_id = _capture_id_for(unit, source_hash=source_hash)
-        events = events[(events["event_date"] >= pd.Timestamp(sd[0]))
-                        & (events["event_date"] < as_of_ts)]
-        rows = build_rows(
+        # Keep events before the first close: they count in event_ordinal (the ticker's full
+        # event history) and are stored as skipped rows, never dropped.
+        events = events[events["event_date"] < as_of_ts]
+        rows = _build_rows_typed(
             ticker, events, sd, sc, inputs.daily(ticker),
             computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id)
         if not rows:

@@ -75,7 +75,8 @@ def _daily_for(ticker: str) -> list[dict]:
         implied = (None if ticker == "C" or i % 5 == 0
                    else round(2 + ((i * 7 + offset) % 11) * 0.25, 2))
         rows.append({**template, "ticker": ticker, "date": day.to_pydatetime(),
-                     "year": 2024, "implied_move": implied})
+                     "year": 2024, "implied_move": implied,
+                     "src_iv": "orats.summaries"})
     return rows
 
 
@@ -184,10 +185,10 @@ def _outcomes(conn) -> dict[str, str]:
 _GOLDEN_REPORT = {"mode": "all_scoreable", "scoreable_on_orats_calendar": 6, "also_in_oquants": 0,
                   "no_daily_market_rows": 1, "targets": 5}
 _GOLDEN_ROWS = {
-    "A": (14, "50cade2d51ca63f6e8514ea1945cb140b5b5e8a84317f949770f0873d290f2c1"),
-    "AA": (12, "df833c5995b1c599dce4184f7be37cc72a65cce82119eeda9f2267dde07921aa"),
-    "C": (13, "4f2d835c98a1945957ea33d101798907ea46c929c00ffe51c77b3932d69776d4"),
-    "E": (12, "ca14eb66f19135530963117c5f7cb258abcfbbe3e7828ff5e7baf4af31d30c08"),
+    "A": (14, "cf814b2e876f58b5219ce0b0081f5d189d29131c2e53f0b318b7a54cdc945887"),
+    "AA": (12, "08f5b806b058c30f24978515f1eebbaf56174ffac16d8f69fa6dd179967dde50"),
+    "C": (13, "49cffaba44f65f4e0f0aa0f4694aa731132803b98a5be04fe918eb29313297ab"),
+    "E": (12, "8b4710bed15c4fc0b5d450c160ed832b717563a066c8039cdb7e90caa89fba06"),
 }
 _GOLDEN_OUTCOMES = {"A": "added", "AA": "added", "C": "added", "D": "no_history", "E": "added"}
 _GOLDEN_ROWS_TOTAL = sum(count for count, _ in _GOLDEN_ROWS.values())

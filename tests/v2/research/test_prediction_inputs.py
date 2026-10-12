@@ -46,7 +46,8 @@ def _move(event, value=2.0, **overrides):
     day = event["event_date"].date()
     row = dict(ticker=event["ticker"], event_date=day.isoformat(), realized_move_pct=value,
                available_as_of_date=(day + timedelta(days=2)).isoformat(), implied_move_pct=3.0,
-               quarter_ordinal=1, skipped=False, computed_at="2025-01-01T00:00:00Z",
+               event_ordinal=0, admitted=False, mean_prior_or_implied=None, n_prior_implied=0,
+               skipped=False, computed_at="2025-01-01T00:00:00Z",
                source_hash="synthetic-price-history", capture_id="synthetic-capture")
     return {**row, **overrides}
 
