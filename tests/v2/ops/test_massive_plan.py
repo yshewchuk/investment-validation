@@ -86,6 +86,7 @@ def mutate_receipt(cache, record, field, value):
     ("test.b", "2025-03-07", "2025-04-09", "split_adjusted", True),
     ("BRK.B", "2026-07-08", "2026-08-19", "raw", False),
     ("T" * 32, "2026-01-01", "2026-01-31", "raw", False),
+    ("ONE", "2026-07-08", "2026-07-08", "raw", False),
 ])
 def test_descriptors_and_budgets_are_canonical_and_explicit(ticker, start, end, adjustment, adjusted):
     scope = {"start": start, "end": end, "adjustment": adjustment}
@@ -184,11 +185,26 @@ def test_invalid_inputs_refuse_before_catalog_access(change):
     assert error.value.code == "INVALID_REQUEST"
 
 
+@pytest.mark.parametrize("start,end", [
+    ("2026-02-01", "2026-01-31"),
+    ("2024-10-09", "2024-10-08"),
+    ("2026-10-11", "2026-10-10"),
+])
+def test_reversed_dates_refuse_as_invalid_before_history_or_catalog(start, end):
+    class Poison:
+        def execute(self, *args):
+            raise AssertionError("reversed dates reached the catalog")
+
+    with pytest.raises(OpsError) as error:
+        massive_plan.plan(Poison(), None, **(PARAMS | {"start": start, "end": end}))
+    assert error.value.code == "INVALID_REQUEST"
+    assert error.value.problem.details == {}
+
+
 @pytest.mark.parametrize("change,reason", [
     ({"start": "2024-10-09"}, "HISTORY_UNAVAILABLE"),
     ({"end": "2026-10-10"}, "HISTORY_UNAVAILABLE"),
     ({"end": "2026-10-11"}, "HISTORY_UNAVAILABLE"),
-    ({"start": "2026-02-01"}, "HISTORY_UNAVAILABLE"),
     ({"transport": "s3"}, "CAPABILITY_UNAVAILABLE"),
     ({"transport": "other"}, "CAPABILITY_UNAVAILABLE"),
     ({"datasets": ["minute"]}, "CAPABILITY_UNAVAILABLE"),
@@ -398,6 +414,18 @@ def test_invalid_manifest_size_refuses_before_object_read(cache, monkeypatch, si
     with pytest.raises(OpsError) as error:
         inventory(cache, datasets=["daily"])
     assert error.value.code == "RESOURCE_LIMIT_EXCEEDED"
+
+
+def test_exact_maximum_raw_size_is_a_verified_cache_hit(cache):
+    unit = inventory(datasets=["daily"])["units"][0]
+    encoded = canonical_json(body(unit["request"])).encode()
+    raw = encoded + b" " * (16 * 1024 * 1024 - len(encoded))
+    assert len(raw) == 16 * 1024 * 1024
+    record = seed(cache, unit["request"], raw=raw)
+    assert record.object_ref.byte_size == 16 * 1024 * 1024
+    result = inventory(cache, datasets=["daily"])
+    assert result["units"] == [unit | {"raw_receipt_id": record.raw_receipt_id}]
+    assert result["minimum_initial_calls"] == result["maximum_http_attempts"] == 0
 
 
 @pytest.mark.parametrize("missing", [False, True])

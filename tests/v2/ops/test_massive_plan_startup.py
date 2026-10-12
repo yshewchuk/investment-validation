@@ -119,7 +119,7 @@ def _run(root, arguments, revision, replacement="", *, guard_worker=True):
     "help", "invalid", "s3", "missing", "empty", "cached", "fifo", "nul_catalog", "nul_store",
     "receipt_corrupt", "bytes_corrupt", "object_missing",
     "cwd_shadow",
-    "missing_flags", "missing_value", "bad_adjustment", "bad_cap", "unsupported_transport",
+    "missing_flags", "missing_value", "bad_adjustment", "bad_cap", "unsupported_transport", "reversed_dates",
 ])
 def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, mode):
     conn, _, root = cache
@@ -152,6 +152,8 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         arguments = cli_args(root, adjustment="synthetic-private-choice")
     elif mode == "bad_cap":
         arguments = cli_args(root, **{"max-calls-per-request": "synthetic-private-cap"})
+    elif mode == "reversed_dates":
+        arguments = cli_args(root, start="2026-02-01", end="2026-01-31")
     elif mode == "unsupported_transport":
         arguments = cli_args(root, transport="synthetic-private-transport")
     elif mode == "s3":
@@ -188,7 +190,7 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         assert json.loads(first["stdout"]) == {
             "refused": "INVALID_REQUEST", "reason": "CAPABILITY_UNAVAILABLE"}
         assert first["stderr"] == ""
-    if mode in ("invalid", "missing_flags", "missing_value", "bad_adjustment", "bad_cap"):
+    if mode in ("invalid", "missing_flags", "missing_value", "bad_adjustment", "bad_cap", "reversed_dates"):
         assert json.loads(first["stdout"]) == {"refused": "INVALID_REQUEST", "reason": None}
         assert first["stderr"] == ""
     if mode == "help":

@@ -40,13 +40,15 @@ def _scope(tickers, start, end, as_of, adjustment, transport, call_cap):
            for t in tickers):
         raise fail("INVALID_REQUEST", "invalid stock ticker syntax")
     first, last, today = _day(start), _day(end), _day(as_of)
+    if first > last:
+        raise fail("INVALID_REQUEST", "start date must not follow end date")
     if today.year <= 2:
         raise fail("INVALID_REQUEST", "planning date has no two-year history window")
     try:
         earliest = today.replace(year=today.year - 2)
     except ValueError:
         earliest = today.replace(year=today.year - 2, day=28)
-    if not earliest <= first <= last < today:
+    if first < earliest or last >= today:
         raise fail("INVALID_REQUEST", "dates exceed the Basic planning window",
                    details={"reason": "HISTORY_UNAVAILABLE"})
     return sorted(set(tickers)), earliest.isoformat(), (today - timedelta(days=1)).isoformat()
