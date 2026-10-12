@@ -47,7 +47,7 @@ fitting, aggregate materialization or final-read authority.
 | Invalid window, non-`computed_moves` source, or combined `final_read` | `INVALID_EXPERIMENT_SPEC` before repository access. |
 | Missing admission reservation | `INVALID_EXPERIMENT_SPEC`; no metadata scan or implicit registration. |
 | Changed/omitted mode, conflicting expected identity, or malformed/cross-context stored plan | `EXPERIMENT_IDENTITY_CONFLICT`; prior evidence remains unchanged. |
-| Mode/request/source/environment/scope/snapshot/month drift or rehashed malformed/permuted metadata | Refusal before population/calendar scans. |
+| On admission (`require_native_registration`): mode/request/source/environment/scope/snapshot/month drift or rehashed malformed/permuted metadata | Refusal before population/calendar scans. |
 | Planner admission, calendar or empty-fold failure | Shared typed error propagates; no partial registration. |
 | v1.2 final-request preparation | `INVALID_EXPERIMENT_SPEC`; final declarations remain exclusive to v1.1. |
 Existing publication/transaction/retry semantics above apply unchanged.
@@ -96,6 +96,7 @@ from verified bytes; malformed metadata refuses before ledger or catalog effects
 | R1 invalid specification, R2 unresolved snapshot, or R6 identity conflict | `publish_native_refusal` publishes private evidence only; no result or ledger row. |
 | Empty, directory or symlinked recorded ledger destination | R1 before outcome reservation or ledger access; no default-ledger fallback or conflict evidence. |
 | Publish, replay or export called within an active caller transaction | R1 before path access or artifact/CSV effects; leave the caller transaction unchanged. |
+| Publish, replay or export with magnitude registration v1.2 | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private refusal evidence only, before outcome/report reads or catalog/ledger/export effects. These outcome paths accept only v1.0/v1.1; magnitude v1.2 remains valid for registration read/admission. |
 | Admitted R3 look-ahead or R5 holdout denial | Immutable refusal and `refused` row, unless smoke; no current-attempt report. |
 | Admitted R4 variant failure | Immutable refusal and `failed` row, unless smoke; no current-attempt report. |
 | Same canonical registration/result/destination repeated, including tuple/list-equivalent refusal details | Reuse the first outcome and date; reconcile one terminal CSV row per experiment/variant identity without refitting. |
