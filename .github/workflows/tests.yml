@@ -61,6 +61,12 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 checks/test_layout_budget.py --base-ref "$BASE_SHA"
 
+      - name: Check Markdown structure
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 checks/markdown_structure.py --base-ref "$BASE_SHA"
+
       - name: Run pytest
         env:
           # Empty ('') for push/schedule/workflow_dispatch: the "Select PR
