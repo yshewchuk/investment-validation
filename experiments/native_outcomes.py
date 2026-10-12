@@ -181,11 +181,19 @@ def _typed(operation):
     return call
 
 
+def _verify_outcome_registration(conn, store, registration):
+    """Magnitude preregistration has no outcome/report contract in this version."""
+    verify_native_registration(conn, store, registration)
+    if registration.document["schema_version"] not in (
+            "native_experiment_registration.v1.0", "native_experiment_registration.v1.1"):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "registration schema has no native outcome contract")
+
+
 @_typed
 def replay_native_outcome(conn, store, registration, *, no_ledger=False, ledger_path=None):
     """Verify and finish a saved intent, or return None without evaluating."""
     key, destination, ledger_path = _slot(no_ledger, ledger_path)
-    verify_native_registration(conn, store, registration)
+    _verify_outcome_registration(conn, store, registration)
     evidence = _evidence(conn, registration)
     return None if key not in evidence else _reconcile(
         conn, store, registration, key, destination, ledger_path, evidence[key])
@@ -199,7 +207,7 @@ def publish_native_outcome(conn, store, registration, *, report=None, problem=No
     if (type(attempted) is not bool or (problem is None and (not attempted or not isinstance(report, str)
             or not report.strip())) or (problem is not None and (report is not None or problem.code not in STAGES))):
         raise fail("INVALID_EXPERIMENT_SPEC", "native outcome requires one success or supported typed refusal")
-    verify_native_registration(conn, store, registration)
+    _verify_outcome_registration(conn, store, registration)
     stage = "ran" if problem is None else STAGES[problem.code]
     row = {"id": registration.document["execution_plan"]["experiment_id"],
            "spec_hash": registration.variant_id, "date": datetime.now(timezone.utc).date().isoformat(),
@@ -230,7 +238,7 @@ def publish_native_outcome(conn, store, registration, *, report=None, problem=No
 def export_native_report(conn, store, registration, *, no_ledger=False, ledger_path=None):
     """Materialize a verified completed report at its fixed store-local address."""
     key, destination, ledger_path = _slot(no_ledger, ledger_path)
-    verify_native_registration(conn, store, registration)
+    _verify_outcome_registration(conn, store, registration)
     evidence = _evidence(conn, registration)
     if key not in evidence:
         raise fail("INVALID_EXPERIMENT_SPEC", "native outcome has no completed report")

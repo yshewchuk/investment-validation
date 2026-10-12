@@ -14,6 +14,7 @@ from engine.v2.foundation import artifact_reference, canonical_json, content_has
 from engine.v2.ops.errors import OpsError, fail as ops_fail
 from engine.v2.ops.experiments import resolve_experiment_plan
 from engine.v2.research.magnitude_folds import magnitude_window
+from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from tests.data_scan_support import commit_tables
 from tests.ops_support import FakeClock
@@ -115,6 +116,14 @@ def test_full_plan_is_sealed_and_idempotently_admitted(source, monkeypatch):
         "magnitude_plan": expected_plan}
     assert registered.binding_json == canonical_json(document).encode()
     assert registered.variant_id == content_hash(document)
+    assert document["magnitude_plan"]["folds"] == [{"year": "2024",
+        "training_labels_before": "2023-12-22",
+        "training_candidate_event_ids": [source.events[0]["event_id"]],
+        "evaluation_event_ids": [source.events[1]["event_id"]]}]
+    clocks = document["magnitude_plan"]["events"][1]["forecasts"]
+    assert [(clock["horizon_sessions"], clock["pre_announcement_close"], clock["source_session_ceiling"])
+            for clock in clocks] == [(5, "2024-01-02", "2023-12-22"),
+                                     (3, "2024-01-02", "2023-12-27"), (1, "2024-01-02", "2023-12-29")]
     assert source.repository.pins == ["shadow"]
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
     before, objects = _catalog(source.conn), _objects(source.store)
@@ -735,3 +744,54 @@ def test_clock_values_and_schedule_status_have_independent_refusal_oracles(sourc
         assert plan["availability"]["event_schedule_as_known"] == "unverified"
         plan["availability"]["event_schedule_as_known"] = "observed"
     _assert_forged_refusal(source, registered, doc, monkeypatch)
+
+
+@pytest.mark.parametrize("operation", ["publish", "refusal", "replay", "export"])
+@pytest.mark.parametrize("no_ledger", [False, True])
+def test_magnitude_outcome_paths_refuse_before_result_access(source, monkeypatch, tmp_path, operation, no_ledger):
+    """A valid preregistration permits read/admission, but only private conflict evidence."""
+    registered = _call(source)
+    assert native.read_native_registration(source.conn, source.store, source.spec) == registered
+    assert _call(source, admit=True) == registered
+    before, objects = _catalog(source.conn), _objects(source.store)
+    ledger = tmp_path / "unused" / "ledger.csv"
+    refusal = canonical_json({"schema_version": "native_experiment_refusal.v1.0",
+        "failure_code": "EXPERIMENT_IDENTITY_CONFLICT", "request": {"run_id": registered.run_id},
+        "variant_id": None}).encode()
+    ref = artifact_reference(refusal, "native_experiment_refusal.v1.0")
+    publish = source.store.publish_bytes
+    def private_only(payload, *, schema_ref):
+        assert payload == refusal and schema_ref == ref.schema_ref
+        return publish(payload, schema_ref=schema_ref)
+    monkeypatch.setattr(source.store, "publish_bytes", private_only)
+    monkeypatch.setattr(source.repository, "scan", _forbid)
+    for name in ("_evidence", "_reconcile", "_report_path", "ledger_append"):
+        monkeypatch.setattr(outcomes, name, _forbid)
+    method = {"publish": outcomes.publish_native_outcome, "refusal": outcomes.publish_native_outcome,
+              "replay": outcomes.replay_native_outcome, "export": outcomes.export_native_report}[operation]
+    options = ({"report": "Synthetic result must not publish", "attempted": True} if operation == "publish"
+               else {"problem": ops_fail("FEATURE_LOOKAHEAD", "synthetic").problem} if operation == "refusal" else {})
+    with pytest.raises(OpsError) as caught:
+        method(source.conn, source.store, registered, no_ledger=no_ledger, ledger_path=ledger, **options)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert caught.value.problem.details == {"refusal_ref": to_document(ref)}
+    assert source.store.read_verified(ref) == refusal
+    assert _catalog(source.conn) == before
+    assert _objects(source.store) == {**objects, ref.storage_key: refusal}
+    assert not ledger.parent.exists() and not (source.store.root / "native_reports").exists()
+
+
+@pytest.mark.parametrize("declared", [False, True])
+@pytest.mark.parametrize("no_ledger", [False, True])
+def test_older_registration_schemas_keep_complete_outcome_cycle(source, tmp_path, declared, no_ledger):
+    """The outcome schema fence preserves both existing schemas and recording modes."""
+    registered = _call(source, magnitude_training_start=None, final_read=_declaration() if declared else None)
+    assert registered.document["schema_version"] == "native_experiment_registration.v1." + str(int(declared))
+    options = {"no_ledger": no_ledger, "ledger_path": tmp_path / "ledger.csv"}
+    result = outcomes.publish_native_outcome(source.conn, source.store, registered,
+        report="Synthetic compatibility report", attempted=True, **options)
+    assert outcomes.replay_native_outcome(source.conn, source.store, registered, **options) == result
+    path = outcomes.export_native_report(source.conn, source.store, registered, **options)
+    assert path.read_text() == "Synthetic compatibility report"
+    assert options["ledger_path"].exists() is not no_ledger
