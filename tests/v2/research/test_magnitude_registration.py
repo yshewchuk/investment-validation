@@ -712,3 +712,26 @@ def test_empty_evaluation_or_training_fold_never_publishes(source, monkeypatch, 
         _call(source, spec=replace(source.spec, folds=years), magnitude_training_start=start)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
     assert _catalog(source.conn) == before and _objects(source.store) == objects
+
+
+@pytest.mark.parametrize("kind", ["horizon-value", "calendar-digest", "schedule-availability"])
+def test_clock_values_and_schedule_status_have_independent_refusal_oracles(source, monkeypatch, kind):
+    """Keep calendar agreement, wire types and other descriptors valid for each guard."""
+    registered = _call(source)
+    doc = registered.document
+    plan = doc["magnitude_plan"]
+    if kind == "horizon-value":
+        clock = plan["events"][0]["forecasts"][0]
+        assert clock["horizon_sessions"] == 5
+        clock["horizon_sessions"] = 4
+        assert type(clock["horizon_sessions"]) is int
+    elif kind == "calendar-digest":
+        for event in plan["events"]:
+            for clock in event["forecasts"]:
+                clock["calendar_id"] = "not-a-digest"
+        assert {clock["calendar_id"] for event in plan["events"]
+                for clock in event["forecasts"]} == {"not-a-digest"}
+    else:
+        assert plan["availability"]["event_schedule_as_known"] == "unverified"
+        plan["availability"]["event_schedule_as_known"] = "observed"
+    _assert_forged_refusal(source, registered, doc, monkeypatch)
