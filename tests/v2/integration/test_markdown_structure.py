@@ -1,4 +1,6 @@
 """Tests for checks/markdown_structure.py: one failing and one passing fixture per rule."""
+# packages: ops
+
 import subprocess
 
 import pytest
