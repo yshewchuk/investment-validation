@@ -38,7 +38,9 @@ def reserve(conn, claim, account, calls, *, clock):
                      "VALUES (?,?,?,?)", (account, claim.attempt_id, claim.fence, calls))
 
 
-def before_request(conn, claim, account, *, clock):
+def before_request(conn, claim, account, *, clock, minimum_interval_seconds=0):
+    if type(minimum_interval_seconds) is not int or minimum_interval_seconds < 0:
+        raise fail("INVALID_REQUEST", "invalid provider pacing interval")
     with transaction(conn):
         verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
         row = conn.execute("SELECT r.*,a.blocked_code,a.next_eligible_at FROM provider_reservations r "
@@ -55,6 +57,9 @@ def before_request(conn, claim, account, *, clock):
                      "WHERE account = ? AND attempt_id = ?", (account, claim.attempt_id))
         conn.execute("UPDATE provider_accounts SET remaining = MAX(0,remaining-1), uncertain = 1 "
                      "WHERE account = ?", (account,))
+        if minimum_interval_seconds:
+            conn.execute("UPDATE provider_accounts SET next_eligible_at = ? WHERE account = ?",
+                         (format_timestamp(clock.now() + timedelta(seconds=minimum_interval_seconds)), account))
 
 
 def budgeted_fetcher(fetcher, *, catalog_path, attempt_id, fence, account, clock):
@@ -73,7 +78,10 @@ def budgeted_fetcher(fetcher, *, catalog_path, attempt_id, fence, account, clock
     return fetch
 
 
-def record_response(conn, account, status, *, clock, remaining=None, empty=False, final=True):
+def record_response(conn, account, status, *, clock, remaining=None, empty=False, final=True,
+                    fence_check=None, minimum_interval_seconds=0):
+    if type(minimum_interval_seconds) is not int or minimum_interval_seconds < 0:
+        raise fail("INVALID_REQUEST", "invalid provider pacing interval")
     code = {401: "CREDENTIAL_INVALID", 403: "CREDENTIAL_INVALID",
             404: "SOURCE_NOT_FOUND", 429: "RATE_LIMITED"}.get(status)
     if status >= 500:
@@ -81,6 +89,12 @@ def record_response(conn, account, status, *, clock, remaining=None, empty=False
     if 200 <= status < 300:
         code = "SOURCE_NOT_FINAL" if not final else ("SOURCE_EMPTY" if empty else None)
     with transaction(conn):
+        if fence_check is not None:
+            fence_check()
+        if minimum_interval_seconds:
+            stamp = format_timestamp(clock.now() + timedelta(seconds=minimum_interval_seconds))
+            conn.execute("UPDATE provider_accounts SET next_eligible_at = MAX(COALESCE(next_eligible_at,''), ?) "
+                         "WHERE account = ?", (stamp, account))
         if remaining is not None:
             if remaining < 0:
                 raise fail("INVALID_REQUEST", "negative quota header")
@@ -90,5 +104,6 @@ def record_response(conn, account, status, *, clock, remaining=None, empty=False
             conn.execute("UPDATE provider_accounts SET blocked_code = ? WHERE account = ?", (code, account))
         if code == "RATE_LIMITED":
             stamp = format_timestamp(clock.now() + timedelta(seconds=65))
-            conn.execute("UPDATE provider_accounts SET next_eligible_at = ? WHERE account = ?", (stamp, account))
+            conn.execute("UPDATE provider_accounts SET next_eligible_at = MAX(COALESCE(next_eligible_at,''), ?) "
+                         "WHERE account = ?", (stamp, account))
     return code

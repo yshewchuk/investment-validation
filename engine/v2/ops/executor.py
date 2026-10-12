@@ -77,6 +77,8 @@ def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds
         envelope = dict(worker=kind.worker, parameters=claim.spec.parameters,
                         staging=str(staging), result_fd=write_fd, job_id=claim.job_id,
                         attempt_id=claim.attempt_id, fence=claim.fence,
+                        catalog_path=next(row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"),
+                        objects_root=str(store.root),
                         cpu_ids=list(claim.resources.assigned_cpu_ids), legacy_root=legacy,
                         **(envelope_extra or {}))
         child.stdin.write(json.dumps(envelope).encode() + b"\n")

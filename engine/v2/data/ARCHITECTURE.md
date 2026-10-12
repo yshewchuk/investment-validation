@@ -193,6 +193,13 @@ accessor only.
 
 ## Outputs
 
+`incremental.cache_raw_receipt` accepts an optional caller-owned `fence_check`.
+It runs inside the raw receipt's own write transaction before insertion or
+existing-receipt return; omitted checks preserve unfenced callers. Object
+verification/publication remains outside that transaction. A refused fence
+can leave unreferenced immutable bytes but no new catalog receipt. Existing
+identical content retains its original receipt metadata and acquisition time.
+
 **Original panel COPY identity.** Offline size-fold authoring uses `Repository`
 and the existing object verifier to bind the named committed snapshot's
 `feature_panel` dataset version to one original object and full byte hash.
@@ -276,8 +283,8 @@ never imports this package (root doc §3).
 
 **Callers.** `engine.v2.ops` (7.0) — schema migrations, snapshot commit for
 the Phase 1 fence, snapshot import/promotion, nightly barrier read plans,
-`daily_market`/`computed_moves`/`price_history` refresh submission (only
-`forward_calendar_store.py` supplies a `fence_check`). `engine.v2.serving`
+`daily_market`/`computed_moves`/`price_history` refresh submission (`forward_calendar_store.py`
+supplies a candidate `fence_check`; Massive acquisition fences raw receipts). `engine.v2.serving`
 (7.0) imports `repository.Repository`. `engine.v2.research` (6.0/7.0) reads
 pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 (no `fence_check`) and `incremental_tables.revision_hash`/`GenericRevision`.
