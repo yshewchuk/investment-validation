@@ -158,6 +158,7 @@ tests = ["tests/v2/models/test_v2_models_no_fit.py", "tests/test_v2_models_no_fi
 
 [modules.canonical]
 why = "Every receipt, artifact and corpus identity is a content_hash over canonical_json; a number-layout or key-order slip re-keys everything or collides two different values."
+scans_tree = "engine/v2/"
 mutate = ["engine/v2/foundation/canonical.py"]
 tests = ["tests/v2/foundation/test_v2_ops_foundation.py", "tests/test_v2_data_contracts.py",
          "tests/v2/integration/test_mutation_registration_selection.py"]
@@ -217,6 +218,7 @@ tests = [
 
 [modules.foundation]
 why = "Typed values, artifact identities and the clock every v2 layer builds on; a slip in a validator or identity helper is inherited everywhere."
+scans_tree = "engine/v2/"
 mutate = [
     "engine/v2/foundation/*.py",
 ]
@@ -275,6 +277,7 @@ tests = [
 
 [modules.diagnosis]
 why = "Record comparator, tolerances and receipts decide whether two runs agree; a weakened comparison hides a parity break."
+scans_tree = "engine/v2/"
 mutate = [
     "engine/v2/diagnosis/*.py",
     "engine/v2/parity/receipt.py",
