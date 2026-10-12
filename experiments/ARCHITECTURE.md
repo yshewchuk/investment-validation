@@ -81,12 +81,6 @@ Schedule/source availability stays unverified reconstruction; quantile calibrati
 market/history features, search and final evaluation are not implemented.
 The existing native report/outcome/completion, ledger and replay lifecycle applies;
 no-ledger runs still persist smoke evidence. Replay admits metadata but does not refit.
-Use a spec with runner `experiments/v2_prediction.py`, `computed_moves`, seed `0`,
-empty economics and ordered year folds. Both `register` and `run` take
-`--target absolute_move --magnitude-training-start YYYY-MM-DD
---magnitude-labels-before YYYY-MM-DD` plus the existing required spec/catalog/store
-and holdout-month options. Run first with `--no-ledger`; recorded execution
-requires an explicit `--ledger`. These commands never download providers.
 
 | Magnitude registration condition | Outcome |
 |---|---|

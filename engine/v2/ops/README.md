@@ -127,6 +127,9 @@ the engine import graph; it introduces no peer-layer engine dependency.
 `experiments/native_outcomes.py` consumes `catalog.transaction` and
 `errors.OpsError`/`fail` for catalog-owned publication and typed refusal.
 It owns short catalog transactions; artifact and CSV effects stay outside them.
+`experiments/magnitude_inputs.py` consumes `native_registration.magnitude_execution_document`;
+`experiments/magnitude_report.py` consumes `native_registration.validate_magnitude_execution`
+and `errors.fail` before computing/reporting the admitted mean baseline.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection

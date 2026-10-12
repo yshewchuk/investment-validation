@@ -155,6 +155,9 @@ and `experiments/EXP-186_.../run.py` (for `_replay_run.events_frame`)
 registered structures and replay interfaces for read-only smoke pricing.
 `experiments/native_registration.py` consumes population admission, the pure
 magnitude window and the metadata-only planner to bind research registrations.
+`experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`.
+`experiments/magnitude_report.py` consumes that preflight, `load_magnitude_targets`
+and `qualify_magnitude_training_targets` for the admitted mean baseline.
 
 <!-- consumers: none -->
 
