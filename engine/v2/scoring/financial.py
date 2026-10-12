@@ -54,8 +54,11 @@ def _calendar_date(value: Any) -> date | None:
 
 
 def days_to_print(event_date: Any, entry_date: Any) -> float | None:
-    """Calendar days from the decision (entry) date to the announcement: legacy
-    engine/features.py entry_feature_frame, (event_date - entry_date).dt.days as float."""
+    """Calendar days from the decision date to the announcement: legacy
+    engine/features.py:1166-1168, (event_date - as_of_column).dt.days as float.
+    The second parameter is the decision date (``as_of``), NOT the entry date;
+    the name is kept for callers. engine/score.py:2654 passes the decision date
+    (as_of_column="decision_date")."""
     if event_date is None or entry_date is None:
         return None
     event = _calendar_date(event_date)
