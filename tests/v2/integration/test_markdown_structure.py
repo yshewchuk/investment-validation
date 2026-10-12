@@ -339,6 +339,12 @@ def test_closer_follows_commonmark_not_the_opener_regex():
 
 def test_the_versioned_pre_commit_hook_runs_the_markdown_lint():
     hook = (ms.ROOT / "checks" / "hooks" / "pre-commit").read_text(encoding="utf-8")
-    assert 'checks/markdown_structure.py" --quiet' in hook
+    live = [ln.strip() for ln in hook.splitlines() if not ln.strip().startswith("#")]
+    assert 'python3 "$ROOT/checks/markdown_structure.py" --quiet' in live
+    # A commented-out invocation must not count.
+    commented = hook.replace('python3 "$ROOT/checks/markdown_structure.py" --quiet',
+                             '# python3 "$ROOT/checks/markdown_structure.py" --quiet')
+    live_commented = [ln.strip() for ln in commented.splitlines() if not ln.strip().startswith("#")]
+    assert 'python3 "$ROOT/checks/markdown_structure.py" --quiet' not in live_commented
 
 
