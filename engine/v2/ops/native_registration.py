@@ -27,7 +27,7 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None):
         evidence = json.loads(row["evidence_json"])
         ref = from_document(ArtifactRef, evidence["native_registration"])
         if (ref.schema_ref not in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
-                                  "native_experiment_registration.v1.2")
+                                  "native_experiment_registration.v1.2", "native_experiment_registration.v1.3")
                 or (expected_ref is not None and ref != expected_ref)):
             raise ValueError
         binding = store.read_verified(ref)
@@ -52,13 +52,25 @@ def _matches(row, evidence, ref, binding, document):
             and type(evidence["planned_variants"]) is int and evidence["planned_variants"] == 1)
 
 
+def validate_magnitude_execution(document):
+    """Check the executable envelope only; catalog ownership and admission remain separate."""
+    try:
+        if document["schema_version"] == "native_experiment_registration.v1.3" and _magnitude_binding(document):
+            return
+    except (KeyError, TypeError, ValueError, OverflowError):
+        pass
+    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "magnitude execution requires a sealed v1.3 plan")
+
+
 def _magnitude_binding(document):
     """Check stored plan integrity and cross-links, never reconstruct or authorize."""
-    if document["schema_version"] != "native_experiment_registration.v1.2":
-        return not {"magnitude_request", "magnitude_plan"}.intersection(document)
+    executable = document["schema_version"] == "native_experiment_registration.v1.3"
+    if document["schema_version"] not in ("native_experiment_registration.v1.2",
+                                           "native_experiment_registration.v1.3"):
+        return not {"magnitude_request", "magnitude_plan", "magnitude_execution"}.intersection(document)
     if set(document) != {"schema_version", "spec_hash", "execution_plan", "snapshot", "scope",
                          "source_closure", "environment", "event_ids", "holdouts",
-                         "magnitude_request", "magnitude_plan"}:
+                         "magnitude_request", "magnitude_plan"} | ({"magnitude_execution"} if executable else set()):
         return False
     plan, request = document["magnitude_plan"], document["magnitude_request"]
     if not isinstance(plan, dict) or not isinstance(request, dict):
@@ -69,7 +81,36 @@ def _magnitude_binding(document):
                      "folds", "availability", "plan_id"}:
         return False
     return (_magnitude_metadata(plan) and _magnitude_sources(plan, document["snapshot"])
-            and _magnitude_context(document, plan, request))
+            and _magnitude_context(document, plan, request)
+            and (not executable or _magnitude_execution(document, plan)))
+
+
+def magnitude_execution_document(labels_before):
+    """Declare the fixed baseline policy; the evaluation clock has no implicit default."""
+    try:
+        if not _day(labels_before):
+            raise ValueError
+    except (ValueError, TypeError, OverflowError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "a canonical magnitude evaluation cutoff is required") from None
+    return {"schema_version": "magnitude_execution.v1", "evaluation_labels_before": labels_before,
+            "training_labels": "omit_skipped_unavailable_or_late_before_numeric_parse",
+            "evaluation_labels": "complete_finite_strictly_before_cutoff",
+            "model": "fold_local_arithmetic_mean", "features": ["constant_intercept"],
+            "primary_metric": "event_pooled_rmse", "secondary_metrics": ["mae"],
+            "quantile_calibration": "not_implemented"}
+
+
+def _magnitude_execution(document, plan):
+    """Validate sealed execution policy without reading labels or granting execution."""
+    execution = document["magnitude_execution"]
+    if (not isinstance(execution, dict) or not _day(execution.get("evaluation_labels_before"))
+            or execution != magnitude_execution_document(execution["evaluation_labels_before"])):
+        return False
+    evaluation = {key for fold in plan["folds"] for key in fold["evaluation_event_ids"]}
+    return (type(document["execution_plan"]["seed"]) is int and document["execution_plan"]["seed"] == 0
+            and document["execution_plan"]["economic_params"] == {}
+            and all(event["event_date"] < execution["evaluation_labels_before"]
+                    for event in plan["events"] if event["event_id"] in evaluation))
 
 
 def _text(value):
