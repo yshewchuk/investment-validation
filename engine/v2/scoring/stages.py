@@ -3017,8 +3017,9 @@ def _check_pricing_boundary(
     )
     # dte_entry is the SUCCESSFULLY PRICED first leg's days to expiry (legacy
     # engine/score.py:2451 `int(priced.legs[0].dte)`). On a pricing/geometry
-    # refusal nothing is written, and a captured primitive (the chooser stages
-    # dte_entry) is never overwritten with None.
+    # refusal nothing is written, and a value already captured in the context
+    # is never overwritten with None. dte_entry is scorer-computed from the
+    # priced legs and quote date, never projected from source inputs.
     if pricing.refusal is None and geometry.refusal is None and pricing.legs:
         computed_dte = financial.dte_entry(
             pricing.legs[0].expiry, values.get("quote_date"))

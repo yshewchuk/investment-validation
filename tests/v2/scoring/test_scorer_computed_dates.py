@@ -488,8 +488,8 @@ def test_entry_cost_pct_overlay():
 def test_missing_quote_date_keeps_captured_dte_entry():
     values = assemble_native_values(_inputs(
         context_overrides={"dte_entry": 55, "quote_date": _DROP}))
-    # No quote_date means no computed dte_entry, so the captured primitive
-    # survives: it must not be overwritten with None.
+    # No quote_date means no computed dte_entry, so the value already in the
+    # context survives: it must not be overwritten with None.
     assert values["dte_entry"] == 55
 
 

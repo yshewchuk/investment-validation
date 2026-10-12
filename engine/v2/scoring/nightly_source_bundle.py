@@ -416,8 +416,9 @@ def _is_null_forecast_value(value: Any) -> bool:
 #: from quotes, days_to_print/dte_entry from staged dates. They are not
 #: projected from tier4/panel rows. Only entry_cost_pct is also an answer field
 #: that source_inputs forbids (projecting it would make every row refuse);
-#: dte_entry stays allowed in source inputs because the chooser stages it as a
-#: captured primitive.
+#: days_to_print/dte_entry are not in that denylist, but the scorer computes
+#: them (dte_entry from the priced legs and quote date) and they are never
+#: projected from source inputs.
 _SCORER_COMPUTED_FEATURES = frozenset({
     "entry_cost_pct", "days_to_print", "dte_entry",
 })
