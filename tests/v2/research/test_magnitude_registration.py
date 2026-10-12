@@ -1,5 +1,6 @@
 """Native magnitude preregistration over real synthetic metadata, never outcomes."""
 import json
+import inspect
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -143,13 +144,15 @@ def test_absent_outcomes_table_is_not_a_registration_dependency(source):
 @pytest.mark.parametrize("changes", [
     {"magnitude_training_start": "2024-01-01"}, {"magnitude_training_start": "2023-02-30"},
     {"magnitude_training_start": True}, {"magnitude_training_start": []},
-    {"final_read": {}}, {"spec_changes": {"price_source": "option_chains"}},
+    {"valid_final_read": True}, {"spec_changes": {"price_source": "option_chains"}},
     {"spec_changes": {"folds": ("fold",)}}, {"spec_changes": {"folds": ("2025", "2024")}},
 ])
 @pytest.mark.parametrize("admit", [False, True])
 def test_bad_declarations_refuse_before_any_repository_access(source, monkeypatch, changes, admit):
     """Window and source validation precede pins, scans and registration effects."""
     changes = dict(changes)
+    if changes.pop("valid_final_read", False):
+        changes["final_read"] = _declaration()
     spec = replace(source.spec, **changes.pop("spec_changes", {}))
     before, objects = _catalog(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "resolve_pinned", _forbid)
@@ -505,3 +508,154 @@ def test_rehashed_membership_permutations_refuse_before_scans(source, monkeypatc
     with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
+
+
+def _rehash_clocks_and_plan(doc):
+    """Repair only digests; intentional cross-link changes remain independently testable."""
+    plan = doc["magnitude_plan"]
+    for event in plan["events"]:
+        for clock in event["forecasts"]:
+            clock["cutoff_id"] = content_hash({key: value for key, value in clock.items() if key != "cutoff_id"})
+    plan["plan_id"] = content_hash({key: value for key, value in plan.items() if key != "plan_id"})
+
+
+def _assert_forged_refusal(source, registered, doc, monkeypatch):
+    """Exercise public stored verification first, before fresh admission can mask a guard."""
+    _rehash_clocks_and_plan(doc)
+    forged = _rewrite(source, registered, doc)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(source.repository, "scan", _forbid)
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        native.verify_native_registration(source.conn, source.store, forged)
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        _call(source, admit=True)
+    assert _catalog(source.conn) == before and _objects(source.store) == objects
+
+
+@pytest.mark.parametrize("link", ["events", "years", "snapshot", "holdout_as_of_month",
+    "random_membership_version", "rolling_membership_version"])
+def test_outer_links_refuse_with_an_otherwise_unchanged_valid_plan(source, monkeypatch, link):
+    """Alter only the enclosing link so nested plan-shape checks cannot mask it."""
+    registered = _call(source)
+    doc = registered.document
+    if link == "events":
+        doc["event_ids"] = doc["event_ids"][1:]
+    elif link == "years":
+        doc["execution_plan"]["folds"] = ["2025"]
+    elif link == "snapshot":
+        tables = ("earnings_events", "daily_market")
+        other = commit_tables(source.conn, FakeClock(),
+            {name: source.repository.fragment_records(source.snapshot, name) for name in tables},
+            {name: source.repository.table_contract(source.snapshot, name) for name in tables},
+            scope="other", receipt_id="other", attempt_id="other", store=source.store)
+        doc["snapshot"] = to_document(other)
+        assert other.snapshot_id != source.snapshot.snapshot_id
+    else:
+        doc["holdouts"][link] = "2026-02" if link == "holdout_as_of_month" else "different-membership.v1"
+    assert doc["magnitude_plan"] == registered.document["magnitude_plan"]
+    _assert_forged_refusal(source, registered, doc, monkeypatch)
+
+
+@pytest.mark.parametrize("kind", ["reversed", "duplicate"])
+def test_year_order_refuses_after_repairing_fold_and_outer_declarations(source, monkeypatch, kind):
+    """Corresponding folds and all year declarations agree except for the ordering rule."""
+    registered = _call(source, spec=replace(source.spec, folds=("2024", "2025")))
+    doc = registered.document
+    plan = doc["magnitude_plan"]
+    if kind == "reversed":
+        plan["evaluation_years"].reverse()
+        plan["folds"].reverse()
+    else:
+        plan["evaluation_years"].insert(0, plan["evaluation_years"][0])
+        plan["folds"].insert(0, plan["folds"][0])
+    doc["magnitude_request"]["evaluation_years"] = plan["evaluation_years"]
+    doc["execution_plan"]["folds"] = plan["evaluation_years"]
+    assert [fold["year"] for fold in plan["folds"]] == plan["evaluation_years"]
+    _assert_forged_refusal(source, registered, doc, monkeypatch)
+
+
+@pytest.mark.parametrize("kind", ["duplicate-event", "blank-event-id", "null-ticker", "blank-ticker",
+    "clock-schema", "clock-session", "clock-event-date", "clock-short", "clock-long", "clock-bool",
+    "clock-anchor-null", "clock-anchor-compact", "empty-train"])
+def test_independent_event_clock_and_training_guards(source, monkeypatch, kind):
+    """Repair unrelated identities/cardinalities instead of relying on secondary refusals."""
+    registered = _call(source)
+    doc = registered.document
+    plan = doc["magnitude_plan"]
+    event = plan["events"][0]
+    clocks = event["forecasts"]
+    if kind == "duplicate-event":
+        plan["events"].insert(0, event)
+        doc["event_ids"] = sorted(item["event_id"] for item in plan["events"])
+    elif kind == "blank-event-id":
+        old, event["event_id"] = event["event_id"], ""
+        doc["event_ids"] = sorted(item["event_id"] for item in plan["events"])
+        plan["folds"][0]["training_candidate_event_ids"] = ["" if key == old else key
+            for key in plan["folds"][0]["training_candidate_event_ids"]]
+    elif kind.endswith("ticker"):
+        event["ticker"] = None if kind == "null-ticker" else ""
+    elif kind in ("clock-schema", "clock-session", "clock-event-date"):
+        key, value = {"clock-schema": ("schema_version", "earnings_forecast_cutoff.v2"),
+            "clock-session": ("session", "BMO"), "clock-event-date": ("event_date", "2023-12-11")}[kind]
+        clocks[0][key] = value
+    elif kind == "clock-short":
+        clocks.pop()
+    elif kind == "clock-long":
+        clocks.append(dict(clocks[-1]))
+    elif kind == "clock-bool":
+        assert clocks[-1]["horizon_sessions"] == 1
+        clocks[-1]["horizon_sessions"] = True
+    elif kind.startswith("clock-anchor"):
+        for clock in clocks:
+            clock["pre_announcement_close"] = None if kind.endswith("null") else "20231212"
+    else:
+        plan["folds"][0]["training_candidate_event_ids"] = []
+    _assert_forged_refusal(source, registered, doc, monkeypatch)
+
+
+@pytest.mark.parametrize("admit", [False, True])
+def test_no_caller_supplied_plan_parameter(source, monkeypatch, admit):
+    """A valid prebuilt plan cannot bypass the public metadata reconstruction boundary."""
+    registered = _call(source)
+    method = native.require_native_registration if admit else native.register_native
+    parameters = inspect.signature(method).parameters
+    assert "magnitude_plan" not in parameters
+    assert all(parameter.kind != inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    before, objects = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(source.repository, "resolve_pinned", _forbid)
+    with pytest.raises(TypeError):
+        _call(source, admit=admit, magnitude_plan=registered.document["magnitude_plan"])
+    assert _catalog(source.conn) == before and _objects(source.store) == objects
+
+
+def test_prediction_cli_does_not_expose_magnitude_registration(monkeypatch, capsys):
+    """The existing CLI refuses the new-mode option before constructing a store."""
+    from experiments import v2_prediction as cli
+    monkeypatch.setattr(cli.foundation, "ArtifactStore", _forbid)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["register", "--spec", "unused", "--catalog", "unused", "--store-root", "unused",
+                  "--as-of-month", "2026-01", "--magnitude-training-start", "2023-12-10"])
+    assert caught.value.code == 2
+    assert "unrecognized arguments: --magnitude-training-start 2023-12-10" in capsys.readouterr().err
+
+
+def test_registration_effects_are_only_its_binding_and_reservation(source, monkeypatch):
+    """Poison shared fit/history execution and compare complete pre-registration state."""
+    from engine.v2.features import panel_math
+    from engine.v2.ops import experiment_folds
+    from engine.v2.research import event_history, magnitude_features
+    from experiments import prediction_report
+    for module, name in ((experiment_folds, "fit_walk_forward_fold"), (prediction_report, "fit_walk_forward_fold"),
+            (panel_math, "history_features"), (event_history, "history_features"),
+            (event_history, "load_event_history"), (magnitude_features, "load_event_history")):
+        monkeypatch.setattr(module, name, _forbid)
+    before, objects = _catalog(source.conn), _objects(source.store)
+    registered = _call(source)
+    after, published = _catalog(source.conn), _objects(source.store)
+    changed = {table for table in before.keys() | after.keys() if before.get(table) != after.get(table)}
+    assert changed == {"hypotheses", "experiment_runs"}
+    assert all(len(after[table]) == len(before[table]) + 1 for table in changed)
+    assert all(published[path] == data for path, data in objects.items())
+    assert [published[path] for path in published.keys() - objects.keys()] == [registered.binding_json]
+    assert _call(source, admit=True) == registered
+    assert _catalog(source.conn) == after and _objects(source.store) == published
