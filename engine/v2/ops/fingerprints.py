@@ -90,6 +90,8 @@ MODEL_PICKLE_MODULES = (
 #: git-tracked code, never anything under ``data/`` or a secret — enforced by
 #: :func:`_assert_code_asset_path_safe`, not just convention.
 CODE_ASSET_FILES: tuple[str, ...] = (
+    # Fixed -m child entrypoint: no Python import in the executor names it.
+    "experiments/native_gate_entrypoint.py",
     "engine/v2/data/legacy_annotations.json",
     # engine/models/training/chooser.py dynamically loads this file via
     # importlib.util.spec_from_file_location (not a static import, so the
