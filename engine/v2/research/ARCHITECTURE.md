@@ -255,9 +255,10 @@ features refuse `EXPERIMENT_VARIANT_FAILED` rather than reaching a model.
 Provenance explicitly says reconstructed date bounds, with event-schedule
 as-known and source-publication evidence unverified. Calendar reconstruction
 and source hashes do not establish that evidence; strict PIT experiment
-admission remains a later prerequisite. This seam has no fitting, target
-join, CLI, provider, report, ledger or final-read caller. Repository failures
-propagate with no cache, retry, write or partial result.
+admission remains a later prerequisite. The explicit stored-history build
+command now consumes this seam; fitting, target joins, providers, reports,
+ledger and final-read callers remain absent. The adapter itself has no cache,
+retry, write or partial result; Repository failures propagate.
 
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
 evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
@@ -563,6 +564,9 @@ not a claim that feature bytes were untouched. Missing/mixed/stale contexts or
 malformed values refuse the whole read. No historical outcomes or arithmetic are
 used by the reader. Native inspected catalog metadata is the trust anchor, not
 independent attestation against an arbitrary malicious catalog writer.
+Context/receipt drift refuses `IDENTITY_CONFLICT`; unprovable physical isolation
+refuses `HOLDOUT_ACCESS_DENIED`; bad stored schema/metadata/missingness refuses
+`CONTRACT_MISMATCH`. Native catalog, object and source-admission errors propagate.
 Schedule-as-known and source-publication availability remain unverified
 reconstruction. This prerequisite grants no experiment/final-read authority and
 does not change registration v1.0–v1.3 or the fixed-intercept baseline.

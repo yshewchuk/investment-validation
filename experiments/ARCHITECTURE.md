@@ -80,7 +80,7 @@ Primary RMSE pools equally weighted events, never fold RMSEs; MAE and per-horizo
 metrics are also reported. Numerically scaled errors avoid square overflow.
 The report binds every opened object, training omission, cutoff and sealed plan.
 Schedule/source availability stays unverified reconstruction; quantile calibration,
-market/history features, search and final evaluation are not implemented.
+market/history-feature model fitting, search and final evaluation are not implemented.
 The existing native report/outcome/completion, ledger and replay lifecycle applies;
 no-ledger runs still persist smoke evidence. Replay admits metadata but does not refit.
 
