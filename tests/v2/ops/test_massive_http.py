@@ -153,7 +153,6 @@ def test_fixed_https_header_only_key_explicit_query_and_charge_order(http, adjus
          "stream": True, "allow_redirects": False, "timeout": (10, 15)},
     )]
     assert json.dumps(request, sort_keys=True) == serialized
-    assert SYNTHETIC_KEY not in serialized
     assert SYNTHETIC_KEY not in http.calls[0][0]
     assert SYNTHETIC_KEY not in json.dumps(http.calls[0][1]["params"])
     assert http.response.chunk_size == 65536

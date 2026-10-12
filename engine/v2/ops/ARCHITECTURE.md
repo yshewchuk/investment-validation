@@ -1118,13 +1118,13 @@ Stored integrity is not current-plan reconstruction or read authority; ops impor
 |---|---|---|
 | `sqlite3` | the operations catalog | — |
 | Local filesystem | artifact store, snapshot roots, legacy px/fetch-cache trees | legacy trees are read only through `legacy_adapter.py` |
+| `massive-stocks` provider account | [bounded Basic raw acquisition](stores/massive/ARCHITECTURE.md) | keyed; executor allowlist forwards only `MASSIVE_API_KEY`; always paced by its versioned policy |
 | `orats-daily-market` provider account | ORATS daily-market rows | keyed, reads `ORATS_API_KEY`; credentials are never held here, only remaining-call/reserve counts |
 | `nasdaq` provider account (`providers/nasdaq_calendar.py`) | forward-calendar rows via Nasdaq's public `api.nasdaq.com/api/calendar/earnings` endpoint, one date per call | unmetered, keyless (empty `PROVIDER_CREDENTIAL_VARIABLES`); still budget-tracked like a keyed account; needs a browser user-agent (the endpoint 403s the default client UA) |
 | `yfinance` provider account (`providers/yfinance_edge.py`) | quote/earnings-date rows via the third-party `yfinance` library (`Ticker.history`/`Ticker.get_earnings_dates`, one call per ticker) | unmetered, keyless; `yfinance` is imported lazily inside the default callables, so importing the module touches no network |
 | `pandas`/`numpy`/`scikit-learn` | `native_board_universe.py`'s events-table filter, `BoardRequest.event_date` typing, and its `isinstance(v, (numbers.Number, np.number))` scalar-date guard; `fit_walk_forward_fold`'s estimator and threshold fitting | already transitive dependencies of this package; no file, network, or database access of their own; `scikit-learn` is imported lazily inside that fitting only, so importing the package touches no sklearn code |
 
-All three provider accounts are operator-provisioned budget rows so the
-shared scheduler reserves against them uniformly, keyed or not.
+All four provider accounts are operator-provisioned budget rows, reserved uniformly whether keyed or not.
 
 ## Failure semantics
 

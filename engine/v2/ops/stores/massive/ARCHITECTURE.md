@@ -4,7 +4,7 @@
 Store-tier owner of one explicit US-stock daily OHLCV, split or dividend request under the versioned Basic policy. No research read, normalization, snapshot publication, pagination, refresh or fallback provider.
 
 ## Interfaces and dependencies
-`acquisition.Parameters`, `scope_plan`, `job_kind` and `run` are internal ops interfaces. `ops.massive_acquire` submits; `stages` registers; `worker.dispatch` invokes `run`. `massive_plan` owns canonical request/policy/cache validation, `provider_budget` account admission/accounting, `lifecycle` fences, and `data.incremental.cache_raw_receipt` raw persistence. `providers.massive` owns the fixed HTTPS edge; it depends on Requests, stdlib and `ops.errors` only.
+`acquisition.Parameters`, `scope_plan`, `job_kind` and `run` are internal ops interfaces. `ops.massive_acquire` submits; `stages` registers; `worker.dispatch` invokes `run`. `massive_plan` owns canonical request/policy/cache validation, `provider_budget` account admission/accounting, `lifecycle` fences, and `data.incremental.cache_raw_receipt` raw persistence. `providers.massive` owns the fixed HTTPS edge; it depends on Requests, stdlib, `ops.errors` and the shared 16 MiB limit in `providers.massive_policy`, which the planner also uses.
 
 ## Inputs and outputs
 One strict ticker/dataset/date/adjustment scope, policy version and expected request hash; a fixed source account and one reserved call. Trusted executor context supplies the catalog, object store and attempt/fence, never submission paths. The standalone submitter requires an initialized catalog and creates only a shadow job; `ops serve` executes it later.

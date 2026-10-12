@@ -222,12 +222,15 @@ def test_unusable_bodies_never_commit_complete_receipts(harness, body, code):
     attempt = claim(h)
     def fetch(_, charge):
         charge()
+        h.clock.advance(5)
         return 200, body
     with pytest.raises(OpsError) as error:
         run(h, attempt, fetch)
     assert error.value.code == code
     assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 0
     assert not h.store.root.exists()
+    assert h.conn.execute("SELECT remaining,uncertain,next_eligible_at FROM provider_accounts").fetchone()[:] == (
+        9, 1, "2026-09-12T00:00:18.000000Z")
 
 
 @pytest.mark.parametrize("when", ["before_charge", "during_fetch", "during_publication"])
@@ -257,6 +260,29 @@ def test_cancellation_fences_raw_catalog_visibility(harness, monkeypatch, when):
     assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 0
     assert not (h.root / attempt.attempt_id / "massive_acquisition.json").exists()
     assert h.conn.execute("SELECT used_calls FROM provider_reservations").fetchone()[0] == (when != "before_charge")
+
+
+@pytest.mark.parametrize("status", [200, 401, 429])
+def test_cancelled_fetch_cannot_mutate_accounting_after_charge(harness, status):
+    h = harness
+    enqueue(h)
+    attempt = claim(h)
+    before = []
+    def fetch(_, charge):
+        charge()
+        before.append(tuple(h.conn.execute("SELECT * FROM provider_accounts").fetchone()))
+        h.clock.advance(5)
+        request_cancel(h.conn, attempt.job_id, expected_attempt_id=attempt.attempt_id, clock=h.clock)
+        return status, BODY
+    with pytest.raises(OpsError) as error:
+        run(h, attempt, fetch)
+    assert error.value.code == "CANCELLED"
+    assert tuple(h.conn.execute("SELECT * FROM provider_accounts").fetchone()) == before[0]
+    assert h.conn.execute("SELECT remaining,uncertain,next_eligible_at,blocked_code FROM provider_accounts").fetchone()[:] == (
+        9, 1, "2026-09-12T00:00:13.000000Z", None)
+    assert h.conn.execute("SELECT used_calls FROM provider_reservations").fetchone()[0] == 1
+    assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 0
+    assert not (h.root / attempt.attempt_id / "massive_acquisition.json").exists()
 
 
 def test_transport_failure_keeps_charge_and_closes_budget_transaction(harness):
@@ -331,9 +357,9 @@ def test_existing_raw_receipt_replay_is_fenced_in_its_own_transaction(harness):
     assert replay.received_at == original.received_at
 
 
-@pytest.mark.parametrize("cached", [False, True])
-def test_real_executor_and_worker_use_trusted_store_and_no_ambient_credentials(harness, monkeypatch, cached):
-    from engine.v2.ops import executor
+@pytest.mark.parametrize("cached,forwarded", [(False, False), (True, False), (True, True)])
+def test_real_executor_and_worker_use_trusted_store_and_no_ambient_credentials(harness, monkeypatch, cached, forwarded):
+    from engine.v2.ops import executor, providers
     from engine.v2.ops.stages import validate_result
 
     h = harness
@@ -346,13 +372,27 @@ def test_real_executor_and_worker_use_trusted_store_and_no_ambient_credentials(h
     attempt = claim(h)
     attempt = replace(attempt, resources=replace(attempt.resources,
                       assigned_cpu_ids=(min(os.sched_getaffinity(0)),)))
-    monkeypatch.setattr(executor, "provider_credentials", lambda _: {})
+    marker = "synthetic-massive-key-not-a-credential"
+    synthetic = {"MASSIVE_API_KEY": marker, "ORATS_API_KEY": "unrelated-synthetic"} if forwarded else {}
+    monkeypatch.setattr(providers, "os", SimpleNamespace(environ=synthetic))
+    launched = []
+    original = executor.subprocess.Popen
+    def launch(*args, **kwargs):
+        environment = dict(kwargs["env"])
+        assert "ORATS_API_KEY" not in environment
+        launched.append(environment.pop("MASSIVE_API_KEY", None))
+        # Verify the real allowlist/launch boundary, then remove the synthetic
+        # key so even a cache regression cannot make a provider call in the child.
+        return original(*args, **(kwargs | {"env": environment}))
+    monkeypatch.setattr(executor.subprocess, "Popen", launch)
     running = executor.launch(h.conn, attempt, registry().get("massive_acquisition"), h.store,
                               Path(__file__).resolve().parents[3], clock=h.clock, boot_id="boot")
     try:
         exit_code = running.process.wait(timeout=30)
         executor._read_result(running)
         document = json.loads(running.data)
+        assert launched == [marker if forwarded else None]
+        assert marker not in running.data.decode() + str(tuple(h.conn.iterdump()))
         assert exit_code == (0 if cached else 1)
         if cached:
             assert validate_result(attempt, document) == [

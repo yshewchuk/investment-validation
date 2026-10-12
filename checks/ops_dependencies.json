@@ -17,7 +17,7 @@
       "native_registration", "stores.refresh_contracts", "stores.massive", "stores.massive.acquisition", "unit_receipts"],
     "native": ["carried_set", "native", "native.input_decoding", "native.parity_inputs", "native_board_universe", "native_parity_report", "native_score_batch", "native_score_batch_types", "native_shadow_render", "nightly_calendar_inputs",
       "nightly_quote_rows", "nightly_raw_row_producer", "nightly_raw_rows", "source_availability"],
-    "providers": ["providers", "providers.massive", "providers.nasdaq_calendar", "providers.orats_daily_market", "providers.yfinance_edge"]
+    "providers": ["providers", "providers.massive", "providers.massive_policy", "providers.nasdaq_calendar", "providers.orats_daily_market", "providers.yfinance_edge"]
   },
   "exceptions": {
     "forbidden": [],

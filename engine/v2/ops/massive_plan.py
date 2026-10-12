@@ -9,11 +9,11 @@ from engine.v2.data.incremental import RAW_SCHEMA_REF, load_raw_receipt
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.artifacts import ArtifactError, artifact_reference
 from engine.v2.ops.errors import fail
+from engine.v2.ops.providers.massive_policy import MAX_RAW_BYTES
 
 SOURCE = "massive-stocks"
 POLICY_VERSION = "massive_stocks_basic.2026-10-10"
 DATASETS = ("daily", "splits", "dividends")
-MAX_RAW_BYTES = 16 * 1024 * 1024
 
 
 def _day(value):

@@ -90,3 +90,4 @@ def test_production_source_closure_contains_new_worker_and_http_edge():
     paths = set(manifest)
     assert "engine/v2/ops/stores/massive/acquisition.py" in paths
     assert "engine/v2/ops/providers/massive.py" in paths
+    assert "engine/v2/ops/providers/massive_policy.py" in paths

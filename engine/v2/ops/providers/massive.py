@@ -6,8 +6,8 @@ from contextlib import contextmanager
 import requests
 
 from engine.v2.ops.errors import fail
+from engine.v2.ops.providers.massive_policy import MAX_RAW_BYTES as MAX_BYTES
 
-MAX_BYTES = 16 * 1024 * 1024
 HTTP_DEADLINE_SECONDS = 45
 
 
