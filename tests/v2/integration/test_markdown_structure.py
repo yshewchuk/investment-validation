@@ -227,3 +227,9 @@ def test_list_content_is_ignored_for_headings_and_tables():
     assert rules("- item\n  # not a heading\n  text\n") == []
     assert rules("1. item\n   | a | b |\n   |---|---|\n") == []
 
+
+def test_unclosed_indented_fence_in_list_item_is_reported():
+    found = ms.lint_text("- item\n  ```\n  code\n- next\n")
+    assert [(v.line, v.rule) for v in found] == [(2, "fence-unclosed")]
+    assert ms.scoped(found, {4}) == found
+

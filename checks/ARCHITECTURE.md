@@ -32,12 +32,15 @@ decreases, and a root-level test cannot be modified in place (move it first).
 now live and raises `FileNotFoundError` if one is missing.
 
 `markdown_structure.py` lints Markdown structure that renders wrongly: an ATX
-heading needs a blank line before (unless on line 1) and after; a table needs
-one before and after (unless it ends the file); a top-level fenced block
-needs one before and after and must be closed. Fenced content is never
-scanned as headings or tables. Lists are not checked and list content is
-ignored: only column-0 headings and tables are read, so indented lines and
-list-marker lines are never headings or table headers. Default mode reads
+heading needs a blank line before (unless on line 1) and after (unless last);
+a table needs one before (unless at file start) and after (unless it ends the
+file); an unindented fenced block needs one before and after. Fences are
+tracked everywhere, indented or inside list items too, and every fence must be
+closed; only unindented fences get the blank-line rule. Fenced content is never
+scanned as headings or tables. There is no list rule, and list content is
+skipped for the heading and table rules: only column-0 headings and tables are
+read, so indented lines and list-marker lines are never headings or table
+headers. Default mode reads
 staged blobs and flags only violations touching lines the commit adds or
 changes, except that an unclosed fence is a file-level error reported for any
 changed file (`--base-ref REF` does the same for `REF...HEAD`, run in CI by the

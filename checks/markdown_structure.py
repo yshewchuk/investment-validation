@@ -3,16 +3,24 @@
 
 Rules (no style opinions):
 
-* an ATX heading needs a blank line before it (unless it is line 1) and after;
-* a table needs a blank line before it and after it (unless it ends the file),
-  so a following paragraph is not absorbed as a table row;
-* an unindented fenced code block needs a blank line before and after, and
-  every fence must be closed.
+* an ATX heading needs a blank line before it (unless it is line 1) and after
+  (unless it is the last line);
+* a table needs a blank line before it (unless it starts the file) and after it
+  (unless it ends the file), so a following paragraph is not absorbed as a row;
+  a body row starts with a pipe when the header does, else it has the header's
+  column count;
+* an unindented fenced code block needs a blank line before and after.
 
-Content inside fences is never read as a heading or table. Lists are not
-checked, and list content is ignored: only column-0 headings and tables are
-read, so an indented line or one starting with a list marker (``- ``, ``* ``,
-``+ ``, ``1. ``) is never a heading or a table header. Standard library only.
+Fences are tracked everywhere, indented or not (including inside list items),
+and every fence must be closed: an unclosed fence is reported for any file in
+the changed set, because it breaks rendering of the rest of the file. Only
+unindented fences get the blank-line rule. Content inside a fence is never read
+as a heading or table.
+
+There is no list rule, and list content is skipped for the heading and table
+rules: only column-0 headings and tables are read, so an indented line or one
+starting with a list marker (``- ``, ``* ``, ``+ ``, ``1. ``) is never a heading
+or a table header. Standard library only.
 
 Modes (cwd-independent, ``git -C`` the repo root)::
 
