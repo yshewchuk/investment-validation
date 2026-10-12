@@ -307,6 +307,7 @@ def test_one_bad_results_line_does_not_discard_the_good_ones(tmp_path, capsys):
     out = tmp_path / "gh_output"
     assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
                     "--github-output", str(out)]) == 0
+    assert "state=failure\n" in out.read_text()  # the good row's survivor is still found
     assert "1 malformed results.jsonl row(s) ignored" in capsys.readouterr().out
 
 
