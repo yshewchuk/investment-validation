@@ -72,7 +72,9 @@ computed by this package:
   has no call/put common strike (selection returns nothing, so the captured
   value is the fallback); and every put-ladder strategy.
 - `quotes` — a mapping keyed by `(right, strike, expiry)` (or an equivalent
-  `"right:strike:expiry"` string), each value `{"bid", "ask"}`. The contract
+  `"right:strike:expiry"` string), each value `{"bid", "ask"}` plus an optional
+  `observed_date` (ISO string; `price` copies it to `PricedLeg.quote_date`, and
+  the first leg's drives `dte_entry`; any other value is ignored). The contract
   domain native selects from whenever `strike`/`expiry` is missing.
 - `event_date`, `session` — the print date/session, read by the
   `first_post_event` expiry rule (STR-THRU and every put-ladder strategy).
