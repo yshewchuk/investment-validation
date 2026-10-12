@@ -538,7 +538,7 @@ def test_select_modules_changed_files_delegates_to_pilot_changed_modules(monkeyp
     monkeypatch.setattr(gp.pilot, "enabled_modules", lambda cfg_: ["foundation", "canonical"])
     seen = {}
 
-    def fake_changed_modules(cfg_, names, changed):
+    def fake_changed_modules(cfg_, names, changed, **_):
         seen["names"], seen["changed"] = names, changed
         return ["foundation"]
 
@@ -554,14 +554,14 @@ def test_select_modules_changed_files_applies_after_only_filtering(monkeypatch):
     monkeypatch.setattr(gp.pilot, "read_changed_files", lambda p: ["x"])
     # changed_modules never sees "canonical": --only already dropped it
     monkeypatch.setattr(gp.pilot, "changed_modules",
-                        lambda cfg_, names, changed: names)
+                        lambda cfg_, names, changed, **_: names)
     assert gp.select_modules(cfg(), "foundation", "some/path.txt") == ["foundation"]
 
 
 def test_cmd_matrix_passes_changed_files_through(monkeypatch, capsys):
     monkeypatch.setattr(gp.pilot, "enabled_modules", lambda cfg_: ["foundation", "canonical"])
     monkeypatch.setattr(gp.pilot, "read_changed_files", lambda p: ["engine/x.py"] if p else [])
-    monkeypatch.setattr(gp.pilot, "changed_modules", lambda cfg_, names, changed: ["foundation"])
+    monkeypatch.setattr(gp.pilot, "changed_modules", lambda cfg_, names, changed, **_: ["foundation"])
     args = types.SimpleNamespace(only="", changed_files="some/path.txt")
     assert gp.cmd_matrix(cfg(), args) == 0
     import json

@@ -316,3 +316,120 @@ def test_architecture_documents_resource_and_coverage_fallbacks():
     contract = " ".join((root / "ARCHITECTURE.md").read_text().split())
     assert "size/time limits; exceeding either limit selects the full suite" in contract
     assert "without nonempty base and head test expansions selects the full suite" in contract
+
+
+def _with_scanner(base, cfg, graph):
+    # A module whose tests scan a whole tree (see issue #672): the import graph never links it.
+    for config in (base, cfg):
+        config["modules"]["scan"] = {"mutate": ["engine/scan.py"], "tests": ["tests/test_scan.py"],
+                                     "scans_tree": "engine/"}
+    graph.update({"engine/scan.py": set(), "tests/test_scan.py": set(),
+                  "engine/newb.py": set(), "tests/test_newb.py": {"engine/newb.py"}})
+
+
+@pytest.mark.parametrize("which, expected", [
+    ("alpha", ["alpha", "scan"]),
+    ("beta", ["beta", "scan"]),
+])
+def test_registration_selects_exactly_the_registered_module_plus_tree_scanners(
+        case, which, expected):
+    base, cfg, changed, graph = case
+    _with_scanner(base, cfg, graph)
+    if which == "beta":
+        cfg["modules"]["alpha"] = copy.deepcopy(base["modules"]["alpha"])
+        cfg["modules"]["beta"]["mutate"].append("engine/newb.py")
+        cfg["modules"]["beta"]["tests"].append("tests/test_newb.py")
+        changed = [CONFIG, "engine/newb.py", "tests/test_newb.py"]
+    got = pilot.changed_modules(cfg, ["alpha", "beta", "scan"], changed, graph=graph, base_cfg=base)
+    assert got == expected
+
+
+@pytest.mark.parametrize("path, expected", [
+    ("engine/beta.py", ["beta"]),
+    ("tests/test_beta.py", ["beta"]),
+])
+def test_ordinary_change_does_not_pull_in_tree_scanners(case, path, expected):
+    base, cfg, _, graph = case
+    _with_scanner(base, cfg, graph)
+    got = pilot.changed_modules(cfg, ["alpha", "beta", "scan"], [path], graph=graph)
+    assert got == expected
+
+
+def test_registration_plus_other_changed_path_unions_their_selections(case):
+    base, cfg, changed, graph = case
+    for config in (base, cfg):
+        config["modules"]["gamma"] = {"mutate": ["engine/gamma.py"], "tests": ["tests/test_gamma.py"]}
+    graph.update({"engine/gamma.py": set(), "tests/test_gamma.py": set()})
+    got = pilot.changed_modules(cfg, ["alpha", "beta", "gamma"], [*changed, "engine/beta.py"],
+                                graph=graph, base_cfg=base)
+    assert got == ["alpha", "beta"]
+
+
+@pytest.mark.parametrize("edit", ["defaults", "no_base"])
+def test_unverified_config_change_still_selects_every_module(case, edit):
+    base, cfg, changed, graph = case
+    if edit == "defaults":
+        cfg["defaults"]["max_children"] = 3
+    else:
+        base = None
+    got = pilot.changed_modules(cfg, ["alpha", "beta"], changed, graph=graph, base_cfg=base)
+    assert got == ["alpha", "beta"]
+
+
+@pytest.mark.parametrize("value, ok", [("engine/", True), (5, False), ("", False)])
+def test_scans_tree_validator_itself_refuses_bad_values(case, value, ok):
+    # The same value sits in base AND cfg, so the identity check cannot reject first.
+    base, cfg, changed, graph = case
+    for config in (base, cfg):
+        config["modules"]["beta"]["scans_tree"] = value
+    got = pilot.registration_tests(cfg, base, set(changed), set(graph))
+    assert (got is not None) is ok
+
+
+def test_gremlin_matrix_reads_base_sha_from_environment(case, tmp_path, monkeypatch):
+    import gremlin_pilot
+
+    base, cfg, changed, graph = case
+    path = tmp_path / "changed"
+    path.write_bytes("\0".join(changed).encode())
+    monkeypatch.setattr(gremlin_pilot.pilot, "build_import_graph", lambda: graph)
+    seen = []
+
+    def fake_base(sha, config, paths):
+        seen.append(sha)
+        return base
+
+    monkeypatch.setattr(gremlin_pilot.pilot, "registration_base_config", fake_base)
+    monkeypatch.setenv("BASE_SHA", "a" * 40)
+    assert gremlin_pilot.select_modules(cfg, "", str(path)) == ["alpha"]
+    assert seen == ["a" * 40]
+
+
+def test_mutation_matrix_reads_base_sha_from_environment(case, tmp_path, monkeypatch, capsys):
+    base, cfg, changed, graph = case
+    path = tmp_path / "changed"
+    path.write_bytes("\0".join(changed).encode())
+    monkeypatch.setattr(pilot, "build_import_graph", lambda: graph)
+    seen = []
+
+    def fake_base(sha, config, paths):
+        seen.append(sha)
+        return base
+
+    monkeypatch.setattr(pilot, "registration_base_config", fake_base)
+    monkeypatch.setenv("BASE_SHA", "b" * 40)
+    assert pilot.cmd_matrix(cfg, SimpleNamespace(only="", changed_files=str(path))) == 0
+    assert capsys.readouterr().out.strip() == '["alpha"]'
+    assert seen == ["b" * 40]
+
+
+@pytest.mark.parametrize("extra", [[], ["engine/NOTES.md"]])
+def test_scanner_needs_a_python_change_under_its_prefix(case, extra):
+    base, cfg, _, graph = case
+    _with_scanner(base, cfg, graph)
+    for config in (base, cfg):
+        config["pr_selection"]["inert"] = ["engine/NOTES.md"]
+    cfg["modules"]["alpha"]["mutate"] = list(base["modules"]["alpha"]["mutate"])
+    changed = [CONFIG, "tests/test_new.py", *extra]
+    got = pilot.changed_modules(cfg, ["alpha", "beta", "scan"], changed, graph=graph, base_cfg=base)
+    assert got == ["alpha"]
