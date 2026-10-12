@@ -375,7 +375,7 @@ mutate = [
 tests = [
     "tests/test_v2_data_computed_moves.py",
     "tests/test_v2_data_computed_moves_table.py",
-    "tests/v2/data/test_event_history.py",
+    "tests/v2/data/test_data_event_history.py",
     "tests/test_v2_data_generic_incremental.py",
     "tests/test_v2_data_incremental.py",
     "tests/test_v2_data_incremental_persistence.py",
