@@ -113,7 +113,7 @@ def run(parameters, root):
         raise fail("HOLDOUT_ACCESS_DENIED", "native pricing permits sweep reads only")
     if parameters.get("no_ledger") is not True:
         raise fail("INVALID_EXPERIMENT_SPEC", "native pricing is smoke-only")
-    registration = None
+    pricing = False
     try:
         from_document(NativeGateParameters, dict(parameters))
         conn = sqlite3.connect(Path(parameters["catalog_path"]).resolve().as_uri() + "?mode=ro",
@@ -123,6 +123,7 @@ def run(parameters, root):
             store = ArtifactStore(parameters["objects_root"])
             spec, registration = _admit(parameters, root, conn, store)
             binding = registration.document
+            pricing = True
             result = price_variant(
                 Repository(conn, store), from_document(SnapshotRef, binding["snapshot"]), spec,
                 strategy=spec.economic_params["strategy"], as_of_month=binding["holdouts"]["holdout_as_of_month"],
@@ -142,17 +143,18 @@ def run(parameters, root):
                        "stage_inputs": inputs, "mark_based_cashflows": cashflows}
         finally:
             conn.close()
+        pricing = False
         _write_receipt(root / "native_gate_consumption.json", receipt)
     except DataError as error:
         code = error.code if error.code in FAILURE_CODES else "EXPERIMENT_VARIANT_FAILED"
         raise fail(code, "native pinned pricing refused", details={"data_failure_code": error.code}) from None
-    except (ArtifactError, ValueError, TypeError, KeyError, RecursionError) as error:
-        if registration is not None:
+    except (ArtifactError, ValueError, TypeError, KeyError, RecursionError, OSError, sqlite3.Error) as error:
+        if pricing:
             raise fail("EXPERIMENT_VARIANT_FAILED", "native pinned pricing failed",
                        details={"data_failure_code": getattr(error, "code", type(error).__name__)}) from None
+        if isinstance(error, (OSError, sqlite3.Error)):
+            raise fail("INPUT_CHANGED", "native staged I/O is unavailable") from None
         raise fail("INVALID_EXPERIMENT_SPEC", "native staged input is malformed") from None
-    except (OSError, sqlite3.Error):
-        raise fail("INPUT_CHANGED", "native staged I/O is unavailable") from None
     return {"outputs": [{"name": "native_gate_consumption", "path": "native_gate_consumption.json",
                          "schema": "native_gate_consumption.v1.0"}],
             "completed_ids": [registration.variant_id], "no_work": False}

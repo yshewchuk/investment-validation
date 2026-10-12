@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from engine.v2.contracts import JobSpec, SubmitRequest
-from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.foundation import ArtifactError, ArtifactStore, SystemClock, content_hash
 from engine.v2.ops import stages, worker
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
@@ -444,6 +444,7 @@ def test_excessive_staged_json_depth_has_exact_refusal(source, tmp_path, single_
     ("empty-calendar", "CALENDAR_UNAVAILABLE", "EXPERIMENT_VARIANT_FAILED"),
     ("malformed-contract", "JSONDecodeError", "EXPERIMENT_VARIANT_FAILED"),
     ("incomplete-contract", "MISSING_FIELD", "EXPERIMENT_VARIANT_FAILED"),
+    ("unreadable-contract", "OperationalError", "EXPERIMENT_VARIANT_FAILED"),
 ])
 def test_real_data_failures_preserve_private_diagnostics(
         source, tmp_path, single_thread, case, data_code, ops_code):
@@ -462,6 +463,9 @@ def test_real_data_failures_preserve_private_diagnostics(
         source[0].execute("DROP TRIGGER data_snapshots_no_update")
         source[0].execute("UPDATE data_snapshots SET manifest_hash=? WHERE snapshot_id=?",
                           ("sha256:" + "0" * 64, source[4].snapshot_id))
+    elif case == "unreadable-contract":
+        source[0].execute("ALTER TABLE data_contracts RENAME COLUMN definition_json TO unavailable_definition")
+        assert source[3].resolve(source[4].snapshot_id) == source[4]
     elif case.endswith("-contract"):
         source[0].execute("DROP TRIGGER data_contracts_no_update")
         source[0].execute("PRAGMA ignore_check_constraints=ON")
@@ -483,6 +487,37 @@ def test_real_data_failures_preserve_private_diagnostics(
     assert result["retryable"] is False
     assert _catalog(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
+
+
+@pytest.mark.parametrize("fault,detail", [
+    (OSError("private read failure"), "OSError"),
+    (ArtifactError("OBJECT_CORRUPT", "private artifact failure"), "OBJECT_CORRUPT"),
+])
+def test_pricing_boundary_failures_keep_private_diagnostics(
+        source, tmp_path, single_thread, monkeypatch, fault, detail):
+    """Inject a late read failure only after genuine registered replay completes."""
+    from experiments import native_gate_worker as native
+
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    price, consumed = native.price_variant, []
+    before = _catalog(source[0])
+
+    def fail_after_replay(*args, **kwargs):
+        consumed.append(price(*args, **kwargs))
+        raise fault
+
+    monkeypatch.setattr(native, "price_variant", fail_after_replay)
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert error.value.problem.details == {"data_failure_code": detail}
+    assert error.value.problem.retryable is False
+    assert "private" not in error.value.problem.message
+    result, = consumed
+    assert list(result.stage_inputs.event_ids) == registration.document["event_ids"]
+    assert _catalog(source[0]) == before
+    assert not (stage / "native_gate_consumption.json").exists()
 
 
 def test_no_cross_job_cache_can_skip_native_admission(source, tmp_path):
