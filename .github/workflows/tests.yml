@@ -125,7 +125,15 @@ jobs:
             exit 0
           fi
           mapfile -t FILES <<< "$LIST"
-          python -m pytest -n auto --dist loadgroup -m "not needs_data and not needs_corpus and not heavy_host and not browser" -rfE --durations=25 --junitxml=junit.xml "${FILES[@]}"
+          # Exit 5 = nothing collected (the selection held only marker-excluded tests):
+          # a skipped shard. Every other non-zero code fails the step unchanged.
+          RC=0
+          python -m pytest -n auto --dist loadgroup -m "not needs_data and not needs_corpus and not heavy_host and not browser" -rfE --durations=25 --junitxml=junit.xml "${FILES[@]}" || RC=$?
+          if [ "$RC" -eq 5 ]; then
+            echo "pytest collected no tests for shard $SHARD (every selected test is marker-excluded); skipping."
+            exit 0
+          fi
+          exit "$RC"
 
       - name: Upload test results
         if: always()
