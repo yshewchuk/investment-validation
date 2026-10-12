@@ -154,7 +154,8 @@ The four markers, and which tests carry them, are:
 | `heavy_host` | launches real multi-GB workers; run alone on a quiet box | tests/test_v2_ops_supervised_legacy.py, tests/v2/ops/test_v2_ops_nightly_completion.py (whole files) |
 | `browser` | drives a real Playwright browser or needs node/npm (`ui/` build) | tests/test_v2_dashboard_browser.py, test_v2_dashboard_integration.py, test_v2_ops_serving_browser.py (whole files), test_l02_browser_frame_pins_r1_then_reload_shows_r2 in test_v2_dashboard_preview.py |
 
-CI runs everything except these four categories:
+CI runs everything except these four categories (each shard runs its own file list, see
+"CI shards" below; the command is the same, with the shard's files in place of `tests/`):
 
 ```bash
 python -m pytest -n auto --dist loadgroup -m "not needs_data and not needs_corpus and not heavy_host and not browser" -rfE --durations=25 --junitxml=junit.xml tests/
@@ -167,6 +168,20 @@ python3 tools/bounded_run.py --cores 8 -- python3 -m pytest -q -n 4 --dist loadg
 ```
 
 The `heavy_host` and `browser` tests keep their existing procedure (see above).
+
+### CI shards
+
+CI splits the suite into parallel jobs, one per shard. `tests/shards.toml` is the
+only declaration: ordered `[[shard]]` tables of fnmatch patterns (`*` also matches
+`/`), first match wins, and the last shard is the remainder that owns every file no
+pattern claims, so a new test file can never fall out of CI. `python3 tools/ci_shards.py matrix`
+prints the job matrix and `python3 tools/ci_shards.py files SHARD [--selection FILE]`
+prints a shard's files (a PR's selection from `select-tests` is intersected with it,
+and an empty result skips the shard). `tests/v2/integration/test_ci_shards.py` checks
+that every test file is in exactly one shard and that no pattern is dead or shadowed.
+The required check `test` is an aggregator job that fails unless the plan job and
+every shard job succeeded. To rebalance, move a pattern between shards; keep each
+shard under about 10 minutes of wall time.
 
 ### PR test selection
 
