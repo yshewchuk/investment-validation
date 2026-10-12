@@ -58,6 +58,7 @@ class PricedLeg:
     ask: float
     fill: float
     cash_flow: float
+    quote_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -720,10 +721,27 @@ def price(geometry: Geometry, quotes: Mapping[Any, Mapping[str, Any]],
             raise PricingRefusal(f"INVALID_QUOTE:{leg.name}")
         fill = ask - alpha * (ask - bid) if leg.side == "buy" else bid + alpha * (ask - bid)
         cash = (-1.0 if leg.side == "buy" else 1.0) * fill * leg.quantity
+        observed = quote.get("observed_date")
         priced.append(PricedLeg(leg.name, leg.right, leg.side, leg.quantity,
-                                leg.strike, leg.expiry, bid, ask, fill, cash))
+                                leg.strike, leg.expiry, bid, ask, fill, cash,
+                                quote_date=observed if isinstance(observed, str) else None))
+    _refuse_mixed_quote_dates(priced)
     return Pricing(geometry.strategy, geometry.spot,
                    -sum(item.cash_flow for item in priced), tuple(priced))
+
+
+def _refuse_mixed_quote_dates(priced: list[PricedLeg]) -> None:
+    """Refuse a pricing built from quote rows of different observation dates.
+
+    Such a pricing has no single dte_entry; the earliest date wins only as
+    the refusal label, never as a silently mixed measurement.
+    """
+    dates = {leg.quote_date for leg in priced if leg.quote_date is not None}
+    if len(dates) > 1:
+        earliest = min(dates)
+        for leg in priced:
+            if leg.quote_date is not None and leg.quote_date != earliest:
+                raise PricingRefusal(f"INVALID_QUOTE:{leg.name}")
 
 
 __all__ = ["DISABLED", "Geometry", "GeometryRefusal", "NativeLeg", "PricedLeg",

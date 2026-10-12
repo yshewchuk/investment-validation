@@ -13,9 +13,10 @@ import pytest
 
 from engine.v2.models import FrozenInference, ModelBinding, ModelRelease
 from engine.v2.models.contracts import ArtifactMember
-from engine.v2.scoring import financial
+from engine.v2.scoring import financial, stages
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
-from engine.v2.scoring.nightly_source_bundle import assemble_nightly_source_bundle
+from engine.v2.scoring.nightly_source_bundle import (
+    NightlySourceBundleRefusal, assemble_nightly_source_bundle, quote_domain_map)
 from engine.v2.scoring.source_inputs import build_native_score_inputs
 from engine.v2.scoring.stages import (
     NativeScoreInputs, STAGE_NAMES, StageReceipt, _check_pricing_boundary,
@@ -496,7 +497,7 @@ def test_missing_quote_date_keeps_captured_dte_entry():
 def _pricing_stand_ins(*, pricing_refusal=None, geometry_refusal=None,
                        pricing_legs=None, geometry_legs=None):
     leg = types.SimpleNamespace(bid=1.9, ask=2.1, strike=100.0,
-                                expiry="2026-12-18")
+                                expiry="2026-12-18", quote_date=None)
     pricing = types.SimpleNamespace(
         refusal=pricing_refusal,
         legs=(leg,) if pricing_legs is None else pricing_legs,
@@ -689,3 +690,84 @@ def test_answer_denylist_claim_matches_code():
         _reject_answers("probe", {"entry_cost_pct": 1.0})
     _reject_answers("probe", {"dte_entry": 5})
     _reject_answers("probe", {"days_to_print": 3.0})
+
+
+def _quote_row(strike, observed_at, bid=1.0, ask=1.2):
+    return {"right": "C", "strike": strike, "expiry": "2026-11-20",
+            "bid": bid, "ask": ask, "observed_at": observed_at}
+
+
+def test_quote_domain_map_carries_each_rows_observed_date():
+    quotes = quote_domain_map([
+        _quote_row(100.0, "2026-10-08T15:00:00"),
+        _quote_row(105.0, "2026-10-09T15:00:00"),
+    ])
+    assert quotes["C:100.0:2026-11-20"]["observed_date"] == "2026-10-08"
+    assert quotes["C:105.0:2026-11-20"]["observed_date"] == "2026-10-09"
+
+
+def test_quote_domain_map_duplicate_contract_keeps_earliest_date_or_refuses():
+    same = quote_domain_map([
+        _quote_row(100.0, "2026-10-09T15:00:00"),
+        _quote_row(100.0, "2026-10-08T15:00:00"),
+    ])
+    assert same["C:100.0:2026-11-20"]["observed_date"] == "2026-10-08"
+    with pytest.raises(NightlySourceBundleRefusal) as caught:
+        quote_domain_map([
+            _quote_row(100.0, "2026-10-08T15:00:00"),
+            _quote_row(100.0, "2026-10-09T15:00:00", bid=1.1, ask=1.3),
+        ])
+    assert "INVALID_QUOTE_DOMAIN" in str(caught.value) or getattr(
+        caught.value, "code", "") == "INVALID_QUOTE_DOMAIN"
+
+
+@pytest.mark.parametrize(("legs", "expected"), [
+    ([{"expiry": "2026-11-20", "quote_date": "2026-10-09"},
+      {"expiry": "2026-11-20", "quote_date": "2026-10-09"}], 42),
+    ([{"expiry": "2026-11-20", "quote_date": "2026-10-08"},
+      {"expiry": "2026-11-20", "quote_date": "2026-10-08"}], 43),
+    ([{"expiry": "2026-11-20", "quote_date": "2026-10-09"},
+      {"expiry": "2026-11-20"}], None),
+    ([{"expiry": "2026-11-20", "quote_date": "2026-10-08"},
+      {"expiry": "2026-11-20", "quote_date": "2026-10-09"}], None),
+    ([{"expiry": "2026-11-20"}, {"expiry": "2026-11-20"}], 43),
+])
+def test_priced_dte_entry_uses_the_legs_own_quote_date(legs, expected):
+    values = {"entry_cost": 2.0, "legs": legs, "quote_date": "2026-10-08"}
+    assert stages._priced_dte_entry(values) == expected
+
+
+def _dated_quotes(call_date, put_date):
+    return {("C", 100.0, "2026-11-20"): {"bid": 1.9, "ask": 2.1, "observed_date": call_date},
+            ("P", 100.0, "2026-11-20"): {"bid": 1.9, "ask": 2.1, "observed_date": put_date}}
+
+
+def test_dte_entry_uses_the_priced_legs_date_not_the_earliest_domain_date(tmp_path):
+    # context quote_date is the domain's earliest observation (2026-10-08); both
+    # legs were priced from rows observed on 2026-10-09.
+    gate = _frozen_gate(tmp_path, ("dte_entry", "entry_cost_pct"))
+    inputs = _inputs(gate=gate, quotes=_dated_quotes("2026-10-09", "2026-10-09"))
+    values = assemble_native_values(inputs)
+    assert values["dte_entry"] == 42
+    facts = _facts(inputs, values)
+    assert facts["dte_entry"] == 42
+    assert facts["_native_stage_facts"]["dte_entry"] == 42
+    executor = gate["executors"]["gate_score"]._executor
+    row = executor.execute({
+        "role_model_inputs": {"gate": {"dte_entry": 99, "entry_cost_pct": 99.0}},
+        "_native_stage_facts": facts["_native_stage_facts"],
+    })
+    assert row.request.rows[0][0] == 42
+
+
+def test_dte_entry_unchanged_when_legs_use_the_earliest_date():
+    values = assemble_native_values(
+        _inputs(quotes=_dated_quotes("2026-10-08", "2026-10-08")))
+    assert values["dte_entry"] == 43
+
+
+def test_legs_priced_from_different_dates_refuse_without_dte_entry():
+    values = assemble_native_values(
+        _inputs(quotes=_dated_quotes("2026-10-08", "2026-10-09")))
+    assert any(str(flag).startswith("INVALID_QUOTE:") for flag in values["flags"])
+    assert "dte_entry" not in values

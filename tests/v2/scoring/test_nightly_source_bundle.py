@@ -52,8 +52,10 @@ def test_happy_path_builds_expected_bundle():
         "signal": False, "pred_abs_move": False, "missing_one": True}
     assert "missing_one" not in bundle.feature_vector
     assert bundle.raw_quotes == {
-        "C:100.0:2026-01-16": {"bid": 1.0, "ask": 1.2},
-        "P:100.0:2026-01-16": {"bid": 1.1, "ask": 1.3},
+        "C:100.0:2026-01-16": {
+            "bid": 1.0, "ask": 1.2, "observed_date": "2026-01-09"},
+        "P:100.0:2026-01-16": {
+            "bid": 1.1, "ask": 1.3, "observed_date": "2026-01-09"},
     }
     assert bundle.model_identity == {}
     assert bundle.forecast_recipes == {}
@@ -122,8 +124,10 @@ def test_quote_rows_accepts_a_tuple():
     bundle = assemble_nightly_source_bundle(**_valid_kwargs(
         quote_rows=tuple(kwargs["quote_rows"])))
     assert bundle.raw_quotes == {
-        "C:100.0:2026-01-16": {"bid": 1.0, "ask": 1.2},
-        "P:100.0:2026-01-16": {"bid": 1.1, "ask": 1.3},
+        "C:100.0:2026-01-16": {
+            "bid": 1.0, "ask": 1.2, "observed_date": "2026-01-09"},
+        "P:100.0:2026-01-16": {
+            "bid": 1.1, "ask": 1.3, "observed_date": "2026-01-09"},
     }
 
 
@@ -718,10 +722,14 @@ def test_quote_max_age_sessions_and_earliest_quote_date_go_to_context():
     assert bundle.context["quote_max_age_sessions"] == 1
     assert bundle.context["quote_date"] == "2026-01-08"
     assert bundle.raw_quotes == {
-        "C:100.0:2026-01-16": {"bid": 1.0, "ask": 1.2},
-        "P:100.0:2026-01-16": {"bid": 1.1, "ask": 1.3},
+        "C:100.0:2026-01-16": {
+            "bid": 1.0, "ask": 1.2, "observed_date": "2026-01-08"},
+        "P:100.0:2026-01-16": {
+            "bid": 1.1, "ask": 1.3, "observed_date": "2026-01-09"},
     }
-    assert all(set(quote) == {"bid", "ask"} for quote in bundle.raw_quotes.values())
+    assert all(
+        set(quote) == {"bid", "ask", "observed_date"}
+        for quote in bundle.raw_quotes.values())
 
 
 def test_quote_latest_date_after_entry_refuses_assembled_bundle():

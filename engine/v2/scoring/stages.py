@@ -665,15 +665,37 @@ def _gate_in_domain(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> boo
     return mcap_log >= log(GATE_MCAP_FLOOR)
 
 
+def _legs_dte_entry(
+    expiry: Any, leg_dates: Iterable[Any], fallback_date: Any,
+) -> int | None:
+    """dte_entry measured from the priced legs' own quote date.
+
+    All legs must carry the same date: no leg carrying one falls back to the
+    context ``quote_date`` (direct callers without quote provenance); a
+    partial or disagreeing set yields None.
+    """
+    dates = list(leg_dates)
+    if dates and all(d is not None for d in dates) and len(set(dates)) == 1:
+        return financial.dte_entry(expiry, dates[0])
+    if dates and all(d is None for d in dates):
+        return financial.dte_entry(expiry, fallback_date)
+    return None
+
+
 def _priced_dte_entry(values: Mapping[str, Any]) -> int | None:
     """The scorer-computed dte_entry from the successfully priced first leg
     (legacy engine/score.py:2451), or None on a pricing refusal / no priced leg.
     Never a captured value: it is derived from values["legs"] (published by the
-    pricing stage) and the quote date."""
+    pricing stage), measured from each priced leg's own quote date -- falling
+    back to the context quote date only when no leg carries one."""
     legs = values.get("legs")
     if values.get("entry_cost") is None or not legs:
         return None
-    return financial.dte_entry(legs[0].get("expiry"), values.get("quote_date"))
+    return _legs_dte_entry(
+        legs[0].get("expiry"),
+        [leg.get("quote_date") for leg in legs],
+        values.get("quote_date"),
+    )
 
 
 def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, Any]:
@@ -1409,7 +1431,10 @@ def _publish_pricing(values: dict[str, Any], geometry: Geometry,
             pricing.entry_cost if pricing.refusal is None else None
         ),
         "fill": alpha,
-        "legs": tuple(vars(leg) for leg in legs),
+        "legs": tuple(
+            {key: value for key, value in vars(leg).items()
+             if key != "quote_date" or value is not None}
+            for leg in legs),
         "selected_contracts": tuple(vars(leg) for leg in geometry.legs),
         # engine/score.py:2342 -- ``result.strike = float(priced.legs[0].strike)``,
         # set only once pricing has actually resolved (legacy never reaches
@@ -3018,11 +3043,15 @@ def _check_pricing_boundary(
     # dte_entry is the SUCCESSFULLY PRICED first leg's days to expiry (legacy
     # engine/score.py:2451 `int(priced.legs[0].dte)`). On a pricing/geometry
     # refusal nothing is written, and a value already captured in the context
-    # is never overwritten with None. dte_entry is scorer-computed from the
-    # priced legs and quote date, never projected from source inputs.
+    # is never overwritten with None. dte_entry is measured from the priced
+    # legs' own quote date, not the earliest date of the quote domain, and is
+    # scorer-computed -- never projected from source inputs.
     if pricing.refusal is None and geometry.refusal is None and pricing.legs:
-        computed_dte = financial.dte_entry(
-            pricing.legs[0].expiry, values.get("quote_date"))
+        computed_dte = _legs_dte_entry(
+            pricing.legs[0].expiry,
+            [leg.quote_date for leg in pricing.legs],
+            values.get("quote_date"),
+        )
         if computed_dte is not None:
             values["dte_entry"] = computed_dte
     _check_wide_market(pricing, flags)

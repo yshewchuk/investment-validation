@@ -35,7 +35,7 @@ _PANEL_DATE_COLUMN = "date"
 # answer." An independent copy, not an import -- this package never imports
 # legacy `engine.*` outside compatibility.py's one lazy call (see
 # ARCHITECTURE.md, Native vs. legacy independence). Kept in sync by
-# tests/test_v2_scoring_nightly_source_bundle.py::
+# tests/v2/scoring/test_nightly_source_bundle.py::
 # test_panel_outcome_columns_matches_legacy, which imports the live legacy
 # constant and asserts equality, so the two cannot silently drift apart.
 _PANEL_OUTCOME_COLUMNS = frozenset({"move", "abs_move"})
@@ -106,7 +106,7 @@ def validated_as_of(value: Any, *, label: str = "as_of") -> pd.Timestamp:
     return ts
 
 
-def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str, float]]:
+def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str, Any]]:
     """The native quote map for one event's Tier-1 quote domain.
 
     An empty domain is accepted only when the caller names WHY it is empty
@@ -114,6 +114,8 @@ def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str,
     _EMPTY_QUOTE_STATUSES); an empty domain with no recorded status is a
     refusal, not a silent gap. Extracted, behavior-identical (messages and
     checks unchanged), from tools/capture_tier0_corpus.py's _quote_map.
+    Each quote carries its row's observation date as ``observed_date`` (ISO)
+    so pricing can measure dte_entry per leg.
     """
     if quote_status in _EMPTY_QUOTE_STATUSES:
         if rows != []:
@@ -128,19 +130,47 @@ def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str,
     if not isinstance(rows, list) or not rows:
         raise NightlySourceBundleRefusal(
             "MISSING_STAGED_INPUT", "source_inputs.quote_domain is empty")
-    quotes: dict[str, dict[str, float]] = {}
+    quotes: dict[str, dict[str, Any]] = {}
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             raise NightlySourceBundleRefusal(
                 "INVALID_QUOTE_DOMAIN", f"quote_domain[{index}] is not an object")
         right, strike, expiry, bid, ask = _contract_quote(row, index)
         key = f"{right}:{strike}:{expiry}"
-        quote = {"bid": bid, "ask": ask}
-        if key in quotes and quotes[key] != quote:
-            raise NightlySourceBundleRefusal(
-                "INVALID_QUOTE_DOMAIN", f"conflicting source quote: {key}")
+        observed_date = _observed_date(row.get("observed_at"))
+        quote: dict[str, Any] = {"bid": bid, "ask": ask}
+        if observed_date is not None:
+            quote["observed_date"] = observed_date
+        if key in quotes:
+            _merge_duplicate_quote(quotes[key], quote, key)
+            continue
         quotes[key] = quote
     return quotes
+
+
+def _observed_date(value: Any) -> str | None:
+    """One quote row's observation date as an ISO string, or None when unparseable."""
+    if value is None:
+        return None
+    try:
+        return str(pd.Timestamp(value).date())
+    except (ValueError, TypeError):
+        return None
+
+
+def _merge_duplicate_quote(existing: dict[str, Any], quote: dict[str, Any],
+                           key: str) -> None:
+    """Merge a duplicate key's quote into ``existing``: bid/ask must match,
+    and the earlier observed_date wins so pricing can measure dte_entry."""
+    if (existing["bid"], existing["ask"]) != (quote["bid"], quote["ask"]):
+        raise NightlySourceBundleRefusal(
+            "INVALID_QUOTE_DOMAIN", f"conflicting source quote: {key}")
+    existing_date = existing.get("observed_date")
+    new_date = quote.get("observed_date")
+    if existing_date is None and new_date is not None:
+        existing["observed_date"] = new_date
+    elif existing_date is not None and new_date is not None:
+        existing["observed_date"] = min(existing_date, new_date)
 
 
 def _contract_quote(
@@ -412,13 +442,15 @@ def _is_null_forecast_value(value: Any) -> bool:
 
 
 #: Names a frozen model may list in its feature_order that the scorer itself
-#: computes (engine/v2/scoring/stages.py _check_pricing_boundary): entry_cost_pct
-#: from quotes, days_to_print/dte_entry from staged dates. They are not
-#: projected from tier4/panel rows. Only entry_cost_pct is also an answer field
-#: that source_inputs forbids (projecting it would make every row refuse);
-#: days_to_print/dte_entry are not in that denylist, but the scorer computes
-#: them (dte_entry from the priced legs and quote date) and they are never
-#: projected from source inputs.
+#: computes: days_to_print by engine/v2/scoring/stages.py
+#: _stage_days_to_print (before the forecast); dte_entry, measured from the
+#: priced legs' own quote date, and entry_cost_pct by
+#: engine/v2/scoring/stages.py _check_pricing_boundary (after pricing). They
+#: are not projected from tier4/panel rows. Only entry_cost_pct is also an
+#: answer field that source_inputs forbids (projecting it would make every row
+#: refuse); days_to_print/dte_entry are not in that denylist, but the scorer
+#: computes them (dte_entry from the priced legs and quote date) and they are
+#: never projected from source inputs.
 _SCORER_COMPUTED_FEATURES = frozenset({
     "entry_cost_pct", "days_to_print", "dte_entry",
 })
