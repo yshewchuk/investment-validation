@@ -50,6 +50,7 @@ fitting, aggregate materialization or final-read authority.
 | On admission (`require_native_registration`): mode/request/source/environment/scope/snapshot/month drift or rehashed malformed/permuted metadata | Refusal before population/calendar scans. |
 | Planner admission, calendar or empty-fold failure | Shared typed error propagates; no partial registration. |
 | v1.2 final-request preparation | `INVALID_EXPERIMENT_SPEC`; final declarations remain exclusive to v1.1. |
+
 Existing publication/transaction/retry semantics above apply unchanged.
 
 | Condition | Outcome |

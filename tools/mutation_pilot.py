@@ -1363,7 +1363,8 @@ def module_dependency_closure(cfg: dict, name: str, graph: dict[str, set[str]],
 
 
 def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
-                    graph: dict[str, set[str]] | None = None) -> list[str]:
+                    graph: dict[str, set[str]] | None = None,
+                    base_cfg: dict | None = None) -> list[str]:
     """The subset of ``names`` (already ``--only``-filtered) a changed-file
     list selects, under the "select ALL unless proven safe to skip" rule
     documented above. An empty ``changed`` selects nothing -- a PR with no
@@ -1387,7 +1388,21 @@ def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
     tracked_set = set(graph)
     dep_sets = {n: module_dependency_closure(cfg, n, graph, tracked_set) for n in enabled}
     owned: set[str] = set()
+    # A config change that registration_tests verifies as add-only selects just
+    # the modules whose lists grew; an unverified one stays "unrecognized" and
+    # falls through to select-everything below.
+    registered = (registration_modules(cfg, base_cfg, changed_set, tracked_set)
+                  if _REGISTRATION_CONFIG in changed_set else None)
     for path in changed_set:
+        if path == _REGISTRATION_CONFIG and registered is not None:
+            # A newly registered file is not yet in any import edge, so modules whose
+            # tests scan a whole tree (scans_tree = "<prefix>", #672) are added when a
+            # changed Python file sits under their prefix.
+            owned.update(registered)
+            owned.update(n for n in enabled if cfg["modules"][n].get("scans_tree")
+                         and any(p.endswith(".py") and p.startswith(cfg["modules"][n]["scans_tree"])
+                                 for p in changed_set))
+            continue
         selectors = {n for n in enabled
                      if module_owns_changed_path(cfg, n, path) or path in dep_sets[n]}
         if selectors:
@@ -1845,14 +1860,14 @@ def registration_tests(cfg: dict, base: dict | None, changed: set[str],
                 return None
             for mod in config["modules"].values():
                 if (not isinstance(mod, dict) or "mutate" not in mod
-                        or set(mod) - {"mutate", "tests", "skip", "excluded", "why"}):
+                        or set(mod) - {"mutate", "tests", "skip", "excluded", "why", "scans_tree"}):
                     return None
                 for field, value in mod.items():
                     if field in {"mutate", "tests", "skip"}:
                         if (not isinstance(value, list) or not all(isinstance(p, str) for p in value)
                                 or len(value) != len(set(value))):
                             return None
-                    elif not isinstance(value, str):
+                    elif not isinstance(value, str) or (field == "scans_tree" and not value):
                         return None
         if list(base["modules"]) != list(cfg["modules"]):
             return None
@@ -1915,6 +1930,16 @@ def registration_base_config(base_sha: str, cfg: dict, changed: list[str]) -> di
         return config_at(base)
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         return None
+
+
+def registration_modules(cfg: dict, base: dict | None, changed: set[str],
+                         tracked: set[str]) -> set[str] | None:
+    """Names of the modules whose mutate/tests lists grew, once
+    registration_tests has verified the whole config change as add-only; else None."""
+    if registration_tests(cfg, base, changed, tracked) is None:
+        return None
+    return {name for name, old in base["modules"].items()
+            if any(old.get(f, []) != cfg["modules"][name].get(f, []) for f in ("mutate", "tests"))}
 
 
 def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = None,
@@ -2174,7 +2199,10 @@ def cmd_matrix(cfg: dict, args) -> int:
         names = [n for n in names if n in wanted]
     changed_files = getattr(args, "changed_files", "")
     if changed_files and changed_files.strip():
-        names = changed_modules(cfg, names, read_changed_files(changed_files))
+        changed = read_changed_files(changed_files)
+        base = (registration_base_config(os.environ.get("BASE_SHA", ""), cfg, changed)
+                if _REGISTRATION_CONFIG in changed else None)
+        names = changed_modules(cfg, names, changed, base_cfg=base)
     print(json.dumps(names))
     return 0
 
