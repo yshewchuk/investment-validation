@@ -188,7 +188,8 @@ view. The fixed target recipe is absolute split-neutral, non-dividend-adjusted
 earnings close-to-close return in percentage points; the native signed
 `computed_moves` value is retained, never rescaled, clipped or adjusted again.
 Its primary prediction estimand is conditional mean, selected by pooled RMSE;
-MAE and quantile calibration are secondary, not implemented metric writers.
+MAE and quantile calibration are secondary; the magnitude reporter implements
+MAE while quantile calibration remains unimplemented.
 Shared population admission precedes label access. Bulk reads exclude events
 on/after `labels_before`; explicit requests containing one refuse. All
 remaining objects pass `event_history`'s shared singleton preflight before
@@ -202,7 +203,32 @@ label cutoff, snapshot/dataset/month/membership versions and consumed inputs.
 Forecast cutoff and training/evaluation label cutoff are distinct contracts;
 this seam neither fits a model nor joins labels into forecast features.
 Repository failures propagate; no cache, retry, write or partial return.
-These library prerequisites have no CLI, supervisor or final-read caller.
+`experiments/magnitude_report.py` consumes the strict target loader through the
+magnitude CLI; there is no supervisor or final-read caller.
+
+`magnitude_inputs.preflight_magnitude_targets(repository, snapshot, *,
+as_of_month, event_ids)` admits an explicit selection population and proves
+every candidate object's singleton isolation without opening outcomes. Its
+detached digest binds the exact population/context and planned object identities.
+The magnitude runner preflights the union of actual train/evaluation participants
+across all folds before its first label read; unused window events need not join.
+The preflight is evidence, not a capability: target loaders repeat their own
+admission and physical checks and accept no caller-supplied scan plan.
+
+`qualify_magnitude_training_targets(repository, snapshot, *, as_of_month,
+labels_before, event_ids)` admits explicit candidates whose event dates precede
+the fit boundary, with whole-population physical preflight before outcome access.
+Skipped, unavailable and cutoff-late labels are distinct omissions before numeric
+parsing; eligible labels require valid identity/availability and finite signed values.
+Zero and negative values retain their absolute percentage-point magnitude, without
+clipping or zero fill. The training identity binds every candidate and decoded
+object (including omissions), qualified IDs, omission reasons and the cutoff.
+Empty qualification refuses `POPULATION_COLLAPSED`; malformed eligible labels
+refuse `EXPERIMENT_VARIANT_FAILED`. Protected/ambiguous identities and mixed objects
+refuse before outcome access. Late admitted objects may be decoded for qualification;
+protected objects are never opened. Repository refusals propagate, with no cache,
+retry, write or partial result. Existing strict target identities remain unchanged.
+These library seams neither publish evidence nor compute historical feature aggregates.
 
 `magnitude_features.load_magnitude_history(repository, snapshot, *, event_id,
 as_of_month, horizon, history_start, purpose="selection")` binds one canonical
@@ -483,7 +509,12 @@ shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
 
 Callers: no `engine/` modules import this package (checked by `checks/import_layers.py`).
-Consumers are `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
+`experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`;
+`experiments/magnitude_report.py` consumes `preflight_magnitude_targets`,
+`load_magnitude_targets` and `qualify_magnitude_training_targets`.
+`experiments/native_registration.py` consumes
+`experiment_population.load_population` and `magnitude_folds`' window/planner.
+Other consumers include `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
 trade, calendar, and chain inputs from pinned v2 data. The archived
 trade-read caller omits required holdout context and is refused.
 Historical EXP-147 reads its native replay tag from `experiment_trades.PROVENANCE`.

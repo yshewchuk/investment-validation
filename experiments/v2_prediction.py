@@ -10,9 +10,11 @@ from engine.v2.data.repository import Repository
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
+from experiments import magnitude_report
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from experiments import prediction_report as prediction
+from experiments.magnitude_inputs import admit_magnitude_inputs
 
 
 def main(argv=None):
@@ -24,30 +26,43 @@ def main(argv=None):
     parser.add_argument("--event-id", action="append")
     parser.add_argument("--no-ledger", action="store_true")
     parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--target", choices=("positive_move", "absolute_move"), default="positive_move")
+    parser.add_argument("--magnitude-training-start")
+    parser.add_argument("--magnitude-labels-before")
     args = parser.parse_args(argv)
+    magnitude = args.target == "absolute_move"
+    clocks = (args.magnitude_training_start, args.magnitude_labels_before)
+    if (magnitude and not all(clocks)) or (not magnitude and any(clock is not None for clock in clocks)):
+        parser.error("absolute_move requires both magnitude clocks; positive_move accepts neither")
+    reporter = magnitude_report if magnitude else prediction
     store, conn, registration, attempted = None, None, None, False
     try:
         store = foundation.ArtifactStore(args.store_root)
         spec = experiment_spec_from_document(json.loads(Path(args.spec).read_text()))
-        prediction.validate_prediction_spec(spec)
+        reporter.validate_prediction_spec(spec)
         if args.action == "run" and not args.no_ledger and args.ledger is None:
             raise fail("INVALID_EXPERIMENT_SPEC", "recorded execution requires --ledger")
         conn = connect(args.catalog, must_exist=True)
         repository = Repository(conn, store)
         binding = dict(code_root=Path(__file__).resolve().parents[1], as_of_month=args.as_of_month,
                        scope=args.scope, event_ids=args.event_id)
+        if magnitude:
+            binding.update(magnitude_training_start=clocks[0], magnitude_labels_before=clocks[1])
         if args.action == "register":
             registration = native.register_native(conn, store, repository, spec, **binding)
             print(json.dumps({"registered": registration.variant_id}))
             return 0
         registration = native.read_native_registration(conn, store, spec)
-        registration = native.require_native_registration(conn, store, repository, spec, expected=registration, **binding)
+        if magnitude:
+            registration, _ = admit_magnitude_inputs(conn, store, repository, spec, **binding)
+        else:
+            registration = native.require_native_registration(conn, store, repository, spec, expected=registration, **binding)
         recording = dict(no_ledger=args.no_ledger, ledger_path=args.ledger)
         saved = outcomes.replay_native_outcome(conn, store, registration, **recording)
         if saved is None:
             attempted = True
-            result = prediction.prediction_result(repository, registration)
-            report = prediction.render_prediction_report(registration, result, spec=spec, no_ledger=args.no_ledger)
+            result = reporter.prediction_result(repository, registration)
+            report = reporter.render_prediction_report(registration, result, spec=spec, no_ledger=args.no_ledger)
             saved = outcomes.publish_native_outcome(conn, store, registration, report=report, attempted=True, **recording)
         if saved["outcome"]["failure_code"]:
             print(json.dumps({"refused": saved["outcome"]["failure_code"], "receipt_ref": saved["receipt_ref"]}))
