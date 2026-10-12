@@ -132,12 +132,22 @@ def _load_json(path: str | None):
         return None
 
 
+def _valid_row(r) -> bool:
+    return (isinstance(r, dict) and isinstance(r.get("module"), str)
+            and isinstance(r.get("file"), str) and isinstance(r.get("line"), int)
+            and not isinstance(r.get("line"), bool))
+
+
 def _load_rows(path: Path) -> list[dict]:
     try:
-        return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
-    except (OSError, ValueError):
+        raw = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+    except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
         print("::warning::results.jsonl unreadable; survivors cannot be attributed to the PR")
         return []
+    rows = [r for r in raw if _valid_row(r)]
+    if len(rows) != len(raw):
+        print(f"::warning::{len(raw) - len(rows)} malformed results.jsonl row(s) ignored")
+    return rows
 
 
 def main(argv: list[str] | None = None) -> int:

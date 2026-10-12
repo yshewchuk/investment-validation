@@ -249,3 +249,27 @@ def test_baseline_that_is_not_a_test_exit_failure_excuses_nothing():
 def test_survivor_rows_of_another_module_are_not_attributed():
     v = verdict(merged(a=mod(), b=mod()), [row("b", "engine/v2/a.py", 5)])
     assert v["pr_owned"] == ["b"] and v["modules"]["a"]["class"] == "ok"
+
+
+def test_main_matches_non_ascii_diff_path(tmp_path):
+    path = "engine/v2/café.py"
+    d, diff = _write_report(tmp_path, merged(a=mod()), [row("a", path, 12)])
+    diff.write_text(DIFF.replace("engine/v2/a.py", path), encoding="utf-8")
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    assert "state=failure\n" in out.read_text()
+
+
+def test_malformed_result_rows_are_ignored_with_a_warning(tmp_path, capsys):
+    d, diff = _write_report(tmp_path, merged(a=mod()), [row("a", "engine/v2/a.py", 99)])
+    with (d / "results.jsonl").open("a") as fh:
+        fh.write("5\nnull\n[]\n" + json.dumps({"status": "survived"}) + "\n"
+                 + json.dumps({"module": "a", "file": None, "line": 4, "status": "survived"}) + "\n"
+                 + json.dumps({"module": "a", "file": "engine/v2/a.py", "line": "4",
+                               "status": "survived"}) + "\n")
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    assert "state=success\n" in out.read_text()
+    assert "6 malformed results.jsonl row(s) ignored" in capsys.readouterr().out
