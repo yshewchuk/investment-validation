@@ -4,8 +4,8 @@
 ``session_move``/``MIN_SCOREABLE``/``MAX_GAP_CALENDAR_DAYS`` are copied
 verbatim from the untouched legacy pull (the source of record for the legacy
 path); the legacy module itself is never edited. :func:`build_rows` keeps
-``build_ticker``'s computation byte-for-byte and changes only its return
-shape -- one row dict per event, matching
+``build_ticker``'s realised-move computation byte-for-byte and returns one row
+dict per event (``computed_moves.v4``: plus the ``event_history`` columns), matching
 :mod:`engine.v2.data.computed_moves_table`'s columns, including one row per
 SKIPPED event (``skipped=True``, ``realized_move_pct=None``) and, on every
 computable row, ``available_as_of_date`` (the measured close date plus one
