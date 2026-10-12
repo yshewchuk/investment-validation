@@ -20,8 +20,9 @@ The reserved arm is planned; registration does not mark a variant as tried.
 Admission verifies the stored object and compares a freshly built binding;
 returned documents are copies, not mutable views of registered bytes.
 Registration and current-request admission do not fit models, publish reports,
-write the CSV ledger or emit outcome/refusal receipts, and have no supervisor caller.
-The smoke worker reuses `verify_native_registration` to verify its staged binding.
+write the CSV ledger or emit outcome/refusal receipts. The supervisor module does
+not call them directly; its dispatched smoke worker reuses
+`verify_native_registration` to verify its staged binding.
 
 Optional `final_read` metadata creates a versioned native registration that seals recipe, completeness-bar and frozen-model artifact references. Legacy registration bytes remain unchanged when omitted.
 `prepare_final_holdout_request` verifies that original registration and derives an immutable request keyed by experiment ID; missing declarations or malformed request metadata refuse `INVALID_EXPERIMENT_SPEC`, and changed catalog/artifact identity refuses `EXPERIMENT_IDENTITY_CONFLICT`.
@@ -98,7 +99,7 @@ replacement after opening cannot redirect the bytes; growth past the cap refuses
 The worker installs one `native_gate_consumption.v1.0` receipt with the immutable plan,
 stage inputs and mark-based cash flows; the supervisor publishes it only after worker success.
 Bytes are written and closed in a private staging directory, then installed
-create-only; existing destinations are never opened, overwritten or unlinked.
+create-only; staging must support hard links. Existing destinations are never opened, overwritten or unlinked.
 This receipt is not an evaluation report or promotion evidence.
 
 | Native worker condition | Outcome |

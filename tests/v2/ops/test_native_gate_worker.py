@@ -724,10 +724,24 @@ def test_registered_code_must_match_the_running_worker(
 
 
 @pytest.mark.parametrize("arm", ["candidate", "STR-THRU"])
-def test_supervised_missing_strategy_refuses_before_population_reads(source, tmp_path, arm):
+def test_supervised_missing_strategy_refuses_before_population_reads(
+        source, tmp_path, arm, single_thread, monkeypatch):
     """A worker never substitutes the arm name for an undeclared strategy."""
+    from experiments import v2_gate_variant as gate
+
     request = _registered(source, primary_arm_id=arm, arms=[arm], economic_params={"fill": 0.0})
+    document, registration, parameters = request
+    stage = _stage(tmp_path / "staging", document, registration)
     before = _catalog(source[0])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("missing strategy reached population reads")
+
+    monkeypatch.setattr(gate, "load_population", forbidden)
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.message == "native worker requires a registered strategy"
     result = _supervise(tmp_path, source, *request)
     assert result["code"] == "INVALID_EXPERIMENT_SPEC"
     assert _catalog(source[0]) == before
