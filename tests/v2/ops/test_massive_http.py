@@ -6,6 +6,7 @@ import signal
 import socket
 import time
 import traceback
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -14,9 +15,6 @@ import requests
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.providers import massive
 
-# The edge owns SIGALRM in its dedicated worker. Disable the pytest harness's
-# competing alarm, then test the real edge timer and its restoration below.
-pytestmark = pytest.mark.test_timeout(0)
 SYNTHETIC_KEY = "synthetic-massive-key-never-a-real-credential"
 
 
@@ -77,7 +75,17 @@ def offline_and_synthetic(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def restored_alarm():
+def fake_deadline(monkeypatch):
+    # Ordinary fake HTTP tests retain the pytest harness's SIGALRM hang guard.
+    # Only the explicit real_deadline fixture below takes ownership of it.
+    original = massive._deadline
+    monkeypatch.setattr(massive, "_deadline", nullcontext)
+    return original
+
+
+@pytest.fixture
+def real_deadline(monkeypatch, fake_deadline):
+    monkeypatch.setattr(massive, "_deadline", fake_deadline)
     previous_handler = signal.getsignal(signal.SIGALRM)
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
     yield
@@ -284,8 +292,25 @@ def test_credential_echo_across_chunk_boundary_is_refused(http):
     assert http.response.closed and http.sessions[0].closed
 
 
+# These focused timer tests own SIGALRM, so only they disable the competing
+# pytest alarm. Their explicit fixture verifies timer and handler restoration.
+@pytest.mark.test_timeout(0)
+@pytest.mark.parametrize("fail_inside", [False, True])
+def test_real_deadline_arms_timer_and_restores_on_exit(real_deadline, fail_inside):
+    expected = pytest.raises(RuntimeError, match="synthetic failure") if fail_inside else nullcontext()
+    with expected, massive._deadline():
+        remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+        assert 0 < remaining <= massive.HTTP_DEADLINE_SECONDS
+        assert interval == 0
+        if fail_inside:
+            raise RuntimeError("synthetic failure")
+
+
+@pytest.mark.test_timeout(0)
 @pytest.mark.parametrize("phase", ["get", "stream"])
-def test_real_total_deadline_interrupts_delayed_fake_and_restores_timer(http, monkeypatch, phase):
+def test_real_total_deadline_interrupts_delayed_fake_and_restores_timer(
+    http, monkeypatch, real_deadline, phase,
+):
     assert massive.HTTP_DEADLINE_SECONDS == 45
     monkeypatch.setattr(massive, "HTTP_DEADLINE_SECONDS", 0.06)
     if phase == "get":
@@ -310,7 +335,8 @@ def test_real_total_deadline_interrupts_delayed_fake_and_restores_timer(http, mo
         assert http.response.closed
 
 
-def test_preexisting_timer_refuses_without_overwriting_it_or_charging(http):
+@pytest.mark.test_timeout(0)
+def test_preexisting_timer_refuses_without_overwriting_it_or_charging(http, real_deadline):
     previous_handler = signal.getsignal(signal.SIGALRM)
     signal.setitimer(signal.ITIMER_REAL, 30)
     try:

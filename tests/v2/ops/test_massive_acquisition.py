@@ -144,13 +144,39 @@ def test_fresh_acquisition_and_repeated_job_reuse_only_raw_cache(harness):
     assert service._cache_allowed(replace(second, spec=replace(second.spec, kind="artifact_check"))) is True
 
 
-@pytest.mark.parametrize("change", [{"provider_calls": 0}, {"provider_calls": True},
+SCOPE_REFUSALS = [{"provider_calls": 0},
     {"provider_calls": 2}, {"provider_account": "other"}, {"policy_version": "other"},
-    {"expected_ids": ("wrong",)}, {"dataset": "minute"}, {"adjustment": "dividend_adjusted"}])
-def test_parameter_refusals_precede_storage(change):
+    {"expected_ids": ("wrong",)}, {"dataset": "minute"}, {"adjustment": "dividend_adjusted"}]
+
+
+@pytest.mark.parametrize("change", [*SCOPE_REFUSALS, {"provider_calls": True}])
+def test_parameter_refusals_precede_storage(harness, monkeypatch, change):
+    enqueue(harness)
+    attempt = claim(harness)
+    def forbidden(*_, **__):
+        pytest.fail("invalid worker scope reached storage or provider access")
+    monkeypatch.setattr(acquisition, "connect", forbidden)
     with pytest.raises(OpsError) as error:
-        acquisition.run(to_document(replace(PARAMS, **change)), None, {})
+        run(harness, attempt, forbidden, replace(PARAMS, **change))
     assert error.value.code == "INVALID_REQUEST"
+    assert harness.conn.execute("SELECT used_calls FROM provider_reservations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("change", SCOPE_REFUSALS)
+def test_submission_scope_refusals_use_registered_validator(harness, monkeypatch, change):
+    checked = []
+    original = acquisition.parameter_problems
+    def validate(job, params):
+        checked.append(params)
+        return original(job, params)
+    monkeypatch.setattr(acquisition, "parameter_problems", validate)
+    params = replace(PARAMS, **change)
+    with pytest.raises(OpsError) as error:
+        enqueue(harness, params=params)
+    assert error.value.code == "INVALID_REQUEST"
+    assert checked == [params]
+    assert harness.conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+    assert harness.conn.execute("SELECT count(*) FROM provider_reservations").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("change", [{"provider_budget_ref": "other"}, {"input_refs": ("artifact-1",)},
@@ -257,6 +283,31 @@ def test_transport_failure_keeps_charge_and_closes_budget_transaction(harness):
     assert state == "failed"
     assert claim(h) is None
     assert h.conn.execute("SELECT count(*) FROM attempts").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("code,recorded_status", [("TRANSIENT_SOURCE", 503),
+    ("SOURCE_INVALID", 200), ("RESOURCE_LIMIT_EXCEEDED", 200)])
+def test_transport_refusal_accounting_preserves_observed_status(harness, monkeypatch, code, recorded_status):
+    h = harness
+    enqueue(h)
+    attempt = claim(h)
+    statuses = []
+    original = provider_budget.record_response
+    def record(conn, account, status, **kwargs):
+        statuses.append(status)
+        return original(conn, account, status, **kwargs)
+    monkeypatch.setattr(provider_budget, "record_response", record)
+    def fetch(_, charge):
+        charge()
+        h.clock.advance(5)
+        raise fail(code, "synthetic transport refusal")
+    with pytest.raises(OpsError) as error:
+        run(h, attempt, fetch)
+    assert error.value.code == code
+    assert statuses == [recorded_status]
+    row = h.conn.execute("SELECT remaining,uncertain,next_eligible_at,blocked_code FROM provider_accounts").fetchone()
+    assert tuple(row) == (9, 1, "2026-09-12T00:00:18.000000Z", None)
+    assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 0
 
 
 def test_existing_raw_receipt_replay_is_fenced_in_its_own_transaction(harness):

@@ -67,6 +67,13 @@ def job_kind():
                    namespaces=frozenset({"shadow"}), validate=parameter_problems)
 
 
+def _record_fetch_failure(error, response):
+    status = {"TRANSIENT_SOURCE": 503, "SOURCE_INVALID": 200,
+              "RESOURCE_LIMIT_EXCEEDED": 200}.get(error.code)
+    if status is not None:
+        response(status)
+
+
 def _acquire(conn, store, params, claim, *, fetch, clock):
     def fence():
         verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
@@ -94,9 +101,9 @@ def _acquire(conn, store, params, claim, *, fetch, clock):
     if not cache_hit:
         try:
             status, body = fetch(unit["request"], charge)
-        except OpsError:
+        except OpsError as error:
             if charged:
-                response(503)
+                _record_fetch_failure(error, response)
             raise
         if not charged:
             raise fail("INTEGRITY_FAILED", "Massive transport omitted durable accounting")

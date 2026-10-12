@@ -1063,7 +1063,7 @@ worker builds `events.json` from the pinned snapshot before scoring.
 
 Top-level imports, all strictly below this package's own layer (7.0):
 `engine.v2.contracts` (0.0), `engine.v2.foundation` (0.5), `engine.v2.data`
-(1.0 — `generic_incremental`/`incremental_tables`/`incremental` (`load_raw_receipt`, `cache_raw_receipt`, `RawPayload`, `RAW_SCHEMA_REF`; [Massive acquisition](stores/massive/ARCHITECTURE.md))/`repository.Repository`/
+(1.0 — `errors`/`generic_incremental`/`incremental_tables`/`incremental` (`load_raw_receipt`, `cache_raw_receipt`, `RawPayload`, `RAW_SCHEMA_REF`; [Massive acquisition](stores/massive/ARCHITECTURE.md))/`repository.Repository`/
 `computed_moves`/`computed_moves_table`), `engine.v2.registry` (3.0,
 `DYNAMIC_MENU`), `engine.v2.scoring` (5.0 — `native_board_universe.py`'s
 `SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s
