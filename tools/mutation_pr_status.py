@@ -72,12 +72,12 @@ def classify_module(name: str, mod, rows: list[dict], changed: dict[str, set[int
         return "infra", f"killed by signal (exit {rc})"
     if (mod.get("counts_backend") or {}).get("error"):
         return "infra", "gremlin ERROR results (tool errors)"
+    if any(str(r).startswith("RAW_") for r in mod.get("failure_reasons") or []):
+        return "infra", "invalid raw report"
     if _is_test_failure_rc(rc):
         if name in failing_on_main:
             return "infra", f"module run fails on main too (exit {rc})"
         return "pr_owned", f"module run failed (exit {rc})"
-    if any(str(r).startswith("RAW_") for r in mod.get("failure_reasons") or []):
-        return "infra", "invalid raw report"
     hits = sorted((r["file"], r["line"]) for r in rows
                   if r.get("module") == name and r.get("status") == "survived"
                   and r.get("line") in changed.get(r.get("file"), ()))
@@ -129,6 +129,7 @@ def _load_rows(path: Path) -> list[dict]:
     try:
         return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
     except (OSError, ValueError):
+        print("::warning::results.jsonl unreadable; survivors cannot be attributed to the PR")
         return []
 
 
@@ -151,7 +152,8 @@ def main(argv: list[str] | None = None) -> int:
         changed: dict[str, set[int]] = {}
         try:
             changed = parse_changed_lines(Path(args.diff_file).read_text()) if args.diff_file else {}
-        except OSError:
+        except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
+            changed = {}
             print("::warning::PR diff unavailable; survivors cannot be attributed to the PR")
         baseline = _load_json(args.baseline_summary)
         if args.baseline_summary and baseline is None:

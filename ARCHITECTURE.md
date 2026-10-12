@@ -259,16 +259,17 @@ evidence. See the models and data component contracts.
     taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
-  - **Mutation PR status** (`tools/mutation_pr_status.py`, run by the gremlins
-    `report` job on a PR): inputs are the merged `summary.json`, the PR's
+  - **Mutation PR status** (`tools/mutation_pr_status.py`; once wired, the gremlins
+    `report` job runs it on a PR; the workflow step lands in a follow-up commit
+    on this PR, so until then `mutation.yml` does not call it): inputs are the merged `summary.json`, the PR's
     `git diff -U0` and, optionally, main's last merged `summary.json`; it prints
     a JSON verdict and sets `state` (`success`|`failure`) and `description`
     (at most 140 characters), which `report_status` posts as `mutation/pr`.
     Each scheduled module is `pr_owned` (a `survived` row on a line the PR
     added or changed in a diff of that file, or a run exit code above 0 and
     below 128 that main's summary does not also show for the module), `infra`
-    (no report, `skipped_reason`, timeout/cancel (`-1`), signal exit (128 or
-    more), gremlin `ERROR` results, an invalid raw report, or a failure main
+    (no report, `skipped_reason`, timeout/cancel (`-1`), other negative or 128+ signal exit,
+    gremlin `ERROR` results, an invalid raw report, or a failure main
     shows too) or `ok`. Only `pr_owned` modules make the state `failure`;
     infra modules emit `::warning::` lines and are counted in the description,
     never red. A missing or unparsable merged summary yields `success` with an

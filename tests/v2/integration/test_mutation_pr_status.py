@@ -90,6 +90,7 @@ def test_each_infra_class_is_a_warning_never_red():
         "errors": mod(counts_backend={"error": 2}, failure_reasons=["ERROR_RESULTS"]),
         "skipped": mod(skipped_reason="pr_closed_mid_run"),
         "rawbad": mod(failure_reasons=["RAW_INVALID"]),
+        "rawbad_rc1": mod(run_exit_code=1, failure_reasons=["RAW_INVALID", "RUN_INCOMPLETE"]),
     }
     m = merged(**cases)
     m["expected_modules"].append("missing")
@@ -156,3 +157,27 @@ def test_main_unreadable_inputs_never_red(tmp_path, capsys):
              "--baseline-summary", str(tmp_path / "no.json"), "--github-output", str(out2)])
     assert "state=failure\n" in out2.read_text()
     assert "baseline summary unreadable" in capsys.readouterr().out
+
+
+def test_missing_or_undecodable_diff_attributes_no_survivor(tmp_path, capsys):
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "summary.json").write_text(json.dumps(merged(a=mod())))
+    (d / "results.jsonl").write_text(json.dumps(row("a", "engine/v2/a.py", 5)) + "\n")
+    bad = tmp_path / "bad.diff"
+    bad.write_bytes(b"+++ b/engine/v2/a.py\n@@ -1 +5 @@\n\xff\xfe\n")
+    for i, diff_args in enumerate([[], ["--diff-file", str(tmp_path / "no.diff")],
+                                   ["--diff-file", str(bad)]]):
+        out = tmp_path / f"gh_{i}"
+        assert ps.main(["--merged-dir", str(d), "--github-output", str(out), *diff_args]) == 0
+        assert "state=success\n" in out.read_text()
+    assert "PR diff unavailable" in capsys.readouterr().out
+
+
+def test_corrupt_results_jsonl_warns(tmp_path, capsys):
+    d, diff = _write_report(tmp_path, merged(a=mod()), [])
+    (d / "results.jsonl").write_text("{not json\n")
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    assert "results.jsonl unreadable" in capsys.readouterr().out
