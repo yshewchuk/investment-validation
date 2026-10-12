@@ -16,8 +16,8 @@ from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.executor import THREAD_VARIABLES
-from engine.v2.ops.experiments import experiment_spec_from_document
-from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+from engine.v2.ops.experiments import experiment_spec_from_document, experiments_ledger_path
+from engine.v2.ops.fingerprints import environment_identity, snapshot_code, worker_source_manifest
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
 from experiments.native_gate_worker import RUNNER
@@ -30,7 +30,7 @@ from tests.v2.research.test_native_registration import _catalog
 REPO = Path(__file__).resolve().parents[3]
 
 
-def _registered(source, alpha=0.0, **changes):
+def _registered(source, alpha=0.0, *, code_root=REPO, **changes):
     """Bind the worker and strategy without conflating strategy with arm identity."""
     arm = "candidate" if alpha == 0.0 else "control"
     document = {**_document(alpha), "experiment_id": "synthetic-worker",
@@ -38,7 +38,7 @@ def _registered(source, alpha=0.0, **changes):
                 "economic_params": {"fill": alpha, "strategy": "STR-THRU"}, **changes}
     spec = experiment_spec_from_document(document)
     registration = register_native(source[0], source[2], source[3], spec,
-                                   code_root=REPO, as_of_month="2025-01")
+                                   code_root=code_root, as_of_month="2025-01")
     parameters = {"run_id": registration.run_id, "variant_id": registration.variant_id,
                   "expected_ids": [registration.variant_id], "no_ledger": True,
                   "catalog_path": source[0].execute("PRAGMA database_list").fetchone()["file"],
@@ -72,7 +72,8 @@ def forbidden_pricing(monkeypatch):
 
 
 def _supervise(tmp_path, source, document, registration, parameters, *, key="smoke",
-               staged_bytes=None, expected_details=None, shared_root=None, before_start=None):
+               staged_bytes=None, expected_details=None, shared_root=None, before_start=None,
+               code_source=REPO):
     """Submit through the production registry, launcher, child and checkpoint path."""
     root = tmp_path / (shared_root or key)
     root.mkdir(exist_ok=shared_root is not None)
@@ -89,7 +90,7 @@ def _supervise(tmp_path, source, document, registration, parameters, *, key="smo
                 register_artifact(conn, ref, None, clock)
             bindings[name] = ref.artifact_id
         job = JobSpec(kind="native_gate_pricing", spec_hash=content_hash(document),
-                      implementation_ref=content_hash(worker_source_manifest(REPO)),
+                      implementation_ref=content_hash(worker_source_manifest(code_source)),
                       environment_ref=content_hash(environment_identity(1)),
                       parameters={**parameters, "input_bindings": bindings},
                       input_refs=tuple(bindings.values()), output_namespace="smoke",
@@ -98,7 +99,7 @@ def _supervise(tmp_path, source, document, registration, parameters, *, key="smo
         receipt = submit(conn, stages.registry(), NamespacePolicy({"operator": frozenset({"smoke"})}),
                          SubmitRequest(namespace="smoke", idempotency_key=key, principal="operator", job=job),
                          clock=clock)
-        service = Service(conn, root, stages.registry(), TEST_POLICY, clock=clock, code_source=REPO)
+        service = Service(conn, root, stages.registry(), TEST_POLICY, clock=clock, code_source=code_source)
         if before_start is not None:
             before_start(conn, store, job, clock)
         checkpoint_count = conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
@@ -141,11 +142,14 @@ def test_supervised_arms_consume_independent_fill_and_never_record(source, tmp_p
         event_rows=[{**_event_rows()[0], "event_id": other, "ticker": "OTHER"}] + _event_rows(),
         receipt_id="two-event-provenance", expected_head=source[4].snapshot_id, generation=1)
     source = (*source[:4], snapshot)
-    requests = [_registered(source, alpha) for alpha in (0.0, 1.0)]
+    checkout = tmp_path / "checkout"
+    snapshot_code(REPO, checkout, worker_source_manifest(REPO))
+    requests = [_registered(source, alpha, code_root=checkout) for alpha in (0.0, 1.0)]
     before = _catalog(source[0])
-    ledger = source[2].root / "LEDGER.csv"
+    ledger = experiments_ledger_path(checkout)
+    assert ledger == checkout / "experiments" / "LEDGER.csv"
     ledger.write_bytes(b"sentinel legacy ledger\n")
-    results = [_supervise(tmp_path, source, *request, key=f"arm-{i}")
+    results = [_supervise(tmp_path, source, *request, key=f"arm-{i}", code_source=checkout)
                for i, request in enumerate(requests)]
     for result, request, alpha, cost, exits, profits in zip(
             results, requests, (0.0, 1.0), (3.8, 3.0), ((6.0, 5.0), (6.8, 5.8)),
@@ -171,6 +175,12 @@ def test_supervised_arms_consume_independent_fill_and_never_record(source, tmp_p
     assert {result["execution_plan"]["arms"][0] for result in results} == {"candidate", "control"}
     assert _catalog(source[0]) == before
     assert ledger.read_bytes() == b"sentinel legacy ledger\n"
+    private_checkouts = list(tmp_path.glob("arm-*/code/*"))
+    assert len(private_checkouts) == 2
+    for code in private_checkouts:
+        assert (code / RUNNER).is_file()
+        assert not experiments_ledger_path(code).exists()
+    assert list(tmp_path.rglob("LEDGER.csv")) == [ledger]
     assert not list(tmp_path.rglob("REPORT.md"))
     assert not list(tmp_path.rglob("*.append.lock"))
 
@@ -213,6 +223,30 @@ def test_changed_staged_binding_refuses_before_pricing(
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert error.value.problem.retryable is False
+    assert not (stage / "native_gate_consumption.json").exists()
+
+
+@pytest.mark.parametrize("field", ["run_id", "variant_id"])
+@pytest.mark.parametrize("value", [2**100, True, None, [], {}, b"identity", 1.5])
+def test_ill_typed_worker_identities_refuse_before_database_binding(
+        source, tmp_path, single_thread, forbidden_pricing, monkeypatch, field, value):
+    """Valid registration cannot make malformed direct arguments SQL-safe."""
+    from experiments import native_gate_worker as native
+
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    parameters[field] = value
+    before = _catalog(source[0])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("catalog opened before worker argument validation")
+
+    monkeypatch.setattr(native.sqlite3, "connect", forbidden)
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.retryable is False
+    assert _catalog(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -556,8 +590,6 @@ def test_supervised_required_spec_fields_use_experiment_refusal(source, tmp_path
 @pytest.mark.parametrize("kind", ["fifo", "directory", "symlink", "oversized"])
 def test_staged_documents_refuse_unsafe_files_without_blocking(source, tmp_path, single_thread, name, kind):
     """A real dispatch child must terminate on each unsafe staged document."""
-    from experiments.native_gate_worker import MAX_STAGED_BYTES
-
     document, registration, parameters = _registered(source)
     stage = _stage(tmp_path / "staging", document, registration)
     path = stage / name
@@ -570,7 +602,7 @@ def test_staged_documents_refuse_unsafe_files_without_blocking(source, tmp_path,
         path.symlink_to(stage / "absent-target")
     else:
         with path.open("wb") as stream:
-            stream.truncate(MAX_STAGED_BYTES + 1)
+            stream.truncate(16_777_217)
     before = _catalog(source[0])
     program = """
 import json, sys
@@ -677,24 +709,48 @@ def test_consumed_provenance_must_match_registration(
     assert _catalog(source[0]) == before
 
 
-def test_staged_growth_is_bounded_after_descriptor_validation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("name", ["spec.json", "native_registration.json"])
+@pytest.mark.parametrize("size", [16_777_216, 16_777_217], ids=["at-cap", "above-cap"])
+def test_staged_literal_size_boundary(tmp_path, name, size):
+    """Independent byte counts pin the documented inclusive 16 MiB limit."""
+    from experiments import native_gate_worker as native
+
+    path = tmp_path / name
+    expected = b"x" * size
+    path.write_bytes(expected)
+    if size == 16_777_216:
+        assert native._read_staged(path) == expected
+    else:
+        with pytest.raises(OpsError) as error:
+            native._read_staged(path)
+        assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert error.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("name", ["spec.json", "native_registration.json"])
+@pytest.mark.parametrize("size", [16_777_216, 16_777_217], ids=["at-cap", "above-cap"])
+def test_staged_growth_is_bounded_after_descriptor_validation(tmp_path, monkeypatch, name, size):
     """A real file growing after fstat cannot bypass the bounded read."""
     from experiments import native_gate_worker as native
 
-    path = tmp_path / "growing.json"
+    path = tmp_path / name
     path.write_bytes(b"{}")
     original_fstat = native.os.fstat
 
     def grow_after_stat(fd):
         info = original_fstat(fd)
         with path.open("ab") as stream:
-            stream.truncate(native.MAX_STAGED_BYTES + 1)
+            stream.truncate(size)
         return info
 
     monkeypatch.setattr(native.os, "fstat", grow_after_stat)
-    with pytest.raises(OpsError) as error:
-        native._read_staged(path)
-    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    if size == 16_777_216:
+        assert native._read_staged(path) == b"{}" + b"\0" * 16_777_214
+    else:
+        with pytest.raises(OpsError) as error:
+            native._read_staged(path)
+        assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert error.value.problem.retryable is False
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink", "hardlink", "fifo", "write-error",

@@ -19,6 +19,7 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.executor import THREAD_VARIABLES
 from engine.v2.ops.experiments import experiment_spec_from_document, resolve_experiment_plan
 from engine.v2.ops.fingerprints import environment_identity, source_closure
+from engine.v2.ops.stages import NativeGateParameters
 from experiments.native_registration import NativeRegistration, verify_native_registration
 from experiments.v2_gate_variant import price_variant
 
@@ -113,6 +114,7 @@ def run(parameters, root):
     if parameters.get("no_ledger") is not True:
         raise fail("INVALID_EXPERIMENT_SPEC", "native pricing is smoke-only")
     try:
+        from_document(NativeGateParameters, dict(parameters))
         conn = sqlite3.connect(Path(parameters["catalog_path"]).resolve().as_uri() + "?mode=ro",
                                uri=True, isolation_level=None)
         conn.row_factory = sqlite3.Row
