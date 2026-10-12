@@ -58,8 +58,10 @@ jobs:
       - name: Check Markdown structure
         if: github.event_name == 'pull_request'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 checks/markdown_structure.py --base-ref "$BASE_SHA"
+          # The CURRENT base tip, not pull_request.base.sha: once the base branch
+          # moves, the merge commit contains files the stale sha lacks.
+          BASE_REF: origin/${{ github.base_ref }}
+        run: python3 checks/markdown_structure.py --base-ref "$BASE_REF"
 
       - name: Upload PR test selection
         if: github.event_name == 'pull_request'
