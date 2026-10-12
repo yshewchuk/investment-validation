@@ -894,27 +894,11 @@ waits without submitting until its paired succeeded inputs are ready.
 
 ## Outputs
 
-- **`orats_daily_market_fetcher`'s rows** (`providers/orats_daily_market.py`).
-  `fetcher(unit)` returns `ticker_rows` dicts keyed by `daily_market` columns.
-  Scaled fields outside `PLAUSIBLE_RANGES` (a test-verified local mirror of
-  `engine.data.normalize.common.PLAUSIBLE_RANGES`) become `None`, as does
-  in-range `implied_move <= 0` (ORATS's "no quote" sentinel); masking never raises.
-  Missing daily market cap stays `mcap_usd=None`; backward-looking as-of carry
-  belongs to `engine.v2.data.incremental.merge_daily_market`, not this fetcher.
-  Paired summaries/cores calls retry once for non-empty 2xx missing tickers:
-  four reserved calls maximum. Exhaustion returns available rows as partial,
-  with session/attempt metadata and typed missing-ticker coverage bound to the
-  raw receipt, never complete. Empty or literal-404 stays not_final under the
-  normal retry policy; independently classified endpoints retain credential,
-  rate-limit and not-final refusal precedence over partial.
-  `provider_response.py` owns pure `classify_response`, `OutcomeKind` and
-  frozen `AcquisitionOutcome`; `incremental_data` re-exports the same objects.
-  The ORATS edge imports that leaf directly: only stdlib and `ops.errors.fail`,
-  so importing providers/credentials no longer reaches refresh orchestration.
-  Classification validates unique nonempty requested keys, returned/empty/
-  unsupported subsets and nonnegative observed quota before returning an outcome;
-  invalid values retain `INVALID_REQUEST`. No I/O, cache, transaction, partial
-  write or retry occurs in the leaf; equal inputs give equal outcomes; retry/coverage policy remains in `incremental_data`, which imports neither refresh store: `calendar_moves_jobs` owns their callback loaders.
+- **ORATS rows** (`providers/orats_daily_market.py`): `fetcher(unit)` returns `(raw_bytes, response_kind, response_meta, ticker_rows)`; `ticker_rows` supplies the `daily_market` rows. Out-of-range scaled fields and nonpositive `implied_move` become `None` without raising. Missing mcap remains null; backward carry belongs to `data.incremental.merge_daily_market`.
+  `orats_daily_market._fetch_attempts` and `_should_retry` own the bounded summaries/cores retry for nonempty 2xx missing tickers; nightly admission reserves its full paired-retry budget via `nightly.ORATS_CALLS_PER_DAILY_MARKET_UNIT`. Remaining gaps retain partial coverage, session/attempt metadata and raw receipts, never complete; empty/404 remains not_final. Credential, rate-limit and not-final outcomes precede partial.
+  `data.incremental._fetch_unit` validates returned coverage and records raw receipts. `provider_response` owns pure `classify_response`, `OutcomeKind`, `AcquisitionOutcome`; `ops.incremental_data` re-exports them, importing neither refresh store. `calendar_moves_jobs` owns callback loaders. ORATS imports `provider_response` directly; that leaf depends only on stdlib and `ops.errors.fail`, so provider imports never reach orchestration.
+  Classification validates unique nonempty requested keys, returned/empty/unsupported subsets and nonnegative quota; invalid values remain `INVALID_REQUEST`. Equal inputs produce equal outcomes, without I/O, cache, retry, transaction, writes or partial return.
+- **Massive Basic planning**: `python -m tools.v2_massive_plan` calls `massive_plan.plan` for daily OHLCV and splits/dividends. Explicit `as_of` and the versioned policy constrain supported dates/datasets; the policy request rate is reported, not enforced. These establish neither entitlement nor finality. Help succeeds; engine startup may load `.env`, including for help/refusals. Planning performs no provider calls, credential lookup/output, retries, writes, migration, research reads or snapshot publication. Credential-free identity preserves ticker case, dataset, endpoint, dates, params and raw/split-only adjustment; no other-provider or legacy `price_history` substitution. Reuse reflects current catalog state, not receipt availability at `as_of`: only the latest exact-request complete, nonempty, unpaginated receipt is reused after verification; absent/non-complete receipts and empty/paginated bodies remain missing. Raw hits prove neither normalized coverage, historical knowledge nor permitted use. Identical inputs give identical plans; missing units alone determine initial-call/HTTP-attempt bounds, including unknown pagination/retries. Refusals return no partial plan ([failure contract](#massive-basic-planning)). CLI uses a bounded child/read-only transaction; library callers own their connection/transaction and receive other I/O/SQLite errors unchanged.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
@@ -1078,7 +1062,7 @@ worker builds `events.json` from the pinned snapshot before scoring.
 
 Top-level imports, all strictly below this package's own layer (7.0):
 `engine.v2.contracts` (0.0), `engine.v2.foundation` (0.5), `engine.v2.data`
-(1.0 — `generic_incremental`/`incremental_tables`/`repository.Repository`/
+(1.0 — `generic_incremental`/`incremental_tables`/`incremental` (`load_raw_receipt`, `RAW_SCHEMA_REF`)/`repository.Repository`/
 `computed_moves`/`computed_moves_table`), `engine.v2.registry` (3.0,
 `DYNAMIC_MENU`), `engine.v2.scoring` (5.0 — `native_board_universe.py`'s
 `SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s
@@ -1161,6 +1145,22 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | Feature read: snapshot mismatch; no match; any post-entry match; conflicting tie at latest eligible instant<br>Successful fold helper call | `SNAPSHOT_UNRESOLVED`; `FEATURES_MISSING`; non-retryable `FEATURE_LOOKAHEAD` (no clipping, shifting, or dropping); `INVALID_EXPERIMENT_SPEC`, respectively. Refusal returns no feature value and writes no artifact or report.<br>Returns only an in-memory result; writes no artifact, report, or ledger row. |
 
 Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row supplies the retry receipt and short-circuits the effect. Two distinct heartbeats govern a live attempt: `attempts.heartbeat_at` is the fenced lease-renewal stamp (`lifecycle.heartbeat`), while a `progress_events` row of `kind="heartbeat"` is only a throttled supervisor observation event (`HEARTBEAT_EVENT_SECONDS` or a state change) and never a lease signal; failure diagnostics expose the lease heartbeat stamp and the worker process-family liveness (recorded launch `ProcessIdentity`, ownership proof) separately from the latest progress event/step.<br>`fit_walk_forward_fold(estimator, train_features, train_labels, test_features, threshold_rule: TrainFoldRule) -> WalkForwardFoldFit` and `TrainFoldRule.fit_threshold(scores, labels) -> float` are pure fold-local helpers; `TrainFoldRule` accepts an optional `top_fraction`. The threshold uses training-fold scores and binary labels only; the estimator fits only on training rows, then scores test rows. Positive scores use the probability column whose fitted `classes_` label is `1`; `classes_` must be exactly binary `{0, 1}` in either order. Test labels are not accepted. Feature matrices are copied before estimator calls so caller-owned rows remain unchanged across folds, and threshold scoring uses original-value training rows even if fitting mutates its input. Named train/test frames require identical column names in identical order; unnamed arrays use positional columns, and mixed named/positional inputs are refused. Callers must apply `ExperimentFeatureContext` while building feature rows to enforce `FEATURE_LOOKAHEAD`; `fit_walk_forward_fold` does not inspect temporal metadata. Test-owned job polling in `tests/ops_support.py` is bounded by the test's own deadline. If that budget or an earlier helper deadline expires before the job is terminal, polling raises a typed timeout that identifies the last observed job state and reports its queue/admission reason, attempt count, and last heartbeat. The admission watch shares the polling deadline and cannot defer those diagnostics beyond it. A timeout is observational: it does not retry the job or extend the polling budget.
+
+### Massive Basic planning
+
+| Condition | Outcome |
+|---|---|
+| Malformed/reversed input or unavailable capability/history | Redacted `INVALID_REQUEST`, with a capability reason only for policy refusals; no catalog access or date clipping. |
+| Supplied catalog lacks the raw-receipt table | Non-retryable `VALIDATION_FAILED`, before unit lookup or raw-store access. |
+| Malformed or contradictory cached response envelope | `SOURCE_INVALID`. |
+| Cached object reference rejected by the shared manifest decoder | `MANIFEST_CORRUPT`. |
+| Malformed/mismatched receipt identity, artifact identity mismatch, or raw object with wrong type, byte count or hash | `INTEGRITY_FAILED`. |
+| Declared byte size is not an integer, is negative, or exceeds the planning bound | `RESOURCE_LIMIT_EXCEEDED`, before reading the raw object. |
+| Selected receipt disappears before the shared loader reads it (library callers own transaction consistency) | `INPUT_CHANGED`. |
+| Store root, raw object or its parent is absent when needed by a selected complete receipt | `MISSING`; cache misses do not require a store root. |
+| Other unsafe/unopenable raw-store paths | `UNSAFE_PATH`. |
+| Other CLI catalog/filesystem error, stalled child, launch failure or abnormal child exit | `RESOURCE_UNAVAILABLE`, without partial output. |
+
 ### `board_requests` (`native_board_universe.py`)
 
 | Condition | Outcome |
