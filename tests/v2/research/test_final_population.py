@@ -133,3 +133,16 @@ def test_missing_events_table_refuses_typed_without_partial_population(tmp_path)
             load_final_population(repository, _request(snapshot))
     finally:
         conn.close()
+
+
+def test_resolved_snapshot_with_different_identity_refuses_without_scan(tmp_path):
+    conn, repository, snapshot = _commit(tmp_path, list(_events().values()), include_targets=False)
+    try:
+        other = replace(snapshot, snapshot_id="different-snapshot")
+        repository.resolve = lambda _snapshot_id: other
+        with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED") as refusal:
+            load_final_population(repository, _request(snapshot))
+        assert not refusal.value.problem.retryable
+        assert repository.scans == []
+    finally:
+        conn.close()
