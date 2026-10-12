@@ -65,6 +65,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/parity/` | [`engine/v2/parity/ARCHITECTURE.md`](engine/v2/parity/ARCHITECTURE.md) |
 | `engine/v2/serving/` | [`engine/v2/serving/ARCHITECTURE.md`](engine/v2/serving/ARCHITECTURE.md) |
 | `engine/v2/ops/` | [`engine/v2/ops/ARCHITECTURE.md`](engine/v2/ops/ARCHITECTURE.md) |
+| `engine/v2/ops/stores/massive/` | [`engine/v2/ops/stores/massive/ARCHITECTURE.md`](engine/v2/ops/stores/massive/ARCHITECTURE.md) |
 | `engine/v2/diagnosis/` | (pending) |
 | `engine/v2/dashboard/` | [`engine/v2/dashboard/ARCHITECTURE.md`](engine/v2/dashboard/ARCHITECTURE.md) |
 | `ui/` | [`ui/ARCHITECTURE.md`](ui/ARCHITECTURE.md) |
@@ -428,6 +429,7 @@ Only a tracked path absent from the worktree reads as empty.
 ## 4. Production entrypoints and the job graph
 
 - **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
+- **Massive acquisition — `python -m engine.v2.ops.massive_acquire`.** Explicit shadow-job submission; `ops serve` performs bounded, cache-first REST acquisition. See the [acquisition contract](engine/v2/ops/stores/massive/ARCHITECTURE.md).
 - **Shadow nightly coordination.** The operations trigger coordinates snapshot
   import, pinned planning, submission and bounded serving; preparation commands
   remain separate interfaces. It does not start the production legacy nightly.
