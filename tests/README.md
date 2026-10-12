@@ -365,6 +365,16 @@ that applies does the status mirror `report`'s own result as `success`.
 The two contexts, `mutation-mutmut/pr` and `mutation/pr`, are distinct from
 each other and from the `Tests` check.
 
+**`mutation/pr` is red only for PR-owned problems (gremlins workflow).** The
+`report` job's last step runs `tools/mutation_pr_status.py` over the merged
+report, the PR's `git diff -U0` and main's last push report, and `report_status`
+posts its `state`/`description` when present. PR-owned: a survivor on a line the
+PR changed, or a module run that failed with a test-failure exit code main does
+not also show. Infra (a `::warning::`, never red): no report, skipped, timeout or
+cancel, signal kill, gremlin ERROR results, an invalid raw report, a failure main
+shows too. Unreadable inputs degrade to warnings. If the classify step did not run
+at all, the old mapping above still applies.
+
 **The two scores measure different things and are never comparable.** mutmut's
 score is (killed + timeout) / checked -- every mutant the run considered,
 `no_tests` counting against it; gremlins' is (zapped + timeout) /
