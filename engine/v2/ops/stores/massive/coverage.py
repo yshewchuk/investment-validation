@@ -118,6 +118,9 @@ def _verified(conn, store, row, remaining):
 def plan(conn, store, request, generation):
     """Return deterministic clipped receipt bindings and maximal missing intervals."""
     validate_generation(generation)
+    first, last = massive_plan._day(request["start"]), massive_plan._day(request["end"])
+    if first > last:
+        raise fail("INVALID_REQUEST", "Massive coverage start follows end")
     rows = conn.execute(
         "SELECT * FROM ops_massive_occurrences WHERE family=? AND generation=? "
         "AND start_date<=? AND end_date>=? ORDER BY occurrence_id LIMIT ?",
@@ -126,7 +129,7 @@ def plan(conn, store, request, generation):
         raise fail("RESOURCE_LIMIT_EXCEEDED", "Massive coverage candidate limit exceeded")
     remaining = [MAX_VERIFIED_BYTES]
     candidates = [(row["occurrence_id"], _verified(conn, store, row, remaining)) for row in rows]
-    first, stop = massive_plan._day(request["start"]), massive_plan._day(request["end"]) + timedelta(days=1)
+    stop = last + timedelta(days=1)
     boundaries = {first, stop}
     for _, document in candidates:
         boundaries.update((max(first, massive_plan._day(document["request"]["start"])),

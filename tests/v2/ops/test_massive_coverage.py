@@ -698,6 +698,100 @@ def test_interval_planning_cli_is_readonly_clipped_gap_aware_and_legacy_compatib
     assert "MASSIVE_API_KEY" not in captured.out + legacy.out
 
 
+@pytest.mark.parametrize("generation", ["initial", "refresh"])
+@pytest.mark.parametrize("observed,end", [
+    ("2026-09-12T02:00:00+00:00", "2026-09-11"),
+    ("2026-11-02T04:59:59+00:00", "2026-11-01"),
+])
+def test_generation_planner_refuses_unclosed_window_before_storage(
+        harness, monkeypatch, capsys, generation, observed, end):
+    h = harness
+    clock = SimpleNamespace(now=lambda: datetime.fromisoformat(observed))
+    monkeypatch.setattr(plan_cli, "SystemClock", lambda: clock)
+    before = tuple(h.conn.iterdump())
+    def no_storage(*args, **kwargs):
+        pytest.fail("unclosed generation plan accessed storage")
+    monkeypatch.setattr(plan_cli, "sqlite3", SimpleNamespace(connect=no_storage, Error=sqlite3.Error))
+    monkeypatch.setattr(coverage, "plan", no_storage)
+    args = ["--catalog", str(h.root / "ops.sqlite"), "--store-root", str(h.store.root),
+            "--ticker", "SYNTH", "--start", end, "--end", end,
+            "--as-of", observed[:10], "--adjustment", "raw", "--max-calls-per-request", "7",
+            "--generation", generation]
+    assert plan_cli._main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {"refused": "SOURCE_NOT_FINAL", "reason": None}
+    assert tuple(h.conn.iterdump()) == before
+
+
+def test_generation_planner_checks_every_unit_and_preserves_exact_mode(harness, monkeypatch, capsys):
+    h = harness
+    clock = FakeClock()
+    clock.value = datetime.fromisoformat("2026-09-12T02:00:00+00:00")
+    monkeypatch.setattr(plan_cli, "SystemClock", lambda: clock)
+    before = tuple(h.conn.iterdump())
+    args = ["--catalog", str(h.root / "ops.sqlite"), "--store-root", str(h.store.root),
+            "--ticker", "synth", "--ticker", "OTHER", "--ticker", "SYNTH",
+            "--start", "2026-09-11", "--end", "2026-09-11", "--as-of", "2026-09-12",
+            "--adjustment", "raw", "--max-calls-per-request", "7"]
+    assert plan_cli._main(args) == 0
+    assert json.loads(capsys.readouterr().out)["schema_version"] == "massive_cache_plan.v1"
+    clock.value = datetime.fromisoformat("2026-09-12T04:00:00+00:00")
+    checked, original_check, original_plan = [], plan_cli.closed_day, coverage.plan
+    def check(unit, observed):
+        original_check(unit, observed)
+        checked.append((unit["ticker"], unit["dataset"], observed))
+    def planned(*args):
+        assert len(checked) == 6  # Validate the whole request before reading any evidence.
+        return original_plan(*args)
+    monkeypatch.setattr(plan_cli, "closed_day", check)
+    monkeypatch.setattr(coverage, "plan", planned)
+    assert plan_cli._main(args + ["--generation", "initial"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == "" and json.loads(captured.out)["maximum_http_attempts"] == 42
+    assert set(checked) == {(ticker, dataset, clock.now()) for ticker in ("OTHER", "SYNTH")
+                           for dataset in ("daily", "splits", "dividends")}
+    assert tuple(h.conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+def test_interval_planner_refuses_inverted_dates_before_storage(dataset):
+    class NoStorage:
+        def execute(self, *args):
+            pytest.fail("invalid range accessed storage")
+    with pytest.raises(OpsError) as error:
+        coverage.plan(NoStorage(), None, request("2026-08-02", "2026-08-01", dataset), "initial")
+    assert error.value.code == "INVALID_REQUEST"
+
+
+def test_generation_planner_real_isolated_worker_returns_closed_window_refusal(harness, monkeypatch, capsys):
+    h = harness
+    original = plan_cli.subprocess.run
+    def frozen_worker(command, **kwargs):
+        command = list(command)
+        marker = "from tools.v2_massive_plan import _main; "
+        assert marker in command[-1]
+        command[-1] = command[-1].replace(marker,
+            "from datetime import datetime; from types import SimpleNamespace; "
+            "import socket; from tools import v2_massive_plan as cli; "
+            "cli.SystemClock = lambda: SimpleNamespace(now=lambda: "
+            "datetime.fromisoformat('2026-09-12T02:00:00+00:00')); "
+            "socket.socket.connect = lambda *a: (_ for _ in ()).throw(AssertionError('network')); "
+            + marker)
+        return original(command, **kwargs)
+    monkeypatch.setattr(plan_cli.subprocess, "run", frozen_worker)
+    before = tuple(h.conn.iterdump())
+    args = ["--catalog", str(h.root / "ops.sqlite"), "--store-root", str(h.store.root),
+            "--ticker", "SYNTH", "--start", "2026-09-11", "--end", "2026-09-11",
+            "--as-of", "2026-09-12", "--adjustment", "raw", "--max-calls-per-request", "7",
+            "--generation", "initial"]
+    assert plan_cli.main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {"refused": "SOURCE_NOT_FINAL", "reason": None}
+    assert tuple(h.conn.iterdump()) == before
+
+
 def test_real_service_launches_each_cached_history_job_and_publishes_own_output(tmp_path, monkeypatch, capsys):
     from engine.v2.ops import executor
     from engine.v2.ops.checkpoints import artifact

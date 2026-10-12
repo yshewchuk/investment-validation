@@ -11,11 +11,12 @@ from contextlib import closing
 from pathlib import Path
 
 from engine.v2.data.errors import DataError
-from engine.v2.foundation import ArtifactStore
+from engine.v2.foundation import ArtifactStore, SystemClock
 from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.massive_plan import plan
 from engine.v2.ops.stores.massive import coverage
+from engine.v2.ops.stores.massive.pages import closed_day
 
 PLAN_TIMEOUT_SECONDS = 30
 
@@ -43,6 +44,9 @@ def _main(argv=None):
         requested = plan(None, None, **args)
         if generation is not None:
             coverage.validate_generation(generation)
+            observed_at = SystemClock().now()
+            for unit in requested["units"]:
+                closed_day(unit["request"], observed_at)
         if "\0" in str(catalog) or "\0" in str(root) or not catalog.is_file():
             raise OSError("planning paths require a regular catalog and no NUL characters")
         with closing(sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
