@@ -44,5 +44,5 @@ def test_planner_failure_table_names_each_refusal_separately():
     assert sorted(row[0] for row in codes) == sorted({
         "INVALID_REQUEST", "SOURCE_INVALID", "INTEGRITY_FAILED", "MANIFEST_CORRUPT",
         "RESOURCE_LIMIT_EXCEEDED", "MISSING", "UNSAFE_PATH", "INPUT_CHANGED",
-        "RESOURCE_UNAVAILABLE",
+        "RESOURCE_UNAVAILABLE", "VALIDATION_FAILED",
     })

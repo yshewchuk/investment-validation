@@ -626,10 +626,10 @@ def test_attempt_input_bindings_migration_applies_once_and_checksums_hold(tmp_pa
     path = tmp_path / "ops.sqlite"
     conn = open_catalog(path, clock=SystemClock())
     applied = applied_versions(conn, schema.OWNER)
-    # The latest migration adds final-holdout authorization without changing
+    # The latest migration adds final-holdout state events without changing
     # the checksums of the existing nightly and input-binding migrations.
     assert applied.get(schema.MIGRATIONS[-1].version) == checksum(schema.MIGRATIONS[-1])
-    assert schema.MIGRATIONS[-1].version == 10
+    assert schema.MIGRATIONS[-1].version == 11
     conn.close()
     # Re-opening the same catalog re-applies no migration and does not raise.
     conn2 = open_catalog(path, clock=SystemClock())

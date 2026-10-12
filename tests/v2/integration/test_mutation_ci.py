@@ -3048,7 +3048,7 @@ def test_select_tests_cli_uncaught_selector_error_exits_nonzero_with_no_output(t
     """A selector error that escapes select_pr_tests's handled graph-build and
     unresolved-scan fallbacks must kill the CLI: nonzero exit, stdout exactly
     empty. An empty list, a narrowed list or `__ALL__` would each be read by
-    the `test` job as a verdict; nothing-on-stdout plus a failed select step is
+    the `plan` job as a verdict; nothing-on-stdout plus a failed select step is
     the only shape that stops the run instead of silently deciding for it.
     Fresh subprocess so the real CLI dispatch and process exit are what's
     asserted, independent of any workflow YAML. The graph is stubbed only to

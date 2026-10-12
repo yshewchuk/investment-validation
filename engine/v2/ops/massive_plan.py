@@ -7,7 +7,7 @@ from datetime import date, timedelta
 
 from engine.v2.data.incremental import RAW_SCHEMA_REF, load_raw_receipt
 from engine.v2.foundation import content_hash
-from engine.v2.foundation.artifacts import artifact_reference
+from engine.v2.foundation.artifacts import ArtifactError, artifact_reference
 from engine.v2.ops.errors import fail
 
 SOURCE = "massive-stocks"
@@ -121,7 +121,12 @@ def _cached(conn, store, request, request_hash):
     if row is None or row["response_kind"] != "complete":
         return None
     ref = _receipt_identity(row, request, request_hash)
-    body = load_raw_receipt(conn, store, row["raw_receipt_id"])
+    try:
+        body = load_raw_receipt(conn, store, row["raw_receipt_id"])
+    except ArtifactError as exc:
+        if exc.code == "UNSAFE_PATH" and isinstance(exc.__cause__, FileNotFoundError):
+            raise ArtifactError("MISSING", "Massive cached raw store is absent") from None
+        raise
     if ref["object_id"] != artifact_reference(body, RAW_SCHEMA_REF).artifact_id:
         raise fail("INTEGRITY_FAILED", "Massive raw artifact identity disagrees")
     return row["raw_receipt_id"] if _complete_body(body, request) else None
@@ -139,6 +144,10 @@ def plan(conn, store, *, tickers, start, end, as_of, adjustment,
                    details={"reason": "CAPABILITY_UNAVAILABLE"})
     requests = [_request_descriptor(d, t, start, end, adjustment)
                 for t in tickers for d in sorted(set(datasets))]
+    if conn is not None and conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='data_raw_receipts'"
+    ).fetchone() is None:
+        raise fail("VALIDATION_FAILED", "Massive planning requires a raw-receipt catalog")
     units = []
     for request in requests:
         digest = content_hash(request)

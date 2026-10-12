@@ -458,7 +458,7 @@ def test_corrupt_or_missing_object_is_never_a_hit(cache, missing):
 
 @pytest.mark.parametrize("condition,code", [
     ("store_symlink", "UNSAFE_PATH"), ("object_symlink", "UNSAFE_PATH"),
-    ("missing_parent", "MISSING"),
+    ("missing_parent", "MISSING"), ("missing_store", "MISSING"),
 ])
 def test_real_object_path_failures_preserve_exact_codes(cache, condition, code):
     conn, store, root = cache
@@ -469,10 +469,11 @@ def test_real_object_path_failures_preserve_exact_codes(cache, condition, code):
     before = tuple(conn.iterdump())
     digest = record.raw_hash.removeprefix("sha256:")
     path = store.root / "objects" / digest[:2] / digest
-    if condition == "store_symlink":
+    if condition in ("store_symlink", "missing_store"):
         saved = root / "saved-store"
         store.root.rename(saved)
-        store.root.symlink_to(saved, target_is_directory=True)
+        if condition == "store_symlink":
+            store.root.symlink_to(saved, target_is_directory=True)
     elif condition == "object_symlink":
         saved = root / "saved-object"
         path.rename(saved)
@@ -484,6 +485,33 @@ def test_real_object_path_failures_preserve_exact_codes(cache, condition, code):
         inventory(cache, datasets=["daily"])
     assert error.value.code == code
     assert tuple(conn.iterdump()) == before
+    if condition == "missing_store":
+        assert not store.root.exists()
+
+
+@pytest.mark.parametrize("kind", [None, "partial"])
+def test_missing_store_is_not_required_without_a_complete_receipt(cache, kind):
+    missing = inventory(datasets=["daily"])
+    if kind:
+        seed(cache, missing["units"][0]["request"], kind=kind)
+        cache[1].root.rename(cache[2] / "saved-store")
+    assert not cache[1].root.exists()
+    assert inventory(cache, datasets=["daily"]) == missing
+    assert not cache[1].root.exists()
+
+
+def test_uninitialized_catalog_refuses_without_retry_or_storage_access():
+    conn = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(OpsError) as error:
+            massive_plan.plan(conn, None, **PARAMS)
+        assert error.value.code == "VALIDATION_FAILED"
+        assert error.value.problem.category == "validation"
+        assert error.value.problem.retryable is False
+        assert error.value.problem.details == {}
+        assert conn.execute("SELECT name FROM sqlite_master").fetchall() == []
+    finally:
+        conn.close()
 
 
 def test_selected_receipt_disappearing_before_real_load_is_input_changed(cache, monkeypatch):

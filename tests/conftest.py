@@ -36,7 +36,7 @@ os.environ["PYTHONFAULTHANDLER"] = "1"
 #: (.github/workflows/tests.yml) deselects every one of these; the local
 #: complement run in tests/README.md ("CI tests") covers the rest. Every mark
 #: carries a one-line reason comment where it is applied.
-#: tests/test_tests_ci.py checks that the workflow's -m expression names
+#: tests/v2/integration/test_tests_ci.py checks that the workflow's -m expression names
 #: exactly these and that tests/README.md documents each one.
 LOCAL_ONLY_MARKERS = {
     "needs_data": "reads the real data/ root (gitignored, absent in CI and worktrees)",

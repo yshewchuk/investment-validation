@@ -2,6 +2,7 @@
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -117,7 +118,7 @@ def _run(root, arguments, revision, replacement="", *, guard_worker=True):
 
 @pytest.mark.parametrize("mode", [
     "help", "invalid", "s3", "missing", "empty", "cached", "fifo", "nul_catalog", "nul_store",
-    "receipt_corrupt", "bytes_corrupt", "object_missing", "manifest_missing_id",
+    "receipt_corrupt", "bytes_corrupt", "object_missing", "manifest_missing_id", "store_missing", "unmigrated",
     "cwd_shadow",
     "missing_flags", "missing_value", "bad_adjustment", "bad_cap", "unsupported_transport", "reversed_dates",
 ])
@@ -128,7 +129,7 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
     if mode == "cached":
         for unit in inventory(cache)["units"]:
             seed(cache, unit["request"])
-    if mode in ("receipt_corrupt", "bytes_corrupt", "object_missing", "manifest_missing_id"):
+    if mode in ("receipt_corrupt", "bytes_corrupt", "object_missing", "manifest_missing_id", "store_missing"):
         record = seed(cache, inventory(datasets=["daily"])["units"][0]["request"])
         digest = record.raw_hash.removeprefix("sha256:")
         path = root / "store" / "objects" / digest[:2] / digest
@@ -141,6 +142,8 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         elif mode == "bytes_corrupt":
             path.chmod(0o600)
             path.write_bytes(b"tampered")
+        elif mode == "store_missing":
+            (root / "store").rename(root / "saved-store")
         else:
             path.unlink()
     arguments = cli_args(root)
@@ -164,6 +167,11 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         arguments = cli_args(root, transport="s3")
     elif mode == "missing":
         arguments = cli_args(root, catalog=root / "missing.sqlite")
+    elif mode == "unmigrated":
+        empty_catalog = root / "unmigrated.sqlite"
+        sqlite3.connect(empty_catalog).close()
+        arguments = cli_args(root, catalog=empty_catalog)
+        empty_bytes = empty_catalog.read_bytes()
     elif mode == "fifo":
         fifo = root / "catalog.fifo"
         os.mkfifo(fifo)
@@ -174,9 +182,10 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         arguments = cli_args(root, **{"store-root": str(root / "bad") + "\0"})
     before = tuple(conn.iterdump())
     objects = {str(path.relative_to(root)): path.read_bytes()
-               for path in (root / "store").rglob("*") if path.is_file()}
-    first, markers = _run(root, arguments, "first")
-    second, more_markers = _run(root, arguments, "second")
+               for base in (root / "store", root / "saved-store")
+               for path in base.rglob("*") if path.is_file()}
+    first, _ = _run(root, arguments, "first")
+    second, _ = _run(root, arguments, "second")
     assert first == second
     assert first["code"] == (0 if mode in ("help", "empty", "cached", "cwd_shadow") else 2)
     if mode in ("empty", "cached", "cwd_shadow"):
@@ -202,15 +211,20 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         assert "--max-calls-per-request" in first["stdout"]
         assert first["stderr"] == ""
     cache_errors = {"receipt_corrupt": "INTEGRITY_FAILED", "bytes_corrupt": "INTEGRITY_FAILED",
-                    "object_missing": "MISSING", "manifest_missing_id": "MANIFEST_CORRUPT"}
+                    "object_missing": "MISSING", "manifest_missing_id": "MANIFEST_CORRUPT",
+                    "store_missing": "MISSING", "unmigrated": "VALIDATION_FAILED"}
     if mode in cache_errors:
         assert json.loads(first["stdout"]) == {
             "refused": cache_errors[mode], "reason": None}
         assert first["stderr"] == ""
     assert tuple(conn.iterdump()) == before
     assert objects == {str(path.relative_to(root)): path.read_bytes()
-                       for path in (root / "store").rglob("*") if path.is_file()}
-    assert all(marker not in str(before) + str(objects) for marker in markers + more_markers)
+                       for base in (root / "store", root / "saved-store")
+                       for path in base.rglob("*") if path.is_file()}
+    if mode in ("store_missing", "unmigrated"):
+        assert not (root / "store").exists()
+    if mode == "unmigrated":
+        assert empty_catalog.read_bytes() == empty_bytes
 
 
 @pytest.mark.parametrize("cached", [False, True])
