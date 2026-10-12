@@ -143,6 +143,14 @@ def test_repeated_datasets_have_unique_units_and_budgets(cache, datasets, unique
     assert result["maximum_http_attempts"] == 7 * (len(unique) - 1)
 
 
+def test_exactly_one_hundred_tickers_are_accepted():
+    tickers = [f"T{index:03d}" for index in range(100)]
+    result = inventory(tickers=tickers, datasets=["daily"])
+    assert [unit["request"]["ticker"] for unit in result["units"]] == tickers
+    assert len(result["units"]) == result["minimum_initial_calls"] == 100
+    assert result["maximum_http_attempts"] == 700
+
+
 def test_adjustment_case_and_date_changes_separate_keys():
     raw = inventory(datasets=["daily"])["units"][0]
     adjusted = inventory(datasets=["daily"], adjustment="split_adjusted")["units"][0]

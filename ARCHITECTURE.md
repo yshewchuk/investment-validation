@@ -403,6 +403,7 @@ Only a tracked path absent from the worktree reads as empty.
 
 ## 4. Production entrypoints and the job graph
 
+- **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
 - **Shadow nightly coordination.** The operations trigger coordinates snapshot
   import, pinned planning, submission and bounded serving; preparation commands
   remain separate interfaces. It does not start the production legacy nightly.
