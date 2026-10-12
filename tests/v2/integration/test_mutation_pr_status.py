@@ -105,7 +105,7 @@ def test_mixed_result_is_red_and_description_fits_status_limit():
     modules = {f"module_{i}_with_a_long_name": mod(run_exit_code=1) for i in range(30)}
     v = verdict(merged(**modules, infra_one=mod(run_exit_code=-1)))
     assert v["state"] == "failure" and len(v["pr_owned"]) == 30
-    assert len(v["description"]) <= ps.DESC_MAX
+    assert len(v["description"]) <= 140  # GitHub's commit-status description limit
 
 
 def test_clean_run_description():
@@ -218,7 +218,7 @@ def test_survivor_from_rows_without_summary_entry_is_pr_owned():
 def test_truncation_keeps_the_infra_count():
     modules = {f"module_{i}_with_a_long_name": mod(run_exit_code=1) for i in range(30)}
     v = verdict(merged(**modules, infra_one=mod(run_exit_code=-1)))
-    assert len(v["description"]) <= ps.DESC_MAX
+    assert len(v["description"]) <= 140  # GitHub's commit-status description limit
     assert v["description"].endswith("; 1 infra warning(s)")
 
 
@@ -233,3 +233,19 @@ def test_baseline_only_excuses_the_same_module_failing_with_a_test_exit():
     other = {"modules": {"b": mod(run_exit_code=1)}}
     v = verdict(pr, baseline=other)
     assert v["state"] == "failure" and v["pr_owned"] == ["a"]
+
+
+def test_baseline_that_is_not_a_test_exit_failure_excuses_nothing():
+    pr = merged(a=mod(run_exit_code=1))
+    for base_rc in (-1, 128, 137, -9, 0, None):
+        base = {"modules": {"a": mod(run_exit_code=base_rc)}}
+        assert verdict(pr, baseline=base)["state"] == "failure", base_rc
+    for junk in ([], "x", 3, {"modules": []}, {"modules": {"a": "bad"}}, {"modules": None}):
+        assert verdict(pr, baseline=junk)["state"] == "failure", junk
+    # Positive control: a test-exit failure on main for the same module excuses it.
+    assert verdict(pr, baseline={"modules": {"a": mod(run_exit_code=127)}})["state"] == "success"
+
+
+def test_survivor_rows_of_another_module_are_not_attributed():
+    v = verdict(merged(a=mod(), b=mod()), [row("b", "engine/v2/a.py", 5)])
+    assert v["pr_owned"] == ["b"] and v["modules"]["a"]["class"] == "ok"
