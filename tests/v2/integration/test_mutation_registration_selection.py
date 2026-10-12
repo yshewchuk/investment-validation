@@ -413,3 +413,15 @@ def test_mutation_matrix_reads_base_sha_from_environment(case, tmp_path, monkeyp
     assert pilot.cmd_matrix(cfg, SimpleNamespace(only="", changed_files=str(path))) == 0
     assert capsys.readouterr().out.strip() == '["alpha"]'
     assert seen == ["b" * 40]
+
+
+@pytest.mark.parametrize("extra", [[], ["engine/NOTES.md"]])
+def test_scanner_needs_a_python_change_under_its_prefix(case, extra):
+    base, cfg, _, graph = case
+    _with_scanner(base, cfg, graph)
+    for config in (base, cfg):
+        config["pr_selection"]["inert"] = ["engine/NOTES.md"]
+    cfg["modules"]["alpha"]["mutate"] = list(base["modules"]["alpha"]["mutate"])
+    changed = [CONFIG, "tests/test_new.py", *extra]
+    got = pilot.changed_modules(cfg, ["alpha", "beta", "scan"], changed, graph=graph, base_cfg=base)
+    assert got == ["alpha"]
