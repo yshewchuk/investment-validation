@@ -11,6 +11,7 @@ from engine.v2.contracts import FinalHoldoutDeclaration
 from engine.v2.data.errors import DataError, fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import artifact_reference, canonical_json, content_hash, to_document
+from engine.v2.foundation.final_holdout import request_from_document
 from engine.v2.ops.errors import OpsError, fail as ops_fail
 from engine.v2.ops.experiments import resolve_experiment_plan
 from engine.v2.research.magnitude_folds import magnitude_window
@@ -124,6 +125,18 @@ def test_full_plan_is_sealed_and_idempotently_admitted(source, monkeypatch):
     assert [(clock["horizon_sessions"], clock["pre_announcement_close"], clock["source_session_ceiling"])
             for clock in clocks] == [(5, "2024-01-02", "2023-12-22"),
                                      (3, "2024-01-02", "2023-12-27"), (1, "2024-01-02", "2023-12-29")]
+    plan = document["magnitude_plan"]
+    assert plan["plan_id"] == content_hash({key: value for key, value in plan.items() if key != "plan_id"})
+    for table, field in (("earnings_events", "population_input"), ("daily_market", "calendar_input")):
+        expected = {"table": table, "dataset_version": source.snapshot.table_versions[table].dataset_version_id,
+            "columns": ["date"] if table == "daily_market" else [
+                "event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"],
+            "objects": [{"fragment_id": record.fragment_id, "object_id": record.object_ref.object_id,
+                         "content_hash": record.object_ref.content_hash}
+                        for record in source.repository.fragment_records(source.snapshot, table)]}
+        if table == "daily_market":
+            expected.update(snapshot_id=source.snapshot.snapshot_id, calendar_version=source.snapshot.calendar_version)
+        assert plan[field] == expected
     assert source.repository.pins == ["shadow"]
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
     before, objects = _catalog(source.conn), _objects(source.store)
@@ -795,3 +808,33 @@ def test_older_registration_schemas_keep_complete_outcome_cycle(source, tmp_path
     path = outcomes.export_native_report(source.conn, source.store, registered, **options)
     assert path.read_text() == "Synthetic compatibility report"
     assert options["ledger_path"].exists() is not no_ledger
+
+
+@pytest.mark.parametrize("source", [[_event("2024-01-04")]], indirect=True)
+@pytest.mark.parametrize("kind", ["one-anchor", "one-calendar", "missing-evaluation"])
+def test_cross_clock_and_fold_consistency_guards_are_independent(source, monkeypatch, kind):
+    """Valid dates/digests and nonempty subsequences cannot mask agreement or coverage."""
+    registered = _call(source)
+    doc = registered.document
+    plan = doc["magnitude_plan"]
+    if kind == "one-anchor":
+        plan["events"][0]["forecasts"][0]["pre_announcement_close"] = "2023-12-11"
+    elif kind == "one-calendar":
+        for clock in plan["events"][0]["forecasts"]:
+            clock["calendar_id"] = content_hash("different valid calendar identity")
+    else:
+        assert len(plan["folds"][0]["evaluation_event_ids"]) == 2
+        plan["folds"][0]["evaluation_event_ids"].pop()
+    _assert_forged_refusal(source, registered, doc, monkeypatch)
+
+
+def test_v12_reference_is_invalid_final_request_metadata_before_catalog_access(source, monkeypatch):
+    """Only pure request decoding: no authority call, terminal prompt or authorization."""
+    registered = _call(source, magnitude_training_start=None, final_read=_declaration())
+    request = native.prepare_final_holdout_request(source.conn, source.store, registered)
+    ref = artifact_reference(registered.binding_json, "native_experiment_registration.v1.2")
+    forged = replace(request, registration_ref=ref, variant_id=ref.content_hash)
+    monkeypatch.setattr(source.store, "read_verified", _forbid)
+    with pytest.raises(ValueError, match="^invalid final-read artifact reference$"):
+        request_from_document(to_document(forged))
+    assert source.conn.execute("SELECT COUNT(*) FROM final_holdout_authorizations").fetchone()[0] == 0
