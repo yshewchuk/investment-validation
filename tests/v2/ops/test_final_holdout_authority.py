@@ -544,6 +544,8 @@ def test_revocation_before_start_and_state_history_are_permanent(context, monkey
     _state_assent(monkeypatch, context, "REVOKE")
     revoked = _revoke(context)
     assert revoked["state"] == "revoked"
+    assert revoked["fence"] == 1
+    assert _state_events(context)[0]["fence"] == 1
     _state_assent(monkeypatch, context, "START")
     with pytest.raises(OpsError) as exc_info:
         _start(context)
