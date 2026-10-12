@@ -86,10 +86,20 @@ def load_event_history(repository, snapshot, *, event_id, as_of_month,
     if contract != COMPUTED_MOVES_CONTRACT:
         raise errors.fail("CONTRACT_MISMATCH", "history requires the native computed-moves contract")
     plans = _plans(repository, snapshot, candidates, contract)
+    def read_rows(event, request):
+        """Preserve the original sequential scan-and-validate refusal order."""
+        return [row for batch in repository.scan(request, table_name="computed_moves")
+                for row in batch.to_pylist()]
+    return _assemble_history(snapshot, target, population, plans, start=start, decision=decision,
+                             purpose=purpose, read_rows=read_rows)
+
+
+def _assemble_history(snapshot, target, population, plans, *, start, decision, purpose, read_rows):
+    """Shared arithmetic/provenance over admitted, ordered, physically preflighted plans."""
+    event_id, event_day = target.event_id, target.event_date.date()
     history, omitted, moves = [], [], []
     for event, request, record in plans:
-        rows = [row for batch in repository.scan(request, table_name="computed_moves")
-                for row in batch.to_pylist()]
+        rows = read_rows(event, request)
         outcome, reason = _historical_target(rows, event, decision)
         if reason:
             omitted.append({"event_id": event.event_id, "reason": reason})

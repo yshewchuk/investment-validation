@@ -14,7 +14,7 @@ from engine.v2.foundation import SystemClock, canonical_json, content_hash, to_d
 from engine.v2.research import event_history
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 from engine.v2.research.experiment_population import load_population
-from engine.v2.research.magnitude_features import load_magnitude_history
+from engine.v2.research.magnitude_features import _feature_recipe
 from engine.v2.research.magnitude_folds import plan_magnitude_folds
 from engine.v2.research.magnitude_history_table import (
     CONTRACT,
@@ -74,19 +74,38 @@ def _preflight_source(repository, snapshot, context):
     contract = repository.table_contract(snapshot, "computed_moves")
     if contract != COMPUTED_MOVES_CONTRACT:
         raise errors.fail("CONTRACT_MISMATCH", "history requires native computed moves")
-    event_history._plans(repository, snapshot, candidates, contract)
+    plans = event_history._plans(repository, snapshot,
+        candidates.sort_values(["event_date", "event_id"]), contract)
+    return population.set_index("event_id", drop=False), plans
 
 
-def _event_rows(repository, snapshot, context, event):
+def _prepare_history(repository, snapshot, context):
+    """Lazily decode at most one row per admitted candidate; no cross-build cache."""
+    population, plans = _preflight_source(repository, snapshot, context)
+    decoded, by_ticker = {}, {}
+    for event, request, record in plans:
+        by_ticker.setdefault(event.ticker, []).append((event, request, record))
+    def read_rows(event, request):
+        """Read only when a forecast first needs this preflighted candidate."""
+        if event.event_id not in decoded:
+            decoded[event.event_id] = [row for batch in repository.scan(request, table_name="computed_moves")
+                                       for row in batch.to_pylist()]
+        return decoded[event.event_id]
+    return population, by_ticker, read_rows
+
+
+def _event_rows(repository, snapshot, context, event, prepared):
     """Build all horizons and retain every consumed or omitted input identity."""
+    population, by_ticker, read_rows = prepared
+    target = population.loc[event["event_id"]]
     rows = []
     for cutoff in sorted(event["forecasts"], key=lambda c: c["horizon_sessions"]):
-        history = load_magnitude_history(repository, snapshot, event_id=event["event_id"],
-            as_of_month=context["temporal_plan"]["holdout_as_of_month"], horizon=cutoff["horizon_sessions"],
-            history_start=context["history_start"])
-        if history["forecast_cutoff"] != cutoff:
-            raise errors.fail("IDENTITY_CONFLICT", "history cutoff differs from the materialization plan")
-        lineage = {k: v for k, v in history["history_input"].items() if k != "features"}
+        start, decision = event_history._window(context["history_start"], cutoff["source_session_ceiling"])
+        plans = [p for p in by_ticker.get(event["ticker"], ()) if p[0].event_date.date() < decision]
+        history = event_history._assemble_history(snapshot, target, population, plans,
+            start=start, decision=decision, purpose="selection", read_rows=read_rows)
+        _feature_recipe(history["features"])
+        lineage = {k: v for k, v in history.items() if k != "features"}
         rows.append({"event_id": event["event_id"], "context_id": context["context_id"],
             "horizon_sessions": cutoff["horizon_sessions"], "event_date": event["event_date"],
             "cutoff_id": cutoff["cutoff_id"], "source_session_ceiling": cutoff["source_session_ceiling"],
@@ -103,14 +122,15 @@ def materialize(repository, snapshot, context):
     if existing is not None:
         read_stored(repository, existing, context)
         return existing
-    _preflight_source(repository, snapshot, context)
+    prepared = _prepare_history(repository, snapshot, context)
     store, records = artifact_store(repository), []
     ref = TableContractRef(contract_id=CONTRACT.contract_id, definition_hash=CONTRACT.definition_hash)
     schema = pa.schema([pa.field(c.name, query.arrow_type_for(c.physical_type), nullable=c.nullable)
                         for c in CONTRACT.columns])
     for event in sorted(context["temporal_plan"]["events"], key=lambda e: e["event_id"]):
         sink = pa.BufferOutputStream()
-        pq.write_table(pa.Table.from_pylist(_event_rows(repository, snapshot, context, event), schema=schema), sink)
+        rows = _event_rows(repository, snapshot, context, event, prepared)
+        pq.write_table(pa.Table.from_pylist(rows, schema=schema), sink)
         published = store.publish_bytes(sink.getvalue().to_pybytes(), schema_ref="parquet_fragment.v1")
         obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
                         content_hash=published.content_hash, byte_size=published.byte_size)

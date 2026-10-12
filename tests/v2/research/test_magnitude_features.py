@@ -9,7 +9,13 @@ from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.foundation import content_hash
 from engine.v2.research import magnitude_features
-from tests.data_scan_support import catalog_and_store, commit_tables, contract_for, contract_ref_for, publish_and_inspect
+from tests.data_scan_support import (
+    catalog_and_store,
+    commit_tables,
+    contract_for,
+    contract_ref_for,
+    publish_and_inspect,
+)
 from tests.v2.research.test_event_history import _event, _poison
 from tests.v2.research.test_magnitude_inputs import _calendar
 from tests.v2.research.test_prediction_inputs import TrackingRepository, _move
@@ -258,7 +264,7 @@ def test_late_storage_failure_propagates_without_partial_result_or_retry(tmp_pat
 
 @pytest.mark.parametrize("value", [True, float("inf"), float("nan"), "2.0"])
 def test_invalid_derived_feature_does_not_reach_a_model(value):
-    features = dict.fromkeys(magnitude_features._FEATURES)
+    features = dict.fromkeys(magnitude_features.HISTORY_FEATURE_COLUMNS)
     features["n_prior"] = value
     with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
         magnitude_features._feature_recipe(features)

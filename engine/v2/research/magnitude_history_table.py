@@ -3,10 +3,10 @@ from dataclasses import replace
 
 from engine.v2.contracts.data import ColumnContract, TableContract
 from engine.v2.data.manifests import table_contract_hash
-from engine.v2.research.magnitude_features import _FEATURES
+from engine.v2.research.magnitude_features import HISTORY_FEATURE_COLUMNS
 
 TABLE = "research_magnitude_history"
-FEATURES = _FEATURES
+FEATURES = HISTORY_FEATURE_COLUMNS
 METADATA = ("event_id", "context_id", "horizon_sessions", "event_date", "cutoff_id",
             "source_session_ceiling", "history_status", "history_json")
 

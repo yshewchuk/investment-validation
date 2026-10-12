@@ -476,9 +476,11 @@ This bounds retained unmatched rows, not total process RSS.
 
 ## Dependencies
 
-`engine.v2.data` (`Repository`, `errors`, `generic_incremental`), `engine.v2.
+`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `catalog`,
+`objects`, `manifests`, `query`, `computed_moves_table`), `engine.v2.
 contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`),
-`engine.v2.foundation` (`ArtifactStore`, `SystemClock`) — the package's own
+`engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`,
+`content_hash`, `to_document`, `market_calendar`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
 at a lower layer" rule (`only_imports` is unset for this package in
 `checks/layer_map.py`, i.e. no narrower restriction than that generic
@@ -490,6 +492,8 @@ connection to this package (see Inputs); nothing under
 `engine/v2/research/` imports `engine.v2.ops` itself, even though layer
 7.0 (ops) is not below this package's own enforced layer (also 7.0) and
 so could not be imported under the generic rule regardless.
+Stored history publishes new objects/manifests through `data.catalog.commit_snapshot`;
+this native write path advances only its dedicated context scope, never source heads.
 `_pricing.py` holds pure pricing primitives copied from legacy
 `engine.structures`/`engine.fills`/`engine.calendar` rather than reached
 through a legacy adapter (supervisor decision: no legacy adapter for this
@@ -542,8 +546,11 @@ Every row physically binds the context digest. No experiment output is an input.
 The builder preflights the complete eligible historical candidate union before
 any outcome opens, then uses the existing protected history arithmetic at build
 time. Protected/ambiguous objects never open; admitted late labels may decode
-availability and be omitted. Repeated per-event metadata scans are an initial
-performance limitation, not a measured production-scale claim. All consumed
+availability and be omitted. Planning reads the calendar once; one further
+population scan prepares the candidate union. A lazy build-local cache decodes
+at most one row per admitted candidate, only after its forecast window selects it.
+Shared arithmetic preserves availability and numeric-refusal ordering.
+No cache survives the build. Production-scale performance is unmeasured. All consumed
 objects, omissions and availability remain stored alongside the eleven columns.
 `n_prior` is zero for empty history; other missing features stay null with explicit
 `on_missing=null`, never runtime imputation or production v4 aggregates.
