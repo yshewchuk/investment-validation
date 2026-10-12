@@ -63,6 +63,14 @@ def classify_module(name: str, mod, rows: list[dict], changed: dict[str, set[int
     """Return (class, reason) with class in ok / pr_owned / infra."""
     if not isinstance(mod, dict):
         return "infra", "no report: job cancelled, runner or setup error"
+    # A survivor on a line this PR changed is PR-owned even if the run later timed
+    # out or failed: the rows it did write are still the PR's own survivors.
+    hits = sorted((r["file"], r["line"]) for r in rows
+                  if r.get("module") == name and r.get("status") == "survived"
+                  and r.get("line") in changed.get(r.get("file"), ()))
+    if hits:
+        shown = ", ".join(f"{f}:{n}" for f, n in hits[:5])
+        return "pr_owned", f"{len(hits)} survivor(s) on changed lines: {shown}"
     if mod.get("skipped_reason"):
         return "infra", f"skipped ({mod['skipped_reason']})"
     rc = mod.get("run_exit_code")
@@ -78,12 +86,6 @@ def classify_module(name: str, mod, rows: list[dict], changed: dict[str, set[int
         if name in failing_on_main:
             return "infra", f"module run fails on main too (exit {rc})"
         return "pr_owned", f"module run failed (exit {rc})"
-    hits = sorted((r["file"], r["line"]) for r in rows
-                  if r.get("module") == name and r.get("status") == "survived"
-                  and r.get("line") in changed.get(r.get("file"), ()))
-    if hits:
-        shown = ", ".join(f"{f}:{n}" for f, n in hits[:5])
-        return "pr_owned", f"{len(hits)} survivor(s) on changed lines: {shown}"
     return "ok", ""
 
 
@@ -151,7 +153,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         changed: dict[str, set[int]] = {}
         try:
-            changed = parse_changed_lines(Path(args.diff_file).read_text()) if args.diff_file else {}
+            if not args.diff_file:
+                raise OSError("no --diff-file given")
+            changed = parse_changed_lines(Path(args.diff_file).read_text())
         except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
             changed = {}
             print("::warning::PR diff unavailable; survivors cannot be attributed to the PR")

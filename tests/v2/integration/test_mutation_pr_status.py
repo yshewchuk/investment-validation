@@ -171,7 +171,7 @@ def test_missing_or_undecodable_diff_attributes_no_survivor(tmp_path, capsys):
         out = tmp_path / f"gh_{i}"
         assert ps.main(["--merged-dir", str(d), "--github-output", str(out), *diff_args]) == 0
         assert "state=success\n" in out.read_text()
-    assert "PR diff unavailable" in capsys.readouterr().out
+        assert "PR diff unavailable" in capsys.readouterr().out
 
 
 def test_corrupt_results_jsonl_warns(tmp_path, capsys):
@@ -181,3 +181,26 @@ def test_corrupt_results_jsonl_warns(tmp_path, capsys):
     assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
                     "--github-output", str(out)]) == 0
     assert "results.jsonl unreadable" in capsys.readouterr().out
+
+
+def test_exit_band_boundaries():
+    v = verdict(merged(lo=mod(run_exit_code=0), top=mod(run_exit_code=127),
+                       sig=mod(run_exit_code=128), neg=mod(run_exit_code=-9),
+                       timeout=mod(run_exit_code=-1)))
+    classes = {n: m["class"] for n, m in v["modules"].items()}
+    assert classes == {"lo": "ok", "top": "pr_owned", "sig": "infra", "neg": "infra",
+                       "timeout": "infra"}
+
+
+def test_changed_line_survivor_wins_over_infra_and_baseline_excuses():
+    base = {"modules": {"main_fails": mod(run_exit_code=1)}}
+    m = merged(timed_out=mod(run_exit_code=-1), main_fails=mod(run_exit_code=1),
+               killed=mod(run_exit_code=137), rawbad=mod(failure_reasons=["RAW_INVALID"]),
+               errors=mod(counts_backend={"error": 1}))
+    rows = [row(n, "engine/v2/a.py", 4) for n in m["modules"]]
+    v = verdict(m, rows, baseline=base)
+    assert v["state"] == "failure"
+    assert sorted(v["pr_owned"]) == sorted(m["modules"])
+    # The same modules without a changed-line survivor stay infra / excused.
+    v2 = verdict(m, [row(n, "engine/v2/a.py", 99) for n in m["modules"]], baseline=base)
+    assert v2["state"] == "success" and v2["pr_owned"] == []
