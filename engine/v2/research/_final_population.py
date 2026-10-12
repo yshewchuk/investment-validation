@@ -39,7 +39,9 @@ def load_final_population(repository, request) -> FinalPopulation:
         raise errors.fail("HOLDOUT_ACCESS_DENIED", "a valid final-read request is required") from None
     try:
         snapshot = repository.resolve(request.snapshot_id)
-    except (errors.DataError, ValueError, TypeError, KeyError):
+    except (errors.DataError, ValueError, TypeError, KeyError) as error:
+        if isinstance(error, errors.DataError) and error.problem.category == "integrity":
+            raise
         raise errors.fail("SNAPSHOT_UNRESOLVED", "the requested snapshot cannot be resolved") from None
     if getattr(snapshot, "snapshot_id", None) != request.snapshot_id:
         raise errors.fail("SNAPSHOT_UNRESOLVED", "snapshot differs from its committed identity")

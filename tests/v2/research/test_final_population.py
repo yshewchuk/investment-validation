@@ -4,6 +4,7 @@ from dataclasses import replace
 import pytest
 
 from engine.v2.contracts import FinalHoldoutDeclaration, FinalHoldoutRequest
+from engine.v2.data import errors
 from engine.v2.data.errors import DataError
 from engine.v2.foundation import artifact_reference
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
@@ -155,5 +156,20 @@ def test_events_table_without_fragments_is_an_empty_collapsed_population(tmp_pat
         with pytest.raises(DataError, match="POPULATION_COLLAPSED") as refusal:
             load_final_population(repository, _request(snapshot))
         assert not refusal.value.problem.retryable
+    finally:
+        conn.close()
+
+
+def test_integrity_refusal_from_resolve_propagates_unchanged(tmp_path):
+    conn, repository, snapshot = _commit(tmp_path, list(_events().values()), include_targets=False)
+    try:
+        def corrupt(_snapshot_id):
+            raise errors.fail("MANIFEST_CORRUPT", "synthetic integrity failure")
+        repository.resolve = corrupt
+        with pytest.raises(DataError) as refusal:
+            load_final_population(repository, _request(snapshot))
+        assert refusal.value.problem.code == "MANIFEST_CORRUPT"
+        assert refusal.value.problem.category == "integrity"
+        assert repository.scans == []
     finally:
         conn.close()
