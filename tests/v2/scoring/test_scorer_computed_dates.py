@@ -17,7 +17,7 @@ from engine.v2.scoring import financial, stages
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal, assemble_nightly_source_bundle, quote_domain_map)
-from engine.v2.scoring.source_inputs import build_native_score_inputs
+from engine.v2.scoring.source_inputs import _quote_block, build_native_score_inputs
 from engine.v2.scoring.stages import (
     NativeScoreInputs, STAGE_NAMES, StageReceipt, _check_pricing_boundary,
     _facts, _priced_dte_entry, assemble_native_values)
@@ -771,3 +771,28 @@ def test_legs_priced_from_different_dates_refuse_without_dte_entry():
         _inputs(quotes=_dated_quotes("2026-10-08", "2026-10-09")))
     assert any(str(flag).startswith("INVALID_QUOTE:") for flag in values["flags"])
     assert "dte_entry" not in values
+
+
+_CONTRACT = ("C", 100.0, "2026-11-20")
+
+
+@pytest.mark.parametrize("observed_date", [
+    "junk", "2026-02-30", "2026-1-5", "2026-10-09T15:00:00", 20261009, True,
+])
+def test_quote_block_rejects_bad_observed_date(observed_date):
+    with pytest.raises(ValueError, match="observed_date"):
+        _quote_block({_CONTRACT: {"bid": 1.9, "ask": 2.1,
+                                  "observed_date": observed_date}})
+
+
+def test_quote_block_accepts_absent_observed_date():
+    quotes = _quote_block({_CONTRACT: {"bid": 1.9, "ask": 2.1}})
+    assert "observed_date" not in quotes[_CONTRACT]
+
+
+def test_quote_block_keeps_a_valid_observed_date():
+    quotes = _quote_block({_CONTRACT: {"bid": 1.9, "ask": 2.1,
+                                       "observed_date": "2026-10-09"}})
+    assert quotes[_CONTRACT]["observed_date"] == "2026-10-09"
+    assert quotes[_CONTRACT]["bid"] == 1.9
+    assert quotes[_CONTRACT]["ask"] == 2.1

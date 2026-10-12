@@ -24,18 +24,6 @@ def _stages_with(field: str) -> list[str]:
     return [stage.stage_id for stage in SCORER_V1.stages if field in stage.fields]
 
 
-def test_scorer_computed_keys_each_belong_to_exactly_one_stage():
-    expected = {
-        "days_to_print": "resolve_context",
-        "dte_entry": "pricing",
-        "entry_cost_pct": "pricing",
-    }
-    for field, stage_id in expected.items():
-        owners = _stages_with(field)
-        assert owners == [stage_id], field
-        assert SCORER_V1.stage_of(field) == stage_id, field
-
-
 def test_scorer_computed_keys_attributed_to_producing_stage():
     expected = {
         "days_to_print": "resolve_context",
@@ -47,13 +35,6 @@ def test_scorer_computed_keys_attributed_to_producing_stage():
         assert owners == [stage_id], field
         assert SCORER_V1.stage_of(field) == stage_id, field
 
-    resolve_context = next(
-        stage for stage in SCORER_V1.stages if stage.stage_id == "resolve_context"
-    )
-    assert "dte_entry" not in resolve_context.fields
-
-
-def test_dte_entry_is_not_a_resolve_context_field():
     resolve_context = next(
         stage for stage in SCORER_V1.stages if stage.stage_id == "resolve_context"
     )
