@@ -131,9 +131,10 @@ builds the block, `native_chooser.py` assembles it, `native_chooser_features.py`
 holds the ported `Scorer._chooser_frame` arithmetic): `chooser_recipe` names the
 champion binding, its `producers` (the implied_t1/runup_move Tier-4 folds) and
 the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`;
-`chooser_fold_pools` carries the served folds' pools. Only the 17 primitive
-features (event history, market/regime block, `dte_entry`) come from
-`feature_vector`, which still wins for any derived column it declares.
+`chooser_fold_pools` carries the served folds' pools. Only the primitive
+features (event history, market/regime block) come from `feature_vector`, which
+still wins for any derived column it declares; `dte_entry` is scorer-computed
+(from the priced legs and quote date) and no longer projected.
 
 The current builder is deliberately bounded to STR-THRU and its declared
 recipes. To add another strategy or recipe, extend `source_inputs.py` and add

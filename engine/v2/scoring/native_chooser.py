@@ -3,8 +3,9 @@
 ``engine/score.py`` ``Scorer._chooser_frame`` assembles the champion's 67
 inputs. :func:`derive_chooser_columns` assembles the 50 it computes, from the
 native scoring pass and the chooser block's declared frozen state; the other
-17 (event history, market and regime block, ``dte_entry``) are primitive
-features the bundle declares in ``feature_vector``:
+primitive features (event history, market and regime block) come from
+``feature_vector``. ``dte_entry`` is scorer-computed (from the priced legs and
+quote date) and is no longer projected into ``feature_vector``:
 
 * the direct columns (``exp_pnl_sim``, ``exp_pnl_sim_select``, the ``is_*``
   one-hots, ``quote_repaired``, ``wide_market``) and ``entry_cost_pct``;
