@@ -206,8 +206,9 @@ evidence. See the models and data component contracts.
     section describes applies to `pull_request` runs only: a push to main
     and the weekly scheduled run mutate every enabled module unfiltered, so
     this gap costs informational PR coverage, never an unmutated merge.
-  - **`test` CI PR selection** (`select_pr_tests`, used by
-    `.github/workflows/tests.yml`'s `test` job): on `pull_request`, narrows which
+  - **`test` CI PR selection** (`select_pr_tests`, run once by
+    `.github/workflows/tests.yml`'s `plan` job; each shard then narrows it to its own
+    files): on `pull_request`, narrows which
     tracked test files pytest collects to the subset the diff can affect, and includes
     configured `[pr_selection].always_run` paths present in the tracked test set (which
     may be nested), falling back to every test file when it can't prove a narrower subset
@@ -263,7 +264,7 @@ is separate from the active workflow; see [package test selection by
 layer](guides/test_selection_by_layer.md). The checked-in test-layout ratchet
 (`checks/test_layout_budget.py`) keeps root-level tests from growing while
 packages migrate. On `pull_request`, `tests.yml` runs it against the PR base SHA before
-pytest and a nonzero result fails the `test` job; pushes to `main` keep the full-suite backstop.
+pytest and a nonzero result fails the `plan` job, and so the required `test` check; pushes to `main` keep the full-suite backstop.
 
 CI runs the suite as shards declared in `tests/shards.toml`. `tools/ci_shards.py matrix`
 prints the shard names and `files SHARD [--selection FILE]` prints one shard's test files

@@ -154,7 +154,8 @@ The four markers, and which tests carry them, are:
 | `heavy_host` | launches real multi-GB workers; run alone on a quiet box | tests/test_v2_ops_supervised_legacy.py, tests/v2/ops/test_v2_ops_nightly_completion.py (whole files) |
 | `browser` | drives a real Playwright browser or needs node/npm (`ui/` build) | tests/test_v2_dashboard_browser.py, test_v2_dashboard_integration.py, test_v2_ops_serving_browser.py (whole files), test_l02_browser_frame_pins_r1_then_reload_shows_r2 in test_v2_dashboard_preview.py |
 
-CI runs everything except these four categories:
+CI runs everything except these four categories (each shard runs its own file list, see
+"CI shards" below; the command is the same, with the shard's files in place of `tests/`):
 
 ```bash
 python -m pytest -n auto --dist loadgroup -m "not needs_data and not needs_corpus and not heavy_host and not browser" -rfE --durations=25 --junitxml=junit.xml tests/

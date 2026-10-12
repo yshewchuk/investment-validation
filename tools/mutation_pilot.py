@@ -1404,7 +1404,7 @@ def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
 # select_pr_tests generalizes changed_modules above from the hand-configured
 # [modules.<name>] partition (which covers only engine/v2/* + ops, not the
 # whole tests/ tree) to every tracked tests/test_*.py file's own closure, so
-# the `test` CI job's pull_request runs can narrow WHICH TEST FILES pytest
+# the `plan` CI job's pull_request runs can narrow WHICH TEST FILES pytest
 # collects instead of always running all of them. It reuses
 # build_import_graph, .precise, _conftest_ancestors and
 # is_inert_changed_path unchanged; it does not touch changed_modules or
@@ -1423,9 +1423,9 @@ def dynamic_files(graph: dict[str, set[str]]) -> set[str]:
 
 
 def pytest_test_files(tracked_set: set[str]) -> list[str]:
-    """Every tracked file the `test` CI job's pytest run collects: that
-    job's positional argument is the tests/ directory, and pytest's default
-    collection pattern is test_*.py."""
+    """Every tracked file a `test` CI shard's pytest run can collect: the
+    shards (tests/shards.toml, tools/ci_shards.py) together cover the tests/
+    directory, and pytest's default collection pattern is test_*.py."""
     return sorted(p for p in tracked_set
                   if p.startswith("tests/") and p.rsplit("/", 1)[-1].startswith("test_")
                   and p.endswith(".py"))
@@ -2181,7 +2181,8 @@ def cmd_matrix(cfg: dict, args) -> int:
 def cmd_select_tests(cfg: dict, args) -> int:
     """Print __ALL__ (run the full test suite) or the selected pytest test
     file paths, one per line (possibly zero lines, never a trailing blank
-    line), for the `test` CI job's pull_request runs."""
+    line), for the pull_request runs of the `plan` CI job (each shard then
+    narrows it to its own files)."""
     changed = read_changed_files(args.changed_files)
     base = (registration_base_config(getattr(args, "base_sha", ""), cfg, changed)
             if _REGISTRATION_CONFIG in changed else None)
