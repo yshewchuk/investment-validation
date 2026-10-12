@@ -468,8 +468,9 @@ def test_state_action_rechecks_registration_after_assent(context, monkeypatch, a
 
     monkeypatch.setattr(builtins, "input", changed_during_assent)
     state_action = _start if action == "START" else _revoke
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with pytest.raises(OpsError) as exc_info:
         state_action(context)
+    assert exc_info.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert _state_events(context) == []
 
 
@@ -489,8 +490,9 @@ def test_fenced_start_spends_once_and_revocation_invalidates_publication(context
         context.conn, context.request.experiment_id, content_hash("wrong request"), started["fence"])
     assert not authority.final_holdout_fence_current(
         context.conn, context.request.experiment_id, started["request_digest"], started["fence"] + 1)
-    with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(OpsError) as exc_info:
         _start(context)
+    assert exc_info.value.code == "HOLDOUT_ACCESS_DENIED"
     assert len(_state_events(context)) == 1
     monkeypatch.setattr(context.clock, "now", lambda: datetime(2026, 10, 10, 0, 2, tzinfo=timezone.utc))
     _state_assent(monkeypatch, context, "REVOKE")
@@ -504,8 +506,9 @@ def test_fenced_start_spends_once_and_revocation_invalidates_publication(context
     ]
     assert not authority.final_holdout_fence_current(
         context.conn, context.request.experiment_id, started["request_digest"], started["fence"])
-    with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(OpsError) as exc_info:
         _start(context)
+    assert exc_info.value.code == "HOLDOUT_ACCESS_DENIED"
     assert [row["state"] for row in _state_events(context)] == ["read_started", "revoked"]
     assert len(_rows(context)) == 1
 
@@ -516,8 +519,9 @@ def test_revocation_before_start_and_state_history_are_permanent(context, monkey
     revoked = _revoke(context)
     assert revoked["state"] == "revoked"
     _state_assent(monkeypatch, context, "START")
-    with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(OpsError) as exc_info:
         _start(context)
+    assert exc_info.value.code == "HOLDOUT_ACCESS_DENIED"
     for sql in (
         "DELETE FROM final_holdout_state_events",
         "UPDATE final_holdout_state_events SET state='read_started'",
@@ -533,6 +537,13 @@ def test_revocation_before_start_and_state_history_are_permanent(context, monkey
             (row["event_id"], row["experiment_id"], row["request_digest"], row["state"],
              row["fence"], row["actor"], row["occurred_at"], row["confirmation"]))
     assert [row["state"] for row in _state_events(context)] == ["revoked"]
+    authorization_before = _rows(context)
+    events_before = _state_events(context)
+    _state_assent(monkeypatch, context, "REVOKE")
+    repeated = _revoke(context)
+    assert repeated == row
+    assert _rows(context) == authorization_before
+    assert _state_events(context) == events_before == [row]
 
 
 def test_revoke_refuses_maximum_started_fence_without_mutation(context, monkeypatch):
@@ -561,9 +572,10 @@ def test_recovery_refuses_while_owner_is_alive(context, monkeypatch):
     _authorize(context)
     _state_assent(monkeypatch, context, "START")
     started = _start(context)
-    with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(OpsError) as exc_info:
         authority.recover_interrupted_final_holdout_read(
             context.conn, context.request.experiment_id, clock=context.clock)
+    assert exc_info.value.code == "HOLDOUT_ACCESS_DENIED"
     assert [row["state"] for row in _state_events(context)] == ["read_started"]
 
 
@@ -631,14 +643,17 @@ def test_real_owner_exit_is_proven_dead_without_a_timeout(context, monkeypatch):
         assert not authority.final_holdout_fence_current(
             context.conn, context.request.experiment_id, started["request_digest"], started["fence"])
         _state_assent(monkeypatch, context, "START")
-        with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
+        with pytest.raises(OpsError) as exc_info:
             _start(context)
+        assert exc_info.value.code == "HOLDOUT_ACCESS_DENIED"
         _state_assent(monkeypatch, context, "REVOKE")
-        with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
+        with pytest.raises(OpsError) as exc_info:
             _revoke(context)
-        with pytest.raises(OpsError, match="STALE_EXPECTATION"):
+        assert exc_info.value.code == "HOLDOUT_ACCESS_DENIED"
+        with pytest.raises(OpsError) as exc_info:
             authority.recover_interrupted_final_holdout_read(
                 context.conn, context.request.experiment_id, clock=context.clock)
+        assert exc_info.value.code == "STALE_EXPECTATION"
         assert [row["state"] for row in _state_events(context)] == ["read_started", "indeterminate"]
     finally:
         child.join(20)
@@ -813,6 +828,56 @@ def test_publication_fence_accepts_maximum_valid_fence(context):
         context.conn, context.request.experiment_id, authorization["request_digest"], 2**63 - 1) is True
 
 
+def test_publication_fence_is_scoped_to_experiment_id(context, monkeypatch):
+    authorization = _authorize(context)
+    _state_assent(monkeypatch, context, "START")
+    started = _start(context)
+    other_experiment_id = context.request.experiment_id + "-other"
+    other_digest = content_hash("other experiment request")
+    other_authorization = dict(authorization)
+    other_authorization["experiment_id"] = other_experiment_id
+    context.conn.execute(
+        "INSERT INTO final_holdout_authorizations "
+        "(experiment_id,schema_version,registration_run_id,request_digest,request_json,actor,authorized_at,confirmation) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        tuple(other_authorization[key] for key in (
+            "experiment_id", "schema_version", "registration_run_id", "request_digest",
+            "request_json", "actor", "authorized_at", "confirmation")),
+    )
+    identity, *_ = authority.process_info(os.getpid(), authority.read_boot_id())
+    context.conn.execute(
+        "INSERT INTO final_holdout_state_events "
+        "(experiment_id,request_digest,state,fence,owner_boot_id,owner_pid,owner_start_ticks,"
+        "owner_process_group,actor,occurred_at,confirmation) "
+        "VALUES (?,?, 'read_started',1,?,?,?,?,?,?,?)",
+        (other_experiment_id, other_digest, identity.boot_id, identity.pid,
+         identity.start_ticks, identity.process_group, "1234:synthetic-user",
+         "2026-10-10T00:00:00.000000Z", "synthetic second-experiment start"),
+    )
+    assert authority.final_holdout_fence_current(
+        context.conn, context.request.experiment_id,
+        started["request_digest"], started["fence"])
+    assert authority.final_holdout_fence_current(
+        context.conn, other_experiment_id, other_digest, 1)
+    assert not authority.final_holdout_fence_current(
+        context.conn, context.request.experiment_id, other_digest, 1)
+    assert not authority.final_holdout_fence_current(
+        context.conn, other_experiment_id, started["request_digest"], started["fence"])
+    assert {row["experiment_id"] for row in _state_events(context)} == {
+        context.request.experiment_id, other_experiment_id}
+
+
+def test_absent_history_publication_and_recovery_boundaries(context):
+    events_before = _state_events(context)
+    assert authority.final_holdout_fence_current(
+        context.conn, context.request.experiment_id, content_hash("request"), 1) is False
+    with pytest.raises(OpsError) as exc_info:
+        authority.recover_interrupted_final_holdout_read(
+            context.conn, context.request.experiment_id, clock=context.clock)
+    assert exc_info.value.code == "STALE_EXPECTATION"
+    assert _state_events(context) == events_before == []
+
+
 @pytest.mark.parametrize("experiment_id", [None, "", "  ", " padded ", 1 << 100])
 def test_recovery_rejects_malformed_experiment_id_before_lookup(context, monkeypatch, experiment_id):
     monkeypatch.setattr(authority, "_latest_event", lambda *args: pytest.fail("invalid input reached SQLite lookup"))
@@ -844,9 +909,10 @@ def test_publication_fence_storage_failure_is_typed(monkeypatch, context):
         raise sqlite3.OperationalError("synthetic storage failure")
 
     monkeypatch.setattr(authority, "_latest_event", unavailable)
-    with pytest.raises(OpsError, match="RESOURCE_UNAVAILABLE"):
+    with pytest.raises(OpsError) as exc_info:
         authority.final_holdout_fence_current(
             context.conn, context.request.experiment_id, content_hash("request"), 1)
+    assert exc_info.value.code == "RESOURCE_UNAVAILABLE"
 
 
 @pytest.mark.parametrize(("column", "value"), [
@@ -857,8 +923,9 @@ def test_start_rejects_corrupt_authorization_evidence(context, monkeypatch, colu
     context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_update")
     context.conn.execute(f"UPDATE final_holdout_authorizations SET {column}=?", (value,))
     _state_assent(monkeypatch, context, "START")
-    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+    with pytest.raises(OpsError) as exc_info:
         _start(context)
+    assert exc_info.value.code == "VALIDATION_FAILED"
     assert _state_events(context) == []
 
 
@@ -910,11 +977,12 @@ def test_state_assent_denials_do_not_append(context, monkeypatch, action, mode):
         monkeypatch.setattr(authority.os, "getuid", lambda: 9876)
     else:
         monkeypatch.setattr(builtins, "input", lambda prompt: "wrong")
-    with pytest.raises(OpsError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(OpsError) as exc_info:
         if action == "START":
             _start(context)
         else:
             _revoke(context)
+    assert exc_info.value.code == "HOLDOUT_ACCESS_DENIED"
     assert _state_events(context) == []
 
 
@@ -931,8 +999,9 @@ def test_start_rejects_foreign_digest_in_persisted_history(context, monkeypatch)
          "2026-10-10T00:00:00.000000Z", "synthetic confirmation"),
     )
     _state_assent(monkeypatch, context, "START")
-    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+    with pytest.raises(OpsError) as exc_info:
         _start(context)
+    assert exc_info.value.code == "VALIDATION_FAILED"
     assert len(_state_events(context)) == 1
     assert _state_events(context)[0]["request_digest"] != authorization["request_digest"]
 
@@ -947,10 +1016,33 @@ def test_recovery_rejects_corrupt_authorization_evidence(context, monkeypatch, c
     context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_update")
     context.conn.execute(f"UPDATE final_holdout_authorizations SET {column}=?", (value,))
     monkeypatch.setattr(authority, "is_alive", lambda *args: pytest.fail("corrupt authorization reached owner check"))
-    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+    with pytest.raises(OpsError) as exc_info:
         authority.recover_interrupted_final_holdout_read(
             context.conn, context.request.experiment_id, clock=context.clock)
+    assert exc_info.value.code == "VALIDATION_FAILED"
     assert [row["state"] for row in _state_events(context)] == ["read_started"]
+
+
+def test_recovery_rejects_started_event_without_authorization(context, monkeypatch):
+    _authorize(context)
+    _state_assent(monkeypatch, context, "START")
+    _start(context)
+    context.conn.execute("PRAGMA foreign_keys=OFF")
+    context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_delete")
+    context.conn.execute(
+        "DELETE FROM final_holdout_authorizations WHERE experiment_id=?",
+        (context.request.experiment_id,),
+    )
+    context.conn.execute("PRAGMA foreign_keys=ON")
+    events_before = _state_events(context)
+    assert _rows(context) == []
+    assert [row["state"] for row in events_before] == ["read_started"]
+    monkeypatch.setattr(authority, "is_alive", lambda *args: pytest.fail("missing authorization reached owner check"))
+    with pytest.raises(OpsError) as exc_info:
+        authority.recover_interrupted_final_holdout_read(
+            context.conn, context.request.experiment_id, clock=context.clock)
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert _state_events(context) == events_before
 
 
 @pytest.mark.parametrize(("field", "invalid_value"), [
