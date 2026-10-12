@@ -44,6 +44,7 @@ from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests, objects, reference_catalog
 from engine.v2.data.computed_moves import MIN_SCOREABLE, build_rows
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
+from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
 from engine.v2.ops.catalog import transaction
@@ -982,7 +983,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
             cached_outcomes=_plan_cached_outcomes(conn, units, use_cached_receipts),
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(document["expected_head_generation"]))
-        fragment_records, attempts = _capture_targets(
+        fragment_records, attempts = _capture_targets_typed(
             conn, store, plan, fetcher, clock,
             inputs=_TickerChunks(repository, parent.snapshot,
                                  [unit.expected_keys[0] for unit in plan.units], stats),
@@ -1091,6 +1092,20 @@ def _capture_id_for(unit, *, source_hash: str | None = None,
     if source_hash is not None:
         payload["source_hash"] = source_hash
     return "capture_" + content_hash(payload).removeprefix("sha256:")[:32]
+
+
+def _capture_targets_typed(*args, **kwargs):
+    """``_capture_targets`` with build_rows refusals (DataError) surfaced as typed OpsError.
+
+    The CLI catches only OpsError and ops has no data codes, so the data code rides in the
+    message and ``details["data_code"]`` (the ``snapshot_planning`` precedent).
+    """
+    try:
+        return _capture_targets(*args, **kwargs)
+    except DataError as exc:
+        raise fail("INPUT_CHANGED", "computed moves rows cannot be built from the pinned "
+                   f"inputs: {exc.code}: {exc.problem.message}",
+                   details={"data_code": exc.code}) from None
 
 
 def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks,

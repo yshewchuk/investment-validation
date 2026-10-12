@@ -13,6 +13,7 @@ import pytest
 from engine.v2.contracts.data import ColumnContract, TableContractRef
 from engine.v2.data import manifests
 from engine.v2.ops.errors import OpsError
+from engine.v2.data.errors import fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops import computed_moves_store as store_module
@@ -71,6 +72,13 @@ def _records(conn, store, snapshot_id):
                   if r.table_contract_ref.contract_id.startswith("computed_moves."))
 
 
+def _write_counts(conn):
+    """Rows a generation would write: snapshots, heads, captures (raw receipts may remain)."""
+    return tuple(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                 for table in ("data_snapshots", "data_snapshot_heads",
+                               "data_computed_moves_captures"))
+
+
 def _v3_head(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
@@ -88,8 +96,10 @@ def _v3_head(tmp_path, monkeypatch):
 
 def test_incremental_generation_over_a_v3_parent_refuses_without_writing(tmp_path, monkeypatch):
     conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
+    written = _write_counts(conn)
     with pytest.raises(OpsError) as err:
         _run(conn, tmp_path, "v4partial", v3_head, ("AAAA",), monkeypatch)
+    assert _write_counts(conn) == written
     assert "VALIDATION_FAILED" in str(err.value)
     assert "full rebuild required" in str(err.value)
     after = _head_row(conn)
@@ -138,3 +148,25 @@ def test_full_rebuild_where_a_v3_ticker_has_no_v4_rows_drops_its_manifest_hash(
     after = Repository(conn, store).resolve_full(new_head["snapshot_id"])
     hashes = after.table_manifests["computed_moves"].partition_logical_hashes
     assert set(hashes) <= {"AAAA", "BBBB"}
+
+
+def test_build_rows_refusal_reaches_the_ops_layer_typed_without_writing(tmp_path, monkeypatch):
+    """A DataError from build_rows (duplicate event dates, a daily frame without src_iv: those
+    refusals are unit-tested on build_rows itself, and the fixture publisher cannot carry such
+    a parent) must leave the refresh as an OpsError (INPUT_CHANGED, data code kept in the message and details): the CLI catches only
+    OpsError. The raise is injected at build_rows; the conversion under test is the store's."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events = [_event_row(t, d) for t in _TICKERS for d in _EVENT_DAYS]
+    head = _build_parent(conn, clock, store, events_rows=events)
+
+    def refuse(*args, **kwargs):
+        raise fail("CONTRACT_MISMATCH", "event dates must be strictly ascending")
+
+    monkeypatch.setattr(store_module, "build_rows", refuse)
+    written = _write_counts(conn)
+    with pytest.raises(OpsError) as err:
+        _run(conn, tmp_path, "dup", head, _TICKERS, monkeypatch)
+    assert "INPUT_CHANGED" in str(err.value)
+    assert "CONTRACT_MISMATCH" in str(err.value)
+    assert _write_counts(conn) == written
