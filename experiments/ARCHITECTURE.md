@@ -119,8 +119,8 @@ The adapter reads staged `spec.json` and
 `native_registration.json`, verifies existing preregistration, and checks
 the requested identity, resolved plan, source closure and single-thread
 environment before pricing. Required `economic_params.strategy` selects the
-native strategy independently of arm IDs; any declared strategy must be a
-supported native structure before registration reads or effects. Snapshot,
+native strategy independently of arm IDs; the fixed worker requires it before
+registration reads or effects, and declared strategies must be supported. Snapshot,
 event IDs and holdout context come only from registration.
 It never re-resolves a scope head or accepts a supplied trades frame.
 Submission uses the existing `SubmitRequest` API and artifact input bindings;

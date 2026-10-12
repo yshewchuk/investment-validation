@@ -106,8 +106,8 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-`experiments/native_gate_worker.py` consumes public `stages.NativeGateParameters`
-for strict argument decoding and `executor.THREAD_VARIABLES` for launch checks; `experiments/native_gate_entrypoint.py` consumes `worker.main` and injects only its fixed pricing callback.
+`experiments/native_gate_worker.py` consumes `stages.NativeGateParameters`, `executor.THREAD_VARIABLES`, `experiments.experiment_spec_from_document`/`resolve_experiment_plan`, `fingerprints.environment_identity`/`source_closure` and `errors.OpsError`/`fail` for admission.
+`experiments/native_gate_entrypoint.py` consumes `worker.main` and injects only its fixed pricing callback.
 
 No other production package imports ops. The CLI starts the coordinator, and
 serving reads a versioned health artifact without a peer-layer import. The one

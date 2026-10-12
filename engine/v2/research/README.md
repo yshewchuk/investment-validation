@@ -152,8 +152,8 @@ and `experiments/EXP-186_.../run.py` (for `_replay_run.events_frame`)
 
 `experiments/v2_gate_variant.py` also consumes the shared population loader,
 registered structures and replay interfaces for read-only smoke pricing.
-`experiments/native_registration.py` consumes population admission, the pure
-magnitude window and the metadata-only planner to bind research registrations.
+`experiments/native_registration.py` consumes `_pricing.STRUCTURES`, population admission,
+the pure magnitude window and metadata-only planner to bind research registrations.
 
 <!-- consumers: none -->
 

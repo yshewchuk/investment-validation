@@ -54,6 +54,8 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
+    if plan.runner == NATIVE_GATE_WORKER and "strategy" not in plan.economic_params:
+        raise fail("INVALID_EXPERIMENT_SPEC", "native worker requires a registered strategy")
     if (plan.runner in NATIVE_GATE_RUNNERS
             and "strategy" in plan.economic_params and plan.economic_params["strategy"] not in STRUCTURES):
         raise fail("INVALID_EXPERIMENT_SPEC", "declared strategy is not a supported native structure")

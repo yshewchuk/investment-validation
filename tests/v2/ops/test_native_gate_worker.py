@@ -252,6 +252,46 @@ def test_native_entrypoint_cannot_dispatch_other_workers(tmp_path, name):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_native_source_change_invalidates_a_nonnative_plan_and_cache_identity(tmp_path):
+    """The conservative common closure applies at the real non-native launch gate."""
+    from engine.v2.ops.checkpoints import cache_identity
+    from tests.ops_support import POLICY, request
+
+    checkout = tmp_path / "checkout"
+    manifest = worker_source_manifest(REPO)
+    snapshot_code(REPO, checkout, manifest)
+    before = content_hash(manifest)
+    pricing = checkout / "engine/v2/research/_pricing.py"
+    pricing.chmod(0o600)
+    pricing.write_text(pricing.read_text() + "\n# synthetic native source change\n")
+    after = content_hash(worker_source_manifest(checkout))
+    assert before != after
+    common = dict(kind="artifact_check", inputs="same-input", parameters="same-parameters",
+                  environment="same-environment", schema="receipt.v1.0", shard="default")
+    assert cache_identity(implementation=before, **common) != cache_identity(implementation=after, **common)
+    root, clock = tmp_path / "ops", SystemClock()
+    root.mkdir()
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        job = submit(conn, stages.registry(), POLICY, request(
+            kind="artifact_check", checkpoint_contract_ref="receipt.v1.0", parameters={"expected_ids": []},
+            implementation_ref=before, environment_ref=content_hash(environment_identity(1))), clock=clock)
+        service = Service(conn, root, stages.registry(), TEST_POLICY, clock=clock, code_source=checkout)
+        try:
+            service.start()
+            assert run_until(service, conn, job.job_id, timeout=90) == "failed"
+        finally:
+            service.close()
+        row = conn.execute("SELECT failure_json FROM attempts WHERE job_id=?", (job.job_id,)).fetchone()
+        failure = json.loads(row[0])
+        assert failure["code"] == "INPUT_CHANGED"
+        assert failure["message"] == "planned worker implementation changed"
+        assert conn.execute("SELECT COUNT(*) FROM attempt_outputs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_ops_worker_never_imports_native_pricing_adapter(tmp_path):
     """Inspect the actual import closure and exercise the old dispatch boundary."""
     from engine.v2.ops import worker as ops_worker
@@ -447,8 +487,10 @@ def test_non_gate_runner_cannot_register_unused_strategy(source, monkeypatch, ru
     assert _objects(source[2]) == objects
 
 
-@pytest.mark.parametrize("strategy", [None, True, 1, [], {}, "", " ", "unsupported-native-structure"])
-def test_invalid_strategy_cannot_reserve_native_identity(source, monkeypatch, strategy):
+@pytest.mark.parametrize("economics", [{"fill": 0.0}, *(
+    {"fill": 0.0, "strategy": strategy}
+    for strategy in [None, True, 1, [], {}, "", " ", "unsupported-native-structure"])])
+def test_invalid_strategy_cannot_reserve_native_identity(source, monkeypatch, economics):
     """Real registration refuses before any read/effect; the corrected arm remains usable."""
     before, objects = _catalog(source[0]), _objects(source[2])
 
@@ -460,10 +502,13 @@ def test_invalid_strategy_cannot_reserve_native_identity(source, monkeypatch, st
         patch.setattr(source[3], "resolve_pinned", forbidden)
         patch.setattr(source[3], "scan", forbidden)
         with pytest.raises(OpsError) as error:
-            _registered(source, economic_params={"fill": 0.0, "strategy": strategy})
+            _registered(source, economic_params=economics)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    strategy = economics.get("strategy")
     expected = ("declared strategy must be a non-empty string" if not isinstance(strategy, str) or not strategy
                 else "declared strategy is not a supported native structure")
+    if "strategy" not in economics:
+        expected = "native worker requires a registered strategy"
     assert error.value.problem.message == expected
     assert error.value.problem.retryable is False
     assert _catalog(source[0]) == before
@@ -888,8 +933,9 @@ def test_supervised_missing_strategy_refuses_before_population_reads(
     """A worker never substitutes the arm name for an undeclared strategy."""
     from experiments import v2_gate_variant as gate
 
-    request = _registered(source, primary_arm_id=arm, arms=[arm], economic_params={"fill": 0.0})
+    request = _registered(source, primary_arm_id=arm, arms=[arm])
     document, registration, parameters = request
+    del document["economic_params"]["strategy"]
     stage = _stage(tmp_path / "staging", document, registration)
     before = _catalog(source[0])
 
