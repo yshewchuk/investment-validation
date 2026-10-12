@@ -367,7 +367,11 @@ def select_modules(cfg: dict, only: str = "", changed_files: str = "") -> list[s
     depends on it (a static ast import-graph closure), an inert-allowlisted
     path keeps none, and any other path keeps every name (never zero on an
     unrecognized change, and never zero if the import graph itself cannot be
-    built). Blank/omitted: unchanged behavior."""
+    built). Two exceptions narrow the last rule: a `tools/mutation_pilot.toml`
+    change that `registration_tests` verifies as add-only (base read from the
+    `BASE_SHA` environment variable) keeps just the modules whose lists grew, and
+    such a registration also keeps every module declaring `scans_tree` when a
+    changed `.py` file sits under that prefix. Blank/omitted: unchanged behavior."""
     names = pilot.enabled_modules(cfg)
     if only.strip():
         wanted = [n.strip() for n in only.split(",") if n.strip()]
@@ -379,7 +383,12 @@ def select_modules(cfg: dict, only: str = "", changed_files: str = "") -> list[s
             sys.exit(f"not enabled modules: {bad}; enabled: {', '.join(names)}")
         names = [n for n in names if n in wanted]
     if changed_files and changed_files.strip():
-        names = pilot.changed_modules(cfg, names, pilot.read_changed_files(changed_files))
+        changed = pilot.read_changed_files(changed_files)
+        # The plan step exports BASE_SHA; a verified add-only registration in the
+        # selector config then selects only the registered modules.
+        base = (pilot.registration_base_config(os.environ.get("BASE_SHA", ""), cfg, changed)
+                if pilot._REGISTRATION_CONFIG in changed else None)
+        names = pilot.changed_modules(cfg, names, changed, base_cfg=base)
     return names
 
 

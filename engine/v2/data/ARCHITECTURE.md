@@ -237,6 +237,30 @@ knowable. It is null exactly when `realized_move_pct` is null; null means
 unavailable to any decision. Readers must require
 `available_as_of_date <= decision_session`.
 
+**`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
+no clock. A feature declares its parameters; none is hard-coded in the module.
+- `event_sequence(event_dates, warmup=, first_known=)` takes one ticker's FULL
+  ordered event list. `ordinal` is the 0-based count of every earlier event,
+  realised or not; `admitted = ordinal >= warmup`.
+- `AsofSeries(rows, eligible=, value=, on_missing=)` anchors on the last row
+  with a data date strictly before the event date whose `eligible` fields are
+  all non-null (None or float NaN); eligibility is separate from the value
+  field, and the lookup never reaches back past that anchor. `max_staleness_days`
+  optionally bounds the anchor's age. `on_missing` has no default.
+- `strict_prior_mean(events, values, population=)` returns `(mean, count)` per
+  event over earlier-ordinal events with a non-null value, within `population`
+  (`"admitted"` or `"all"`; a non-admitted event gets `(None, 0)` under
+  `"admitted"`). Each mean is the exact rational mean, rounded once to float.
+- Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
+  `computed_at` are provenance and never filter or order.
+- The module only computes from the inputs it is given; it stores nothing and
+  has no production caller yet.
+
+| Condition | Outcome |
+|---|---|
+| no anchor, stale anchor, or null anchor value | `None` under `on_missing="null"`, `CONTRACT_MISMATCH` under `"refuse"` |
+| any other malformed input: wrong type, or a container that is not a list or tuple (str, bytes, range, array, generator), non-canonical date, unsorted or duplicate dates, `first_known` not the first event, missing column, negative, non-integer or omitted declaration (`warmup`, `eligible`, `value`, `on_missing`, `population` have no default), unknown `on_missing`/`population`, non-numeric or non-finite value (every value is checked whatever the population or row eligibility; `AsofSeries` checks all rows at construction), length mismatch | `CONTRACT_MISMATCH`, never a bare exception |
+
 ## Dependencies
 
 Layer 1.0 has no `only_imports` restriction (root doc §2), but in practice

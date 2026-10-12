@@ -104,6 +104,10 @@ evidence. See the models and data component contracts.
   validating recipe and state parameters for `ops plan --kind training`.
   Describe dependencies at the module level because some modules serve shared
   runtime paths.
+  The smoke-only `native_gate_pricing` kind launches the fixed unlayered child
+  `experiments.native_gate_entrypoint`. After the ops protocol's launch gate opens,
+  its callback imports native pricing; ops never imports that adapter or research.
+  The verified source closure includes both files; the receipt grants no recording authority.
   - `tools/oc_check.py` appends one best-effort JSONL line per run to
     `$OC_METRICS_DIR/oc_check.jsonl` (default `.oc_logs/oc_check.jsonl`, per worktree);
     its module docstring defines the fields and failure behavior.
@@ -206,8 +210,9 @@ evidence. See the models and data component contracts.
     section describes applies to `pull_request` runs only: a push to main
     and the weekly scheduled run mutate every enabled module unfiltered, so
     this gap costs informational PR coverage, never an unmutated merge.
-  - **`test` CI PR selection** (`select_pr_tests`, used by
-    `.github/workflows/tests.yml`'s `test` job): on `pull_request`, narrows which
+  - **`test` CI PR selection** (`select_pr_tests`, run once by
+    `.github/workflows/tests.yml`'s `plan` job; each shard then narrows it to its own
+    files): on `pull_request`, narrows which
     tracked test files pytest collects to the subset the diff can affect, and includes
     configured `[pr_selection].always_run` paths present in the tracked test set (which
     may be nested), falling back to every test file when it can't prove a narrower subset
@@ -245,8 +250,17 @@ evidence. See the models and data component contracts.
     existing tooling-reader tests plus the selector's integration regression listed
     in `_REGISTRATION_READERS`; bare tool imports
     make relying on graph reachability alone unsafe. Other full-suite triggers and
-    the dynamic-loading fail-safe remain unchanged. Mutation-CI module selection is
-    unchanged. The selection rule (leaf,
+    the dynamic-loading fail-safe remain unchanged. Mutation-CI module selection
+    (`changed_modules`, via either `matrix` command, which read the plan step's
+    `BASE_SHA`) reuses the same proof: a `tools/mutation_pilot.toml` change that
+    `registration_tests` verifies as add-only selects just the modules whose
+    `mutate`/`tests` lists grew, plus whatever the other changed paths select. An
+    unverified config change (no or unreadable base, any other edit) still selects
+    every module. A module whose tests scan a whole tree declares
+    `scans_tree = "<prefix>"` in the config and is also selected by a verified
+    registration that changes a Python file under that prefix, since a newly added
+    file has no import edge to it
+    ([#672](https://github.com/yshewchuk/investment-validation/issues/672)). The selection rule (leaf,
     taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
@@ -263,7 +277,17 @@ is separate from the active workflow; see [package test selection by
 layer](guides/test_selection_by_layer.md). The checked-in test-layout ratchet
 (`checks/test_layout_budget.py`) keeps root-level tests from growing while
 packages migrate. On `pull_request`, `tests.yml` runs it against the PR base SHA before
-pytest and a nonzero result fails the `test` job; pushes to `main` keep the full-suite backstop.
+pytest and a nonzero result fails the `plan` job, and so the required `test` check; pushes to `main` keep the full-suite backstop.
+
+CI runs the suite as shards declared in `tests/shards.toml`. `tools/ci_shards.py matrix`
+prints the shard names and `files SHARD [--selection FILE]` prints one shard's test files
+(first matching pattern wins; the last shard owns every file no pattern claims; a
+selection only narrows, and unknown paths are ignored). The loader refuses a bad
+declaration with `ValueError`; an unknown shard exits 2. In `tests.yml` a `plan` job
+selects the PR's tests once and prints the matrix, a `shard` matrix job runs one shard
+each, and the required check `test` is an aggregator that fails unless `plan` and every
+shard succeeded (failed, cancelled and skipped all fail). A failing `ci_shards.py` fails
+its step; it never means "no tests".
 
 Fixed dependencies in verification code should use ordinary imports or lazy
 literal `importlib.import_module` calls, retaining every target and its import
@@ -403,6 +427,7 @@ Only a tracked path absent from the worktree reads as empty.
 
 ## 4. Production entrypoints and the job graph
 
+- **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
 - **Shadow nightly coordination.** The operations trigger coordinates snapshot
   import, pinned planning, submission and bounded serving; preparation commands
   remain separate interfaces. It does not start the production legacy nightly.
@@ -600,9 +625,9 @@ flowchart LR
     Tools --> V2
 ```
 
-This is the production shape only — which entrypoint starts which run —
-not the internal stage dependencies (§4's `GRAPH` bullet and
-`engine/v2/ops/ARCHITECTURE.md` cover those). `"delivery"` is a resource
+This shows which entrypoint starts which run, not a complete import graph;
+§1 documents ops' unlayered tools/experiments callbacks. Internal stage dependencies are covered by §4's `GRAPH` bullet and
+`engine/v2/ops/ARCHITECTURE.md`. `"delivery"` is a resource
 class shared by `ledger_export`/`engineering_gate`/`publication`/`backup`
 (`nightly.py`'s resource-class lookup), and a node in the shadow-only
 `GRAPH` (`publication --> delivery`) — it is not one of `_DAG_STAGES`,

@@ -28,6 +28,12 @@ def _window(evaluation_years, training_start):
         raise errors.fail("CONTRACT_MISMATCH", "explicit ordered years and earlier training start required") from None
 
 
+def magnitude_window(evaluation_years, training_start):
+    """Canonical detached request shared by planning and native preregistration."""
+    start, _ = _window(evaluation_years, training_start)
+    return {"training_start": start, "evaluation_years": list(evaluation_years)}
+
+
 def _event_plan(event, calendar, clocks):
     """Bind one canonical event to all horizons, with no outcome or feature read."""
     day, forecasts = event.event_date.date().isoformat(), []
