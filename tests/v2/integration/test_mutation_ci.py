@@ -4015,7 +4015,7 @@ def test_domain_valuation_init_change_selects_its_dependents():
 
 
 def test_a_leaf_module_change_selects_only_its_own_module_again():
-    # Before 2026-09-26, this changed path selected exactly ["research"].
+    # Before 2026-09-26, a research leaf selected exactly ["research"].
     # A path-based-loader fail-safe added that day made every checks/*.py
     # file using the common `sys.path.insert(0,
     # str(Path(__file__).resolve().parents[1]))` idiom depend on EVERY
@@ -4026,9 +4026,18 @@ def test_a_leaf_module_change_selects_only_its_own_module_again():
     # DYNAMIC catch-all edge collapse every module's dependency set (see
     # module_dependency_closure's docstring). Fixed the same way: the walk
     # now follows a DYNAMIC file's REAL edges (`build_import_graph.precise`)
-    # instead of cascading its catch-all, so this is a leaf change again.
+    # instead of cascading its catch-all. Replay now has legitimate worker
+    # consumers; fill_quality selects only the research mutation module here.
     names = pilot.enabled_modules(CFG)
-    assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == ["research"]
+    assert pilot.changed_modules(CFG, names, ["engine/v2/research/fill_quality.py"]) == ["research"]
+
+
+def test_replay_change_selects_its_transitive_worker_consumers():
+    """The real replay source selects its native-worker and other actual consumers."""
+    names = pilot.enabled_modules(CFG)
+    assert set(pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"])) == {
+        "ops_cli", "ops_runtime", "ops_nightly", "research",
+    }
 
 
 # -- import-graph build guard: deterministic parse-count property ------------

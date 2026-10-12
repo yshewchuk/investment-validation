@@ -13,6 +13,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
+    NATIVE_GATE_RUNNERS,
     ExperimentSpec,
     ResolvedExperimentPlan,
     experiment_spec_from_document,
@@ -49,10 +50,12 @@ def _plan(spec, strategy):
         valid_alpha = type(alpha) in (int, float) and isfinite(alpha) and 0 <= alpha <= 1
     except OverflowError:
         valid_alpha = False
-    if (plan.runner != "native-gate-replay" or plan.price_source != "option_chains"
+    if (plan.runner not in NATIVE_GATE_RUNNERS
+            or plan.price_source != "option_chains"
             or not isinstance(strategy, str) or strategy not in STRUCTURES
+            or plan.economic_params.get("strategy", strategy) != strategy
             or spec.input_files
-            or set(plan.economic_params) != {"fill"} or not valid_alpha):
+            or set(plan.economic_params) not in ({"fill"}, {"fill", "strategy"}) or not valid_alpha):
         raise fail("INVALID_EXPERIMENT_SPEC", "unsupported native gate pricing declaration")
     return plan
 
@@ -80,8 +83,9 @@ def price_variant(repository, snapshot, spec: ExperimentSpec, *, strategy: str,
     try:
         result = replay(repository, snapshot, inputs.strategy, events,
                         alphas=(inputs.fill_alpha,), progress_every=0)
-    except (ValueError, TypeError, KeyError, OverflowError):
-        raise fail("EXPERIMENT_VARIANT_FAILED", "native gate pricing failed") from None
+    except (ValueError, TypeError, KeyError, OverflowError) as error:
+        raise fail("EXPERIMENT_VARIANT_FAILED", "native gate pricing failed",
+                   details={"data_failure_code": getattr(error, "code", type(error).__name__)}) from None
     actual = tuple(result.trades["event_id"])
     if len(actual) != len(inputs.event_ids) or set(actual) != set(inputs.event_ids):
         raise fail("EXPERIMENT_VARIANT_FAILED", "native gate pricing population is incomplete")
