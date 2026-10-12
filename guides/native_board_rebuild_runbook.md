@@ -116,7 +116,7 @@ produce only the eight legacy tables, and price-history capture is the existing 
 
 ## Readiness checklist (manual, against the operations catalog and release directory)
 
-- [ ] Current `shadow` head holds all eight legacy tables, `price_history.v3`, `computed_moves.v4` (a v3 head needs the full rebuild first; an incremental generation over it refuses).
+- [ ] Current `shadow` head holds all eight legacy tables, `price_history.v3`, `computed_moves.v4` (a v3 head needs the full rebuild first; a run that neither rewrites nor attempts every non-v4 partition, or produces no v4 rows, refuses).
 - [ ] Newest head receipt carries the required reference pins; the price-history capture receipt has a `data_receipt_lineage` entry.
 - [ ] Catalog `decisions` holds the imported prediction/outcome history the rebuilt tree needs.
 - [ ] Legacy selected session is exactly `AS_OF` — wait for currency, never import later/partial.
