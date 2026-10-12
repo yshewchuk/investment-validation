@@ -25,8 +25,8 @@ REQUEST = dict(as_of_month="2026-01", evaluation_years=["2024"],
                training_start="2023-01-01", history_start="2022-01-01")
 
 
-def _source(tmp_path, *, mixed_days=(), overrides=None):
-    events = [_event(day) for day in ("2022-06-02", "2023-01-03", "2023-06-02", "2024-06-12", "2024-06-17")]
+def _source(tmp_path, *, mixed_days=(), overrides=None, recent_day="2024-06-12"):
+    events = [_event(day) for day in ("2022-06-02", "2023-01-03", "2023-06-02", recent_day, "2024-06-17")]
     moves = [_move(event, value) for event, value in zip(events, (-2., -4., 6., 10., None))]
     for index, changes in (overrides or {}).items():
         moves[index].update(changes)
@@ -205,6 +205,28 @@ def test_all_metadata_is_admitted_before_any_feature_column_decode(source, monke
     assert len(seen) == 1
 
 
+@pytest.mark.parametrize("name,value", [
+    ("event_id", "wrong"), ("context_id", "wrong"), ("horizon_sessions", 2),
+    ("event_date", "2024-06-16"), ("cutoff_id", "wrong"), ("source_session_ceiling", "2024-06-01"),
+])
+def test_each_decoded_metadata_pin_refuses_before_feature_columns(source, monkeypatch, name, value):
+    _, output = _build(source)
+    scan = stored._scan
+    seen = []
+
+    def malformed(repository, snapshot, context, columns, count):
+        assert not set(columns) & set(FEATURES), "feature decode preceded complete metadata admission"
+        rows = scan(repository, snapshot, context, columns, count)
+        rows[-1][name] = value  # Exercise row admission independently of physical fragment guards.
+        seen.append(columns)
+        return rows
+
+    monkeypatch.setattr(stored, "_scan", malformed)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        _read(source, output)
+    assert len(seen) == 1
+
+
 @pytest.mark.parametrize("field,value", [
     ("n_prior", 99), ("mean_prior_move", float("nan")),
     ("mean_prior_abs_move", -1.), ("ema12_prior_move", 0.), ("mean_prior_move", None),
@@ -327,7 +349,22 @@ def test_cli_build_read_and_typed_refusal(source, capsys):
         entry.main(["build", *args, "--feature-snapshot-id", source.snapshot.snapshot_id])
 
 
-def test_recipe_and_physical_contract_are_closed_and_source_rows_are_not_outputs():
+@pytest.mark.parametrize("action", ["build", "read"])
+def test_cli_missing_catalog_refuses_before_bootstrap_or_directory_creation(tmp_path, monkeypatch, capsys, action):
+    missing = tmp_path / "missing" / "catalog.sqlite"
+    args = [action, "--catalog", str(missing), "--store-root", str(tmp_path / "objects"),
+        "--source-snapshot-id", "source", "--as-of-month", "2026-01", "--evaluation-years", "2024",
+        "--training-start", "2023-01-01", "--history-start", "2022-01-01"]
+    if action == "read":
+        args += ["--feature-snapshot-id", "features"]
+    monkeypatch.setattr(entry, "open_catalog", _forbid)
+    with pytest.raises(SystemExit, match="2"):
+        entry.main(args)
+    assert "existing native catalog file" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_recipe_and_physical_contract_are_closed():
     assert CONTRACT.primary_key == ("event_id", "context_id", "horizon_sessions")
     assert CONTRACT.partition_columns == ("context_id",)
     assert [c.name for c in CONTRACT.columns] == [*stored.METADATA, *FEATURES]
@@ -343,6 +380,35 @@ def test_context_or_source_mismatch_refuses_before_any_source_or_feature_payload
         stored.materialize(source.repository, source.snapshot, {**binding, "history_start": "2022-02-01"})
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         stored.materialize(source.repository, replace(source.snapshot, calendar_version="different"), binding)
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+@pytest.mark.parametrize("scope,name,value", [
+    ("event", "ticker", "OTHER"), ("event", "event_date", "2024-06-18"),
+    ("event", "session", "BMO"), ("event", "population_use", "wrong"),
+    ("event", "event_id", "unknown"), ("event", "event_id", "protected"),
+    ("event", "forecasts", []), ("cutoff", "horizon_sessions", 3),
+    ("cutoff", "horizon_sessions", True), ("cutoff", "event_date", "2024-06-18"),
+    ("cutoff", "session", "BMO"), ("cutoff", "source_session_ceiling", "2024-06-18"),
+    ("cutoff", "source_session_ceiling", "2024-06-17"),
+    ("cutoff", "source_session_ceiling", "2021-12-31"),
+])
+def test_rehashed_direct_context_guards_all_targets_before_outcomes(source, monkeypatch, scope, name, value):
+    binding = entry.context(source.repository, source.snapshot, **REQUEST)
+    plan = binding["temporal_plan"]
+    event = plan["events"][-1]  # A malformed later target must stop earlier safe-target reads too.
+    assert event["event_date"] == "2024-06-17"
+    target = event if scope == "event" else event["forecasts"][-1]
+    target[name] = source.forbidden[0]["event_id"] if value == "protected" else value
+    for forecast in event["forecasts"]:
+        forecast["cutoff_id"] = content_hash({k: v for k, v in forecast.items() if k != "cutoff_id"})
+    plan["plan_id"] = content_hash({k: v for k, v in plan.items() if k != "plan_id"})
+    binding["context_id"] = content_hash({k: v for k, v in binding.items() if k != "context_id"})
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    before = _catalog(source.conn), _objects(source.store)
+    code = "HOLDOUT_ACCESS_DENIED" if name == "event_id" else "CONTRACT_MISMATCH"
+    with pytest.raises(DataError, match=code):
+        stored.materialize(source.repository, source.snapshot, binding)
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
@@ -369,6 +435,9 @@ def test_explicit_protected_population_fails_before_any_outcome_or_publication(s
     ("random_membership_version", "wrong"), ("rolling_membership_version", "wrong"),
     ("holdout_as_of_month", "2026-02"), ("computed_moves_version", "wrong"),
     ("purpose", "final"), ("schema_version", "wrong"), ("read_inputs", None),
+    ("snapshot_id", "wrong"), ("event_id", "wrong"), ("ticker", "OTHER"),
+    ("event_date", "2024-06-16"), ("population_use", "wrong"),
+    ("history_start", "2022-02-01"), ("decision_session", "2024-06-01"),
 ])
 def test_rehashed_cross_context_or_missing_lineage_refuses_before_features(source, monkeypatch, name, value):
     original = stored._event_rows
@@ -433,7 +502,7 @@ def test_old_native_contract_refuses_before_feature_scan(source, monkeypatch):
         _read(source, output)
 
 
-def test_late_unparseable_and_skipped_labels_are_stored_as_omissions(tmp_path):
+def test_late_missing_and_skipped_labels_are_stored_as_omissions(tmp_path):
     source = _source(tmp_path, overrides={0: {"realized_move_pct": None, "available_as_of_date": "2026-01-01"},
         1: {"realized_move_pct": None, "skipped": True, "available_as_of_date": None},
         2: {"realized_move_pct": 0.}})
@@ -466,6 +535,28 @@ def test_build_scans_calendar_once_population_twice_and_each_outcome_once(source
     source.repository.scans.clear()
     _build(source, history_start="2022-02-01")
     assert Counter(name for name, _ in source.repository.scans)["computed_moves"] == 4  # No cross-build cache.
+
+
+def test_candidate_equal_to_a_forecast_ceiling_is_absent_from_that_forecast_reads(source):
+    _, output = _build(source)
+    rows = _read(source, output)["rows"]
+    row = next(r for r in rows if r["event_date"] == "2024-06-17" and r["horizon_sessions"] == 3)
+    assert row["source_session_ceiling"] == "2024-06-12"
+    history = json.loads(row["history_json"])
+    assert [r["event_id"] for r in history["read_inputs"]] == [e["event_id"] for e in source.events[:3]]
+    assert history["omitted_history"] == []
+
+
+def test_candidate_on_latest_ceiling_is_never_opened(tmp_path, monkeypatch):
+    source = _source(tmp_path, recent_day="2024-06-14")
+    try:
+        _poison(monkeypatch, source.repository, source.snapshot, ["2024-06-14", "2024-06-17"])
+        _, output = _build(source)
+        rows = _read(source, output)["rows"]
+        row = next(r for r in rows if r["event_date"] == "2024-06-17" and r["horizon_sessions"] == 1)
+        assert row["source_session_ceiling"] == "2024-06-14" and row["n_prior"] == 3
+    finally:
+        source.conn.close()
 
 
 def test_lazy_cache_preserves_first_invalid_label_refusal_before_later_objects(tmp_path, monkeypatch):

@@ -108,7 +108,7 @@ Existing publication/transaction/retry semantics above apply unchanged.
 
 ## Stored research-history entrypoint
 
-`python -m experiments.magnitude_history_store build|read` requires a catalog,
+`python -m experiments.magnitude_history_store build|read` requires an existing catalog file,
 object store, exact source snapshot, holdout month, evaluation years, training
 start and earlier history start. `read` also requires the exact feature snapshot.
 The entrypoint fingerprints its installed source closure and numerical environment;

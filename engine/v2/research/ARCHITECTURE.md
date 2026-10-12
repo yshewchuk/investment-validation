@@ -542,6 +542,7 @@ snapshot, admitted temporal plan, explicit history start, fixed 5/3/1 clocks,
 per-feature missingness and its own source/environment closure. The source stays
 unchanged; a dedicated context scope holds a features-only output snapshot.
 Every row physically binds the context digest. No experiment output is an input.
+Engine materialization requires that derived context and globally checks target identity/windows.
 
 The builder preflights the complete eligible historical candidate union before
 any outcome opens, then uses the existing protected history arithmetic at build
@@ -550,8 +551,8 @@ availability and be omitted. Planning reads the calendar once; one further
 population scan prepares the candidate union. A lazy build-local cache decodes
 at most one row per admitted candidate, only after its forecast window selects it.
 Shared arithmetic preserves availability and numeric-refusal ordering.
-No cache survives the build. Production-scale performance is unmeasured. All consumed
-objects, omissions and availability remain stored alongside the eleven columns.
+Cache memory is O(admitted candidates), without a byte cap; no cache survives a build.
+Production scale is unmeasured; objects, omissions and availability are stored with the columns.
 `n_prior` is zero for empty history; other missing features stay null with explicit
 `on_missing=null`, never runtime imputation or production v4 aggregates.
 

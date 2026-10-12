@@ -46,6 +46,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if (args.action == "read") != (args.feature_snapshot_id is not None):
         parser.error("read requires --feature-snapshot-id; build does not accept it")
+    if not Path(args.catalog).is_file():
+        parser.error("--catalog must name an existing native catalog file")
     conn = open_catalog(args.catalog, clock=SystemClock())
     try:
         repository = Repository(conn, ArtifactStore(args.store_root))

@@ -59,15 +59,45 @@ def _existing(repository, context):
     return repository.resolve(row["result_snapshot_id"])
 
 
+def _event_ceiling(event, start, event_day):
+    """Validate exact horizon coverage and causal windows for one canonical target."""
+    forecasts = event["forecasts"]
+    if (any(type(c["horizon_sessions"]) is not int for c in forecasts)
+            or sorted(c["horizon_sessions"] for c in forecasts) != [1, 3, 5]):
+        raise ValueError
+    for cutoff in forecasts:
+        _, decision = event_history._window(start, cutoff["source_session_ceiling"])
+        if (decision >= event_day
+                or any(cutoff[k] != event[k] for k in ("event_date", "session"))):
+            raise ValueError
+    return max(c["source_session_ceiling"] for c in forecasts)
+
+
+def _target_ceilings(indexed, context):
+    """Guard every derived target/window before planning or opening any outcome."""
+    ceilings = {}
+    try:
+        for event in context["temporal_plan"]["events"]:
+            if event["event_id"] not in indexed.index:
+                raise errors.fail("HOLDOUT_ACCESS_DENIED", "history target is not admitted")
+            target = indexed.loc[event["event_id"]]
+            if (event["event_date"] != target.event_date.date().isoformat()
+                    or any(event[k] != target[k] for k in ("ticker", "session", "population_use"))):
+                raise ValueError
+            ceiling = _event_ceiling(event, context["history_start"], target.event_date.date())
+            ceilings[event["ticker"]] = max(ceilings.get(event["ticker"], ""), ceiling)
+    except (KeyError, TypeError, ValueError):
+        raise errors.fail("CONTRACT_MISMATCH", "history target or forecast window differs") from None
+    return ceilings
+
+
 def _preflight_source(repository, snapshot, context):
     """Prove the complete candidate union before any per-forecast history reads."""
     plan = context["temporal_plan"]
     population = load_population(repository, snapshot, as_of_month=plan["holdout_as_of_month"],
                                  purpose="selection")
-    ceilings = {}
-    for event in plan["events"]:
-        ceiling = max(c["source_session_ceiling"] for c in event["forecasts"])
-        ceilings[event["ticker"]] = max(ceilings.get(event["ticker"], ""), ceiling)
+    indexed = population.set_index("event_id", drop=False)
+    ceilings = _target_ceilings(indexed, context)
     days = population.event_date.dt.strftime("%Y-%m-%d")
     candidates = population[(days >= context["history_start"])
         & (days < population.ticker.map(ceilings).fillna(""))]
@@ -76,7 +106,7 @@ def _preflight_source(repository, snapshot, context):
         raise errors.fail("CONTRACT_MISMATCH", "history requires native computed moves")
     plans = event_history._plans(repository, snapshot,
         candidates.sort_values(["event_date", "event_id"]), contract)
-    return population.set_index("event_id", drop=False), plans
+    return indexed, plans
 
 
 def _prepare_history(repository, snapshot, context):

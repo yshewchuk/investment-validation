@@ -87,7 +87,7 @@ def load_event_history(repository, snapshot, *, event_id, as_of_month,
         raise errors.fail("CONTRACT_MISMATCH", "history requires the native computed-moves contract")
     plans = _plans(repository, snapshot, candidates, contract)
     def read_rows(event, request):
-        """Preserve the original sequential scan-and-validate refusal order."""
+        """Scan one outcome; the caller validates it before requesting the next."""
         return [row for batch in repository.scan(request, table_name="computed_moves")
                 for row in batch.to_pylist()]
     return _assemble_history(snapshot, target, population, plans, start=start, decision=decision,
