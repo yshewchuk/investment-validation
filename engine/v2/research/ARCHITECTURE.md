@@ -510,8 +510,9 @@ modules' callers, outside this PR's one concern.
 
 Callers: no `engine/` modules import this package (checked by `checks/import_layers.py`).
 `experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`;
-`experiments/magnitude_report.py` also consumes `load_magnitude_targets` and
-`qualify_magnitude_training_targets`. `experiments/native_registration.py` consumes
+`experiments/magnitude_report.py` consumes `preflight_magnitude_targets`,
+`load_magnitude_targets` and `qualify_magnitude_training_targets`.
+`experiments/native_registration.py` consumes
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
 Other consumers include `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
 trade, calendar, and chain inputs from pinned v2 data. The archived
