@@ -337,14 +337,33 @@ def test_closer_follows_commonmark_not_the_opener_regex():
     assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n``` x\n")] == ["fence-unclosed"]
 
 
-def test_the_versioned_pre_commit_hook_runs_the_markdown_lint():
-    hook = (ms.ROOT / "checks" / "hooks" / "pre-commit").read_text(encoding="utf-8")
-    live = [ln.strip() for ln in hook.splitlines() if not ln.strip().startswith("#")]
-    assert 'python3 "$ROOT/checks/markdown_structure.py" --quiet' in live
-    # A commented-out invocation must not count.
-    commented = hook.replace('python3 "$ROOT/checks/markdown_structure.py" --quiet',
-                             '# python3 "$ROOT/checks/markdown_structure.py" --quiet')
-    live_commented = [ln.strip() for ln in commented.splitlines() if not ln.strip().startswith("#")]
-    assert 'python3 "$ROOT/checks/markdown_structure.py" --quiet' not in live_commented
+def test_the_versioned_pre_commit_hook_blocks_a_staged_violation(tmp_path, monkeypatch):
+    import re
+    import shutil
+
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    hook_text = (ms.ROOT / "checks" / "hooks" / "pre-commit").read_text(encoding="utf-8")
+    (tmp_path / "checks").mkdir()
+    # The other hook steps are not under test: stub each one as a passing script.
+    for name in set(re.findall(r"checks/([a-z_0-9]+\.py)", hook_text)):
+        (tmp_path / "checks" / name).write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    shutil.copy(ms.__file__, tmp_path / "checks" / "markdown_structure.py")
+    hook = tmp_path / "pre-commit"
+    hook.write_text(hook_text, encoding="utf-8")
+    _git(tmp_path, "init", "-q")
+
+    def run_hook():
+        return subprocess.run(["sh", str(hook)], cwd=tmp_path, capture_output=True, text=True)
+
+    (tmp_path / "bad.md").write_text("# Title\nbody\n", encoding="utf-8")
+    _git(tmp_path, "add", "bad.md")
+    blocked = run_hook()
+    assert blocked.returncode != 0
+    assert "bad.md:1: heading-after" in blocked.stdout
+
+    (tmp_path / "bad.md").write_text("# Title\n\nbody\n", encoding="utf-8")
+    _git(tmp_path, "add", "bad.md")
+    assert run_hook().returncode == 0
 
 
