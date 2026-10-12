@@ -85,6 +85,7 @@ def mutate_receipt(cache, record, field, value):
     ("TEST.A", "2026-01-01", "2026-01-31", "raw", False),
     ("test.b", "2025-03-07", "2025-04-09", "split_adjusted", True),
     ("BRK.B", "2026-07-08", "2026-08-19", "raw", False),
+    ("T" * 32, "2026-01-01", "2026-01-31", "raw", False),
 ])
 def test_descriptors_and_budgets_are_canonical_and_explicit(ticker, start, end, adjustment, adjusted):
     scope = {"start": start, "end": end, "adjustment": adjustment}
@@ -122,6 +123,24 @@ def test_descriptors_and_budgets_are_canonical_and_explicit(ticker, start, end, 
     assert "apiKey" not in text and "MASSIVE_" not in text and "https://" not in text
 
 
+@pytest.mark.parametrize("datasets,unique", [
+    (["splits", "daily", "splits"], ["daily", "splits"]),
+    (("dividends", "dividends", "dividends"), ["dividends"]),
+])
+def test_repeated_datasets_have_unique_units_and_budgets(cache, datasets, unique):
+    units = inventory(datasets=unique)["units"]
+    result = inventory(cache, datasets=datasets)
+    assert [unit["request"]["dataset"] for unit in result["units"]] == unique
+    assert result["units"] == units
+    assert result["minimum_initial_calls"] == len(unique)
+    assert result["maximum_http_attempts"] == 7 * len(unique)
+    record = seed(cache, units[0]["request"])
+    result = inventory(cache, datasets=datasets)
+    assert result["units"] == [units[0] | {"raw_receipt_id": record.raw_receipt_id}, *units[1:]]
+    assert result["minimum_initial_calls"] == len(unique) - 1
+    assert result["maximum_http_attempts"] == 7 * (len(unique) - 1)
+
+
 def test_adjustment_case_and_date_changes_separate_keys():
     raw = inventory(datasets=["daily"])["units"][0]
     adjusted = inventory(datasets=["daily"], adjustment="split_adjusted")["units"][0]
@@ -149,7 +168,7 @@ def test_calendar_year_boundaries_and_no_same_day_claim():
     {"adjustment": "total_return"},
     {"tickers": []}, {"tickers": "TEST"}, {"tickers": ["TEST"] * 101},
     {"tickers": [1]}, {"tickers": ["TEST?apiKey=secret"]}, {"tickers": ["../TEST"]},
-    {"tickers": [""]}, {"tickers": ["TEST\n"]},
+    {"tickers": [""]}, {"tickers": ["TEST\n"]}, {"tickers": ["T" * 33]},
     {"datasets": []}, {"datasets": "daily"},
     {"datasets": ["daily"] * 4}, {"max_calls_per_request": 0},
     {"max_calls_per_request": 101}, {"max_calls_per_request": True},
@@ -368,13 +387,14 @@ def test_receipt_identity_is_recomputed(cache):
     assert error.value.code == "INTEGRITY_FAILED"
 
 
-def test_oversized_manifest_refuses_before_object_read(cache, monkeypatch):
+@pytest.mark.parametrize("size", [-1, True, False, 1.0, "1", None, 16 * 1024 * 1024 + 1])
+def test_invalid_manifest_size_refuses_before_object_read(cache, monkeypatch, size):
     req = inventory(datasets=["daily"])["units"][0]["request"]
     record = seed(cache, req)
     document = json.loads(cache[0].execute("SELECT artifact_ref_json FROM data_raw_receipts").fetchone()[0])
-    document["byte_size"] = massive_plan.MAX_RAW_BYTES + 1
+    document["byte_size"] = size
     mutate_receipt(cache, record, "artifact_ref_json", json.dumps(document))
-    monkeypatch.setattr(massive_plan, "load_raw_receipt", lambda *a: pytest.fail("read oversized bytes"))
+    monkeypatch.setattr(massive_plan, "load_raw_receipt", lambda *a: pytest.fail("read invalid-size bytes"))
     with pytest.raises(OpsError) as error:
         inventory(cache, datasets=["daily"])
     assert error.value.code == "RESOURCE_LIMIT_EXCEEDED"
