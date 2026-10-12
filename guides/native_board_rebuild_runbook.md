@@ -3,7 +3,7 @@
 ## Recommendation (amendment option A)
 
 Use a runbook plus the existing commands, and add exactly one missing standard command:
-`ops computed-moves capture` — the proposed CLI exposes/reuses the existing native `computed_moves.v3`
+`ops computed-moves capture` — the proposed CLI exposes/reuses the existing native `computed_moves.v4`
 producer (`computed_moves_store.py`) but also requires a commit-path change to propagate the reference
 pins, a requirement that is not implemented. Do not add a `--from-tier` sequencer, migration code, or a
 readiness CLI: the runbook below already makes the order, head precondition, and serial heavy admission
@@ -116,7 +116,7 @@ produce only the eight legacy tables, and price-history capture is the existing 
 
 ## Readiness checklist (manual, against the operations catalog and release directory)
 
-- [ ] Current `shadow` head holds all eight legacy tables, `price_history.v3`, `computed_moves.v3`.
+- [ ] Current `shadow` head holds all eight legacy tables, `price_history.v3`, `computed_moves.v4` (a v3 head needs the full rebuild first; a run that neither rewrites nor attempts every non-v4 partition, or produces no v4 rows, refuses).
 - [ ] Newest head receipt carries the required reference pins; the price-history capture receipt has a `data_receipt_lineage` entry.
 - [ ] Catalog `decisions` holds the imported prediction/outcome history the rebuilt tree needs.
 - [ ] Legacy selected session is exactly `AS_OF` — wait for currency, never import later/partial.
