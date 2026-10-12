@@ -1085,7 +1085,7 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
 `identity`/`application`), `engine.v2.ledger` (6.0), `engine.v2.parity`
 (6.5). `engine.v2.models` (3.5) and `engine.v2.domain.generation` (2.0,
-`Geometry`/`Pricing`) are lazy-only, never at module top level.
+`Geometry`/`Pricing`) are lazy-only, never at module top level. `worker.dispatch` lazily imports the unlayered `experiments.native_gate_worker` smoke adapter.
 `engine.v2.domain.generation` supplies geometry to the rescore decoder
 (`native/input_decoding.py::_load_native_score_inputs`). The pending PR-6 calendar
 helper uses its public expiry-only API lazily. Native foundation supplies calendar arithmetic;
@@ -1119,7 +1119,7 @@ assertion paid once at import time, no I/O, no legacy dependency).
 **Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
 `experiments/native_registration.py` may import `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`, `fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
 `experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Prediction reporting consumes public `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Other modules stay internal.
-`experiments.native_gate_worker` also consumes public `stages.NativeGateParameters` and `executor.THREAD_VARIABLES` for argument and launch-environment checks; these are narrow exceptions above. Its required immutable `economic_params.strategy` is independent of arm IDs. `resolve_experiment_plan` admits that key only for `native-gate-replay` and `experiments/native_gate_worker.py`; other runners refuse `INVALID_EXPERIMENT_SPEC` before registration effects. The registered holdout code preserves R5 through the supervisor pipe.
+`experiments.native_gate_worker` also consumes public `stages.NativeGateParameters` and `executor.THREAD_VARIABLES` for argument and launch-environment checks; these are narrow exceptions above. Its required immutable `economic_params.strategy` is independent of arm IDs. `resolve_experiment_plan` admits that key only for `native-gate-replay` and `experiments/native_gate_worker.py`; other runners refuse `INVALID_EXPERIMENT_SPEC` before registration effects. `HOLDOUT_ACCESS_DENIED` preserves R5 through the supervisor pipe.
 
 ### Final-holdout authorization (#490)
 

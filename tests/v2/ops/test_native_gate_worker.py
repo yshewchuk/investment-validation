@@ -580,6 +580,46 @@ def test_replay_exceptions_preserve_private_type(source, tmp_path, single_thread
     assert not (stage / "native_gate_consumption.json").exists()
 
 
+def test_unexpected_replay_failure_retains_generic_worker_boundary(source, tmp_path):
+    """A real admitted child consumes pricing before the generic, private failure path."""
+    checkout = tmp_path / "checkout"
+    snapshot_code(REPO, checkout, worker_source_manifest(REPO))
+    replay_module = checkout / "experiments" / "v2_gate_variant.py"
+    original = replay_module.read_text()
+    needle = "                        alphas=(inputs.fill_alpha,), progress_every=0)\n"
+    assert original.count(needle) == 1
+    fault_line = '        raise RuntimeError("private replay diagnostic")'
+    modified = original.replace(
+        needle, needle + '        assert tuple(result.trades["event_id"]) == inputs.event_ids\n'
+        + fault_line + "\n")
+    replay_module.chmod(0o600)
+    replay_module.write_text(modified)
+    fault_location = f"experiments/v2_gate_variant.py:{modified.splitlines().index(fault_line) + 1}"
+    request = _registered(source, code_root=checkout)
+    before = _catalog(source[0])
+    failure = _supervise(tmp_path, source, *request, code_source=checkout)
+    assert failure["code"] == "WORKER_FAILED"
+    assert failure["message"] == "worker raised an unhandled exception"
+    assert failure["retryable"] is True
+    assert "private replay diagnostic" not in json.dumps(failure)
+    assert "RuntimeError" not in json.dumps(failure)
+    assert _catalog(source[0]) == before
+    root = tmp_path / "smoke"
+    conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
+    try:
+        store = ArtifactStore(root)
+        diagnostic = artifact(conn, store, failure["diagnostic_ref"])
+        details = json.loads(store.read_verified(diagnostic))
+        assert set(details) == {"exception_type", "location"}
+        assert details["exception_type"] == "RuntimeError"
+        assert details["location"].endswith(fault_location)
+        assert "private replay diagnostic" not in json.dumps(details)
+        assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 1
+    finally:
+        conn.close()
+    assert not list(root.rglob("native_gate_consumption.json"))
+
+
 def test_no_cross_job_cache_can_skip_native_admission(source, tmp_path):
     """A real compatible cache hit cannot bypass fresh pinned-data admission."""
     from engine.v2.contracts import CheckpointReceipt

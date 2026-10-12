@@ -4027,7 +4027,7 @@ def test_a_leaf_module_change_selects_only_its_own_module_again():
     # module_dependency_closure's docstring). Fixed the same way: the walk
     # now follows a DYNAMIC file's REAL edges (`build_import_graph.precise`)
     # instead of cascading its catch-all. Replay now has legitimate worker
-    # consumers; fill_quality remains a research-only leaf for this regression.
+    # consumers; fill_quality selects only the research mutation module here.
     names = pilot.enabled_modules(CFG)
     assert pilot.changed_modules(CFG, names, ["engine/v2/research/fill_quality.py"]) == ["research"]
 
