@@ -17,6 +17,8 @@ from engine.v2.ops.nightly_session import (
     session_transition_lock,
 )
 
+__all__ = ["Disposition", "SCHEMA", "build_completion_report", "record_completion"]
+
 SCHEMA = "nightly_completion.v1"
 _ROLES = {"required", "optional", "qualification"}
 _STATES = {"pending", "succeeded", "degraded", "failed", "timed_out", "recovery_required"}

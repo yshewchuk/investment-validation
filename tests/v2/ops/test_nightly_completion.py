@@ -20,7 +20,7 @@ import pytest
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly_completion import (
     Disposition, build_completion_report, record_completion)
-from engine.v2.ops import nightly_session
+from engine.v2.ops import nightly_completion, nightly_session
 from engine.v2.ops.nightly_session import (
     MAX_SESSION_BYTES,
     atomic_write,
@@ -36,6 +36,11 @@ from engine.v2.ops.supervisor import Service
 
 IDENT = SessionIdentity("2026-10-08", "shadow", "sel-1", "cat-1")
 RUN_ID = "a" * 64
+
+
+def test_nightly_completion_exports_match_ops_readme():
+    assert nightly_completion.__all__ == [
+        "Disposition", "SCHEMA", "build_completion_report", "record_completion"]
 
 
 class _Clock:
