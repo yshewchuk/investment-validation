@@ -140,6 +140,32 @@ def test_repeated_act_needs_confirmation_and_returns_original_without_expiry(con
     assert _rows(context) == [first]
 
 
+@pytest.mark.parametrize(("column", "value", "expected_code"), [
+    ("schema_version", "final_holdout_authorization.v9.0", "VALIDATION_FAILED"),
+    ("registration_run_id", "missing-registration", "VALIDATION_FAILED"),
+    ("request_digest", content_hash("tampered digest"), "IDEMPOTENCY_CONFLICT"),
+    ("request_json", "{}", "IDEMPOTENCY_CONFLICT"),
+    ("confirmation", "tampered confirmation", "VALIDATION_FAILED"),
+    ("authorized_at", "not a timestamp", "VALIDATION_FAILED"),
+])
+def test_authorization_retry_rejects_corrupt_prior_evidence(
+        context, monkeypatch, column, value, expected_code):
+    _authorize(context)
+    context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_update")
+    context.conn.execute("PRAGMA foreign_keys=OFF")
+    context.conn.execute("PRAGMA ignore_check_constraints=ON")
+    context.conn.execute(f"UPDATE final_holdout_authorizations SET {column}=?", (value,))
+    context.conn.execute("PRAGMA ignore_check_constraints=OFF")
+    context.conn.execute("PRAGMA foreign_keys=ON")
+    before = _rows(context)
+    _assent(monkeypatch, context.request)
+    with pytest.raises(OpsError) as exc_info:
+        _authorize(context)
+    assert exc_info.value.code == expected_code
+    assert _rows(context) == before
+    assert _state_events(context) == []
+
+
 def test_missing_os_user_record_is_resource_unavailable(context, monkeypatch):
     def missing_user(uid):
         raise KeyError(uid)
@@ -915,16 +941,30 @@ def test_publication_fence_storage_failure_is_typed(monkeypatch, context):
     assert exc_info.value.code == "RESOURCE_UNAVAILABLE"
 
 
+@pytest.mark.parametrize("action", ["START", "REVOKE"])
 @pytest.mark.parametrize(("column", "value"), [
-    ("confirmation", "tampered confirmation"), ("authorized_at", "not a timestamp"),
+    ("schema_version", "final_holdout_authorization.v9.0"),
+    ("registration_run_id", "missing-registration"),
+    ("request_digest", content_hash("tampered digest")),
+    ("request_json", "{}"),
+    ("confirmation", "tampered confirmation"),
+    ("authorized_at", "not a timestamp"),
 ])
-def test_start_rejects_corrupt_authorization_evidence(context, monkeypatch, column, value):
+def test_start_and_revoke_reject_corrupt_authorization_evidence(
+        context, monkeypatch, column, value, action):
     _authorize(context)
     context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_update")
+    context.conn.execute("PRAGMA foreign_keys=OFF")
+    context.conn.execute("PRAGMA ignore_check_constraints=ON")
     context.conn.execute(f"UPDATE final_holdout_authorizations SET {column}=?", (value,))
-    _state_assent(monkeypatch, context, "START")
+    context.conn.execute("PRAGMA ignore_check_constraints=OFF")
+    context.conn.execute("PRAGMA foreign_keys=ON")
+    _state_assent(monkeypatch, context, action)
     with pytest.raises(OpsError) as exc_info:
-        _start(context)
+        if action == "START":
+            _start(context)
+        else:
+            _revoke(context)
     assert exc_info.value.code == "VALIDATION_FAILED"
     assert _state_events(context) == []
 
@@ -986,7 +1026,29 @@ def test_state_assent_denials_do_not_append(context, monkeypatch, action, mode):
     assert _state_events(context) == []
 
 
-def test_start_rejects_foreign_digest_in_persisted_history(context, monkeypatch):
+@pytest.mark.parametrize("action", ["START", "REVOKE"])
+def test_foreign_uid_denial_precedes_corrupt_evidence_without_mutation(
+        context, monkeypatch, action):
+    _authorize(context)
+    context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_update")
+    context.conn.execute(
+        "UPDATE final_holdout_authorizations SET actor=?,confirmation=?",
+        ("9999:foreign-user", "tampered confirmation"),
+    )
+    authorization_before = _rows(context)
+    events_before = _state_events(context)
+    with pytest.raises(OpsError) as exc_info:
+        if action == "START":
+            _start(context)
+        else:
+            _revoke(context)
+    assert exc_info.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert _rows(context) == authorization_before
+    assert _state_events(context) == events_before
+
+
+@pytest.mark.parametrize("action", ["START", "REVOKE"])
+def test_start_and_revoke_reject_foreign_digest_in_persisted_history(context, monkeypatch, action):
     authorization = _authorize(context)
     identity, *_ = authority.process_info(os.getpid(), authority.read_boot_id())
     context.conn.execute(
@@ -998,29 +1060,101 @@ def test_start_rejects_foreign_digest_in_persisted_history(context, monkeypatch)
          identity.pid, identity.start_ticks, identity.process_group, "1234:synthetic-user",
          "2026-10-10T00:00:00.000000Z", "synthetic confirmation"),
     )
-    _state_assent(monkeypatch, context, "START")
+    events_before = _state_events(context)
+    _state_assent(monkeypatch, context, action)
     with pytest.raises(OpsError) as exc_info:
-        _start(context)
+        if action == "START":
+            _start(context)
+        else:
+            _revoke(context)
     assert exc_info.value.code == "VALIDATION_FAILED"
-    assert len(_state_events(context)) == 1
-    assert _state_events(context)[0]["request_digest"] != authorization["request_digest"]
+    assert _state_events(context) == events_before
+    assert _rows(context) == [authorization]
+
+
+def test_recovery_rejects_consistent_request_bound_to_another_experiment(context, monkeypatch):
+    _authorize(context)
+    _state_assent(monkeypatch, context, "START")
+    _start(context)
+    authorization = _rows(context)[0]
+    event = _state_events(context)[0]
+    other_id = context.request.experiment_id[:-1] + (
+        "0" if context.request.experiment_id[-1] != "0" else "1")
+    other_request = replace(context.request, experiment_id=other_id)
+    other_document = to_document(other_request)
+    encoded = canonical_json(other_document)
+    digest = content_hash(other_document)
+    confirmation = (
+        f'AUTHORIZE {json.dumps(other_id)} {digest} AS {json.dumps(authorization["actor"])}'
+    )
+    context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_update")
+    context.conn.execute("DROP TRIGGER final_holdout_state_events_no_update")
+    context.conn.execute(
+        "UPDATE final_holdout_authorizations SET request_digest=?,request_json=?,confirmation=? "
+        "WHERE experiment_id=?",
+        (digest, encoded, confirmation, context.request.experiment_id),
+    )
+    context.conn.execute(
+        "UPDATE final_holdout_state_events SET request_digest=? WHERE event_id=?",
+        (digest, event["event_id"]),
+    )
+    authorization_before = _rows(context)
+    events_before = _state_events(context)
+    monkeypatch.setattr(authority, "is_alive", lambda *args: pytest.fail("identity mismatch reached owner check"))
+    with pytest.raises(OpsError) as exc_info:
+        authority.recover_interrupted_final_holdout_read(
+            context.conn, context.request.experiment_id, clock=context.clock)
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert _rows(context) == authorization_before
+    assert _state_events(context) == events_before
 
 
 @pytest.mark.parametrize(("column", "value"), [
-    ("confirmation", "tampered confirmation"), ("authorized_at", "not a timestamp"),
+    ("schema_version", "final_holdout_authorization.v9.0"),
+    ("registration_run_id", "missing-registration"),
+    ("request_digest", content_hash("tampered digest")),
+    ("request_json", "{}"),
+    ("confirmation", "tampered confirmation"),
+    ("authorized_at", "not a timestamp"),
 ])
 def test_recovery_rejects_corrupt_authorization_evidence(context, monkeypatch, column, value):
     _authorize(context)
     _state_assent(monkeypatch, context, "START")
     _start(context)
     context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_update")
+    context.conn.execute("PRAGMA foreign_keys=OFF")
+    context.conn.execute("PRAGMA ignore_check_constraints=ON")
     context.conn.execute(f"UPDATE final_holdout_authorizations SET {column}=?", (value,))
+    context.conn.execute("PRAGMA ignore_check_constraints=OFF")
+    context.conn.execute("PRAGMA foreign_keys=ON")
     monkeypatch.setattr(authority, "is_alive", lambda *args: pytest.fail("corrupt authorization reached owner check"))
     with pytest.raises(OpsError) as exc_info:
         authority.recover_interrupted_final_holdout_read(
             context.conn, context.request.experiment_id, clock=context.clock)
     assert exc_info.value.code == "VALIDATION_FAILED"
     assert [row["state"] for row in _state_events(context)] == ["read_started"]
+
+
+@pytest.mark.parametrize("action", ["START", "REVOKE"])
+def test_start_and_revoke_require_persisted_authorization(context, monkeypatch, action):
+    _authorize(context)
+    context.conn.execute("PRAGMA foreign_keys=OFF")
+    context.conn.execute("DROP TRIGGER final_holdout_authorizations_no_delete")
+    context.conn.execute(
+        "DELETE FROM final_holdout_authorizations WHERE experiment_id=?",
+        (context.request.experiment_id,),
+    )
+    context.conn.execute("PRAGMA foreign_keys=ON")
+    events_before = _state_events(context)
+    assert _rows(context) == []
+    with pytest.raises(OpsError) as exc_info:
+        if action == "START":
+            _start(context)
+        else:
+            _revoke(context)
+    assert exc_info.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert _rows(context) == []
+    assert _state_events(context) == events_before
 
 
 def test_recovery_rejects_started_event_without_authorization(context, monkeypatch):
