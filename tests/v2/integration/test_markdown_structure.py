@@ -322,3 +322,18 @@ def test_base_that_moved_after_branching_does_not_flag_main_s_own_changes(repo, 
     assert "moved.md:1: heading-after" in capsys.readouterr().out
 
 
+def test_closer_follows_commonmark_not_the_opener_regex():
+    # A list-marker line or a 4-space-indented fence run inside an open fence is content.
+    assert rules("a\n\n```\n- ```\ncode\n```\n\nb\n") == []
+    assert rules("a\n\n```\n    ```\ncode\n```\n\nb\n") == []
+    # A valid closer indented up to 3 spaces still closes.
+    assert rules("a\n\n```\ncode\n   ```\n\nb\n") == []
+    # Nested list opener (content column 4): closer at the same column closes it ...
+    assert rules("- a\n  - ```\n    code\n    ```\n") == []
+    # ... but 8 spaces is more than 3 beyond the opener's column, so it is content.
+    found = ms.lint_text("- a\n  - ```\n    code\n        ```\n")
+    assert [v.rule for v in found] == ["fence-unclosed"]
+    # A closer with trailing text is not a closer.
+    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n``` x\n")] == ["fence-unclosed"]
+
+

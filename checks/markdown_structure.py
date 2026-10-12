@@ -44,6 +44,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 _FENCE = re.compile(r"^( *(?:(?:[-*+]|\d+[.)]) +)?)(`{3,}|~{3,})(.*)$")  # optional list-marker prefix
+# A closer has no list-marker prefix and nothing after the fence run; its indent
+# is checked against the opener's in lint_text (CommonMark: 0-3 spaces relative
+# to the container the fence opened in).
+_CLOSER = re.compile(r"^( *)(`{3,}|~{3,})[ \t]*$")
 _HEADING = re.compile(r"^#{1,6}(\s|$)")
 _LIST_ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
 _DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
@@ -95,8 +99,9 @@ def lint_text(text: str) -> list[Violation]:
         if m and m.group(2)[0] == "`" and "`" in m.group(3):
             m = None  # an inline code span such as ```json```, not a fence
         if fence:
-            if (m and m.group(2)[0] == fence[0] and len(m.group(2)) >= fence[1]
-                    and not m.group(3).strip()):
+            c = _CLOSER.match(s)
+            if (c and c.group(2)[0] == fence[0] and len(c.group(2)) >= fence[1]
+                    and len(c.group(1)) <= fence[2] + 3):
                 if fence[2] == 0 and not blank(i + 1):
                     found.append(Violation(i + 1, i + 2, "fence-after"))
                 fence = None
