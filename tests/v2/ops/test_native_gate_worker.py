@@ -1,10 +1,13 @@
 """Real staged worker admission over committed synthetic option-chain snapshots."""
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -247,7 +250,9 @@ def test_ill_typed_worker_identities_refuse_before_database_binding(
     def forbidden(*args, **kwargs):
         pytest.fail("catalog opened before worker argument validation")
 
-    monkeypatch.setattr(native.sqlite3, "connect", forbidden)
+    monkeypatch.setattr(native, "sqlite3", SimpleNamespace(**(vars(sqlite3) | {"connect": forbidden})))
+    with closing(sqlite3.connect(tmp_path / "observer.sqlite")) as observer:
+        observer.execute("CREATE TABLE observer(value)")
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
@@ -269,7 +274,9 @@ def test_recorded_execution_refuses_before_catalog_access(
     def forbidden(*args, **kwargs):
         pytest.fail("recorded request opened the catalog")
 
-    monkeypatch.setattr(native.sqlite3, "connect", forbidden)
+    monkeypatch.setattr(native, "sqlite3", SimpleNamespace(**(vars(sqlite3) | {"connect": forbidden})))
+    with closing(sqlite3.connect(tmp_path / "observer.sqlite")) as observer:
+        observer.execute("CREATE TABLE observer(value)")
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
@@ -302,7 +309,9 @@ def test_catalog_connection_is_read_only_and_autocommit(source, tmp_path, single
             raise
 
     before = _catalog(source[0])
-    monkeypatch.setattr(native.sqlite3, "connect", observe)
+    monkeypatch.setattr(native, "sqlite3", SimpleNamespace(**(vars(sqlite3) | {"connect": observe})))
+    with closing(sqlite3.connect(tmp_path / "observer.sqlite")) as observer:
+        observer.execute("CREATE TABLE observer(value)")
     result = worker.dispatch("native_gate_pricing", parameters, stage)
     assert checked == [True] and result["completed_ids"] == [registration.variant_id]
     assert _catalog(source[0]) == before
