@@ -86,7 +86,10 @@ def _refuses(error_type, code):
 @pytest.mark.parametrize("wrong_field", ["code", "retryability"])
 def test_refusal_oracle_rejects_wrong_code_or_retryability(factory, code, other, wrong_field):
     """A misleading message or incorrectly retryable problem must fail the oracle."""
-    error = factory(other if wrong_field == "code" else code, code)
+    error = factory(other if wrong_field == "code" else code, f"Misleading message names {code}; inspect the typed envelope")
+    assert code in str(error)  # The old unanchored exception-text match would accept this.
+    if wrong_field == "code":
+        assert error.code != code
     if wrong_field == "retryability":
         error = type(error)(replace(error.problem, retryable=True))
     with pytest.raises(AssertionError):
@@ -452,14 +455,20 @@ def test_older_registration_bytes_remain_exact(source, declared):
                  final_read=declaration if declared else None) == registered
 
 
-def test_public_window_is_detached_and_rejects_invalid_requests():
+@pytest.mark.parametrize("invalid_years,invalid_start", [
+    ([], "2023-12-10"), (None, "2023-12-10"), ([2024], "2023-12-10"),
+    (["2024", "2024"], "2023-12-10"), (["2025", "2024"], "2023-12-10"),
+    (["２０２４"], "2023-12-10"), (["0001"], "0001-01-01"), (["9999"], "2023-12-10"),
+    (["2024"], None), (["2024"], "2023-02-30"), (["2024"], "2024-01-01"),
+])
+def test_public_window_is_detached_and_rejects_invalid_requests(invalid_years, invalid_start):
     """The registration declaration shares the planner's pure validation rules."""
     years = ["2024"]
     result = magnitude_window(years, "2023-12-10")
     years.append("2025")
     assert result == {"training_start": "2023-12-10", "evaluation_years": ["2024"]}
     with _refuses(DataError, "CONTRACT_MISMATCH"):
-        magnitude_window(["2024", "2024"], "2023-12-10")
+        magnitude_window(invalid_years, invalid_start)
 
 
 def test_multiple_spec_years_define_the_complete_registered_fold_list(source):
@@ -519,7 +528,7 @@ def _rehash_clocks_and_plan(doc):
     plan["plan_id"] = content_hash({key: value for key, value in plan.items() if key != "plan_id"})
 
 
-def _assert_forged_refusal(source, registered, doc, monkeypatch):
+def _assert_forged_refusal(source, registered, doc, monkeypatch, *, spec=None):
     """Exercise public stored verification first, before fresh admission can mask a guard."""
     _rehash_clocks_and_plan(doc)
     forged = _rewrite(source, registered, doc)
@@ -528,7 +537,7 @@ def _assert_forged_refusal(source, registered, doc, monkeypatch):
     with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
     with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True)
+        _call(source, admit=True, spec=spec)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
 
@@ -559,7 +568,8 @@ def test_outer_links_refuse_with_an_otherwise_unchanged_valid_plan(source, monke
 @pytest.mark.parametrize("kind", ["reversed", "duplicate"])
 def test_year_order_refuses_after_repairing_fold_and_outer_declarations(source, monkeypatch, kind):
     """Corresponding folds and all year declarations agree except for the ordering rule."""
-    registered = _call(source, spec=replace(source.spec, folds=("2024", "2025")))
+    spec = replace(source.spec, folds=("2024", "2025"))
+    registered = _call(source, spec=spec)
     doc = registered.document
     plan = doc["magnitude_plan"]
     if kind == "reversed":
@@ -571,7 +581,7 @@ def test_year_order_refuses_after_repairing_fold_and_outer_declarations(source, 
     doc["magnitude_request"]["evaluation_years"] = plan["evaluation_years"]
     doc["execution_plan"]["folds"] = plan["evaluation_years"]
     assert [fold["year"] for fold in plan["folds"]] == plan["evaluation_years"]
-    _assert_forged_refusal(source, registered, doc, monkeypatch)
+    _assert_forged_refusal(source, registered, doc, monkeypatch, spec=spec)
 
 
 @pytest.mark.parametrize("kind", ["duplicate-event", "blank-event-id", "null-ticker", "blank-ticker",
@@ -659,3 +669,46 @@ def test_registration_effects_are_only_its_binding_and_reservation(source, monke
     assert [published[path] for path in published.keys() - objects.keys()] == [registered.binding_json]
     assert _call(source, admit=True) == registered
     assert _catalog(source.conn) == after and _objects(source.store) == published
+
+
+def test_cross_year_event_permutation_is_not_masked_by_fold_membership(source, monkeypatch):
+    """Swap evaluation years while every fold's internal member order remains intact."""
+    spec = replace(source.spec, folds=("2024", "2025"))
+    registered = _call(source, spec=spec)
+    doc = registered.document
+    plan = doc["magnitude_plan"]
+    assert [event["event_date"][:4] for event in plan["events"]] == ["2023", "2024", "2025"]
+    plan["events"][1], plan["events"][2] = plan["events"][2], plan["events"][1]
+    for fold in plan["folds"]:
+        for name in ("training_candidate_event_ids", "evaluation_event_ids"):
+            assert fold[name] == [event["event_id"] for event in plan["events"] if event["event_id"] in fold[name]]
+    _assert_forged_refusal(source, registered, doc, monkeypatch, spec=spec)
+
+
+@pytest.mark.parametrize("source", [[_event("2023-12-14")]], indirect=True)
+@pytest.mark.parametrize("change", ["start", "years", "month", "events"])
+def test_changed_register_request_cannot_overwrite_its_reservation(source, monkeypatch, change):
+    """Otherwise-valid altered requests refuse before publication on the register path."""
+    _call(source)
+    source.repository.scans.clear()
+    changes = {"start": {"magnitude_training_start": "2023-12-11"},
+        "years": {"spec": replace(source.spec, folds=("2024", "2025"))},
+        "month": {"as_of_month": "2026-02"},
+        "events": {"event_ids": [event["event_id"] for event in source.events[:2]]}}[change]
+    before, objects = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        _call(source, **changes)
+    assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
+    assert _catalog(source.conn) == before and _objects(source.store) == objects
+
+
+@pytest.mark.parametrize("years,start", [(("2024", "2026"), "2023-12-10"), (("2024",), "2023-12-30")])
+def test_empty_evaluation_or_training_fold_never_publishes(source, monkeypatch, years, start):
+    """Propagate the planner's exact nonretryable refusal without reserving a partial run."""
+    before, objects = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
+    with _refuses(DataError, "POPULATION_COLLAPSED"):
+        _call(source, spec=replace(source.spec, folds=years), magnitude_training_start=start)
+    assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
+    assert _catalog(source.conn) == before and _objects(source.store) == objects
