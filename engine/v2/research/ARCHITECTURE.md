@@ -304,11 +304,11 @@ Other experiment report/ledger publication remains outside this library seam.
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
 snapshot-read helpers), `_pricing.py` (except the names carved out above),
-`_trades_revisions.py`.
+`_trades_revisions.py`, `_final_population.py`.
 
 ### Proposed authorized final read (#490)
 
-Request preparation and the private ops authorization/spend primitive are implemented; no production authorization entrypoint, final read or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
+Request preparation, the private ops authorization/spend primitive and the private metadata-only final population reader are implemented; no production authorization entrypoint, final read or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
 The [user decision](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6072905454)
 permits agents/supervisors to prepare requests, never to authorize them.
 
@@ -324,6 +324,16 @@ Both sets are bound together; changing month, version, snapshot or winner cannot
 `native_registration.prepare_final_holdout_request` verifies existing catalog/artifact registration metadata only; it never resolves a head, scans a population or reads results.
 Native registration's optional `final_read` declaration seals recipe, completeness-bar and frozen-model artifact references before authorization; preparation derives them, never accepts replacements. Registrations without that declaration refuse preparation.
 Request validity proves neither winner selection nor read eligibility. The later metadata-only preflight must verify the preregistered completeness artifact and refuse an unmet bar before any holdout outcome read; declared references alone do not prove completeness.
+
+**Population reader.** Private `_final_population.load_final_population(repository, request)` is the only place the held-out event sets are materialized. It takes a validated `FinalHoldoutRequest`, never a caller population, and is not exported or reachable from loaders, training, selection or sweep. It resolves the request's exact snapshot, reads canonical `earnings_events` metadata (no outcomes, no results, no writes), and classifies each event with the same `ExperimentHoldouts.classify` and ambiguity rules as `load_trades`/`load_population` (one shared helper, not a fork). It returns a frozen `FinalPopulation`: sorted random and rolling event IDs kept as separate sets, their overlap count, the ambiguous-excluded count, and the bound snapshot/month/versions. Ambiguous events enter neither set. The reader checks no ops state and holds no grant.
+
+| Population reader condition | Outcome |
+|---|---|
+| Invalid request bytes, unsupported membership version, or as-of month later than the current UTC month | Non-retryable `HOLDOUT_ACCESS_DENIED` before any scan. |
+| Snapshot unresolved, or resolved identity differs from `request.snapshot_id` | `SNAPSHOT_UNRESOLVED`; no fallback. |
+| Missing table or repository integrity failure | Repository's typed refusal; no partial population. |
+| Both sets empty after ambiguity exclusion | `POPULATION_COLLAPSED`; never an empty success. Preregistered completeness remains the later preflight's refusal. |
+| Retry, cache, write | None; read-only, identical pinned inputs return identical populations. |
 
 **Authority/ownership.** A proposed `tools/v2_final_holdout.py` leaf composes ops'
 private authorization/state owner with a private research final evaluator. It is
