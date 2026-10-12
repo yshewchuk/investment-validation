@@ -26,6 +26,33 @@ Optional `final_read` metadata creates a versioned native registration that seal
 `prepare_final_holdout_request` verifies that original registration and derives an immutable request keyed by experiment ID; missing declarations or malformed request metadata refuse `INVALID_EXPERIMENT_SPEC`, and changed catalog/artifact identity refuses `EXPERIMENT_IDENTITY_CONFLICT`.
 Preparation reads only registration metadata, performs no repository/head/population/result access or writes, and grants no authority. Foundation owns shared request decoding so ops and research need no peer import; later read admission must verify the referenced evidence and completeness before reading.
 
+Optional `magnitude_training_start` binds v1.2 to a `computed_moves` spec;
+years come only from `spec.folds`, validated by pure `magnitude_window`.
+The metadata-only planner owns the sealed temporal plan, selected event IDs
+and holdout context from one pinned snapshot; caller-supplied plans are refused.
+Equivalent explicit/bulk membership gives identical bytes with other inputs fixed;
+omission preserves v1.0/v1.1 bytes and identities.
+
+Admission requires the catalog-owned original, even without `expected`, and a
+complete fresh binding match. Stored integrity does not establish current
+semantic admission: calendar arithmetic and fold reconstruction belong to the planner.
+The closed stored schema requires canonical dates, nonempty ordered years,
+fixed recipe/policy/availability declarations and snapshot-linked source identities.
+Events follow `(event_date, event_id)` order; fold lists retain that order.
+This library has no magnitude CLI/production caller, feature/label reads,
+fitting, aggregate materialization or final-read authority.
+
+| Magnitude registration condition | Outcome |
+|---|---|
+| Invalid window, non-`computed_moves` source, or combined `final_read` | `INVALID_EXPERIMENT_SPEC` before repository access. |
+| Missing admission reservation | `INVALID_EXPERIMENT_SPEC`; no metadata scan or implicit registration. |
+| Changed/omitted mode, conflicting expected identity, or malformed/cross-context stored plan | `EXPERIMENT_IDENTITY_CONFLICT`; prior evidence remains unchanged. |
+| On admission (`require_native_registration`): mode/request/source/environment/scope/snapshot/month drift or rehashed malformed/permuted metadata | Refusal before population/calendar scans. |
+| Planner admission, calendar or empty-fold failure | Shared typed error propagates; no partial registration. |
+| v1.2 final-request preparation | `INVALID_EXPERIMENT_SPEC`; final declarations remain exclusive to v1.1. |
+
+Existing publication/transaction/retry semantics above apply unchanged.
+
 | Condition | Outcome |
 | --- | --- |
 | Invalid plan, external inputs, unsupported runner path, or missing/malformed/indirect source | `INVALID_EXPERIMENT_SPEC` before registration. |
@@ -70,6 +97,7 @@ from verified bytes; malformed metadata refuses before ledger or catalog effects
 | R1 invalid specification, R2 unresolved snapshot, or R6 identity conflict | `publish_native_refusal` publishes private evidence only; no result or ledger row. |
 | Empty, directory or symlinked recorded ledger destination | R1 before outcome reservation or ledger access; no default-ledger fallback or conflict evidence. |
 | Publish, replay or export called within an active caller transaction | R1 before path access or artifact/CSV effects; leave the caller transaction unchanged. |
+| Publish, replay or export with magnitude registration v1.2 | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private refusal evidence only, before outcome/report reads or catalog/ledger/export effects. These outcome paths accept only v1.0/v1.1; magnitude v1.2 remains valid for registration read/admission. |
 | Admitted R3 look-ahead or R5 holdout denial | Immutable refusal and `refused` row, unless smoke; no current-attempt report. |
 | Admitted R4 variant failure | Immutable refusal and `failed` row, unless smoke; no current-attempt report. |
 | Same canonical registration/result/destination repeated, including tuple/list-equivalent refusal details | Reuse the first outcome and date; reconcile one terminal CSV row per experiment/variant identity without refitting. |

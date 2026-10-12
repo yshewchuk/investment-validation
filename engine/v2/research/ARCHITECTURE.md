@@ -236,6 +236,9 @@ propagate with no cache, retry, write or partial result.
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
 evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
 annual evaluation folds from one admitted snapshot and its pinned calendar.
+`magnitude_folds.magnitude_window(evaluation_years, training_start)` exposes the
+same pure request validation to native preregistration and returns a detached
+canonical window; invalid requests refuse `CONTRACT_MISMATCH` without reads.
 
 - Exact snapshot and random/rolling/ambiguous-union admission precede calendar
   reads. Bulk membership includes `training_start` and excludes January 1
