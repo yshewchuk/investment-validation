@@ -182,10 +182,11 @@ def _typed(operation):
 
 
 def _verify_outcome_registration(conn, store, registration):
-    """Magnitude preregistration has no outcome/report contract in this version."""
+    """Only executable schemas, including the sealed fixed magnitude policy, may publish."""
     verify_native_registration(conn, store, registration)
     if registration.document["schema_version"] not in (
-            "native_experiment_registration.v1.0", "native_experiment_registration.v1.1"):
+            "native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
+            "native_experiment_registration.v1.3"):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "registration schema has no native outcome contract")
 
 
