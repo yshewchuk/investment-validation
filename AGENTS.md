@@ -9,9 +9,11 @@
 
 ## Pull requests, gates and owners
 
-- The PR watcher runs the merge gate at `/root/agent-ops/gate/gate.sh` after CI `test` is green, CodeRabbit approves, and no thread is open on the head. It starts detached, once per head and at most five times per PR. Owners do not run the gate.
+- The PR watcher runs the merge gate at `/root/agent-ops/gate/gate.sh`. It starts detached, once per head, in parallel with CI; only a finished failing required check holds it. It runs at most 15 automatic launches per PR, plus one per `gate-extra-round` label, which only the user or supervisor applies. Owners do not run the gate.
+- The gate has two tiers. A cheap tier runs first; a cheap BLOCK stops there, and a cheap pass runs the expensive tier. One launch covers both tiers.
+- Merge requires a gate pass and green CI. CodeRabbit is requested only after the gate passes and CI is green, as the final sign-off; it must approve and no thread may be open.
 - Owners wake only for a BLOCK. A pass wakes nobody and auto-merge completes the PR. If a passing PR is still unmerged after 10 minutes, the owner is woken once.
-- On a BLOCK, fix real findings and push once per round. Continue independently for up to five gate rounds, then stop and report. Deferring a finding to an issue requires the gate's agreement, as with a CodeRabbit comment. If the gate blocks on it again, fix it.
+- On a BLOCK, fix real findings and push once per round. Continue independently until the launch cap, then stop and report. Deferring a finding to an issue requires the gate's agreement, as with a CodeRabbit comment. If the gate blocks on it again, fix it.
 - Every PR description starts with `## Gate notes` (about 1,000 characters maximum; the gate reads the first 4,000 description characters). Keep concise round notes and any deferral's issue link and reason there. Update the notes before each fix push. The gate takes no notes file.
 - Size limits count added lines only: code PRs, about 200 non-test code lines and 60 doc lines; design PRs, about 150 doc lines and a split list. Deleted lines do not count; a category with zero or negative net change is never size-blocked. A PR within limits at its first reviewed head is not size-blocked when the overage is review- or gate-found bug fixes. For scope growth over a limit mid-work, stop and split (add, then wire, then remove).
 - A comment from the shared GitHub login that starts with `@pr-owner` force-wakes that PR's owner, bypassing the wake gap and hourly cap. This is the user's lever; owners never start their own comments with it.
