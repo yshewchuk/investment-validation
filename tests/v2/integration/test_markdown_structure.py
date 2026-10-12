@@ -300,3 +300,25 @@ def test_staged_deletion_of_a_markdown_file_is_not_read(repo):
     assert ms.main(["--quiet"]) == 0
 
 
+def test_base_that_moved_after_branching_does_not_flag_main_s_own_changes(repo, capsys):
+    # CI checks out a merge commit; the base branch tip is newer than the PR's
+    # recorded base sha. Three-dot against the CURRENT base tip must flag only the
+    # branch's own lines, while a stale base sha also flags what main added since.
+    _git(repo, "branch", "-M", "main")
+    stale_base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                check=True, capture_output=True, text=True).stdout.strip()
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "feat.md").write_text("# Ok\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "feat.md")
+    _git(repo, "commit", "-qm", "feature work")
+    _git(repo, "checkout", "-q", "main")
+    (repo / "moved.md").write_text("# Bad\nno blank after heading\n", encoding="utf-8")
+    _git(repo, "add", "moved.md")
+    _git(repo, "commit", "-qm", "main moved")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "merge", "-q", "--no-edit", "main")
+    assert ms.main(["--base-ref", "main", "--quiet"]) == 0
+    assert ms.main(["--base-ref", stale_base, "--quiet"]) == 1
+    assert "moved.md:1: heading-after" in capsys.readouterr().out
+
+
