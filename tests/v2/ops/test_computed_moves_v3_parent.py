@@ -147,7 +147,7 @@ def test_full_rebuild_where_a_v3_ticker_has_no_v4_rows_drops_its_manifest_hash(
     assert {ticker for _, ticker, _ in records} == {"AAAA", "BBBB"}
     after = Repository(conn, store).resolve_full(new_head["snapshot_id"])
     hashes = after.table_manifests["computed_moves"].partition_logical_hashes
-    assert set(hashes) <= {"AAAA", "BBBB"}
+    assert set(hashes) == {"AAAA", "BBBB"}
 
 
 def test_full_rebuild_producing_no_rows_over_a_v3_head_refuses_instead_of_leaving_v3_live(
