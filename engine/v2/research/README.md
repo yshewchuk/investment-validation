@@ -98,9 +98,11 @@ basis, mark provenance and the declared vs. applied exit alpha. Neither function
 writes results or combines mark-based P&L with fill-validated performance.
 
 `experiment_population.load_population` returns holdout-admitted canonical event
-metadata. `prediction_inputs.load_prediction_targets` reads eligible positive-move
-labels and their availability dates from that same pinned snapshot. These input
-prerequisites have no supervisor caller or report/ledger writer.
+metadata, including for the smoke-only `native_gate_pricing` supervisor worker
+through `experiments.v2_gate_variant.price_variant`.
+`prediction_inputs.load_prediction_targets` reads eligible positive-move labels
+and their availability dates from that same pinned snapshot; it has no supervisor
+caller. Neither input reader writes reports or ledger rows.
 
 `event_history.load_event_history` returns admitted prior-event features and
 consumed-object/cutoff provenance; mixed outcome fragments refuse before access.
@@ -150,8 +152,8 @@ and `experiments/EXP-186_.../run.py` (for `_replay_run.events_frame`)
 
 `experiments/v2_gate_variant.py` also consumes the shared population loader,
 registered structures and replay interfaces for read-only smoke pricing.
-`experiments/native_registration.py` consumes population admission, the pure
-magnitude window and the metadata-only planner to bind research registrations.
+`experiments/native_registration.py` consumes `_pricing.STRUCTURES`, population admission,
+the pure magnitude window and metadata-only planner to bind research registrations.
 
 <!-- consumers: none -->
 
