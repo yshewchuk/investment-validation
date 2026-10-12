@@ -141,6 +141,9 @@ def _generic_problem(exc: BaseException):
 
 def dispatch(worker, parameters, root, *, envelope=None):
     envelope = envelope or {}
+    if worker == "massive_acquisition":
+        from engine.v2.ops.stores.massive.acquisition import run
+        return run(parameters, root, envelope)
     if worker in ("incremental_refresh", "computed_moves_refresh",
                   "forward_calendar_refresh"):
         return _dispatch_refresh(worker, parameters, root)

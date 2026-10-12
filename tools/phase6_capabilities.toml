@@ -572,6 +572,20 @@ notes = "S9H adds the native per-event analog view: GET /analogs.json?release_id
 # ------------------------------------------------------------- operations
 
 [[row]]
+id = "operations-massive-acquisition"
+evidence = "cli:engine.v2.ops.massive_acquire"
+area = "operations"
+capability = "Explicit bounded Massive Basic REST acquisition into verified raw cache"
+old = []
+new = ["cli:engine/v2/ops/massive_acquire.py", "py:engine/v2/ops/stores/massive/acquisition.py::run"]
+producer = "massive_acquisition supervised worker"
+identity = "massive_acquisition.v1; canonical request hash, raw receipt and attempt fence"
+tests = ["tests/v2/ops/test_massive_acquisition.py", "tests/v2/ops/test_massive_http.py", "tests/v2/ops/test_massive_submission.py"]
+disposition = "native"
+owner = "P6-2"
+notes = "One canonical request and one HTTP attempt per explicit job; terminal nonempty responses only. No pagination, refresh, normalized publication, research consumer or nightly wiring."
+
+[[row]]
 id = "operations-massive-cache-plan"
 evidence = "cli:tools.v2_massive_plan"
 area = "operations"
