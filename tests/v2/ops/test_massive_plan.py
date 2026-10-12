@@ -91,15 +91,15 @@ def mutate_receipt(cache, record, field, value):
 ])
 def test_descriptors_and_budgets_are_canonical_and_explicit(ticker, start, end, adjustment, adjusted):
     scope = {"start": start, "end": end, "adjustment": adjustment}
-    result = inventory(tickers=["ZZZ", ticker, ticker], **scope)
-    assert result == inventory(tickers=[ticker, "ZZZ"], **scope)
+    result = inventory(tickers=["ZZZ", ticker.lower(), ticker.upper(), ticker.swapcase()], **scope)
+    assert result == inventory(tickers=[ticker.upper(), "ZZZ"], **scope)
     assert result["schema_version"] == "massive_cache_plan.v1"
     assert result["policy_version"] == "massive_stocks_basic.2026-10-10"
     assert result["requests_per_minute"] == 5
     assert result["minimum_initial_calls"] == 6
     assert result["maximum_http_attempts"] == 42
     expected = {}
-    for stock in {ticker, "ZZZ"}:
+    for stock in {ticker.upper(), "ZZZ"}:
         common = {"schema_version": "massive_request.v1", "source": "massive-stocks",
                   "transport": "rest", "ticker": stock, "start": start, "end": end}
         expected[stock] = {
@@ -151,12 +151,11 @@ def test_exactly_one_hundred_tickers_are_accepted():
     assert result["maximum_http_attempts"] == 700
 
 
-def test_adjustment_case_and_date_changes_separate_keys():
+def test_adjustment_and_date_changes_separate_keys():
     raw = inventory(datasets=["daily"])["units"][0]
     adjusted = inventory(datasets=["daily"], adjustment="split_adjusted")["units"][0]
     assert raw["request_hash"] != adjusted["request_hash"]
     assert adjusted["request"]["params"]["adjusted"] is True
-    assert raw["request_hash"] != inventory(datasets=["daily"], tickers=["test.a"])["units"][0]["request_hash"]
     assert raw["request_hash"] != inventory(datasets=["daily"], end="2026-01-30")["units"][0]["request_hash"]
     assert raw["request_hash"] == inventory(datasets=["daily"], as_of="2026-10-11")["units"][0]["request_hash"]
 
@@ -178,6 +177,7 @@ def test_calendar_year_boundaries_and_no_same_day_claim():
     {"adjustment": "total_return"},
     {"tickers": []}, {"tickers": "TEST"}, {"tickers": ["TEST"] * 101},
     {"tickers": [1]}, {"tickers": ["TEST?apiKey=secret"]}, {"tickers": ["../TEST"]},
+    {"tickers": ["teſt.a"]},
     {"tickers": [""]}, {"tickers": ["TEST\n"]}, {"tickers": ["T" * 33]},
     {"datasets": []}, {"datasets": "daily"},
     {"datasets": ["daily"] * 4}, {"max_calls_per_request": 0},
@@ -240,6 +240,39 @@ def test_real_cache_hits_are_read_only_and_do_not_fetch(cache):
     assert [u["raw_receipt_id"] for u in result["units"]] == [r.raw_receipt_id for r in receipts]
     assert inventory(cache) == result
     assert before == (conn.total_changes, tuple(conn.iterdump()), sorted(p.relative_to(root) for p in store.root.rglob("*")))
+
+
+@pytest.mark.parametrize("tickers", [
+    ["TEST.A"], ["test.a"], ["tEsT.a"], ["TEST.A", "test.a", "tEsT.a"],
+])
+@pytest.mark.parametrize("response_ticker", ["TEST.A", "test.a", "tEsT.a"])
+def test_ticker_case_variants_share_canonical_real_receipts(cache, tickers, response_ticker):
+    canonical = inventory(tickers=["TEST.A"])
+    receipts = [seed(cache, unit["request"],
+                     document=body(unit["request"], ticker=response_ticker))
+                for unit in canonical["units"]]
+    before = tuple(cache[0].iterdump())
+    result = inventory(cache, tickers=tickers)
+    assert result["units"] == [unit | {"raw_receipt_id": receipt.raw_receipt_id}
+                               for unit, receipt in zip(canonical["units"], receipts, strict=True)]
+    assert result["minimum_initial_calls"] == result["maximum_http_attempts"] == 0
+    assert tuple(cache[0].iterdump()) == before
+
+
+@pytest.mark.parametrize("dataset", DATASETS)
+def test_legacy_lowercase_receipts_are_not_aliased_or_migrated(cache, dataset):
+    missing = inventory(tickers=["TEST.A"], datasets=[dataset])
+    request = missing["units"][0]["request"]
+    legacy = request | {"ticker": "test.a"}
+    if dataset == "daily":
+        legacy["endpoint"] = request["endpoint"].replace("TEST.A", "test.a")
+    else:
+        legacy["params"] = request["params"] | {"ticker": "test.a"}
+    record = seed(cache, legacy)
+    assert record.request_hash != missing["units"][0]["request_hash"]
+    before = tuple(cache[0].iterdump())
+    assert inventory(cache, tickers=["test.a", "TEST.A"], datasets=[dataset]) == missing
+    assert tuple(cache[0].iterdump()) == before
 
 
 @pytest.mark.parametrize("dataset", ["splits", "dividends"])
@@ -353,7 +386,12 @@ def test_invalid_cached_envelopes_refuse(cache, dataset, changes):
     assert error.value.code == "SOURCE_INVALID"
 
 
-@pytest.mark.parametrize("changes", [{"ticker": "WRONG"}, {"adjusted": 0}])
+@pytest.mark.parametrize("changes", [
+    {"ticker": "WRONG"}, {"ticker": "wrong"}, {"ticker": None}, {"ticker": 1},
+    {"ticker": True}, {"ticker": ["TEST.A"]}, {"ticker": {"ticker": "TEST.A"}},
+    {"ticker": ""}, {"ticker": " TEST.A"}, {"ticker": "TEST.A\n"},
+    {"ticker": "teſt.a"}, {"adjusted": 0},
+])
 def test_daily_identity_mismatch_refuses(cache, changes):
     req = inventory(datasets=["daily"])["units"][0]["request"]
     seed(cache, req, document=body(req, **changes))

@@ -94,6 +94,7 @@ def _acquire(conn, store, params, claim, *, fetch, clock):
         charged = True
 
     def response(status):
+        # A 403 denies this request's capability, not the account's credential.
         return provider_budget.record_response(
             conn, massive_plan.SOURCE, 400 if status == 403 else status, clock=clock,
             fence_check=fence, minimum_interval_seconds=interval)

@@ -212,6 +212,8 @@ def test_http_refusals_accounting_and_no_cache(harness, status, code, blocked, c
 
 
 @pytest.mark.parametrize("body,code", [(b"malformed", "SOURCE_INVALID"),
+    (canonical_json(json.loads(BODY) | {"resultsCount": 2}).encode(), "SOURCE_INVALID"),
+    (canonical_json(json.loads(BODY) | {"ticker": "OTHER"}).encode(), "SOURCE_INVALID"),
     (canonical_json(json.loads(BODY) | {"results": [], "resultsCount": 0}).encode(), "SOURCE_EMPTY"),
     (canonical_json(json.loads(BODY) | {"next_url": "https://untrusted.invalid/secret"}).encode(), "SOURCE_NOT_FINAL"),
     (canonical_json(json.loads(BODY) | {"adjusted": True}).encode(), "SOURCE_INVALID"),
@@ -231,6 +233,58 @@ def test_unusable_bodies_never_commit_complete_receipts(harness, body, code):
     assert not h.store.root.exists()
     assert h.conn.execute("SELECT remaining,uncertain,next_eligible_at FROM provider_accounts").fetchone()[:] == (
         9, 1, "2026-09-12T00:00:18.000000Z")
+
+
+def test_transport_without_charge_cannot_publish_or_update_account(harness):
+    h = harness
+    enqueue(h)
+    attempt = claim(h)
+    with pytest.raises(OpsError) as error:
+        run(h, attempt, lambda *_: (200, BODY))
+    assert error.value.code == "INTEGRITY_FAILED"
+    assert h.conn.execute("SELECT remaining,uncertain,next_eligible_at FROM provider_accounts").fetchone()[:] == (
+        10, 0, None)
+    assert h.conn.execute("SELECT used_calls FROM provider_reservations").fetchone()[0] == 0
+    assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 0
+    assert not (h.root / attempt.attempt_id / "massive_acquisition.json").exists()
+
+
+def test_missing_returned_receipt_refuses_exactly(harness, monkeypatch):
+    h = harness
+    enqueue(h)
+    attempt = claim(h)
+    original = acquisition.cache_raw_receipt
+    def cache_then_return_missing(*args, **kwargs):
+        record = original(*args, **kwargs)
+        # Raw receipts are immutable. Inject an absent returned reference rather
+        # than bypassing their deletion guard; the final catalog lookup is real.
+        return replace(record, raw_receipt_id="raw_missing")
+    monkeypatch.setattr(acquisition, "cache_raw_receipt", cache_then_return_missing)
+    with pytest.raises(OpsError) as error:
+        run(h, attempt, successful)
+    assert error.value.code == "INPUT_CHANGED"
+    assert h.conn.execute("SELECT used_calls FROM provider_reservations").fetchone()[0] == 1
+    assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 1
+    assert not (h.root / attempt.attempt_id / "massive_acquisition.json").exists()
+
+
+def test_mixed_case_acquisition_reuses_canonical_uppercase_raw_receipt(harness):
+    h = harness
+    mixed = replace(PARAMS, ticker="sYnTh")
+    enqueue(h, params=mixed)
+    first = claim(h)
+    _, acquired = run(h, first, successful, mixed)
+    assert acquired["request_hash"] == content_hash(REQUEST)
+    finish(h, first)
+    h.clock.advance(13)
+    enqueue(h, key="uppercase")
+    def forbidden(*_):
+        pytest.fail("case-only symbol changes must reuse the canonical raw cache")
+    _, reused = run(h, claim(h), forbidden)
+    assert reused["raw_receipt_id"] == acquired["raw_receipt_id"]
+    assert reused["cache_hit"] is True and reused["http_attempts"] == 0
+    assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 1
+    assert h.conn.execute("SELECT remaining FROM provider_accounts").fetchone()[0] == 9
 
 
 @pytest.mark.parametrize("when", ["before_charge", "during_fetch", "during_publication"])
