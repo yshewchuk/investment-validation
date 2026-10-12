@@ -108,6 +108,9 @@ consumed-object/cutoff provenance; mixed outcome fragments refuse before access.
 `magnitude_inputs.forecast_cutoff` defines full-session forecast ceilings;
 `magnitude_inputs.load_magnitude_targets` reads isolated magnitude labels under
 a separate strict label-availability cutoff. Neither is a runnable experiment.
+`magnitude_inputs.preflight_magnitude_targets` proves an explicit population's
+physical isolation; `qualify_magnitude_training_targets` returns strictly
+fit-available training magnitudes with complete read/omission provenance.
 
 `magnitude_features.load_magnitude_history` binds one admitted event's pinned
 calendar, forecast ceiling and protected history features, explicitly retaining
@@ -124,7 +127,7 @@ The manual no-ledger `experiments.v2_gate_variant` CLI consumes
 `experiment_population.load_population`, `_pricing.STRUCTURES`, and
 `replay.replay`/`replay.ReplayResult` for fresh per-arm fill pricing.
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window -->
+<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window -->
 
 ## Consumers
 

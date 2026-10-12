@@ -204,6 +204,35 @@ this seam neither fits a model nor joins labels into forecast features.
 Repository failures propagate; no cache, retry, write or partial return.
 These library prerequisites have no CLI, supervisor or final-read caller.
 
+`magnitude_inputs.preflight_magnitude_targets(repository, snapshot, *,
+as_of_month, event_ids)` admits an explicit selection population and proves
+every candidate object's singleton isolation without opening outcomes. Its
+detached digest binds the exact population/context and planned object identities.
+A later runner must preflight the union of actual train/evaluation participants
+across all folds before its first label read; unused window events need not join.
+The preflight is evidence, not a capability: target loaders repeat their own
+admission and physical checks and accept no caller-supplied scan plan.
+
+`qualify_magnitude_training_targets(repository, snapshot, *, as_of_month,
+labels_before, event_ids)` qualifies explicit training candidates only. Every
+candidate event must precede the explicit fit boundary, and all objects pass
+the same global preflight before any outcome is decoded. The decoded event key
+and boolean skipped flag are checked first. Skipped labels, null availability,
+and valid availability on/after the boundary are omitted with distinct reasons,
+before numeric parsing. Otherwise availability must follow the event, and the
+native signed value must be finite; zero and negative signed values remain valid.
+Absolute magnitudes retain percentage-point units. No clipping or zero fill occurs.
+Its separate training-input identity binds candidate IDs, all decoded objects
+(including omitted labels), qualified IDs, omission reasons and the fit cutoff.
+An empty qualified population refuses `POPULATION_COLLAPSED`; malformed eligible
+labels refuse `EXPERIMENT_VARIANT_FAILED`. Explicit excluded/ambiguous identities
+and mixed objects refuse before outcome access. Repository refusals propagate;
+there is no cache, retry, write or partial result. Late admitted objects may be
+decoded for qualification; protected objects are never opened. Existing strict
+`load_magnitude_targets` semantics and identities remain unchanged. These library
+seams do not register, fit, evaluate, publish evidence or implement a CLI; they
+do not materialize or recompute historical feature aggregates.
+
 `magnitude_features.load_magnitude_history(repository, snapshot, *, event_id,
 as_of_month, horizon, history_start, purpose="selection")` binds one canonical
 event's prior-history features to its full-session forecast ceiling. Exact
