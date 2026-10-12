@@ -456,6 +456,58 @@ def test_corrupt_or_missing_object_is_never_a_hit(cache, missing):
     assert error.value.code == ("MISSING" if missing else "INTEGRITY_FAILED")
 
 
+@pytest.mark.parametrize("condition,code", [
+    ("store_symlink", "UNSAFE_PATH"), ("object_symlink", "UNSAFE_PATH"),
+    ("missing_parent", "MISSING"),
+])
+def test_real_object_path_failures_preserve_exact_codes(cache, condition, code):
+    conn, store, root = cache
+    unit = inventory(datasets=["daily"])["units"][0]
+    record = seed(cache, unit["request"])
+    assert inventory(cache, datasets=["daily"])["units"] == [
+        unit | {"raw_receipt_id": record.raw_receipt_id}]
+    before = tuple(conn.iterdump())
+    digest = record.raw_hash.removeprefix("sha256:")
+    path = store.root / "objects" / digest[:2] / digest
+    if condition == "store_symlink":
+        saved = root / "saved-store"
+        store.root.rename(saved)
+        store.root.symlink_to(saved, target_is_directory=True)
+    elif condition == "object_symlink":
+        saved = root / "saved-object"
+        path.rename(saved)
+        path.symlink_to(saved)
+    else:
+        path.unlink()
+        path.parent.rmdir()
+    with pytest.raises(ArtifactError) as error:
+        inventory(cache, datasets=["daily"])
+    assert error.value.code == code
+    assert tuple(conn.iterdump()) == before
+
+
+def test_selected_receipt_disappearing_before_real_load_is_input_changed(cache, monkeypatch):
+    conn, store, _ = cache
+    unit = inventory(datasets=["daily"])["units"][0]
+    record = seed(cache, unit["request"])
+    assert inventory(cache, datasets=["daily"])["units"] == [
+        unit | {"raw_receipt_id": record.raw_receipt_id}]
+    original_load = massive_plan.load_raw_receipt
+
+    def remove_then_load(connection, objects, receipt_id):
+        assert connection is conn and objects is store and receipt_id == record.raw_receipt_id
+        connection.execute("DROP TRIGGER data_raw_receipts_no_delete")
+        connection.execute("DELETE FROM data_raw_receipts WHERE raw_receipt_id=?", (receipt_id,))
+        connection.commit()
+        return original_load(connection, objects, receipt_id)
+
+    monkeypatch.setattr(massive_plan, "load_raw_receipt", remove_then_load)
+    with pytest.raises(DataError) as error:
+        inventory(cache, datasets=["daily"])
+    assert error.value.code == "INPUT_CHANGED"
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 0
+
+
 def cli_args(root, **changes):
     args = {"catalog": root / "ops.sqlite", "store-root": root / "store", "ticker": "TEST.A",
             "start": PARAMS["start"], "end": PARAMS["end"], "as-of": PARAMS["as_of"],
