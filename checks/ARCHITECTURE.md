@@ -37,7 +37,8 @@ one before and after (unless it ends the file); a top-level fenced block
 needs one before and after and must be closed. Fenced content is never
 scanned as headings or tables. Lists are not checked. Default mode reads
 staged blobs and flags only violations touching lines the commit adds or
-changes (`--base-ref REF` does the same for `REF...HEAD`, run in CI by the
+changes, except that an unclosed fence is a file-level error reported for any
+changed file (`--base-ref REF` does the same for `REF...HEAD`, run in CI by the
 Tests workflow; `--all` scans every tracked `.md` in full). Standard library
 only; the pre-commit hook runs the default mode.
 

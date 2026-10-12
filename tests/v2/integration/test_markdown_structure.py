@@ -78,6 +78,8 @@ def test_scoped_keeps_only_violations_touching_changed_lines():
     assert len(found) == 2
     assert [v.line for v in ms.scoped(found, {5})] == [4]
     assert ms.scoped(found, set()) == []
+    unclosed = ms.lint_text("para\n\n```\ncode\n")
+    assert ms.scoped(unclosed, {4}) == unclosed
     assert ms.scoped(found, None) == found
 
 
@@ -106,6 +108,39 @@ def test_staged_mode_ignores_untouched_legacy_defects(repo, capsys):
     assert ms.main(["--quiet"]) == 0
     assert ms.main(["--all", "--quiet"]) == 1
     assert "old.md:1: heading-after" in capsys.readouterr().out
+
+
+def test_staged_legacy_file_flags_only_touched_defect(repo, capsys):
+    # old.md has a legacy defect on line 1 (heading-after). Change an unrelated line.
+    (repo / "old.md").write_text("# Old\nlegacy defect\n\nbody\n\nmore\n", encoding="utf-8")
+    _git(repo, "add", "old.md")
+    assert ms.main(["--quiet"]) == 0
+    capsys.readouterr()
+    # Now touch the defect line itself.
+    (repo / "old.md").write_text("# Older\nlegacy defect\n\nbody\n\nmore\n", encoding="utf-8")
+    _git(repo, "add", "old.md")
+    assert ms.main(["--quiet"]) == 1
+    assert "old.md:1: heading-after" in capsys.readouterr().out
+
+
+def test_unclosed_fence_reported_when_closing_fence_deleted(repo, capsys):
+    (repo / "f.md").write_text("intro\n\n```\ncode\n```\n\nend\n", encoding="utf-8")
+    _git(repo, "add", "f.md")
+    _git(repo, "commit", "-qm", "add f")
+    (repo / "f.md").write_text("intro\n\n```\ncode\n\nend\n", encoding="utf-8")
+    _git(repo, "add", "f.md")
+    assert ms.main(["--quiet"]) == 1
+    assert "f.md:3: fence-unclosed" in capsys.readouterr().out
+
+
+def test_unclosed_fence_reported_when_text_added_after_it(repo, capsys):
+    (repo / "g.md").write_text("intro\n\n```\ncode\n", encoding="utf-8")
+    _git(repo, "add", "g.md")
+    _git(repo, "commit", "-qm", "add g (already unclosed)")
+    (repo / "g.md").write_text("intro\n\n```\ncode\nmore\n", encoding="utf-8")
+    _git(repo, "add", "g.md")
+    assert ms.main(["--quiet"]) == 1
+    assert "g.md:3: fence-unclosed" in capsys.readouterr().out
 
 
 def test_staged_mode_flags_a_new_defect(repo, capsys):

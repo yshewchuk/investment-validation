@@ -120,10 +120,14 @@ def changed_lines(diff: str) -> set[int]:
 
 
 def scoped(violations: list[Violation], touched: set[int] | None) -> list[Violation]:
-    """``touched`` None means the whole file is in scope."""
+    """``touched`` None means the whole file is in scope. An unclosed fence is a
+    file-level error: the opening line is usually untouched when the closing
+    fence is deleted or text is added after it, so it is always reported for a
+    file in the changed set."""
     if touched is None:
         return violations
-    return [v for v in violations if v.line in touched or v.near in touched]
+    return [v for v in violations
+            if v.rule == "fence-unclosed" or v.line in touched or v.near in touched]
 
 
 def _git(*args: str) -> bytes:
