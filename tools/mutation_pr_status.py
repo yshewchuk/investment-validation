@@ -61,16 +61,17 @@ def baseline_failing(baseline) -> set[str]:
 def classify_module(name: str, mod, rows: list[dict], changed: dict[str, set[int]],
                     failing_on_main: set[str]) -> tuple[str, str]:
     """Return (class, reason) with class in ok / pr_owned / infra."""
-    if not isinstance(mod, dict):
-        return "infra", "no report: job cancelled, runner or setup error"
     # A survivor on a line this PR changed is PR-owned even if the run later timed
-    # out or failed: the rows it did write are still the PR's own survivors.
+    # out or failed, and even if the summary has no entry for the module (a module
+    # reported twice is dropped from ``modules``): the rows are the evidence.
     hits = sorted((r["file"], r["line"]) for r in rows
                   if r.get("module") == name and r.get("status") == "survived"
                   and r.get("line") in changed.get(r.get("file"), ()))
     if hits:
         shown = ", ".join(f"{f}:{n}" for f, n in hits[:5])
         return "pr_owned", f"{len(hits)} survivor(s) on changed lines: {shown}"
+    if not isinstance(mod, dict):
+        return "infra", "no report: job cancelled, runner or setup error"
     if mod.get("skipped_reason"):
         return "infra", f"skipped ({mod['skipped_reason']})"
     rc = mod.get("run_exit_code")
@@ -89,16 +90,19 @@ def classify_module(name: str, mod, rows: list[dict], changed: dict[str, set[int
     return "ok", ""
 
 
-def _truncate(text: str) -> str:
+def _truncate(text: str, keep_tail: str = "") -> str:
+    """Fit DESC_MAX; ``keep_tail`` (the infra count) is never cut."""
     text = " ".join(text.split())
-    return text if len(text) <= DESC_MAX else text[:DESC_MAX - 3] + "..."
+    if len(text) + len(keep_tail) <= DESC_MAX:
+        return text + keep_tail
+    return text[:DESC_MAX - 3 - len(keep_tail)] + "..." + keep_tail
 
 
 def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=None) -> dict:
     """Pure verdict: ``state`` is ``failure`` only when a module is PR-owned."""
     modules = (merged.get("modules") or {}) if isinstance(merged, dict) else {}
     expected = merged.get("expected_modules") if isinstance(merged, dict) else None
-    names = sorted(set(expected or []) | set(modules))
+    names = sorted(set(expected or []) | set(modules) | {r["module"] for r in rows if r.get("module")})
     failing_on_main = baseline_failing(baseline)
     result: dict[str, dict] = {}
     for name in names:
@@ -106,15 +110,16 @@ def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=No
         result[name] = {"class": cls, "reason": reason}
     owned = [n for n, v in result.items() if v["class"] == "pr_owned"]
     infra = [n for n, v in result.items() if v["class"] == "infra"]
+    tail = ""
     if owned:
         desc = f"gremlins: PR-owned problem in {', '.join(owned)}"
         if infra:
-            desc += f"; {len(infra)} infra warning(s)"
+            tail = f"; {len(infra)} infra warning(s)"
     elif infra:
         desc = f"gremlins: no PR-owned problems; {len(infra)} infra warning(s)"
     else:
         desc = f"gremlins: no PR-owned problems in {len(names)} module(s)"
-    return {"state": "failure" if owned else "success", "description": _truncate(desc),
+    return {"state": "failure" if owned else "success", "description": _truncate(desc, tail),
             "pr_owned": owned, "infra": infra, "modules": result}
 
 

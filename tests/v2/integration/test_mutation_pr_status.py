@@ -204,3 +204,19 @@ def test_changed_line_survivor_wins_over_infra_and_baseline_excuses():
     # The same modules without a changed-line survivor stay infra / excused.
     v2 = verdict(m, [row(n, "engine/v2/a.py", 99) for n in m["modules"]], baseline=base)
     assert v2["state"] == "success" and v2["pr_owned"] == []
+
+
+def test_survivor_from_rows_without_summary_entry_is_pr_owned():
+    # A module reported twice is dropped from ``modules`` by the merge; its rows remain.
+    m = {"modules": {"ok": mod()}, "expected_modules": ["ok", "dup"]}
+    v = verdict(m, [row("dup", "engine/v2/a.py", 5)])
+    assert v["state"] == "failure" and v["pr_owned"] == ["dup"]
+    v = verdict(m, [row("dup", "engine/v2/a.py", 99)])
+    assert v["state"] == "success" and v["modules"]["dup"]["class"] == "infra"
+
+
+def test_truncation_keeps_the_infra_count():
+    modules = {f"module_{i}_with_a_long_name": mod(run_exit_code=1) for i in range(30)}
+    v = verdict(merged(**modules, infra_one=mod(run_exit_code=-1)))
+    assert len(v["description"]) <= ps.DESC_MAX
+    assert v["description"].endswith("; 1 infra warning(s)")

@@ -365,7 +365,7 @@ that applies does the status mirror `report`'s own result as `success`.
 The two contexts, `mutation-mutmut/pr` and `mutation/pr`, are distinct from
 each other and from the `Tests` check.
 
-**`mutation/pr` is red only for PR-owned problems (gremlins workflow).** Once
+**Once the gremlins `report` job runs the classifier, `mutation/pr` is red only for PR-owned problems.** Once
 wired (the workflow edit lands in a follow-up commit on the slice B PR; until then
 `mutation.yml` does not call it), the `report` job's last step runs
 `tools/mutation_pr_status.py` over the merged
