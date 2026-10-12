@@ -632,6 +632,8 @@ tests = [
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
+    "tests/v2/ops/test_native_gate_worker.py",
+    "tests/v2/research/test_magnitude_registration.py",
     "tests/v2/research/test_native_outcomes.py",
     "tests/v2/research/test_v2_prediction_cli.py",
     "tests/v2/research/test_native_outcome_validation.py",
@@ -677,6 +679,7 @@ mutate = [
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
+    "tests/v2/ops/test_native_gate_worker.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/v2/ops/test_provider_requirements.py",
     "tests/test_v2_ops_catalog.py",
@@ -793,6 +796,7 @@ tests = [
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
+    "tests/v2/research/test_magnitude_registration.py",
 ]
 
 [modules.ops_catalog_sched]
@@ -956,6 +960,7 @@ mutate = [
     "engine/v2/ops/carried_set.py",
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",
+    "engine/v2/ops/massive_plan.py",
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/forward_calendar_store.py",
     "engine/v2/ops/incremental_data.py",
@@ -967,6 +972,7 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_native_gate_worker.py",
     "tests/v2/ops/test_planned_price_refresh.py",
     "tests/v2/ops/test_planned_price_recovery.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
@@ -975,6 +981,8 @@ tests = [
     "tests/v2/ops/test_provider_response_boundary.py",
     "tests/v2/ops/test_native_parity_inputs_leaf.py",
     "tests/v2/ops/test_carried_set.py",
+    "tests/v2/ops/test_massive_plan.py",
+    "tests/v2/ops/test_massive_plan_startup.py",
     "tests/v2/ops/test_native_parity_pairing.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
@@ -1046,6 +1054,7 @@ tests = [
     "tests/v2/research/test_magnitude_inputs.py",
     "tests/v2/research/test_magnitude_features.py",
     "tests/v2/research/test_magnitude_folds.py",
+    "tests/v2/research/test_magnitude_registration.py",
     "tests/v2/research/test_experiment_trades.py",
     "tests/v2/research/test_exp144_v2_trades.py",
     "tests/v2/research/test_experiments_common_v2_store_root.py",
