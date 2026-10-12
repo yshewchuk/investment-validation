@@ -220,3 +220,16 @@ def test_truncation_keeps_the_infra_count():
     v = verdict(merged(**modules, infra_one=mod(run_exit_code=-1)))
     assert len(v["description"]) <= ps.DESC_MAX
     assert v["description"].endswith("; 1 infra warning(s)")
+
+
+def test_baseline_only_excuses_the_same_module_failing_with_a_test_exit():
+    pr = merged(a=mod(run_exit_code=1))
+    # (a) main green for the module: the PR's failure is PR-owned.
+    assert verdict(pr, baseline={"modules": {"a": mod(run_exit_code=0)}})["state"] == "failure"
+    # (b) main's module was skipped (placeholder rc): it must not excuse the PR.
+    skipped = {"modules": {"a": mod(run_exit_code=1, skipped_reason="pr_closed_mid_run")}}
+    assert verdict(pr, baseline=skipped)["state"] == "failure"
+    # (c) main fails a different module only.
+    other = {"modules": {"b": mod(run_exit_code=1)}}
+    v = verdict(pr, baseline=other)
+    assert v["state"] == "failure" and v["pr_owned"] == ["a"]
