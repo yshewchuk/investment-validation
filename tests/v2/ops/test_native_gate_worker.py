@@ -250,15 +250,110 @@ def test_ill_typed_worker_identities_refuse_before_database_binding(
     assert not (stage / "native_gate_consumption.json").exists()
 
 
-def test_recorded_execution_refuses_before_catalog_access(tmp_path):
+def test_recorded_execution_refuses_before_catalog_access(
+        source, tmp_path, single_thread, forbidden_pricing, monkeypatch):
     """No-ledger admission cannot fall through to the legacy coordinator."""
+    from experiments import native_gate_worker as native
+
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    parameters["no_ledger"] = False
+    before = _catalog(source[0])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("recorded request opened the catalog")
+
+    monkeypatch.setattr(native.sqlite3, "connect", forbidden)
     with pytest.raises(OpsError) as error:
-        worker.dispatch("native_gate_pricing", {"no_ledger": False}, tmp_path)
+        worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.retryable is False
     kind = stages.registry().get("native_gate_pricing")
     assert kind.namespaces == {"smoke"}
     assert kind.retry.max_attempts == 1
-    assert list(tmp_path.iterdir()) == []
+    assert _catalog(source[0]) == before
+    assert {path.name for path in stage.iterdir()} == {"spec.json", "native_registration.json"}
+
+
+def test_catalog_connection_is_read_only_and_autocommit(source, tmp_path, single_thread, monkeypatch):
+    """Probe the actual SQLite connection's write capability and transaction mode."""
+    from experiments import native_gate_worker as native
+
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    connect, checked = native.sqlite3.connect, []
+
+    def observe(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        try:
+            assert conn.isolation_level is None and not conn.in_transaction
+            with pytest.raises(native.sqlite3.OperationalError, match="readonly"):
+                conn.execute("CREATE TABLE forbidden_write(value)")
+            checked.append(True)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
+
+    before = _catalog(source[0])
+    monkeypatch.setattr(native.sqlite3, "connect", observe)
+    result = worker.dispatch("native_gate_pricing", parameters, stage)
+    assert checked == [True] and result["completed_ids"] == [registration.variant_id]
+    assert _catalog(source[0]) == before
+
+
+def test_library_environment_drift_refuses_before_pricing(
+        source, tmp_path, single_thread, forbidden_pricing, monkeypatch):
+    """Real package metadata discovery differs while code and threads stay fixed."""
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    metadata = tmp_path / "library-metadata" / "numpy-0.dist-info" / "METADATA"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text("Metadata-Version: 2.1\nName: numpy\nVersion: 0+synthetic\n")
+    before = _catalog(source[0])
+    monkeypatch.syspath_prepend(str(metadata.parent.parent))
+    observed = environment_identity(1)
+    expected = registration.document["environment"]
+    assert observed["libraries"]["numpy"] == "0+synthetic" != expected["libraries"]["numpy"]
+    assert observed == {**expected, "libraries": {**expected["libraries"], "numpy": "0+synthetic"}}
+    assert all(os.environ.get(name) == "1" for name in THREAD_VARIABLES)
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert error.value.problem.retryable is False
+    assert _catalog(source[0]) == before
+    assert not (stage / "native_gate_consumption.json").exists()
+
+
+@pytest.mark.parametrize("name", ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                                  "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS",
+                                  "LOKY_MAX_CPU_COUNT"])
+def test_each_launch_thread_variable_refuses_drift_before_pricing(
+        source, tmp_path, single_thread, forbidden_pricing, monkeypatch, name):
+    """Literal variable names independently cover every promised thread limit."""
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    monkeypatch.setenv(name, "2")
+    assert environment_identity(1) == registration.document["environment"]
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert error.value.problem.retryable is False
+    assert not (stage / "native_gate_consumption.json").exists()
+
+
+def test_registered_unsupported_runner_refuses_before_pricing(
+        source, tmp_path, single_thread, forbidden_pricing):
+    """A valid registered Python runner does not expand the worker allowlist."""
+    document, registration, parameters = _registered(source, runner="experiments/v2_gate_variant.py")
+    stage = _stage(tmp_path / "staging", document, registration)
+    before = _catalog(source[0])
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.retryable is False
+    assert _catalog(source[0]) == before
+    assert not (stage / "native_gate_consumption.json").exists()
 
 
 @pytest.mark.parametrize("purpose", ["holdout", "final", "random_holdout"])
