@@ -155,8 +155,11 @@ def test_missing_requested_event_refuses(source):
     assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
 
 
-def test_holdout_refusal_precedes_even_missing_quote_tables(tmp_path):
+def test_holdout_refusal_precedes_even_missing_quote_tables(tmp_path, monkeypatch):
     """Holdout admission fails before a quote-free snapshot can reach pricing."""
+    def forbidden(*args, **kwargs):
+        pytest.fail("quote replay ran before population refusal")
+    monkeypatch.setattr(gate, "replay", forbidden)
     conn, clock, store = catalog_and_store(tmp_path)
     try:
         contract = contract_for("earnings_events")
