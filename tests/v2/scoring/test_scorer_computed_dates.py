@@ -33,7 +33,8 @@ _DROP = object()
 def _inputs(*, gate=None, quotes=None, quote_bid_ask=None,
             forecast_coefficients=None,
             diagnostics=None, expiry=None, event_date=None,
-            drop_decision=False, context_overrides=None) -> NativeScoreInputs:
+            drop_decision=False, context_overrides=None,
+            quote_date=None) -> NativeScoreInputs:
     resolved_expiry = "2026-11-20" if expiry is None else expiry
     if quotes is None:
         if quote_bid_ask is None:
@@ -46,7 +47,8 @@ def _inputs(*, gate=None, quotes=None, quote_bid_ask=None,
     context = {"ticker": "AAA", "strategy": "STR-THRU",
                "event_date": "2026-10-27" if event_date is None else event_date,
                "entry_date": "2026-10-08",
-               "quote_date": "2026-10-08", "exit_date": "2026-10-27",
+               "quote_date": "2026-10-08" if quote_date is None else quote_date,
+               "exit_date": "2026-10-27",
                "expiry": resolved_expiry, "strike": 100.0, "spot": 100.0,
                "as_of": "2026-10-07",
                "quotes": quotes}
@@ -261,6 +263,34 @@ def test_dates_not_projected_into_source_mask():
     assert "signal" in bundle.feature_vector
 
 
+#: The scorer-computed feature names a source row must never contribute.
+_COMPUTED_NAMES = ("days_to_print", "dte_entry", "entry_cost_pct")
+
+
+@pytest.mark.parametrize("source", ["tier4", "panel", "both"])
+def test_computed_names_not_projected_even_when_a_source_row_carries_them(source):
+    # A guard that skips computed names only when they are absent from BOTH
+    # rows would still satisfy test_dates_not_projected_into_source_mask,
+    # whose rows carry none of them. Here the named row really does carry
+    # each computed name (with the fold_start a non-null Tier-4 value needs),
+    # so the guard must skip on the name alone, not on its absence.
+    computed = {"days_to_print": 7.0, "dte_entry": 9, "entry_cost_pct": 3.0}
+    fold_starts = {f"{name}_fold_start": "2026-01-01" for name in _COMPUTED_NAMES}
+    tier4_row = {"pred_abs_move": 0.05, "pred_abs_move_fold_start": "2026-01-01"}
+    panel_row = {"date": "2026-01-15", "signal": 1.5}
+    if source in ("tier4", "both"):
+        tier4_row.update(computed)
+        tier4_row.update(fold_starts)
+    if source in ("panel", "both"):
+        panel_row.update(computed)
+    bundle = assemble_nightly_source_bundle(**_kwargs(
+        tier4_row=tier4_row, panel_row=panel_row))
+    for name in _COMPUTED_NAMES:
+        assert name not in bundle.feature_vector
+        assert name not in bundle.feature_missing_mask
+    assert "signal" in bundle.feature_vector
+
+
 def test_bundle_through_scoring_gives_forecast_days_to_print():
     bundle = assemble_nightly_source_bundle(**_kwargs(
         as_of="2026-01-14",
@@ -325,6 +355,11 @@ def test_priced_leg_expiry_wins_over_context_expiry():
     assert _priced_dte_entry(priced) == 71
     assert _priced_dte_entry({**priced, "entry_cost": None}) is None
     assert _priced_dte_entry({**priced, "legs": ()}) is None
+    # The priced leg's own expiry is the reference date: moving the quote
+    # date one day later shortens the count by one.
+    assert _priced_dte_entry({**priced, "quote_date": "2026-10-09"}) == 70
+    # Quote date equal to the leg expiry is zero days, not absent.
+    assert _priced_dte_entry({**priced, "quote_date": "2026-12-18"}) == 0
 
 
 def test_days_to_print_second_value():
@@ -499,9 +534,9 @@ def test_geometry_or_pricing_refusal_blocks_dte_write():
     assert boundary_values["dte_entry"] == 71
 
 
-#: Two distinct scenarios so a production constant (e.g. a hard-coded
+#: Distinct scenarios so a production constant (e.g. a hard-coded
 #: ``dte_entry`` or ``days_to_print``) cannot satisfy every assertion: the
-#: literals differ across A and B. Each ``inputs`` block builds via ``_inputs``.
+#: literals differ across A, B and C. Each ``inputs`` block builds via ``_inputs``.
 _SCENARIOS = {
     "A": {
         "inputs": {},
@@ -517,6 +552,13 @@ _SCENARIOS = {
         "days_to_print": 29.0,   # event 2026-11-05 - decision as_of 2026-10-07
         "dte_entry": 71,         # priced expiry 2026-12-18 - quote_date 2026-10-08
         "entry_cost_pct": 6.0,   # 2 legs x mid 3.0 / spot 100 * 100
+    },
+    "C": {
+        "inputs": {"quote_date": "2026-10-09"},
+        "bid_ask": (1.9, 2.1),
+        "days_to_print": 20.0,   # event 2026-10-27 - decision as_of 2026-10-07
+        "dte_entry": 42,         # priced expiry 2026-11-20 - quote_date 2026-10-09
+        "entry_cost_pct": 4.0,   # 2 legs x mid 2.0 / spot 100 * 100
     },
 }
 
