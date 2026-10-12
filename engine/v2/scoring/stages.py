@@ -2443,6 +2443,7 @@ def _execute_frozen_analogs(
     display: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from engine.v2.scoring.native_analog import evaluate_frozen_analogs
+    from engine.v2.scoring.native_analog_query import complete_analog_query
 
     if block.get("source_rows") is not None:
         _add_flag(flags, "MODEL_NOT_READY")  # two populations declared: never pick one
@@ -2451,7 +2452,7 @@ def _execute_frozen_analogs(
         result, flag = evaluate_frozen_analogs(
             artifact=block.get(ANALOG_ARTIFACT_FIELD),
             recipe=block.get(ANALOG_ARTIFACT_RECIPE_FIELD) or {},
-            query_features=block.get("query_features"),
+            query_features=complete_analog_query(block.get("query_features"), values),
             strategy=strategy,
             alpha=_finite(values.get("fill")),
         )

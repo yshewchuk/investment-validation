@@ -122,6 +122,29 @@ load-bearing entrypoints:
   native arithmetic for the analog stage, the DYN-SV chooser, the entry-rule
   gates, payoff-calibration/model layer and frozen residual-state reading.
   Each is pure arithmetic over declared inputs; none performs I/O.
+  **Nightly frozen analog declaration (issue #681).** `native_analog_query.py`
+  holds the pure helpers for the frozen board analog matcher (it imports only
+  `engine.v2.models.analog_artifact.board_analog_pool_key`).
+  `analog_declarations(artifacts, strategy, alpha, cutoff, panel_row,
+  snapshot, request_key)` picks the one pool whose
+  `board_analog_pool_key(strategy, alpha, cutoff)` equals the row's key and
+  returns `analog_artifact`, `analog_artifact_recipe` (cutoff, pinned
+  `content_hash`, `min_analogs=30`, `bootstrap_draws=2000`, `ci_quantiles=
+  (0.05, 0.95)`, `seed_snapshot`, `request_key`: legacy `match` defaults) and
+  the bundle-time part of `analog_query` (`mcap_bucket` from
+  `exp(panel_row["mcap_log"])`, `implied_ratio = im / mean_prior_or_implied`,
+  `None` unless both are finite and the divisor non-zero). No matching pool
+  returns `{}` (block stays undeclared, as before). The query's
+  `dte_band`/`moneyness_band` need the priced leg, so `complete_analog_query
+  (query, values)` adds them inside `_execute_frozen_analogs` from
+  `values["dte_entry"]` and `abs(values["strike"] / values["spot"] - 1) *
+  100`, with legacy's band edges; an input that is absent or non-finite gives
+  `None` (the matcher drops that dimension, as legacy does with no chain).
+  A query that already carries a band key keeps it. A non-mapping query is
+  returned unchanged so the evaluator's `INVALID_ANALOG_INPUT` still fires.
+  Until `mean_prior_or_implied` exists (#651) `implied_ratio` is `None`, so
+  native matches a different pool than legacy and per-row analog parity
+  cannot hold yet.
 - `compatibility.py` — `score_legacy_request`, the one legacy adapter this
   package owns (see Dependencies).
 

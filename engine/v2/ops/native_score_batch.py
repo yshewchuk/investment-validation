@@ -29,7 +29,8 @@ from engine.v2.ops.native_score_batch_types import (
     _event_date_identity,
 )
 from engine.v2.scoring.application import score_batch
-from engine.v2.scoring.identity import request_hash
+from engine.v2.scoring.identity import request_hash, score_request_key
+from engine.v2.scoring.native_analog_query import analog_declarations
 from engine.v2.scoring.native_gate_features import GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
@@ -314,24 +315,34 @@ def _with_release_artifacts(
     snapshot_id: str,
     calendar_row: Mapping[str, Any],
     quote_max_age_sessions: Any,
+    panel_row: Mapping[str, Any],
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """Declare the release-backed artifacts on a bundle, or re-wrap a refusal.
 
     Split out of :func:`_assemble_one_event` to keep it under its line budget.
     The cutoff's own date refusal (:func:`_row_cutoff`) is a source-bundle
-    refusal like any other and is re-wrapped with the row's key.
+    refusal like any other and is re-wrapped with the row's key. The frozen
+    board analog pool, when the release carries one for this row's
+    ``(strategy, fill alpha, cutoff)``, is declared with the row's legacy
+    request key (#681); otherwise the analog block stays undeclared.
     """
+    context = {**bundle.context,
+               **_identity_context(as_of, snapshot_id, calendar_row,
+                                   quote_max_age_sessions=quote_max_age_sessions)}
     try:
         declarations = _release_artifact_declarations(
             binding, strategy, driver_identity, as_of, calendar_row)
+        analogs = binding.analog_artifacts.get(strategy) or ()
+        if analogs:
+            declarations.update(analog_declarations(
+                analogs, strategy, _SHADOW_FILL_ALPHA, _row_cutoff(as_of, calendar_row),
+                panel_row, snapshot_id,
+                score_request_key({**context, "ticker": key.ticker, "strategy": strategy})))
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
             key, exc.code, f"nightly_source_bundle refused: {exc.code}")
     return replace(
-        bundle, **declarations,
-        context={**bundle.context,
-                 **_identity_context(as_of, snapshot_id, calendar_row,
-                                     quote_max_age_sessions=quote_max_age_sessions)},
+        bundle, **declarations, context=context,
         model_release=binding.model_release, frozen_inference=binding.frozen_inference,
     )
 
@@ -447,7 +458,8 @@ def _assemble_one_event(
         bundle, binding=binding, key=key, strategy=strategy,
         driver_identity=driver_identity, as_of=as_of, snapshot_id=snapshot_id,
         calendar_row=event.calendar_row,
-        quote_max_age_sessions=event.quote_max_age_sessions)
+        quote_max_age_sessions=event.quote_max_age_sessions,
+        panel_row=event.panel_row)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
     try:

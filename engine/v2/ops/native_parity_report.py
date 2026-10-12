@@ -33,6 +33,7 @@ exactly the DAG-shape drift ``nightly.GRAPH`` exists to avoid).
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from pathlib import Path
@@ -112,9 +113,25 @@ def _dimension_fields(dimension: str) -> tuple[str, ...]:
     return fields
 
 
+def _entry_cost_pct(row: Mapping[str, Any]) -> float | None:
+    """``entry_cost / spot * 100`` (checks/phase4_real._expected_financial_diagnostics)."""
+    cost, spot = row.get("entry_cost"), row.get("spot")
+    if cost is None or spot in (None, 0, 0.0):
+        return None
+    value = float(cost) / float(spot) * 100.0
+    return value if math.isfinite(value) else None
+
+
 def _dimension_view(row: Mapping[str, Any], dimension: str) -> dict[str, Any]:
-    """One row's values for one dimension, read by the checker's field names."""
-    return {name: row.get(name) for name in _dimension_fields(dimension)}
+    """One row's values for one dimension, read by the checker's field names.
+
+    Legacy score rows never carry ``entry_cost_pct`` (#681), so a row without
+    the key has it derived from its own ``entry_cost`` and ``spot``.
+    """
+    view = {name: row.get(name) for name in _dimension_fields(dimension)}
+    if "entry_cost_pct" in view and "entry_cost_pct" not in row:
+        view["entry_cost_pct"] = _entry_cost_pct(row)
+    return view
 
 
 def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, Any],

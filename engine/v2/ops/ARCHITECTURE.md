@@ -245,9 +245,8 @@ submission path reads either edge (the rule Part 4 established for
   `native_rows` share any key (below, `_empty_native_report`) before
   calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
-  This is the only production producer of `native_parity_report.json`;
-  `tools/native_parity_run.py` and `row_explanations` never existed and no
-  parallel manual path is built.
+  This is the only production producer of `native_parity_report.json`; no parallel manual path exists.
+- **`financial_diagnostics` view of a legacy row (#681).** Legacy score rows never carry `entry_cost_pct`; `_dimension_view` derives it as `entry_cost / spot * 100` (`None` when either is absent or `spot` is 0; `checks/phase4_real._expected_financial_diagnostics` arithmetic). A row that already carries the key keeps its value.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
   dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
   gap in `compare_native_vs_legacy`: its unchanged guards reject an empty
@@ -1084,8 +1083,7 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `DYNAMIC_MENU`), `engine.v2.scoring` (5.0 — `native_board_universe.py`'s
 `SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
-`identity`/`application`), `engine.v2.ledger` (6.0), `engine.v2.parity`
-(6.5). `engine.v2.models` (3.5) and `engine.v2.domain.generation` (2.0,
+`identity`/`application`, and since #681 `native_analog_query.analog_declarations` plus `identity.score_request_key`, declaring the frozen board analog pool on each row whose release carries a matching one), `engine.v2.ledger` (6.0), `engine.v2.parity` (6.5). `engine.v2.models` (3.5) and `engine.v2.domain.generation` (2.0,
 `Geometry`/`Pricing`) are lazy-only, never at module top level.
 `engine.v2.domain.generation` supplies geometry to the rescore decoder
 (`native/input_decoding.py::_load_native_score_inputs`). The pending PR-6 calendar

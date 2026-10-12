@@ -1,0 +1,213 @@
+"""Pure query/declaration helpers for the frozen board analog matcher (#681).
+
+Every case is synthetic: bucket edges, the implied-ratio rule, the
+declaration pick, and one real-artifact run through the frozen stage. No
+fixture tree, no ``data/`` read, nothing imported from ``tests/``.
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import pytest
+
+from engine.v2.models.analog_artifact import (
+    board_analog_pool_key,
+    make_board_analog_pool_artifact,
+)
+from engine.v2.models.lineage import Lineage
+from engine.v2.scoring.native_analog import FROZEN_ANALOG_RECIPE_FIELDS
+from engine.v2.scoring.native_analog_query import (
+    BOOTSTRAP_DRAWS,
+    CI_QUANTILES,
+    MIN_ANALOGS,
+    analog_declarations,
+    analog_query_base,
+    complete_analog_query,
+)
+from engine.v2.scoring.stages import _execute_frozen_analogs
+
+
+def test_query_base_buckets_and_ratio():
+    panel_row = {
+        "mcap_log": math.log(5e9),
+        "im": 0.06,
+        "mean_prior_or_implied": 0.05,
+    }
+    query = analog_query_base(panel_row)
+    assert query["mcap_bucket"] == "1-10B"
+    assert query["implied_ratio"] == pytest.approx(1.2)
+
+    # Edge cases, all in this one test: the bucket boundary is half-open
+    # upward, a missing or overflowing market cap gives no bucket, and a
+    # missing/zero/non-finite ratio (a bool is not a number) gives none.
+    for panel, bucket, ratio in [
+        ({"mcap_log": math.log(1.0001e9)}, "1-10B", None),
+        ({"mcap_log": math.log(9.99e8)}, "<1B", None),
+        ({"mcap_log": math.log(1.0001e10)}, ">=10B", None),
+        ({}, None, None),
+        ({"mcap_log": 1e9}, None, None),
+        ({"im": 0.06, "mean_prior_or_implied": 0.05}, None, pytest.approx(1.2)),
+        ({"mcap_log": math.log(5e9), "im": 0.06}, "1-10B", None),
+        ({"mcap_log": math.log(5e9), "im": 0.06, "mean_prior_or_implied": 0.0},
+         "1-10B", None),
+        ({"mcap_log": math.log(5e9), "im": float("nan"),
+          "mean_prior_or_implied": 0.05}, "1-10B", None),
+        ({"mcap_log": math.log(5e9), "im": 0.06,
+          "mean_prior_or_implied": True}, "1-10B", None),
+    ]:
+        got = analog_query_base(panel)
+        assert got["mcap_bucket"] == bucket
+        assert got["implied_ratio"] == ratio
+
+
+@pytest.mark.parametrize(
+    ("dte_entry", "band"),
+    [
+        (1, "1-3"),
+        (3, "1-3"),
+        (4, "4-10"),
+        (26, "26-45"),
+        (45, "26-45"),
+        (46, None),
+        (3.5, None),
+        (pytest.param(None, None, id="absent")),
+    ],
+)
+def test_complete_query_dte_band(dte_entry, band):
+    values = {} if dte_entry is None else {"dte_entry": dte_entry}
+    query = {"mcap_bucket": "1-10B", "implied_ratio": None}
+    out = complete_analog_query(query, values)
+    assert out["dte_band"] == band
+    assert out["mcap_bucket"] == "1-10B"
+    assert out["implied_ratio"] is None
+
+
+@pytest.mark.parametrize(
+    ("strike", "band"),
+    [
+        (100.0, "ATM"),
+        (101.99, "ATM"),
+        (102.0, "2-5%"),
+        (104.99, "2-5%"),
+        (105.0, ">5%"),
+        (90.0, ">5%"),
+        (pytest.param(None, None, id="absent")),
+    ],
+)
+def test_complete_query_moneyness_band(strike, band):
+    values = {"spot": 100.0}
+    if strike is not None:
+        values["strike"] = strike
+    out = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None}, values)
+    assert out["moneyness_band"] == band
+
+
+def test_complete_query_zero_spot_is_none():
+    out = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None},
+                                {"spot": 0.0, "strike": 100.0})
+    assert out["moneyness_band"] is None
+
+
+def test_complete_query_keeps_existing_and_passes_non_mapping():
+    kept = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None,
+                                  "dte_band": "1-3"},
+                                 {"dte_entry": 30, "spot": 100.0, "strike": 100.0})
+    assert kept["dte_band"] == "1-3"
+    assert kept["moneyness_band"] == "ATM"
+    assert complete_analog_query(None, {}) is None
+
+
+@dataclass(frozen=True, kw_only=True)
+class _FakeArtifact:
+    """A stand-in pool carrying only what ``analog_declarations`` reads."""
+
+    key: tuple
+    content_hash: str
+
+
+def test_declarations_pick_matching_pool():
+    match_key = board_analog_pool_key("STR-THRU", 0.5, "2026-01-09")
+    artifacts = [
+        _FakeArtifact(key=board_analog_pool_key("STR-THRU", 0.5, "2025-12-31"),
+                      content_hash="sha256:other"),
+        _FakeArtifact(key=match_key, content_hash="sha256:picked"),
+        _FakeArtifact(key=board_analog_pool_key("STR-THRU", 0.5, "2026-01-10"),
+                      content_hash="sha256:later"),
+    ]
+    panel_row = {"mcap_log": math.log(5e9), "im": 0.06, "mean_prior_or_implied": 0.05}
+    declarations = analog_declarations(
+        artifacts, "STR-THRU", 0.5, "2026-01-09", panel_row, "snap-1", "req-key")
+    assert declarations["analog_artifact"] is artifacts[1]
+    recipe = declarations["analog_artifact_recipe"]
+    assert set(recipe) == set(FROZEN_ANALOG_RECIPE_FIELDS)
+    assert recipe["cutoff"] == "2026-01-09"
+    assert recipe["content_hash"] == "sha256:picked"
+    assert recipe["seed_snapshot"] == "snap-1"
+    assert recipe["request_key"] == "req-key"
+    assert recipe["min_analogs"] == 30 and recipe["min_analogs"] == MIN_ANALOGS
+    assert recipe["bootstrap_draws"] == 2000 and recipe["bootstrap_draws"] == BOOTSTRAP_DRAWS
+    assert recipe["ci_quantiles"] == (0.05, 0.95)
+    assert recipe["ci_quantiles"] == CI_QUANTILES
+    assert declarations["analog_query"] == analog_query_base(panel_row)
+
+    # A different cutoff or a different strategy declares no pool at all.
+    assert analog_declarations(artifacts, "STR-THRU", 0.5, "2026-01-11",
+                               panel_row, "snap-1", "req-key") == {}
+    assert analog_declarations(artifacts, "OTHER-STR", 0.5, "2026-01-09",
+                               panel_row, "snap-1", "req-key") == {}
+    assert analog_declarations([], "STR-THRU", 0.5, "2026-01-09",
+                               panel_row, "snap-1", "req-key") == {}
+
+
+def _pool_rows():
+    # 35 rows in the "4-10" dte band and 25 in "26-45", all other bands equal:
+    # only the dte band tells the two groups apart (min_analogs is 30).
+    return [
+        (f"r{i:03d}", "2025-01-01", "2025-02-01", "1-10B",
+         "4-10" if i < 35 else "26-45", "ATM", "mid", 0.01 * (i % 7 - 3))
+        for i in range(60)
+    ]
+
+
+def _pool_block():
+    artifact = make_board_analog_pool_artifact(
+        strategy="STR-THRU", alpha=0.5, cutoff="2026-01-09",
+        population_edges=(0.9, 1.1), causal_edges=(0.9, 1.1),
+        rows=_pool_rows(), lineage=Lineage())
+    declarations = analog_declarations(
+        [artifact], "STR-THRU", 0.5, "2026-01-09",
+        {"mcap_log": math.log(5e9)}, "snap-1", "req-key")
+    block = {
+        "analog_artifact": declarations["analog_artifact"],
+        "analog_artifact_recipe": declarations["analog_artifact_recipe"],
+        "query_features": declarations["analog_query"],
+    }
+    return block
+
+
+def _n_analogs(values):
+    flags: list[str] = []
+    output = _execute_frozen_analogs(_pool_block(), "STR-THRU", values, flags)
+    assert flags == []
+    return output
+
+
+def test_real_frozen_path_end_to_end():
+    # dte 5 completes to "4-10" and strike 101 to "ATM": exactly the 35 rows.
+    output = _n_analogs({"fill": 0.5, "spot": 100.0, "strike": 101.0, "dte_entry": 5})
+    assert output["n_analogs"] == 35
+    assert output["ci_low"] is not None and output["ci_low"] <= output["ci_high"]
+
+    # dte 30 completes to "26-45": 25 rows < min_analogs, so the matcher widens
+    # (moneyness, then dte) and the answer holds the whole pool.
+    output = _n_analogs({"fill": 0.5, "spot": 100.0, "strike": 101.0, "dte_entry": 30})
+    assert output["n_analogs"] == 60
+
+    # An unavailable dte/moneyness input drops that dimension, not the row.
+    output = _n_analogs({"fill": 0.5, "spot": 100.0})
+    assert output["n_analogs"] == 60
+
+    # ">5%" moneyness matches no frozen row; the matcher widens it away.
+    output = _n_analogs({"fill": 0.5, "spot": 100.0, "strike": 110.0, "dte_entry": 5})
+    assert output["n_analogs"] == 35
