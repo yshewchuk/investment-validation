@@ -21,6 +21,7 @@ from engine.v2.ops.providers.yfinance_edge import (
 #: ``yfinance``/``nasdaq`` accounts are unmetered and keyless, so their tuples
 #: are deliberately empty (budget reservation still applies).
 PROVIDER_CREDENTIAL_VARIABLES = {
+    "massive-stocks": ("MASSIVE_API_KEY",),
     "orats-daily-market": ("ORATS_API_KEY",),
     "yfinance": (),
     "nasdaq": (),

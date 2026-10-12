@@ -9,11 +9,16 @@ from engine.v2.data.incremental import RAW_SCHEMA_REF, load_raw_receipt
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.artifacts import ArtifactError, artifact_reference
 from engine.v2.ops.errors import fail
+from engine.v2.ops.providers.massive_policy import MAX_RAW_BYTES
 
 SOURCE = "massive-stocks"
 POLICY_VERSION = "massive_stocks_basic.2026-10-10"
 DATASETS = ("daily", "splits", "dividends")
-MAX_RAW_BYTES = 16 * 1024 * 1024
+
+
+def _valid_ticker(value):
+    return (isinstance(value, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}", value) is not None)
 
 
 def _day(value):
@@ -36,8 +41,7 @@ def _scope(tickers, start, end, as_of, adjustment, transport, call_cap):
         raise fail("INVALID_REQUEST", "per-request HTTP-attempt cap must be 1 to 100")
     if not isinstance(tickers, (list, tuple)) or not 1 <= len(tickers) <= 100:
         raise fail("INVALID_REQUEST", "one to 100 ticker inputs are required")
-    if any(not isinstance(t, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}", t)
-           for t in tickers):
+    if any(not _valid_ticker(t) for t in tickers):
         raise fail("INVALID_REQUEST", "invalid stock ticker syntax")
     first, last, today = _day(start), _day(end), _day(as_of)
     if first > last:
@@ -51,7 +55,7 @@ def _scope(tickers, start, end, as_of, adjustment, transport, call_cap):
     if first < earliest or last >= today:
         raise fail("INVALID_REQUEST", "dates exceed the Basic planning window",
                    details={"reason": "HISTORY_UNAVAILABLE"})
-    return sorted(set(tickers)), earliest.isoformat(), (today - timedelta(days=1)).isoformat()
+    return sorted({t.upper() for t in tickers}), earliest.isoformat(), (today - timedelta(days=1)).isoformat()
 
 
 def _request_descriptor(dataset, ticker, start, end, adjustment):
@@ -102,7 +106,8 @@ def _complete_body(body, request):
         count = document.get("resultsCount", len(rows))
         valid = valid and type(count) is int and count == len(rows)
         if request["dataset"] == "daily":
-            valid = (valid and document.get("ticker") == request["ticker"]
+            ticker = document.get("ticker")
+            valid = (valid and _valid_ticker(ticker) and ticker.upper() == request["ticker"]
                      and document.get("adjusted") is request["params"]["adjusted"])
     except (ValueError, TypeError, AttributeError, RecursionError):
         raise fail("SOURCE_INVALID", "Massive cached response is malformed") from None
