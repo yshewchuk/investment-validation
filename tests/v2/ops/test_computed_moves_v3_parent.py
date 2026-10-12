@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 
+import pandas as pd
 import pyarrow as pa
 import pytest
 
@@ -186,3 +187,45 @@ def test_build_rows_refusal_reaches_the_ops_layer_typed_without_writing(tmp_path
     assert "CONTRACT_MISMATCH" in str(err.value)
     assert err.value.problem.details["data_code"] == "CONTRACT_MISMATCH"
     assert _write_counts(conn) == written
+
+
+class _LateHistoryFetcher:
+    """The normal closes, but the history starts at business day 6 (earlier events predate it)."""
+
+    def __call__(self, ticker):
+        lines = _closes_csv().decode().splitlines()
+        return "\n".join(lines[:1] + lines[1 + 6:]).encode(), "complete", {}, None
+
+
+def test_store_keeps_an_event_before_the_first_close_as_a_skipped_row_in_the_ordinal(
+        tmp_path, monkeypatch):
+    from engine.v2.contracts import DataQuery, KeyPredicate
+    from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
+
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    bdays = pd.bdate_range("2024-01-02", "2024-01-31")
+    events = [_event_row("AAAA", bdays[i]) for i in (1, 8, 10, 12, 14, 18, 20)]
+    head = _build_parent(conn, clock, store, events_rows=events)
+    result = _run(conn, tmp_path, "late", head, ("AAAA",), monkeypatch,
+                  fetcher=_LateHistoryFetcher())
+    assert result.status == "complete"
+
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(_head_row(conn)["snapshot_id"])
+    dvr = snapshot.table_versions[COMPUTED_MOVES_TABLE_NAME]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=("AAAA",)),)
+    bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=COMPUTED_MOVES_TABLE_NAME,
+        table_contract_ref=dvr.table_contract_ref, key_filter=key_filter, time_interval=None)
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
+        columns=("event_date", "event_ordinal", "admitted", "skipped", "realized_move_pct"),
+        key_filter=key_filter, order_by=("ticker", "event_date"),
+        max_batch_rows=min(100, bound), max_result_rows=min(100, bound))
+    rows = [r for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
+            for r in batch.to_pylist()]
+    assert [r["event_ordinal"] for r in rows] == list(range(7))
+    assert [r["admitted"] for r in rows] == [False] * 4 + [True] * 3
+    assert [r["skipped"] for r in rows] == [True] + [False] * 6
+    assert rows[0]["realized_move_pct"] is None
