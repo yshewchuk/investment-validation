@@ -20,7 +20,9 @@ from engine.v2.foundation.final_holdout import declaration_from_document, reques
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
+    NATIVE_GATE_ENTRYPOINT,
     NATIVE_GATE_RUNNERS,
+    NATIVE_GATE_WORKER,
     ExperimentSpec,
     register_hypothesis_in_transaction,
     resolve_experiment_plan,
@@ -29,6 +31,7 @@ from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.ops.native_registration import verified_registration_bytes
 from engine.v2.research._pricing import STRUCTURES
 from engine.v2.research.experiment_population import load_population
+from engine.v2.research.magnitude_folds import magnitude_window, plan_magnitude_folds
 
 
 @dataclass(frozen=True)
@@ -47,13 +50,21 @@ class NativeRegistration:
 
 
 def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
-             final_read=None, expected=None):
+             final_read=None, expected=None, magnitude_training_start=None, admission=None):
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
     if (plan.runner in NATIVE_GATE_RUNNERS
             and "strategy" in plan.economic_params and plan.economic_params["strategy"] not in STRUCTURES):
         raise fail("INVALID_EXPERIMENT_SPEC", "declared strategy is not a supported native structure")
+    magnitude = None
+    if magnitude_training_start is not None:
+        if final_read is not None or plan.price_source != "computed_moves":
+            raise fail("INVALID_EXPERIMENT_SPEC", "magnitude registration requires computed_moves and no final read")
+        try:
+            magnitude = magnitude_window(plan.folds, magnitude_training_start)
+        except DataError:
+            raise fail("INVALID_EXPERIMENT_SPEC", "invalid magnitude temporal window") from None
     try:
         declaration = None if final_read is None else declaration_from_document(to_document(final_read))
     except (ValueError, TypeError):
@@ -71,7 +82,8 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
         root = Path(code_root).resolve()
         if (root / plan.runner).resolve() != root / plan.runner:
             raise ValueError
-        sources = source_closure(root, [plan.runner])
+        entries = [plan.runner] + ([NATIVE_GATE_ENTRYPOINT] if plan.runner == NATIVE_GATE_WORKER else [])
+        sources = source_closure(root, entries)
         if any((root / name).resolve() != root / name for name in sources):
             raise ValueError
     except (ArtifactError, OpsError, OSError, SyntaxError, ValueError, TypeError):
@@ -91,18 +103,39 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
     if declaration is not None:
         document.update(schema_version="native_experiment_registration.v1.1",
                         final_read=to_document(declaration))
+    if magnitude is not None:
+        document.update(schema_version="native_experiment_registration.v1.2", magnitude_request=magnitude)
+    key = content_hash({"experiment_id": plan.experiment_id, "arm": plan.arms[0]})
+    run_id = "native_" + key.removeprefix("sha256:")
+    if admission is not None:
+        original = verified_registration_bytes(*admission, run_id)
+        if original is None and magnitude is not None:
+            raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
+        if original is not None:
+            stored = NativeRegistration(run_id, original)
+            if magnitude is not None or stored.document["schema_version"] == "native_experiment_registration.v1.2":
+                if expected is not None and expected != stored:
+                    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "expected registration differs from original")
+                expected = stored
     if expected is not None and any(expected.document[name] != value for name, value in document.items()):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native execution inputs changed before population admission")
-    events = load_population(repository, snapshot, as_of_month=as_of_month,
-                             purpose="selection", event_ids=event_ids)
+    if magnitude is not None:
+        if expected is not None and expected.document["holdouts"]["holdout_as_of_month"] != as_of_month:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "magnitude holdout month differs from registration")
+        temporal = plan_magnitude_folds(repository, snapshot, as_of_month=as_of_month,
+                                        event_ids=event_ids, **magnitude)
+        document["magnitude_plan"] = temporal
+        selected_ids, context = [event["event_id"] for event in temporal["events"]], temporal
+    else:
+        events = load_population(repository, snapshot, as_of_month=as_of_month,
+                                 purpose="selection", event_ids=event_ids)
+        selected_ids, context = list(events["event_id"]), events.iloc[0]
     document.update({
-        "event_ids": sorted(events["event_id"]),
-        "holdouts": {name: events.iloc[0][name] for name in (
+        "event_ids": sorted(selected_ids),
+        "holdouts": {name: context[name] for name in (
             "holdout_as_of_month", "random_membership_version", "rolling_membership_version")},
     })
-    key = content_hash({"experiment_id": plan.experiment_id, "arm": plan.arms[0]})
-    return NativeRegistration("native_" + key.removeprefix("sha256:"),
-                              canonical_json(document).encode("utf-8")), spec
+    return NativeRegistration(run_id, canonical_json(document).encode("utf-8")), spec
 
 
 def _existing(conn, store, registration):
@@ -115,14 +148,15 @@ def _existing(conn, store, registration):
 
 
 def register_native(conn, store, repository, spec, *, code_root, as_of_month,
-                    scope="shadow", event_ids=None, final_read=None):
+                    scope="shadow", event_ids=None, final_read=None, magnitude_training_start=None):
     """Explicitly reserve an exact current binding before any outcome is read.
 
     Publication precedes the short catalog transaction. A failed commit can
     leave an unreferenced complete object, never a partially admitted binding.
     """
     registration, spec = _binding(repository, spec, code_root=code_root, as_of_month=as_of_month,
-                                  scope=scope, event_ids=event_ids, final_read=final_read)
+                                  scope=scope, event_ids=event_ids, final_read=final_read,
+                                  magnitude_training_start=magnitude_training_start)
     if _existing(conn, store, registration):
         return registration
     ref = store.publish_bytes(registration.binding_json,
@@ -144,10 +178,12 @@ def register_native(conn, store, repository, spec, *, code_root, as_of_month,
 
 
 def require_native_registration(conn, store, repository, spec, *, code_root,
-                                as_of_month, scope="shadow", event_ids=None, final_read=None, expected=None):
+                                as_of_month, scope="shadow", event_ids=None, final_read=None, expected=None,
+                                magnitude_training_start=None):
     """Read-only admission; never create registration, ledger, or result rows."""
     registration, _ = _binding(repository, spec, code_root=code_root, as_of_month=as_of_month,
-                               scope=scope, event_ids=event_ids, final_read=final_read, expected=expected)
+                               scope=scope, event_ids=event_ids, final_read=final_read, expected=expected,
+                               magnitude_training_start=magnitude_training_start, admission=(conn, store))
     if not _existing(conn, store, registration):
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     return registration

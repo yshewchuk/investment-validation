@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
@@ -19,16 +20,21 @@ from engine.v2.foundation import (
     SystemClock,
     content_hash,
 )
-from engine.v2.ops import stages, worker
+from engine.v2.ops import stages
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.executor import THREAD_VARIABLES
-from engine.v2.ops.experiments import experiment_spec_from_document, experiments_ledger_path
+from engine.v2.ops.experiments import (
+    NATIVE_GATE_ENTRYPOINT,
+    experiment_spec_from_document,
+    experiments_ledger_path,
+)
 from engine.v2.ops.fingerprints import environment_identity, snapshot_code, worker_source_manifest
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
+from experiments import native_gate_entrypoint as worker
 from experiments.native_gate_worker import RUNNER
 from experiments.native_registration import register_native
 from tests.ops_support import TEST_POLICY, run_until
@@ -192,6 +198,71 @@ def test_supervised_arms_consume_independent_fill_and_never_record(source, tmp_p
     assert list(tmp_path.rglob("LEDGER.csv")) == [ledger]
     assert not list(tmp_path.rglob("REPORT.md"))
     assert not list(tmp_path.rglob("*.append.lock"))
+
+
+def test_fixed_child_imports_pricing_only_after_pid_launch_gate(source, tmp_path, monkeypatch):
+    """The real child reaches its stdin gate before loading the registered adapter."""
+    from engine.v2.ops import executor
+
+    checkout = tmp_path / "checkout"
+    manifest = worker_source_manifest(REPO)
+    assert NATIVE_GATE_ENTRYPOINT in manifest and RUNNER in manifest
+    snapshot_code(REPO, checkout, manifest)
+    ready, imported = tmp_path / "entry-ready", tmp_path / "pricing-imported"
+    entry = checkout / NATIVE_GATE_ENTRYPOINT
+    adapter = checkout / RUNNER
+    for path in (entry, adapter):
+        path.chmod(0o600)
+    entry.write_text(entry.read_text().replace(
+        'if __name__ == "__main__":',
+        'if __name__ == "__main__":\n    from pathlib import Path\n'
+        f'    Path({str(ready)!r}).write_text("ready")'))
+    adapter.write_text(adapter.read_text().replace(
+        "from pathlib import Path\n", "from pathlib import Path\n"
+        f'Path({str(imported)!r}).write_text("imported")\n'))
+    request = _registered(source, code_root=checkout)
+    assert NATIVE_GATE_ENTRYPOINT in request[1].document["source_closure"]
+    record_launch, launches = executor.record_launch, []
+
+    def observe_gate(*args, **kwargs):
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.read_text() == "ready"
+        assert not imported.exists()
+        result = record_launch(*args, **kwargs)
+        assert not imported.exists()
+        launches.append(True)
+        return result
+
+    monkeypatch.setattr(executor, "record_launch", observe_gate)
+    result = _supervise(tmp_path, source, *request, code_source=checkout)
+    assert result["variant_id"] == request[1].variant_id
+    assert imported.read_text() == "imported" and launches == [True]
+
+
+@pytest.mark.parametrize("name", ["experiment", "legacy_score", "os", None])
+def test_native_entrypoint_cannot_dispatch_other_workers(tmp_path, name):
+    """The fixed composition root has no fallback to another or arbitrary runner."""
+    with pytest.raises(OpsError) as error:
+        worker.dispatch(name, {}, tmp_path)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.message == "unsupported native gate worker"
+    assert error.value.problem.retryable is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ops_worker_never_imports_native_pricing_adapter(tmp_path):
+    """Inspect the actual import closure and exercise the old dispatch boundary."""
+    from engine.v2.ops import worker as ops_worker
+    from engine.v2.ops.fingerprints import source_closure
+
+    sources = source_closure(REPO, ["engine/v2/ops/worker.py"])
+    assert RUNNER not in sources and NATIVE_GATE_ENTRYPOINT not in sources
+    assert not any(path.startswith("engine/v2/research/") for path in sources)
+    with pytest.raises(ValueError, match="^unsupported worker$"):
+        ops_worker.dispatch("native_gate_pricing", {}, tmp_path)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_supervised_unconsumed_economics_refuse_without_receipt(source, tmp_path):
@@ -424,6 +495,17 @@ def test_holdout_request_refuses_before_catalog_or_staged_reads(tmp_path, purpos
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", {"purpose": purpose, "no_ledger": True}, tmp_path)
     assert error.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert error.value.problem.retryable is False
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("purpose", [None, True, 1, [], {}])
+def test_malformed_purpose_refuses_before_catalog_or_staged_reads(tmp_path, purpose):
+    """Malformed purposes have R1 semantics before any read or publication."""
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", {"purpose": purpose, "no_ledger": True}, tmp_path)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.message == "native pricing purpose must be a string"
     assert error.value.problem.retryable is False
     assert list(tmp_path.iterdir()) == []
 
@@ -761,19 +843,19 @@ def test_smoke_opt_in_is_required_by_submission_and_worker(tmp_path, opt_in):
     assert list(stage.iterdir()) == []
 
 
+@pytest.mark.parametrize("source_path", [RUNNER, NATIVE_GATE_ENTRYPOINT])
 @pytest.mark.parametrize("change", ["bytes", "missing", "malformed", "encoding", "unreadable"])
 def test_registered_code_must_match_the_running_worker(
-        source, tmp_path, single_thread, forbidden_pricing, monkeypatch, change):
+        source, tmp_path, single_thread, forbidden_pricing, monkeypatch, change, source_path):
     """A real source-closure change cannot reuse a registration in another checkout."""
-    from engine.v2.ops.fingerprints import source_closure
-
     document, registration, parameters = _registered(source)
+    assert NATIVE_GATE_ENTRYPOINT in registration.document["source_closure"]
     code = tmp_path / "changed-code"
-    for name in source_closure(REPO, [RUNNER]):
+    for name in registration.document["source_closure"]:
         path = code / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((REPO / name).read_bytes())
-    runner = code / RUNNER
+    runner = code / source_path
     if change == "bytes":
         runner.write_bytes(runner.read_bytes() + b"\n# Synthetic source identity change.\n")
     elif change == "missing":
@@ -900,7 +982,7 @@ def test_staged_documents_refuse_unsafe_files_without_blocking(source, tmp_path,
     program = """
 import json, sys
 from pathlib import Path
-from engine.v2.ops.worker import dispatch
+from experiments.native_gate_entrypoint import dispatch
 from engine.v2.ops.errors import OpsError
 try:
     dispatch('native_gate_pricing', json.loads(sys.argv[1]), Path(sys.argv[2]))
@@ -1073,7 +1155,7 @@ def test_receipt_destination_refuses_without_truncation_or_blocking(source, tmp_
     program = """
 import errno, json, os, resource, signal, sys
 from pathlib import Path
-from engine.v2.ops.worker import dispatch
+from experiments.native_gate_entrypoint import dispatch
 from engine.v2.ops.errors import OpsError
 from experiments import native_gate_worker as native
 replacements = []

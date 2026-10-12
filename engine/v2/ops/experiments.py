@@ -36,6 +36,7 @@ SUPPORTED_ECONOMIC_KEYS = frozenset({"fill", "exit"})
 
 #: Shared native runner vocabulary; the worker admits only its fixed source.
 NATIVE_GATE_WORKER = "experiments/native_gate_worker.py"
+NATIVE_GATE_ENTRYPOINT = "experiments/native_gate_entrypoint.py"
 NATIVE_GATE_RUNNERS = frozenset({"native-gate-replay", NATIVE_GATE_WORKER})
 
 

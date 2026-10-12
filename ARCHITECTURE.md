@@ -104,10 +104,10 @@ evidence. See the models and data component contracts.
   validating recipe and state parameters for `ops plan --kind training`.
   Describe dependencies at the module level because some modules serve shared
   runtime paths.
-  The smoke-only `native_gate_pricing` kind reaches `experiments.native_gate_worker`
-  through `engine.v2.ops.worker.dispatch` to verify preregistration and consume pinned
-  per-arm pricing inputs through research population/replay adapters. Direct-edge
-  layer checks do not traverse unlayered callbacks. Its receipt grants no recording authority.
+  The smoke-only `native_gate_pricing` kind launches the fixed unlayered child
+  `experiments.native_gate_entrypoint`. After the ops protocol's launch gate opens,
+  its callback imports native pricing; ops never imports that adapter or research.
+  The verified source closure includes both files; the receipt grants no recording authority.
   - `tools/oc_check.py` appends one best-effort JSONL line per run to
     `$OC_METRICS_DIR/oc_check.jsonl` (default `.oc_logs/oc_check.jsonl`, per worktree);
     its module docstring defines the fields and failure behavior.

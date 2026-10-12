@@ -4036,10 +4036,7 @@ def test_replay_change_selects_its_transitive_worker_consumers():
     """The real replay source selects its native-worker and other actual consumers."""
     names = pilot.enabled_modules(CFG)
     assert set(pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"])) == {
-        "foundation", "parity", "data_store", "data_documents", "serving", "research",
-        "ops_cli", "ops_runtime", "ops_catalog_store", "ops_catalog_state",
-        "ops_catalog_sched", "ops_catalog_submit", "ops_legacy", "ops_effects",
-        "ops_decisions", "ops_nightly", "ops_snapshots",
+        "ops_cli", "ops_runtime", "ops_nightly", "research",
     }
 
 

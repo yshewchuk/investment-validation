@@ -43,7 +43,8 @@ def _write_failure_details(root: Path, details: dict) -> None:
         os.close(fd)
 
 
-def main():
+def main(*, dispatcher=None):
+    """Run the gated protocol; a fixed composition root may supply its callback."""
     envelope = json.loads(sys.stdin.buffer.readline())
     os.sched_setaffinity(0, envelope["cpu_ids"])
     root = Path(envelope["staging"])
@@ -51,7 +52,8 @@ def main():
     fd = int(envelope["result_fd"])
     worker_progress.configure(root)
     try:
-        result = dispatch(envelope["worker"], envelope["parameters"], root, envelope=envelope)
+        result = (dispatch if dispatcher is None else dispatcher)(
+            envelope["worker"], envelope["parameters"], root, envelope=envelope)
         result.update(schema_version="worker_result.v1.0", job_id=envelope["job_id"],
                       attempt_id=envelope["attempt_id"], fence=envelope["fence"])
         result["self_peak_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
@@ -172,9 +174,6 @@ def dispatch(worker, parameters, root, *, envelope=None):
                              "threads": os.environ["OMP_NUM_THREADS"]}}
     if worker == "experiment":
         return _dispatch_experiment(parameters, root)
-    if worker == "native_gate_pricing":
-        from experiments.native_gate_worker import run
-        return run(parameters, root)
     if worker in ("training", "models_promote", "models_rollback"):
         return _dispatch_model_worker(worker, parameters, root)
     raise ValueError("unsupported worker")

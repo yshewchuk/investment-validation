@@ -18,6 +18,7 @@ from engine.v2.foundation import ArtifactError, ArtifactStore, canonical_json, f
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.executor import THREAD_VARIABLES
 from engine.v2.ops.experiments import (
+    NATIVE_GATE_ENTRYPOINT,
     NATIVE_GATE_WORKER,
     experiment_spec_from_document,
     resolve_experiment_plan,
@@ -95,7 +96,7 @@ def _admit(parameters, root, conn, store):
     verify_native_registration(conn, store, registration)
     binding = registration.document
     try:
-        current_source = source_closure(Path.cwd(), [RUNNER])
+        current_source = source_closure(Path.cwd(), [RUNNER, NATIVE_GATE_ENTRYPOINT])
     except (OpsError, OSError, SyntaxError, ValueError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registered source cannot be verified") from None
     if (registration.variant_id != parameters["variant_id"]
@@ -113,7 +114,10 @@ def run(parameters, root):
     """Read only the registered snapshot and return a complete staged receipt."""
     if not isinstance(parameters, Mapping):
         raise fail("INVALID_EXPERIMENT_SPEC", "native worker arguments must be a mapping")
-    if parameters.get("purpose", "sweep") != "sweep":
+    purpose = parameters.get("purpose", "sweep")
+    if not isinstance(purpose, str):
+        raise fail("INVALID_EXPERIMENT_SPEC", "native pricing purpose must be a string")
+    if purpose != "sweep":
         raise fail("HOLDOUT_ACCESS_DENIED", "native pricing permits sweep reads only")
     if parameters.get("no_ledger") is not True:
         raise fail("INVALID_EXPERIMENT_SPEC", "native pricing is smoke-only")
