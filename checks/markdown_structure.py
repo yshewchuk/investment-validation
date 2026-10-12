@@ -147,8 +147,13 @@ def scoped(violations: list[Violation], touched: set[int] | None) -> list[Violat
 
 
 def _git(*args: str) -> bytes:
+    # The user's git config (color.ui=always, diff.external) must not change
+    # the parsed output; paths are read NUL-separated, so quotepath is moot.
+    if args and args[0] == "diff":
+        args = (args[0], "--no-color", "--no-ext-diff", *args[1:])
     try:
-        proc = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, timeout=60)
+        proc = subprocess.run(["git", "-c", "color.ui=never", "-C", str(ROOT), *args],
+                              capture_output=True, timeout=60)
     except subprocess.TimeoutExpired as exc:
         raise LintError(f"git {' '.join(args)} timed out after 60s") from exc
     if proc.returncode != 0:

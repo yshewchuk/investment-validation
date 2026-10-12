@@ -205,3 +205,16 @@ def test_unreadable_file_exits_2(repo, monkeypatch, capsys):
     monkeypatch.setattr(ms.Path, "read_bytes", fail)
     assert ms.main(["--all", "--quiet"]) == 2
     assert "unreadable" in capsys.readouterr().err
+
+
+def test_user_git_color_and_external_diff_config_do_not_hide_violations(repo, monkeypatch, capsys):
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "color.ui")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "diff.external")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "false")
+    (repo / "new.md").write_text("intro\n# Bad\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    assert ms.main(["--quiet"]) == 1
+    assert "new.md:2: heading-before" in capsys.readouterr().out
+
