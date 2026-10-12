@@ -96,7 +96,8 @@ def test_clean_required_and_succeeded_qualification_is_completed():
                          ids=["good-first", "bad-first"])
 def test_required_outcome_reduces_heterogeneous_items_in_either_order(names):
     expected = {name: "required" for name in names}
-    observed = {names[0]: Disposition("succeeded"), names[1]: Disposition("failed")}
+    by_name = {"good": Disposition("succeeded"), "bad": Disposition("failed")}
+    observed = {name: by_name[name] for name in names}
     report = _report(expected, observed)
     assert report["required_outcome"] == "failed"
     assert report["status"] == "failed"
@@ -107,10 +108,11 @@ def test_required_outcome_reduces_heterogeneous_items_in_either_order(names):
 @pytest.mark.parametrize("names", [("good", "bad"), ("bad", "good")],
                          ids=["good-first", "bad-first"])
 def test_qualification_outcome_reduces_heterogeneous_items_in_either_order(names):
-    expected = {"primary": "required", names[0]: "qualification",
-                names[1]: "qualification"}
-    observed = {"primary": Disposition("succeeded"),
-                names[0]: Disposition("succeeded"), names[1]: Disposition("failed")}
+    expected = {"primary": "required"}
+    expected.update({name: "qualification" for name in names})
+    by_name = {"good": Disposition("succeeded"), "bad": Disposition("failed")}
+    observed = {"primary": Disposition("succeeded")}
+    observed.update({name: by_name[name] for name in names})
     report = _report(expected, observed)
     assert report["required_outcome"] == "completed"
     assert report["qualification_outcome"] == "failed"
