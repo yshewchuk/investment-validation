@@ -660,15 +660,15 @@ def test_no_caller_supplied_plan_parameter(source, monkeypatch, admit):
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
 
-def test_prediction_cli_does_not_expose_magnitude_registration(monkeypatch, capsys):
-    """The existing CLI refuses the new-mode option before constructing a store."""
+def test_prediction_cli_rejects_magnitude_clock_for_default_target(monkeypatch, capsys):
+    """Magnitude clocks cannot silently change the default target before store access."""
     from experiments import v2_prediction as cli
     monkeypatch.setattr(cli.foundation, "ArtifactStore", _forbid)
     with pytest.raises(SystemExit) as caught:
         cli.main(["register", "--spec", "unused", "--catalog", "unused", "--store-root", "unused",
                   "--as-of-month", "2026-01", "--magnitude-training-start", "2023-12-10"])
     assert caught.value.code == 2
-    assert "unrecognized arguments: --magnitude-training-start 2023-12-10" in capsys.readouterr().err
+    assert "positive_move accepts neither" in capsys.readouterr().err
 
 
 def test_registration_effects_are_only_its_binding_and_reservation(source, monkeypatch):
