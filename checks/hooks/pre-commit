@@ -38,4 +38,8 @@ python3 "$ROOT/checks/rearchitecture_phase1_lint.py" --quiet
 #    refactor needed first). See checks/architecture_doc_budgets.py.
 python3 "$ROOT/checks/architecture_doc_budgets.py" --quiet
 
-echo "pre-commit: hygiene, layers, budgets, READMEs, v2 lint and doc budgets all green"
+# 7. Markdown structure (blank lines around headings, tables and fences; closed
+#    fences), staged blobs, only on lines this commit adds or changes.
+python3 "$ROOT/checks/markdown_structure.py" --quiet
+
+echo "pre-commit: hygiene, layers, budgets, READMEs, v2 lint, doc budgets and markdown structure all green"

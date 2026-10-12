@@ -528,6 +528,7 @@ Only a tracked path absent from the worktree reads as empty.
   | Compared values differ | Preserve both values and shared-comparator findings |
   | Same verified inputs and code on retry | Same semantic report; output publication is atomic |
   | Output targets the retained corpus | Refuse; no partial source write |
+
 - **Native parity summary projection (serving, read-only).**
 
   `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`

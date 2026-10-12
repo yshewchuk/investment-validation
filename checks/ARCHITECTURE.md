@@ -31,6 +31,16 @@ decreases, and a root-level test cannot be modified in place (move it first).
 `phase1_suite()` in `v2_coverage_ratchet.py` resolves baseline tests where they
 now live and raises `FileNotFoundError` if one is missing.
 
+`markdown_structure.py` lints Markdown structure that renders wrongly: an ATX
+heading needs a blank line before (unless on line 1) and after; a table needs
+one before and after (unless it ends the file); a top-level fenced block
+needs one before and after and must be closed. Fenced content is never
+scanned as headings or tables. Lists are not checked. Default mode reads
+staged blobs and flags only violations touching lines the commit adds or
+changes (`--base-ref REF` does the same for `REF...HEAD`, run in CI by the
+Tests workflow; `--all` scans every tracked `.md` in full). Standard library
+only; the pre-commit hook runs the default mode.
+
 The Phase 1 check binds the active test inventory to source and test
 contents. It reports suite-version, inventory, or source drift when the
 measurement differs from the active profile.
@@ -75,6 +85,8 @@ check defines missing-input and failure outcomes:
 | `repo_hygiene.py` scan | Clean: exit 0; violations: exit 1 |
 | Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
 | Worktree hygiene read failure | Default returns empty bytes; `strict=True` raises `OSError`; missing non-symlink paths return empty bytes in either mode |
+| `markdown_structure.py` finds a violation on a scoped line | Prints `path:line: rule`; exit 1 |
+| `markdown_structure.py` git or file read fails, or a file is not UTF-8 | Message on stderr; exit 2; never read as clean |
 | Cache | No shared cache contract; reuse is check-specific |
 | Retry | No automatic package retry; check-specific if any |
 | Transaction | No package-wide transaction contract |

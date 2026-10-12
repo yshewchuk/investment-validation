@@ -1,0 +1,141 @@
+"""Tests for checks/markdown_structure.py: one failing and one passing fixture per rule."""
+import subprocess
+
+import pytest
+
+from checks import markdown_structure as ms
+
+
+def rules(text):
+    return sorted(v.rule for v in ms.lint_text(text))
+
+
+def test_heading_needs_blank_before():
+    assert rules("para\n# Title\n\nbody\n") == ["heading-before"]
+    assert rules("# First line\n\nbody\n\n## Two\n\nbody\n") == []
+
+
+def test_heading_needs_blank_after_but_may_end_file():
+    assert rules("# Title\nbody\n") == ["heading-after"]
+    assert rules("body\n\n# Title\n") == []
+
+
+def test_table_needs_blank_before():
+    assert rules("para\n| a | b |\n|---|---|\n| 1 | 2 |\n") == ["table-before"]
+    assert rules("para\n\n| a | b |\n|---|---|\n| 1 | 2 |\n") == []
+
+
+def test_table_must_not_absorb_following_paragraph():
+    assert rules("| a | b |\n|---|---|\n| 1 | 2 |\nclosing sentence\n") == ["table-after"]
+    assert rules("| a | b |\n|---|---|\n| 1 | 2 |\n\nclosing sentence\n") == []
+    assert rules("| a | b |\n|---|---|\n| 1 | 2 |") == []
+
+
+def test_fence_needs_blank_before_and_after():
+    assert rules("para\n```\ncode\n```\n\nnext\n") == ["fence-before"]
+    assert rules("para\n\n```\ncode\n```\nnext\n") == ["fence-after"]
+    assert rules("para\n\n```\ncode\n```\n\nnext\n") == []
+
+
+def test_unclosed_fence_is_reported_at_opening_line():
+    found = ms.lint_text("para\n\n```\ncode\n")
+    assert [(v.line, v.rule) for v in found] == [(3, "fence-unclosed")]
+
+
+def test_fenced_content_is_not_read_as_heading_or_table():
+    text = "intro\n\n```\n# not a heading\n| a | b |\n|---|---|\nplain\n```\n\nend\n"
+    assert rules(text) == []
+    tilde = "intro\n\n~~~\n# x\n```\n# still inside\n~~~\n\nend\n"
+    assert rules(tilde) == []
+
+
+def test_shorter_or_other_fence_does_not_close():
+    assert rules("a\n\n````\n```\ncode\n````\n\nb\n") == []
+    assert [v.rule for v in ms.lint_text("a\n\n````\n```\ncode\n")] == ["fence-unclosed"]
+
+
+def test_indented_fence_in_list_is_exempt_from_blank_rules():
+    assert rules("- item\n  ```\n  code\n  ```\n- next\n") == []
+
+
+def test_lists_are_not_checked():
+    assert rules("para\n- a\n- b\npara two\n") == []
+
+
+def test_inline_code_span_at_line_start_is_not_a_fence():
+    assert rules("para\n\n   ```json``` appendix\nmore\n") == []
+
+
+def test_changed_lines_parses_hunks_and_deletions():
+    diff = "@@ -1,0 +2,2 @@\n+a\n+b\n@@ -9,3 +11 @@\n-x\n+y\n@@ -20,2 +22,0 @@\n-gone\n"
+    assert ms.changed_lines(diff) == {2, 3, 11, 22, 23}
+
+
+def test_scoped_keeps_only_violations_touching_changed_lines():
+    found = ms.lint_text("# A\ntext\n\n# B\ntext\n")
+    assert len(found) == 2
+    assert [v.line for v in ms.scoped(found, {5})] == [4]
+    assert ms.scoped(found, set()) == []
+    assert ms.scoped(found, None) == found
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    # A pre-commit hook run exports these; they would point git at the real repo.
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "old.md").write_text("# Old\nlegacy defect\n", encoding="utf-8")
+    _git(tmp_path, "add", "old.md")
+    _git(tmp_path, "commit", "-qm", "base")
+    monkeypatch.setattr(ms, "ROOT", tmp_path)
+    return tmp_path
+
+
+def test_staged_mode_ignores_untouched_legacy_defects(repo, capsys):
+    (repo / "new.md").write_text("# New\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    assert ms.main(["--quiet"]) == 0
+    assert ms.main(["--all", "--quiet"]) == 1
+    assert "old.md:1: heading-after" in capsys.readouterr().out
+
+
+def test_staged_mode_flags_a_new_defect(repo, capsys):
+    (repo / "new.md").write_text("intro\n# Bad\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    assert ms.main(["--quiet"]) == 1
+    assert "new.md:2: heading-before" in capsys.readouterr().out
+
+
+def test_base_ref_mode_checks_only_the_branch_diff(repo, capsys):
+    _git(repo, "branch", "base")
+    (repo / "old.md").write_text("# Old\nlegacy defect\n\n| a | b |\n|---|---|\n| 1 | 2 |\nabsorbed\n",
+                                 encoding="utf-8")
+    _git(repo, "commit", "-qam", "edit")
+    assert ms.main(["--base-ref", "base", "--quiet"]) == 1
+    out = capsys.readouterr().out
+    assert "old.md:7: table-after" in out
+    assert "heading-after" not in out
+
+
+def test_undecodable_file_and_bad_ref_exit_2_never_clean(repo, capsys):
+    (repo / "bin.md").write_bytes(b"\xff\xfe bad\n")
+    _git(repo, "add", "bin.md")
+    assert ms.main(["--quiet"]) == 2
+    assert "not valid UTF-8" in capsys.readouterr().err
+    assert ms.main(["--base-ref", "no-such-ref", "--quiet"]) == 2
+
+
+def test_quiet_suppresses_the_clean_message(repo, capsys):
+    (repo / "ok.md").write_text("# Ok\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "ok.md")
+    assert ms.main(["--quiet"]) == 0
+    assert capsys.readouterr().out == ""
+    assert ms.main([]) == 0
+    assert "clean" in capsys.readouterr().out
