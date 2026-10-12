@@ -146,3 +146,14 @@ def test_resolved_snapshot_with_different_identity_refuses_without_scan(tmp_path
         assert repository.scans == []
     finally:
         conn.close()
+
+
+def test_events_table_without_fragments_is_an_empty_collapsed_population(tmp_path):
+    conn, repository, snapshot = _commit(tmp_path, list(_events().values()), include_targets=False)
+    try:
+        repository.fragment_records = lambda _snapshot, _table: []
+        with pytest.raises(DataError, match="POPULATION_COLLAPSED") as refusal:
+            load_final_population(repository, _request(snapshot))
+        assert not refusal.value.problem.retryable
+    finally:
+        conn.close()

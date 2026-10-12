@@ -329,9 +329,10 @@ Request validity proves neither winner selection nor read eligibility. The later
 
 | Population reader condition | Outcome |
 |---|---|
-| Invalid request bytes, unsupported membership version, or as-of month later than the current UTC month | Non-retryable `HOLDOUT_ACCESS_DENIED` before any scan. |
+| Invalid request object, unsupported membership version, or as-of month later than the current UTC month | Non-retryable `HOLDOUT_ACCESS_DENIED` before any scan. |
 | Snapshot unresolved, or resolved identity differs from `request.snapshot_id` | `SNAPSHOT_UNRESOLVED`; no fallback. |
-| Missing table or repository integrity failure | Repository's typed refusal; no partial population. |
+| `earnings_events` absent from the snapshot | `CONTRACT_MISMATCH`; no partial population. Present with no fragments, the scan yields no events and the empty-population row applies. |
+| Any `resolve` failure, including manifest corruption | `SNAPSHOT_UNRESOLVED` (the repository's own code is not surfaced). Integrity failures during the scan propagate as the repository's typed refusal. |
 | Both sets empty after ambiguity exclusion | `POPULATION_COLLAPSED`; never an empty success. Preregistered completeness remains the later preflight's refusal. |
 | Retry, cache, write | None; read-only, identical pinned inputs return identical populations. |
 
