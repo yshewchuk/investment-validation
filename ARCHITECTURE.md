@@ -261,23 +261,31 @@ evidence. See the models and data component contracts.
     `_has_unresolved_import_attempt`'s docstrings, not here.
   - **Mutation PR status** (`tools/mutation_pr_status.py`; once wired, the gremlins
     `report` job runs it on a PR; the workflow step lands in a follow-up commit
-    on this PR, so until then `mutation.yml` does not call it): inputs are the merged `summary.json`, the PR's
-    `git diff -U0` and, optionally, main's last merged `summary.json`; it prints
-    a JSON verdict and sets `state` (`success`|`failure`) and `description`
-    (at most 140 characters), which `report_status` posts as `mutation/pr`.
-    Each scheduled module is `pr_owned` (a `survived` row on a line the PR
-    added or changed in a diff of that file, or a run exit code above 0 and
-    below 128 that main's summary does not also show for the module), `infra`
-    (no report, `skipped_reason`, timeout/cancel (`-1`), other negative or 128+ signal exit,
-    gremlin `ERROR` results, an invalid raw report, or a failure main
-    shows too) or `ok`. Only `pr_owned` modules make the state `failure`;
-    infra modules emit `::warning::` lines and are counted in the description,
-    never red. A missing or unparsable merged summary yields `success` with an
-    "unavailable" description and a warning. A missing diff warns and attributes
-    no survivor to the PR; a baseline that cannot be read warns and is treated
-    as empty (nothing is excused). Survivors on lines the PR did
-    not touch never fail a PR. Pure function `classify`; no network or git
-    inside it.
+    on this PR, so until then `mutation.yml` does not call it). Inputs
+    (`--merged-dir`, `--diff-file`, `--baseline-summary`, `--github-output`): the
+    merged `summary.json` and `results.jsonl` in the merged directory, the PR's
+    `git diff -U0`, and optionally main's last merged `summary.json`. Outputs: a
+    JSON verdict on stdout, `::error::` (PR-owned) and `::warning::` (infra)
+    annotations, and `state` (`success`|`failure`) and `description` (at most 140
+    characters, the infra count never cut) appended to `--github-output`, which
+    `report_status` posts as `mutation/pr`. The module set is the summary's
+    `expected_modules` and `modules` plus every module named in a result row.
+    A module is `pr_owned` when a `survived` row sits on a line the PR added or
+    changed (checked first, from the rows alone, so it wins over every infra
+    class and over a missing summary entry), or when its run exit code is 1..127
+    and main's summary does not show the same module also failing with an exit in 1..127
+    (a skipped module in main's summary excuses nothing). Otherwise it is `infra`
+    (no summary entry, `skipped_reason`, timeout/cancel `-1`, other negative or
+    128+ signal exit, gremlin `ERROR` results, an invalid raw report, or a failure
+    main shows too) or `ok`. Only `pr_owned` modules make the state `failure`;
+    infra modules are counted in the description, never red. Failure semantics:
+    the tool exits 0 for every classified or degraded input (only argument errors
+    exit nonzero). A missing or unparsable merged summary yields `success`, an
+    "unavailable" description and a warning. An omitted, missing or undecodable
+    diff, or an unreadable `results.jsonl`, warns and attributes no survivor to
+    the PR; an unreadable baseline warns and excuses nothing. Survivors on lines
+    the PR did not touch never fail a PR. `classify` is a pure function: no
+    network or git.
 
 The active PR workflow uses `tools/mutation_pilot.py select-tests` and the
 import-graph policy described above. For each non-empty diff that yields a
