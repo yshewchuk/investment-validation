@@ -54,6 +54,10 @@ write path.
 
 ## Public interface
 
+`magnitude_history_store` owns build-time native history materialization and its
+stored-only reader; `experiments.magnitude_history_store` provides the explicit
+source-fingerprinted CLI. See the architecture's stored-history contract.
+
 The names the `tools/v2_*` CLIs import. Those CLIs sit in `tools/`, outside
 the `checks/import_layers.py` hook (which only parses `engine*` importers), so
 no `engine` package is observed importing this one; everything else here is

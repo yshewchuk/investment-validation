@@ -529,6 +529,44 @@ handing it to `price_candidate_grid`. None of these research callers are
 parsed by the layering hook (it only parses `engine*` importers, and
 `experiments/` is outside it too).
 
+### Stored magnitude-history materialization
+
+`experiments.magnitude_history_store` is the explicit build/read entrypoint for
+`research_magnitude_history.v1`. It derives a closed context from an exact source
+snapshot, admitted temporal plan, explicit history start, fixed 5/3/1 clocks,
+per-feature missingness and its own source/environment closure. The source stays
+unchanged; a dedicated context scope holds a features-only output snapshot.
+Every row physically binds the context digest. No experiment output is an input.
+
+The builder preflights the complete eligible historical candidate union before
+any outcome opens, then uses the existing protected history arithmetic at build
+time. Protected/ambiguous objects never open; admitted late labels may decode
+availability and be omitted. Repeated per-event metadata scans are an initial
+performance limitation, not a measured production-scale claim. All consumed
+objects, omissions and availability remain stored alongside the eleven columns.
+`n_prior` is zero for empty history; other missing features stay null with explicit
+`on_missing=null`, never runtime imputation or production v4 aggregates.
+
+Three ordered horizons share one event-isolated object. The native primary key
+is `(event_id, context_id, horizon_sessions)` with a context partition. Publication
+inspects new objects and atomically commits their manifests and success receipt
+under an initially empty deterministic scope. Failed publication leaves no
+admitted snapshot; complete unreferenced objects may remain for normal cleanup.
+A matching success receipt returns the original artifact without moving a head.
+Conflicting receipts/heads refuse; no automatic retry or failed-receipt poisoning.
+
+The reader reconstructs the context, verifies its exact committed receipt/output,
+and preflights the complete object set before opening feature objects. It then
+validates all row identity/cutoff/context metadata before decoding feature columns.
+Object checksum verification reads bytes; the second boundary is column decoding,
+not a claim that feature bytes were untouched. Missing/mixed/stale contexts or
+malformed values refuse the whole read. No historical outcomes or arithmetic are
+used by the reader. Native inspected catalog metadata is the trust anchor, not
+independent attestation against an arbitrary malicious catalog writer.
+Schedule-as-known and source-publication availability remain unverified
+reconstruction. This prerequisite grants no experiment/final-read authority and
+does not change registration v1.0–v1.3 or the fixed-intercept baseline.
+
 ## External systems and libraries
 
 None directly: no network call (Polygon/ORATS pulls stay in

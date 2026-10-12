@@ -106,6 +106,21 @@ Existing publication/transaction/retry semantics above apply unchanged.
 | Existing key has changed code, environment, plan, snapshot, population or context, or corrupt stored evidence | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; existing catalog and artifact bytes stay unchanged. |
 | Publication or catalog commit fails | No partial registration is admitted; a complete unreferenced artifact may remain. No automatic retry. |
 
+## Stored research-history entrypoint
+
+`python -m experiments.magnitude_history_store build|read` requires a catalog,
+object store, exact source snapshot, holdout month, evaluation years, training
+start and earlier history start. `read` also requires the exact feature snapshot.
+The entrypoint fingerprints its installed source closure and numerical environment;
+callers cannot submit features, a context document or an alternative producer.
+Research owns the native contract, protected build and stored-only reader; ops
+supplies existing bootstrap/fingerprinting, with no peer-layer import added.
+Build returns the source/context/output identities; read returns stored rows.
+Both are explicit local operations, never implicit provider downloads or model
+runs. Typed failures produce a refusal and nonzero exit; no partial successful
+output, report, registration or ledger entry is created. A future feature-model
+registration must bind both snapshots and this context before consuming rows.
+
 ## Native outcome publication
 
 `native_outcomes.publish_native_outcome` records one admitted success or typed
