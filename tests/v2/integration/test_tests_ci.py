@@ -193,6 +193,21 @@ def test_a_failing_pytest_fails_the_shard_step(tmp_path):
     assert _run_bash(run, env).returncode != 0
 
 
+@pytest.mark.parametrize(("code", "ok"), [
+    ("0", True), ("1", False), ("2", False), ("4", False), ("5", True),
+])
+def test_pytest_exit_5_is_a_skip_and_every_other_failure_code_propagates(tmp_path, code, ok):
+    run = _step(_workflow(), "Run pytest")["run"]
+    env = dict(_stub_bin(tmp_path, "echo tests/a/test_x.py"), SHARD="ops", SELECTION_FILE="",
+               STUB_PYTEST_EXIT=code)
+    proc = _run_bash(run, env)
+    assert (proc.returncode == 0) is ok
+    if code == "5":
+        assert "no tests" in proc.stdout.lower()
+    if not ok:
+        assert proc.returncode == int(code)
+
+
 def test_failing_matrix_command_fails_the_plan_step(tmp_path):
     run = _step(_workflow(), "Print shard matrix")["run"]
     output = tmp_path / "out"

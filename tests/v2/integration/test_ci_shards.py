@@ -76,6 +76,22 @@ def test_a_duplicate_or_shadowed_pattern_inside_one_shard_is_found(tmp_path):
     assert _first_unclaimed_pattern(ci_shards.load_shards(shadow), files) == ("a", "tests/a/*")
 
 
+def test_a_pattern_duplicated_or_shadowed_across_shards_is_found(tmp_path):
+    files = ["tests/a/test_x.py", "tests/x/test_y.py"]
+    dup = _toml(tmp_path, '[[shard]]\nname="a"\npatterns=["tests/a/*"]\n'
+                          '[[shard]]\nname="b"\npatterns=["tests/a/*", "tests/x/*"]\n'
+                          '[[shard]]\nname="r"\nremainder=true\n')
+    assert _first_unclaimed_pattern(ci_shards.load_shards(dup), files) == ("b", "tests/a/*")
+    shadow = _toml(tmp_path, '[[shard]]\nname="a"\npatterns=["tests/*"]\n'
+                             '[[shard]]\nname="b"\npatterns=["tests/x/*"]\n'
+                             '[[shard]]\nname="r"\nremainder=true\n')
+    assert _first_unclaimed_pattern(ci_shards.load_shards(shadow), files) == ("b", "tests/x/*")
+    clean = _toml(tmp_path, '[[shard]]\nname="a"\npatterns=["tests/a/*"]\n'
+                            '[[shard]]\nname="b"\npatterns=["tests/x/*"]\n'
+                            '[[shard]]\nname="r"\nremainder=true\n')
+    assert _first_unclaimed_pattern(ci_shards.load_shards(clean), files) is None
+
+
 def test_discovery_finds_both_pytest_naming_conventions(tmp_path):
     for rel in ("tests/test_a.py", "tests/v2/x/b_test.py", "tests/v2/x/helper.py",
                 "tests/__pycache__/test_c.py"):
