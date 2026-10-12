@@ -16,16 +16,20 @@ from engine.v2.foundation import (
     safe_relative_path,
     to_document,
 )
+from engine.v2.foundation.final_holdout import declaration_from_document, request_from_registration
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
+    NATIVE_GATE_ENTRYPOINT,
+    NATIVE_GATE_RUNNERS,
+    NATIVE_GATE_WORKER,
     ExperimentSpec,
     register_hypothesis_in_transaction,
     resolve_experiment_plan,
 )
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.ops.native_registration import verified_registration_bytes
-from engine.v2.foundation.final_holdout import declaration_from_document, request_from_registration
+from engine.v2.research._pricing import STRUCTURES
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_folds import magnitude_window, plan_magnitude_folds
 
@@ -50,6 +54,11 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
+    if plan.runner == NATIVE_GATE_WORKER and "strategy" not in plan.economic_params:
+        raise fail("INVALID_EXPERIMENT_SPEC", "native worker requires a registered strategy")
+    if (plan.runner in NATIVE_GATE_RUNNERS
+            and "strategy" in plan.economic_params and plan.economic_params["strategy"] not in STRUCTURES):
+        raise fail("INVALID_EXPERIMENT_SPEC", "declared strategy is not a supported native structure")
     magnitude = None
     if magnitude_training_start is not None:
         if final_read is not None or plan.price_source != "computed_moves":
@@ -75,7 +84,8 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
         root = Path(code_root).resolve()
         if (root / plan.runner).resolve() != root / plan.runner:
             raise ValueError
-        sources = source_closure(root, [plan.runner])
+        entries = [plan.runner] + ([NATIVE_GATE_ENTRYPOINT] if plan.runner == NATIVE_GATE_WORKER else [])
+        sources = source_closure(root, entries)
         if any((root / name).resolve() != root / name for name in sources):
             raise ValueError
     except (ArtifactError, OpsError, OSError, SyntaxError, ValueError, TypeError):

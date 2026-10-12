@@ -216,6 +216,19 @@ def test_real_git_path_fails_closed_for_missing_source_policy_or_base(tmp_path):
         ops.check_repository(tmp_path, base)
 
 
+@pytest.mark.parametrize("statement", [
+    b"from engine.v2.research import replay\n",
+    b"def dispatch():\n    from engine.v2.research import replay\n",
+])
+def test_native_worker_direct_research_import_remains_forbidden(statement):
+    path = "engine/v2/ops/worker.py"
+    actual = (ROOT / path).read_bytes()
+    assert layers.check_files({path: actual}).ok
+    planted = layers.check_files({path: actual + b"\n" + statement})
+    assert any(item.rule == "upward-import" and item.edge.importer == "engine.v2.ops.worker"
+               and item.edge.imported.startswith("engine.v2.research") for item in planted.violations)
+
+
 def test_real_tree_matches_enumerated_findings_and_layer_ci_entrypoint():
     rules = json.loads((ROOT / ops.POLICY).read_bytes())
     files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)
