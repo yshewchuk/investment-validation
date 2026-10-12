@@ -584,14 +584,19 @@ def _is_other_computed_moves_contract(contract_id: str) -> bool:
             and contract_id != COMPUTED_MOVES_CONTRACT.contract_id)
 
 
+def _stale_partition_keys(parent) -> set:
+    """Partition keys the parent still holds under a non-current computed_moves contract."""
+    return {record.partition_key for record in parent.records
+            if _is_other_computed_moves_contract(record.table_contract_ref.contract_id)}
+
+
 def _refuse_unrebuilt_stale_partitions(parent, rewritten, attempts) -> None:
     """Rebuild over migration: a v3 (non-v4) partition is never carried or migrated.
 
     A generation that would drop one it neither rewrites nor attempts (an attempted but
     unbuildable ticker is rebuilt away) refuses before any write.
     """
-    stale = {record.partition_key for record in parent.records
-             if _is_other_computed_moves_contract(record.table_contract_ref.contract_id)}
+    stale = _stale_partition_keys(parent)
     attempted = {str(attempt["ticker"]) for attempt in attempts}
     if stale - rewritten - attempted:
         raise fail("VALIDATION_FAILED",
@@ -722,6 +727,10 @@ def _noop_result(parameters, completed_ids) -> RefreshCallbackResult:
 
 def _no_fragment_result(conn, parameters, attempts, targets, document, parent, clock):
     """Persist fenced audit attempts without publishing a generation."""
+    if _stale_partition_keys(parent):  # a full rebuild must not leave a v3 head live
+        raise fail("VALIDATION_FAILED",
+                   "computed moves full rebuild required: no v4 rows were produced for a "
+                   "parent that still holds non-v4 partitions")
     with transaction(conn):
         _fence_check_for(document.get("attempt_id"), document.get("fence"), clock)(conn)
         _parent_receipt_id_for_commit(
@@ -983,7 +992,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
             cached_outcomes=_plan_cached_outcomes(conn, units, use_cached_receipts),
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(document["expected_head_generation"]))
-        fragment_records, attempts = _capture_targets_typed(
+        fragment_records, attempts = _capture_targets(
             conn, store, plan, fetcher, clock,
             inputs=_TickerChunks(repository, parent.snapshot,
                                  [unit.expected_keys[0] for unit in plan.units], stats),
@@ -1094,14 +1103,15 @@ def _capture_id_for(unit, *, source_hash: str | None = None,
     return "capture_" + content_hash(payload).removeprefix("sha256:")[:32]
 
 
-def _capture_targets_typed(*args, **kwargs):
-    """``_capture_targets`` with build_rows refusals (DataError) surfaced as typed OpsError.
+def _build_rows_typed(*args, **kwargs):
+    """``build_rows`` with its DataError refusals surfaced as a typed OpsError.
 
     The CLI catches only OpsError and ops has no data codes, so the data code rides in the
-    message and ``details["data_code"]`` (the ``snapshot_planning`` precedent).
+    message and ``details["data_code"]`` (the ``snapshot_planning`` precedent). Only the
+    builder is converted: object-store DataErrors from the fragment writer pass through.
     """
     try:
-        return _capture_targets(*args, **kwargs)
+        return build_rows(*args, **kwargs)
     except DataError as exc:
         raise fail("INPUT_CHANGED", "computed moves rows cannot be built from the pinned "
                    f"inputs: {exc.code}: {exc.problem.message}",
@@ -1168,7 +1178,7 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
         capture_id = _capture_id_for(unit, source_hash=source_hash)
         events = events[(events["event_date"] >= pd.Timestamp(sd[0]))
                         & (events["event_date"] < as_of_ts)]
-        rows = build_rows(
+        rows = _build_rows_typed(
             ticker, events, sd, sc, inputs.daily(ticker),
             computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id)
         if not rows:

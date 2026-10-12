@@ -150,6 +150,21 @@ def test_full_rebuild_where_a_v3_ticker_has_no_v4_rows_drops_its_manifest_hash(
     assert set(hashes) <= {"AAAA", "BBBB"}
 
 
+def test_full_rebuild_producing_no_rows_over_a_v3_head_refuses_instead_of_leaving_v3_live(
+        tmp_path, monkeypatch):
+    conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
+    monkeypatch.setattr(store_module, "build_rows", lambda *a, **k: [])
+    written = _write_counts(conn)
+    with pytest.raises(OpsError) as err:
+        _run(conn, tmp_path, "v4none", v3_head, _TICKERS, monkeypatch)
+    assert "VALIDATION_FAILED" in str(err.value)
+    assert "full rebuild required" in str(err.value)
+    assert _write_counts(conn) == written
+    after = _head_row(conn)
+    assert (after["snapshot_id"], after["generation"]) == (
+        v3_head["snapshot_id"], v3_head["generation"])
+
+
 def test_build_rows_refusal_reaches_the_ops_layer_typed_without_writing(tmp_path, monkeypatch):
     """A DataError from build_rows (duplicate event dates, a daily frame without src_iv: those
     refusals are unit-tested on build_rows itself, and the fixture publisher cannot carry such
@@ -169,4 +184,5 @@ def test_build_rows_refusal_reaches_the_ops_layer_typed_without_writing(tmp_path
         _run(conn, tmp_path, "dup", head, _TICKERS, monkeypatch)
     assert "INPUT_CHANGED" in str(err.value)
     assert "CONTRACT_MISMATCH" in str(err.value)
+    assert err.value.problem.details["data_code"] == "CONTRACT_MISMATCH"
     assert _write_counts(conn) == written
