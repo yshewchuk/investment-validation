@@ -12,6 +12,9 @@ import hashlib
 import json
 import os
 import re
+import stat
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -20,13 +23,43 @@ from engine.v2.ops.errors import fail
 
 __all__ = ["Generation", "SessionIdentity", "SessionState", "atomic_write", "compare_and_swap",
            "ensure_session", "load_session", "mark_started", "request_rerun",
-           "session_path"]
+           "session_path", "session_transition_lock"]
 
 SCHEMA = "nightly_session.v1"
 KEY_VERSION = "nightly_session_key.v1"
 STATE_DIR = ("reports", "phase6", "nightly_trigger", "sessions")
 MAX_SWAP_ATTEMPTS = 3
+MAX_SESSION_BYTES = 1024 * 1024
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _require_regular_fd(fd: int, description: str) -> os.stat_result:
+    try:
+        info = os.fstat(fd)
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", f"{description} is unreadable") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise fail("INTEGRITY_FAILED", f"{description} is not a regular file")
+    return info
+
+
+def _open_regular(path: Path, flags: int, description: str,
+                  *, missing_ok: bool = False, mode: int = 0o666) -> int | None:
+    try:
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode)
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return None
+        raise fail("INTEGRITY_FAILED", f"{description} is missing") from exc
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", f"{description} is unsafe or unreadable") from exc
+    try:
+        _require_regular_fd(fd, description)
+    except Exception:
+        _close_publication_fd(
+            fd, f"{description} close failed", preserve_error=True)
+        raise
+    return fd
 
 
 def _digest(*parts: object) -> str:
@@ -133,28 +166,247 @@ def _decode(text: str, identity: SessionIdentity) -> SessionState:
 
 def load_session(root: Path, identity: SessionIdentity) -> SessionState | None:
     """The recorded state, ``None`` only when no file exists; never ``None`` for bad bytes."""
-    try:
-        text = session_path(root, identity).read_text()
-    except FileNotFoundError:
+    path = session_path(root, identity)
+    fd = _open_regular(path, os.O_RDONLY, "session state", missing_ok=True)
+    if fd is None:
         return None
+    try:
+        info = _require_regular_fd(fd, "session state")
+        if info.st_size > MAX_SESSION_BYTES:
+            raise fail("INTEGRITY_FAILED", "session state is too large")
+        chunks: list[bytes] = []
+        remaining = MAX_SESSION_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_SESSION_BYTES:
+            raise fail("INTEGRITY_FAILED", "session state is too large")
+        text = data.decode("utf-8", errors="strict")
     except (OSError, UnicodeDecodeError) as exc:
         raise fail("INTEGRITY_FAILED", "session state is unreadable") from exc
+    finally:
+        active_error = sys.exc_info()[0] is not None
+        _close_publication_fd(
+            fd, "session state close failed", preserve_error=active_error)
     return _decode(text, identity)
 
 
-def atomic_write(path: Path, text: str) -> None:
-    """Durably replace ``path`` with ``text``: temp file, fsync, rename, directory fsync."""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
-    dir_fd = os.open(path.parent, os.O_RDONLY)
+def _create_atomic_temp(path: Path, dir_fd: int) -> tuple[int, str]:
+    temporary_name = path.name + ".tmp"
+    try:
+        info = os.stat(temporary_name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "temporary session file is unreadable") from exc
+    else:
+        if not stat.S_ISREG(info.st_mode):
+            raise fail("INTEGRITY_FAILED", "temporary session file is not regular")
+        try:
+            os.unlink(temporary_name, dir_fd=dir_fd)
+        except OSError as exc:
+            raise fail("INTEGRITY_FAILED", "stale temporary session file cannot be removed") from exc
+    try:
+        fd = os.open(temporary_name,
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     0o666, dir_fd=dir_fd)
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "temporary session file is unsafe or already exists") from exc
+    try:
+        info = os.fstat(fd)
+    except OSError as exc:
+        typed = fail("INTEGRITY_FAILED", "temporary session file is unreadable")
+        typed.__cause__ = exc
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise typed
+    if not stat.S_ISREG(info.st_mode):
+        typed = fail("INTEGRITY_FAILED", "temporary session file is not regular")
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise typed
+    return fd, temporary_name
+
+
+def _open_publication_directory(parent: Path) -> int:
+    try:
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "session publication directory is unsafe") from exc
+    try:
+        info = os.fstat(fd)
+    except OSError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise fail("INTEGRITY_FAILED", "session publication directory is unreadable") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise fail("INTEGRITY_FAILED", "session publication path is not a directory")
+    return fd
+
+
+def _check_publication_destination(dir_fd: int, name: str) -> None:
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "session publication destination is unreadable") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise fail("INTEGRITY_FAILED", "session publication destination is not regular")
+
+
+def _write_and_sync_temp(fd: int, data: bytes) -> None:
+    try:
+        handle = os.fdopen(fd, "wb")
+    except OSError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise fail("INTEGRITY_FAILED", "session state write failed") from exc
+    try:
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "session state write failed") from exc
+
+
+def _replace_publication_temp(dir_fd: int, temporary_name: str, destination_name: str) -> None:
+    try:
+        os.replace(temporary_name, destination_name,
+                   src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "session publication destination is unsafe") from exc
+
+
+def _sync_publication_directory(dir_fd: int) -> None:
     try:
         os.fsync(dir_fd)
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "session publication directory fsync failed") from exc
+
+
+def _close_publication_fd(fd: int, message: str, preserve_error: bool = False) -> None:
+    try:
+        os.close(fd)
+    except OSError as exc:
+        if not preserve_error:
+            raise fail("INTEGRITY_FAILED", message) from exc
+
+
+def _cleanup_publication_temp(dir_fd: int, fd: int, temporary_name: str,
+                              temp_created: bool, published: bool,
+                              preserve_error: bool = False) -> None:
+    if fd != -1:
+        _close_publication_fd(fd, "session publication file close failed", preserve_error)
+    if temp_created and not published:
+        try:
+            os.unlink(temporary_name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if not preserve_error:
+                raise fail("INTEGRITY_FAILED", "session publication cleanup failed") from exc
+
+
+def atomic_write(path: Path, text: str, *, max_bytes: int | None = None,
+                 size_error: str = "publication data is too large") -> None:
+    """Durably replace ``path``, optionally enforcing its owner's size limit."""
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise fail("INVALID_REQUEST", "publication byte limit must be a nonnegative integer")
+    data = text.encode("utf-8")
+    if max_bytes is not None and len(data) > max_bytes:
+        raise fail("INTEGRITY_FAILED", size_error)
+    dir_fd = _open_publication_directory(path.parent)
+    published = False
+    temp_created = False
+    tmp_fd = -1
+    tmp_name = path.name + ".tmp"
+    try:
+        _check_publication_destination(dir_fd, path.name)
+        tmp_fd, tmp_name = _create_atomic_temp(path, dir_fd)
+        temp_created = True
+        write_fd = tmp_fd
+        tmp_fd = -1
+        _write_and_sync_temp(write_fd, data)
+        _replace_publication_temp(dir_fd, tmp_name, path.name)
+        published = True
+        _sync_publication_directory(dir_fd)
     finally:
-        os.close(dir_fd)
+        active_error = sys.exc_info()[0] is not None
+        try:
+            _cleanup_publication_temp(
+                dir_fd, tmp_fd, tmp_name, temp_created, published, active_error)
+        finally:
+            _close_publication_fd(
+                dir_fd, "session publication directory close failed",
+                active_error or sys.exc_info()[0] is not None)
+
+
+def _validated_session_root(root: Path) -> Path:
+    try:
+        path = Path(root)
+        raw = os.fspath(path)
+    except (TypeError, ValueError) as exc:
+        raise fail("INVALID_REQUEST", "session state root is invalid") from exc
+    if "\x00" in raw:
+        raise fail("INVALID_REQUEST", "session state root is invalid")
+    return path
+
+
+@contextmanager
+def session_transition_lock(root: Path, identity: SessionIdentity):
+    """Hold the per-session lock used for transitions and run-scoped publications."""
+    if not isinstance(identity, SessionIdentity):
+        raise fail("INVALID_REQUEST", "session transition lock needs a session identity")
+    root = _validated_session_root(root)
+    path = session_path(root, identity)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED",
+                   "session state directory is unsafe or unavailable") from exc
+    try:
+        lock_fd = _open_regular(path.with_name(path.name + ".lock"),
+                                os.O_RDWR | os.O_APPEND | os.O_CREAT, "session lock")
+        assert lock_fd is not None
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            active_error = sys.exc_info()[0] is not None
+            try:
+                os.close(lock_fd)
+            except OSError as exc:
+                if not active_error:
+                    raise fail("INTEGRITY_FAILED",
+                               "session transition lock close failed") from exc
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "session transition lock is unavailable") from exc
 
 
 def compare_and_swap(root: Path, identity: SessionIdentity, expected_revision: int,
@@ -162,15 +414,14 @@ def compare_and_swap(root: Path, identity: SessionIdentity, expected_revision: i
     """Write ``generations`` at ``expected_revision + 1`` iff the stored revision is
     ``expected_revision`` (0 = no file). Returns ``None`` when the swap was lost."""
     path = session_path(root, identity)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.with_name(path.name + ".lock"), "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with session_transition_lock(root, identity):
         current = load_session(root, identity)
         if (current.revision if current else 0) != expected_revision:
             return None
         state = SessionState(identity, expected_revision + 1, generations)
         _decode(_encode(state), identity)  # the loader's own rules; raises before any write
-        atomic_write(path, _encode(state))
+        atomic_write(path, _encode(state), max_bytes=MAX_SESSION_BYTES,
+                     size_error="session state is too large")
         return state
 
 
