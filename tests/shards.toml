@@ -1,0 +1,28 @@
+# CI test shards: the ONE place that says which CI job runs which test file.
+# Read by tools/ci_shards.py (matrix + per-shard file lists) and checked by
+# tests/v2/integration/test_ci_shards.py. Same fnmatch convention as
+# tools/mutation_pilot.toml: `*` also matches `/`, so "tests/v2/ops/*" covers
+# every nested file.
+#
+# Shards are ORDERED and the first shard whose pattern matches a file owns it.
+# The last shard is the remainder: it owns every test file no earlier pattern
+# claims, so a new test file or package can never silently fall out of CI.
+# Measured 2026-10-11 (CPU seconds over 3475 total, ~3.8x parallel on a 4-core
+# runner): ops ~1224, research ~902, checks ~474, rest ~876. Rebalance by
+# moving a pattern; keep every shard under ~10 minutes of wall time.
+
+[[shard]]
+name = "ops"
+patterns = ["tests/v2/ops/*", "tests/test_v2_ops_*.py"]
+
+[[shard]]
+name = "research"
+patterns = ["tests/v2/research/*", "tests/v2/integration/*", "tests/test_v2_research_*.py"]
+
+[[shard]]
+name = "checks"
+patterns = ["tests/test_checks_*.py"]
+
+[[shard]]
+name = "rest"
+remainder = true
