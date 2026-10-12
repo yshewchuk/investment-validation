@@ -121,7 +121,8 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
                 if expected is not None and expected != stored:
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "expected registration differs from original")
                 expected = stored
-    if expected is not None and any(expected.document[name] != value for name, value in document.items()):
+    if expected is not None and (not document.keys() <= expected.document.keys()
+            or any(expected.document[name] != value for name, value in document.items())):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native execution inputs changed before population admission")
     if magnitude is not None:
         if expected is not None and expected.document["holdouts"]["holdout_as_of_month"] != as_of_month:

@@ -140,7 +140,9 @@ def test_fold_means_event_pooled_losses_and_all_horizons_are_real_and_read_only(
     expected_mae = (1 + 5 + 8 + 8 / 7) / 4
     assert result["metrics"] == pytest.approx({"count": 4, "rmse": expected_rmse, "mae": expected_mae})
     assert result["metrics"]["rmse"] != pytest.approx(sum(f["metrics"]["rmse"] for f in folds) / 2)
-    assert [fold["metrics"]["count"] for fold in folds] == [3, 1]
+    # Handwritten fold oracles: errors (1, 5, 8), then the single error 8/7.
+    assert folds[0]["metrics"] == pytest.approx({"count": 3, "rmse": math.sqrt(30), "mae": 14 / 3})
+    assert folds[1]["metrics"] == pytest.approx({"count": 1, "rmse": 8 / 7, "mae": 8 / 7})
     sealed = {event["event_id"]: event for event in result["provenance"]["magnitude_plan"]["events"]}
     assert len({row["event_id"] for row in result["predictions"]}) == 4
     for row in result["predictions"]:
@@ -312,6 +314,38 @@ def test_renderer_refuses_cross_registration_results(source, field):
     with pytest.raises(OpsError) as caught:
         magnitude.render_prediction_report(source.registration, result, spec=spec, no_ledger=True)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
+
+
+def test_renderer_digest_guard_independently_rejects_metrics_only_tampering(source, monkeypatch):
+    result = magnitude.prediction_result(source.repository, source.registration)
+    original_id = result["result_id"]
+    result["metrics"]["rmse"] += 1
+    assert result["variant_id"] == source.registration.variant_id
+    assert result["run_id"] == source.registration.run_id
+    assert result["provenance"] == source.registration.document
+    payload = {key: value for key, value in result.items() if key != "result_id"}
+    assert result["result_id"] == original_id != content_hash(payload)
+
+    def assert_refused():
+        with pytest.raises(OpsError) as caught:
+            magnitude.render_prediction_report(source.registration, result, spec=source.spec, no_ledger=True)
+        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert caught.value.problem.retryable is False
+
+    assert_refused()
+    calls = []
+
+    def neutralize_only_result_digest(document):
+        assert document == payload
+        calls.append(document)
+        return original_id
+
+    # Isolated mutant control: making only this digest check pass defeats the refusal oracle.
+    with monkeypatch.context() as patch:
+        patch.setattr(magnitude, "content_hash", neutralize_only_result_digest)
+        with pytest.raises(pytest.fail.Exception, match="DID NOT RAISE"):
+            assert_refused()
+    assert calls == [payload]
 
 
 def test_cli_metadata_registration_then_durable_smoke_never_touches_ledger(tmp_path, monkeypatch, capsys):

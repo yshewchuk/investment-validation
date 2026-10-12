@@ -293,6 +293,20 @@ def test_execution_registration_needs_no_computed_moves_table(source):
     _unchanged(source, before, objects)
 
 
+@pytest.mark.parametrize("missing", ["schema_version", "scope", "execution_plan"])
+def test_incomplete_expected_legacy_binding_refuses_before_population(source, monkeypatch, missing):
+    """Missing request keys are a typed conflict, independent of dictionary key order."""
+    registered = _call(source, magnitude_training_start=None)
+    document = registered.document
+    del document[missing]
+    expected = native.NativeRegistration(registered.run_id, canonical_json(document).encode())
+    before = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(native, "load_population", _forbid)
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        _call(source, admit=True, magnitude_training_start=None, expected=expected)
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
 @pytest.mark.parametrize("no_ledger", [False, True])
 @pytest.mark.parametrize("version", [0, 1, 3])
 def test_valid_v13_and_older_outcome_contracts_publish_replay_and_export(source, monkeypatch, tmp_path, no_ledger, version):
