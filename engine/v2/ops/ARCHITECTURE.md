@@ -1105,13 +1105,13 @@ one declared adapter module, `engine/v2/ops/legacy_adapter.py`
 (`checks/legacy_adapters.json`); its own further legacy `engine.*` imports
 are the adapter's job and are not layer-checked v2 dependencies. `finality.py` never imports the adapter: it takes legacy reads and monkeypatch-seam lookups as explicit `FinalityReads` callbacks the adapter supplies, and `legacy_adapter.session_finality`/`resolve_final_session`/`covered_tickers` bind them.
 
-`native_board_universe.py` never imports `engine.score`, `engine.structures`,
-`engine.replay`, or `engine.fills`: the first two import the legacy chain index
-and fill model at module level, violating isolation even for read-only comparison.
-It does not check `engine.score.DISABLED_STRATEGIES`: `SUPPORTED_STRATEGIES`
-from `engine.v2.scoring.source_inputs` already excludes both disabled strategies.
-It checks that set against `engine.v2.registry.strategies.DYNAMIC_MENU` instead:
-one import-time subset assertion, with no I/O or legacy dependency.
+`native_board_universe.py` deliberately never imports `engine.score`, `engine.structures`, `engine.replay`,
+or `engine.fills` — the first two each pull in `engine.replay`/`engine.fills` (the legacy chain index and
+fill model) at their own top level, which would violate the isolation invariant at import time even for
+a read-only comparison. It performs no consistency check against `engine.score.DISABLED_STRATEGIES` either:
+`SUPPORTED_STRATEGIES` (native's own input-builder strategy set, exported from `engine.v2.scoring.source_inputs`)
+already excludes both disabled strategies by construction, so no legacy read is needed; it is instead checked against
+`engine.v2.registry.strategies.DYNAMIC_MENU` (a subset assertion paid once at import time, no I/O, no legacy dependency).
 
 **Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
 `experiments/native_registration.py` imports ops `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`,
