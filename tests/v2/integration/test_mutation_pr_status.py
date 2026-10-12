@@ -351,3 +351,21 @@ def test_classify_tolerates_odd_shapes_in_parsed_json():
     assert v["modules"]["a"]["class"] == "ok" and v["modules"]["b"]["class"] == "infra"
     v = ps.classify({"modules": {"a": mod()}, "expected_modules": "a"}, [], {}, [1])
     assert v["modules"] == {"a": {"class": "ok", "reason": ""}}
+
+
+def test_unparsable_summary_or_baseline_json_degrades(tmp_path, capsys):
+    d, diff = _write_report(tmp_path, merged(a=mod(run_exit_code=1)), [])
+    (d / "summary.json").write_text("{not json")
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    assert "state=success\n" in out.read_text()
+    assert "merged mutation report unavailable" in capsys.readouterr().out
+    (d / "summary.json").write_text(json.dumps(merged(a=mod(run_exit_code=1))))
+    base = tmp_path / "base.json"
+    base.write_text("{not json")
+    out2 = tmp_path / "gh_output2"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--baseline-summary", str(base), "--github-output", str(out2)]) == 0
+    assert "state=failure\n" in out2.read_text()
+    assert "baseline summary unreadable" in capsys.readouterr().out
