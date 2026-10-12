@@ -20,6 +20,7 @@ from engine.v2.foundation.final_holdout import declaration_from_document, reques
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
+    NATIVE_GATE_RUNNERS,
     ExperimentSpec,
     register_hypothesis_in_transaction,
     resolve_experiment_plan,
@@ -50,7 +51,7 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
-    if (plan.runner in ("native-gate-replay", "experiments/native_gate_worker.py")
+    if (plan.runner in NATIVE_GATE_RUNNERS
             and "strategy" in plan.economic_params and plan.economic_params["strategy"] not in STRUCTURES):
         raise fail("INVALID_EXPERIMENT_SPEC", "declared strategy is not a supported native structure")
     try:

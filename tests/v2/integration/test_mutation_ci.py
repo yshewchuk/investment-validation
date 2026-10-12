@@ -3048,7 +3048,7 @@ def test_select_tests_cli_uncaught_selector_error_exits_nonzero_with_no_output(t
     """A selector error that escapes select_pr_tests's handled graph-build and
     unresolved-scan fallbacks must kill the CLI: nonzero exit, stdout exactly
     empty. An empty list, a narrowed list or `__ALL__` would each be read by
-    the `test` job as a verdict; nothing-on-stdout plus a failed select step is
+    the `plan` job as a verdict; nothing-on-stdout plus a failed select step is
     the only shape that stops the run instead of silently deciding for it.
     Fresh subprocess so the real CLI dispatch and process exit are what's
     asserted, independent of any workflow YAML. The graph is stubbed only to
@@ -4030,6 +4030,17 @@ def test_a_leaf_module_change_selects_only_its_own_module_again():
     # consumers; fill_quality selects only the research mutation module here.
     names = pilot.enabled_modules(CFG)
     assert pilot.changed_modules(CFG, names, ["engine/v2/research/fill_quality.py"]) == ["research"]
+
+
+def test_replay_change_selects_its_transitive_worker_consumers():
+    """The real replay source selects its native-worker and other actual consumers."""
+    names = pilot.enabled_modules(CFG)
+    assert set(pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"])) == {
+        "foundation", "parity", "data_store", "data_documents", "serving", "research",
+        "ops_cli", "ops_runtime", "ops_catalog_store", "ops_catalog_state",
+        "ops_catalog_sched", "ops_catalog_submit", "ops_legacy", "ops_effects",
+        "ops_decisions", "ops_nightly", "ops_snapshots",
+    }
 
 
 # -- import-graph build guard: deterministic parse-count property ------------

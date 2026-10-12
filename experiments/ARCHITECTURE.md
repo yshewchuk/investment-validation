@@ -98,8 +98,8 @@ Each staged document itself must be a nonsymlink regular file of at most 16 MiB;
 pathname replacement cannot redirect admitted bytes.
 The worker installs one `native_gate_consumption.v1.0` receipt with the immutable plan,
 stage inputs and mark-based cash flows; the supervisor publishes it only after worker success.
-Installation is create-only and never assigns partial bytes; staging must support
-hard links. Existing destinations are never opened, overwritten or unlinked.
+Installation is create-only and never assigns partial bytes; unsupported hard links
+refuse `INPUT_CHANGED`. Existing destinations are never opened, overwritten or unlinked.
 This receipt is not an evaluation report or promotion evidence.
 
 | Native worker condition | Outcome |

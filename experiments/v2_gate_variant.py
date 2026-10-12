@@ -13,6 +13,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
+    NATIVE_GATE_RUNNERS,
     ExperimentSpec,
     ResolvedExperimentPlan,
     experiment_spec_from_document,
@@ -49,7 +50,7 @@ def _plan(spec, strategy):
         valid_alpha = type(alpha) in (int, float) and isfinite(alpha) and 0 <= alpha <= 1
     except OverflowError:
         valid_alpha = False
-    if (plan.runner not in ("native-gate-replay", "experiments/native_gate_worker.py")
+    if (plan.runner not in NATIVE_GATE_RUNNERS
             or plan.price_source != "option_chains"
             or not isinstance(strategy, str) or strategy not in STRUCTURES
             or plan.economic_params.get("strategy", strategy) != strategy

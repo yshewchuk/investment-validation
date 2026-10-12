@@ -17,13 +17,17 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactError, ArtifactStore, canonical_json, from_document
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.executor import THREAD_VARIABLES
-from engine.v2.ops.experiments import experiment_spec_from_document, resolve_experiment_plan
+from engine.v2.ops.experiments import (
+    NATIVE_GATE_WORKER,
+    experiment_spec_from_document,
+    resolve_experiment_plan,
+)
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.ops.stages import NativeGateParameters
 from experiments.native_registration import NativeRegistration, verify_native_registration
 from experiments.v2_gate_variant import price_variant
 
-RUNNER = "experiments/native_gate_worker.py"
+RUNNER = NATIVE_GATE_WORKER
 BINDINGS = {"spec.json", "native_registration.json"}
 MAX_STAGED_BYTES = 16 * 1024 * 1024
 

@@ -213,8 +213,7 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
         profile = profile_named(DEFAULT_POLICY, name)
         assert profile.memory_bytes >= measured_peak_bytes
         assert profile.measured is False
-    assert POLICY_VERSION == DEFAULT_POLICY.version
-    assert "2026-10-10" in POLICY_VERSION
+    assert POLICY_VERSION == DEFAULT_POLICY.version == "ops_resources.2026-10-10.v10"
 
 
 # --------------------------------------------------------------------------

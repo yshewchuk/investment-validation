@@ -616,7 +616,8 @@ def test_replay_exceptions_preserve_private_type(source, tmp_path, single_thread
     assert not (stage / "native_gate_consumption.json").exists()
 
 
-def test_unexpected_replay_failure_retains_generic_worker_boundary(source, tmp_path):
+@pytest.mark.parametrize("exception_type", ["RuntimeError", "IndexError", "AttributeError"])
+def test_unexpected_replay_failure_retains_generic_worker_boundary(source, tmp_path, exception_type):
     """A real admitted child consumes pricing before the generic, private failure path."""
     checkout = tmp_path / "checkout"
     snapshot_code(REPO, checkout, worker_source_manifest(REPO))
@@ -624,7 +625,7 @@ def test_unexpected_replay_failure_retains_generic_worker_boundary(source, tmp_p
     original = replay_module.read_text()
     needle = "                        alphas=(inputs.fill_alpha,), progress_every=0)\n"
     assert original.count(needle) == 1
-    fault_line = '        raise RuntimeError("private replay diagnostic")'
+    fault_line = f'        raise {exception_type}("private replay diagnostic")'
     modified = original.replace(
         needle, needle + '        assert tuple(result.trades["event_id"]) == inputs.event_ids\n'
         + fault_line + "\n")
@@ -638,7 +639,7 @@ def test_unexpected_replay_failure_retains_generic_worker_boundary(source, tmp_p
     assert failure["message"] == "worker raised an unhandled exception"
     assert failure["retryable"] is True
     assert "private replay diagnostic" not in json.dumps(failure)
-    assert "RuntimeError" not in json.dumps(failure)
+    assert exception_type not in json.dumps(failure)
     assert _catalog(source[0]) == before
     root = tmp_path / "smoke"
     conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
@@ -647,7 +648,7 @@ def test_unexpected_replay_failure_retains_generic_worker_boundary(source, tmp_p
         diagnostic = artifact(conn, store, failure["diagnostic_ref"])
         details = json.loads(store.read_verified(diagnostic))
         assert set(details) == {"exception_type", "location"}
-        assert details["exception_type"] == "RuntimeError"
+        assert details["exception_type"] == exception_type
         assert details["location"].endswith(fault_location)
         assert "private replay diagnostic" not in json.dumps(details)
         assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 1
@@ -1046,7 +1047,7 @@ def test_staged_growth_is_bounded_after_descriptor_validation(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink", "hardlink", "fifo", "write-error",
-                                 "replacement-write-error", "cleanup-error"])
+                                 "replacement-write-error", "cleanup-error", "unsupported-link"])
 def test_receipt_destination_refuses_without_truncation_or_blocking(source, tmp_path, single_thread, kind):
     """Real dispatch and OS writes preserve foreign targets and typed I/O failure."""
     document, registration, parameters = _registered(source)
@@ -1076,6 +1077,12 @@ from engine.v2.ops.worker import dispatch
 from engine.v2.ops.errors import OpsError
 from experiments import native_gate_worker as native
 replacements = []
+if sys.argv[3] == 'unsupported-link':
+    def unsupported_link(source, destination, *args, **kwargs):
+        assert Path(source).read_bytes()
+        assert not Path(destination).exists()
+        raise OSError(errno.EOPNOTSUPP, 'injected hardlink unavailability')
+    native.os.link = unsupported_link
 if sys.argv[3] == 'cleanup-error':
     unlink = os.unlink
     def deny_private_cleanup(target, *args, **kwargs):
@@ -1111,8 +1118,9 @@ else:
     assert outside.read_bytes() == b"foreign sentinel"
     if kind == "file":
         assert path.read_bytes() == b"existing sentinel"
-    elif kind == "write-error":
+    elif kind in ("write-error", "unsupported-link"):
         assert not path.exists()
+        assert list(stage.glob(".native-gate-*")) == []
     elif kind == "replacement-write-error":
         assert path.read_bytes() == b"replacement sentinel"
         current = path.stat()

@@ -38,7 +38,7 @@ of importing the supervisor.
 Native experiment registration also exposes these existing submodule APIs:
 `catalog.transaction`, `errors.OpsError`, `errors.fail`,
 `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`,
-`experiments.register_hypothesis_in_transaction`,
+`experiments.register_hypothesis_in_transaction`, `experiments.NATIVE_GATE_WORKER`, `experiments.NATIVE_GATE_RUNNERS`,
 `fingerprints.environment_identity`, `fingerprints.source_closure` and
 `native_registration.verified_registration_bytes`.
 They compose one resolved plan, source/environment binding and primary catalog
@@ -98,7 +98,7 @@ either required table. Their current consumer is
 
 `nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package and used by completion persistence in `supervisor.Service`; tests include `tests/v2/ops/test_nightly_session.py` and `tests/v2/ops/test_nightly_completion.py`. `nightly_completion` (run-scoped reports, #564 slice 7; exports `Disposition`, `SCHEMA`, `build_completion_report`, `record_completion`) is internal and consumed through `supervisor.Service`; `tests/v2/ops/test_nightly_completion.py` covers its report contract and persistence. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is imported by the production modules `nightly_chain`, `nightly_history`, and `nightly_repair`; `nightly_trigger` does not call it yet. `tests/v2/ops/test_nightly_receipts.py` covers its contract. `nightly_readiness` (legacy run-report readiness for a session, #564 slice 3; exports `LegacyReadiness`, `check_legacy_report`) is internal and uncalled by `nightly_trigger`; `tests/v2/ops/test_nightly_readiness.py` covers its contract. `nightly_chain` (snapshot import/refresh/moves/capture step chain over step receipts, #564 slice 4; exports `ChainResult`, `ChainStep`, `run_snapshot_chain`) is imported by production module `nightly_history`; `nightly_trigger` does not call it directly. `tests/v2/ops/test_nightly_chain.py` covers its contract.
 
-<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, environment_identity, source_closure, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters -->
+<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, environment_identity, source_closure, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_RUNNERS -->
 
 ## Consumers
 

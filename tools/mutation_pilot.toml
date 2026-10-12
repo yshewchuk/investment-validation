@@ -373,10 +373,12 @@ mutate = [
     "engine/v2/data/incremental_tables.py",
     "engine/v2/data/computed_moves.py",
     "engine/v2/data/computed_moves_table.py",
+    "engine/v2/data/event_history.py",
 ]
 tests = [
     "tests/test_v2_data_computed_moves.py",
     "tests/test_v2_data_computed_moves_table.py",
+    "tests/v2/data/test_data_event_history.py",
     "tests/test_v2_data_generic_incremental.py",
     "tests/test_v2_data_incremental.py",
     "tests/test_v2_data_incremental_persistence.py",

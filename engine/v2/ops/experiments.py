@@ -34,6 +34,10 @@ SPEC_FIELDS = frozenset({"experiment_id", "hypothesis", "primary_arm_id", "arms"
 #: any other key is an unused declaration, refused before the runner.
 SUPPORTED_ECONOMIC_KEYS = frozenset({"fill", "exit"})
 
+#: Shared native runner vocabulary; the worker admits only its fixed source.
+NATIVE_GATE_WORKER = "experiments/native_gate_worker.py"
+NATIVE_GATE_RUNNERS = frozenset({"native-gate-replay", NATIVE_GATE_WORKER})
+
 
 def default_checkout_root() -> Path:
     """The code checkout whose ``experiments/`` tree owns pre-registration.
@@ -354,7 +358,7 @@ def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
                    "experiment must declare exactly one arm and name it as its primary arm",
                    details={"arms": list(spec.arms), "primary_arm_id": spec.primary_arm_id})
     supported = SUPPORTED_ECONOMIC_KEYS
-    if spec.runner in ("native-gate-replay", "experiments/native_gate_worker.py"):
+    if spec.runner in NATIVE_GATE_RUNNERS:
         supported = supported | {"strategy"}
         strategy = spec.economic_params.get("strategy")
         if "strategy" in spec.economic_params and (not isinstance(strategy, str) or not strategy):
