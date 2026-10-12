@@ -119,6 +119,7 @@ as_of_month, event_ids=None)` resolves one immutable single-arm plan and
 freshly prices its eligible canonical events from that snapshot's option
 chains and calendar. It accepts a finite `fill` and optional `strategy`
 economics declaration, which must match the explicit strategy argument.
+The resolver permits that key only for `native-gate-replay` and the fixed native worker.
 The admitted worker requires that declaration; manual fill-only calls retain
 their explicit strategy input. Replay consumes the resolved fill. Returned
 stage inputs bind the strategy, alpha, snapshot, event population and holdout

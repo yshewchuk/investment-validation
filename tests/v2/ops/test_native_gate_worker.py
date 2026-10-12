@@ -25,7 +25,7 @@ from experiments.native_registration import register_native
 from tests.ops_support import TEST_POLICY, run_until
 from tests.v2.research.test_gate_variant import _document
 from tests.v2.research.test_gate_variant import source as source
-from tests.v2.research.test_native_registration import _catalog
+from tests.v2.research.test_native_registration import _catalog, _objects
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -342,15 +342,36 @@ def test_each_launch_thread_variable_refuses_drift_before_pricing(
     assert not (stage / "native_gate_consumption.json").exists()
 
 
+@pytest.mark.parametrize("runner", ["experiments/v2_gate_variant.py", "experiments/v2_prediction.py"])
+def test_non_gate_runner_cannot_register_unused_strategy(source, monkeypatch, runner):
+    """The real registration path refuses before pinning, scanning or writing."""
+    before, objects = _catalog(source[0]), _objects(source[2])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unused economics reached snapshot reads")
+
+    monkeypatch.setattr(source[3], "resolve_pinned", forbidden)
+    monkeypatch.setattr(source[3], "scan", forbidden)
+    with pytest.raises(OpsError) as error:
+        _registered(source, runner=runner)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.details == {"keys": ["strategy"]}
+    assert error.value.problem.retryable is False
+    assert _catalog(source[0]) == before
+    assert _objects(source[2]) == objects
+
+
 def test_registered_unsupported_runner_refuses_before_pricing(
         source, tmp_path, single_thread, forbidden_pricing):
     """A valid registered Python runner does not expand the worker allowlist."""
-    document, registration, parameters = _registered(source, runner="experiments/v2_gate_variant.py")
+    document, registration, parameters = _registered(source, runner="experiments/v2_gate_variant.py",
+                                                     economic_params={"fill": 0.0})
     stage = _stage(tmp_path / "staging", document, registration)
     before = _catalog(source[0])
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.message == "native pricing runner is not allowlisted"
     assert error.value.problem.retryable is False
     assert _catalog(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
@@ -663,9 +684,10 @@ def test_registered_code_must_match_the_running_worker(
     assert not (stage / "native_gate_consumption.json").exists()
 
 
-def test_supervised_missing_strategy_refuses_before_population_reads(source, tmp_path):
+@pytest.mark.parametrize("arm", ["candidate", "STR-THRU"])
+def test_supervised_missing_strategy_refuses_before_population_reads(source, tmp_path, arm):
     """A worker never substitutes the arm name for an undeclared strategy."""
-    request = _registered(source, economic_params={"fill": 0.0})
+    request = _registered(source, primary_arm_id=arm, arms=[arm], economic_params={"fill": 0.0})
     before = _catalog(source[0])
     result = _supervise(tmp_path, source, *request)
     assert result["code"] == "INVALID_EXPERIMENT_SPEC"

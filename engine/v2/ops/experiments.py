@@ -32,7 +32,7 @@ SPEC_FIELDS = frozenset({"experiment_id", "hypothesis", "primary_arm_id", "arms"
 
 #: Economic declarations with a defined execution meaning;
 #: any other key is an unused declaration, refused before the runner.
-SUPPORTED_ECONOMIC_KEYS = frozenset({"fill", "exit", "strategy"})
+SUPPORTED_ECONOMIC_KEYS = frozenset({"fill", "exit"})
 
 
 def default_checkout_root() -> Path:
@@ -353,7 +353,10 @@ def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "experiment must declare exactly one arm and name it as its primary arm",
                    details={"arms": list(spec.arms), "primary_arm_id": spec.primary_arm_id})
-    unused = sorted(set(spec.economic_params) - SUPPORTED_ECONOMIC_KEYS)
+    supported = SUPPORTED_ECONOMIC_KEYS
+    if spec.runner in ("native-gate-replay", "experiments/native_gate_worker.py"):
+        supported = supported | {"strategy"}
+    unused = sorted(set(spec.economic_params) - supported)
     if unused:
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "experiment declares economically unused parameters",
