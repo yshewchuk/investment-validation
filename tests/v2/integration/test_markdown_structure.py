@@ -260,3 +260,43 @@ def test_blockquoted_fence_is_not_checked():
     assert rules("> ```\n> # x\n") == []
 
 
+def test_alignment_delimiters_are_tables():
+    assert rules("| a | b |\n|:---|---:|\n| 1 | 2 |\nafter\n") == ["table-after"]
+    assert rules("| a | b |\n|:---:|:---:|\n| 1 | 2 |\n\nafter\n") == []
+    assert rules("a | b\n:-:|-:\n1 | 2\nafter\n") == ["table-after"]
+
+
+def test_heading_regex_edges():
+    assert rules("para\n#hashtag\n") == []
+    assert rules("para\n####### seven\n") == []
+    assert rules("para\n#\n") == ["heading-before"]
+
+
+def test_delimiter_like_lines_are_not_table_headers():
+    assert rules("para\n|---|---|\n|---|---|\n") == []
+    assert rules("para\na | b\n---\n") == []
+    assert rules("1. a | b\n--|--\n1 | 2\nafter\n") == []
+
+
+def test_every_list_marker_style_opens_a_fence():
+    for opener in ("- ```", "* ```", "+ ```", "2) ```", "3. ```"):
+        found = ms.lint_text(opener + "\n  code\n")
+        assert [v.rule for v in found] == ["fence-unclosed"], opener
+
+
+def test_closing_fence_must_have_no_info_string():
+    assert rules("a\n\n```\ncode\n```python\nmore\n```\n\nb\n") == []
+    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n```python\nmore\n")] == ["fence-unclosed"]
+
+
+def test_scoped_matches_the_reported_line_as_well_as_the_neighbour():
+    found = ms.lint_text("# A\ntext\n\n# B\ntext\n")
+    assert [v.line for v in ms.scoped(found, {1})] == [1]
+    assert [v.line for v in ms.scoped(found, {2})] == [1]
+
+
+def test_staged_deletion_of_a_markdown_file_is_not_read(repo):
+    _git(repo, "rm", "-q", "old.md")
+    assert ms.main(["--quiet"]) == 0
+
+
