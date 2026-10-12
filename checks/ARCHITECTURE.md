@@ -92,7 +92,7 @@ check defines missing-input and failure outcomes:
 | Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
 | Worktree hygiene read failure | Default returns empty bytes; `strict=True` raises `OSError`; missing non-symlink paths return empty bytes in either mode |
 | `markdown_structure.py` finds a violation on a scoped line | Prints `path:line: rule`; exit 1 |
-| `markdown_structure.py` git or file read fails, or a file is not UTF-8 | Message on stderr; exit 2; never read as clean |
+| `markdown_structure.py` git or file read fails, a file is not UTF-8, or `--base-ref` is empty | Message on stderr; exit 2; never read as clean, never staged mode |
 | Cache | No shared cache contract; reuse is check-specific |
 | Retry | No automatic package retry; check-specific if any |
 | Transaction | No package-wide transaction contract |

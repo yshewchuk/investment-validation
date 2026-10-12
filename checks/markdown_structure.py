@@ -28,7 +28,10 @@ Modes (cwd-independent, ``git -C`` the repo root)::
     python3 checks/markdown_structure.py --base-ref origin/main  # REF...HEAD, changed lines only
     python3 checks/markdown_structure.py --all       # every tracked .md, whole file
 
-Exit 0 clean, 1 violations, 2 a git/read/decode error (never read as clean).
+A fence may open on a list-marker line (``- ```python``); it counts as indented.
+An empty ``--base-ref ""`` is a usage error (exit 2), never staged mode.
+
+Exit 0 clean, 1 violations, 2 a git/read/decode/usage error (never read as clean).
 """
 from __future__ import annotations
 
@@ -40,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-_FENCE = re.compile(r"^( *)(`{3,}|~{3,})(.*)$")
+_FENCE = re.compile(r"^( *(?:(?:[-*+]|\d+[.)]) +)?)(`{3,}|~{3,})(.*)$")  # optional list-marker prefix
 _HEADING = re.compile(r"^#{1,6}(\s|$)")
 _LIST_ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
 _DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
@@ -214,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base-ref", help="check lines changed in REF...HEAD")
     ap.add_argument("--quiet", action="store_true", help="print nothing when clean")
     args = ap.parse_args(argv)
+    if args.base_ref is not None and not args.base_ref.strip():
+        print("markdown_structure: --base-ref needs a non-empty ref", file=sys.stderr)
+        return 2
     mode = "all" if args.all else "base" if args.base_ref else "staged"
     try:
         files = collect(mode, args.base_ref)

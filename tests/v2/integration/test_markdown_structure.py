@@ -233,3 +233,16 @@ def test_unclosed_indented_fence_in_list_item_is_reported():
     assert [(v.line, v.rule) for v in found] == [(2, "fence-unclosed")]
     assert ms.scoped(found, {4}) == found
 
+
+def test_fence_opening_on_a_list_marker_line_is_recognised():
+    assert rules("- ```\n  code\n  ```\n- next\n") == []
+    assert rules("1. ```python\n   code\n   ```\n") == []
+    found = ms.lint_text("- ```\n  code\n- next\n")
+    assert [(v.line, v.rule) for v in found] == [(1, "fence-unclosed")]
+
+
+def test_empty_base_ref_is_a_usage_error_not_staged_mode(repo, capsys):
+    assert ms.main(["--base-ref", "", "--quiet"]) == 2
+    assert "non-empty" in capsys.readouterr().err
+    assert ms.main(["--base-ref", "   ", "--quiet"]) == 2
+
