@@ -367,11 +367,23 @@ def atomic_write(path: Path, text: str, *, max_bytes: int | None = None,
                 active_error or sys.exc_info()[0] is not None)
 
 
+def _validated_session_root(root: Path) -> Path:
+    try:
+        path = Path(root)
+        raw = os.fspath(path)
+    except (TypeError, ValueError) as exc:
+        raise fail("INVALID_REQUEST", "session state root is invalid") from exc
+    if "\x00" in raw:
+        raise fail("INVALID_REQUEST", "session state root is invalid")
+    return path
+
+
 @contextmanager
 def session_transition_lock(root: Path, identity: SessionIdentity):
     """Hold the per-session lock used for transitions and run-scoped publications."""
     if not isinstance(identity, SessionIdentity):
         raise fail("INVALID_REQUEST", "session transition lock needs a session identity")
+    root = _validated_session_root(root)
     path = session_path(root, identity)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

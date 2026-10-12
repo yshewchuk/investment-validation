@@ -87,6 +87,45 @@ def test_clean_required_and_succeeded_qualification_is_completed():
     assert report["sidecar_count"] == 1
 
 
+@pytest.mark.parametrize("names", [("good", "bad"), ("bad", "good")],
+                         ids=["good-first", "bad-first"])
+def test_required_outcome_reduces_heterogeneous_items_in_either_order(names):
+    expected = {name: "required" for name in names}
+    observed = {names[0]: Disposition("succeeded"), names[1]: Disposition("failed")}
+    report = _report(expected, observed)
+    assert report["required_outcome"] == "failed"
+    assert report["status"] == "failed"
+    assert report["degraded_outcome"] == "clean"
+    assert report["qualification_outcome"] == "not_requested"
+
+
+@pytest.mark.parametrize("names", [("good", "bad"), ("bad", "good")],
+                         ids=["good-first", "bad-first"])
+def test_qualification_outcome_reduces_heterogeneous_items_in_either_order(names):
+    expected = {"primary": "required", names[0]: "qualification",
+                names[1]: "qualification"}
+    observed = {"primary": Disposition("succeeded"),
+                names[0]: Disposition("succeeded"), names[1]: Disposition("failed")}
+    report = _report(expected, observed)
+    assert report["required_outcome"] == "completed"
+    assert report["qualification_outcome"] == "failed"
+    assert report["degraded_outcome"] == "degraded"
+    assert report["status"] == "completed_degraded"
+
+
+def test_clean_optional_does_not_hide_problematic_qualification_degradation():
+    expected = {"primary": "required", "side": "optional",
+                "quality": "qualification"}
+    observed = {"primary": Disposition("succeeded"),
+                "side": Disposition("succeeded"),
+                "quality": Disposition("failed", reason_code="QUALITY_FAILED")}
+    report = _report(expected, observed)
+    assert report["required_outcome"] == "completed"
+    assert report["qualification_outcome"] == "failed"
+    assert report["degraded_outcome"] == "degraded"
+    assert report["status"] == "completed_degraded"
+
+
 @pytest.mark.parametrize("required_status", ["failed", "degraded"])
 def test_required_failure_or_degradation_is_never_clean_success_even_with_clean_sidecars(
         required_status):
@@ -256,6 +295,8 @@ def test_malformed_no_required_extra_or_unselected_inputs_refuse(expected, obser
     pytest.param(RUN_ID, {"primary": []}, {}, id="nonstring-work-role"),
     pytest.param("a" * 63, {"primary": "required"}, {}, id="short-run-id"),
     pytest.param("a" * 65, {"primary": "required"}, {}, id="long-run-id"),
+    pytest.param("g" * 64, {"primary": "required"}, {}, id="nonhex-run-id"),
+    pytest.param(RUN_ID, {"": "required"}, {}, id="empty-work-name"),
     pytest.param(RUN_ID, {"n" * 65: "required"}, {}, id="long-work-name"),
 ])
 def test_each_independent_validation_guard_returns_invalid_request(
@@ -333,6 +374,25 @@ def test_session_transition_lock_rejects_bad_identity_before_filesystem(identity
     assert not tmp_path.joinpath(*STATE_DIR).exists()
 
 
+@pytest.mark.parametrize("root", [None, Path("\x00")], ids=["none", "nul"])
+def test_session_transition_lock_rejects_bad_root_before_filesystem(root, tmp_path):
+    with pytest.raises(OpsError) as exc:
+        with nightly_session.session_transition_lock(root, IDENT):
+            pass
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.problem.message == "session state root is invalid"
+    assert not tmp_path.joinpath(*STATE_DIR).exists()
+
+
+@pytest.mark.parametrize("root", [None, Path("\x00")], ids=["none", "nul"])
+def test_record_completion_rejects_bad_root_before_filesystem(root, tmp_path):
+    with pytest.raises(OpsError) as exc:
+        record_completion(root, IDENT, 1, {"primary": "required"}, {})
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.problem.message == "session state root is invalid"
+    assert not tmp_path.joinpath(*STATE_DIR).exists()
+
+
 @pytest.mark.parametrize("max_bytes", [True, -1, 1.5, "5", []])
 def test_atomic_writer_rejects_malformed_size_limit_before_filesystem(max_bytes, tmp_path):
     path = tmp_path / "missing" / "payload.json"
@@ -349,6 +409,12 @@ def test_atomic_writer_accepts_payload_at_exact_size_limit(tmp_path):
     atomic_write(path, payload, max_bytes=MAX_SESSION_BYTES)
     assert path.stat().st_size == MAX_SESSION_BYTES
     assert path.read_text() == payload
+
+
+def test_atomic_writer_accepts_empty_payload_at_zero_byte_limit(tmp_path):
+    path = tmp_path / "empty.json"
+    atomic_write(path, "", max_bytes=0)
+    assert path.read_bytes() == b""
 
 
 def test_shared_atomic_writer_default_preserves_large_sibling_artifact_capacity(tmp_path):
