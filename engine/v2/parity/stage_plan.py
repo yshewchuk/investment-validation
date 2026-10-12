@@ -122,7 +122,7 @@ SCORER_V1 = StagePlan(
         Stage("resolve_context", (
             "ticker", "strategy", "as_of", "event_date", "session",
             "entry_date", "exit_date", "evidence_cutoff", "quote_date",
-            "quote_age_sessions", "quote_max_age_sessions", "dte_entry",
+            "quote_age_sessions", "quote_max_age_sessions", "days_to_print",
             "snapshot_hash",
         )),
         Stage("features", (
@@ -141,7 +141,8 @@ SCORER_V1 = StagePlan(
             "legs", "strike", "requested_strike", "expiry", "variant",
             "structure_width", "structure_peak",
         ), depends_on=("resolve_context", "forecast")),
-        Stage("pricing", ("entry_cost", "spot", "fill", "fill_alpha", "rel_spread"),
+        Stage("pricing", ("entry_cost", "entry_cost_pct", "dte_entry", "spot",
+                          "fill", "fill_alpha", "rel_spread"),
               depends_on=("geometry",)),
         Stage("analogs", (
             "exp_pnl_analog", "win_analog", "ci_low", "ci_high", "n_analogs",
