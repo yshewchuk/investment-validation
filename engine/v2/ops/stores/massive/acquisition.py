@@ -163,7 +163,7 @@ def _acquire(conn, store, params, claim, *, fetch, clock, on_receipt=None,
         body = _response_body(conn, store, unit, fetch, charge, response, lambda: charged)
         continuation = None
         if on_receipt is not None:
-            continuation = validate_page(body, original, unit["request"])
+            continuation = validate_page(body, original, unit["request"], cached=cache_hit)
             if continuation is not None and content_hash(continuation) in (*previous_requests, unit["request_hash"]):
                 raise fail("SOURCE_INVALID", "Massive continuation repeats a previous request")
         else:
@@ -171,7 +171,7 @@ def _acquire(conn, store, params, claim, *, fetch, clock, on_receipt=None,
         def record_receipt(record):
             observed = record.received_at if cache_hit else format_timestamp(clock.now())
             if on_receipt is not None:
-                closed_day(unit["request"], parse_timestamp(observed))
+                closed_day(unit["request"], parse_timestamp(observed), cached=cache_hit)
                 on_receipt(record, observed, cache_hit, continuation)
         record = cache_raw_receipt(
             conn, store, RawPayload(payload=body, response_kind="partial" if continuation else "complete", response_meta={}),

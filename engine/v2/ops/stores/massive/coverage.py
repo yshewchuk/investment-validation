@@ -59,7 +59,7 @@ def _raw(conn, store, document, original, remaining):
                                (document["attempt_id"],)).fetchone()
         if attempt is None or tuple(attempt) != (document["job_id"], document["fence"]):
             raise ValueError
-        closed_day(original, observed)
+        closed_day(original, observed, cached=True)
         raw = conn.execute("SELECT * FROM data_raw_receipts WHERE raw_receipt_id=?",
                            (document["raw_receipt_id"],)).fetchone()
         if (raw is None
@@ -76,7 +76,7 @@ def _raw(conn, store, document, original, remaining):
         body = load_raw_receipt(conn, store, raw["raw_receipt_id"])
         if ref["object_id"] != artifact_reference(body, RAW_SCHEMA_REF).artifact_id:
             raise ValueError
-        continuation = validate_page(body, original, request)
+        continuation = validate_page(body, original, request, cached=True)
         if raw["response_kind"] != ("partial" if continuation is not None else "complete"):
             raise ValueError
         return continuation

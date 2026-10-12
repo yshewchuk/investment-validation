@@ -1,7 +1,7 @@
 """Synthetic page boundaries only: no provider, credentials, or private data."""
 import json
 import socket
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib.parse import urlencode
 
 import pytest
@@ -38,9 +38,9 @@ def next_url(endpoint=REQUEST["endpoint"], **params):
     return "https://api.massive.com" + endpoint + "?" + urlencode({"cursor": CURSOR} | params)
 
 
-def refusal(payload, request=REQUEST, page=None, code="SOURCE_INVALID"):
+def refusal(payload, request=REQUEST, page=None, code="SOURCE_INVALID", *, cached=False):
     with pytest.raises(OpsError) as error:
-        validate_page(payload, request, page or request)
+        validate_page(payload, request, page or request, cached=cached)
     assert error.value.code == code
     assert "synthetic-secret" not in str(error.value)
     assert "api.massive.com" not in str(error.value)
@@ -82,10 +82,19 @@ def test_malformed_body_is_sanitized(payload):
     refusal(payload)
 
 
-def test_raw_size_bound_is_shared_and_checked_before_json():
+@pytest.mark.parametrize("cached", [False, True])
+def test_raw_size_bound_is_shared_and_checked_before_json(cached):
     payload = body()
-    assert validate_page(payload + b" " * (MAX_RAW_BYTES - len(payload)), REQUEST, REQUEST) is None
-    refusal(b" " * (MAX_RAW_BYTES + 1), code="RESOURCE_LIMIT_EXCEEDED")
+    assert validate_page(payload + b" " * (MAX_RAW_BYTES - len(payload)), REQUEST, REQUEST, cached=cached) is None
+    refusal(b" " * (MAX_RAW_BYTES + 1), code="RESOURCE_LIMIT_EXCEEDED", cached=cached)
+
+
+@pytest.mark.parametrize("payload", [
+    b"{", body(results=[], resultsCount=0), body(results=[ROW | {"t": 1577854799999}]),
+    body(next_url="https://other.example/?apiKey=synthetic-secret"),
+])
+def test_cached_page_failures_are_terminal_integrity_refusals(payload):
+    refusal(payload, code="INTEGRITY_FAILED", cached=True)
 
 
 def test_duplicate_json_keys_cannot_hide_secret_bearing_continuation():
@@ -317,28 +326,28 @@ def test_empty_later_page_never_establishes_coverage(continuation):
     ("2020-01-10T23:59:59-05:00", True), ("2020-01-11T00:00:00-05:00", False),
     ("2020-01-11T00:00:00", True),
 ])
-def test_closed_day_uses_eastern_observation_date(observed, refused):
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+@pytest.mark.parametrize("cached", [False, True])
+def test_closed_day_uses_eastern_observation_date(observed, refused, dataset, cached):
+    request = REQUEST if dataset == "daily" else corporate(dataset)[0]
     observed_at = datetime.fromisoformat(observed)
     if refused:
         with pytest.raises(OpsError) as error:
-            closed_day(REQUEST, observed_at)
-        assert error.value.code == "SOURCE_NOT_FINAL"
+            closed_day(request, observed_at, cached=cached)
+        assert error.value.code == ("INTEGRITY_FAILED" if cached else "SOURCE_NOT_FINAL")
+        assert error.value.problem.retryable is not cached
     else:
-        assert closed_day(REQUEST, observed_at) is None
+        assert closed_day(request, observed_at, cached=cached) is None
 
 
 @pytest.mark.parametrize("end,before,after", [
     ("2020-03-08", "2020-03-09T03:59:59+00:00", "2020-03-09T04:00:00+00:00"),
     ("2020-11-01", "2020-11-02T04:59:59+00:00", "2020-11-02T05:00:00+00:00"),
 ])
-def test_closed_day_handles_dst_without_fixed_offset(end, before, after):
-    request = REQUEST | {"end": end}
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+def test_closed_day_handles_dst_without_fixed_offset(end, before, after, dataset):
+    request = (REQUEST if dataset == "daily" else corporate(dataset)[0]) | {"end": end}
     with pytest.raises(OpsError) as error:
         closed_day(request, datetime.fromisoformat(before))
     assert error.value.code == "SOURCE_NOT_FINAL"
     assert closed_day(request, datetime.fromisoformat(after)) is None
-
-
-def test_closed_day_is_only_daily_local_eligibility():
-    request, _, _ = corporate("splits")
-    assert closed_day(request, datetime(2020, 1, 10, tzinfo=timezone.utc)) is None

@@ -13,7 +13,7 @@ Research admission, normalization, snapshots and provider entitlement verificati
 Internal ops modules `acquisition`, `coverage`, `journal` and `pages`; no cross-package research API.
 
 ## Consumers
-`engine.v2.ops.massive_acquire`, `engine.v2.ops.stages`, `engine.v2.ops.worker`.
+`engine.v2.ops.massive_acquire`, `engine.v2.ops.stages`, `engine.v2.ops.worker`, `tools.v2_massive_plan`.
 
 ## Usage
 After verifying account access and data-use terms, initialize an ops root with the normal operator commands and configure its `massive-stocks` provider call budget. Keep the API key in the existing environment configuration, never command arguments. `as_of` cannot be after the current UTC date; both submission and worker enforce this before storage. Submission itself does not fetch:
@@ -28,7 +28,7 @@ An initialized catalog must have the current normal ops migrations. Inspect sema
 ```sh
 python -m tools.v2_massive_plan --catalog ROOT/catalog.sqlite --store-root ROOT --ticker EXAMPLE --start 2026-08-01 --end 2026-08-31 --as-of 2026-10-12 --adjustment raw --max-calls-per-request 10 --generation initial
 ```
-Planning is bounded/read-only; its HTTP count is a cap, not an exact page estimate. A missing occurrence may still be promotable from a verified exact raw hit under `initial`. The worker replans at execution; the completed result pins original receipts. New generations are acquisition namespaces, not coherent adjustment snapshots. Daily ranges must end before the current Eastern calendar day; later corrections still require explicit refresh.
+Planning is bounded/read-only; its HTTP count is a cap, not an exact page estimate. A missing occurrence may still be promotable from a verified exact raw hit under `initial`. The worker replans at execution; the completed result pins original receipts. New generations are acquisition namespaces, not coherent adjustment snapshots. Daily, split and dividend generation ranges must end before the observation's Eastern calendar day. Early cached observations fail once with `INTEGRITY_FAILED`; choose an explicit new generation to acquire fresh evidence. Later announcements/corrections still require explicit refresh.
 Partial chains and empty responses never create interval coverage. Same-job retries recover verified page prefixes without refetching committed pages; only terminal complete chains become reusable intervals. Completed gaps survive a failed job, but resubmitting the same key does not restart it. Choose a distinct key only when authorizing a new bounded operation; it cannot inherit the failed job's partial chain or reset its allowance. Native normalization and atomic pinned snapshot publication remain the final slice.
 
 ## Testing

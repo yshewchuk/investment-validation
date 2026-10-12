@@ -125,7 +125,7 @@ def retry(h, attempt, error):
     return state
 
 
-def seed_overlap(h, key, scope, observed):
+def seed_overlap(h, key, scope, observed, *, payload=None):
     """Construct verified historical overlaps through the real atomic receipt API."""
     enqueue(h, key, parameters(scope))
     attempt = claim(h)
@@ -138,7 +138,9 @@ def seed_overlap(h, key, scope, observed):
                     "observed_at": observed, "attempt_id": attempt.attempt_id, "fence": attempt.fence}
         coverage.record(h.conn, document)
         documents.append(document)
-    cache_raw_receipt(h.conn, h.store, RawPayload(payload=body(scope), response_kind="complete", response_meta={}),
+    cache_raw_receipt(h.conn, h.store,
+                      RawPayload(payload=body(scope) if payload is None else payload,
+                                 response_kind="complete", response_meta={}),
                       source=SOURCE, endpoint=scope["endpoint"], request=scope, received_at=observed,
                       fence_check=lambda: verify_fence(h.conn, attempt.attempt_id, attempt.fence, h.clock.now()),
                       record_receipt=record)
@@ -242,14 +244,17 @@ def test_corporate_history_reuses_its_own_family_only(harness, dataset):
         assert coverage.plan(h.conn, h.store, unrelated, "initial")["gaps"] == [unrelated]
 
 
-def test_initial_generation_promotes_legacy_receipt_at_original_observation(harness):
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+def test_initial_generation_promotes_legacy_receipt_at_original_observation(harness, dataset):
     h = harness
-    enqueue_exact(h)
+    scope = request(dataset=dataset)
+    params = parameters(scope, generation=None)
+    enqueue_exact(h, params=params)
     attempt = claim(h)
-    _, legacy = run(h, attempt, fetching([]))
+    _, legacy = run(h, attempt, fetching([]), params)
     finish(h, attempt)
     h.clock.advance(13)
-    _, result = acquire(h, "promote", fetch=no_fetch)
+    _, result = acquire(h, "promote", scope, fetch=no_fetch)
     evidence = result["coverage"]["bindings"][0]["evidence"]
     assert evidence["raw_receipt_id"] == legacy["raw_receipt_id"]
     assert evidence["observed_at"] == legacy["first_received_at"]
@@ -257,9 +262,25 @@ def test_initial_generation_promotes_legacy_receipt_at_original_observation(harn
     assert h.conn.execute("SELECT SUM(used_calls) FROM provider_reservations").fetchone()[0] == 1
 
 
-def test_preclose_legacy_receipt_does_not_age_into_positive_coverage(harness):
+def assert_terminal_evidence_failure(h, attempt, params):
+    with pytest.raises(OpsError) as error:
+        run(h, attempt, no_fetch, params)
+    assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
+    assert retry(h, attempt, error.value) == "failed"
+    assert claim(h) is None
+    assert h.conn.execute("SELECT count(*) FROM attempts WHERE job_id=?",
+                          (attempt.job_id,)).fetchone()[0] == 1
+    assert h.conn.execute("SELECT used_calls FROM provider_reservations WHERE attempt_id=?",
+                          (attempt.attempt_id,)).fetchone()[0] == 0
+    assert not (h.root / attempt.attempt_id / "massive_acquisition.json").exists()
+
+
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+@pytest.mark.parametrize("observed", ["2026-09-12T00:00:00+00:00", "2026-09-12T03:59:59+00:00"])
+def test_preclose_legacy_receipt_is_terminal_when_initial_generation_adopts_it(harness, dataset, observed):
     h = harness
-    scope = request("2026-09-10", "2026-09-11")
+    h.clock.value = datetime.fromisoformat(observed)
+    scope = request("2026-09-10", "2026-09-11", dataset=dataset)
     exact = parameters(scope, generation=None)
     enqueue_exact(h, params=exact)
     attempt = claim(h)
@@ -268,11 +289,69 @@ def test_preclose_legacy_receipt_does_not_age_into_positive_coverage(harness):
     h.clock.advance(86400)
     params = parameters(scope)
     enqueue(h, params=params)
-    with pytest.raises(OpsError) as error:
-        run(h, claim(h), no_fetch, params)
-    assert error.value.code == "SOURCE_NOT_FINAL"
+    assert_terminal_evidence_failure(h, claim(h), params)
     assert occurrences(h) == []
     assert h.conn.execute("SELECT received_at FROM data_raw_receipts").fetchone()[0] == legacy["first_received_at"]
+    assert h.conn.execute("SELECT SUM(used_calls) FROM provider_reservations").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+@pytest.mark.parametrize("observed,allowed", [
+    ("2026-09-12T00:00:00.000000Z", False),
+    ("2026-09-12T03:59:59.000000Z", False),
+    ("2026-09-12T04:00:00.000000Z", True),
+    ("2026-09-13T12:00:00.000000Z", True),
+])
+def test_occurrence_reuse_checks_original_scope_at_its_observation(harness, dataset, observed, allowed):
+    h = harness
+    scope = request("2026-09-10", "2026-09-11", dataset=dataset)
+    identity, evidence = seed_overlap(h, "original", scope, observed)
+    before = tuple(occurrences(h)[0])
+    h.clock.advance(2 * 86400)
+    # This subset was already closed at every observation. Only validation of
+    # the original evidence scope can reject its prematurely observed superset.
+    subset = request("2026-09-10", "2026-09-10", dataset=dataset)
+    if allowed:
+        _, result = acquire(h, "reuse", subset, fetch=no_fetch)
+        assert result["coverage"]["gaps"] == []
+        assert result["coverage"]["bindings"] == [
+            {"start": subset["start"], "end": subset["end"],
+             "occurrence_id": identity, "evidence": evidence}]
+    else:
+        with pytest.raises(OpsError) as error:
+            coverage.plan(h.conn, h.store, subset, "initial")
+        assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
+        params = parameters(subset)
+        enqueue(h, "reuse", params)
+        assert_terminal_evidence_failure(h, claim(h), params)
+    assert [tuple(row) for row in occurrences(h)] == [before]
+    assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 1
+    assert h.conn.execute("SELECT SUM(used_calls) FROM provider_reservations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+@pytest.mark.parametrize("stored_as", ["occurrence", "legacy_exact"])
+def test_stored_out_of_scope_rows_are_terminal_integrity_failures(harness, dataset, stored_as):
+    h = harness
+    scope = request(dataset=dataset)
+    # A complete, nonempty envelope accepted by the old exact validator, with
+    # one row outside the requested dates. Stronger validation must not retry it.
+    payload = body(request("2026-07-31", "2026-08-31", dataset=dataset))
+    if stored_as == "occurrence":
+        seed_overlap(h, "original", scope, "2026-09-12T00:00:00.000000Z", payload=payload)
+    else:
+        params = parameters(scope, generation=None)
+        enqueue_exact(h, params=params)
+        attempt = claim(h)
+        run(h, attempt, fetching([], payload), params)
+        finish(h, attempt)
+    h.clock.advance(13)
+    before = [tuple(row) for row in occurrences(h)]
+    params = parameters(scope)
+    enqueue(h, "reuse", params)
+    assert_terminal_evidence_failure(h, claim(h), params)
+    assert [tuple(row) for row in occurrences(h)] == before
+    assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 1
 
 
 def test_crash_after_atomic_commit_before_output_recovers_without_duplicate_fetch(harness):
@@ -435,10 +514,11 @@ def test_out_of_scope_or_nonterminal_corpus_never_becomes_positive(harness, data
 
 @pytest.mark.parametrize("instant,allowed", [("2026-09-12T03:59:59+00:00", False),
                                             ("2026-09-12T04:00:00+00:00", True)])
-def test_daily_eligibility_uses_current_eastern_date(harness, instant, allowed):
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+def test_history_eligibility_uses_current_eastern_date(harness, instant, allowed, dataset):
     h = harness
     h.clock.value = datetime.fromisoformat(instant)
-    scope = request("2026-09-10", "2026-09-11")
+    scope = request("2026-09-10", "2026-09-11", dataset=dataset)
     params = parameters(scope)
     enqueue(h, params=params)
     attempt = claim(h)
@@ -499,6 +579,51 @@ def test_history_cli_submits_registered_kind_and_preserves_idempotency(tmp_path,
         assert conn.execute("SELECT count(*) FROM provider_reservations").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 0
         assert isolated not in str(tuple(conn.iterdump())) + canonical_json(first)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+@pytest.mark.parametrize("instant,allowed", [
+    ("2026-09-12T00:00:00+00:00", False),
+    ("2026-09-12T03:59:59+00:00", False),
+    ("2026-09-12T04:00:00+00:00", True),
+    ("2026-09-13T12:00:00+00:00", True),
+])
+def test_history_cli_closed_window_precedes_fingerprints_and_submission(
+        tmp_path, isolated, monkeypatch, capsys, dataset, instant, allowed):
+    clock = FakeClock()
+    clock.value = datetime.fromisoformat(instant)
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
+    fingerprints = []
+    def source(_):
+        fingerprints.append("source")
+        return {"synthetic_source": "v1"}
+    def environment(threads):
+        fingerprints.append("environment")
+        return {"synthetic_threads": threads}
+    monkeypatch.setattr(submit_cli, "worker_source_manifest", source)
+    monkeypatch.setattr(submit_cli, "environment_identity", environment)
+    monkeypatch.setattr(providers, "provider_credentials", no_fetch)
+    monkeypatch.setattr(provider_budget, "before_request", no_fetch)
+    try:
+        args = submission_tests.arguments(tmp_path) + ["--generation", "initial"]
+        for flag, value in (("--dataset", dataset), ("--start", "2026-09-10"), ("--end", "2026-09-11")):
+            args[args.index(flag) + 1] = value
+        assert submit_cli.main(args, clock=clock) == (0 if allowed else 2)
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert captured.err == "" and isolated not in captured.out
+        if allowed:
+            assert result["kind"] == "massive_history_acquisition" and result["state"] == "queued"
+            assert fingerprints == ["source", "environment"]
+        else:
+            assert result == {"refused": "SOURCE_NOT_FINAL"}
+            assert fingerprints == []
+        assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == int(allowed)
+        for table in ("attempts", "provider_accounts", "provider_reservations", "data_raw_receipts",
+                      "ops_massive_occurrences", "ops_massive_pages"):
+            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
     finally:
         conn.close()
 

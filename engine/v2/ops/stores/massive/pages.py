@@ -6,7 +6,7 @@ from urllib.parse import parse_qsl, urlsplit
 from zoneinfo import ZoneInfo
 
 from engine.v2.ops import massive_plan
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.providers.massive_policy import MAX_RAW_BYTES
 
 _EASTERN = ZoneInfo("America/New_York")
@@ -131,19 +131,23 @@ def validate_rows(body: bytes, original_request: dict, page_request: dict) -> di
     return document
 
 
-def validate_page(body: bytes, original_request: dict, page_request: dict) -> dict | None:
+def validate_page(body: bytes, original_request: dict, page_request: dict, *, cached=False) -> dict | None:
     """Return a checked credential-free continuation before any raw persistence."""
-    document = validate_rows(body, original_request, page_request)
     try:
+        document = validate_rows(body, original_request, page_request)
         return _next_request(document.get("next_url"), original_request, page_request)
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
-        raise fail("SOURCE_INVALID", "Massive page continuation is invalid") from None
+        raise fail("INTEGRITY_FAILED" if cached else "SOURCE_INVALID", "Massive page continuation is invalid") from None
+    except OpsError as error:
+        if cached and error.code in ("SOURCE_INVALID", "SOURCE_EMPTY"):
+            raise fail("INTEGRITY_FAILED", "Massive cached page validation failed") from None
+        raise
 
 
-def closed_day(request: dict, observed_at: datetime) -> None:
-    """Versioned local daily eligibility only; this is not source finality evidence."""
-    if request["dataset"] == "daily":
-        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
-            raise fail("SOURCE_NOT_FINAL", "Massive observation requires an explicit timezone")
-        if request["end"] >= observed_at.astimezone(_EASTERN).date().isoformat():
-            raise fail("SOURCE_NOT_FINAL", "Massive daily range includes an unclosed Eastern date")
+def closed_day(request: dict, observed_at: datetime, *, cached=False) -> None:
+    """Versioned local eligibility for every dataset; not source finality evidence."""
+    code = "INTEGRITY_FAILED" if cached else "SOURCE_NOT_FINAL"
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise fail(code, "Massive observation requires an explicit timezone")
+    if request["end"] >= observed_at.astimezone(_EASTERN).date().isoformat():
+        raise fail(code, "Massive range includes an unclosed Eastern date")
