@@ -609,7 +609,7 @@ def _jsonable(value):
 
 def cache_raw_receipt(conn: Any, store: ArtifactStore, payload: RawPayload,
                       *, source: str, endpoint: str, request: Mapping[str, Any],
-                      received_at: str) -> RawReceiptRecord:
+                      received_at: str, fence_check: Callable[[], None] | None = None) -> RawReceiptRecord:
     request_hash = content_hash(_jsonable(dict(request)))
     predicted = artifact_reference(payload.payload, RAW_SCHEMA_REF)
     receipt_id = "raw_" + content_hash({
@@ -628,6 +628,9 @@ def cache_raw_receipt(conn: Any, store: ArtifactStore, payload: RawPayload,
                               "raw receipt identity has conflicting content")
         object_ref = _object_ref_document(existing["artifact_ref_json"])
         store.verify(_artifact_ref(object_ref, RAW_SCHEMA_REF))
+        if fence_check is not None:
+            with _write_transaction(conn):
+                fence_check()
         return RawReceiptRecord(
             raw_receipt_id=existing["raw_receipt_id"], source=existing["source"],
             endpoint=existing["endpoint"], request_hash=existing["request_hash"],
@@ -649,6 +652,8 @@ def cache_raw_receipt(conn: Any, store: ArtifactStore, payload: RawPayload,
         response_meta=dict(payload.response_meta), received_at=received_at,
         cache_hit=False)
     with _write_transaction(conn):
+        if fence_check is not None:
+            fence_check()
         conn.execute(
             "INSERT INTO data_raw_receipts (raw_receipt_id, source, endpoint, request_hash, "
             "raw_hash, artifact_ref_json, response_kind, request_json, response_meta_json, "
