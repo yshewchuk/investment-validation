@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tools import mutation_pr_status as ps
 
 DIFF = """\
@@ -369,3 +371,114 @@ def test_unparsable_summary_or_baseline_json_degrades(tmp_path, capsys):
                     "--baseline-summary", str(base), "--github-output", str(out2)]) == 0
     assert "state=failure\n" in out2.read_text()
     assert "baseline summary unreadable" in capsys.readouterr().out
+
+
+def _run_main(tmp_path, name, m, rows=(), baseline=None, diff=True):
+    """Run main() over real files; return (annotation lines, verdict JSON, github output)."""
+    root = tmp_path / name
+    root.mkdir()
+    d, dfile = _write_report(root, m, list(rows))
+    out = root / "gh_output"
+    args = ["--merged-dir", str(d), "--github-output", str(out)]
+    if diff:
+        args += ["--diff-file", str(dfile)]
+    if baseline is not None:
+        bfile = root / "base.json"
+        bfile.write_text(json.dumps(baseline))
+        args += ["--baseline-summary", str(bfile)]
+    assert ps.main(args) == 0
+    return d, out
+
+
+def _split(stdout):
+    lines = stdout.splitlines()
+    start = lines.index("{")
+    return [x for x in lines[:start]], json.loads("\n".join(lines[start:]))
+
+
+REASON_CASES = [
+    # (module summary, rows, baseline, level, exact reason)
+    (None, [], None, "warning", "no report: job cancelled, runner or setup error"),
+    (mod(skipped_reason="pr_closed_mid_run"), [], None, "warning",
+     "skipped (pr_closed_mid_run)"),
+    (mod(run_exit_code=-1), [], None, "warning", "timeout or cancelled"),
+    (mod(run_exit_code=137), [], None, "warning", "killed by signal (exit 137)"),
+    (mod(run_exit_code=-9), [], None, "warning", "killed by signal (exit -9)"),
+    (mod(counts_backend={"error": 2}), [], None, "warning",
+     "gremlin ERROR results (tool errors)"),
+    (mod(failure_reasons=["RAW_INVALID"]), [], None, "warning", "invalid raw report"),
+    (mod(run_exit_code=1), [], {"modules": {"a": mod(run_exit_code=1)}}, "warning",
+     "module run fails on main too (exit 1)"),
+    (mod(run_exit_code=2), [], None, "error", "module run failed (exit 2)"),
+    (mod(), [row("a", "engine/v2/a.py", 5)], None, "error",
+     "1 survivor(s) on changed lines: engine/v2/a.py:5"),
+]
+
+
+@pytest.mark.parametrize("summary_mod,rows,baseline,level,reason", REASON_CASES)
+def test_published_reason_text_in_annotation_and_json(tmp_path, capsys, summary_mod, rows,
+                                                      baseline, level, reason):
+    m = {"modules": {} if summary_mod is None else {"a": summary_mod},
+         "expected_modules": ["a"]}
+    _run_main(tmp_path, "case", m, rows, baseline)
+    notes, verdict = _split(capsys.readouterr().out)
+    cls = "pr_owned" if level == "error" else "infra"
+    assert verdict["modules"]["a"] == {"class": cls, "reason": reason}
+    suffix = "" if level == "error" else " (infra, not PR-owned)"
+    assert notes == [f"::{level}::a: {reason}{suffix}"]
+    assert verdict["state"] == ("failure" if level == "error" else "success")
+
+
+def test_published_descriptions_and_degradation_messages_are_exact(tmp_path, capsys):
+    # clean, infra-only and PR-owned descriptions
+    _, out = _run_main(tmp_path, "clean", merged(a=mod(), b=mod()))
+    assert "description=gremlins: no PR-owned problems in 2 module(s)\n" in out.read_text()
+    _, out = _run_main(tmp_path, "infra", merged(a=mod(run_exit_code=-1), b=mod()))
+    assert "description=gremlins: no PR-owned problems; 1 infra warning(s)\n" in out.read_text()
+    _, out = _run_main(tmp_path, "owned", merged(a=mod(run_exit_code=1), b=mod(run_exit_code=-1)))
+    assert ("description=gremlins: PR-owned problem in a; 1 infra warning(s)\n"
+            in out.read_text())
+    capsys.readouterr()
+    # unavailable report
+    out = tmp_path / "gh_unavailable"
+    assert ps.main(["--merged-dir", str(tmp_path / "nowhere"), "--github-output", str(out)]) == 0
+    assert out.read_text() == ("state=success\n"
+                               "description=gremlins: merged report unavailable (infra); "
+                               "no PR-owned result\n")
+    notes, verdict = _split(capsys.readouterr().out)
+    assert notes == ["::warning::merged mutation report unavailable; "
+                     "not reporting red for infra"]
+    assert verdict == {"state": "success", "pr_owned": [], "infra": ["report"], "modules": {},
+                       "description": "gremlins: merged report unavailable (infra); "
+                                      "no PR-owned result"}
+
+
+def test_exact_degradation_warnings(tmp_path, capsys):
+    d, diff = _write_report(tmp_path, merged(a=mod()), [])
+    out = tmp_path / "gh_output"
+    base = tmp_path / "missing_base.json"
+    ps.main(["--merged-dir", str(d), "--baseline-summary", str(base),
+             "--github-output", str(out)])
+    notes, verdict = _split(capsys.readouterr().out)
+    assert notes == [
+        "::warning::PR diff unavailable; survivors cannot be attributed to the PR",
+        "::warning::main baseline summary unreadable; no failure is excused as pre-existing"]
+    assert set(verdict) == {"state", "description", "pr_owned", "infra", "modules"}
+    (d / "results.jsonl").write_text("{bad\n")
+    ps.main(["--merged-dir", str(d), "--diff-file", str(diff), "--github-output", str(out)])
+    notes, _ = _split(capsys.readouterr().out)
+    assert notes == ["::warning::1 malformed results.jsonl row(s) ignored"]
+    (d / "results.jsonl").unlink()
+    ps.main(["--merged-dir", str(d), "--diff-file", str(diff), "--github-output", str(out)])
+    notes, _ = _split(capsys.readouterr().out)
+    assert notes == ["::warning::results.jsonl unreadable; "
+                     "survivors cannot be attributed to the PR"]
+
+
+def test_survivor_reason_lists_first_five_sorted_hits_with_full_count():
+    changed = {"engine/v2/a.py": set(range(1, 9))}
+    rows = [row("a", "engine/v2/a.py", n) for n in (8, 3, 1, 7, 2, 6, 5)]
+    v = ps.classify(merged(a=mod()), rows, changed)
+    assert v["modules"]["a"]["reason"] == (
+        "7 survivor(s) on changed lines: engine/v2/a.py:1, engine/v2/a.py:2, "
+        "engine/v2/a.py:3, engine/v2/a.py:5, engine/v2/a.py:6")
