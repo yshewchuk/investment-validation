@@ -897,7 +897,7 @@ waits without submitting until its paired succeeded inputs are ready.
 
 - **ORATS rows** (`providers/orats_daily_market.py`): `fetcher(unit)` returns `(raw_bytes, response_kind, response_meta, ticker_rows)`; `ticker_rows` supplies the `daily_market` rows. Out-of-range scaled fields and nonpositive `implied_move` become `None` without raising. Missing mcap remains null; backward carry belongs to `data.incremental.merge_daily_market`.
   `orats_daily_market._fetch_attempts` and `_should_retry` own the bounded summaries/cores retry for nonempty 2xx missing tickers; nightly admission reserves its full paired-retry budget via `nightly.ORATS_CALLS_PER_DAILY_MARKET_UNIT`. Remaining gaps retain partial coverage, session/attempt metadata and raw receipts, never complete; empty/404 remains not_final. Credential, rate-limit and not-final outcomes precede partial.
-  `data.incremental._fetch_unit` validates returned coverage and records raw receipts. `provider_response` owns pure `classify_response`, `OutcomeKind`, `AcquisitionOutcome`; `ops.incremental_data` re-exports them, importing neither refresh store. `calendar_moves_jobs` owns callback loaders. ORATS imports the leaf directly (stdlib and `ops.errors.fail` only), so provider imports never reach orchestration.
+  `data.incremental._fetch_unit` validates returned coverage and records raw receipts. `provider_response` owns pure `classify_response`, `OutcomeKind`, `AcquisitionOutcome`; `ops.incremental_data` re-exports them, importing neither refresh store. `calendar_moves_jobs` owns callback loaders. ORATS imports `provider_response` directly; that leaf depends only on stdlib and `ops.errors.fail`, so provider imports never reach orchestration.
   Classification validates unique nonempty requested keys, returned/empty/unsupported subsets and nonnegative quota; invalid values remain `INVALID_REQUEST`. Equal inputs produce equal outcomes, without I/O, cache, retry, transaction, writes or partial return.
 - **Massive Basic planning**: `python -m tools.v2_massive_plan` calls `massive_plan.plan` over an existing read-only catalog and verified raw objects. Normal engine startup may load `.env` before argument parsing, including help/refused requests; the planner performs no provider-credential lookup or output, provider I/O, migration, acquisition, normalization, research read or snapshot publication.
   Daily REST OHLCV and splits/dividends use an explicit `as_of` under a versioned Basic capability policy. The plan reports the policy identity, supported date bounds and request rate; these are planning constraints, not account entitlement or EOD-finality evidence.
@@ -1069,7 +1069,7 @@ worker builds `events.json` from the pinned snapshot before scoring.
 
 Top-level imports, all strictly below this package's own layer (7.0):
 `engine.v2.contracts` (0.0), `engine.v2.foundation` (0.5), `engine.v2.data`
-(1.0 — `generic_incremental`/`incremental_tables`/`repository.Repository`/
+(1.0 — `generic_incremental`/`incremental_tables`/`incremental` (`load_raw_receipt`, `RAW_SCHEMA_REF`)/`repository.Repository`/
 `computed_moves`/`computed_moves_table`), `engine.v2.registry` (3.0,
 `DYNAMIC_MENU`), `engine.v2.scoring` (5.0 — `native_board_universe.py`'s
 `SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s

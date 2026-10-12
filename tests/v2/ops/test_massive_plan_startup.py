@@ -117,7 +117,7 @@ def _run(root, arguments, revision, replacement="", *, guard_worker=True):
 
 @pytest.mark.parametrize("mode", [
     "help", "invalid", "s3", "missing", "empty", "cached", "fifo", "nul_catalog", "nul_store",
-    "receipt_corrupt", "bytes_corrupt", "object_missing",
+    "receipt_corrupt", "bytes_corrupt", "object_missing", "manifest_missing_id",
     "cwd_shadow",
     "missing_flags", "missing_value", "bad_adjustment", "bad_cap", "unsupported_transport", "reversed_dates",
 ])
@@ -128,12 +128,16 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
     if mode == "cached":
         for unit in inventory(cache)["units"]:
             seed(cache, unit["request"])
-    if mode in ("receipt_corrupt", "bytes_corrupt", "object_missing"):
+    if mode in ("receipt_corrupt", "bytes_corrupt", "object_missing", "manifest_missing_id"):
         record = seed(cache, inventory(datasets=["daily"])["units"][0]["request"])
         digest = record.raw_hash.removeprefix("sha256:")
         path = root / "store" / "objects" / digest[:2] / digest
         if mode == "receipt_corrupt":
             mutate_receipt(cache, record, "raw_receipt_id", "raw_" + "0" * 32)
+        elif mode == "manifest_missing_id":
+            ref = json.loads(conn.execute("SELECT artifact_ref_json FROM data_raw_receipts").fetchone()[0])
+            del ref["object_id"]
+            mutate_receipt(cache, record, "artifact_ref_json", json.dumps(ref))
         elif mode == "bytes_corrupt":
             path.chmod(0o600)
             path.write_bytes(b"tampered")
@@ -197,10 +201,11 @@ def test_ambient_startup_never_becomes_provider_io_or_credential_output(cache, m
         assert first["stdout"].startswith("usage: tools.v2_massive_plan ")
         assert "--max-calls-per-request" in first["stdout"]
         assert first["stderr"] == ""
-    if mode in ("receipt_corrupt", "bytes_corrupt", "object_missing"):
+    cache_errors = {"receipt_corrupt": "INTEGRITY_FAILED", "bytes_corrupt": "INTEGRITY_FAILED",
+                    "object_missing": "MISSING", "manifest_missing_id": "MANIFEST_CORRUPT"}
+    if mode in cache_errors:
         assert json.loads(first["stdout"]) == {
-            "refused": "MISSING" if mode == "object_missing" else "INTEGRITY_FAILED",
-            "reason": None}
+            "refused": cache_errors[mode], "reason": None}
         assert first["stderr"] == ""
     assert tuple(conn.iterdump()) == before
     assert objects == {str(path.relative_to(root)): path.read_bytes()

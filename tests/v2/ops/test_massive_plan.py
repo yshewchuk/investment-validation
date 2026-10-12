@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from engine.v2.data.errors import DataError
 from engine.v2.data.incremental import RawPayload, cache_raw_receipt
 from engine.v2.foundation import ArtifactStore, canonical_json, content_hash
 from engine.v2.foundation.artifacts import ArtifactError
@@ -267,8 +268,11 @@ def test_only_missing_units_spend_the_declared_call_cap(cache, cap):
     assert result["max_calls_per_request"] == cap
 
 
-@pytest.mark.parametrize("missing_key", ["kind", "content_hash", "byte_size"])
-def test_schema_admissible_incomplete_manifest_is_typed(cache, missing_key):
+@pytest.mark.parametrize("missing_key,error_type,code", [
+    ("kind", OpsError, "INTEGRITY_FAILED"), ("content_hash", OpsError, "INTEGRITY_FAILED"),
+    ("byte_size", OpsError, "INTEGRITY_FAILED"), ("object_id", DataError, "MANIFEST_CORRUPT"),
+])
+def test_schema_admissible_incomplete_manifest_is_typed(cache, missing_key, error_type, code):
     req = inventory(datasets=["daily"])["units"][0]["request"]
     record = seed(cache, req)
     document = json.loads(cache[0].execute("SELECT artifact_ref_json FROM data_raw_receipts").fetchone()[0])
@@ -276,9 +280,9 @@ def test_schema_admissible_incomplete_manifest_is_typed(cache, missing_key):
     malformed = json.dumps(document)
     mutate_receipt(cache, record, "artifact_ref_json", malformed)
     assert cache[0].execute("SELECT artifact_ref_json FROM data_raw_receipts").fetchone()[0] == malformed
-    with pytest.raises(OpsError) as error:
+    with pytest.raises(error_type) as error:
         inventory(cache, datasets=["daily"])
-    assert error.value.code == "INTEGRITY_FAILED"
+    assert error.value.code == code
 
 
 @pytest.mark.parametrize("dataset", DATASETS)
