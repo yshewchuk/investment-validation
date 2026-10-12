@@ -365,17 +365,25 @@ def test_registration_plus_other_changed_path_unions_their_selections(case):
     assert got == ["alpha", "beta"]
 
 
-@pytest.mark.parametrize("edit", ["defaults", "no_base", "scans_int", "scans_empty"])
+@pytest.mark.parametrize("edit", ["defaults", "no_base"])
 def test_unverified_config_change_still_selects_every_module(case, edit):
     base, cfg, changed, graph = case
     if edit == "defaults":
         cfg["defaults"]["max_children"] = 3
-    elif edit == "no_base":
-        base = None
     else:
-        cfg["modules"]["beta"]["scans_tree"] = 5 if edit == "scans_int" else ""
+        base = None
     got = pilot.changed_modules(cfg, ["alpha", "beta"], changed, graph=graph, base_cfg=base)
     assert got == ["alpha", "beta"]
+
+
+@pytest.mark.parametrize("value, ok", [("engine/", True), (5, False), ("", False)])
+def test_scans_tree_validator_itself_refuses_bad_values(case, value, ok):
+    # The same value sits in base AND cfg, so the identity check cannot reject first.
+    base, cfg, changed, graph = case
+    for config in (base, cfg):
+        config["modules"]["beta"]["scans_tree"] = value
+    got = pilot.registration_tests(cfg, base, set(changed), set(graph))
+    assert (got is not None) is ok
 
 
 def test_gremlin_matrix_reads_base_sha_from_environment(case, tmp_path, monkeypatch):
