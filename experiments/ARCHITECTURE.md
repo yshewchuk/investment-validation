@@ -88,18 +88,18 @@ boundary. Its fixed worker reads staged `spec.json` and
 `native_registration.json`, verifies existing preregistration, and checks
 the requested identity, resolved plan, source closure and single-thread
 environment before pricing. Required `economic_params.strategy` selects the
-native strategy independently of arm IDs; the immutable registered economics
-bind it. Snapshot, event IDs and holdout context come only from registration.
+native strategy independently of arm IDs; any declared strategy must be a
+supported native structure before registration reads or effects. Snapshot,
+event IDs and holdout context come only from registration.
 It never re-resolves a scope head or accepts a supplied trades frame.
 Submission uses the existing `SubmitRequest` API and artifact input bindings;
 no production entrypoint submits this kind. The worker's catalog connection is read-only.
-Each staged document is limited to 16 MiB, opened nonblocking without following
-the final symlink, and checked as a regular file on the open descriptor. A
-replacement after opening cannot redirect the bytes; growth past the cap refuses.
+Each staged document itself must be a nonsymlink regular file of at most 16 MiB;
+pathname replacement cannot redirect admitted bytes.
 The worker installs one `native_gate_consumption.v1.0` receipt with the immutable plan,
 stage inputs and mark-based cash flows; the supervisor publishes it only after worker success.
-Bytes are written and closed in a private staging directory, then installed
-create-only; staging must support hard links. Existing destinations are never opened, overwritten or unlinked.
+Installation is create-only and never assigns partial bytes; staging must support
+hard links. Existing destinations are never opened, overwritten or unlinked.
 This receipt is not an evaluation report or promotion evidence.
 
 | Native worker condition | Outcome |
@@ -108,7 +108,7 @@ This receipt is not an evaluation report or promotion evidence.
 | Non-mapping or ill-typed worker arguments; unsupported recipe or malformed staging, including missing/null required spec fields or excessive JSON nesting; missing staged bytes | `INVALID_EXPERIMENT_SPEC` before catalog access for malformed arguments and before pricing for malformed staging; `INPUT_CHANGED` for missing bytes. |
 | Changed staged spec, registration, expected identity, source (including missing, unreadable or malformed Python) or numerical environment | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` before pricing; preserve registration and prior evidence. |
 | Unresolved pin or non-sweep purpose | `SNAPSHOT_UNRESOLVED` or `HOLDOUT_ACCESS_DENIED`; no pricing receipt or partial report. |
-| Incomplete/nonfinite pricing or caught pinned-data failure | `EXPERIMENT_VARIANT_FAILED` for incomplete/nonfinite pricing and admitted `ArtifactError`, `ValueError`, `TypeError`, `KeyError`, `RecursionError`, `OSError` or `sqlite3.Error`; replay also catches `OverflowError`. Registered `DataError` codes retain their code; other `DataError` uses R4. Caught underlying failures retain their code, or uncoded type, only in private `data_failure_code` details; no success receipt. |
+| Incomplete/nonfinite pricing or caught pinned-data failure | `EXPERIMENT_VARIANT_FAILED`; registered data refusal codes retain their code. Caught underlying failures retain their code, or uncoded type, only in private `data_failure_code` details; no success receipt. The real replay and catalog-failure regressions define the supported catch boundary. |
 | Unexpected programming failure | The existing worker classifier remains authoritative: unexpected replay exceptions such as `RuntimeError`, `IndexError` or `AttributeError` yield generic `WORKER_FAILED`, private type/location diagnostics and no successful output. This admission-only boundary does not reconcile full-sweep R4 outcomes. |
 | Retry/cache/transaction | One attempt; cross-job cache reuse is disabled so admission is checked again. No worker catalog transaction or CSV access. |
 | Existing receipt destination or receipt I/O failure | Non-retryable `INPUT_CHANGED`; cleanup touches only private temporary names and preserves the original failure. Failed post-install cleanup can retain a complete assigned receipt; earlier failures can retain private partial bytes. No partial assigned receipt or successful output is published. |

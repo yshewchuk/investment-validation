@@ -367,6 +367,32 @@ def test_non_gate_runner_cannot_register_unused_strategy(source, monkeypatch, ru
     assert _objects(source[2]) == objects
 
 
+@pytest.mark.parametrize("strategy", [None, True, 1, [], {}, "", " ", "unsupported-native-structure"])
+def test_invalid_strategy_cannot_reserve_native_identity(source, monkeypatch, strategy):
+    """Real registration refuses before any read/effect; the corrected arm remains usable."""
+    before, objects = _catalog(source[0]), _objects(source[2])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid strategy reached snapshot reads")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("experiments.native_registration.source_closure", forbidden)
+        patch.setattr(source[3], "resolve_pinned", forbidden)
+        patch.setattr(source[3], "scan", forbidden)
+        with pytest.raises(OpsError) as error:
+            _registered(source, economic_params={"fill": 0.0, "strategy": strategy})
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    expected = ("declared strategy must be a non-empty string" if not isinstance(strategy, str) or not strategy
+                else "declared strategy is not a supported native structure")
+    assert error.value.problem.message == expected
+    assert error.value.problem.retryable is False
+    assert _catalog(source[0]) == before
+    assert _objects(source[2]) == objects
+    _, registration, _ = _registered(source)
+    assert registration.document["execution_plan"]["economic_params"]["strategy"] == "STR-THRU"
+    assert _registered(source)[1].variant_id == registration.variant_id
+
+
 def test_registered_unsupported_runner_refuses_before_pricing(
         source, tmp_path, single_thread, forbidden_pricing):
     """A valid registered Python runner does not expand the worker allowlist."""
@@ -389,6 +415,7 @@ def test_holdout_request_refuses_before_catalog_or_staged_reads(tmp_path, purpos
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", {"purpose": purpose, "no_ledger": True}, tmp_path)
     assert error.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert error.value.problem.retryable is False
     assert list(tmp_path.iterdir()) == []
 
 

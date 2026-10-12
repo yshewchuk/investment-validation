@@ -102,12 +102,12 @@ either required table. Their current consumer is
 
 ## Consumers
 
-`experiments/native_gate_worker.py` additionally consumes public `stages.NativeGateParameters`
-for strict argument decoding and `executor.THREAD_VARIABLES` to check the preregistered launch environment.
-
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
+
+`experiments/native_gate_worker.py` additionally consumes public `stages.NativeGateParameters`
+for strict argument decoding and `executor.THREAD_VARIABLES` to check the preregistered launch environment.
 
 No other production package imports ops. The CLI starts the coordinator, and
 serving reads a versioned health artifact without a peer-layer import. The one

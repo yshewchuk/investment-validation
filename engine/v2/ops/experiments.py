@@ -356,6 +356,9 @@ def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
     supported = SUPPORTED_ECONOMIC_KEYS
     if spec.runner in ("native-gate-replay", "experiments/native_gate_worker.py"):
         supported = supported | {"strategy"}
+        strategy = spec.economic_params.get("strategy")
+        if "strategy" in spec.economic_params and (not isinstance(strategy, str) or not strategy):
+            raise fail("INVALID_EXPERIMENT_SPEC", "declared strategy must be a non-empty string")
     unused = sorted(set(spec.economic_params) - supported)
     if unused:
         raise fail("INVALID_EXPERIMENT_SPEC",

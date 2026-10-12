@@ -16,6 +16,7 @@ from engine.v2.foundation import (
     safe_relative_path,
     to_document,
 )
+from engine.v2.foundation.final_holdout import declaration_from_document, request_from_registration
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
@@ -25,7 +26,7 @@ from engine.v2.ops.experiments import (
 )
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.ops.native_registration import verified_registration_bytes
-from engine.v2.foundation.final_holdout import declaration_from_document, request_from_registration
+from engine.v2.research._pricing import STRUCTURES
 from engine.v2.research.experiment_population import load_population
 
 
@@ -49,6 +50,9 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
+    if (plan.runner in ("native-gate-replay", "experiments/native_gate_worker.py")
+            and "strategy" in plan.economic_params and plan.economic_params["strategy"] not in STRUCTURES):
+        raise fail("INVALID_EXPERIMENT_SPEC", "declared strategy is not a supported native structure")
     try:
         declaration = None if final_read is None else declaration_from_document(to_document(final_read))
     except (ValueError, TypeError):

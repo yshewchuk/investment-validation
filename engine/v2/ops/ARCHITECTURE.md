@@ -1097,9 +1097,9 @@ release-resolution call sites — including `training.py`'s `promote_plan`,
 one of the plan-builder functions the Invariants section below cites for
 self-derived fingerprinting roots.
 
-It does not import its layer-7.0 peers `engine.v2.serving`/
-`engine.v2.research`, or anything above them (`engine.v2.diagnosis`,
-`engine.v2.dashboard`), lazily or otherwise. Legacy reads go through the
+It has no direct imports of its layer-7.0 peers `engine.v2.serving`/
+`engine.v2.research`, or higher packages (`engine.v2.diagnosis`, `engine.v2.dashboard`), including lazy imports. The smoke dispatch reaches research transitively through `experiments.native_gate_worker` → `v2_gate_variant`/`native_registration` → research pricing, population and replay.
+The direct-edge layer checks do not traverse unlayered experiments/tools callbacks and do not establish transitive isolation. Legacy reads go through the
 one declared adapter module, `engine/v2/ops/legacy_adapter.py`
 (`checks/legacy_adapters.json`); its own further legacy `engine.*` imports
 are the adapter's job and are not layer-checked v2 dependencies. `finality.py` never imports the adapter: it takes legacy reads and monkeypatch-seam lookups as explicit `FinalityReads` callbacks the adapter supplies, and `legacy_adapter.session_finality`/`resolve_final_session`/`covered_tickers` bind them.
