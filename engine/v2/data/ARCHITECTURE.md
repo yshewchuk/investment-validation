@@ -244,6 +244,46 @@ knowable. It is null exactly when `realized_move_pct` is null; null means
 unavailable to any decision. Readers must require
 `available_as_of_date <= decision_session`.
 
+**`computed_moves.v4` — event-history columns (design #651, slice S2).** Contract
+`computed_moves.v4` / `4.0.0` replaces `computed_moves.v3`; v3 snapshots stay pinned
+and readable, and there is no migration, dual read or backfill: the standard
+refresh rewrites whole ticker partitions under v4 (rebuild over migration).
+`quarter_ordinal` is dropped (it has no readers). New columns, stored at build time
+and never computed per run by a reader:
+- `event_ordinal` int64 not null: 0-based count of every earlier event of the ticker
+  in the event list the builder was given (`event_sequence`, `warmup=4`, the legacy
+  panel `MIN_HISTORY`), realised or skipped. `admitted` bool not null:
+  `event_ordinal >= 4`.
+- `implied_move_pct` (meaning changed, same name): the `AsofSeries` value
+  `implied_move` at the last `daily_market` row strictly before `event_date` whose
+  `src_iv` is non-null (`on_missing="null"`), filled for skipped events too. If that
+  anchor's `implied_move` is null or non-finite the result is null; it never falls
+  back to an older row. Null when no `src_iv` row precedes the event.
+- `mean_prior_or_implied` float64 nullable and `n_prior_implied` int64 not null:
+  `strict_prior_mean(population="admitted")` over the stored `implied_move_pct`
+  of earlier admitted events, nulls skipped. A non-admitted row, or an admitted row
+  with no earlier non-null implied value, is `(null, 0)`.
+- The ordinal counts every confirmed event dated before `as_of`, including events
+  that precede the first available close; those cannot be bracketed, so they are
+  stored as skipped rows (null realised move and `available_as_of_date`) that still
+  count in `event_ordinal`. v3 dropped them, so v4 has more rows than v3 for such
+  tickers. The v3 admission rule stays: a ticker with fewer than five computable
+  events emits no rows. For events inside the price history, realised moves,
+  `skipped` and `available_as_of_date` are bit-identical to v3.
+
+| Condition | Outcome |
+|---|---|
+| duplicate or unsorted event dates, or duplicate or unsorted `daily_market` dates, for a ticker | `build_rows` raises `CONTRACT_MISMATCH`; the refresh fails before any catalog commit, surfaced by the store as `OpsError` `INPUT_CHANGED` (`details.data_code` = the data code) |
+| the `daily_market` frame, empty or not, lacks `date`, `implied_move` or `src_iv` | `build_rows` raises `CONTRACT_MISMATCH` (the store's own scan refuses a missing table column first, per the ops doc) |
+| no `src_iv` row before an event | `implied_move_pct` null, no contribution to the aggregate |
+
+A refresh over a parent that still holds v3 partitions refuses `VALIDATION_FAILED`
+("full rebuild required", ops doc) when it neither rewrites nor attempts every non-v4
+partition, or produces no v4 rows at all; v3 records are never carried.
+
+`computed_at` and `retrieved_at` never order or filter anything here. The builder
+imports `event_history` from this same package (no new cross-component dependency).
+
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.
 - `event_sequence(event_dates, warmup=, first_known=)` takes one ticker's FULL
@@ -260,8 +300,8 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
   `"admitted"`). Each mean is the exact rational mean, rounded once to float.
 - Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
   `computed_at` are provenance and never filter or order.
-- The module only computes from the inputs it is given; it stores nothing and
-  has no production caller yet.
+- The module only computes from the inputs it is given; it stores nothing. Its
+  one production caller is `computed_moves.build_rows` (`computed_moves.v4`).
 
 | Condition | Outcome |
 |---|---|
