@@ -60,8 +60,7 @@ coordinator-effect functions in `effects_graph.py`; `training.py`'s `training_jo
 native-covered strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
 `computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
 `calendar_moves_job_spec`, and `run_computed_moves_worker`/`run_forward_calendar_worker` (dispatched by `worker.py`).
-`forward_calendar_refresh` has a `JobKind` (worker dispatch, loader callback, parameter validation) but no `nightly.py`
-`GRAPH`/`OPTIONAL` node and no `supervisor.Service` submitter yet — not on the nightly schedule.
+`forward_calendar_refresh` has a `JobKind` but no nightly submitter. `native_gate_pricing` is a smoke-only, single-thread staged kind: the executor launches only the fixed `experiments.native_gate_entrypoint` module, which passes its narrow callback to `worker.main` for invocation after the launch gate; registration/spec/code/environment checks precede pricing. It has no coordinator ledger effect or cache reuse; see `experiments/ARCHITECTURE.md`.
 
 `forward_calendar_store.run_forward_calendar_refresh` is a standalone, keyword-only native fetcher in ops: non-fetcher arguments validate before catalog/provider access; empty tickers mean whole market.
 Commit fencing checks the head before the attempt within one transaction; cancelled/expired attempts refuse before commit. An omitted attempt fence preserves generic-refresh and research callers.
@@ -1070,7 +1069,7 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
 `identity`/`application`), `engine.v2.ledger` (6.0), `engine.v2.parity`
 (6.5). `engine.v2.models` (3.5) and `engine.v2.domain.generation` (2.0,
-`Geometry`/`Pricing`) are lazy-only, never at module top level.
+`Geometry`/`Pricing`) are lazy-only, never at module top level. Ops does not import the native experiment adapter; the executor selects a fixed child module.
 `engine.v2.domain.generation` supplies geometry to the rescore decoder
 (`native/input_decoding.py::_load_native_score_inputs`). The pending PR-6 calendar
 helper uses its public expiry-only API lazily. Native foundation supplies calendar arithmetic;
@@ -1083,8 +1082,8 @@ one of the plan-builder functions the Invariants section below cites for
 self-derived fingerprinting roots.
 
 It does not import its layer-7.0 peers `engine.v2.serving`/
-`engine.v2.research`, or anything above them (`engine.v2.diagnosis`,
-`engine.v2.dashboard`), lazily or otherwise. Legacy reads go through the
+`engine.v2.research`, or higher packages (`engine.v2.diagnosis`, `engine.v2.dashboard`), lazily or otherwise. The unlayered native child imports the ops protocol, then its own pricing adapter after the launch gate opens; ops never loads an experiment module from submitted parameters.
+The entrypoint and adapter are covered by worker snapshots and native registration source identity. Legacy reads go through the
 one declared adapter module, `engine/v2/ops/legacy_adapter.py`
 (`checks/legacy_adapters.json`); its own further legacy `engine.*` imports
 are the adapter's job and are not layer-checked v2 dependencies. `finality.py` never imports the adapter: it takes legacy reads and monkeypatch-seam lookups as explicit `FinalityReads` callbacks the adapter supplies, and `legacy_adapter.session_finality`/`resolve_final_session`/`covered_tickers` bind them.
@@ -1099,11 +1098,12 @@ already excludes both disabled strategies by construction, so no legacy read is 
 
 **Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
 `experiments/native_registration.py` imports ops `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`,
-`fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`/`magnitude_execution_document`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
-That unlayered caller also imports research's `experiment_population.load_population` and `magnitude_folds.magnitude_window`/`plan_magnitude_folds`; these are caller dependencies, not ops-to-research edges.
+`experiments.NATIVE_GATE_RUNNERS`/`NATIVE_GATE_WORKER`/`NATIVE_GATE_ENTRYPOINT`, `fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`/`magnitude_execution_document`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
+That unlayered caller also imports research's `_pricing.STRUCTURES`, `experiment_population.load_population` and `magnitude_folds.magnitude_window`/`plan_magnitude_folds`; these are caller dependencies, not ops-to-research edges.
 The shared verifier accepts magnitude v1.2/v1.3 only with closed request/plan envelopes, intact digests and matching snapshot/holdout/event/fold identities. v1.3 additionally requires the exact `magnitude_execution_document` policy, a canonical evaluation cutoff after every evaluation event, seed zero and empty economics; malformed or hybrid schemas refuse `EXPERIMENT_IDENTITY_CONFLICT`.
 `magnitude_execution_document` constructs the fixed wire policy from an explicit canonical cutoff, refusing `INVALID_EXPERIMENT_SPEC` for malformed input. `validate_magnitude_execution` checks the closed v1.3 envelope without catalog access; malformed input refuses `EXPERIMENT_IDENTITY_CONFLICT`. Neither grants read authority or reconstructs the plan; ops imports no research code and old-schema bytes are unchanged.
 `experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; its artifact/CSV effects stay outside SQL. Prediction reporting consumes public `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. `experiments/magnitude_inputs.py` consumes `native_registration.magnitude_execution_document`; `experiments/magnitude_report.py` consumes `validate_magnitude_execution` and `errors.fail`. Other modules stay internal.
+`experiments.native_gate_worker` also consumes public `stages.NativeGateParameters`, `executor.THREAD_VARIABLES` and `experiments.NATIVE_GATE_WORKER`/`NATIVE_GATE_ENTRYPOINT` for admission; its entrypoint consumes `worker.main(dispatcher=...)` without accepting arbitrary worker names. Required `economic_params.strategy` is independent of arm IDs. Resolver, registration and pricing share `NATIVE_GATE_RUNNERS`; worker admission accepts only `NATIVE_GATE_WORKER`. Other runners refuse strategy declarations before registration effects. `HOLDOUT_ACCESS_DENIED` preserves R5 through the supervisor pipe.
 
 ### Final-holdout authorization (#490)
 
@@ -1137,7 +1137,7 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | R3 | `lifecycle.py`/`recovery.py` govern lease and ownership recovery; a stale lease is reclaimed only after ownership is proven gone. A tick-loop sidecar (below) never resubmits a job that already exists under its own key in any state — that is a coarser, separate budget from a job's own `RetryPolicy`. |
 | R4 | Catalog writes go through `catalog.transaction`. A coordinator effect's own filesystem write must be replay-safe and idempotent, not atomic with the DB commit (root doc §6) — one exception, legacy `experiment_effect`, appends a ledger CSV row inside the transaction and recovers by replay. An explicit variant ID must be a non-blank string; only `None` defaults to the resolved spec hash. A fixed-arm run validates one primary arm before runner execution and records one immutable variant identity/count in its report and durable run evidence; reuse refuses a conflicting stored identity/count or an existing `ran` ledger identity, and its ledger row carries the same registered identity. Registered runner/arm pairs without an audited fixed-arm selector are refused before runner invocation and variant-count recording. Smoke execution passes `--no-ledger`. A primary registered run is authorized in the operator and experiment-kind `primary` namespaces; it stages its wrapper, registered spec at `HERE/spec.yaml`, declared runtime sources, and declared runtime input files at their checkout-relative paths as input bindings. A binding path that resolves outside the checkout is refused with `VALIDATION_FAILED` before its bytes are published. The wrapper writes its report at the staging root for worker publication. A wrapper enters staging mode only when the adapter-only `INVESTING_PLAN_PINNED_SOURCE` is set, which `run_legacy_script` sets only for a runner with declared runtime sources (and clears otherwise); `INVESTING_PLAN_ROOT` stays the general root and never selects staging, so a direct wrapper run is unchanged. If it is set but a staged input (pinned source, spec) is missing, the wrapper fails loading it, the runner exits non-zero and the worker refuses `VALIDATION_FAILED`; it never falls back to checkout paths. |
 | R5 | Artifact publication is atomic (`ArtifactStore`): a killed process leaves the old artifact or nothing. |
-| R6 | Job identity is `job_id_for(namespace, key)`; a resubmission in the same namespace with the same key and a different digest is refused `IDEMPOTENCY_CONFLICT`, never merged. A new key scheme is checked against legacy's own keyspace, not only sibling native writers. |
+| R6 | Job identity is `job_id_for(namespace, key)`; a resubmission in the same namespace with the same key and a different digest is refused `IDEMPOTENCY_CONFLICT`, never merged. A new key scheme is checked against legacy's own keyspace, not only sibling native writers. The common worker manifest conservatively includes the native child and its static source closure for every kind: changes can refuse previously planned non-native jobs with `INPUT_CHANGED` at launch and prevent reuse of their implementation-bound checkpoints. Native gate jobs already disable cache reuse. |
 
 | Experiment execution condition | Outcome |
 |---|---|

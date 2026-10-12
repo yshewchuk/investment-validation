@@ -81,6 +81,29 @@ class ExperimentParameters:
 
 
 @dataclass(frozen=True)
+class NativeGateParameters:
+    """Only existing registration and staged inputs may enter native smoke pricing."""
+    expected_ids: tuple[str, ...]
+    catalog_path: str
+    objects_root: str
+    run_id: str
+    variant_id: str
+    input_bindings: dict[str, str]
+    no_ledger: bool
+    purpose: str = "sweep"
+
+
+def _native_gate_kind():
+    """Keep native smoke admission separate from the legacy recording effect."""
+    return JobKind(
+        name="native_gate_pricing", worker="native_gate_pricing", parameters=NativeGateParameters,
+        resource_classes=frozenset({"native_experiment"}), effects=("staged",),
+        retry=RetryPolicy("once", 1), checkpoint_contract="native_gate_consumption.v1.0",
+        namespaces=frozenset({"smoke"}),
+        validate=lambda spec, params: [] if params.no_ledger else ["native pricing is smoke-only"])
+
+
+@dataclass(frozen=True)
 class SnapshotImportParameters:
     """P2-7/Task7b: the ``snapshot_import`` worker needs nothing scalar at all
     — its full plan (table sources, contract refs, calendar/source-priority
@@ -404,7 +427,7 @@ def _core_kinds():
 
 
 def registry():
-    kinds = _core_kinds()
+    kinds = [*_core_kinds(), _native_gate_kind()]
     # P2-5/Task5: the export/publication/backup outbox effects, wired into the
     # nightly job DAG (guide §9.4 item 3). Each worker is trivial (it emits a
     # small receipt); the supervisor's coordinator effect

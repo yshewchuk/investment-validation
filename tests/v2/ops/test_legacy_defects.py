@@ -14,11 +14,10 @@ import pandas as pd
 import pytest
 
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
-from engine.v2.ops import cli
+from engine.v2.ops import cli, legacy_adapter
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity
-from engine.v2.ops import legacy_adapter
 from engine.v2.ops.legacy_adapter import _action_score, _load_finality
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.plans import nightly_plan
@@ -214,8 +213,7 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
         profile = profile_named(DEFAULT_POLICY, name)
         assert profile.memory_bytes >= measured_peak_bytes
         assert profile.measured is False
-    assert POLICY_VERSION == DEFAULT_POLICY.version
-    assert "2026-10-08" in POLICY_VERSION
+    assert POLICY_VERSION == DEFAULT_POLICY.version == "ops_resources.2026-10-10.v10"
 
 
 # --------------------------------------------------------------------------
@@ -229,9 +227,27 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
 MEASURED_READ_SET_BYTES = 1796916876
 
 
-def test_policy_version_is_v9():
-    assert POLICY_VERSION == "ops_resources.2026-10-08.v9"
-    assert POLICY_VERSION == DEFAULT_POLICY.version
+def test_native_experiment_profile_preserves_production_reservations():
+    """The actual worker profile keeps conservative experiment-sized admission."""
+    from engine.v2.ops.resources import decide
+    from tests.ops_support import FakeClock, sample
+
+    assert registry().get("native_gate_pricing").resource_classes == frozenset({"native_experiment"})
+    profile = profile_named(DEFAULT_POLICY, "native_experiment")
+    expected_memory, expected_scratch = 11 * (1 << 29), 10 * (1 << 30)
+    assert (profile.memory_bytes, profile.scratch_bytes, profile.cpu_count, profile.thread_count) == (
+        expected_memory, expected_scratch, 1, 1)
+    assert profile.heavy is True
+    assert profile.disk_heavy is True
+    assert profile.measured is False
+    assert profile.estimated_seconds is None
+    admission = decide(DEFAULT_POLICY, profile, sample(FakeClock()), ())
+    assert admission.admitted is True
+    assert admission.resources.reserved_memory_bytes == expected_memory
+    assert admission.resources.scratch_limit_bytes == expected_scratch
+    assert admission.resources.assigned_cpu_ids == (3,)
+    assert admission.resources.thread_count == 1
+    assert admission.resources.resource_profile_version == "ops_resources.2026-10-10.v10"
 
 
 def test_scratch_admits_the_measured_read_set_for_every_staging_profile():

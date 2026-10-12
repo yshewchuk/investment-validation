@@ -19,8 +19,10 @@ transaction. Re-registering identical content returns the same identity.
 The reserved arm is planned; registration does not mark a variant as tried.
 Admission verifies the stored object and compares a freshly built binding;
 returned documents are copies, not mutable views of registered bytes.
-These library entrypoints do not fit models, publish reports, write the CSV
-ledger or emit outcome/refusal receipts, and have no supervisor caller.
+Registration and current-request admission do not fit models, publish reports,
+write the CSV ledger or emit outcome/refusal receipts. The supervisor module does
+not call them directly; its dispatched smoke worker reuses
+`verify_native_registration` to verify its staged binding.
 
 Optional `final_read` metadata creates a versioned native registration that seals recipe, completeness-bar and frozen-model artifact references. Legacy registration bytes remain unchanged when omitted.
 `prepare_final_holdout_request` verifies that original registration and derives an immutable request keyed by experiment ID; missing declarations or malformed request metadata refuse `INVALID_EXPERIMENT_SPEC`, and changed catalog/artifact identity refuses `EXPERIMENT_IDENTITY_CONFLICT`.
@@ -151,11 +153,50 @@ Pre-admission receipts cannot invent admission; rejected-request ledger identiti
 
 ## Native gate-variant pricing
 
+The `native_gate_pricing` supervisor kind launches only the fixed unlayered
+`native_gate_entrypoint` child. Its callback imports native pricing after the
+ops protocol's stdin/PID launch gate, refusing every other worker name. Both
+entrypoint and adapter belong to the verified registration/source snapshot.
+The adapter reads staged `spec.json` and
+`native_registration.json`, verifies existing preregistration, and checks
+the requested identity, resolved plan, source closure and single-thread
+environment before pricing. Required `economic_params.strategy` selects the
+native strategy independently of arm IDs; the fixed worker requires it before
+registration reads or effects, and declared strategies must be supported. Snapshot,
+event IDs and holdout context come only from registration.
+It never re-resolves a scope head or accepts a supplied trades frame.
+Submission uses the existing `SubmitRequest` API and artifact input bindings;
+no production entrypoint submits this kind. The worker's catalog connection is read-only.
+Each staged document itself must be a nonsymlink regular file of at most 16 MiB;
+pathname replacement cannot redirect admitted bytes.
+The worker installs one `native_gate_consumption.v1.0` receipt with the immutable plan,
+stage inputs and mark-based cash flows; the supervisor publishes it only after worker success.
+Installation is create-only and never assigns partial bytes; unsupported hard links
+refuse `INPUT_CHANGED`. Existing destinations are never opened, overwritten or unlinked.
+This receipt is not an evaluation report or promotion evidence.
+
+| Native worker condition | Outcome |
+| --- | --- |
+| Recording requested or missing smoke opt-in | Submission `INVALID_REQUEST`; worker defense `INVALID_EXPERIMENT_SPEC` before catalog access. |
+| Non-mapping or ill-typed worker arguments, including non-string purpose; unsupported recipe or malformed staging, including missing/null required spec fields or excessive JSON nesting; missing staged bytes | `INVALID_EXPERIMENT_SPEC` before catalog access for malformed arguments and before pricing for malformed staging; `INPUT_CHANGED` for missing bytes. |
+| Changed staged spec, registration, expected identity, source (including missing, unreadable or malformed Python) or numerical environment | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` before pricing; preserve registration and prior evidence. |
+| Unresolved pin or non-sweep purpose | `SNAPSHOT_UNRESOLVED` or `HOLDOUT_ACCESS_DENIED`; no pricing receipt or partial report. |
+| Incomplete/nonfinite pricing or caught pinned-data failure | `EXPERIMENT_VARIANT_FAILED`; registered data refusal codes retain their code. Caught underlying failures retain their code, or uncoded type, only in private `data_failure_code` details; no success receipt. The real replay and catalog-failure regressions define the supported catch boundary. |
+| Unexpected programming failure | The existing worker classifier remains authoritative: unexpected replay exceptions such as `RuntimeError`, `IndexError` or `AttributeError` yield generic `WORKER_FAILED`, private type/location diagnostics and no successful output. This admission-only boundary does not reconcile full-sweep R4 outcomes. |
+| Retry/cache/transaction | One attempt; cross-job cache reuse is disabled so admission is checked again. No worker catalog transaction or CSV access. |
+| Existing receipt destination or receipt I/O failure | Non-retryable `INPUT_CHANGED`; preserve existing destinations and the original failure. Private partial bytes or a complete assigned receipt may remain, never a partial assigned receipt or successful output. |
+| Successful smoke | Operations job/output artifact rows only; no reusable checkpoint is stored. Native registration/outcome and experiment ledger rows stay unchanged. |
+
+This admitted path does not fit gates, record outcomes or orchestrate sweeps.
+
 `v2_gate_variant.price_variant(repository, snapshot, spec, *, strategy,
 as_of_month, event_ids=None)` resolves one immutable single-arm plan and
 freshly prices its eligible canonical events from that snapshot's option
-chains and calendar. It accepts only a finite `fill` economics declaration;
-the alpha passed to native replay is the resolved plan's own value. Returned
+chains and calendar. It accepts a finite `fill` and optional `strategy`
+economics declaration, which must match the explicit strategy argument.
+The resolver permits that key only for `native-gate-replay` and the fixed native worker.
+The admitted worker requires that declaration; manual fill-only calls retain
+their explicit strategy input. Replay consumes the resolved fill. Returned
 stage inputs bind the strategy, alpha, snapshot, event population and holdout
 context. No prepriced trade frame or previous experiment output is accepted.
 The source population uses `research.experiment_population.load_population`
@@ -165,7 +206,7 @@ This is a pricing prerequisite, with no gate fitting or sweep lifecycle.
 `python -m experiments.v2_gate_variant --no-ledger` is the smoke entrypoint.
 It pins the current scope head once, opens the existing catalog read-only,
 and prints execution evidence. It writes no report, artifact or ledger row.
-It is not an admitted supervisor runner or a promotion-authorizing evaluation.
+This manual CLI is separate from the admitted smoke worker; neither authorizes promotion.
 
 | Condition | Outcome |
 | --- | --- |
