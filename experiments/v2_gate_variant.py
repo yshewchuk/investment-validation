@@ -82,8 +82,9 @@ def price_variant(repository, snapshot, spec: ExperimentSpec, *, strategy: str,
     try:
         result = replay(repository, snapshot, inputs.strategy, events,
                         alphas=(inputs.fill_alpha,), progress_every=0)
-    except (ValueError, TypeError, KeyError, OverflowError):
-        raise fail("EXPERIMENT_VARIANT_FAILED", "native gate pricing failed") from None
+    except (ValueError, TypeError, KeyError, OverflowError) as error:
+        raise fail("EXPERIMENT_VARIANT_FAILED", "native gate pricing failed",
+                   details={"data_failure_code": getattr(error, "code", type(error).__name__)}) from None
     actual = tuple(result.trades["event_id"])
     if len(actual) != len(inputs.event_ids) or set(actual) != set(inputs.event_ids):
         raise fail("EXPERIMENT_VARIANT_FAILED", "native gate pricing population is incomplete")

@@ -9,7 +9,13 @@ from pathlib import Path
 import pytest
 
 from engine.v2.contracts import JobSpec, SubmitRequest
-from engine.v2.foundation import ArtifactError, ArtifactStore, SystemClock, content_hash
+from engine.v2.foundation import (
+    ArtifactError,
+    ArtifactStore,
+    DocumentError,
+    SystemClock,
+    content_hash,
+)
 from engine.v2.ops import stages, worker
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
@@ -537,6 +543,39 @@ def test_pricing_boundary_failures_keep_private_diagnostics(
     assert "private" not in error.value.problem.message
     result, = consumed
     assert list(result.stage_inputs.event_ids) == registration.document["event_ids"]
+    assert _catalog(source[0]) == before
+    assert not (stage / "native_gate_consumption.json").exists()
+
+
+@pytest.mark.parametrize("fault,detail", [
+    (ValueError("private replay diagnostic"), "ValueError"),
+    (TypeError("private replay diagnostic"), "TypeError"),
+    (KeyError("private replay diagnostic"), "KeyError"),
+    (OverflowError("private replay diagnostic"), "OverflowError"),
+    (DocumentError("BAD_TYPE", "$", "private replay diagnostic"), "BAD_TYPE"),
+])
+def test_replay_exceptions_preserve_private_type(source, tmp_path, single_thread, monkeypatch, fault, detail):
+    """The actual pricing catch retains failures from its genuine replay boundary."""
+    from experiments import v2_gate_variant as gate
+
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    replay, consumed = gate.replay, []
+    before = _catalog(source[0])
+
+    def fail_after_replay(*args, **kwargs):
+        result = replay(*args, **kwargs)
+        consumed.extend(result.trades["event_id"])
+        raise fault
+
+    monkeypatch.setattr(gate, "replay", fail_after_replay)
+    with pytest.raises(OpsError) as error:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    assert error.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert error.value.problem.details == {"data_failure_code": detail}
+    assert error.value.problem.message == "native gate pricing failed"
+    assert error.value.problem.retryable is False
+    assert sorted(consumed) == registration.document["event_ids"]
     assert _catalog(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
