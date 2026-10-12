@@ -1,0 +1,119 @@
+"""A computed_moves generation over a v3 parent: refuse incremental, rebuild fully.
+
+Rebuild over migration (#651): v3 partitions are never carried or migrated. The v3 parent is
+produced by the real refresh path under a v3-shaped contract; the v4 runs are unpatched.
+"""
+from __future__ import annotations
+
+import dataclasses
+
+import pyarrow as pa
+import pytest
+
+from engine.v2.contracts.data import ColumnContract, TableContractRef
+from engine.v2.data import manifests
+from engine.v2.ops.errors import OpsError
+from engine.v2.data.repository import Repository
+from engine.v2.foundation import ArtifactStore
+from engine.v2.ops import computed_moves_store as store_module
+from tests.ops_support import catalog
+from tests.test_v2_ops_computed_moves_store import (
+    _AS_OF, _EVENT_DAYS, _CountingFetcher, _build_parent, _closes_csv, _event_row, _head_row,
+    _parameters, _write_input)
+
+_NEW = ("event_ordinal", "admitted", "mean_prior_or_implied", "n_prior_implied")
+_TICKERS = ("AAAA", "BBBB", "CCCC")
+
+
+def _v3_contract():
+    v4 = store_module.COMPUTED_MOVES_CONTRACT
+    columns = [c for c in v4.columns if c.name not in _NEW]
+    at = [c.name for c in columns].index("implied_move_pct") + 1
+    columns.insert(at, ColumnContract(name="quarter_ordinal", physical_type="int64",
+                                      nullable=False))
+    draft = dataclasses.replace(v4, contract_id="computed_moves.v3", semantic_version="3.0.0",
+                                columns=tuple(columns), definition_hash="sha256:" + "0" * 64)
+    return dataclasses.replace(draft, definition_hash=manifests.table_contract_hash(draft))
+
+
+def _patch_v3(monkeypatch):
+    v3 = _v3_contract()
+    fields = [f for f in store_module._ARROW_SCHEMA if f.name not in _NEW]
+    fields.insert([f.name for f in fields].index("implied_move_pct") + 1,
+                  pa.field("quarter_ordinal", pa.int64()))
+    names = [c for c in store_module.FRAGMENT_COLUMNS if c not in _NEW]
+    names.insert(names.index("implied_move_pct") + 1, "quarter_ordinal")
+    real_build_rows = store_module.build_rows
+    monkeypatch.setattr(store_module, "COMPUTED_MOVES_CONTRACT", v3)
+    monkeypatch.setattr(store_module, "_CONTRACT_REF", TableContractRef(
+        contract_id=v3.contract_id, definition_hash=v3.definition_hash))
+    monkeypatch.setattr(store_module, "_ARROW_SCHEMA", pa.schema(fields))
+    monkeypatch.setattr(store_module, "FRAGMENT_COLUMNS", tuple(names))
+    monkeypatch.setattr(store_module, "build_rows", lambda *a, **k: [
+        {**row, "quarter_ordinal": 0} for row in real_build_rows(*a, **k)])
+
+
+def _run(conn, tmp_path, name, head, ids, monkeypatch):
+    monkeypatch.setattr(store_module, "target_tickers_from_snapshot",
+                        lambda *a, **k: (list(ids), {}))
+    root = tmp_path / name
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=tuple(ids), catalog_path=tmp_path / "ops.sqlite",
+                             objects_root=tmp_path)
+    return store_module.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(_closes_csv()))
+
+
+def _records(conn, store, snapshot_id):
+    resolved = Repository(conn, store).resolve_full(snapshot_id)
+    return sorted((r.table_contract_ref.contract_id, r.partition_key, r.object_ref.object_id)
+                  for r in resolved.records
+                  if r.table_contract_ref.contract_id.startswith("computed_moves."))
+
+
+def _v3_head(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events = [_event_row(t, d) for t in _TICKERS for d in _EVENT_DAYS]
+    head = _build_parent(conn, clock, store, events_rows=events)
+    with monkeypatch.context() as patch:
+        _patch_v3(patch)
+        assert _run(conn, tmp_path, "v3run", head, _TICKERS, patch).status == "complete"
+    v3_head = _head_row(conn)
+    records = _records(conn, store, v3_head["snapshot_id"])
+    assert {contract for contract, _, _ in records} == {"computed_moves.v3"}
+    assert {ticker for _, ticker, _ in records} == set(_TICKERS)
+    return conn, store, v3_head
+
+
+def test_incremental_generation_over_a_v3_parent_refuses_without_writing(tmp_path, monkeypatch):
+    conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
+    with pytest.raises(OpsError) as err:
+        _run(conn, tmp_path, "v4partial", v3_head, ("AAAA",), monkeypatch)
+    assert "VALIDATION_FAILED" in str(err.value)
+    assert "full rebuild required" in str(err.value)
+    after = _head_row(conn)
+    assert (after["snapshot_id"], after["generation"]) == (
+        v3_head["snapshot_id"], v3_head["generation"])
+
+
+def test_full_rebuild_over_a_v3_head_writes_complete_v4(tmp_path, monkeypatch):
+    conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
+    assert _run(conn, tmp_path, "v4full", v3_head, _TICKERS, monkeypatch).status == "complete"
+    new_head = _head_row(conn)
+    assert new_head["snapshot_id"] != v3_head["snapshot_id"]
+    records = _records(conn, store, new_head["snapshot_id"])
+    assert {contract for contract, _, _ in records} == {"computed_moves.v4"}
+    assert {ticker for _, ticker, _ in records} == set(_TICKERS)
+
+
+def test_all_v4_incremental_generation_carries_unselected_tickers(tmp_path, monkeypatch):
+    conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
+    _run(conn, tmp_path, "v4full", v3_head, _TICKERS, monkeypatch)
+    v4_head = _head_row(conn)
+    before = [r for r in _records(conn, store, v4_head["snapshot_id"]) if r[1] != "AAAA"]
+    _run(conn, tmp_path, "v4one", v4_head, ("AAAA",), monkeypatch)
+    after_head = _head_row(conn)
+    after = _records(conn, store, after_head["snapshot_id"])
+    assert [r for r in after if r[1] != "AAAA"] == before
+    assert {ticker for _, ticker, _ in after} == set(_TICKERS)

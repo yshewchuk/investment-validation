@@ -577,6 +577,27 @@ def _fence_check_for(staged_attempt_id, staged_fence, clock):
                                            clock.now())
 
 
+def _is_other_computed_moves_contract(contract_id: str) -> bool:
+    """A computed_moves record under a contract version other than the current one."""
+    return (contract_id.startswith(COMPUTED_MOVES_TABLE_NAME + ".")
+            and contract_id != COMPUTED_MOVES_CONTRACT.contract_id)
+
+
+def _refuse_unrebuilt_stale_partitions(parent, rewritten, attempts) -> None:
+    """Rebuild over migration: a v3 (non-v4) partition is never carried or migrated.
+
+    A generation that would drop one it neither rewrites nor attempts (an attempted but
+    unbuildable ticker is rebuilt away) refuses before any write.
+    """
+    stale = {record.partition_key for record in parent.records
+             if _is_other_computed_moves_contract(record.table_contract_ref.contract_id)}
+    attempted = {str(attempt["ticker"]) for attempt in attempts}
+    if stale - rewritten - attempted:
+        raise fail("VALIDATION_FAILED",
+                   "computed moves full rebuild required: the parent holds non-v4 "
+                   "partitions this run does not attempt")
+
+
 def _generation_manifest(store, prior_manifest, kept, records_by_ticker):
     """Hash freshly inspected event objects; retain untouched partition evidence."""
     written = tuple(record for group in records_by_ticker.values() for record in group)
@@ -626,6 +647,7 @@ def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records
             raise fail("VALIDATION_FAILED",
                        "computed moves refresh would inherit a committed fragment with "
                        "event dates on or after this run's as_of")
+    _refuse_unrebuilt_stale_partitions(parent, rewritten, attempts)
     manifest, new_records = _generation_manifest(store, prior_manifest, kept, records_by_ticker)
 
     table_manifests = {name: manifest_ for name, manifest_ in parent.table_manifests.items()
@@ -639,7 +661,9 @@ def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records
 
     other_records = tuple(record for record in parent.records
                           if record.table_contract_ref.contract_id
-                          != COMPUTED_MOVES_CONTRACT.contract_id)
+                          != COMPUTED_MOVES_CONTRACT.contract_id
+                          and not _is_other_computed_moves_contract(
+                              record.table_contract_ref.contract_id))
     all_records = other_records + new_records
     contracts = {item.contract_id: item for item in parent.contracts}
     contracts[COMPUTED_MOVES_CONTRACT.contract_id] = COMPUTED_MOVES_CONTRACT
