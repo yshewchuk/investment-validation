@@ -73,6 +73,7 @@ def _magnitude_binding(document):
 
 
 def _text(value):
+    """Require nonblank, unpadded wire strings without coercion."""
     return isinstance(value, str) and bool(value.strip()) and value == value.strip()
 
 
