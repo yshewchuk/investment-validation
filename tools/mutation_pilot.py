@@ -1425,10 +1425,12 @@ def dynamic_files(graph: dict[str, set[str]]) -> set[str]:
 def pytest_test_files(tracked_set: set[str]) -> list[str]:
     """Every tracked file a `test` CI shard's pytest run can collect: the
     shards (tests/shards.toml, tools/ci_shards.py) together cover the tests/
-    directory, and pytest's default collection pattern is test_*.py."""
+    directory, and pytest's default collection patterns are test_*.py and
+    *_test.py."""
     return sorted(p for p in tracked_set
-                  if p.startswith("tests/") and p.rsplit("/", 1)[-1].startswith("test_")
-                  and p.endswith(".py"))
+                  if p.startswith("tests/") and p.endswith(".py")
+                  and (p.rsplit("/", 1)[-1].startswith("test_")
+                       or p.endswith("_test.py")))
 
 
 def forces_full_suite(cfg: dict, path: str) -> bool:

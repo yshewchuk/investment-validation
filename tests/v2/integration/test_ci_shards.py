@@ -254,6 +254,15 @@ def test_investing_plan_root_override_is_where_the_cli_reads_shards_and_tests(tm
     assert real.stdout == '{"include":[' + names + ']}\n'
 
 
+def test_pr_selection_universe_matches_shard_discovery_on_both_naming_conventions():
+    import mutation_pilot as pilot
+
+    tracked = {"tests/a/test_x.py", "tests/a/y_test.py", "tests/a/helper.py",
+               "tests/conftest.py", "tests/a/test_w.txt", "engine/test_z.py", "engine/z_test.py"}
+    assert pilot.pytest_test_files(tracked) == ["tests/a/test_x.py", "tests/a/y_test.py"]
+    assert set(pilot.pytest_test_files(set(REAL_FILES))) == set(REAL_FILES)
+
+
 def test_unknown_shard_exits_2(capsys):
     assert ci_shards.main(["files", "nope"]) == 2
     assert capsys.readouterr().err == "unknown shard 'nope'\n"
