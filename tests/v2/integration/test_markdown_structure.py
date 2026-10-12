@@ -337,3 +337,8 @@ def test_closer_follows_commonmark_not_the_opener_regex():
     assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n``` x\n")] == ["fence-unclosed"]
 
 
+def test_the_versioned_pre_commit_hook_runs_the_markdown_lint():
+    hook = (ms.ROOT / "checks" / "hooks" / "pre-commit").read_text(encoding="utf-8")
+    assert 'checks/markdown_structure.py" --quiet' in hook
+
+

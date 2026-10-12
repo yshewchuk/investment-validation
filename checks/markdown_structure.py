@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Markdown structure lint for defects that make a page render wrongly.
+"""Markdown structure lint: blank lines around blocks, closed fences, no absorbed tables.
 
-Rules (no style opinions):
+Only ``table-after`` (a paragraph absorbed into a table) and ``fence-unclosed``
+(the rest of the file swallowed) prevent a CommonMark/GFM rendering defect. The
+other blank-line rules (around headings and fences, and before a table) are house
+style: they keep diffs and other renderers safe, and CommonMark renders those
+cases fine.
+
+Rules (no other style opinions):
 
 * an ATX heading needs a blank line before it (unless it is line 1) and after
   (unless it is the last line);
@@ -70,9 +76,11 @@ def _cells(row: str) -> int:
 
 
 def _is_table_row(row: str, header: str) -> bool:
-    """A body row of a table whose header starts with a pipe must start with
-    one too; for a pipeless-edge header it must have the header's column count.
-    A paragraph that merely contains a pipe is therefore not absorbed as a row."""
+    """Whether ``row`` continues the table under ``header``, as this lint models
+    it. GFM itself absorbs any following non-blank line into the table; the lint
+    instead ends the table at the first line not shaped like a row (a leading
+    pipe when the header has one, else the header's column count), so that
+    ``table-after`` can flag the paragraph GFM would absorb."""
     stripped = row.strip()
     if not stripped or "|" not in stripped:
         return False

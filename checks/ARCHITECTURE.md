@@ -31,8 +31,10 @@ decreases, and a root-level test cannot be modified in place (move it first).
 `phase1_suite()` in `v2_coverage_ratchet.py` resolves baseline tests where they
 now live and raises `FileNotFoundError` if one is missing.
 
-`markdown_structure.py` lints Markdown structure that renders wrongly: an ATX
-heading needs a blank line before (unless on line 1) and after (unless last);
+`markdown_structure.py` lints Markdown structure. Only the table rule (a
+paragraph absorbed into a table) and the closed-fence rule prevent a CommonMark
+rendering defect; the other blank-line rules are house style that keeps diffs
+and other renderers safe. An ATX heading needs a blank line before (unless on line 1) and after (unless last);
 a table needs one before (unless at file start) and after (unless it ends the
 file); an unindented fenced block needs one before and after. Indented
 and list-marker fences are tracked too, and every fence must be closed; only
