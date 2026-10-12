@@ -133,7 +133,7 @@ def test_fresh_acquisition_and_repeated_job_reuse_only_raw_cache(harness):
     assert reused["first_received_at"] == record["first_received_at"]
     assert reused["observed_at"] == "2026-09-12T00:00:13.000000Z"
     assert reused["attempt_id"] == second.attempt_id
-    assert reused["cache_hit"] is True and reused["http_attempts"] == 0 and protocol2["no_work"] is True
+    assert reused["cache_hit"] is True and reused["http_attempts"] == 0 and protocol2["no_work"] is False
     assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 1
     assert h.conn.execute("SELECT remaining FROM provider_accounts").fetchone()[0] == 9
     assert h.conn.execute("SELECT used_calls FROM provider_reservations WHERE attempt_id=?",
@@ -179,6 +179,86 @@ def test_submission_scope_refusals_use_registered_validator(harness, monkeypatch
     assert harness.conn.execute("SELECT count(*) FROM provider_reservations").fetchone()[0] == 0
 
 
+def test_worker_future_as_of_cannot_cache_current_or_future_bars(harness, monkeypatch):
+    h = harness
+    request = REQUEST | {"end": "2026-09-12",
+                         "endpoint": "/v2/aggs/ticker/SYNTH/range/1/day/2026-08-01/2026-09-12"}
+    params = replace(PARAMS, as_of="2026-09-13", end="2026-09-12", expected_ids=(content_hash(request),))
+    enqueue(h, params=params)
+    attempt = claim(h)
+    def forbidden(*_, **__):
+        pytest.fail("future acquisition scope reached storage or transport")
+    monkeypatch.setattr(acquisition, "connect", forbidden)
+    with pytest.raises(OpsError) as error:
+        run(h, attempt, forbidden, params)
+    assert error.value.code == "INVALID_REQUEST"
+    assert h.conn.execute("SELECT used_calls FROM provider_reservations").fetchone()[0] == 0
+    assert h.conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 0
+    assert not h.store.root.exists()
+
+
+@pytest.mark.parametrize("instant,refused", [("2026-09-12T00:30:00+02:00", True),
+    ("2026-09-11T23:30:00-02:00", False), ("2026-09-12T00:00:00+00:00", False)])
+def test_worker_date_guard_uses_utc_and_accepts_its_current_date(harness, monkeypatch, instant, refused):
+    h = harness
+    h.clock.value = datetime.fromisoformat(instant)
+    enqueue(h)
+    attempt = claim(h)
+    if refused:
+        def forbidden(*_, **__):
+            pytest.fail("future UTC date reached storage")
+        monkeypatch.setattr(acquisition, "connect", forbidden)
+        with pytest.raises(OpsError) as error:
+            run(h, attempt, forbidden)
+        assert error.value.code == "INVALID_REQUEST"
+        assert h.conn.execute("SELECT used_calls FROM provider_reservations").fetchone()[0] == 0
+    else:
+        protocol, record = run(h, attempt, successful)
+        assert record["http_attempts"] == 1 and protocol["no_work"] is False
+
+
+@pytest.mark.parametrize("field", ["attempt_id", "fence", "catalog_path", "objects_root"])
+@pytest.mark.parametrize("mode", ["missing", "empty"])
+def test_worker_trusted_context_refusals_precede_storage(harness, monkeypatch, field, mode):
+    h = harness
+    enqueue(h)
+    attempt = claim(h)
+    envelope = {"attempt_id": attempt.attempt_id, "fence": attempt.fence,
+                "catalog_path": str(h.root / "ops.sqlite"), "objects_root": str(h.store.root)}
+    if mode == "missing":
+        del envelope[field]
+    else:
+        envelope[field] = 0 if field == "fence" else ""
+    def forbidden(*_, **__):
+        pytest.fail("invalid trusted context reached storage or transport")
+    monkeypatch.setattr(acquisition, "connect", forbidden)
+    with pytest.raises(OpsError) as error:
+        acquisition.run(to_document(PARAMS), h.root, envelope, fetch=forbidden, clock=h.clock)
+    assert error.value.code == "INVALID_REQUEST"
+    assert h.conn.execute("SELECT used_calls FROM provider_reservations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("field", ["catalog_path", "objects_root"])
+def test_submission_paths_are_refused_in_parameters_by_submitter_and_worker(harness, monkeypatch, field):
+    h = harness
+    parameters = to_document(PARAMS) | {field: "synthetic-forged-path"}
+    with pytest.raises(OpsError) as submitted:
+        enqueue(h, parameters=parameters)
+    assert submitted.value.code == "INVALID_REQUEST"
+    assert h.conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+    enqueue(h)
+    attempt = claim(h)
+    def forbidden(*_, **__):
+        pytest.fail("submission-supplied path reached storage or transport")
+    monkeypatch.setattr(acquisition, "connect", forbidden)
+    with pytest.raises(OpsError) as executed:
+        acquisition.run(parameters, h.root, {"attempt_id": attempt.attempt_id, "fence": attempt.fence,
+                        "catalog_path": str(h.root / "ops.sqlite"), "objects_root": str(h.store.root)},
+                        fetch=forbidden, clock=h.clock)
+    assert executed.value.code == "INVALID_REQUEST"
+    assert h.conn.execute("SELECT used_calls FROM provider_reservations").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("change", [{"provider_budget_ref": "other"}, {"input_refs": ("artifact-1",)},
                                     {"dependency_job_ids": ("job-1",)}])
 def test_submission_rejects_unbound_account_and_dependencies(harness, change):
@@ -212,6 +292,7 @@ def test_http_refusals_accounting_and_no_cache(harness, status, code, blocked, c
 
 
 @pytest.mark.parametrize("body,code", [(b"malformed", "SOURCE_INVALID"),
+    (None, "SOURCE_INVALID"), (BODY.decode(), "SOURCE_INVALID"), (bytearray(BODY), "SOURCE_INVALID"),
     (canonical_json(json.loads(BODY) | {"resultsCount": 2}).encode(), "SOURCE_INVALID"),
     (canonical_json(json.loads(BODY) | {"ticker": "OTHER"}).encode(), "SOURCE_INVALID"),
     (canonical_json(json.loads(BODY) | {"results": [], "resultsCount": 0}).encode(), "SOURCE_EMPTY"),

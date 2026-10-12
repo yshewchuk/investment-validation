@@ -1,11 +1,13 @@
 """Offline operator submission, allowlist and source-registration contracts."""
 import json
 import socket
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from engine.v2.foundation import format_timestamp
 from engine.v2.ops import massive_acquire as cli
 from engine.v2.ops import providers
 from engine.v2.ops.bootstrap import open_catalog
@@ -23,6 +25,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", forbidden)
     monkeypatch.setattr(cli, "worker_source_manifest", lambda _: {"synthetic_source": "v1"})
     monkeypatch.setattr(cli, "environment_identity", lambda n: {"synthetic_threads": n})
+    monkeypatch.setattr(cli, "SystemClock", FakeClock)
     return marker
 
 
@@ -76,6 +79,45 @@ def test_cli_refusals_are_redacted_and_do_not_create_catalogs(tmp_path, isolated
     assert json.loads(captured.out) == {"refused": "RESOURCE_UNAVAILABLE" if mode == "missing_catalog" else "INVALID_REQUEST"}
     assert isolated not in captured.out
     assert not (tmp_path / "catalog.sqlite").exists()
+
+
+@pytest.mark.parametrize("now", ["2026-09-11T23:59:59+00:00", "2026-09-12T00:30:00+02:00"])
+@pytest.mark.parametrize("injected", [False, True])
+def test_future_as_of_refuses_before_fingerprinting_or_storage(
+        tmp_path, isolated, monkeypatch, capsys, now, injected):
+    clock = FakeClock()
+    clock.value = datetime.fromisoformat(now)
+    monkeypatch.setattr(cli, "SystemClock", lambda: clock)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("future-dated submission reached fingerprinting or storage")
+
+    for name in ("worker_source_manifest", "environment_identity", "connect", "submit"):
+        monkeypatch.setattr(cli, name, forbidden)
+    kwargs = {"clock": clock} if injected else {}
+    assert cli.main(arguments(tmp_path), **kwargs) == 2
+    captured = capsys.readouterr()
+    assert captured.out == '{"refused": "INVALID_REQUEST"}\n'
+    assert captured.err == ""
+    assert not (tmp_path / "catalog.sqlite").exists()
+
+
+@pytest.mark.parametrize("now", ["2026-09-12T00:00:00+00:00", "2026-09-11T23:30:00-02:00"])
+def test_same_utc_date_as_of_submits_using_the_injected_clock(tmp_path, isolated, capsys, now):
+    clock = FakeClock()
+    clock.value = datetime.fromisoformat(now)
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
+    try:
+        assert cli.main(arguments(tmp_path), clock=clock) == 0
+        captured = capsys.readouterr()
+        receipt = json.loads(captured.out)
+        assert captured.err == ""
+        assert receipt["state"] == "queued"
+        assert receipt["created_at"] == format_timestamp(clock.now())
+        row = conn.execute("SELECT created_at FROM jobs").fetchone()
+        assert row["created_at"] == format_timestamp(clock.now())
+    finally:
+        conn.close()
 
 
 def test_executor_credential_allowlist_is_account_specific(isolated):

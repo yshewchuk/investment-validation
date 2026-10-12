@@ -4,11 +4,11 @@
 Store-tier owner of one explicit US-stock daily OHLCV, split or dividend request under the versioned Basic policy. No research read, normalization, snapshot publication, pagination, refresh or fallback provider.
 
 ## Interfaces and dependencies
-`acquisition.Parameters`, `scope_plan`, `job_kind` and `run` are internal ops interfaces. `ops.massive_acquire` submits; `stages` registers; `worker.dispatch` invokes `run`. `massive_plan` owns canonical request/policy/cache validation, `provider_budget` account admission/accounting, `lifecycle` fences, and `data.incremental.cache_raw_receipt` raw persistence. `providers.massive` owns the fixed HTTPS edge; it depends on Requests, stdlib, `ops.errors` and the shared 16 MiB limit in `providers.massive_policy`, which the planner also uses.
+`acquisition.Parameters`, `scope_plan`, `validate_as_of`, `job_kind` and `run` are internal ops interfaces. `ops.massive_acquire` submits; `stages` registers; `worker.dispatch` invokes `run`. `massive_plan` owns canonical request/policy/cache validation, `provider_budget` account admission/accounting, `lifecycle` fences, and `data.incremental.cache_raw_receipt` raw persistence. `providers.massive` owns the fixed HTTPS edge; it depends on Requests, stdlib, `ops.errors` and the shared 16 MiB limit in `providers.massive_policy`, which the planner also uses.
 
 ## Inputs and outputs
-One strict ticker/dataset/date/adjustment scope, policy version and expected request hash; a fixed source account and one reserved call. Valid symbols are uppercased before deduplication and request identity; daily response symbols compare case-insensitively. Existing uppercase request identities are unchanged; old lowercase raw keys are not migrated or silently aliased. Trusted executor context supplies the catalog, object store and attempt/fence, never submission paths. The standalone submitter requires an initialized catalog and creates only a shadow job; `ops serve` executes it later.
-Success writes `massive_acquisition.v1`: request hash, raw receipt/hash, first receipt time, this job's observation time, attempt/fence, cache-hit flag, HTTP-attempt count and policy identity. Supervisor completion publishes this output under its ordinary fence. A raw hit proves verified response bytes, not normalized coverage, entitlement, EOD finality or historical knowledge.
+One strict ticker/dataset/date/adjustment scope, policy version and expected request hash; a fixed source account and one reserved call. CLI and worker refuse `as_of` after the current UTC date before storage, preventing future-dated scopes from caching bars-so-far as complete. Valid symbols are uppercased before deduplication and request identity; daily response symbols compare case-insensitively. Existing uppercase request identities are unchanged; old lowercase raw keys are not migrated or silently aliased. Trusted executor context supplies the catalog, object store and attempt/fence, never submission paths. The standalone submitter requires an initialized catalog and creates only a shadow job; `ops serve` executes it later.
+Success writes `massive_acquisition.v1`: request hash, raw receipt/hash, first receipt time, this job's observation time, attempt/fence, cache-hit flag, HTTP-attempt count and policy identity. Every success produces this job output, including cache hits, so `no_work` is false. Supervisor completion publishes this output under its ordinary fence. A raw hit proves verified response bytes, not normalized coverage, entitlement, EOD finality or historical knowledge.
 
 ## Invariants
 - Account admission serializes this producer's jobs. The worker rechecks the exact cache after admission; verified hits consume zero HTTP attempts/charges but still require an available account reservation. Cross-job checkpoint reuse is disabled; raw receipts are the only fetch cache.
@@ -24,11 +24,11 @@ No refusal emits a success artifact or invents partial coverage. A failure after
 
 | Condition | Outcome |
 |---|---|
-| Invalid scope, policy, identity, account, dependencies or parameters | `INVALID_REQUEST` before provider access; scope validation precedes storage. |
+| Invalid scope, future `as_of`, policy, identity, account, dependencies, trusted context or parameters | `INVALID_REQUEST` before provider access; validation precedes storage. |
 | Catalog lacks raw-receipt schema | `VALIDATION_FAILED`; no migration. |
 | Missing/invalid credential or HTTP 401 | `CREDENTIAL_INVALID`; an observed 401 blocks the account pending operator action. |
 | HTTP 403 | `SOURCE_INVALID` with `CAPABILITY_UNAVAILABLE`; does not mark the credential invalid. |
-| Other rejected HTTP/envelope, unsupported compression or credential echo | `SOURCE_INVALID`. |
+| Other rejected HTTP/envelope, non-bytes body, unsupported compression or credential echo | `SOURCE_INVALID`. |
 | HTTP 404 | `SOURCE_NOT_FOUND`. |
 | Valid empty envelope | `SOURCE_EMPTY`; no negative cache. |
 | Continuation present | `SOURCE_NOT_FINAL`; no pagination or complete receipt. |

@@ -3,6 +3,7 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,6 +61,11 @@ def parameter_problems(job, params):
     return ()
 
 
+def validate_as_of(as_of, clock):
+    if as_of > clock.now().astimezone(timezone.utc).date().isoformat():
+        raise fail("INVALID_REQUEST", "Massive acquisition date exceeds the current UTC date")
+
+
 def job_kind():
     return JobKind(name=KIND, worker=KIND, parameters=Parameters,
                    resource_classes=frozenset({"io_fetch"}), effects=("staged",),
@@ -72,6 +78,16 @@ def _record_fetch_failure(error, response):
               "RESOURCE_LIMIT_EXCEEDED": 200}.get(error.code)
     if status is not None:
         response(status)
+
+
+def _validate_body(body, request):
+    if type(body) is not bytes:
+        raise fail("SOURCE_INVALID", "Massive response body must be bytes")
+    if len(body) > massive_plan.MAX_RAW_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "Massive response exceeds byte policy")
+    if not massive_plan._complete_body(body, request):
+        code = "SOURCE_NOT_FINAL" if json.loads(body).get("next_url") is not None else "SOURCE_EMPTY"
+        raise fail(code, "Massive response is not a complete nonempty terminal page")
 
 
 def _acquire(conn, store, params, claim, *, fetch, clock):
@@ -114,11 +130,7 @@ def _acquire(conn, store, params, claim, *, fetch, clock):
                        details={"reason": "CAPABILITY_UNAVAILABLE"})
         if status != 200:
             raise fail(code or "SOURCE_INVALID", "Massive HTTP request was refused")
-        if type(body) is not bytes or len(body) > massive_plan.MAX_RAW_BYTES:
-            raise fail("RESOURCE_LIMIT_EXCEEDED", "Massive response exceeds byte policy")
-        if not massive_plan._complete_body(body, unit["request"]):
-            code = "SOURCE_NOT_FINAL" if json.loads(body).get("next_url") is not None else "SOURCE_EMPTY"
-            raise fail(code, "Massive response is not a complete nonempty terminal page")
+        _validate_body(body, unit["request"])
         record = cache_raw_receipt(
             conn, store, RawPayload(payload=body, response_kind="complete", response_meta={}),
             source=massive_plan.SOURCE, endpoint=unit["request"]["endpoint"], request=unit["request"],
@@ -143,6 +155,8 @@ def run(parameters, root, envelope, *, fetch=None, clock=None):
     except DocumentError:
         raise fail("INVALID_REQUEST", "invalid Massive acquisition parameters") from None
     scope_plan(params)
+    clock = clock or SystemClock()
+    validate_as_of(params.as_of, clock)
     if not all(envelope.get(k) for k in ("attempt_id", "fence", "catalog_path", "objects_root")):
         raise fail("INVALID_REQUEST", "Massive acquisition requires trusted launch context")
     if fetch is None:
@@ -151,11 +165,11 @@ def run(parameters, root, envelope, *, fetch=None, clock=None):
         with closing(connect(envelope["catalog_path"], must_exist=True)) as conn:
             result = _acquire(conn, ArtifactStore(envelope["objects_root"]), params,
                               SimpleNamespace(attempt_id=envelope["attempt_id"], fence=envelope["fence"]),
-                              fetch=fetch, clock=clock or SystemClock())
+                              fetch=fetch, clock=clock)
         Path(root, "massive_acquisition.json").write_text(canonical_json(result))
     except (DataError, ArtifactError):
         raise fail("INTEGRITY_FAILED", "Massive raw cache evidence is unusable") from None
     except (OSError, sqlite3.Error):
         raise fail("RESOURCE_UNAVAILABLE", "Massive acquisition storage is unavailable") from None
     return {"outputs": [{"name": KIND, "path": "massive_acquisition.json", "schema": SCHEMA}],
-            "completed_ids": list(params.expected_ids), "no_work": result["cache_hit"]}
+            "completed_ids": list(params.expected_ids), "no_work": False}

@@ -194,9 +194,9 @@ accessor only.
 ## Outputs
 
 `incremental.cache_raw_receipt` accepts an optional caller-owned `fence_check`.
-It runs inside the raw receipt's own write transaction before insertion or
-existing-receipt return; omitted checks preserve unfenced callers. Object
-verification/publication remains outside that transaction. A refused fence
+It runs inside the insertion transaction, or a fresh write transaction after
+object verification on existing-receipt replay, before returning. Omitted checks
+preserve unfenced callers; object I/O remains outside SQL. A refused fence
 can leave unreferenced immutable bytes but no new catalog receipt. Existing
 identical content retains its original receipt metadata and acquisition time.
 

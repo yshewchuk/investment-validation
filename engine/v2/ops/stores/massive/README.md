@@ -10,13 +10,13 @@ Validate one request, reuse verified raw bytes, coordinate a bounded provider ed
 Research admission, normalization, snapshots, pagination, interval reuse and provider entitlement verification.
 
 ## Public interface
-Internal ops module `acquisition`: `Parameters`, `scope_plan`, `job_kind`, `run`. No cross-package research API.
+Internal ops module `acquisition`: `Parameters`, `scope_plan`, `validate_as_of`, `job_kind`, `run`. No cross-package research API.
 
 ## Consumers
 `engine.v2.ops.massive_acquire`, `engine.v2.ops.stages`, `engine.v2.ops.worker`.
 
 ## Usage
-After verifying account access and data-use terms, initialize an ops root with the normal operator commands and configure its `massive-stocks` provider call budget. Keep the API key in the existing environment configuration, never command arguments. Submission itself does not fetch:
+After verifying account access and data-use terms, initialize an ops root with the normal operator commands and configure its `massive-stocks` provider call budget. Keep the API key in the existing environment configuration, never command arguments. `as_of` cannot be after the current UTC date; both submission and worker enforce this before storage. Submission itself does not fetch:
 ```sh
 python -m engine.v2.ops.massive_acquire --root ROOT --idempotency-key REQUEST_ID --ticker EXAMPLE --dataset daily --start 2026-08-01 --end 2026-08-31 --as-of 2026-10-12 --adjustment raw
 python -m engine.v2.ops --root ROOT serve
