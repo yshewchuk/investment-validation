@@ -90,7 +90,9 @@ def _is_table_row(row: str, header: str) -> bool:
 
 
 def lint_text(text: str) -> list[Violation]:
-    lines = text.split("\n")
+    # CRLF files: every line regex is anchored with $, so drop the \r of each
+    # line ending first. Line numbers still match git's, which counts \n only.
+    lines = text.replace("\r\n", "\n").split("\n")
     if lines and lines[-1] == "":
         lines.pop()
     n = len(lines)
