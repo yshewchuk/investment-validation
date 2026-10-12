@@ -290,6 +290,8 @@ EXPECTED_WORKFLOW = {
                 {"name": "Select PR test files", "if": PR, "env": BASE_SHA, "run": SELECT_RUN},
                 {"name": "Check test layout ratchet", "if": PR, "env": BASE_SHA,
                  "run": 'python3 checks/test_layout_budget.py --base-ref "$BASE_SHA"'},
+                {"name": "Check Markdown structure", "if": PR, "env": BASE_SHA,
+                 "run": 'python3 checks/markdown_structure.py --base-ref "$BASE_SHA"'},
                 {"name": "Upload PR test selection", "if": PR,
                  "uses": "actions/upload-artifact@v4",
                  "with": {"name": "pr-test-selection",

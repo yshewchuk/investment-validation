@@ -33,6 +33,13 @@ def test_table_must_not_absorb_following_paragraph():
     assert rules("| a | b |\n|---|---|\n| 1 | 2 |") == []
 
 
+def test_pipe_in_following_paragraph_is_not_a_table_row():
+    text = "| a | b |\n|---|---|\n| 1 | 2 |\nuse a | b here\n"
+    assert rules(text) == ["table-after"]
+    assert rules("a | b\n--|--\n1 | 2\n\nafter\n") == []
+    assert rules("a | b\n--|--\n1 | 2\nx | y\n\nafter\n") == []
+
+
 def test_fence_needs_blank_before_and_after():
     assert rules("para\n```\ncode\n```\n\nnext\n") == ["fence-before"]
     assert rules("para\n\n```\ncode\n```\nnext\n") == ["fence-after"]
@@ -176,3 +183,25 @@ def test_quiet_suppresses_the_clean_message(repo, capsys):
     assert capsys.readouterr().out == ""
     assert ms.main([]) == 0
     assert "clean" in capsys.readouterr().out
+
+
+def test_git_timeout_exits_2(repo, monkeypatch, capsys):
+    def boom(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=60)
+
+    monkeypatch.setattr(ms.subprocess, "run", boom)
+    assert ms.main(["--quiet"]) == 2
+    assert "timed out" in capsys.readouterr().err
+
+
+def test_unreadable_file_exits_2(repo, monkeypatch, capsys):
+    real = ms.Path.read_bytes
+
+    def fail(self):
+        if self.name == "old.md":
+            raise OSError("denied")
+        return real(self)
+
+    monkeypatch.setattr(ms.Path, "read_bytes", fail)
+    assert ms.main(["--all", "--quiet"]) == 2
+    assert "unreadable" in capsys.readouterr().err

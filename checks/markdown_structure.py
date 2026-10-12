@@ -47,6 +47,22 @@ class Violation:
     rule: str
 
 
+def _cells(row: str) -> int:
+    return len(row.strip().strip("|").split("|"))
+
+
+def _is_table_row(row: str, header: str) -> bool:
+    """A body row of a table whose header starts with a pipe must start with
+    one too; for a pipeless-edge header it must have the header's column count.
+    A paragraph that merely contains a pipe is therefore not absorbed as a row."""
+    stripped = row.strip()
+    if not stripped or "|" not in stripped:
+        return False
+    if header.strip().startswith("|"):
+        return stripped.startswith("|")
+    return _cells(stripped) == _cells(header)
+
+
 def lint_text(text: str) -> list[Violation]:
     lines = text.split("\n")
     if lines and lines[-1] == "":
@@ -90,7 +106,7 @@ def lint_text(text: str) -> list[Violation]:
             if not blank(i - 1):
                 found.append(Violation(i + 1, i, "table-before"))
             j = i + 2
-            while j < n and lines[j].strip() and "|" in lines[j]:
+            while j < n and _is_table_row(lines[j], s):
                 j += 1
             if j < n and lines[j].strip():
                 found.append(Violation(j + 1, j, "table-after"))
