@@ -572,6 +572,20 @@ notes = "S9H adds the native per-event analog view: GET /analogs.json?release_id
 # ------------------------------------------------------------- operations
 
 [[row]]
+id = "operations-massive-cache-plan"
+evidence = "cli:tools.v2_massive_plan"
+area = "operations"
+capability = "Read-only Massive Basic REST request and exact raw-cache planning"
+old = []
+new = ["cli:tools/v2_massive_plan.py", "py:engine/v2/ops/massive_plan.py::plan"]
+producer = "massive_plan.plan (network-free, plan-only)"
+identity = "massive_cache_plan.v1; versioned policy and canonical request hashes"
+tests = ["tests/v2/ops/test_massive_plan.py"]
+disposition = "native"
+owner = "P6-2"
+notes = "Standalone operator CLI over an existing read-only catalog and verified raw artifacts; no provider acquisition, normalization, dataset publication or nightly wiring."
+
+[[row]]
 id = "operations-flags"
 evidence = "route:GET /flags"
 area = "operations"
@@ -791,6 +805,10 @@ reason = "Mutation-testing CI tooling (mutmut and pytest-gremlins backends)."
 [[excluded]]
 ids = ["cli:tools/oc_check.py"]
 reason = "Agent-delegation check wrapper (gates + bounded tests for an agent worktree); development tooling, not a consumer."
+
+[[excluded]]
+ids = ["cli:tools/ci_shards.py"]
+reason = "CI test-shard matrix and per-shard file lists (tests/shards.toml); CI tooling, not a consumer."
 
 [[excluded]]
 ids = ["cli:tools/land.py"]
