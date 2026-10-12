@@ -1,15 +1,16 @@
 """Native magnitude preregistration over real synthetic metadata, never outcomes."""
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from engine.v2.contracts import FinalHoldoutDeclaration
-from engine.v2.data.errors import DataError
+from engine.v2.data.errors import DataError, fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import artifact_reference, canonical_json, content_hash, to_document
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail as ops_fail
 from engine.v2.ops.experiments import resolve_experiment_plan
 from engine.v2.research.magnitude_folds import magnitude_window
 from experiments import native_registration as native
@@ -68,6 +69,30 @@ def _forbid(*args, **kwargs):
     raise AssertionError("forbidden access")
 
 
+@contextmanager
+def _refuses(error_type, code):
+    """Assert the exact documented nonretryable envelope, never exception text."""
+    with pytest.raises(error_type) as caught:
+        yield
+    assert caught.value.code == code
+    assert caught.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("factory,code,other", [
+    (ops_fail, "INVALID_EXPERIMENT_SPEC", "EXPERIMENT_IDENTITY_CONFLICT"),
+    (data_fail, "CONTRACT_MISMATCH", "OBJECT_CORRUPT"),
+])
+@pytest.mark.parametrize("wrong_field", ["code", "retryability"])
+def test_refusal_oracle_rejects_wrong_code_or_retryability(factory, code, other, wrong_field):
+    """A misleading message or incorrectly retryable problem must fail the oracle."""
+    error = factory(other if wrong_field == "code" else code, code)
+    if wrong_field == "retryability":
+        error = type(error)(replace(error.problem, retryable=True))
+    with pytest.raises(AssertionError):
+        with _refuses(type(error), code):
+            raise error
+
+
 def test_full_plan_is_sealed_and_idempotently_admitted(source, monkeypatch):
     """Bind the independently planned metadata and only its selected population."""
     expected_plan = _plan(source.repository, source.snapshot)
@@ -98,7 +123,7 @@ def test_full_plan_is_sealed_and_idempotently_admitted(source, monkeypatch):
     assert _catalog(source.conn) == before and _objects(source.store) == objects
     document["magnitude_request"]["evaluation_years"].clear()
     assert registered.document["magnitude_request"]["evaluation_years"] == ["2024"]
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         native.prepare_final_holdout_request(source.conn, source.store, registered)
 
 
@@ -128,7 +153,7 @@ def test_bad_declarations_refuse_before_any_repository_access(source, monkeypatc
     spec = replace(source.spec, **changes.pop("spec_changes", {}))
     before, objects = _catalog(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "resolve_pinned", _forbid)
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         _call(source, spec=spec, admit=admit, **changes)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -166,7 +191,7 @@ def test_identity_drift_refuses_before_metadata_scan(source, monkeypatch, change
         kwargs["expected"] = replace(registered, binding_json=b"{}")
     before, objects = _catalog(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", _forbid)
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True, **kwargs)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -174,7 +199,7 @@ def test_identity_drift_refuses_before_metadata_scan(source, monkeypatch, change
 def test_missing_reservation_refuses_before_metadata_scan(source, monkeypatch):
     """Admission never substitutes fresh registration for a missing reservation."""
     monkeypatch.setattr(source.repository, "scan", _forbid)
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         _call(source, admit=True)
 
 
@@ -183,7 +208,7 @@ def test_adding_magnitude_mode_to_an_old_registration_refuses_before_scan(source
     """An old immutable reservation cannot acquire a new research plan implicitly."""
     _call(source, magnitude_training_start=None, final_read=_declaration() if declared else None)
     monkeypatch.setattr(source.repository, "scan", _forbid)
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
 
 
@@ -198,7 +223,7 @@ def test_late_calendar_failure_never_publishes_or_retries(source, monkeypatch):
         yield from original(query, table_name=table_name)
     monkeypatch.setattr(source.repository, "scan", scan)
     before, objects = _catalog(source.conn), _objects(source.store)
-    with pytest.raises(DataError, match="OBJECT_CORRUPT"):
+    with _refuses(DataError, "OBJECT_CORRUPT"):
         _call(source)
     assert calls.count("daily_market") == 1 and "earnings_events" in calls
     assert _catalog(source.conn) == before and _objects(source.store) == objects
@@ -214,7 +239,7 @@ def test_protected_or_outside_explicit_population_refuses_before_calendar(source
         yield from original(query, table_name=table_name)
     monkeypatch.setattr(source.repository, "scan", scan)
     before, objects = _catalog(source.conn), _objects(source.store)
-    with pytest.raises(DataError, match=code):
+    with _refuses(DataError, code):
         _call(source, event_ids=[source.events[index]["event_id"]])
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -303,9 +328,9 @@ def test_rehashed_malformed_or_cross_context_plans_refuse_without_reads(source, 
     forged = _rewrite(source, registered, doc)
     before, objects = _catalog(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", _forbid)
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -321,7 +346,7 @@ def test_stored_integrity_does_not_replace_fresh_semantic_admission(source):
     native.verify_native_registration(source.conn, source.store, forged)
     source.repository.scans.clear()
     before, objects = _catalog(source.conn), _objects(source.store)
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
     assert _catalog(source.conn) == before and _objects(source.store) == objects
@@ -390,9 +415,9 @@ def test_rehashed_nested_wire_schema_refuses_before_metadata_scan(source, monkey
     forged = _rewrite(source, registered, doc)
     before, objects = _catalog(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", _forbid)
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -430,7 +455,7 @@ def test_public_window_is_detached_and_rejects_invalid_requests():
     result = magnitude_window(years, "2023-12-10")
     years.append("2025")
     assert result == {"training_start": "2023-12-10", "evaluation_years": ["2024"]}
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with _refuses(DataError, "CONTRACT_MISMATCH"):
         magnitude_window(["2024", "2024"], "2023-12-10")
 
 
@@ -475,8 +500,8 @@ def test_rehashed_membership_permutations_refuse_before_scans(source, monkeypatc
     forged = _rewrite(source, registered, doc)
     before, objects = _catalog(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", _forbid)
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
