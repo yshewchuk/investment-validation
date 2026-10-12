@@ -727,10 +727,14 @@ def test_quote_domain_map_duplicate_contract_keeps_earliest_date_or_refuses():
     ([{"expiry": "2026-11-20", "quote_date": "2026-10-08"},
       {"expiry": "2026-11-20", "quote_date": "2026-10-08"}], 43),
     ([{"expiry": "2026-11-20", "quote_date": "2026-10-09"},
-      {"expiry": "2026-11-20"}], None),
+      {"expiry": "2026-11-20"}], 42),
     ([{"expiry": "2026-11-20", "quote_date": "2026-10-08"},
-      {"expiry": "2026-11-20", "quote_date": "2026-10-09"}], None),
+      {"expiry": "2026-11-20", "quote_date": "2026-10-09"}], 43),
+    ([{"expiry": "2026-11-20", "quote_date": "2026-10-09"},
+      {"expiry": "2026-11-20", "quote_date": "2026-10-08"}], 42),
     ([{"expiry": "2026-11-20"}, {"expiry": "2026-11-20"}], 43),
+    ([{"expiry": "2026-11-20"},
+      {"expiry": "2026-11-20", "quote_date": "2026-10-09"}], 43),
 ])
 def test_priced_dte_entry_uses_the_legs_own_quote_date(legs, expected):
     values = {"entry_cost": 2.0, "legs": legs, "quote_date": "2026-10-08"}
@@ -766,11 +770,19 @@ def test_dte_entry_unchanged_when_legs_use_the_earliest_date():
     assert values["dte_entry"] == 43
 
 
-def test_legs_priced_from_different_dates_refuse_without_dte_entry():
+@pytest.mark.parametrize(("call_date", "put_date", "expected"), [
+    ("2026-10-08", "2026-10-09", 43),
+    ("2026-10-09", "2026-10-08", 42),
+])
+def test_legs_priced_from_different_dates_use_the_first_legs_date(
+        call_date, put_date, expected):
+    # leg 0 is the call; legacy takes dte_entry from legs[0] (engine/score.py:2451)
     values = assemble_native_values(
-        _inputs(quotes=_dated_quotes("2026-10-08", "2026-10-09")))
-    assert any(str(flag).startswith("INVALID_QUOTE:") for flag in values["flags"])
-    assert "dte_entry" not in values
+        _inputs(quotes=_dated_quotes(call_date, put_date)))
+    assert values["legs"][0]["right"] == "C"
+    assert not any(str(flag).startswith("INVALID_QUOTE:") for flag in values["flags"])
+    assert values["entry_cost"] is not None
+    assert values["dte_entry"] == expected
 
 
 _CONTRACT = ("C", 100.0, "2026-11-20")

@@ -38,7 +38,9 @@ Exported from `engine/v2/domain/generation/__init__.py`
 - Dataclasses: `Geometry` (`strategy`, `spot`, `width`, `legs`, `refusal`,
   `detail`), `NativeLeg` (`name`, `right`, `side`, `quantity`, `strike`,
   `expiry`), `Pricing` (`strategy`, `spot`, `entry_cost`, `legs`, `refusal`),
-  `PricedLeg` (`NativeLeg`'s fields plus `bid`, `ask`, `fill`, `cash_flow`).
+  `PricedLeg` (`NativeLeg`'s fields plus `bid`, `ask`, `fill`, `cash_flow`,
+  `quote_date` — the optional ISO date of the quote row that priced the leg;
+  the first leg's date drives `dte_entry`).
 - Exceptions: `GeometryRefusal` (raised by `generate`,
   `has_resolvable_expiry` helpers, and `resolve_expiry`; carries the refusal
   code as both its message and `.code`, plus an optional `.detail`) and

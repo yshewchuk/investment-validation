@@ -666,34 +666,32 @@ def _gate_in_domain(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> boo
 
 
 def _legs_dte_entry(
-    expiry: Any, leg_dates: Iterable[Any], fallback_date: Any,
+    expiry: Any, first_leg_date: Any, fallback_date: Any,
 ) -> int | None:
-    """dte_entry measured from the priced legs' own quote date.
+    """dte_entry measured from the FIRST priced leg's own quote date (legacy
+    ``engine/score.py:2451`` takes it from ``legs[0]``).
 
-    All legs must carry the same date: no leg carrying one falls back to the
-    context ``quote_date`` (direct callers without quote provenance); a
-    partial or disagreeing set yields None.
+    When that leg carries a date, it drives the count; only when it carries
+    none does the context ``quote_date`` (direct callers without quote
+    provenance) stand in.
     """
-    dates = list(leg_dates)
-    if dates and all(d is not None for d in dates) and len(set(dates)) == 1:
-        return financial.dte_entry(expiry, dates[0])
-    if dates and all(d is None for d in dates):
-        return financial.dte_entry(expiry, fallback_date)
-    return None
+    if first_leg_date is not None:
+        return financial.dte_entry(expiry, first_leg_date)
+    return financial.dte_entry(expiry, fallback_date)
 
 
 def _priced_dte_entry(values: Mapping[str, Any]) -> int | None:
     """The scorer-computed dte_entry from the successfully priced first leg
     (legacy engine/score.py:2451), or None on a pricing refusal / no priced leg.
     Never a captured value: it is derived from values["legs"] (published by the
-    pricing stage), measured from each priced leg's own quote date -- falling
-    back to the context quote date only when no leg carries one."""
+    pricing stage), measured from the first priced leg's own quote date --
+    falling back to the context quote date only when that leg carries none."""
     legs = values.get("legs")
     if values.get("entry_cost") is None or not legs:
         return None
     return _legs_dte_entry(
         legs[0].get("expiry"),
-        [leg.get("quote_date") for leg in legs],
+        legs[0].get("quote_date"),
         values.get("quote_date"),
     )
 
@@ -3043,13 +3041,14 @@ def _check_pricing_boundary(
     # dte_entry is the SUCCESSFULLY PRICED first leg's days to expiry (legacy
     # engine/score.py:2451 `int(priced.legs[0].dte)`). On a pricing/geometry
     # refusal nothing is written, and a value already captured in the context
-    # is never overwritten with None. dte_entry is measured from the priced
-    # legs' own quote date, not the earliest date of the quote domain, and is
-    # scorer-computed -- never projected from source inputs.
+    # is never overwritten with None. dte_entry is measured from the first
+    # priced leg's own quote date, exactly as legacy takes it from legs[0], not
+    # the earliest date of the quote domain, and is scorer-computed -- never
+    # projected from source inputs.
     if pricing.refusal is None and geometry.refusal is None and pricing.legs:
         computed_dte = _legs_dte_entry(
             pricing.legs[0].expiry,
-            [leg.quote_date for leg in pricing.legs],
+            pricing.legs[0].quote_date,
             values.get("quote_date"),
         )
         if computed_dte is not None:
