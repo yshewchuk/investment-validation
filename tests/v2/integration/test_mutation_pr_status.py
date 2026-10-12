@@ -180,7 +180,7 @@ def test_corrupt_results_jsonl_warns(tmp_path, capsys):
     out = tmp_path / "gh_output"
     assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
                     "--github-output", str(out)]) == 0
-    assert "results.jsonl unreadable" in capsys.readouterr().out
+    assert "1 malformed results.jsonl row(s) ignored" in capsys.readouterr().out
 
 
 def test_exit_band_boundaries():
@@ -273,3 +273,51 @@ def test_malformed_result_rows_are_ignored_with_a_warning(tmp_path, capsys):
                     "--github-output", str(out)]) == 0
     assert "state=success\n" in out.read_text()
     assert "6 malformed results.jsonl row(s) ignored" in capsys.readouterr().out
+
+
+def test_parse_changed_lines_handles_quoted_and_spaced_paths():
+    diff = (
+        'diff --git "a/engine/v2/caf\\303\\251.py" "b/engine/v2/caf\\303\\251.py"\n'
+        '--- "a/engine/v2/caf\\303\\251.py"\n'
+        '+++ "b/engine/v2/caf\\303\\251.py"\n'
+        "@@ -1 +3 @@\n-x\n+y\n"
+        "diff --git a/engine/v2/with space.py b/engine/v2/with space.py\n"
+        "--- a/engine/v2/with space.py\t\n"
+        "+++ b/engine/v2/with space.py\t\n"
+        "@@ -1,0 +7,2 @@\n+a\n+b\n"
+        'diff --git "a/engine/v2/q\\"t\\t.py" "b/engine/v2/q\\"t\\t.py"\n'
+        '+++ "b/engine/v2/q\\"t\\t.py"\n'
+        "@@ -1 +2 @@\n-x\n+y\n"
+        "diff --git a/engine/v2/plain.py b/engine/v2/plain.py\n"
+        "+++ b/engine/v2/plain.py\n"
+        "@@ -1 +9 @@\n-x\n+y\n"
+    )
+    assert ps.parse_changed_lines(diff) == {
+        "engine/v2/café.py": {3},
+        "engine/v2/with space.py": {7, 8},
+        'engine/v2/q"t\t.py': {2},
+        "engine/v2/plain.py": {9},
+    }
+
+
+def test_one_bad_results_line_does_not_discard_the_good_ones(tmp_path, capsys):
+    d, diff = _write_report(tmp_path, merged(a=mod()), [row("a", "engine/v2/a.py", 5)])
+    with (d / "results.jsonl").open("a") as fh:
+        fh.write("{not json\n")
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    assert "1 malformed results.jsonl row(s) ignored" in capsys.readouterr().out
+
+
+def test_missing_or_undecodable_results_file_warns_unreadable(tmp_path, capsys):
+    d, diff = _write_report(tmp_path, merged(a=mod()), [])
+    (d / "results.jsonl").write_bytes(b"\xff\xfe\n")
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    assert "results.jsonl unreadable" in capsys.readouterr().out
+    (d / "results.jsonl").unlink()
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    assert "results.jsonl unreadable" in capsys.readouterr().out

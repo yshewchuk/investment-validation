@@ -17,8 +17,44 @@ import sys
 from pathlib import Path
 
 DESC_MAX = 140
-_FILE = re.compile(r"^\+\+\+ b/(.+)$")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_SIMPLE_ESC = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _unquote(s: str) -> str:
+    """Undo git's C-style path quoting (octal bytes and simple escapes)."""
+    out = bytearray()
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s):
+            n = s[i + 1]
+            if n in "01234567":
+                j, digits = i + 1, ""
+                while j < len(s) and len(digits) < 3 and s[j] in "01234567":
+                    digits += s[j]
+                    j += 1
+                out.append(int(digits, 8) & 255)
+                i = j
+                continue
+            if n in _SIMPLE_ESC:
+                out.append(_SIMPLE_ESC[n])
+                i += 2
+                continue
+        out += c.encode()
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
+def _head_path(line: str) -> str | None:
+    """The repo path of a ``+++ b/<path>`` header, or None (``/dev/null``, other forms).
+
+    Git appends a TAB after names containing spaces and double-quotes names with
+    non-ASCII or control characters (unless ``core.quotepath=off``)."""
+    rest = line[4:].rstrip("\t")
+    if len(rest) >= 2 and rest.startswith('"') and rest.endswith('"'):
+        rest = _unquote(rest[1:-1])
+    return rest[2:] if rest.startswith("b/") else None
 
 
 def parse_changed_lines(diff_text: str) -> dict[str, set[int]]:
@@ -26,13 +62,10 @@ def parse_changed_lines(diff_text: str) -> dict[str, set[int]]:
     changed: dict[str, set[int]] = {}
     current: str | None = None
     for line in diff_text.splitlines():
-        m = _FILE.match(line)
-        if m:
-            current = m.group(1)
-            changed.setdefault(current, set())
-            continue
         if line.startswith("+++ "):  # +++ /dev/null: a deleted file has no head lines
-            current = None
+            current = _head_path(line)
+            if current is not None:
+                changed.setdefault(current, set())
             continue
         m = _HUNK.match(line)
         if m and current is not None:
@@ -140,13 +173,20 @@ def _valid_row(r) -> bool:
 
 def _load_rows(path: Path) -> list[dict]:
     try:
-        raw = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+        lines = [x for x in path.read_text().splitlines() if x.strip()]
     except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
         print("::warning::results.jsonl unreadable; survivors cannot be attributed to the PR")
         return []
-    rows = [r for r in raw if _valid_row(r)]
-    if len(rows) != len(raw):
-        print(f"::warning::{len(raw) - len(rows)} malformed results.jsonl row(s) ignored")
+    rows = []
+    for x in lines:
+        try:
+            r = json.loads(x)
+        except ValueError:
+            continue
+        if _valid_row(r):
+            rows.append(r)
+    if len(rows) != len(lines):
+        print(f"::warning::{len(lines) - len(rows)} malformed results.jsonl row(s) ignored")
     return rows
 
 
