@@ -53,7 +53,7 @@ def _patch_v3(monkeypatch):
         {**row, "quarter_ordinal": 0} for row in real_build_rows(*a, **k)])
 
 
-def _run(conn, tmp_path, name, head, ids, monkeypatch):
+def _run(conn, tmp_path, name, head, ids, monkeypatch, fetcher=None):
     monkeypatch.setattr(store_module, "target_tickers_from_snapshot",
                         lambda *a, **k: (list(ids), {}))
     root = tmp_path / name
@@ -61,7 +61,7 @@ def _run(conn, tmp_path, name, head, ids, monkeypatch):
     parameters = _parameters(head, expected_ids=tuple(ids), catalog_path=tmp_path / "ops.sqlite",
                              objects_root=tmp_path)
     return store_module.run_computed_moves_refresh(
-        parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(_closes_csv()))
+        parameters, root, as_of=_AS_OF, fetcher=fetcher or _CountingFetcher(_closes_csv()))
 
 
 def _records(conn, store, snapshot_id):
@@ -117,3 +117,24 @@ def test_all_v4_incremental_generation_carries_unselected_tickers(tmp_path, monk
     after = _records(conn, store, after_head["snapshot_id"])
     assert [r for r in after if r[1] != "AAAA"] == before
     assert {ticker for _, ticker, _ in after} == set(_TICKERS)
+
+
+
+def test_full_rebuild_where_a_v3_ticker_has_no_v4_rows_drops_its_manifest_hash(
+        tmp_path, monkeypatch):
+    conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
+    before = Repository(conn, store).resolve_full(v3_head["snapshot_id"])
+    assert "CCCC" in before.table_manifests["computed_moves"].partition_logical_hashes
+    real_build_rows = store_module.build_rows
+    # CCCC yields no v4 rows (the refresh records it as too_few); the rest is the real builder.
+    monkeypatch.setattr(store_module, "build_rows", lambda ticker, *a, **k: (
+        [] if ticker == "CCCC" else real_build_rows(ticker, *a, **k)))
+    _run(conn, tmp_path, "v4full", v3_head, _TICKERS, monkeypatch)
+    new_head = _head_row(conn)
+    assert new_head["snapshot_id"] != v3_head["snapshot_id"]
+    records = _records(conn, store, new_head["snapshot_id"])
+    assert {contract for contract, _, _ in records} == {"computed_moves.v4"}
+    assert {ticker for _, ticker, _ in records} == {"AAAA", "BBBB"}
+    after = Repository(conn, store).resolve_full(new_head["snapshot_id"])
+    hashes = after.table_manifests["computed_moves"].partition_logical_hashes
+    assert set(hashes) <= {"AAAA", "BBBB"}

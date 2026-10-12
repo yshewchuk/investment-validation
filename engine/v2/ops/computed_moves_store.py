@@ -603,9 +603,12 @@ def _generation_manifest(store, prior_manifest, kept, records_by_ticker):
     written = tuple(record for group in records_by_ticker.values() for record in group)
     records = tuple(sorted((*kept, *written),
                            key=lambda item: (item.partition_key, item.primary_key_min)))
+    # Only partitions whose records are kept keep a prior hash: a rewritten partition is
+    # re-hashed below, and a dropped one (e.g. a v3 ticker with no v4 rows) must not survive.
+    kept_keys = {record.partition_key for record in kept}
     partition_hashes = {key: value for key, value in
                         (prior_manifest.partition_logical_hashes.items() if prior_manifest else ())
-                        if key not in records_by_ticker}
+                        if key in kept_keys and key not in records_by_ticker}
     for ticker, group in records_by_ticker.items():
         if len(group) > 1:
             partition_hashes[ticker] = objects.partition_logical_hash(

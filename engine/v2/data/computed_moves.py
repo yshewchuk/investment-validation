@@ -100,9 +100,9 @@ def _implied_by_event(dates: list[str], daily: pd.DataFrame) -> list[float | Non
     non-null (``AsofSeries``, ``on_missing="null"``); an anchor whose ``implied_move`` is
     null or non-finite yields None and never falls back to an older row."""
     rows = []
+    if not {"date", "implied_move", "src_iv"} <= set(daily.columns):
+        raise fail("CONTRACT_MISMATCH", "daily_market frame lacks date, implied_move or src_iv")
     if len(daily):
-        if not {"date", "implied_move", "src_iv"} <= set(daily.columns):
-            raise fail("CONTRACT_MISMATCH", "daily_market frame lacks date, implied_move or src_iv")
         days = pd.to_datetime(daily["date"]).dt.strftime("%Y-%m-%d")
         for day, im, src in zip(days, daily["implied_move"], daily["src_iv"]):
             rows.append({
