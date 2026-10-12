@@ -91,7 +91,7 @@ native strategy independently of arm IDs; the immutable registered economics
 bind it. Snapshot, event IDs and holdout context come only from registration.
 It never re-resolves a scope head or accepts a supplied trades frame.
 Submission uses the existing `SubmitRequest` API and artifact input bindings;
-there is no dedicated plan CLI. The worker's catalog connection is read-only.
+no production entrypoint submits this kind. The worker's catalog connection is read-only.
 Each staged document is limited to 16 MiB, opened nonblocking without following
 the final symlink, and checked as a regular file on the open descriptor. A
 replacement after opening cannot redirect the bytes; growth past the cap refuses.
@@ -107,7 +107,7 @@ This receipt is not an evaluation report or promotion evidence.
 | Non-mapping or ill-typed worker arguments; unsupported recipe or malformed staging, including missing/null required spec fields or excessive JSON nesting; missing staged bytes | `INVALID_EXPERIMENT_SPEC` before catalog access for malformed arguments and before pricing for malformed staging; `INPUT_CHANGED` for missing bytes. |
 | Changed staged spec, registration, expected identity, source (including missing, unreadable or malformed Python) or numerical environment | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` before pricing; preserve registration and prior evidence. |
 | Unresolved pin or non-sweep purpose | `SNAPSHOT_UNRESOLVED` or `HOLDOUT_ACCESS_DENIED`; no pricing receipt or partial report. |
-| Incomplete/nonfinite pricing or pinned-data failure | Incomplete/nonfinite pricing yields `EXPERIMENT_VARIANT_FAILED`. Data codes registered with ops retain their code; others use that fallback. The original data code remains only in private `data_failure_code` details; no success receipt. |
+| Incomplete/nonfinite pricing or pinned-data failure | Incomplete/nonfinite pricing yields `EXPERIMENT_VARIANT_FAILED`. Data codes registered with ops retain their code; other admitted pricing failures use that fallback. The original code, or uncoded exception type, remains only in private `data_failure_code` details; no success receipt. |
 | Retry/cache/transaction | One attempt; cross-job cache reuse is disabled so admission is checked again. No worker catalog transaction or CSV access. |
 | Existing receipt destination or receipt I/O failure | Non-retryable `INPUT_CHANGED`; cleanup touches only private temporary names and preserves the original failure. Cleanup failure may retain private partial bytes, never a partial assigned receipt; no successful output is published. |
 | Successful smoke | Operations job/output artifact rows only; no reusable checkpoint is stored. Native registration/outcome and experiment ledger rows stay unchanged. |

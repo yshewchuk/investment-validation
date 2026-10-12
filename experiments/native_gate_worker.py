@@ -113,6 +113,7 @@ def run(parameters, root):
         raise fail("HOLDOUT_ACCESS_DENIED", "native pricing permits sweep reads only")
     if parameters.get("no_ledger") is not True:
         raise fail("INVALID_EXPERIMENT_SPEC", "native pricing is smoke-only")
+    registration = None
     try:
         from_document(NativeGateParameters, dict(parameters))
         conn = sqlite3.connect(Path(parameters["catalog_path"]).resolve().as_uri() + "?mode=ro",
@@ -145,7 +146,10 @@ def run(parameters, root):
     except DataError as error:
         code = error.code if error.code in FAILURE_CODES else "EXPERIMENT_VARIANT_FAILED"
         raise fail(code, "native pinned pricing refused", details={"data_failure_code": error.code}) from None
-    except (ArtifactError, ValueError, TypeError, KeyError, RecursionError):
+    except (ArtifactError, ValueError, TypeError, KeyError, RecursionError) as error:
+        if registration is not None:
+            raise fail("EXPERIMENT_VARIANT_FAILED", "native pinned pricing failed",
+                       details={"data_failure_code": getattr(error, "code", type(error).__name__)}) from None
         raise fail("INVALID_EXPERIMENT_SPEC", "native staged input is malformed") from None
     except (OSError, sqlite3.Error):
         raise fail("INPUT_CHANGED", "native staged I/O is unavailable") from None

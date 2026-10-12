@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from engine.v2.contracts import CheckpointCandidate, OutputCandidate, Problem, ProgressEvent
@@ -65,6 +66,8 @@ from engine.v2.ops.lifecycle import (
     record_progress,
     renew_after_resume,
 )
+from engine.v2.ops.nightly_completion import Disposition, record_completion
+from engine.v2.ops.nightly_session import SessionIdentity
 from engine.v2.ops.reclaim import reclaim
 from engine.v2.ops.recovery import (
     SupervisorLock,
@@ -308,6 +311,12 @@ class Service:
         self._reconcile_native_score_batch_shadow()
         self._reconcile_native_parity()
         return bool(self.running or claim)
+
+    def record_nightly_completion(self, identity: SessionIdentity, generation: int,
+                                  expected: Mapping[str, str],
+                                  observed: Mapping[str, Disposition]) -> dict:
+        """Persist explicit outcomes for one active run; tick idleness is not completion."""
+        return record_completion(self.root, identity, generation, expected, observed)
 
     _RECLAIM_IDLE_SECONDS = 30.0
     #: #609: monotonic time before which the reclaim pass is idle, and the

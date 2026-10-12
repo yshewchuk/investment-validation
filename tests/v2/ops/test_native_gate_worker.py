@@ -442,13 +442,15 @@ def test_excessive_staged_json_depth_has_exact_refusal(source, tmp_path, single_
     ("corrupt-snapshot", "SNAPSHOT_UNRESOLVED", "SNAPSHOT_UNRESOLVED"),
     ("missing-calendar", "CONTRACT_MISMATCH", "EXPERIMENT_VARIANT_FAILED"),
     ("empty-calendar", "CALENDAR_UNAVAILABLE", "EXPERIMENT_VARIANT_FAILED"),
+    ("malformed-contract", "JSONDecodeError", "EXPERIMENT_VARIANT_FAILED"),
+    ("incomplete-contract", "MISSING_FIELD", "EXPERIMENT_VARIANT_FAILED"),
 ])
 def test_real_data_failures_preserve_private_diagnostics(
         source, tmp_path, single_thread, case, data_code, ops_code):
     """Real repository failures cross the worker pipe without public detail leaks."""
     from tests.test_v2_research_replay import _chain_rows, _commit, _event_rows
 
-    if case != "corrupt-snapshot":
+    if case in {"missing-calendar", "empty-calendar"}:
         snapshot = _commit(source[0], source[1], source[2], chain_rows=_chain_rows(),
                            event_rows=_event_rows(), receipt_id=case,
                            expected_head=source[4].snapshot_id, generation=1,
@@ -460,6 +462,13 @@ def test_real_data_failures_preserve_private_diagnostics(
         source[0].execute("DROP TRIGGER data_snapshots_no_update")
         source[0].execute("UPDATE data_snapshots SET manifest_hash=? WHERE snapshot_id=?",
                           ("sha256:" + "0" * 64, source[4].snapshot_id))
+    elif case.endswith("-contract"):
+        source[0].execute("DROP TRIGGER data_contracts_no_update")
+        source[0].execute("PRAGMA ignore_check_constraints=ON")
+        source[0].execute("UPDATE data_contracts SET definition_json=? WHERE table_name=?",
+                          ("{" if case == "malformed-contract" else "{}", "earnings_events"))
+        source[0].execute("PRAGMA ignore_check_constraints=OFF")
+        assert source[3].resolve(source[4].snapshot_id) == source[4]
     stage = _stage(tmp_path / "staging", document, registration)
     before = _catalog(source[0])
     details = {"data_failure_code": data_code}
@@ -533,7 +542,8 @@ def test_finite_quotes_that_overflow_cashflows_refuse_whole_worker(source, tmp_p
     """Real pricing overflow cannot become a canonical tagged-value success receipt."""
     from tests.test_v2_research_replay import _chain_rows, _commit, _event_rows
 
-    rows = [{**row, "bid": 9e307, "ask": 9e307} for row in _chain_rows()]
+    rows = [{**row, "bid": 9e307, "ask": 9e307}
+            if row["obs_date"].date().isoformat() == "2024-05-03" else row for row in _chain_rows()]
     _commit(source[0], source[1], source[2], chain_rows=rows,
             event_rows=_event_rows(), receipt_id="overflow-quotes",
             expected_head=source[4].snapshot_id, generation=1)
@@ -542,6 +552,7 @@ def test_finite_quotes_that_overflow_cashflows_refuse_whole_worker(source, tmp_p
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert error.value.problem.message == "native pricing produced nonfinite cash flows"
     assert not (stage / "native_gate_consumption.json").exists()
 
 
