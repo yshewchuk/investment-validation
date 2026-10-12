@@ -35,7 +35,9 @@ now live and raises `FileNotFoundError` if one is missing.
 heading needs a blank line before (unless on line 1) and after; a table needs
 one before and after (unless it ends the file); a top-level fenced block
 needs one before and after and must be closed. Fenced content is never
-scanned as headings or tables. Lists are not checked. Default mode reads
+scanned as headings or tables. Lists are not checked and list content is
+ignored: only column-0 headings and tables are read, so indented lines and
+list-marker lines are never headings or table headers. Default mode reads
 staged blobs and flags only violations touching lines the commit adds or
 changes, except that an unclosed fence is a file-level error reported for any
 changed file (`--base-ref REF` does the same for `REF...HEAD`, run in CI by the

@@ -10,7 +10,9 @@ Rules (no style opinions):
   every fence must be closed.
 
 Content inside fences is never read as a heading or table. Lists are not
-checked at all (no list rule exists). Standard library only.
+checked, and list content is ignored: only column-0 headings and tables are
+read, so an indented line or one starting with a list marker (``- ``, ``* ``,
+``+ ``, ``1. ``) is never a heading or a table header. Standard library only.
 
 Modes (cwd-independent, ``git -C`` the repo root)::
 
@@ -31,7 +33,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 _FENCE = re.compile(r"^( *)(`{3,}|~{3,})(.*)$")
-_HEADING = re.compile(r"^ {0,3}#{1,6}(\s|$)")
+_HEADING = re.compile(r"^#{1,6}(\s|$)")
+_LIST_ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
 _DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -101,7 +104,8 @@ def lint_text(text: str) -> list[Violation]:
                 found.append(Violation(i + 1, i + 2, "heading-after"))
             i += 1
             continue
-        if ("|" in s and not _DELIM.match(s) and i + 1 < n
+        if ("|" in s and not _DELIM.match(s) and not s[:1].isspace()
+                and not _LIST_ITEM.match(s) and i + 1 < n
                 and "|" in lines[i + 1] and _DELIM.match(lines[i + 1])):
             if not blank(i - 1):
                 found.append(Violation(i + 1, i, "table-before"))

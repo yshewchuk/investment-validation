@@ -218,3 +218,12 @@ def test_user_git_color_and_external_diff_config_do_not_hide_violations(repo, mo
     assert ms.main(["--quiet"]) == 1
     assert "new.md:2: heading-before" in capsys.readouterr().out
 
+
+def test_list_content_is_ignored_for_headings_and_tables():
+    indented_table = "- item\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n  tail\n"
+    assert rules(indented_table) == []
+    marker_pipe = "- a | b\n- --|--\n- 1 | 2\nafter\n"
+    assert rules(marker_pipe) == []
+    assert rules("- item\n  # not a heading\n  text\n") == []
+    assert rules("1. item\n   | a | b |\n   |---|---|\n") == []
+
