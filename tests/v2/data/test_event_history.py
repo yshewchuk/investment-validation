@@ -543,3 +543,29 @@ def test_every_container_input_allows_only_list_or_tuple(bad):
 def test_omitting_a_mandatory_declaration_refuses_with_no_silent_default(call, message):
     with _mismatch(message):
         call()
+
+
+def test_refuse_policy_returns_a_present_value_and_refuses_only_on_a_miss():
+    rows = _rows(("2020-01-01", 0.5, 4.0), ("2020-01-08", 0.5, 6.0))
+    series = _asof(rows, on_missing="refuse")
+    assert series.at("2020-01-05") == 4.0
+    assert series.at("2020-01-10") == 6.0
+    assert _asof(rows, on_missing="refuse", max_staleness_days=2).at("2020-01-10") == 6.0
+
+
+def test_falsy_but_present_eligibility_values_count_as_present():
+    rows = _rows(("2020-01-01", 0, 4.0), ("2020-01-05", False, 5.0),
+                 ("2020-01-08", 0.0, 6.0), ("2020-01-09", "", 7.0))
+    series = _asof(rows)
+    assert series.at("2020-01-02") == 4.0
+    assert series.at("2020-01-06") == 5.0
+    assert series.at("2020-01-09") == 6.0
+    assert series.at("2020-01-10") == 7.0
+
+
+@pytest.mark.parametrize("ordinals", [[0, 1, 3], [0, 1, 1], [0, 2, 3]])
+def test_malformed_ordinals_after_the_first_position_refuse(ordinals):
+    events = [SequencedEvent(day, ordinal, True)
+              for day, ordinal in zip(DAYS[:3], ordinals)]
+    with _mismatch("events must be the full sequence in ordinal order"):
+        strict_prior_mean(events, [1.0, 2.0, 3.0], population="all")

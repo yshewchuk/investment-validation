@@ -250,7 +250,7 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
 - `strict_prior_mean(events, values, population=)` returns `(mean, count)` per
   event over earlier-ordinal events with a non-null value, within `population`
   (`"admitted"` or `"all"`; a non-admitted event gets `(None, 0)` under
-  `"admitted"`). Each mean is the exact rational mean rounded once to float (no overflow, underflow or double rounding).
+  `"admitted"`). Each mean is the exact rational mean, rounded once to float.
 - Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
   `computed_at` are provenance and never filter or order.
 - The module only computes from the inputs it is given; it stores nothing and
