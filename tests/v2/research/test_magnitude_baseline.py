@@ -305,15 +305,36 @@ def test_rendered_report_has_reviewable_clock_provenance_losses_and_limits(sourc
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
-@pytest.mark.parametrize("field", ["variant_id", "run_id", "provenance", "spec"])
+@pytest.mark.parametrize("field", ["variant_id", "run_id", "provenance"])
 def test_renderer_refuses_cross_registration_results(source, field):
     result = magnitude.prediction_result(source.repository, source.registration)
-    spec = replace(source.spec, hypothesis="A different hypothesis") if field == "spec" else source.spec
-    if field != "spec":
-        result[field] = "another-registration"
+    result[field] = "another-registration"
+    result["result_id"] = content_hash({key: value for key, value in result.items() if key != "result_id"})
+    reference = {"variant_id": source.registration.variant_id, "run_id": source.registration.run_id,
+                 "provenance": source.registration.document}
+    assert {key: result[key] != value for key, value in reference.items()} == {
+        key: key == field for key in reference}
+    assert source.spec.spec_hash == source.registration.document["spec_hash"]
+    with pytest.raises(OpsError) as caught:
+        magnitude.render_prediction_report(source.registration, result, spec=source.spec, no_ledger=True)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+
+
+def test_renderer_refuses_other_hypothesis_with_otherwise_valid_result(source):
+    result = magnitude.prediction_result(source.repository, source.registration)
+    original = canonical_json(result)
+    spec = replace(source.spec, hypothesis="A different hypothesis")
+    assert spec.spec_hash != source.registration.document["spec_hash"]
+    assert result["variant_id"] == source.registration.variant_id
+    assert result["run_id"] == source.registration.run_id
+    assert result["provenance"] == source.registration.document
+    assert result["result_id"] == content_hash({key: value for key, value in result.items() if key != "result_id"})
     with pytest.raises(OpsError) as caught:
         magnitude.render_prediction_report(source.registration, result, spec=spec, no_ledger=True)
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert canonical_json(result) == original
 
 
 def test_renderer_digest_guard_independently_rejects_metrics_only_tampering(source, monkeypatch):
@@ -474,7 +495,9 @@ def test_cli_invalid_mode_combinations_refuse_before_store_or_spec_access(monkey
                   "--as-of-month", MONTH, "--no-ledger", *extra])
     assert caught.value.code == 2
     captured = capsys.readouterr()
-    assert captured.err and not captured.out
+    assert captured.err.splitlines()[-1].endswith(
+        ": error: absolute_move requires both magnitude clocks; positive_move accepts neither")
+    assert not captured.out
 
 
 @pytest.mark.parametrize("kind", ["v1.0", "v1.1", "v1.2", "null-envelope", "list-envelope",
