@@ -853,7 +853,10 @@ jobs:
           # tools/mutation_pr_status.py: red only for PR-owned problems; infra
           # problems (timeouts, cancels, runner errors, failures main shows too)
           # are warnings and never change the state.
-          elif [ -n "${CLASSIFIED_STATE:-}" ]; then
+          # A classified `success` never overrides a report job that did not succeed
+          # (it exits nonzero on a merge tool error); that falls through to the
+          # report-result branch below. failure and neutral verdicts are posted as is.
+          elif [ -n "${CLASSIFIED_STATE:-}" ] && { [ "$CLASSIFIED_STATE" != success ] || [ "$REPORT_RESULT" = success ]; }; then
             state="$CLASSIFIED_STATE"
             desc="$CLASSIFIED_DESC"
           elif [ "$REPORT_RESULT" != "success" ]; then
