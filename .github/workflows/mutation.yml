@@ -859,13 +859,17 @@ jobs:
           elif [ -n "${CLASSIFIED_STATE:-}" ] && { [ "$CLASSIFIED_STATE" != success ] || [ "$REPORT_RESULT" = success ]; }; then
             state="$CLASSIFIED_STATE"
             desc="$CLASSIFIED_DESC"
+          # No trusted classified verdict and the report job did not succeed (checkout,
+          # setup or merge error, cancel): an infra problem, never red. Red comes only
+          # from a classified failure or the PR-closed placeholder guard above.
           elif [ "$REPORT_RESULT" != "success" ]; then
-            state=failure
-            desc="gremlins: report job ${REPORT_RESULT} -- see run for detail"
+            state=neutral
+            desc="gremlins: report job ${REPORT_RESULT} before classification -- infra; not a pass"
           else
             state=success
             desc="gremlins: report published for $(jq -r 'length' <<< "$MODULES") module(s)"
           fi
+          # The decision is made above; the status itself is posted with gh api below.
           # Nothing measured: grey, and commit statuses have no grey state. The
           # report_neutral job posts a neutral check run instead; no status here.
           if [ "$state" = neutral ]; then
@@ -885,7 +889,8 @@ jobs:
     if: >-
       always() && needs.plan.outputs.pr_number != '' &&
       needs.plan.outputs.modules != '[]' &&
-      needs.report.outputs.state == 'neutral' &&
+      (needs.report.outputs.state == 'neutral' ||
+       (needs.report.outputs.state != 'failure' && needs.report.result != 'success')) &&
       (needs.report.outputs.skipped_count == '0' || needs.report.outputs.skipped_count == '')
     runs-on: ubuntu-latest
     permissions:
@@ -897,7 +902,7 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          DESC: ${{ needs.report.outputs.description }}
+          DESC: "${{ needs.report.outputs.state == 'neutral' && needs.report.outputs.description || format('gremlins: report job {0} before classification -- infra; not a pass', needs.report.result) }}"
         run: |
           set -euo pipefail
           gh api "repos/$REPO/check-runs" \

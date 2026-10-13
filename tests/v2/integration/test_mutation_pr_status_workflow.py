@@ -69,8 +69,8 @@ def test_report_status_uses_the_classification_when_present():
         ("success", "1 infra warning(s)")
 
 
-def test_report_status_without_classification_keeps_the_old_decision():
-    state, _ = _decide(REPORT_RESULT="failure")
-    assert state == "failure"
+def test_report_status_without_classification_is_infra_when_the_report_job_failed():
+    state, desc = _decide(REPORT_RESULT="failure")
+    assert state == "neutral" and "before classification -- infra" in desc
     state, desc = _decide()
     assert state == "success" and "2 module(s)" in desc

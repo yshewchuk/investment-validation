@@ -1574,7 +1574,11 @@ def _run_status_decision(run_script, modules, report_result, skipped_count="0"):
     # Runs everything the SHIPPED script computes before its `gh api` call
     # (the real state/desc decision, never a hand copy) against fixture
     # inputs, with no network call.
-    decision = run_script[:run_script.index("gh api")]
+    marker = '"$state" = neutral'  # gremlins: a neutral verdict exits before the status post
+    if marker in run_script:
+        decision = run_script[:run_script.index(marker)].rsplit("\n", 1)[0]
+    else:
+        decision = run_script[:run_script.index("gh api")]
     script = "set -euo pipefail\n" + decision + '\necho "${state}|${desc}"\n'
     env = dict(os.environ, MODULES=modules, REPORT_RESULT=report_result,
               SKIPPED_COUNT=skipped_count)
@@ -1600,7 +1604,9 @@ def test_report_status_decision_covers_skip_success_and_failure(jobs):
     state, desc = _run_status_decision(run_script, '["pnl_sim","canonical"]', "success")
     assert state == "success" and "2" in desc
     state, desc = _run_status_decision(run_script, '["pnl_sim"]', "failure")
-    assert state == "failure" and "failure" in desc
+    # gremlins: a report job that failed before classification is an infra problem (neutral,
+    # never red); mutmut keeps the red mapping.
+    assert state == ("neutral" if jobs is JOBS else "failure") and "failure" in desc
     state, desc = _run_status_decision(run_script, '["pnl_sim","canonical"]', "success",
                                        skipped_count="1")
     assert state == "failure"  # never success on a partial (stubbed) measurement

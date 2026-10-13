@@ -27,8 +27,9 @@ def _status_run():
 def test_report_status_posts_no_commit_status_for_neutral():
     run = _status_run()
     guard = run.index('"$state" = neutral')
-    assert guard < run.index("gh api")  # the neutral exit precedes the status post
-    assert "exit 0" in run[guard:run.index("gh api")]
+    post = run.index('gh api "repos/$REPO/statuses')
+    assert guard < post  # the neutral exit precedes the status post
+    assert "exit 0" in run[guard:post]
     # Simulate the shipped script up to the guard: the neutral verdict reaches it unchanged.
     prefix = "set -euo pipefail\n" + run[:guard].rsplit("\n", 1)[0] + \
         '\necho "${state}|${desc}"\n'
