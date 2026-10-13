@@ -93,11 +93,16 @@ def test_missing_required_state_refuses_only_runup_without_inventing_inputs(tmp_
     pytest.param({"residuals": (1.0, float("nan"))}, id="mixed-flat-invalid-after-finite"),
     {"buckets": {"edges": (0.0,), "pools": ()}},
     {"buckets": {"edges": (1.0, 0.0), "pools": ((1.0,),)}},
+    pytest.param({"buckets": {"edges": (0.0, 2.0, 1.0), "pools": ((1.0,), (2.0,))}},
+                 id="mixed-order-invalid-after-valid"),
     {"buckets": {"edges": (0.0, float("nan")), "pools": ((1.0,),)}},
     {"buckets": {"edges": (-float("inf"), float("inf")), "pools": ((float("nan"),),)}},
     pytest.param({"buckets": {"edges": (-float("inf"), float("inf")),
                              "pools": ((1.0, float("nan")),)}}, id="mixed-bucket-invalid-after-finite"),
     {"buckets": {"edges": (-float("inf"), float("inf")), "pools": ((),)}, "min_pool": 0},
+    pytest.param({"buckets": {"edges": (-float("inf"), 0.0, float("inf")),
+                             "pools": ((1.0,), ())}, "min_pool": 0},
+                 id="mixed-zero-floor-empty-after-nonempty"),
 ])
 def test_hash_valid_but_unusable_champion_pool_is_refused(tmp_path, role, change):
     pools = [pool(name, **(change if name == role else {})) for name in ("implied_t1", "runup_move")]
