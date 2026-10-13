@@ -66,9 +66,9 @@ def complete_analog_query(query: Any, values: Mapping[str, Any]) -> Any:
     """``query`` plus the priced-leg bands, for a query lacking those keys.
 
     ``dte_band`` comes from ``values["dte_entry"]``; ``moneyness_band`` from
-    ``abs(strike / spot - 1) * 100``. An absent or non-finite input gives
-    ``None`` (the matcher then drops that dimension). A key already present
-    is kept, and a non-mapping is returned unchanged.
+    ``abs(strike / spot - 1) * 100``. An absent, non-finite or (strike, spot)
+    non-positive input gives ``None`` (the matcher then drops that dimension).
+    A key already present is kept, and a non-mapping is returned unchanged.
     """
     if not isinstance(query, Mapping):
         return query
@@ -81,7 +81,8 @@ def complete_analog_query(query: Any, values: Mapping[str, Any]) -> Any:
     if "moneyness_band" not in out:
         strike = _number(values.get("strike"))
         spot = _number(values.get("spot"))
-        pct = abs(strike / spot - 1.0) * 100.0 if strike is not None and spot else None
+        usable = strike is not None and spot is not None and strike > 0 and spot > 0
+        pct = abs(strike / spot - 1.0) * 100.0 if usable else None
         out["moneyness_band"] = _label(pct, MONEYNESS_EDGES, MONEYNESS_LABELS)
     return out
 

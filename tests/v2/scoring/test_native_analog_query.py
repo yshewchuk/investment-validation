@@ -188,11 +188,15 @@ def test_complete_query_drops_bands_for_every_bad_input(bad):
         assert complete_analog_query(query, values)["moneyness_band"] is None
 
 
-def test_complete_query_negative_spot_is_not_a_missing_input():
-    # Only a zero/absent/non-finite spot is unusable: |strike/spot - 1| is computed otherwise.
+@pytest.mark.parametrize(("spot", "strike"), [
+    (-100.0, 100.0), (100.0, -100.0), (-100.0, -100.0),
+    (0.0, 100.0), (100.0, 0.0), (0.0, 0.0),
+])
+def test_complete_query_non_positive_spot_or_strike_has_no_moneyness(spot, strike):
+    # A non-positive price is invalid input, not a moneyness.
     out = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None},
-                                {"spot": -100.0, "strike": 100.0})
-    assert out["moneyness_band"] == ">5%"
+                                {"spot": spot, "strike": strike})
+    assert out["moneyness_band"] is None
 
 
 def test_complete_query_zero_spot_is_none():

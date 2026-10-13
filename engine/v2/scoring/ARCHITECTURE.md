@@ -140,7 +140,8 @@ load-bearing entrypoints:
   scorer-computed `values["dte_entry"]` (the priced first leg's days to
   expiry, written before the analog stage) and `abs(values["strike"] /
   values["spot"] - 1) * 100`, with legacy's band edges; an input that is
-  absent or non-finite gives `None` (the matcher drops that dimension, as
+  absent or non-finite gives `None`, and a non-positive `strike` or `spot`
+  gives a `None` moneyness band (the matcher drops that dimension, as
   legacy does with no chain). A query that already carries a band key keeps
   it. A non-mapping query is returned unchanged so the evaluator's
   `INVALID_ANALOG_INPUT` still fires. While `implied_ratio` is `None` (no
