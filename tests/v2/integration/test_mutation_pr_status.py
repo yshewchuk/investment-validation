@@ -182,6 +182,52 @@ def test_malformed_planned_or_module_fields_are_neutral(id_, mutate):
     assert verdict["state"] == "neutral", id_
 
 
+def _top_level_cases():
+    cases = []
+    for key in ("complete", "tool_error", "failure_reasons"):
+        cases.append((f"{key}-missing", key, _DELETED))
+        cases.append((f"{key}-none", key, None))
+    cases += [("complete-wrong-str", "complete", "true"),
+              ("complete-wrong-int", "complete", 1),
+              ("tool_error-wrong-str", "tool_error", "false"),
+              ("tool_error-wrong-int", "tool_error", 0),
+              ("failure_reasons-wrong-empty-str", "failure_reasons", ""),
+              ("failure_reasons-wrong-empty-dict", "failure_reasons", {}),
+              ("failure_reasons-wrong-int", "failure_reasons", 0)]
+    return cases
+
+
+@pytest.mark.parametrize("key,value", [c[1:] for c in _top_level_cases()],
+                         ids=[c[0] for c in _top_level_cases()])
+def test_top_level_summary_fields_must_be_strict(key, value):
+    summary = clean("a")
+    if value is _DELETED:
+        summary.pop(key)
+    else:
+        summary[key] = value
+    verdict = ps.classify(summary, [], {"engine/v2/z.py"})
+    assert verdict["state"] == "neutral", key
+
+
+def test_top_level_tool_error_missing_is_neutral_not_failure():
+    summary = clean("a")
+    summary.pop("tool_error")
+    verdict = ps.classify(summary, [row("a", "engine/v2/a.py")],
+                          {"engine/v2/a.py"})
+    assert verdict["state"] == "neutral"
+
+
+def test_four_survivor_files_are_abbreviated():
+    files = [f"engine/v2/{c}.py" for c in "abcd"]
+    verdict = ps.classify(clean("a"), [row("a", f) for f in files], set(files))
+    assert verdict["state"] == "failure"
+    assert len(verdict["description"]) <= 140
+    assert verdict["description"] == (
+        "gremlins: PR-owned problem: 4 surviving mutant(s) in "
+        "engine/v2/a.py, engine/v2/b.py, engine/v2/c.py, ...")
+    assert verdict["reasons"][0].startswith("4 surviving mutant(s)")
+
+
 NEUTRAL_CASES = [
     (lambda: {"modules": {}, "expected_modules": []}, "no module measured"),
     (lambda: {"modules": {"b": mod()}, "expected_modules": ["a"], "complete": True,
