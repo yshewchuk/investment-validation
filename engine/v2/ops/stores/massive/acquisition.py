@@ -129,6 +129,16 @@ def _response_body(conn, store, unit, fetch, charge, response, was_charged):
     return body
 
 
+def _observation_time(observed):
+    try:
+        parsed = parse_timestamp(observed)
+        if format_timestamp(parsed) != observed:
+            raise ValueError
+    except ValueError:
+        raise fail("INTEGRITY_FAILED", "Massive acquisition observation timestamp is malformed") from None
+    return parsed
+
+
 def _acquire(conn, store, params, claim, *, fetch, clock, on_receipt=None,
              page_request=None, previous_requests=()):
     def fence():
@@ -171,7 +181,7 @@ def _acquire(conn, store, params, claim, *, fetch, clock, on_receipt=None,
         def record_receipt(record):
             observed = record.received_at if cache_hit else format_timestamp(clock.now())
             if on_receipt is not None:
-                closed_day(unit["request"], parse_timestamp(observed), cached=cache_hit)
+                closed_day(unit["request"], _observation_time(observed), cached=cache_hit)
                 on_receipt(record, observed, cache_hit, continuation)
         record = cache_raw_receipt(
             conn, store, RawPayload(payload=body, response_kind="partial" if continuation else "complete", response_meta={}),

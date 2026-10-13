@@ -294,6 +294,45 @@ def assert_terminal_evidence_failure(h, attempt, params):
 
 
 @pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
+@pytest.mark.parametrize("observed", ["unusable-synthetic-time", "", "2026-09-12",
+    "2026-09-12T12:00:00.000000", "2026-09-12T12:00:00.000000+00:00", "2026-09-12T12:00:00.0Z",
+    "2026-02-30T12:00:00.000000Z", "2026-9-12T12:00:00.000000Z"])
+def test_initial_raw_timestamp_refuses_before_adoption_without_http(harness, dataset, observed):
+    h = harness
+    scope = request(dataset=dataset)
+    raw = cache_raw_receipt(h.conn, h.store,
+        RawPayload(payload=body(scope), response_kind="complete", response_meta={}),
+        source=SOURCE, endpoint=scope["endpoint"], request=scope, received_at=observed)
+    # Exact mode keeps its existing byte-cache contract; generation adoption is stricter.
+    exact_params = parameters(scope, generation=None)
+    enqueue_exact(h, "exact", exact_params)
+    exact_attempt = claim(h)
+    _, exact_result = run(h, exact_attempt, no_fetch, exact_params)
+    assert exact_result["cache_hit"] and exact_result["first_received_at"] == observed
+    finish(h, exact_attempt)
+    params = parameters(scope)
+    enqueue(h, "adopt", params)
+    attempt = claim(h)
+    before = tuple(h.conn.iterdump())
+    objects = {p.relative_to(h.store.root): (p.read_bytes(), p.stat().st_mtime_ns)
+               for p in h.store.root.rglob("*") if p.is_file()}
+    with pytest.raises(OpsError) as refused:
+        run(h, attempt, no_fetch, params)
+    assert refused.value.code == "INTEGRITY_FAILED" and not refused.value.problem.retryable
+    assert str(refused.value) == "INTEGRITY_FAILED: Massive acquisition observation timestamp is malformed"
+    assert tuple(h.conn.iterdump()) == before
+    assert {p.relative_to(h.store.root): (p.read_bytes(), p.stat().st_mtime_ns)
+            for p in h.store.root.rglob("*") if p.is_file()} == objects
+    assert occurrences(h) == [] and h.conn.execute("SELECT count(*) FROM ops_massive_pages").fetchone()[0] == 0
+    assert h.conn.execute("SELECT SUM(used_calls) FROM provider_reservations").fetchone()[0] == 0
+    assert h.conn.execute("SELECT received_at FROM data_raw_receipts WHERE raw_receipt_id=?",
+                          (raw.raw_receipt_id,)).fetchone()[0] == observed
+    assert not (h.root / attempt.attempt_id / "massive_acquisition.json").exists()
+    assert retry(h, attempt, refused.value) == "failed" and claim(h) is None
+    assert h.conn.execute("SELECT count(*) FROM attempts WHERE job_id=?", (attempt.job_id,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
 @pytest.mark.parametrize("observed", ["2026-09-12T00:00:00+00:00", "2026-09-12T03:59:59+00:00"])
 def test_preclose_legacy_receipt_is_terminal_when_initial_generation_adopts_it(harness, dataset, observed):
     h = harness
@@ -771,6 +810,7 @@ def test_interval_planning_cli_is_readonly_clipped_gap_aware_and_legacy_compatib
     captured = capsys.readouterr()
     result = json.loads(captured.out)
     assert captured.err == "" and result["schema_version"] == "massive_interval_plan.v1"
+    assert result["policy_version"] == "massive_stocks_basic.2026-10-10"
     assert result["plan_only"] is True
     daily = next(p for p in result["plans"] if p["request"]["dataset"] == "daily")
     assert (daily["candidate_count"], daily["candidate_limit"]) == (2, 100)

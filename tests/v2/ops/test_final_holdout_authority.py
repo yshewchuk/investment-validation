@@ -315,10 +315,13 @@ def test_migration_is_atomic_and_does_not_rewrite_prior_versions(tmp_path):
     try:
         migrate(conn, schema.OWNER, migrations[:-1], clock=clock)
         prior = applied_versions(conn, schema.OWNER)
+        faults = []
         def crash(point):
+            faults.append(point)
             raise RuntimeError("synthetic migration interruption")
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="^synthetic migration interruption$"):
             migrate(conn, schema.OWNER, migrations, clock=clock, fault=crash)
+        assert faults == ["ops:11:0"]
         assert applied_versions(conn, schema.OWNER) == prior
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='final_holdout_state_events'").fetchone()
         assert migrate(conn, schema.OWNER, migrations, clock=clock) == [11]
