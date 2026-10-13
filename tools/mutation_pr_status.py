@@ -12,7 +12,7 @@ is 0 for classified/degraded input; nonzero only for argparse errors (exit 2)
 or an unwritable output file (the ``OSError`` propagates AFTER the verdict).
 Integrity first: an unavailable summary, a planned module missing, unreadable
 rows or no changed-file list is neutral before any attribution; only a
-complete, well-formed report can be failure or success.
+complete, well-formed report can be failure or success. Exception: a module run exit code of 1..127 (the PR's tests failed) is red even if the summary is incomplete.
 """
 from __future__ import annotations
 
@@ -65,16 +65,14 @@ def classify(summary, rows, changed) -> dict:
                if isinstance(e, dict) and not e.get("skipped_reason")
                and type(e.get("run_exit_code")) is int
                and 1 <= e["run_exit_code"] <= 127]
+    # Exception: a module whose run exit code is 1..127 (the PR's tests failed) is red even if the summary is incomplete, since the run itself measured the failure; every other incompleteness is neutral.
     if failing:
         parts = [p for p in (
             f"{len(hits)} " + _list("surviving mutant(s) in", set(hits)) if hits else None,
             _list("tests fail in", failing)) if p]
         desc = "gremlins: PR-owned problem: " + "; ".join(parts)
         return {"state": "failure", "description": _cut(desc), "reasons": parts}
-    if hits and summary.get("complete") is True and summary.get("tool_error") is False:
-        parts = [f"{len(hits)} " + _list("surviving mutant(s) in", set(hits))]
-        desc = "gremlins: PR-owned problem: " + "; ".join(parts)
-        return {"state": "failure", "description": _cut(desc), "reasons": parts}
+    # Survivor-red below needs a complete, clean report: complete=True, no tool error, every planned module clean.
     if summary.get("complete") is not True:
         reasons.append("run incomplete")
     if summary.get("tool_error") is not False:
@@ -90,11 +88,15 @@ def classify(summary, rows, changed) -> dict:
                 or not isinstance(e.get("counts_backend"), dict)
                 or e["counts_backend"].get("error")):
             reasons.append(f"module {name} not clean")
-    if not reasons:
-        return {"state": "success", "reasons": [],
-                "description": f"gremlins: no PR-owned problems in {len(names)} module(s)"}
-    desc = f"gremlins: not a clean measured run ({reasons[0]}); not a pass"
-    return {"state": "neutral", "description": _cut(desc), "reasons": reasons}
+    if reasons:
+        desc = f"gremlins: not a clean measured run ({reasons[0]}); not a pass"
+        return {"state": "neutral", "description": _cut(desc), "reasons": reasons}
+    if hits:
+        parts = [f"{len(hits)} " + _list("surviving mutant(s) in", set(hits))]
+        desc = "gremlins: PR-owned problem: " + "; ".join(parts)
+        return {"state": "failure", "description": _cut(desc), "reasons": parts}
+    return {"state": "success", "reasons": [],
+            "description": f"gremlins: no PR-owned problems in {len(names)} module(s)"}
 
 
 # Any malformed or partial report is neutral, even if some rows are readable (user decision 2026-10-13): no salvaging of partial evidence for this advisory check.

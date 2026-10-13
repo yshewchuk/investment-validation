@@ -66,7 +66,7 @@ def _run_bash(script: str, env_over: dict, functions: str) -> subprocess.Complet
 
 GIT_PY_FUNCS = """
 git() { echo "git $*" >> "$LOG"; [ -n "${GIT_FAIL:-}" ] && return 1; return 0; }
-python() { echo "python $*" >> "$LOG"; return 0; }
+python() { echo "python" >> "$LOG"; printf 'ARG %s\\n' "$@" >> "$LOG"; return 0; }
 """
 
 
@@ -78,7 +78,12 @@ def test_classify_script_runs_git_and_the_tool(tmp_path):
     assert log.read_text().splitlines() == [
         "git fetch -q --no-tags origin +refs/pull/7/head:refs/remotes/pr/head",
         "git -c core.quotepath=off diff --name-only --no-renames base1...head1",
-        "python tools/mutation_pr_status.py --merged-dir merged --changed-files changed_files.txt",
+        "python",
+        "ARG tools/mutation_pr_status.py",
+        "ARG --merged-dir",
+        "ARG merged",
+        "ARG --changed-files",
+        "ARG changed_files.txt",
     ]
 
 
@@ -94,7 +99,10 @@ def test_classify_script_degrades_when_git_fails(tmp_path):
     assert "::warning::" in proc.stdout
     assert log.read_text().splitlines() == [
         "git fetch -q --no-tags origin +refs/pull/7/head:refs/remotes/pr/head",
-        "python tools/mutation_pr_status.py --merged-dir merged",
+        "python",
+        "ARG tools/mutation_pr_status.py",
+        "ARG --merged-dir",
+        "ARG merged",
     ]
 
 
@@ -107,6 +115,7 @@ DECISION_TABLE = [
     # (modules, skipped, classified_state, classified_desc, report_result) -> expected state
     ("[]", "0", "", "", "success", "success"),
     ("[\"a\",\"b\"]", "2", "", "", "success", "failure"),
+    ("[\"a\",\"b\"]", "2", "success", "classified text", "success", "failure"),
     ("[\"a\",\"b\"]", "0", "failure", "classified text", "success", "failure"),
     ("[\"a\",\"b\"]", "0", "neutral", "classified text", "success", "neutral"),
     ("[\"a\",\"b\"]", "0", "success", "classified text", "success", "success"),
@@ -133,7 +142,7 @@ def test_report_status_decision_table():
         assert proc.returncode == 0, proc.stderr
         state, desc = proc.stdout.strip().split("|", 1)
         assert state == expected, (modules, skipped, cstate, report)
-        if cstate and not (cstate == "success" and report != "success"):
+        if cstate and not (cstate == "success" and report != "success") and skipped in ("", "0"):
             assert desc == cdesc
         elif expected == "neutral" and report != "success":
             assert "before classification" in desc

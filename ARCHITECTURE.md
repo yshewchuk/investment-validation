@@ -271,7 +271,7 @@ evidence. See the models and data component contracts.
     `failure` for a surviving mutant in a file the PR changed or a failing PR test run,
     `success` only for a clean measured run of every planned module, and `neutral` for
     everything else, including any malformed or partial report (integrity is checked before
-    any attribution; only a complete, well-formed report can be red or green). `report_status` posts the state
+    any attribution; only a complete, well-formed report can be red or green; exception: a module run exit code 1..127, the PR's tests failing, is red even if the summary is incomplete). `report_status` posts the state
     as one check run named `mutation/pr` (never a commit status; not a required check). The rules
     and the decision table are in `tests/README.md` ("Mutation CI").
 

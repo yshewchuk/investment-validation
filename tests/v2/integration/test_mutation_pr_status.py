@@ -78,6 +78,13 @@ def test_integrity_comes_before_attribution():
     verdict = ps.classify({**clean("a"), "modules": {"a": mod(run_exit_code=1)}},
                           [row("a", "engine/v2/a.py")], None)
     assert verdict["state"] == "neutral"
+    for summary in ({**clean("a"), "tool_error": True},
+                    {**clean("a"), "failure_reasons": ["X"]},
+                    {**clean("a"), "modules": {"a": mod(counts_backend={"error": 2})}},
+                    {**clean("a"), "modules": {"a": mod(skipped_reason="x")}}):
+        verdict = ps.classify(summary, [row("a", "engine/v2/a.py")],
+                              {"engine/v2/a.py"})
+        assert verdict["state"] == "neutral"
 
 
 def test_success_cases():
@@ -152,10 +159,12 @@ def test_description_fits_the_limit():
                            "complete": True, "tool_error": True,
                            "failure_reasons": ["x"]}, [], {"engine/v2/z.py"})
     assert verdict["state"] == "failure" and len(verdict["description"]) <= 140
+    assert verdict["description"] and verdict["description"].endswith("...")
     bad = {f"module_{i}_with_a_long_name": mod(skipped_reason="x") for i in range(30)}
     verdict = ps.classify({"modules": bad, "expected_modules": sorted(bad), "complete": True,
                            "tool_error": False, "failure_reasons": []}, [], {"engine/v2/z.py"})
     assert verdict["state"] == "neutral" and len(verdict["description"]) <= 140
+    assert verdict["description"].endswith("; not a pass")
 
 
 def _report(tmp_path, summary, rows_lines, changed_lines, subdir="report"):

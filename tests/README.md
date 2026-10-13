@@ -390,7 +390,9 @@ supersedes the earlier result; mutmut's status is unchanged). The `report` job's
 - **failure (red)**: a surviving mutant in a file the PR changed, or the PR's tests fail
   (a module run exit code 1..127). Only a complete, well-formed report can be red: integrity
   is checked first (an unavailable summary, a missing planned module, unreadable rows or no
-  changed-file list is neutral before any attribution).
+  changed-file list is neutral before any attribution). Exception: a module whose run exit
+  code is 1..127 (the PR's tests failed) is red even if the summary is incomplete, since the
+  run itself measured the failure; every other incompleteness is neutral.
 - **success (green)**: a clean measured run of every planned module (merge `complete`, no
   tool error or failure reasons, no skipped module, exit code 0, no gremlin ERROR results),
   readable rows, a non-empty changed-file list, and no survivor in a changed file.
