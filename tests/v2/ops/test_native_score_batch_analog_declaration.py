@@ -51,7 +51,9 @@ def _declare(pools):
         driver_residual_artifacts={}, model_release="rel", frozen_inference="inf")
     return _with_release_artifacts(
         _bundle(), binding=binding, key=_KEY, strategy="STR-THRU",
-        driver_identity=SimpleNamespace(role="driver", model_id="m"),
+        drivers=(SimpleNamespace(
+            output="driver_prediction", identity_key="driver:STR-THRU",
+            identity=SimpleNamespace(role="driver", model_id="m")),),
         as_of="2026-01-10", snapshot_id="snap-1", calendar_row=_CALENDAR,
         quote_max_age_sessions=None,
         panel_row={"date": "2026-01-15", "mcap_log": math.log(5e9), "im": 0.06})

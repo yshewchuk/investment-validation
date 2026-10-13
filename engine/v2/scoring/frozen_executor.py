@@ -23,6 +23,15 @@ __all__ = [
     "FrozenStageResult",
 ]
 
+_RUNUP_RAW_NAMES = (
+    "prediction", "pred_runup_abs_move_d14", "runup_move_d14",
+    "runup_move_raw_d14",
+)
+_RUNUP_FINAL_NAMES = frozenset({
+    "runup_move_prediction", "runup_move_p10", "runup_move_p90",
+    "runup_move_sd",
+})
+
 
 class FrozenStageRefusal(ValueError):
     """Explicit refusal to execute or trust a frozen scoring stage."""

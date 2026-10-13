@@ -4,7 +4,7 @@ Turns one ``ScoringReleaseBinding`` (PR-1, ``engine/v2/scoring/
 release_bindings.py``) plus per-event staged inputs (PR-2, ``engine/v2/
 scoring/nightly_source_bundle.py``) into ``{BoardRequest: (ScoreRequest,
 NativeScoreInputs)}``, admitting only registered strategies (currently
-``STR-THRU``): batch-level malformed
+``STR-THRU`` and ``STR-RUNUP``): batch-level malformed
 input raises, every per-row gap is a collected
 :class:`NativeScoreBatchRowRefusal`, and ``run_native_score_batch_worker``
 scores the assembled batch under ``no_fit_guard``. Production reaches this
@@ -25,6 +25,7 @@ from engine.v2.contracts import ScoreBatch, ScoreRequest
 from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.models.payoff_artifact import payoff_artifact_key
 from engine.v2.ops.native_board_universe import BoardRequest
+from engine.v2.ops.native_runup_inputs import runup_model_declarations
 from engine.v2.ops.native_score_batch_types import (
     NativeScoreBatchRowRefusal,
     _event_date_identity,
@@ -92,7 +93,7 @@ class _ResolvedDriver:
     identity: ModelIdentity
 
 
-# Concrete declarations, deliberately NOT admitted until residual/surface wiring.
+# RUNUP's forecast declarations; frozen model-state requirements are separate.
 _RUNUP_SPEC = _StrategySpec(
     drivers=(_DriverSpec("driver_prediction", "driver:STR-RUNUP", "implied_t1:*"),
              _DriverSpec("runup_move_prediction", "runup_move:*")),
@@ -105,6 +106,7 @@ _STRATEGY_REGISTRY: Mapping[str, _StrategySpec] = MappingProxyType({
         drivers=(_DriverSpec("driver_prediction", "driver:STR-THRU", "size:*"),),
         gate_role="gate:STR-THRU", gate_policy_key="STR-THRU",
         bundle_strategy="STR-THRU"),
+    "STR-RUNUP": _RUNUP_SPEC,
 })
 
 
@@ -351,7 +353,7 @@ def _with_release_artifacts(
     binding: ScoringReleaseBinding,
     key: BoardRequest,
     strategy: str,
-    driver_identity: Any,
+    drivers: tuple[_ResolvedDriver, ...],
     as_of: Any,
     snapshot_id: str,
     calendar_row: Mapping[str, Any],
@@ -372,8 +374,13 @@ def _with_release_artifacts(
                **_identity_context(as_of, snapshot_id, calendar_row,
                                    quote_max_age_sessions=quote_max_age_sessions)}
     try:
-        declarations = _release_artifact_declarations(
-            binding, strategy, driver_identity, as_of, calendar_row)
+        if strategy == "STR-RUNUP":
+            declarations = runup_model_declarations(
+                binding, {driver.output: driver.identity for driver in drivers},
+                cutoff=_row_cutoff(as_of, calendar_row), fill_alpha=_SHADOW_FILL_ALPHA)
+        else:
+            declarations = _release_artifact_declarations(
+                binding, strategy, drivers[0].identity, as_of, calendar_row)
         analogs = binding.analog_artifacts.get(strategy) or ()
         if analogs:
             declarations.update(analog_declarations(
@@ -500,8 +507,8 @@ def _assemble_one_event(
         return NativeScoreBatchRowRefusal(
             key, "MISSING_STAGED_INPUT", "calendar_row missing event_id")
     bundle = _with_release_artifacts(
-        bundle, binding=binding, key=key, strategy=strategy,
-        driver_identity=driver_identity, as_of=as_of, snapshot_id=snapshot_id,
+        bundle, binding=binding, key=key, strategy=spec.bundle_strategy,
+        drivers=drivers, as_of=as_of, snapshot_id=snapshot_id,
         calendar_row=event.calendar_row,
         quote_max_age_sessions=event.quote_max_age_sessions,
         panel_row=event.panel_row)

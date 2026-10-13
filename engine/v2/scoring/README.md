@@ -129,6 +129,9 @@ quotes, the feature vector and missing mask, model identity and artifact
 references, and recipes for forecasts, residual simulation, analogs and the
 gate. The builder rejects calculated answer fields and leaves geometry,
 pricing, simulation summaries and decisions for the native stages to produce.
+Frozen `runup_move` recipes must select a documented raw D14 point output;
+final-horizon outputs and quantiles are refused before execution. The forecast
+and payoff stages own horizon scaling; see the component contract.
 
 The DYN-SV chooser's vector is derived the same way (`chooser_inputs.py`
 builds the block, `native_chooser.py` assembles it, `native_chooser_features.py`
