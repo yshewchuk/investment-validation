@@ -99,6 +99,31 @@ def test_survivor_on_untouched_line_or_killed_on_changed_line_is_ok():
     assert v["state"] == "success" and v["modules"]["a"]["class"] == "ok"
 
 
+@pytest.mark.parametrize("status", ["killed", "timeout", "suspicious", "excluded", "survived"])
+def test_only_a_survivor_on_a_changed_line_is_pr_owned(status):
+    # Line 5 of engine/v2/a.py is changed by the PR (CHANGED); every non-survivor status there is fine.
+    v = verdict(merged(a=mod()), [row("a", "engine/v2/a.py", 5, status)])
+    if status == "survived":
+        assert v["state"] == "failure" and v["pr_owned"] == ["a"]
+    else:
+        assert v["state"] == "success" and v["pr_owned"] == []
+        assert v["modules"]["a"]["class"] == "ok"
+
+
+@pytest.mark.parametrize("status", ["killed", "timeout", "suspicious", "excluded", "survived"])
+def test_only_a_survivor_on_a_changed_line_is_pr_owned_through_main(tmp_path, status):
+    d, diff = _write_report(tmp_path, merged(a=mod()),
+                            [row("a", "engine/v2/a.py", 5, status)])
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    text = out.read_text()
+    if status == "survived":
+        assert "state=failure\n" in text
+    else:
+        assert "state=success\n" in text
+
+
 def test_module_test_failure_is_pr_owned_unless_main_fails_too():
     m = merged(a=mod(run_exit_code=1, failure_reasons=["RUN_INCOMPLETE"]))
     assert verdict(m)["state"] == "failure"
