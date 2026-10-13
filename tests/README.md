@@ -341,14 +341,15 @@ the first two cancels an older still-running run of its own family:
 GitHub always lists it under the default branch's Actions history instead --
 so, since 2026-09-27, each backend's own last job, `report_status`, posts
 the outcome onto the PR's own head commit itself
-(`github.event.workflow_run.head_sha`) as a plain commit status: this
-design does not add either context to branch protection's required-checks
+(`github.event.workflow_run.head_sha`): mutmut as a plain commit status
+(`mutation-mutmut/pr`), gremlins as one check run (`mutation/pr`, see below).
+This design does not add either name to branch protection's required-checks
 list, so nothing here starts blocking merges on its own (a repo admin
-requiring a status context by name is a separate, later, explicit action,
-not something this change does or enables by itself).** `report_status`
+requiring one by name is a separate, later, explicit action, not something
+this change does or enables by itself).** `report_status`
 needs `[plan, report]` and declares `statuses: write` for its
-`GITHUB_TOKEN` in mutmut (gremlins posts a check run with `checks: write`
-instead, see below) (the existing workflow-level token grants
+`GITHUB_TOKEN` in mutmut and `checks: write` in gremlins (the existing
+workflow-level token grants
 only `contents: read`; every scope a job doesn't list itself becomes
 `none`), with `if: always() && needs.plan.outputs.pr_number != ''` (the
 `always()` is required: without it, GitHub Actions would skip
@@ -359,8 +360,8 @@ same reason -- `plan`'s own steps can fail *after* `select_pr` already set
 `pr_number` (e.g. its checkout or pip install step), and a
 `result == 'success'` guard would then skip `report_status` too, silently
 recreating the exact invisible-PR problem this job exists to fix; posting
-a `failure` status attributed to a "report" that never ran is still
-strictly more informative than nothing). A fork PR, or a Tests run that
+a result for a "report" that never ran (red for mutmut, a grey `neutral`
+infra result for gremlins) is still strictly more informative than nothing). A fork PR, or a Tests run that
 failed, was cancelled, or was not itself a `pull_request` run, never
 reaches this far (`plan` is skipped, or leaves `pr_number` empty), so
 nothing is posted for them -- fail closed, the same as the rest of the
@@ -379,8 +380,8 @@ own `skip` step) and posts `failure` with a "skipped (PR closed)"
 description instead: this must never read as `success`, which would claim
 every module was measured when some were only a stub. Only when none of
 that applies does the status mirror `report`'s own result as `success`.
-The two contexts, `mutation-mutmut/pr` and `mutation/pr`, are distinct from
-each other and from the `Tests` check.
+The two names, `mutation-mutmut/pr` (commit status) and `mutation/pr` (check run), are
+distinct from each other and from the `Tests` check.
 
 **`mutation/pr` (gremlins workflow) is red only for PR-owned problems.** The
 `report` job's last step runs `tools/mutation_pr_status.py` over the merged
@@ -394,23 +395,27 @@ states as ONE check run named `mutation/pr` (conclusion `success`, `failure` or
 `neutral`), never a commit status: a later check run of the same name supersedes an
 earlier one on the same SHA, whereas a commit status could not be replaced by a grey
 rerun. A run in which no module was measured is GREY (`neutral`); the description says
-"no module measured ... not a pass". (mutmut's `mutation-mutmut/pr` is unchanged.) `mutation/pr` is not a required check. PR-owned: a survivor on a line the
-PR changed, or a module run that failed with a test-failure exit code main does
-not also show. Infra (a `::warning::`, never red): no report, skipped, timeout or
-cancel, signal kill, gremlin ERROR results, an invalid raw report, a failure main
-shows too. Unreadable inputs degrade to warnings; none can produce `success`, and a
-PR-owned failure that is still evidenced (a retained changed-line survivor, or an independent
-test failure) still wins as `failure`:
-an unreadable merged summary, a merge tool error or incomplete run, a missing or
-unreadable PR diff, and unreadable or partly malformed result rows (a missing, null or
-unknown `status`, a non-positive or non-integer `line`, a non-string `module` or `file`)
-give `neutral` (never `success`) unless a PR-owned failure is evidenced; so does a merged summary that is not a mapping with a mapping `modules`,
-boolean `complete` and `tool_error`, and a list `failure_reasons` (a module entry with a
-missing or mistyped `run_exit_code`, `counts_backend` or `failure_reasons` is infra)
-(survivors cannot be attributed; listed as `attribution_problems`, merge-level reasons as
-`merge_issues`), while a missing baseline only stops excusing failures. The tool exits 0
-for every classified or degraded input; only argument errors and an unwritable
-`--github-output` file exit nonzero (deliberately, so the CI step fails loudly).
+"no module measured ... not a pass". (mutmut's `mutation-mutmut/pr` is unchanged.)
+`mutation/pr` is not a required check.
+
+PR-owned: a survivor on a line the PR changed, or a module run that failed with a
+test-failure exit code main does not also show. Infra (a `::warning::`, never red): no
+report, skipped, timeout or cancel, signal kill, gremlin ERROR results, an invalid raw
+report, a module entry with a missing or mistyped `run_exit_code`, `counts_backend`,
+`failure_reasons` or `tool_error`, a failure main shows too.
+
+Degraded inputs never produce `success`. They give `neutral`, except that a PR-owned
+failure that is still evidenced (a retained changed-line survivor, or an independent test
+failure) still wins as `failure`. The degraded inputs are: an unreadable merged summary or
+one that is not a mapping with a mapping `modules`, boolean `complete` and `tool_error`
+and a list `failure_reasons` (and a non-empty `modules` or `expected_modules`); a merge
+tool error or incomplete run; a missing, empty or unreadable PR diff; and unreadable or
+partly malformed result rows (a missing, null or unknown `status`, a non-positive or
+non-integer `line`, a non-string or empty `module` or `file`). Survivors that cannot be
+attributed are listed as `attribution_problems`, merge-level reasons as `merge_issues`. A
+missing baseline only stops excusing failures. The tool exits 0 for every classified or
+degraded input; only argument errors and an unwritable `--github-output` file exit nonzero
+(deliberately, after classification, so the CI step fails loudly).
 
 Gremlins `report_status` decision table, first match wins (`report` = the report job
 result, `classified` = the classifier's `state`, empty if its step did not run):
