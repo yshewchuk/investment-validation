@@ -198,6 +198,8 @@ def _history(conn, store, params, claim, *, fetch, clock):
         _, attempt = verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
     planned = coverage.plan(conn, store, request, params.generation)
     if planned["gaps"]:
+        if planned["candidate_count"] + len(planned["gaps"]) > coverage.MAX_OCCURRENCES:
+            raise fail("RESOURCE_LIMIT_EXCEEDED", "Massive coverage completion capacity would be exceeded")
         gap = planned["gaps"][0]
         scoped = replace(params, start=gap["start"], end=gap["end"], expected_ids=(content_hash(gap),))
         chain = coverage.progress(conn, store, gap, params.generation, attempt["job_id"])

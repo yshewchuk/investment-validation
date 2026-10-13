@@ -73,9 +73,9 @@ def parameters(scope=None, *, generation="initial", cap=1):
                    generation=generation, max_http_calls=cap)
 
 
-def enqueue(h, key="history", params=None):
+def enqueue(h, key="history", params=None, **changes):
     return enqueue_exact(h, key, params or parameters(), kind="massive_history_acquisition",
-                         checkpoint_contract_ref="massive_history_acquisition.v1")
+                         checkpoint_contract_ref="massive_history_acquisition.v1", **changes)
 
 
 def body(scope):
@@ -989,11 +989,82 @@ def test_candidate_limit_is_inclusive_and_overflow_precedes_object_reads(harness
     planned = coverage.plan(h.conn, h.store, request(), "initial")
     assert planned["gaps"] == []
     assert (planned["candidate_count"], planned["candidate_limit"]) == (100, 100)
+    _, reused = acquire(h, "full-capacity-reuse", fetch=no_fetch)
+    assert reused["coverage"] == planned
+    assert len(occurrences(h)) == 100
     seed_overlap(h, "candidate-overflow", request(), "2026-09-10T12:00:00.000000Z")
     monkeypatch.setattr(h.store, "read_verified", no_fetch)
     with pytest.raises(OpsError) as refused:
         coverage.plan(h.conn, h.store, request(), "initial")
     assert refused.value.code == "RESOURCE_LIMIT_EXCEEDED"
+
+
+@pytest.mark.parametrize("raw_hit", [False, True])
+@pytest.mark.parametrize("count,start,end,allowed", [(100, "01", "10", False),
+    (99, "11", "20", False), (99, "01", "10", True)])
+def test_worker_checks_capacity_for_every_remaining_gap(harness, capsys, raw_hit, count, start, end, allowed):
+    h = harness
+    for index in range(count):
+        seed_overlap(h, f"candidate-{index}", request(f"2026-08-{start}", f"2026-08-{end}"),
+                     "2026-09-10T12:00:00.000000Z")
+    planned = coverage.plan(h.conn, h.store, request(), "initial")
+    assert planned["candidate_count"] == count
+    assert len(planned["gaps"]) == (2 if start == "11" else 1)
+    gap = planned["gaps"][0]
+    if raw_hit:
+        cache_raw_receipt(h.conn, h.store, RawPayload(payload=body(gap), response_kind="complete", response_meta={}),
+                          source=SOURCE, endpoint=gap["endpoint"], request=gap,
+                          received_at="2026-09-11T12:00:00.000000Z")
+    args = ["--catalog", str(h.root / "ops.sqlite"), "--store-root", str(h.store.root),
+            "--ticker", "SYNTH", "--start", "2026-08-01", "--end", "2026-08-31",
+            "--as-of", "2026-09-12", "--adjustment", "raw", "--max-calls-per-request", "2",
+            "--generation", "initial"]
+    assert plan_cli._main(args) == 0  # Diagnostic planning does not reject future completion growth.
+    plans = json.loads(capsys.readouterr().out)["plans"]
+    assert next(p for p in plans if p["request"]["dataset"] == "daily") == planned
+    params = parameters(cap=2)
+    enqueue(h, "fill-gaps", params)
+    attempt = claim(h)
+    before = tuple(h.conn.iterdump())
+    objects = {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()}
+    calls = []
+    fetch = no_fetch if raw_hit or not allowed else fetching(calls)
+    if allowed:
+        _, result = run(h, attempt, fetch, params)
+        assert result["coverage"]["gaps"] == [] and result["coverage"]["candidate_count"] == 100
+        assert len(occurrences(h)) == 100
+    else:
+        with pytest.raises(OpsError) as refused:
+            run(h, attempt, fetch, params)
+        assert refused.value.code == "RESOURCE_LIMIT_EXCEEDED" and not refused.value.problem.retryable
+        assert tuple(h.conn.iterdump()) == before
+        assert {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()} == objects
+        assert not (h.root / attempt.attempt_id / "massive_acquisition.json").exists()
+        assert retry(h, attempt, refused.value) == "failed" and claim(h) is None
+    assert calls == ([gap] if allowed and not raw_hit else [])
+    assert h.conn.execute("SELECT used_calls FROM provider_reservations WHERE attempt_id=?",
+                          (attempt.attempt_id,)).fetchone()[0] == int(allowed and not raw_hit)
+
+
+def test_exact_candidate_capacity_allows_two_gaps_across_retries(harness):
+    h = harness
+    for index in range(98):
+        seed_overlap(h, f"candidate-{index}", request("2026-08-11", "2026-08-20"),
+                     "2026-09-10T12:00:00.000000Z")
+    params, calls = parameters(cap=2), []
+    enqueue(h, "two-slots", params)
+    first = claim(h)
+    with pytest.raises(OpsError) as pending:
+        run(h, first, fetching(calls), params)
+    assert pending.value.code == "SOURCE_NOT_FINAL"
+    assert retry(h, first, pending.value) == "retry_wait"
+    planned = coverage.plan(h.conn, h.store, request(), "initial")
+    assert planned["candidate_count"] == 99 and planned["gaps"] == [request("2026-08-21", "2026-08-31")]
+    second = claim(h)
+    _, result = run(h, second, fetching(calls), params)
+    assert result["coverage"]["candidate_count"] == 100 and result["coverage"]["gaps"] == []
+    assert calls == [request("2026-08-01", "2026-08-10"), request("2026-08-21", "2026-08-31")]
+    finish(h, second)
 
 
 def test_aggregate_verification_bytes_are_inclusive_and_stop_before_excess_read(harness, monkeypatch):

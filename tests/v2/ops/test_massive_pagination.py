@@ -143,6 +143,51 @@ def test_pages_commit_as_partial_prefix_then_receipt_pinned_complete_coverage(ha
     assert len(raw_rows(h)) == count and len(support.occurrences(h)) == 1
 
 
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_remaining_completion_slot_is_rechecked_for_multi_page_retry(harness, interleaved):
+    h = harness
+    for index in range(99):
+        support.seed_overlap(h, f"candidate-{index}", support.request("2026-08-01", "2026-08-20"),
+                             "2026-09-10T12:00:00.000000Z")
+    scope, gap = support.request(), support.request("2026-08-21", "2026-08-31")
+    params = support.parameters(cap=2)
+    support.enqueue(h, "two-page-last-slot", params)
+    first, calls = support.claim(h), []
+    following = continuation(gap, 1, day="2026-08-22")
+    error = refused(h, first, params, fetcher(calls, gap, payload(gap, following=following)), "SOURCE_NOT_FINAL")
+    assert support.retry(h, first, error) == "retry_wait"
+    planned = coverage.plan(h.conn, h.store, scope, "initial")
+    assert planned["candidate_count"] == 99 and planned["gaps"] == [gap]
+    assert len(pages(h)) == 1  # A partial page consumes no completion slot.
+    if interleaved:
+        other_scope = support.request("2026-08-21", "2026-08-21")
+        other_params = support.parameters(other_scope)
+        support.enqueue(h, "higher-priority-gap", other_params, priority=10)
+        other = support.claim(h)
+        assert other.job_id != first.job_id
+        _, completed = support.run(h, other, support.fetching([]), other_params)
+        assert completed["coverage"]["gaps"] == []
+        support.finish(h, other)
+        h.clock.advance(13)
+    last = support.claim(h)
+    assert last.job_id == first.job_id
+    if interleaved:
+        before = tuple(h.conn.iterdump())
+        objects = {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()}
+        error = refused(h, last, params, support.no_fetch, "RESOURCE_LIMIT_EXCEEDED")
+        assert tuple(h.conn.iterdump()) == before
+        assert {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()} == objects
+        assert len(pages(h)) == 1 and len(support.occurrences(h)) == 100
+        assert calls == [gap] and spent(h, last.job_id) == 1
+        assert support.retry(h, last, error) == "failed" and support.claim(h) is None
+        return
+    _, result = support.run(h, last, fetcher(calls, following, payload(gap, day="2026-08-22")), params)
+    assert result["coverage"]["candidate_count"] == 100 and result["coverage"]["gaps"] == []
+    assert len(pages(h)) == 2 and len(support.occurrences(h)) == 100
+    assert calls == [gap, following] and spent(h, last.job_id) == 2
+    support.finish(h, last)
+
+
 @pytest.mark.parametrize("cap", [1, 2, 3])
 def test_call_cap_spans_released_page_attempts_and_never_refunds_prefix(harness, cap):
     h = harness

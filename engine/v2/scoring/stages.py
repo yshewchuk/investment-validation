@@ -183,7 +183,10 @@ _OWNED_OUTPUTS = (
     _PRICING_OUTPUTS | _FORECAST_OUTPUTS | _SIMULATION_OUTPUTS
     | _GATE_OUTPUTS | _ANALOG_OUTPUTS | _MODEL_OUTPUTS
 )
-_DIAGNOSTIC_PROTECTED = _OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
+# days_to_print / dte_entry are scorer-computed (see _check_pricing_boundary and
+# _stage_days_to_print): a diagnostics block must never replace or install them.
+_DIAGNOSTIC_PROTECTED = (_OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
+                         | frozenset({"days_to_print", "dte_entry"}))
 _ROLE_OUTPUTS = {
     "driver": ("driver_prediction",),
     "size": ("forecast_abs_move",),
@@ -662,6 +665,37 @@ def _gate_in_domain(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> boo
     return mcap_log >= log(GATE_MCAP_FLOOR)
 
 
+def _legs_dte_entry(
+    expiry: Any, first_leg_date: Any, fallback_date: Any,
+) -> int | None:
+    """dte_entry measured from the FIRST priced leg's own quote date (legacy
+    ``engine/score.py:2451`` takes it from ``legs[0]``).
+
+    When that leg carries a date, it drives the count; only when it carries
+    none does the context ``quote_date`` (direct callers without quote
+    provenance) stand in.
+    """
+    if first_leg_date is not None:
+        return financial.dte_entry(expiry, first_leg_date)
+    return financial.dte_entry(expiry, fallback_date)
+
+
+def _priced_dte_entry(values: Mapping[str, Any]) -> int | None:
+    """The scorer-computed dte_entry from the successfully priced first leg
+    (legacy engine/score.py:2451), or None on a pricing refusal / no priced leg.
+    Never a captured value: it is derived from values["legs"] (published by the
+    pricing stage), measured from the first priced leg's own quote date --
+    falling back to the context quote date only when that leg carries none."""
+    legs = values.get("legs")
+    if values.get("entry_cost") is None or not legs:
+        return None
+    return _legs_dte_entry(
+        legs[0].get("expiry"),
+        legs[0].get("quote_date"),
+        values.get("quote_date"),
+    )
+
+
 def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, Any]:
     """Lowest precedence first: ``source_features`` (the captured base
     feature columns -- im/im_d1/im_d5/im_d10/iv10/iv30/... --
@@ -687,6 +721,19 @@ def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, An
     facts["_native_stage_facts"] = {
         key: values[key] for key in _OWNED_OUTPUTS if key in values
     }
+    computed_days = _decision_days_to_print(inputs)
+    if computed_days is not None:
+        facts["days_to_print"] = computed_days
+        facts["_native_stage_facts"]["days_to_print"] = computed_days
+    computed_dte = _priced_dte_entry(values)
+    if computed_dte is not None:
+        facts["dte_entry"] = computed_dte
+        facts["_native_stage_facts"]["dte_entry"] = computed_dte
+    computed_cost_pct = financial.entry_cost_pct(
+        values.get("entry_cost"), values.get("spot"))
+    if computed_cost_pct is not None:
+        facts["entry_cost_pct"] = computed_cost_pct
+        facts["_native_stage_facts"]["entry_cost_pct"] = computed_cost_pct
     return facts
 
 
@@ -1172,6 +1219,28 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
     return output
 
 
+def _decision_days_to_print(inputs: NativeScoreInputs) -> float | None:
+    """The scorer-computed days_to_print (decision date `as_of`, else `requested_as_of`;
+    never entry_date), or None. Never a captured value."""
+    context = inputs.context
+    decision = context.get("as_of")
+    if decision is None:  # fall back ONLY when as_of is absent; falsy invalid values stay invalid
+        decision = context.get("requested_as_of")
+    return financial.days_to_print(context.get("event_date"), decision)
+
+
+def _stage_days_to_print(inputs: NativeScoreInputs, values: dict[str, Any]) -> None:
+    """days_to_print = calendar days from the DECISION date to the announcement
+    (legacy engine/features.py:1166-1168 with as_of_column="decision_date",
+    passed at engine/score.py:2652-2655). It needs no pricing, so it is staged
+    before the forecast models run (legacy computes it before them too). The
+    decision date is the context's `as_of`, else the identity `requested_as_of`;
+    with neither, nothing is written (never fall back to entry_date)."""
+    computed = _decision_days_to_print(inputs)
+    if computed is not None:
+        values["days_to_print"] = computed
+
+
 def _initial_values(
     inputs: NativeScoreInputs,
     flags: list[str],
@@ -1206,6 +1275,8 @@ def _initial_values(
         # leaked content differ, and the divergence is misreported as the
         # forecast stage's INPUT rather than its OUTPUT.
         prior = {"prior": executed[-1].output_hash, "values": dict(values)}
+    _stage_days_to_print(inputs, values)
+    prior = {**prior, "values": dict(values)}  # the receipt records the days_to_print the forecast consumes
     if compatibility:
         values.update(inputs.forecast)
         forecast_output = dict(inputs.forecast)
@@ -1231,7 +1302,8 @@ def _strategy_name(inputs: NativeScoreInputs, strategy: str | None,
 def _observed_empty_quote_lookup(inputs: NativeScoreInputs) -> bool:
     """Whether the capture recorded a quote lookup that ran and found nothing.
 
-    ``tools/capture_tier0_corpus.py::_quote_map`` writes an EMPTY ``quotes``
+    ``quote_domain_map`` (``engine/v2/scoring/nightly_source_bundle.py``,
+    used by ``tools/capture_tier0_corpus.py``) writes an EMPTY ``quotes``
     mapping only when legacy explicitly recorded why (``quote_status``
     ``"empty"``: the chain lookup ran and came back with no usable chain --
     ``engine/score.py:2347-2351`` flags ``NO_CHAIN`` there, BEFORE any expiry
@@ -1358,7 +1430,10 @@ def _publish_pricing(values: dict[str, Any], geometry: Geometry,
             pricing.entry_cost if pricing.refusal is None else None
         ),
         "fill": alpha,
-        "legs": tuple(vars(leg) for leg in legs),
+        "legs": tuple(
+            {key: value for key, value in vars(leg).items()
+             if key != "quote_date" or value is not None}
+            for leg in legs),
         "selected_contracts": tuple(vars(leg) for leg in geometry.legs),
         # engine/score.py:2342 -- ``result.strike = float(priced.legs[0].strike)``,
         # set only once pricing has actually resolved (legacy never reaches
@@ -2964,6 +3039,21 @@ def _check_pricing_boundary(
     values["entry_cost_pct"] = financial.entry_cost_pct(
         values.get("entry_cost"), values.get("spot"),
     )
+    # dte_entry is the SUCCESSFULLY PRICED first leg's days to expiry (legacy
+    # engine/score.py:2451 `int(priced.legs[0].dte)`). On a pricing/geometry
+    # refusal nothing is written, and a value already captured in the context
+    # is never overwritten with None. dte_entry is measured from the first
+    # priced leg's own quote date, exactly as legacy takes it from legs[0], not
+    # the earliest date of the quote domain, and is scorer-computed -- never
+    # projected from source inputs.
+    if pricing.refusal is None and geometry.refusal is None and pricing.legs:
+        computed_dte = _legs_dte_entry(
+            pricing.legs[0].expiry,
+            pricing.legs[0].quote_date,
+            values.get("quote_date"),
+        )
+        if computed_dte is not None:
+            values["dte_entry"] = computed_dte
     _check_wide_market(pricing, flags)
     _check_bad_quote(pricing, flags)
     _check_extrapolated(geometry, pricing, flags)
