@@ -29,7 +29,11 @@ CASES = [
 
 
 def _pin() -> str:
-    return re.search(r"markdownlint-cli2@[\d.]+", HOOK.read_text(encoding="utf-8")).group(0)
+    # Only executable lines count: a stale pin in a comment must not satisfy the test.
+    code = [ln for ln in HOOK.read_text(encoding="utf-8").splitlines() if not ln.lstrip().startswith("#")]
+    pins = [m.group(0) for ln in code for m in re.finditer(r"markdownlint-cli2@[\d.]+", ln)]
+    assert len(pins) == 1, f"expected exactly one pinned invocation in the hook, got {pins}"
+    return pins[0]
 
 
 # The hook's npx pin and the workflow's action must run the same CLI. Action v20 (this
@@ -128,6 +132,39 @@ def test_hook_lints_the_working_tree_copy_of_a_staged_file(tmp_path, monkeypatch
     (tmp_path / "w.md").write_text("# Heading\n\ntext\n", encoding="utf-8")
     _git(tmp_path, "add", "w.md")
     (tmp_path / "w.md").write_text("intro\n# Heading\ntext\n", encoding="utf-8")
+    proc = _run_hook(hook, tmp_path)
+    assert proc.returncode != 0
+    assert "MD022" in proc.stdout + proc.stderr
+
+
+def _commit(repo, message="base"):
+    _git(repo, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", message)
+
+
+@needs_node
+def test_hook_lints_a_modified_file(tmp_path, monkeypatch):
+    # Guards against a `--diff-filter=A` hook: only an existing file is modified here.
+    hook = _hook_repo(tmp_path, monkeypatch)
+    (tmp_path / "m.md").write_text("# Heading\n\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "m.md")
+    _commit(tmp_path)
+    (tmp_path / "m.md").write_text("intro\n# Heading\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "m.md")
+    proc = _run_hook(hook, tmp_path)
+    assert proc.returncode != 0
+    assert "MD022" in proc.stdout + proc.stderr
+
+
+@needs_node
+def test_hook_lints_a_renamed_and_edited_file(tmp_path, monkeypatch):
+    hook = _hook_repo(tmp_path, monkeypatch)
+    body = "".join(f"line {i} of a paragraph that stays the same\n\n" for i in range(12))
+    (tmp_path / "old.md").write_text("# Heading\n\n" + body, encoding="utf-8")
+    _git(tmp_path, "add", "old.md")
+    _commit(tmp_path)
+    _git(tmp_path, "mv", "old.md", "new.md")
+    (tmp_path / "new.md").write_text("intro\n# Heading\n" + body, encoding="utf-8")
+    _git(tmp_path, "add", "new.md")
     proc = _run_hook(hook, tmp_path)
     assert proc.returncode != 0
     assert "MD022" in proc.stdout + proc.stderr
