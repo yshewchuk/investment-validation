@@ -439,6 +439,41 @@ def test_tab_indentation_expands_to_four_column_stops():
     assert ms._expand("-\tx\ty") == "-   x\ty"
 
 
+def test_each_block_starter_ends_a_table_instead_of_being_a_row():
+    head = "a | b\n--|--\n1 | 2\n"
+    # Each starter has the header's cell count, so a cell-count test alone would
+    # swallow it as a row. Every one must end the table (table-after).
+    assert rules(head + "# Alpha | Beta\n\nz\n") == ["heading-before", "table-after"]
+    assert rules(head + "```x | y\ncode\n```\n\nz\n") == ["fence-before", "table-after"]
+    assert rules(head + "- c | d\n") == ["table-after"]
+    assert rules(head + "1. c | d\n") == ["table-after"]
+    assert rules(head + "> e | f\n") == ["table-after"]
+    assert rules(head + "* * *\n") == ["table-after"]
+    assert rules(head + "<div>x | y\n") == ["table-after"]
+    # Positions: the starter line is the one reported.
+    assert [(v.rule, v.line) for v in ms.lint_text(head + "> e | f\n")] == [("table-after", 4)]
+    # A genuine two-cell row still continues the table.
+    assert rules(head + "3 | 4\n\nz\n") == []
+
+
+def test_a_block_starter_cannot_be_a_table_header():
+    assert rules("> a | b\n> --|--\n") == []
+    assert rules("<div>a | b\n--|--\n1 | 2\n") == []
+    assert rules("- a | b\n--|--\n1 | 2\nafter\n") == []
+
+
+def test_marker_followed_by_five_or_more_spaces_is_code_not_a_fence():
+    # The rest after "marker + 5+ spaces" is indented code; content column = marker + 1.
+    assert rules("-     ```\n      x\n") == []
+    assert rules("1.     ```\n       x\n") == []
+    # Up to four spaces after the marker is still a fence opener.
+    assert [v.rule for v in ms.lint_text("-    ```\n     x\n")] == ["fence-unclosed"]
+    # Content column of "-     x" is 2: a fence 6 columns in is code (6 - 2 = 4) ...
+    assert rules("-     x\n\n      ```\n      y\n") == []
+    # ... while 5 columns in (5 - 2 = 3) is a fence.
+    assert [v.rule for v in ms.lint_text("-     x\n\n     ```\n     y\n")] == ["fence-unclosed"]
+
+
 def test_blockquoted_fence_is_not_checked():
     assert rules("> ```\n> # x\n") == []
 

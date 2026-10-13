@@ -62,6 +62,19 @@ _HEADING = re.compile(r"^#{1,6}(\s|$)")
 _LIST_ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
 _ITEM = re.compile(r"^( *)([-*+]|\d+[.)])( +|$)")  # any-indent list item line
 _LEAD = re.compile(r"^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?")  # indent + optional list marker
+# A line that starts another block at the top level (indent 0-3): ATX heading,
+# fence, list item, blockquote, thematic break, or a common HTML block opener.
+_BLOCK_START = re.compile(
+    r"^ {0,3}(?:#{1,6}(?:\s|$)|`{3,}|~{3,}|(?:[-*+]|\d{1,9}[.)])(?:\s|$)|>"
+    r"|([-*_])(?:[ \t]*\1){2,}[ \t]*$"
+    r"|<(?:/?(?:div|p|table|ul|ol|li|h[1-6]|details|summary|section|pre|script|style"
+    r"|blockquote|hr)\b|!--|\?|![A-Za-z]|!\[CDATA\[))")
+
+
+def _starts_block(line: str) -> bool:
+    """Whether ``line`` starts a block other than a paragraph or table row. Used
+    for both the table end and the table-header check, so they cannot disagree."""
+    return bool(_BLOCK_START.match(line))
 _DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -107,7 +120,7 @@ def _is_table_row(row: str, header: str) -> bool:
     paragraph. A line after a table that starts another block is flagged as the
     house blank-line rule, not as an absorbed row."""
     stripped = row.strip()
-    if not stripped or not _UNESCAPED_PIPE.search(stripped):
+    if not stripped or _starts_block(row) or not _UNESCAPED_PIPE.search(stripped):
         return False
     if header.strip().startswith("|"):
         return stripped.startswith("|")
@@ -150,6 +163,8 @@ def lint_text(text: str) -> list[Violation]:
         m = _FENCE.match(s)
         if m and m.group(2)[0] == "`" and "`" in m.group(3):
             m = None  # an inline code span such as ```json```, not a fence
+        if m and m.group(1).strip() and len(m.group(1)) - len(m.group(1).rstrip(" ")) >= 5:
+            m = None  # marker + 5 or more spaces: the rest is indented code, not a fence
         if fence:
             c = _CLOSER.match(s)
             if (c and c.group(2)[0] == fence[0] and len(c.group(2)) >= fence[1]
@@ -187,7 +202,11 @@ def lint_text(text: str) -> list[Violation]:
                 (x for x in items if x <= len(item.group(1))), default=0) < 4:
             while items and items[-1] > len(item.group(1)):
                 items.pop()
-            items.append(len(item.group(0)) if item.group(3) else len(item.group(0)) + 1)
+            # Content column: after the marker and its 1-4 spaces; with no text or
+            # 5+ spaces after the marker the rest is code, so the column is marker + 1.
+            width = len(item.group(1)) + len(item.group(2))
+            gap = len(item.group(3))
+            items.append(width + gap if 1 <= gap <= 4 else width + 1)
         elif s.strip() and not s[:1].isspace():
             items.clear()
         if _HEADING.match(s):
@@ -198,7 +217,7 @@ def lint_text(text: str) -> list[Violation]:
             i += 1
             continue
         if ("|" in s and not _DELIM.match(s) and not s[:1].isspace()
-                and not _LIST_ITEM.match(s) and i + 1 < n
+                and not _starts_block(s) and i + 1 < n
                 and "|" in lines[i + 1] and _DELIM.match(lines[i + 1])
                 and _cells(s) == _cells(lines[i + 1])):
             j = i + 2

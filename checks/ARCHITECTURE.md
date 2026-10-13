@@ -48,7 +48,9 @@ scanned as headings or tables. There is no list rule, and list content is
 skipped for the heading and table rules: only column-0 headings and tables are
 read, so indented lines and list-marker lines are never headings or table
 headers. Known limit: under a pipeless-edge table header, a line with the
-header's cell count is a row by GFM rules and is not flagged. A table needs
+header's cell count is a row by GFM rules and is not flagged. A line that
+starts another block (heading, fence, list item, blockquote, thematic break,
+HTML block) ends a table and is never a row or a header. A table needs
 equal header and delimiter cell counts; unescaped pipes separate cells. Table
 violations are scoped by the whole block (header, delimiter, rows, absorbing
 line), so editing only a delimiter row is caught. Default mode reads
