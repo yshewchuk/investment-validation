@@ -61,7 +61,7 @@ def classify(summary, rows, changed) -> dict:
                 reasons.append(f"module {name} missing")
     if rows is None:
         reasons.append("result rows unreadable")
-    if rows is not None and isinstance(names, list):
+    if rows is not None:
         for m in sorted({r["module"] for r in rows if r["module"] not in names}):
             reasons.append(f"row module {m} not planned")
     if not changed:

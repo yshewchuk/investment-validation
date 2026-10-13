@@ -69,18 +69,15 @@ def test_classify_step_wiring():
 def test_classify_step_fails_loudly_when_the_classifier_fails(tmp_path):
     script = _classify_step()["run"]
     funcs = "git() { printf 'a/x.py\\n'; return 0; }\npython() { return 3; }\n"
-    try:
-        proc = _run_bash(script, {"LOG": str(tmp_path / "log"), "PR": "7",
-                                  "BASE_SHA": "base1", "HEAD_SHA": "head1"}, funcs)
-        assert proc.returncode == 3
-    finally:
-        (ROOT / "changed_files.txt").unlink(missing_ok=True)
+    proc = _run_bash(script, {"LOG": str(tmp_path / "log"), "PR": "7",
+                              "BASE_SHA": "base1", "HEAD_SHA": "head1"}, funcs, tmp_path)
+    assert proc.returncode == 3
 
 
-def _run_bash(script: str, env_over: dict, functions: str) -> subprocess.CompletedProcess:
+def _run_bash(script: str, env_over: dict, functions: str, cwd: Path) -> subprocess.CompletedProcess:
     full = functions + "\nset -euo pipefail\n" + script
     env = {**os.environ, **env_over}
-    return subprocess.run(["bash", "-c", full], env=env, capture_output=True, text=True, cwd=ROOT)
+    return subprocess.run(["bash", "-c", full], env=env, capture_output=True, text=True, cwd=cwd)
 
 
 GIT_PY_FUNCS = """
@@ -92,7 +89,7 @@ python() { echo "python" >> "$LOG"; printf 'ARG %s\\n' "$@" >> "$LOG"; return 0;
 def test_classify_script_runs_git_and_the_tool(tmp_path):
     log = tmp_path / "log"
     script = _classify_step()["run"]
-    proc = _run_bash(script, {"LOG": str(log), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1"}, GIT_PY_FUNCS)
+    proc = _run_bash(script, {"LOG": str(log), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1"}, GIT_PY_FUNCS, tmp_path)
     assert proc.returncode == 0
     assert log.read_text().splitlines() == [
         "git fetch -q --no-tags origin +refs/pull/7/head:refs/remotes/pr/head",
@@ -113,6 +110,7 @@ def test_classify_script_degrades_when_git_fails(tmp_path):
         script,
         {"LOG": str(log), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1", "GIT_FAIL": "1"},
         GIT_PY_FUNCS,
+        tmp_path,
     )
     assert proc.returncode == 0
     assert "::warning::" in proc.stdout
@@ -128,38 +126,33 @@ def test_classify_script_degrades_when_git_fails(tmp_path):
 def test_classify_script_does_not_forward_partial_diff_output(tmp_path):
     log = tmp_path / "log"
     script = _classify_step()["run"]
-    try:
-        proc = _run_bash(
-            script,
-            {"LOG": str(log), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1",
-             "GIT_FAIL_DIFF": "1"},
-            GIT_PY_FUNCS,
-        )
-        assert proc.returncode == 0
-        assert "::warning::" in proc.stdout
-        lines = log.read_text().splitlines()
-        py_lines = [ln for ln in lines if ln == "python" or ln.startswith("ARG ")]
-        assert py_lines == [
-            "python",
-            "ARG tools/mutation_pr_status.py",
-            "ARG --merged-dir",
-            "ARG merged",
-        ]
-        assert "ARG --changed-files" not in lines
-    finally:
-        (ROOT / "changed_files.txt").unlink(missing_ok=True)
+    proc = _run_bash(
+        script,
+        {"LOG": str(log), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1",
+         "GIT_FAIL_DIFF": "1"},
+        GIT_PY_FUNCS,
+        tmp_path,
+    )
+    assert proc.returncode == 0
+    assert "::warning::" in proc.stdout
+    lines = log.read_text().splitlines()
+    py_lines = [ln for ln in lines if ln == "python" or ln.startswith("ARG ")]
+    assert py_lines == [
+        "python",
+        "ARG tools/mutation_pr_status.py",
+        "ARG --merged-dir",
+        "ARG merged",
+    ]
+    assert "ARG --changed-files" not in lines
 
 
 def test_changed_files_holds_the_two_diff_paths(tmp_path):
     script = _classify_step()["run"]
     funcs = "git() { if [ \"$1\" = \"-c\" ]; then printf 'a/x.py\\nb/y.py\\n'; fi; return 0; }\npython() { return 0; }\n"
-    try:
-        proc = _run_bash(script, {"LOG": str(tmp_path / "log"), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1"}, funcs)
-        assert proc.returncode == 0, proc.stderr
-        content = (ROOT / "changed_files.txt").read_text().splitlines()
-        assert content == ["a/x.py", "b/y.py"]
-    finally:
-        (ROOT / "changed_files.txt").unlink(missing_ok=True)
+    proc = _run_bash(script, {"LOG": str(tmp_path / "log"), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1"}, funcs, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    content = (tmp_path / "changed_files.txt").read_text().splitlines()
+    assert content == ["a/x.py", "b/y.py"]
 
 
 def _decision_script() -> str:
@@ -186,7 +179,7 @@ DECISION_TABLE = [
 ]
 
 
-def test_report_status_decision_table():
+def test_report_status_decision_table(tmp_path):
     script = _decision_script()
     for modules, skipped, cstate, cdesc, report, expected in DECISION_TABLE:
         env = {
@@ -196,7 +189,7 @@ def test_report_status_decision_table():
             "CLASSIFIED_DESC": cdesc,
             "REPORT_RESULT": report,
         }
-        proc = _run_bash(script + '\necho "${state}|${desc}"', env, "")
+        proc = _run_bash(script + '\necho "${state}|${desc}"', env, "", tmp_path)
         assert proc.returncode == 0, proc.stderr
         state, desc = proc.stdout.strip().split("|", 1)
         assert state == expected, (modules, skipped, cstate, report)
@@ -235,7 +228,7 @@ def _assert_gh_args(stdout: str, state: str):
     ]
 
 
-def test_check_run_post_keeps_argument_boundaries():
+def test_check_run_post_keeps_argument_boundaries(tmp_path):
     script = _report_status_script()
     base_env = {
         "SHA": "sha1",
@@ -248,7 +241,7 @@ def test_check_run_post_keeps_argument_boundaries():
     }
     for state in ("failure", "neutral", "success"):
         env = {**base_env, "CLASSIFIED_STATE": state}
-        proc = _run_bash(script, env, GH_FUNCS)
+        proc = _run_bash(script, env, GH_FUNCS, tmp_path)
         assert proc.returncode == 0, proc.stderr
         _assert_gh_args(proc.stdout, state)
 
