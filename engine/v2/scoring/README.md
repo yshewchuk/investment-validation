@@ -73,9 +73,10 @@ leaked outcome/driver/Tier-4-stamp feature name, a panel row naming a
 different event, a caller-declared `panel_anchor` (issue #53: the as-of the
 panel row's market-state values were computed against) that postdates
 `as_of`, or a used feature whose own fold_start postdates `as_of`.
-`quote_domain_map` (extracted from `tools/capture_tier0_corpus.py`'s
-`_quote_map`), `validated_as_of`, and `NightlySourceBundleRefusal` are its
-other real `__all__` exports, all four now declared below even though
+`quote_domain_map` (shared with `tools/capture_tier0_corpus.py`, which
+imports it; it was extracted from that tool's former `_quote_map`),
+`validated_as_of`, and `NightlySourceBundleRefusal` are its other real
+`__all__` exports, all four now declared below even though
 `checks/package_readmes.py` only strictly requires an entry for a name
 reached via an unqualified `from engine.v2.scoring import <name>` — every
 real caller of these four (`tools/capture_tier0_corpus.py`,

@@ -1302,7 +1302,8 @@ def _strategy_name(inputs: NativeScoreInputs, strategy: str | None,
 def _observed_empty_quote_lookup(inputs: NativeScoreInputs) -> bool:
     """Whether the capture recorded a quote lookup that ran and found nothing.
 
-    ``tools/capture_tier0_corpus.py::_quote_map`` writes an EMPTY ``quotes``
+    ``quote_domain_map`` (``engine/v2/scoring/nightly_source_bundle.py``,
+    used by ``tools/capture_tier0_corpus.py``) writes an EMPTY ``quotes``
     mapping only when legacy explicitly recorded why (``quote_status``
     ``"empty"``: the chain lookup ran and came back with no usable chain --
     ``engine/score.py:2347-2351`` flags ``NO_CHAIN`` there, BEFORE any expiry

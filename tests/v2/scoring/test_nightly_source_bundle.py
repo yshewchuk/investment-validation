@@ -576,9 +576,9 @@ def test_quote_domain_map_empty_domain_with_status_ok():
 
 
 def test_quote_domain_map_none_rows_with_empty_status_still_refuses():
-    # Behavior-identical to the original _quote_map: an empty *status* only
-    # excuses an empty *list* ([]), not a wholly absent domain (None) -- the
-    # two are not interchangeable, matching the original's `rows != []` check.
+    # An empty *status* only excuses an empty *list* ([]), not a wholly
+    # absent domain (None) -- the two are not interchangeable (the
+    # `rows != []` check).
     with pytest.raises(NightlySourceBundleRefusal) as exc:
         quote_domain_map(None, quote_status="not_reached")
     assert exc.value.code == "INVALID_QUOTE_DOMAIN"

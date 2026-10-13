@@ -113,8 +113,9 @@ def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str,
     An empty domain is accepted only when the caller names WHY it is empty
     (no chain found, or pricing never reached, i.e. quote_status in
     _EMPTY_QUOTE_STATUSES); an empty domain with no recorded status is a
-    refusal, not a silent gap. Derived from tools/capture_tier0_corpus.py's
-    _quote_map, with one addition. Returns {"right:strike:expiry": {"bid":
+    refusal, not a silent gap. Shared with tools/capture_tier0_corpus.py,
+    which imports it (it was extracted from that tool's former _quote_map and
+    has since gained observed_date). Returns {"right:strike:expiry": {"bid":
     float, "ask": float, "observed_date": "YYYY-MM-DD"}}; observed_date is the
     quote row's observed_at calendar date and is omitted when the row has none
     or it is unparseable. A repeated contract must repeat bid/ask exactly (else
