@@ -83,6 +83,14 @@ before writing that attempt's event/refusal or score outputs; reused-root files
 may remain as untrusted residue. The worker job has five bounded attempts, with delays of 30s, 2m, 10m and 30m. Worker production cannot stall supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.
 Snapshot parameters raise `VALIDATION_FAILED` for an unsupported `producer_mode` or, in snapshot mode, a missing or incomplete `catalog_path`/`objects_root` pair.
 
+**DYN-SV batch boundary.** `board_requests` emits one DYN-SV key last per
+event, but the batch assembler refuses it with `UNSUPPORTED_STRATEGY` after
+key/calendar validation; earlier source refusals retain their own codes.
+The worker calls `score_batch`, not the separate menu resolver described in
+[scoring](../scoring/ARCHITECTURE.md#native-nightly-dyn-sv-boundary).
+Enumeration order does not establish a scoring dependency. Encodable meta
+refusals use the keyed output; invalid keys use `unkeyable_refusals`.
+
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
 a manual/operator-invoked script, as `native_parity`'s production caller.
@@ -273,70 +281,23 @@ submission path reads either edge (the rule Part 4 established for
   The test-only `run_shadow_nightly` path calls `native_parity_handler`
   directly and does not reach this worker branch.
 - **`native_parity_report.apply_native_refusals(report, native_refusals,
-  unkeyable_refusals=()) -> dict`** (new) — the mechanism for "missing or
-  refused native rows are counted separately" (user decision, option (c)).
-  `compare_native_vs_legacy` itself is UNCHANGED — pure, refusal-blind,
-  unaware `native_score_batch` can refuse a row at all. **But
-  `native_parity_handler` — the EXISTING function `run_shadow_nightly`
-  already calls, unchanged in signature — now calls
-  `apply_native_refusals(report, {}, ())` unconditionally right after
-  `compare_native_vs_legacy`, on every `"compared"` report it writes (Phase
-  1, `#132`, already on `main`): with no refusals to apply this changes no
-  row's classification, but every report that test-only path writes now
-  also carries the two new, always-present, empty fields
-  `"native_refused": []`/`"native_refused_unmatched": []` and is stamped
-  with this module's current `SCHEMA_VERSION` (`v1.1` when Phase 1 shipped
-  this; `v1.2` since cutover PR-4 slice 1 of #327 added run identity and
-  per-mismatch values on top) — a real, already-shipped change to this
-  existing artifact's shape, not a no-op reserved for
-  `run_native_parity_worker`.** Once Phase 2 builds it,
-  `run_native_parity_worker` calls this the SAME way, this time with real
-  `native_refusals`/`unkeyable_refusals`, AFTER
-  `compare_native_vs_legacy` or `_empty_native_report` (above) returns: any
-  key in the report's own `only_legacy` list that is ALSO a key of
-  `native_refusals` (population-key → refusal code, built from
-  `records.json`'s paired `refusals.json`) moves from `only_legacy` into a
-  NEW `"native_refused"` list (each entry `{"row_key": ..., "refusal_code":
-  ...}`), and is removed from `only_legacy` — never counted in both. A
-  `native_refusals` key that is NOT in `only_legacy` (the row was actually
-  compared, or was `only_native`) is left untouched:
-  `assemble_score_batch_inputs`'s own per-row either/or contract (PR-3)
-  already makes one row both scored and refused impossible within one
-  `records.json`/`refusals.json` pair, so this function trusts that
-  pairing rather than re-validating it, exactly as `legacy_parity_rows`
-  trusts `score.json`'s own shape once its own up-front validation
-  passes. `only_legacy` therefore narrows to its real meaning under this
-  redo: a legacy row `native_board_universe.board_requests` never even
-  enumerated as a `BoardRequest` (an unsupported strategy, the `DYN-SV`
-  wildcard) — never a row native attempted and explicitly refused, which
-  `native_refused` names instead.
-  **A refusal with no legacy counterpart is reported, never dropped
-  (CodeRabbit round 5, real finding).** A `native_refusals` key that is
-  NOT in `only_legacy` cannot be in `compared`/`only_native` either (a
-  refused `BoardRequest` is by construction absent from `native_rows`,
-  and both those buckets are built only from `native_rows`) — so the ONE
-  remaining possibility, silently ignored by the original design, is a
-  refusal whose projected `population_key` is not in `legacy_rows` at
-  all: `native_score_batch`'s own board universe found and refused a row
-  legacy's own `score.json` never carried in the first place. That case
-  is now appended to a second NEW list, `"native_refused_unmatched"`
-  (same `{"row_key": ..., "refusal_code": ...}` shape as `native_refused`,
-  kept separate rather than merged so a reader can tell "legacy scored it,
-  native refused it" apart from "native refused a row legacy never had").
-  Every entry of `unkeyable_refusals` (the third, optional argument —
-  `_native_rows_and_refusals`'s own pass-through of `refusals.json`'s
-  `"unkeyable_refusals"` array, below) is appended to the SAME
-  `"native_refused_unmatched"` list unconditionally, using its raw
-  structured `{"ticker":..., "strategy":..., "event_date":...,
-  "session":...}` key instead of a `row_key` string (below) — an
-  `INVALID_KEY_FIELD` refusal never attempts the keyed join at all (its
-  own source fields are exactly what made a safe key impossible to
-  construct), so it is reported this way regardless of whether a
-  same-identity legacy row exists, rather than trying to prove a negative
-  match first. Every native refusal — keyed or not, legacy-matched or
-  not — therefore lands in exactly one of `native_refused` or
-  `native_refused_unmatched`; none is ever silently absent from the
-  report.
+  unkeyable_refusals=()) -> dict`** separates explicit native refusals from
+  unmatched legacy rows. The worker applies it after comparison (or the
+  empty-native report); the test-only handler supplies empty refusals.
+  A keyed refusal matching `only_legacy` moves to `native_refused`; an
+  unmatched refusal goes to `native_refused_unmatched`. Keyed entries carry
+  `row_key` and `refusal_code`. Unkeyable refusals always enter the latter
+  list with their structured key, without attempting a lossy keyed join.
+  Every refusal is reported exactly once. The writer's disjoint
+  records/refusals contract prevents a key from being both scored and refused.
+  `only_legacy` means no native record or keyed refusal explains that legacy
+  key; it does not imply that native never enumerated the strategy.
+  In particular, `board_requests` already enumerates DYN-SV last per event.
+  Its current `UNSUPPORTED_STRATEGY` refusal belongs in `native_refused`
+  when legacy emitted that row, otherwise `native_refused_unmatched`.
+  DYN-SV uses the same keyed comparison/refusal classification, never a
+  wildcard exemption. Numeric comparisons continue to use the shared parity
+  comparator, with no special tolerance or legacy-derived native value.
 - **`native_parity_report._population_key_from_board_request_key(key) ->
   str`** (new, private) — projects one `records.json`/`refusals.json` key
   (the 4-field canonical `BoardRequest` string `#88` specifies,
