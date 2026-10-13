@@ -32,7 +32,8 @@ decreases, and a root-level test cannot be modified in place (move it first).
 now live and raises `FileNotFoundError` if one is missing.
 
 Markdown is linted by `markdownlint-cli2` (rules in `.markdownlint-cli2.jsonc`),
-run by the pre-commit hook on staged `.md` files and by the Tests workflow on all `.md`.
+run by the pre-commit hook on the working-tree copy of each staged `.md` file (the one
+check there that is not staged-blob, stdlib-only) and by the Tests workflow on all `.md`.
 
 The Phase 1 check binds the active test inventory to source and test
 contents. It reports suite-version, inventory, or source drift when the

@@ -7,10 +7,13 @@
 # reports whether this file is installed at all (system_rearchitecture.md
 # §4.6). A control that cannot detect its own absence is not a control.
 #
-# Every check here reads STAGED BLOBS, not the working tree: checking the
-# working tree passes or fails on content that is not what would be committed.
-# All four are stdlib-only and parse with `ast` rather than importing, because
-# importing `engine.score` loads a panel and a two-minute hook gets deleted.
+# Checks 1-6 read STAGED BLOBS, not the working tree: checking the working tree
+# passes or fails on content that is not what would be committed. They are
+# stdlib-only and parse with `ast` rather than importing, because importing
+# `engine.score` loads a panel and a two-minute hook gets deleted.
+# Exception: check 7 (Markdown) needs Node and lints the WORKING-TREE copy of each
+# staged .md file (markdownlint-cli2 cannot read a blob). CI lints every .md and is
+# the authority.
 #
 # Order is cheapest-and-most-catastrophic first: a leaked credential is
 # permanent, a layer violation is not.
