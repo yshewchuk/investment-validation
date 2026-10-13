@@ -11,10 +11,12 @@ from contextlib import closing
 from pathlib import Path
 
 from engine.v2.data.errors import DataError
-from engine.v2.foundation import ArtifactStore
+from engine.v2.foundation import ArtifactStore, SystemClock
 from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.massive_plan import plan
+from engine.v2.ops.stores.massive import coverage
+from engine.v2.ops.stores.massive.pages import closed_day
 
 PLAN_TIMEOUT_SECONDS = 30
 
@@ -34,17 +36,32 @@ def _main(argv=None):
     parser.add_argument("--adjustment", required=True, choices=("raw", "split_adjusted"))
     parser.add_argument("--max-calls-per-request", required=True, type=int)
     parser.add_argument("--transport", default="rest")
+    parser.add_argument("--generation")
     try:
         args = vars(parser.parse_args(argv))
         catalog, root = args.pop("catalog"), args.pop("store_root")
-        plan(None, None, **args)
+        generation = args.pop("generation")
+        requested = plan(None, None, **args)
+        if generation is not None:
+            coverage.validate_generation(generation)
+            observed_at = SystemClock().now()
+            for unit in requested["units"]:
+                closed_day(unit["request"], observed_at)
         if "\0" in str(catalog) or "\0" in str(root) or not catalog.is_file():
             raise OSError("planning paths require a regular catalog and no NUL characters")
         with closing(sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only=ON")
             conn.execute("BEGIN")
-            result = plan(conn, ArtifactStore(root), **args)
+            if generation is None:
+                result = plan(conn, ArtifactStore(root), **args)
+            else:
+                plans = [coverage.plan(conn, ArtifactStore(root), unit["request"], generation)
+                         for unit in requested["units"]]
+                result = {"schema_version": "massive_interval_plan.v1", "plan_only": True,
+                          "policy_version": requested["policy_version"], "plans": plans,
+                          "maximum_http_attempts": sum(bool(p["gaps"]) for p in plans)
+                          * args["max_calls_per_request"]}
     except (OpsError, DataError, ArtifactError) as exc:
         reason = exc.problem.details.get("reason") if isinstance(exc, OpsError) else None
         print(json.dumps({"refused": exc.code, "reason": reason}))

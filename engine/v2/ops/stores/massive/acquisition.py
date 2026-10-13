@@ -1,31 +1,37 @@
-"""Explicit one-request Massive acquisition through the existing supervisor."""
+"""Bounded Massive exact or generation acquisition through the supervisor."""
 import json
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 from engine.v2.data.errors import DataError
-from engine.v2.data.incremental import RawPayload, cache_raw_receipt
+from engine.v2.data.incremental import RawPayload, cache_raw_receipt, load_raw_receipt
 from engine.v2.foundation import (
     ArtifactStore,
     DocumentError,
     SystemClock,
     canonical_json,
+    content_hash,
     format_timestamp,
     from_document,
+    parse_timestamp,
 )
 from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops import massive_plan, provider_budget
 from engine.v2.ops.catalog import connect, transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.lifecycle import verify_fence
+from engine.v2.ops.stores.massive import coverage, journal
+from engine.v2.ops.stores.massive.pages import closed_day, validate_page
 from engine.v2.ops.submission import JobKind, RetryPolicy
 
 KIND = "massive_acquisition"
 SCHEMA = "massive_acquisition.v1"
+HISTORY_KIND = "massive_history_acquisition"
+HISTORY_SCHEMA = "massive_history_acquisition.v1"
 
 
 @dataclass(frozen=True)
@@ -40,9 +46,16 @@ class Parameters:
     policy_version: str = massive_plan.POLICY_VERSION
     provider_account: str = massive_plan.SOURCE
     provider_calls: int = 1
+    generation: str | None = None
+    max_http_calls: int = 1
 
 
 def scope_plan(params, conn=None, store=None):
+    if (type(params.max_http_calls) is not int or not 1 <= params.max_http_calls <= 100
+            or (params.generation is None and params.max_http_calls != 1)):
+        raise fail("INVALID_REQUEST", "invalid Massive generation or cumulative call cap")
+    if params.generation is not None:
+        coverage.validate_generation(params.generation)
     result = massive_plan.plan(conn, store, tickers=[params.ticker], datasets=[params.dataset],
                                start=params.start, end=params.end, as_of=params.as_of,
                                adjustment=params.adjustment, max_calls_per_request=1)
@@ -56,7 +69,8 @@ def scope_plan(params, conn=None, store=None):
 
 def parameter_problems(job, params):
     scope_plan(params)
-    if job.provider_budget_ref != massive_plan.SOURCE or job.input_refs or job.dependency_job_ids:
+    if (job.provider_budget_ref != massive_plan.SOURCE or job.input_refs or job.dependency_job_ids
+            or (job.kind == HISTORY_KIND) != (params.generation is not None)):
         return ("Massive acquisition requires its fixed account and no input dependencies",)
     return ()
 
@@ -71,6 +85,11 @@ def job_kind():
                    resource_classes=frozenset({"io_fetch"}), effects=("staged",),
                    retry=RetryPolicy("bounded", 1), checkpoint_contract=SCHEMA,
                    namespaces=frozenset({"shadow"}), validate=parameter_problems)
+
+
+def history_kind():
+    return replace(job_kind(), name=HISTORY_KIND, retry=RetryPolicy("bounded", 101, (13,)),
+                   checkpoint_contract=HISTORY_SCHEMA)
 
 
 def _record_fetch_failure(error, response):
@@ -90,14 +109,39 @@ def _validate_body(body, request):
         raise fail(code, "Massive response is not a complete nonempty terminal page")
 
 
-def _acquire(conn, store, params, claim, *, fetch, clock):
+def _response_body(conn, store, unit, fetch, charge, response, was_charged):
+    if unit["raw_receipt_id"] is not None:
+        return load_raw_receipt(conn, store, unit["raw_receipt_id"])
+    try:
+        status, body = fetch(unit["request"], charge)
+    except OpsError as error:
+        if was_charged():
+            _record_fetch_failure(error, response)
+        raise
+    if not was_charged():
+        raise fail("INTEGRITY_FAILED", "Massive transport omitted durable accounting")
+    code = response(status)
+    if status == 403:
+        raise fail("SOURCE_INVALID", "Massive request access is unavailable",
+                   details={"reason": "CAPABILITY_UNAVAILABLE"})
+    if status != 200:
+        raise fail(code or "SOURCE_INVALID", "Massive HTTP request was refused")
+    return body
+
+
+def _acquire(conn, store, params, claim, *, fetch, clock, on_receipt=None,
+             page_request=None, previous_requests=()):
     def fence():
         verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
 
     with transaction(conn):
         fence()
-    planned = scope_plan(params, conn, store)
+    reusable = params.generation in (None, "initial") and page_request is None
+    planned = scope_plan(params, conn if reusable else None, store)
     unit = planned["units"][0]
+    original = unit["request"]
+    if page_request is not None:
+        unit = unit | {"request": page_request, "request_hash": content_hash(page_request)}
     receipt_id = unit["raw_receipt_id"]
     cache_hit = receipt_id is not None
     interval = 60 // planned["requests_per_minute"] + 1
@@ -106,7 +150,7 @@ def _acquire(conn, store, params, claim, *, fetch, clock):
     def charge():
         nonlocal charged
         provider_budget.before_request(conn, claim, massive_plan.SOURCE, clock=clock,
-                                       minimum_interval_seconds=interval)
+                                       minimum_interval_seconds=interval, max_calls_per_job=params.max_http_calls)
         charged = True
 
     def response(status):
@@ -115,26 +159,24 @@ def _acquire(conn, store, params, claim, *, fetch, clock):
             conn, massive_plan.SOURCE, 400 if status == 403 else status, clock=clock,
             fence_check=fence, minimum_interval_seconds=interval)
 
-    if not cache_hit:
-        try:
-            status, body = fetch(unit["request"], charge)
-        except OpsError as error:
-            if charged:
-                _record_fetch_failure(error, response)
-            raise
-        if not charged:
-            raise fail("INTEGRITY_FAILED", "Massive transport omitted durable accounting")
-        code = response(status)
-        if status == 403:
-            raise fail("SOURCE_INVALID", "Massive request access is unavailable",
-                       details={"reason": "CAPABILITY_UNAVAILABLE"})
-        if status != 200:
-            raise fail(code or "SOURCE_INVALID", "Massive HTTP request was refused")
-        _validate_body(body, unit["request"])
+    if not cache_hit or on_receipt is not None:
+        body = _response_body(conn, store, unit, fetch, charge, response, lambda: charged)
+        continuation = None
+        if on_receipt is not None:
+            continuation = validate_page(body, original, unit["request"], cached=cache_hit)
+            if continuation is not None and content_hash(continuation) in (*previous_requests, unit["request_hash"]):
+                raise fail("SOURCE_INVALID", "Massive continuation repeats a previous request")
+        else:
+            _validate_body(body, unit["request"])
+        def record_receipt(record):
+            observed = record.received_at if cache_hit else format_timestamp(clock.now())
+            if on_receipt is not None:
+                closed_day(unit["request"], parse_timestamp(observed), cached=cache_hit)
+                on_receipt(record, observed, cache_hit, continuation)
         record = cache_raw_receipt(
-            conn, store, RawPayload(payload=body, response_kind="complete", response_meta={}),
+            conn, store, RawPayload(payload=body, response_kind="partial" if continuation else "complete", response_meta={}),
             source=massive_plan.SOURCE, endpoint=unit["request"]["endpoint"], request=unit["request"],
-            received_at=format_timestamp(clock.now()), fence_check=fence)
+            received_at=format_timestamp(clock.now()), fence_check=fence, record_receipt=record_receipt)
         receipt_id = record.raw_receipt_id
     with transaction(conn):
         fence()
@@ -147,6 +189,51 @@ def _acquire(conn, store, params, claim, *, fetch, clock):
             "first_received_at": row["received_at"], "observed_at": format_timestamp(clock.now()),
             "attempt_id": claim.attempt_id, "fence": claim.fence, "cache_hit": cache_hit,
             "http_attempts": int(charged), "policy_version": params.policy_version}
+
+
+def _history(conn, store, params, claim, *, fetch, clock):
+    request = scope_plan(params)["units"][0]["request"]
+    closed_day(request, clock.now())
+    with transaction(conn):
+        _, attempt = verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
+    planned = coverage.plan(conn, store, request, params.generation)
+    if planned["gaps"]:
+        gap = planned["gaps"][0]
+        scoped = replace(params, start=gap["start"], end=gap["end"], expected_ids=(content_hash(gap),))
+        chain = coverage.progress(conn, store, gap, params.generation, attempt["job_id"])
+        if chain["next_request"] is None:
+            raise fail("INTEGRITY_FAILED", "Massive terminal journal lacks a completion occurrence")
+        if len(chain["page_ids"]) >= journal.MAX_PAGES:
+            raise fail("RESOURCE_LIMIT_EXCEEDED", "Massive page limit exhausted")
+        continuing = False
+        def persist(record, observed, reused, following):
+            nonlocal continuing
+            continuing = following is not None
+            evidence = {"schema_version": coverage.VERSION, "policy_version": params.policy_version,
+                        "job_id": attempt["job_id"], "generation": params.generation, "request": gap,
+                        "raw_receipt_id": record.raw_receipt_id, "raw_hash": record.raw_hash,
+                        "first_received_at": record.received_at, "origin": "raw_reuse" if reused else "http_response",
+                        "observed_at": observed, "attempt_id": claim.attempt_id, "fence": claim.fence}
+            if chain["page_ids"] or continuing:
+                page = evidence | {"schema_version": journal.VERSION, "scope_hash": content_hash(gap),
+                                   "request": chain["next_request"], "next_request": following,
+                                   "page_index": len(chain["page_ids"]),
+                                   "previous_page_id": chain["page_ids"][-1] if chain["page_ids"] else None}
+                evidence["pages"] = chain["page_ids"] + [journal.append(conn, page)]
+            if not continuing:
+                coverage.record(conn, evidence)
+        _acquire(conn, store, scoped, claim, fetch=fetch, clock=clock, on_receipt=persist,
+                 page_request=chain["next_request"] if chain["page_ids"] else None,
+                 previous_requests=chain["requests"])
+        if continuing:
+            raise fail("SOURCE_NOT_FINAL", "Massive acquisition has a pending continuation")
+        planned = coverage.plan(conn, store, request, params.generation)
+    if planned["gaps"]:
+        raise fail("SOURCE_NOT_FINAL", "Massive acquisition has remaining interval gaps")
+    with transaction(conn):
+        verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
+    return {"schema_version": HISTORY_SCHEMA, "coverage": planned,
+            "attempt_id": claim.attempt_id, "fence": claim.fence}
 
 
 def run(parameters, root, envelope, *, fetch=None, clock=None):
@@ -163,7 +250,8 @@ def run(parameters, root, envelope, *, fetch=None, clock=None):
         from engine.v2.ops.providers.massive import fetch
     try:
         with closing(connect(envelope["catalog_path"], must_exist=True)) as conn:
-            result = _acquire(conn, ArtifactStore(envelope["objects_root"]), params,
+            acquire = _history if params.generation is not None else _acquire
+            result = acquire(conn, ArtifactStore(envelope["objects_root"]), params,
                               SimpleNamespace(attempt_id=envelope["attempt_id"], fence=envelope["fence"]),
                               fetch=fetch, clock=clock)
         Path(root, "massive_acquisition.json").write_text(canonical_json(result))
@@ -171,5 +259,6 @@ def run(parameters, root, envelope, *, fetch=None, clock=None):
         raise fail("INTEGRITY_FAILED", "Massive raw cache evidence is unusable") from None
     except (OSError, sqlite3.Error):
         raise fail("RESOURCE_UNAVAILABLE", "Massive acquisition storage is unavailable") from None
-    return {"outputs": [{"name": KIND, "path": "massive_acquisition.json", "schema": SCHEMA}],
+    schema = HISTORY_SCHEMA if params.generation is not None else SCHEMA
+    return {"outputs": [{"name": KIND, "path": "massive_acquisition.json", "schema": schema}],
             "completed_ids": list(params.expected_ids), "no_work": False}

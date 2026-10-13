@@ -609,7 +609,9 @@ def _jsonable(value):
 
 def cache_raw_receipt(conn: Any, store: ArtifactStore, payload: RawPayload,
                       *, source: str, endpoint: str, request: Mapping[str, Any],
-                      received_at: str, fence_check: Callable[[], None] | None = None) -> RawReceiptRecord:
+                      received_at: str, fence_check: Callable[[], None] | None = None,
+                      record_receipt: Callable[[RawReceiptRecord], None] | None = None) -> RawReceiptRecord:
+    """Verify bytes outside SQL; record caller effects atomically after the fence."""
     request_hash = content_hash(_jsonable(dict(request)))
     predicted = artifact_reference(payload.payload, RAW_SCHEMA_REF)
     receipt_id = "raw_" + content_hash({
@@ -628,10 +630,7 @@ def cache_raw_receipt(conn: Any, store: ArtifactStore, payload: RawPayload,
                               "raw receipt identity has conflicting content")
         object_ref = _object_ref_document(existing["artifact_ref_json"])
         store.verify(_artifact_ref(object_ref, RAW_SCHEMA_REF))
-        if fence_check is not None:
-            with _write_transaction(conn):
-                fence_check()
-        return RawReceiptRecord(
+        record = RawReceiptRecord(
             raw_receipt_id=existing["raw_receipt_id"], source=existing["source"],
             endpoint=existing["endpoint"], request_hash=existing["request_hash"],
             raw_hash=existing["raw_hash"], object_ref=object_ref,
@@ -639,6 +638,13 @@ def cache_raw_receipt(conn: Any, store: ArtifactStore, payload: RawPayload,
             request=json.loads(existing["request_json"]),
             response_meta=json.loads(existing["response_meta_json"]),
             received_at=existing["received_at"], cache_hit=True)
+        if fence_check is not None or record_receipt is not None:
+            with _write_transaction(conn):
+                if fence_check is not None:
+                    fence_check()
+                if record_receipt is not None:
+                    record_receipt(record)
+        return record
 
     ref = store.publish_bytes(payload.payload, schema_ref=RAW_SCHEMA_REF)
     if ref != predicted:
@@ -662,6 +668,8 @@ def cache_raw_receipt(conn: Any, store: ArtifactStore, payload: RawPayload,
              record.raw_hash, canonical_json(to_document(record.object_ref)),
              record.response_kind, canonical_json(_jsonable(record.request)),
              canonical_json(_jsonable(record.response_meta)), record.received_at))
+        if record_receipt is not None:
+            record_receipt(record)
     return record
 
 
