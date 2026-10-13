@@ -124,6 +124,15 @@ def test_success_cases():
     assert planned_unknown_verdict["reasons"][0] == "planned modules unknown"
 
 
+def test_non_survivor_statuses_load_and_stay_success(tmp_path):
+    argv, out = _report(tmp_path, clean("a"),
+                        [json.dumps(row("a", "engine/v2/a.py", s))
+                         for s in ("killed", "timeout", "suspicious", "excluded")],
+                        ["engine/v2/a.py"])
+    assert ps.main(argv) == 0
+    assert "state=success" in out.read_text()
+
+
 def _malformed_cases():
     cases = []
 
@@ -228,8 +237,12 @@ def test_strict_types_and_row_modules_are_neutral(id_, build, tmp_path):
     result = build(tmp_path)
     if isinstance(result, dict):
         assert result["state"] == "neutral", id_
+        if id_ == "row_module_unexpected_str":
+            assert "row module zzz not planned" in result["reasons"], id_
     else:
         assert "state=neutral" in result, id_
+        if id_ == "row_module_int":
+            assert "result rows unreadable" in result, id_
 
 
 def _top_level_cases():
