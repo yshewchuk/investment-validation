@@ -5,8 +5,8 @@ in the layout mutmut 3.8 uses (``mutants/<file>.meta``, ``mutmut-stats.json``).
 # packages: engine.v2.contracts, engine.v2.foundation, engine.v2.data, engine.v2.features, engine.v2.models, engine.v2.registry, engine.v2.domain.generation, engine.v2.domain.scenarios, engine.v2.domain.valuation, engine.v2.domain.simulation, engine.v2.scoring, engine.v2.evaluation, engine.v2.research, engine.v2.ledger, engine.v2.models.training, engine.v2.serving, engine.v2.ops, engine.v2.dashboard, engine.v2.diagnosis, engine.v2.parity
 """
 from __future__ import annotations
-# land: always-run
 
+# land: always-run
 import ast
 import csv
 import io
@@ -2528,8 +2528,10 @@ def test_scoring_stages_change_no_longer_selects_every_enabled_module():
         "tests/test_v2_scoring_runup_frozen.py",
     ]
     selected = pilot.changed_modules(CFG, names, changed)
+    # data_incremental also runs Massive raw-receipt fence tests; their real
+    # supervisor/worker imports reach scoring.application and scoring exports.
     assert set(selected) == set(names) - {
-        "canonical", "data_incremental", "no_fit", "ops_experiment_folds", "ops_final_holdout", "research",
+        "canonical", "no_fit", "ops_experiment_folds", "ops_final_holdout", "research",
     }, (
         "selection drifted from the exact expected set -- re-check whether "
         "this is a narrowing regression (e.g. back toward all 33) or a "
@@ -4015,7 +4017,7 @@ def test_domain_valuation_init_change_selects_its_dependents():
 
 
 def test_a_leaf_module_change_selects_only_its_own_module_again():
-    # Before 2026-09-26, this changed path selected exactly ["research"].
+    # Before 2026-09-26, a research leaf selected exactly ["research"].
     # A path-based-loader fail-safe added that day made every checks/*.py
     # file using the common `sys.path.insert(0,
     # str(Path(__file__).resolve().parents[1]))` idiom depend on EVERY
@@ -4026,9 +4028,18 @@ def test_a_leaf_module_change_selects_only_its_own_module_again():
     # DYNAMIC catch-all edge collapse every module's dependency set (see
     # module_dependency_closure's docstring). Fixed the same way: the walk
     # now follows a DYNAMIC file's REAL edges (`build_import_graph.precise`)
-    # instead of cascading its catch-all, so this is a leaf change again.
+    # instead of cascading its catch-all. Replay now has legitimate worker
+    # consumers; fill_quality selects only the research mutation module here.
     names = pilot.enabled_modules(CFG)
-    assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == ["research"]
+    assert pilot.changed_modules(CFG, names, ["engine/v2/research/fill_quality.py"]) == ["research"]
+
+
+def test_replay_change_selects_its_transitive_worker_consumers():
+    """The real replay source selects its native-worker and other actual consumers."""
+    names = pilot.enabled_modules(CFG)
+    assert set(pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"])) == {
+        "ops_cli", "ops_runtime", "ops_nightly", "research",
+    }
 
 
 # -- import-graph build guard: deterministic parse-count property ------------

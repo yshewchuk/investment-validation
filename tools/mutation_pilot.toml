@@ -377,8 +377,9 @@ mutate = [
     "engine/v2/data/event_history.py",
 ]
 tests = [
-    "tests/test_v2_data_computed_moves.py",
-    "tests/test_v2_data_computed_moves_table.py",
+    "tests/v2/ops/test_massive_acquisition.py",
+    "tests/v2/data/test_computed_moves.py",
+    "tests/v2/data/test_computed_moves_table.py",
     "tests/v2/data/test_data_event_history.py",
     "tests/test_v2_data_generic_incremental.py",
     "tests/test_v2_data_incremental.py",
@@ -579,7 +580,7 @@ tests = [
     "tests/test_v2_scoring_frozen_recipes.py",
     "tests/test_v2_scoring_frozen_residuals.py",
     "tests/test_v2_scoring_native_payoff.py",
-    "tests/test_v2_scoring_nightly_source_bundle.py",
+    "tests/v2/scoring/test_nightly_source_bundle.py",
     "tests/test_v2_scoring_no_score_status.py",
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
@@ -633,7 +634,10 @@ tests = [
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
+    "tests/v2/ops/test_native_gate_worker.py",
     "tests/v2/research/test_magnitude_registration.py",
+    "tests/v2/research/test_magnitude_execution_registration.py",
+    "tests/v2/research/test_magnitude_baseline.py",
     "tests/v2/research/test_native_outcomes.py",
     "tests/v2/research/test_v2_prediction_cli.py",
     "tests/v2/research/test_native_outcome_validation.py",
@@ -679,6 +683,10 @@ mutate = [
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
+    "tests/v2/ops/test_massive_acquisition.py",
+    "tests/v2/ops/test_massive_http.py",
+    "tests/v2/ops/test_massive_submission.py",
+    "tests/v2/ops/test_native_gate_worker.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
     "tests/v2/ops/test_provider_requirements.py",
     "tests/test_v2_ops_catalog.py",
@@ -796,6 +804,7 @@ tests = [
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
     "tests/v2/research/test_magnitude_registration.py",
+    "tests/v2/research/test_magnitude_execution_registration.py",
 ]
 
 [modules.ops_catalog_sched]
@@ -960,6 +969,7 @@ mutate = [
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",
     "engine/v2/ops/massive_plan.py",
+    "engine/v2/ops/massive_acquire.py",
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/forward_calendar_store.py",
     "engine/v2/ops/incremental_data.py",
@@ -971,6 +981,9 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_native_strategy_registry.py",
+    "tests/v2/ops/test_native_score_batch_driver_alias.py",
+    "tests/v2/ops/test_native_gate_worker.py",
     "tests/v2/ops/test_planned_price_refresh.py",
     "tests/v2/ops/test_planned_price_recovery.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
@@ -980,6 +993,8 @@ tests = [
     "tests/v2/ops/test_native_parity_inputs_leaf.py",
     "tests/v2/ops/test_carried_set.py",
     "tests/v2/ops/test_massive_plan.py",
+    "tests/v2/ops/test_massive_acquisition.py",
+    "tests/v2/ops/test_massive_submission.py",
     "tests/v2/ops/test_massive_plan_startup.py",
     "tests/v2/ops/test_native_parity_pairing.py",
     "tests/test_v2_data_incremental_persistence.py",
@@ -1053,6 +1068,9 @@ tests = [
     "tests/v2/research/test_magnitude_features.py",
     "tests/v2/research/test_magnitude_folds.py",
     "tests/v2/research/test_magnitude_registration.py",
+    "tests/v2/research/test_magnitude_execution_registration.py",
+    "tests/v2/research/test_magnitude_training_inputs.py",
+    "tests/v2/research/test_magnitude_baseline.py",
     "tests/v2/research/test_experiment_trades.py",
     "tests/v2/research/test_exp144_v2_trades.py",
     "tests/v2/research/test_experiments_common_v2_store_root.py",

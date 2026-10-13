@@ -109,9 +109,9 @@ consume an eligible population. It shares the trade loader's membership and
 ambiguity logic; neither source dates nor ticker names substitute for event IDs.
 Multiple IDs on one ticker/day are ambiguous even when their sessions differ:
 the prediction outcome table cannot distinguish those event identities.
-The manual `experiments.v2_gate_variant` smoke CLI consumes this population in
-sweep mode before fresh native replay; it has no supervisor or report/ledger
-publication authority. Its pricing contract lives in `experiments/ARCHITECTURE.md`.
+`experiments.v2_gate_variant` consumes this population in sweep mode before
+fresh native replay, directly or through the smoke-only `native_gate_pricing`
+worker. Its no-report/no-ledger contract lives in `experiments/ARCHITECTURE.md`.
 `prediction_inputs.load_prediction_targets` consumes this population first,
 then scans each eligible ticker/event-date pair in pinned `computed_moves`.
 It returns the signed move, binary `positive_move` target, and
@@ -188,7 +188,8 @@ view. The fixed target recipe is absolute split-neutral, non-dividend-adjusted
 earnings close-to-close return in percentage points; the native signed
 `computed_moves` value is retained, never rescaled, clipped or adjusted again.
 Its primary prediction estimand is conditional mean, selected by pooled RMSE;
-MAE and quantile calibration are secondary, not implemented metric writers.
+MAE and quantile calibration are secondary; the magnitude reporter implements
+MAE while quantile calibration remains unimplemented.
 Shared population admission precedes label access. Bulk reads exclude events
 on/after `labels_before`; explicit requests containing one refuse. All
 remaining objects pass `event_history`'s shared singleton preflight before
@@ -202,7 +203,32 @@ label cutoff, snapshot/dataset/month/membership versions and consumed inputs.
 Forecast cutoff and training/evaluation label cutoff are distinct contracts;
 this seam neither fits a model nor joins labels into forecast features.
 Repository failures propagate; no cache, retry, write or partial return.
-These library prerequisites have no CLI, supervisor or final-read caller.
+`experiments/magnitude_report.py` consumes the strict target loader through the
+magnitude CLI; there is no supervisor or final-read caller.
+
+`magnitude_inputs.preflight_magnitude_targets(repository, snapshot, *,
+as_of_month, event_ids)` admits an explicit selection population and proves
+every candidate object's singleton isolation without opening outcomes. Its
+detached digest binds the exact population/context and planned object identities.
+The magnitude runner preflights the union of actual train/evaluation participants
+across all folds before its first label read; unused window events need not join.
+The preflight is evidence, not a capability: target loaders repeat their own
+admission and physical checks and accept no caller-supplied scan plan.
+
+`qualify_magnitude_training_targets(repository, snapshot, *, as_of_month,
+labels_before, event_ids)` admits explicit candidates whose event dates precede
+the fit boundary, with whole-population physical preflight before outcome access.
+Skipped, unavailable and cutoff-late labels are distinct omissions before numeric
+parsing; eligible labels require valid identity/availability and finite signed values.
+Zero and negative values retain their absolute percentage-point magnitude, without
+clipping or zero fill. The training identity binds every candidate and decoded
+object (including omissions), qualified IDs, omission reasons and the cutoff.
+Empty qualification refuses `POPULATION_COLLAPSED`; malformed eligible labels
+refuse `EXPERIMENT_VARIANT_FAILED`. Protected/ambiguous identities and mixed objects
+refuse before outcome access. Late admitted objects may be decoded for qualification;
+protected objects are never opened. Repository refusals propagate, with no cache,
+retry, write or partial result. Existing strict target identities remain unchanged.
+These library seams neither publish evidence nor compute historical feature aggregates.
 
 `magnitude_features.load_magnitude_history(repository, snapshot, *, event_id,
 as_of_month, horizon, history_start, purpose="selection")` binds one canonical
@@ -307,11 +333,11 @@ Other experiment report/ledger publication remains outside this library seam.
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
 snapshot-read helpers), `_pricing.py` (except the names carved out above),
-`_trades_revisions.py`.
+`_trades_revisions.py`, `_final_population.py`.
 
 ### Proposed authorized final read (#490)
 
-Request preparation and the private ops authorization/spend primitive are implemented; no production authorization entrypoint, final read or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
+Request preparation, the private ops authorization/spend primitive and the private metadata-only final population reader are implemented; no production authorization entrypoint, final read or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
 The [user decision](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6072905454)
 permits agents/supervisors to prepare requests, never to authorize them.
 
@@ -327,6 +353,17 @@ Both sets are bound together; changing month, version, snapshot or winner cannot
 `native_registration.prepare_final_holdout_request` verifies existing catalog/artifact registration metadata only; it never resolves a head, scans a population or reads results.
 Native registration's optional `final_read` declaration seals recipe, completeness-bar and frozen-model artifact references before authorization; preparation derives them, never accepts replacements. Registrations without that declaration refuse preparation.
 Request validity proves neither winner selection nor read eligibility. The later metadata-only preflight must verify the preregistered completeness artifact and refuse an unmet bar before any holdout outcome read; declared references alone do not prove completeness.
+
+**Population reader.** Private `_final_population.load_final_population(repository, request)` is the only final-read reader that returns separate held-out event-ID sets. It accepts a validated `FinalHoldoutRequest` (never a caller population) and returns a frozen `FinalPopulation` with sorted random and rolling IDs, overlap and ambiguity counts, and bound snapshot/month/version context. It reads only canonical `earnings_events` metadata with the loaders' shared membership/ambiguity rules, excludes ambiguous events from both sets, performs no writes, and does not inspect ops state or hold a grant. It is not exported or reachable from loaders, training, selection or sweep.
+
+| Population reader condition | Outcome |
+|---|---|
+| Invalid request object, unsupported membership version, or as-of month later than the current UTC month | Non-retryable `HOLDOUT_ACCESS_DENIED` before any scan. |
+| Snapshot unresolved, or resolved identity differs from `request.snapshot_id` | `SNAPSHOT_UNRESOLVED`; no fallback. |
+| `earnings_events` absent from the snapshot | `CONTRACT_MISMATCH`; no partial population. Present with no fragments, the scan yields no events and the empty-population row applies. |
+| `resolve` raising a non-integrity `DataError` (such as not-found), `ValueError`, `TypeError` or `KeyError` | `SNAPSHOT_UNRESOLVED`. An integrity-category `DataError` (such as `MANIFEST_CORRUPT`) and any other exception propagate unchanged. Integrity failures during the scan propagate as the repository's typed refusal. |
+| Both sets empty after ambiguity exclusion | `POPULATION_COLLAPSED`; never an empty success. Preregistered completeness remains the later preflight's refusal. |
+| Retry, cache, write | None; read-only, identical pinned inputs return identical populations. |
 
 **Authority/ownership.** A proposed `tools/v2_final_holdout.py` leaf composes ops'
 private authorization/state owner with a private research final evaluator. It is
@@ -451,7 +488,9 @@ This bounds retained unmatched rows, not total process RSS.
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`), `engine.v2.
 contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`),
-`engine.v2.foundation` (`ArtifactStore`, `SystemClock`) — the package's own
+`engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
+`engine.v2.foundation` (`ArtifactStore`, `SystemClock`, plus
+`final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
 at a lower layer" rule (`only_imports` is unset for this package in
 `checks/layer_map.py`, i.e. no narrower restriction than that generic
@@ -483,7 +522,12 @@ shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
 
 Callers: no `engine/` modules import this package (checked by `checks/import_layers.py`).
-Consumers are `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
+`experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`;
+`experiments/magnitude_report.py` consumes `preflight_magnitude_targets`,
+`load_magnitude_targets` and `qualify_magnitude_training_targets`.
+`experiments/native_registration.py` consumes
+`experiment_population.load_population` and `magnitude_folds`' window/planner.
+Other consumers include `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
 trade, calendar, and chain inputs from pinned v2 data. The archived
 trade-read caller omits required holdout context and is refused.
 Historical EXP-147 reads its native replay tag from `experiment_trades.PROVENANCE`.

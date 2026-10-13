@@ -59,7 +59,9 @@ def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds
     stderr_fd = os.open(diagnostics / "worker.stderr",
                         os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        child = subprocess.Popen([sys.executable, "-u", "-m", "engine.v2.ops.worker"],
+        module = ("experiments.native_gate_entrypoint" if kind.worker == "native_gate_pricing"
+                  else "engine.v2.ops.worker")
+        child = subprocess.Popen([sys.executable, "-u", "-m", module],
                                  cwd=code_root, env=env, stdin=subprocess.PIPE,
                                  stdout=subprocess.DEVNULL, stderr=stderr_fd,
                                  pass_fds=(write_fd,), start_new_session=True)
@@ -77,6 +79,8 @@ def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds
         envelope = dict(worker=kind.worker, parameters=claim.spec.parameters,
                         staging=str(staging), result_fd=write_fd, job_id=claim.job_id,
                         attempt_id=claim.attempt_id, fence=claim.fence,
+                        catalog_path=next(row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"),
+                        objects_root=str(store.root),
                         cpu_ids=list(claim.resources.assigned_cpu_ids), legacy_root=legacy,
                         **(envelope_extra or {}))
         child.stdin.write(json.dumps(envelope).encode() + b"\n")

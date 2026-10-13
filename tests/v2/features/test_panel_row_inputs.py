@@ -548,7 +548,8 @@ def test_19_delayed_close_amc_event_enters_history_only_at_producer_derived_avai
     built = build_rows(
         "AAA", events, pd.to_datetime(days).to_numpy(),
         [closes[day] for day in days],
-        pd.DataFrame({"date": pd.to_datetime(["2024-01-08"]), "implied_move": [1.0]}),
+        pd.DataFrame({"date": pd.to_datetime(["2024-01-08"]), "implied_move": [1.0],
+                      "src_iv": ["orats"]}),
         computed_at="2024-03-01T00:00:00+00:00",
         source_hash=fake_hash("cm-producer"), capture_id="cap-1")
     by_date = {row["event_date"]: row for row in built}

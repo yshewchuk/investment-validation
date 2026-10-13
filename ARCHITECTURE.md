@@ -65,6 +65,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/parity/` | [`engine/v2/parity/ARCHITECTURE.md`](engine/v2/parity/ARCHITECTURE.md) |
 | `engine/v2/serving/` | [`engine/v2/serving/ARCHITECTURE.md`](engine/v2/serving/ARCHITECTURE.md) |
 | `engine/v2/ops/` | [`engine/v2/ops/ARCHITECTURE.md`](engine/v2/ops/ARCHITECTURE.md) |
+| `engine/v2/ops/stores/massive/` | [`engine/v2/ops/stores/massive/ARCHITECTURE.md`](engine/v2/ops/stores/massive/ARCHITECTURE.md) |
 | `engine/v2/diagnosis/` | (pending) |
 | `engine/v2/dashboard/` | [`engine/v2/dashboard/ARCHITECTURE.md`](engine/v2/dashboard/ARCHITECTURE.md) |
 | `ui/` | [`ui/ARCHITECTURE.md`](ui/ARCHITECTURE.md) |
@@ -104,6 +105,10 @@ evidence. See the models and data component contracts.
   validating recipe and state parameters for `ops plan --kind training`.
   Describe dependencies at the module level because some modules serve shared
   runtime paths.
+  The smoke-only `native_gate_pricing` kind launches the fixed unlayered child
+  `experiments.native_gate_entrypoint`. After the ops protocol's launch gate opens,
+  its callback imports native pricing; ops never imports that adapter or research.
+  The verified source closure includes both files; the receipt grants no recording authority.
   - `tools/oc_check.py` appends one best-effort JSONL line per run to
     `$OC_METRICS_DIR/oc_check.jsonl` (default `.oc_logs/oc_check.jsonl`, per worktree);
     its module docstring defines the fields and failure behavior.
@@ -424,6 +429,7 @@ Only a tracked path absent from the worktree reads as empty.
 ## 4. Production entrypoints and the job graph
 
 - **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
+- **Massive acquisition — `python -m engine.v2.ops.massive_acquire`.** Explicit shadow-job submission; `ops serve` performs bounded, cache-first REST acquisition. See the [acquisition contract](engine/v2/ops/stores/massive/ARCHITECTURE.md).
 - **Shadow nightly coordination.** The operations trigger coordinates snapshot
   import, pinned planning, submission and bounded serving; preparation commands
   remain separate interfaces. It does not start the production legacy nightly.
@@ -621,9 +627,9 @@ flowchart LR
     Tools --> V2
 ```
 
-This is the production shape only — which entrypoint starts which run —
-not the internal stage dependencies (§4's `GRAPH` bullet and
-`engine/v2/ops/ARCHITECTURE.md` cover those). `"delivery"` is a resource
+This shows which entrypoint starts which run, not a complete import graph;
+§1 documents ops' unlayered tools/experiments callbacks. Internal stage dependencies are covered by §4's `GRAPH` bullet and
+`engine/v2/ops/ARCHITECTURE.md`. `"delivery"` is a resource
 class shared by `ledger_export`/`engineering_gate`/`publication`/`backup`
 (`nightly.py`'s resource-class lookup), and a node in the shadow-only
 `GRAPH` (`publication --> delivery`) — it is not one of `_DAG_STAGES`,

@@ -19,7 +19,8 @@ from tests.data_scan_support import (
 
 def _move(ticker, day):
     return dict(ticker=ticker, event_date=day, realized_move_pct=1.0,
-                available_as_of_date="2024-05-05", implied_move_pct=2.0, quarter_ordinal=1,
+                available_as_of_date="2024-05-05", implied_move_pct=2.0, event_ordinal=0,
+                admitted=False, mean_prior_or_implied=None, n_prior_implied=0,
                 skipped=False, computed_at="2024-05-05T00:00:00Z", source_hash="synthetic",
                 capture_id="synthetic")
 

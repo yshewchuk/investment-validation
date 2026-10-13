@@ -43,7 +43,8 @@ def _write_failure_details(root: Path, details: dict) -> None:
         os.close(fd)
 
 
-def main():
+def main(*, dispatcher=None):
+    """Run the gated protocol; a fixed composition root may supply its callback."""
     envelope = json.loads(sys.stdin.buffer.readline())
     os.sched_setaffinity(0, envelope["cpu_ids"])
     root = Path(envelope["staging"])
@@ -51,7 +52,8 @@ def main():
     fd = int(envelope["result_fd"])
     worker_progress.configure(root)
     try:
-        result = dispatch(envelope["worker"], envelope["parameters"], root, envelope=envelope)
+        result = (dispatch if dispatcher is None else dispatcher)(
+            envelope["worker"], envelope["parameters"], root, envelope=envelope)
         result.update(schema_version="worker_result.v1.0", job_id=envelope["job_id"],
                       attempt_id=envelope["attempt_id"], fence=envelope["fence"])
         result["self_peak_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
@@ -139,6 +141,9 @@ def _generic_problem(exc: BaseException):
 
 def dispatch(worker, parameters, root, *, envelope=None):
     envelope = envelope or {}
+    if worker == "massive_acquisition":
+        from engine.v2.ops.stores.massive.acquisition import run
+        return run(parameters, root, envelope)
     if worker in ("incremental_refresh", "computed_moves_refresh",
                   "forward_calendar_refresh"):
         return _dispatch_refresh(worker, parameters, root)

@@ -14,7 +14,8 @@ row-building math lives in :mod:`engine.v2.data.computed_moves` and the
 capture/store path in :mod:`engine.v2.ops.computed_moves_store`.
 
 Layout: ``ticker, event_date, realized_move_pct, available_as_of_date,
-implied_move_pct, quarter_ordinal, skipped, computed_at, source_hash,
+implied_move_pct, event_ordinal, admitted, mean_prior_or_implied,
+n_prior_implied, skipped, computed_at, source_hash,
 capture_id``, primary key
 ``(ticker, event_date)``, one partition per ticker (``partition_columns =
 ("ticker",)``). New captures use one fragment per event; older snapshots may
@@ -46,7 +47,7 @@ _SCHEMA_EVOLUTION_POLICY = (
     "alone) raises IDENTITY_CONFLICT on any second, differently-shaped definition "
     "under that id regardless of nullability, so a nullable addition to an "
     "already-committed contract_id needs a new major contract_id/semantic_version too "
-    "(computed_moves.v3/3.0.0 is this table's own example)."
+    "(computed_moves.v4/4.0.0 is this table's own example)."
 )
 
 _COLUMNS = (
@@ -70,13 +71,23 @@ _COLUMNS = (
                                "-- never treat a null available_as_of_date as always available"),
     ColumnContract(name="implied_move_pct", physical_type="float64", nullable=True,
                    unit="percent",
-                   null_policy="null when daily_market has no implied_move row strictly "
-                               "before event_date"),
-    ColumnContract(name="quarter_ordinal", physical_type="int64", nullable=False,
-                   observation_time_semantics="ordinal of the event within its calendar "
-                                              "year, as the legacy computed-moves pull labels it"
-                                              " (0 on a skipped row -- the ordinal is meaningful "
-                                              "only when skipped is False)"),
+                   null_policy="implied_move on the last daily_market row strictly before "
+                               "event_date whose src_iv is non-null, filled for skipped events "
+                               "too; null when no such row precedes the event or that row's "
+                               "implied_move is null or non-finite (never an older row)"),
+    ColumnContract(name="event_ordinal", physical_type="int64", nullable=False,
+                   observation_time_semantics="0-based count of every earlier event of the "
+                                              "ticker in the builder's event list, realised "
+                                              "or skipped"),
+    ColumnContract(name="admitted", physical_type="bool", nullable=False,
+                   null_policy="event_ordinal >= 4 (the legacy panel MIN_HISTORY warm-up)"),
+    ColumnContract(name="mean_prior_or_implied", physical_type="float64", nullable=True,
+                   unit="percent",
+                   null_policy="mean of the stored implied_move_pct of earlier admitted "
+                               "events, nulls skipped; null on a non-admitted row or when no "
+                               "earlier admitted event has an implied value"),
+    ColumnContract(name="n_prior_implied", physical_type="int64", nullable=False,
+                   null_policy="count of values behind mean_prior_or_implied; 0 when it is null"),
     ColumnContract(name="skipped", physical_type="bool", nullable=False,
                    null_policy="the event could not be bracketed: a missing close on either "
                                "side, or a P→Q window wider than MAX_GAP_CALENDAR_DAYS"),
@@ -94,9 +105,9 @@ _COLUMNS = (
 
 def _build() -> TableContract:
     fields = dict(
-        contract_id="computed_moves.v3",
+        contract_id="computed_moves.v4",
         table_name=COMPUTED_MOVES_TABLE_NAME,
-        semantic_version="3.0.0",
+        semantic_version="4.0.0",
         columns=_COLUMNS,
         primary_key=("ticker", "event_date"),
         duplicate_policy="none_by_construction -- one row per (ticker, event_date)",

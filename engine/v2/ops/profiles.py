@@ -291,7 +291,9 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-POLICY_VERSION = "ops_resources.2026-10-08.v9"
+# v10 adds a single-thread native smoke profile with the existing experiment
+# memory/scratch reservation; it does not claim a measured full-universe fit.
+POLICY_VERSION = "ops_resources.2026-10-10.v10"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -395,6 +397,8 @@ DEFAULT_POLICY = ResourcePolicy(
                         scratch_bytes=20 * GIB, heavy=True, disk_heavy=True),
         ResourceProfile(name="experiment_heavy", memory_bytes=11 * GIB // 2, cpu_count=5,
                         scratch_bytes=10 * GIB, heavy=True, disk_heavy=True),
+        ResourceProfile(name="native_experiment", memory_bytes=11 * GIB // 2, cpu_count=1,
+                        thread_count=1, scratch_bytes=10 * GIB, heavy=True, disk_heavy=True),
     ),
 )
 

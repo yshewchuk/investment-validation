@@ -16,6 +16,7 @@ Replaces (§4.4): `new supervisor and catalog`, `dashboard/nightly.py becomes a 
 - Durable job submission, leases, retry history and dependencies.
 - Resource admission and per-job CPU placement.
 - The nightly job graph and its release boundary.
+- Explicit Massive cache-first acquisition via `python -m engine.v2.ops.massive_acquire`; [operator usage](stores/massive/README.md).
 
 ## Non-responsibilities
 
@@ -38,15 +39,18 @@ of importing the supervisor.
 Native experiment registration also exposes these existing submodule APIs:
 `catalog.transaction`, `errors.OpsError`, `errors.fail`,
 `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`,
-`experiments.register_hypothesis_in_transaction`,
+`experiments.register_hypothesis_in_transaction`, `experiments.NATIVE_GATE_WORKER`, `experiments.NATIVE_GATE_ENTRYPOINT`, `experiments.NATIVE_GATE_RUNNERS`,
 `fingerprints.environment_identity`, `fingerprints.source_closure` and
-`native_registration.verified_registration_bytes`.
+`native_registration.verified_registration_bytes` and
+`native_registration.magnitude_execution_document` (the fixed mean-baseline
+execution policy with an explicit evaluation-label cutoff) and
+`native_registration.validate_magnitude_execution` (pure closed-envelope validation).
 They compose one resolved plan, source/environment binding and primary catalog
 reservation; the caller owns the transaction around the reservation helper.
 The registration verifier reads only catalog-owned binding evidence and grants no final-read authority; internal `final_holdout.authorize_final_holdout` has only synthetic tests as consumers and no production entrypoint or read capability.
 Native prediction reporting also consumes the public fold-local
 `experiment_folds.TrainFoldRule` and `experiment_folds.fit_walk_forward_fold`.
-Its CLI consumes `catalog.connect` and `experiments.experiment_spec_from_document`
+The fixed native gate child consumes `worker.main(dispatcher=...)` for the unchanged launch/result protocol; ops never imports its pricing adapter. The prediction CLI consumes `catalog.connect` and `experiments.experiment_spec_from_document`
 to open an existing catalog and decode the same strict experiment specification.
 
 `native.input_decoding._load_native_score_inputs` is an internal decoder shared
@@ -88,6 +92,11 @@ process. `Service._reconcile_native_score_batch_shadow` only submits producer
 parameters for an eligible pinned-snapshot identity. See the component
 architecture contract.
 
+The internal `native_score_batch._STRATEGY_REGISTRY` declares each admitted
+row's driver/alias, gate, policy key and source-bundle strategy. Only STR-THRU
+is registered; it is a single-driver assembly seam, with no runtime
+registration API or chooser execution contract.
+
 `carried_set.CarriedTickerExclusion`, `carried_set.CarriedSetResolution`,
 `carried_set.resolve_carried_set`, and
 `carried_set.build_uncarried_exclusions` expose slice-1 carried-set evidence.
@@ -98,13 +107,16 @@ either required table. Their current consumer is
 
 `nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package and used by completion persistence in `supervisor.Service`; tests include `tests/v2/ops/test_nightly_session.py` and `tests/v2/ops/test_nightly_completion.py`. `nightly_completion` (run-scoped reports, #564 slice 7; exports `Disposition`, `SCHEMA`, `build_completion_report`, `record_completion`) is internal and consumed through `supervisor.Service`; `tests/v2/ops/test_nightly_completion.py` covers its report contract and persistence. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is imported by the production modules `nightly_chain`, `nightly_history`, and `nightly_repair`; `nightly_trigger` does not call it yet. `tests/v2/ops/test_nightly_receipts.py` covers its contract. `nightly_readiness` (legacy run-report readiness for a session, #564 slice 3; exports `LegacyReadiness`, `check_legacy_report`) is internal and uncalled by `nightly_trigger`; `tests/v2/ops/test_nightly_readiness.py` covers its contract. `nightly_chain` (snapshot import/refresh/moves/capture step chain over step receipts, #564 slice 4; exports `ChainResult`, `ChainStep`, `run_snapshot_chain`) is imported by production module `nightly_history`; `nightly_trigger` does not call it directly. `tests/v2/ops/test_nightly_chain.py` covers its contract.
 
-<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, environment_identity, source_closure, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim -->
+<!-- public-interface: registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, environment_identity, source_closure, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main -->
 
 ## Consumers
 
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
+
+`experiments/native_gate_worker.py` consumes `stages.NativeGateParameters`, `executor.THREAD_VARIABLES`, `experiments.experiment_spec_from_document`/`resolve_experiment_plan`, `fingerprints.environment_identity`/`source_closure` and `errors.OpsError`/`fail` for admission.
+`experiments/native_gate_entrypoint.py` consumes `worker.main` and injects only its fixed pricing callback.
 
 No other production package imports ops. The CLI starts the coordinator, and
 serving reads a versioned health artifact without a peer-layer import. The one
@@ -124,6 +136,9 @@ the engine import graph; it introduces no peer-layer engine dependency.
 `experiments/native_outcomes.py` consumes `catalog.transaction` and
 `errors.OpsError`/`fail` for catalog-owned publication and typed refusal.
 It owns short catalog transactions; artifact and CSV effects stay outside them.
+`experiments/magnitude_inputs.py` consumes `native_registration.magnitude_execution_document`;
+`experiments/magnitude_report.py` consumes `native_registration.validate_magnitude_execution`
+and `errors.fail` before computing/reporting the admitted mean baseline.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection

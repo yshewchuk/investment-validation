@@ -2,14 +2,15 @@
 
 ## Ownership
 
-Dependency-free contracts shared by the ops refresh stores, at the `stores`
-level of the planned dependency policy (`checks/ops_dependencies.json`). A
-module here imports nothing else from `engine.v2.ops`.
+Store-tier contracts and acquisition owners under the planned dependency policy
+(`checks/ops_dependencies.json`). `refresh_contracts` remains dependency-free;
+the [Massive acquisition package](massive/ARCHITECTURE.md) composes stores, provider edges and core runtime guards.
 
 ## Responsibilities
 
 - Hold `refresh_contracts.REFRESH_INPUT_DOCUMENT_NAMES`: the staged identity
   document name for each refresh job kind.
+- Own supervised Massive raw acquisition through `massive.acquisition`.
 
 ## Non-responsibilities
 
