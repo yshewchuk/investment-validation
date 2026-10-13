@@ -86,6 +86,7 @@ def test_saved_acquisition_becomes_atomic_pinned_daily_snapshot(harness, monkeyp
     scope = support.request()
     scope.update(adjustment_basis=basis, params=scope["params"] | {"adjusted": basis == "split_adjusted"})
     payload = json.loads(support.body(scope)) | {"adjusted": basis == "split_adjusted"}
+    payload["results"][0].update(o=13.25, h=18.5, l=11.75, c=17.125, v=137.5)
     source, ref, document = acquired(h, scope=scope, payload=canonical_json(payload).encode())
     attempt, params = prepare(h, source)
     before_budget = [tuple(r) for r in h.conn.execute("SELECT * FROM provider_reservations")]
@@ -95,8 +96,8 @@ def test_saved_acquisition_becomes_atomic_pinned_daily_snapshot(harness, monkeyp
     rows = read(h, result, bound=1)
     original = document["coverage"]["bindings"][0]
     assert rows == [{"ticker": "SYNTH", "date": "2026-08-01", "adjustment_basis": basis,
-        "source_timestamp_ms": payload["results"][0]["t"], "open": 10., "high": 12., "low": 9.,
-        "close": 11., "volume": 100., "occurrence_id": original["occurrence_id"],
+        "source_timestamp_ms": payload["results"][0]["t"], "open": 13.25, "high": 18.5, "low": 11.75,
+        "close": 17.125, "volume": 137.5, "occurrence_id": original["occurrence_id"],
         **{k: original["evidence"][k] for k in ("raw_receipt_id", "raw_hash", "first_received_at", "observed_at")}}]
     assert protocol["outputs"] == [{"name": "snapshot", "path": "snapshot.json", "schema": "snapshot_ref.v1.0"}]
     assert set(result.table_versions) == {"massive_daily"}
@@ -179,17 +180,27 @@ def test_snapshot_initial_and_replay_require_live_fence(harness, existing, refus
 
 def test_paginated_rows_retain_each_original_page_clock_and_receipt(harness):
     h = harness
-    params, _, current, calls = pagination.prefix(h)
+    scope, calls = support.request(), []
+    params = support.parameters(cap=2)
+    support.enqueue(h, params=params)
+    first = support.claim(h)
+    current = pagination.continuation(scope, 1, day="2026-08-02")
+    payload = json.loads(daily_payload([("2026-08-01", 20)])) | {"next_url": pagination.next_url(current)}
+    error = pagination.refused(h, first, params,
+        pagination.fetcher(calls, scope, canonical_json(payload).encode()), "SOURCE_NOT_FINAL")
+    assert support.retry(h, first, error) == "retry_wait"
     last = support.claim(h)
     _, document = support.run(h, last, pagination.fetcher(calls, current,
-        pagination.payload(support.request(), day="2026-08-02")), params)
+        daily_payload([("2026-08-02", 40)])), params)
     committed_output(h, last, document)
     pages = [json.loads(row["document_json"]) for row in pagination.pages(h)]
     assert pages[0]["observed_at"] != pages[1]["observed_at"]
     attempt, params = prepare(h, last.job_id)
     _, result = execute(h, attempt, params)
     rows = read(h, result, bound=2)
-    assert [r["date"] for r in rows] == ["2026-08-01", "2026-08-02"]
+    assert [{k: r[k] for k in ("date", "open", "high", "low", "close", "volume")} for r in rows] == [
+        {"date": "2026-08-01", "open": 19.5, "high": 21.5, "low": 18.5, "close": 20., "volume": 200.25},
+        {"date": "2026-08-02", "open": 39.5, "high": 41.5, "low": 38.5, "close": 40., "volume": 400.25}]
     for row, page in zip(rows, pages, strict=True):
         assert {k: row[k] for k in ("raw_receipt_id", "raw_hash", "observed_at", "first_received_at")} == {
             k: page[k] for k in ("raw_receipt_id", "raw_hash", "observed_at", "first_received_at")}
@@ -200,7 +211,8 @@ def daily_payload(days):
     rows = []
     for day, close in days:
         row = json.loads(support.body(support.request(start=day)))["results"][0]
-        rows.append(row | {"o": close, "c": close, "l": close - 1, "h": close + 1})
+        rows.append(row | {"o": close - .5, "c": close, "l": close - 1.5, "h": close + 1.5,
+                           "v": close * 10 + .25})
     return canonical_json({"status": "OK", "ticker": "SYNTH", "adjusted": False,
                            "resultsCount": len(rows), "results": rows}).encode()
 
@@ -218,7 +230,10 @@ def test_saved_clipped_mosaic_ignores_later_coverage_and_preserves_old_pin(harne
     attempt, params = prepare(h, source)
     monkeypatch.setattr(coverage, "plan", support.no_fetch)
     _, result = execute(h, attempt, params)
-    assert [(r["date"], r["close"]) for r in read(h, result, bound=2)] == [("2026-08-10", 40), ("2026-08-20", 30)]
+    assert [{k: r[k] for k in ("date", "open", "high", "low", "close", "volume")}
+            for r in read(h, result, bound=2)] == [
+        {"date": "2026-08-10", "open": 39.5, "high": 41.5, "low": 38.5, "close": 40., "volume": 400.25},
+        {"date": "2026-08-20", "open": 29.5, "high": 31.5, "low": 28.5, "close": 30., "volume": 300.25}]
     before = tuple(h.conn.iterdump())
     with pytest.raises(errors.DataError) as error:
         read(h, result, bound=1)
@@ -513,6 +528,50 @@ def test_explicit_normalization_limits_refuse_before_native_publication(harness,
         execute(h, attempt, params)
     assert error.value.code == "RESOURCE_LIMIT_EXCEEDED"
     assert tuple(h.conn.iterdump()) == before
+
+
+def test_repeated_occurrence_decoding_exceeds_bound_after_verification_succeeds(harness, monkeypatch):
+    h = harness
+    wide = daily_payload([("2026-08-01", 10), ("2026-08-10", 20), ("2026-08-20", 30)])
+    middle = daily_payload([("2026-08-10", 40)])
+    acquired(h, key="wide", payload=wide)
+    support.seed_overlap(h, "middle", support.request("2026-08-05", "2026-08-15"),
+                         "2026-09-12T00:01:00.000000Z", payload=middle)
+    source, _, saved = acquired(h, key="repeated-mosaic")
+    bindings = saved["coverage"]["bindings"]
+    assert [(b["start"], b["end"]) for b in bindings] == [
+        ("2026-08-01", "2026-08-04"), ("2026-08-05", "2026-08-15"), ("2026-08-16", "2026-08-31")]
+    identities = [b["occurrence_id"] for b in bindings]
+    assert identities[0] == identities[2] != identities[1]
+    attempt, params = prepare(h, source)
+    limit = len(wide) + len(middle)
+    monkeypatch.setattr(coverage, "MAX_VERIFIED_BYTES", limit)
+    original_verify, original_load = coverage._verified, pinned.load_raw_receipt
+    verified, decoded = [], []
+    def verify(conn, store, row, remaining):
+        evidence = original_verify(conn, store, row, remaining)
+        verified.append((row["occurrence_id"], remaining[0]))
+        return evidence
+    def load(conn, store, receipt_id):
+        body = original_load(conn, store, receipt_id)
+        decoded.append((receipt_id, len(body)))
+        return body
+    monkeypatch.setattr(coverage, "_verified", verify)
+    monkeypatch.setattr(pinned, "load_raw_receipt", load)
+    before = tuple(h.conn.iterdump())
+    objects = sorted(p.relative_to(h.store.root) for p in h.store.root.rglob("*") if p.is_file())
+    with pytest.raises(OpsError) as error:
+        execute(h, attempt, params)
+    assert error.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert error.value.problem.message == "Massive normalization exceeds raw byte bound"
+    assert verified == [(identities[0], len(middle)), (identities[1], 0)]
+    assert decoded == [(b["evidence"]["raw_receipt_id"], size)
+                       for b, size in zip(bindings, [len(wide), len(middle), len(wide)], strict=True)]
+    assert sum(size for _, size in decoded[:2]) == limit < sum(size for _, size in decoded)
+    assert tuple(h.conn.iterdump()) == before
+    assert h.conn.execute("SELECT count(*) FROM data_snapshots").fetchone()[0] == 0
+    assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
+    assert sorted(p.relative_to(h.store.root) for p in h.store.root.rglob("*") if p.is_file()) == objects
 
 
 @pytest.mark.parametrize("flags", [[], ["--acquisition-job", "invalid"], ["--unexpected", "synthetic"]])
