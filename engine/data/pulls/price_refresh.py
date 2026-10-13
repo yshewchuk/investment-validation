@@ -29,15 +29,16 @@ a cached dated fetch covers the session only if its ``fetched_at`` (UTC-aware)
 is later than the close of the required trading day — the latest trading day
 on or before the session, per :func:`_required_daily_bar_date`, closing at the
 regular 16:00 America/New_York every trading day — plus
-:data:`COVERAGE_CLOSE_BUFFER`. On the ~3 NYSE half-days a year a fetch stamped
-between the early close and 16:30 ET is refetched once (accepted harmless
-extra refetch).
+:data:`COVERAGE_CLOSE_BUFFER`. On the ~3 NYSE half-days a year a fetch made
+before 16:30 ET may be refetched (accepted harmless extra refetch).
 A pre-market fetch lands on the session's date but its last bar is yesterday's
 close, so stamping alone was never coverage until the close-time test was
 added (the 2026-10-12 defect); reading bodies to re-derive bar coverage was
 dropped as over-engineering (the 2026-10-13 simplification decision) — a bad
-or truncated response is capture's job: it fails there and the next refresh
-retries (accepted trade-off). And when the plan *does* ask
+or truncated post-close response is NOT retried until the next session's
+close (same-session and weekend reruns treat it as covered); this is the
+accepted trade-off, and capture is responsible for failing loudly. And when
+the plan *does* ask
 for the session, :func:`run_refresh` gives each daily call a fresh
 ``refetch_token`` — today's cached body is a known-stale answer, so the token
 guarantees a real network call rather than a same-day cache hit. Monthly
@@ -115,9 +116,9 @@ def _regular_market_close(day) -> pd.Timestamp:
     """The close of trading day ``day``: 16:00 America/New_York, every day.
 
     No early-close rules are applied here — on the ~3 NYSE half-days a year a
-    fetch stamped between the 13:00 ET early close and the 16:30 ET cutoff
-    (close + :data:`COVERAGE_CLOSE_BUFFER`) is refetched once, an accepted
-    harmless extra refetch. DST is carried by the zone name, and the result is
+    fetch made before the 16:30 ET cutoff (close +
+    :data:`COVERAGE_CLOSE_BUFFER`) may be refetched, an accepted harmless
+    extra refetch. DST is carried by the zone name, and the result is
     converted to UTC so it compares directly against a fetch's UTC
     ``fetched_at`` stamp.
     """
@@ -250,13 +251,16 @@ def plan_refresh(
         :func:`_regular_market_close` of :func:`_required_daily_bar_date` (the
         latest trading day on or before ``session``; the regular 16:00
         America/New_York close every trading day) plus
-        :data:`COVERAGE_CLOSE_BUFFER`. On a half-day a fetch stamped between
-        the early close and 16:30 ET is refetched once (accepted). Anything
+        :data:`COVERAGE_CLOSE_BUFFER`. On a half-day a fetch made before
+        16:30 ET may be refetched (accepted). Anything
         else — a pre-market or
         at-the-close fetch, a fetch on the wrong day, no fetch at all — goes
         on today's daily list. The body is never read: a bad or truncated
-        response is capture's job (accepted trade-off), and unknown is never
-        coverage, which can only lengthen the daily list, never shorten it.
+        post-close response is NOT retried until the next session's close
+        (same-session and weekend reruns treat it as covered — the accepted
+        trade-off; capture is responsible for failing loudly), and unknown
+        is never coverage, which can only lengthen the daily list, never
+        shorten it.
     always_daily:
         Tickers that are always on the daily schedule regardless of events,
         e.g. the native calendar series. A forced ticker with a post-close
@@ -457,7 +461,10 @@ def load_fetch_history(*, fetch_root=None) -> dict[str, list[date_cls]]:
     A missing or unparseable ``fetched_at`` is skipped — it contributes
     nothing, the same way :func:`load_fetch_times` treats unknown: the
     ticker's month is refetched rather than the whole plan aborting on one
-    bad stamp.
+    bad stamp. Unparseable includes NaT: ``pd.Timestamp`` happily parses a
+    ``"NaT"`` (or ``""``) stamp into NaT without raising, and that is no
+    date, so a parse result that is not a real ``pd.Timestamp`` or that
+    ``pd.isna`` rejects is skipped like any other garbage.
 
     ``fetch_root`` defaults to ``engine.paths.RAW_FETCH`` and exists only so
     tests can point this at a throwaway tree.
@@ -474,6 +481,8 @@ def load_fetch_history(*, fetch_root=None) -> dict[str, list[date_cls]]:
             when = pd.Timestamp(fetched_at)
         except (TypeError, ValueError):
             continue
+        if not isinstance(when, pd.Timestamp) or pd.isna(when):
+            continue
         out.setdefault(str(ticker), []).append(when.normalize().date())
     return out
 
@@ -488,14 +497,18 @@ def load_fetch_times(*, fetch_root=None) -> dict[str, list[pd.Timestamp]]:
     a ticker, a present ``fetched_at``), but keeping the full timestamp
     rather than its date: the daily skip asks whether a fetch was stamped
     AFTER the required trading day's close plus :data:`COVERAGE_CLOSE_BUFFER`
-    (the regular 16:00 ET close every trading day — a fetch on a half-day
-    between the early close and 16:30 ET is refetched once, accepted), which
+    (the regular 16:00 ET close every trading day — a fetch made on a
+    half-day before 16:30 ET may be refetched, accepted), which
     a date alone cannot answer.
     A missing or unparseable ``fetched_at`` contributes nothing: unknown is
     never coverage, which can only lengthen the daily list, never shorten it.
-    The body is never opened — bar validity is capture's job, and a bad or
-    truncated response fails there for the next refresh to retry against
-    (accepted trade-off).
+    Unparseable includes NaT — ``pd.Timestamp("NaT")`` parses to NaT without
+    raising, and a NaT stamp has no side of any cutoff, so it is skipped
+    exactly like a garbage one.
+    The body is never opened — bar validity is capture's job, which fails
+    loudly there; a bad or truncated post-close response is NOT retried
+    until the next session's close (same-session and weekend reruns treat
+    it as covered — the accepted trade-off).
 
     ``fetch_root`` defaults to ``engine.paths.RAW_FETCH`` and exists only so
     tests can point this at a throwaway tree.
@@ -511,6 +524,8 @@ def load_fetch_times(*, fetch_root=None) -> dict[str, list[pd.Timestamp]]:
         try:
             when = pd.Timestamp(fetched_at)
         except (TypeError, ValueError):
+            continue
+        if not isinstance(when, pd.Timestamp) or pd.isna(when):
             continue
         if when.tzinfo is None:
             when = when.tz_localize("UTC")

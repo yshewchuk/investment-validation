@@ -316,8 +316,10 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
 
     # Daily coverage is stamp-based: a board ticker is skipped only when a
     # cached fetch's own ``fetched_at`` post-dates the required trading day's
-    # regular 16:00 ET close plus the coverage buffer (a half-day fetch
-    # between the early close and 16:30 ET is refetched once, accepted). The
+    # regular 16:00 ET close plus the coverage buffer (a half-day fetch made
+    # before 16:30 ET may be refetched, accepted). A bad or truncated
+    # post-close response is not retried until the next session's close --
+    # capture is responsible for failing loudly (accepted trade-off). The
     # loader reads fetch metadata only -- no body parsing anywhere on this
     # path.
     fetch_root = None

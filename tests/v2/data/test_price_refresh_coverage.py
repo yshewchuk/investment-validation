@@ -5,12 +5,13 @@ A daily ticker's cached fetch covers the session only if its ``fetched_at``
 trading day on or before the session, the regular 16:00 America/New_York
 close for every trading day (``price_refresh._regular_market_close``) — plus
 ``COVERAGE_CLOSE_BUFFER`` (30 minutes). On the ~3 NYSE half-days a year a
-fetch made between the early close and 16:30 ET is refetched once (accepted
+fetch made before 16:30 ET may be refetched (accepted
 harmless extra refetch). A pre-market fetch lands on the session's date but
 predates its close (the 2026-10-12 defect), so it never excuses the session.
-Bodies are never parsed on this path: a bad or truncated response is
-capture's job — it fails there and the next refresh retries (accepted
-trade-off, 2026-10-13 simplification decision). Store-level fixtures write
+Bodies are never parsed on this path: capture is responsible for failing
+loudly, and a bad or truncated post-close response is NOT retried until the
+next session's close — same-session and weekend reruns treat it as covered
+(accepted trade-off, 2026-10-13 simplification decision). Store-level fixtures write
 into a real ``Fetcher`` over a throwaway root through a fake yfinance adapter,
 stamping arrival by freezing the clock or writing the sidecar meta directly.
 """
@@ -144,13 +145,32 @@ def test_coverage_is_strictly_after_close_plus_buffer():
     assert one_microsecond_later["skipped_already_fetched"] == ["AAA"]
 
 
-def test_a_half_day_fetch_after_the_early_close_is_refetched_once():
+def test_a_half_day_fetch_before_the_1630_et_cutoff_is_refetched():
     """2026-11-27 is Black Friday: a 13:45 ET fetch predates the plain 16:30 ET
     cutoff, so it is refetched — the accepted harmless extra refetch."""
     plan = pr.plan_refresh("2026-11-27", events=_events([("AAA", "2026-11-27")]),
                            price_universe=[],
                            fetch_times={"AAA": [pd.Timestamp("2026-11-27T18:45:00+00:00")]})
     assert plan["daily"] == ["AAA"]
+
+
+def test_the_coverage_cutoff_follows_the_new_york_zone_in_winter():
+    """The zone, not a fixed UTC hour: 2026-12-14 is a Monday in EST, so the
+    regular 16:00 ET close is 21:00Z and the cutoff 21:30Z. A 20:45Z stamp
+    (15:45 ET, before the close) refetches even though it would clear the
+    20:30Z EDT cutoff of a summer session; 21:45Z (16:45 ET) excuses the
+    session."""
+    winter_events = _events([("AAA", "2026-12-14")])
+    pre_close = pr.plan_refresh("2026-12-14", events=winter_events,
+                                price_universe=[],
+                                fetch_times={"AAA": [pd.Timestamp("2026-12-14T20:45:00+00:00")]})
+    assert pre_close["daily"] == ["AAA"]
+    assert pre_close["skipped_already_fetched"] == []
+    post_close = pr.plan_refresh("2026-12-14", events=winter_events,
+                                 price_universe=[],
+                                 fetch_times={"AAA": [pd.Timestamp("2026-12-14T21:45:00+00:00")]})
+    assert post_close["skipped_already_fetched"] == ["AAA"]
+    assert post_close["daily"] == []
 
 
 def test_a_monday_holiday_session_is_covered_by_friday_post_close():
@@ -209,7 +229,8 @@ def test_a_ticker_whose_only_stamps_are_unreadable_is_daily(fetch_root):
 def test_a_post_close_stamp_covers_even_when_the_body_is_garbage(fetch_root):
     """The accepted trade-off, pinned: coverage never opens the body, so a
     truncated response stamped after the close counts as covered — capture
-    is what rejects the bad rows, and the next session's fetch retries."""
+    is responsible for failing loudly, and this response is NOT retried
+    until the next session's close."""
     directory = Path(fetch_root) / "yfinance" / "gb"
     directory.mkdir(parents=True)
     (directory / "gb.body.gz").write_bytes(b"this is not even gzip")
@@ -249,6 +270,35 @@ def test_invoke_price_refresh_planned_path_survives_an_unparseable_stamp(tmp_pat
     assert "BADSTAMP" not in plan["skipped_already_fetched"]
     assert plan["monthly"] == []
     assert result["report"] is None, "dry run fetches nothing"
+
+
+@pytest.mark.parametrize("fetched_at", ["NaT", ""])
+def test_invoke_price_refresh_planned_path_plans_daily_on_a_nat_or_empty_stamp(
+        tmp_path, fetched_at):
+    """``pd.Timestamp("NaT")`` parses WITHOUT raising and hands back NaT, and
+    NaT is no date and no side of any cutoff — an empty stamp likewise
+    carries no time. Both are unparseable: the entry contributes nothing to
+    either loader (neither may crash on it), and through the production
+    entry point the ticker is planned daily rather than raising."""
+    from engine.v2.ops.legacy_adapter import invoke_price_refresh
+
+    source_root = tmp_path / "source"
+    fetch_root = source_root / "data" / "raw" / "fetch"
+    _write_raw_fetch(fetch_root, "NATSTAMP",
+                     key=f"k-blank-stamp-{fetched_at or 'empty'}",
+                     fetched_at=fetched_at)
+    _write_raw_fetch(fetch_root, "GOODSTAMP", key="k-post-close",
+                     fetched_at=POST_CLOSE_STAMP)
+
+    result = invoke_price_refresh(SESSION, dry_run=True,
+                                  planned_tickers=("NATSTAMP", "GOODSTAMP"),
+                                  source_root=source_root)
+
+    plan = result["plan"]
+    assert "NATSTAMP" in plan["daily"], f"{fetched_at!r} is unparseable: refetch"
+    assert "NATSTAMP" not in plan["skipped_already_fetched"]
+    assert "GOODSTAMP" in plan["skipped_already_fetched"]
+    assert plan["monthly"] == []
 
 
 # --------------------------------------------------------------------------
