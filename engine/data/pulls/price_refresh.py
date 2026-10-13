@@ -134,9 +134,11 @@ def _coverage_stamp(stamp) -> pd.Timestamp | None:
     Anything else — a garbage string, ``None``, NaT, a naive timestamp — is
     no time at all, so it returns ``None`` and contributes nothing: unknown
     is never coverage, which can only lengthen the daily list, never
-    shorten it (the same rule :func:`load_fetch_times` applies on the
-    loader side, re-checked here because callers can inject the mapping
-    directly).
+    shorten it. This is not the same rule as the loader's:
+    :func:`load_fetch_times` localizes a naive stored stamp to UTC (stored
+    stamps are UTC), so a naive value read off disk still counts as coverage,
+    whereas a non-Timestamp or naive stamp passed directly to
+    :func:`plan_refresh` through ``fetch_times`` is treated as uncovered.
     """
     if not isinstance(stamp, (pd.Timestamp, datetime)):
         return None

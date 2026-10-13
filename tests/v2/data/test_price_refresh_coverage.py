@@ -388,3 +388,34 @@ def test_a_tokenless_repeat_is_a_cache_hit_while_a_token_misses(fetch_root, monk
                         live=True, note="price-refresh")
     assert b"2026-09-11,100" in rec.body and rec.from_cache, \
         "the untokenized fetch still serves the stale body, kept untouched"
+
+
+def test_the_module_fetch_wrapper_forwards_refetch_token_to_the_fetcher(monkeypatch):
+    """The module-level ``fetch`` wrapper must pass the caller's nonce through
+    to ``Fetcher.fetch`` verbatim (the refetch path price-refresh relies on),
+    and a default ``None`` when the caller omits it."""
+
+    class _Spy:
+        def __init__(self):
+            self.kwargs = []
+
+        def fetch(self, source, endpoint, params, *, live, timeout, note,
+                  refetch_token):
+            self.kwargs.append({"source": source, "endpoint": endpoint,
+                                "params": params, "live": live,
+                                "timeout": timeout, "note": note,
+                                "refetch_token": refetch_token})
+            return "record"
+
+    spy = _Spy()
+    monkeypatch.setattr(fetch_mod, "_default", lambda: spy)
+
+    fetch_mod.fetch("yfinance", "history", {"ticker": "AAA", "period": "max"},
+                    live=True, note="price-refresh", refetch_token="tok")
+    assert spy.kwargs[-1]["refetch_token"] == "tok", \
+        "the caller's token reaches Fetcher.fetch unchanged"
+    assert spy.kwargs[-1]["live"] is True and spy.kwargs[-1]["note"] == "price-refresh"
+
+    fetch_mod.fetch("yfinance", "history", {"ticker": "AAA", "period": "max"})
+    assert spy.kwargs[-1]["refetch_token"] is None, \
+        "omitting the token reaches Fetcher.fetch as None, the ordinary cache-first path"
