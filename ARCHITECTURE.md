@@ -265,6 +265,14 @@ evidence. See the models and data component contracts.
     taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
+  - **Mutation PR status** (`tools/mutation_pr_status.py`): the gremlins `report` job
+    classifies the merged mutation report by FILE (inputs: the merged `summary.json` and
+    `results.jsonl`, and the PR's changed-file list from `git diff --name-only`). `state` is
+    `failure` for a surviving mutant in a file the PR changed or a failing PR test run,
+    `success` only for a clean measured run of every planned module, and `neutral` for
+    everything else, including any malformed or partial report. `report_status` posts the state
+    as one check run named `mutation/pr` (never a commit status; not a required check). The rules
+    and the decision table are in `tests/README.md` ("Mutation CI").
 
 The active PR workflow uses `tools/mutation_pilot.py select-tests` and the
 import-graph policy described above. For each non-empty diff that yields a

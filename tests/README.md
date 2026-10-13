@@ -341,13 +341,13 @@ the first two cancels an older still-running run of its own family:
 GitHub always lists it under the default branch's Actions history instead --
 so, since 2026-09-27, each backend's own last job, `report_status`, posts
 the outcome onto the PR's own head commit itself
-(`github.event.workflow_run.head_sha`) as a plain commit status: this
-design does not add either context to branch protection's required-checks
-list, so nothing here starts blocking merges on its own (a repo admin
-requiring a status context by name is a separate, later, explicit action,
+(`github.event.workflow_run.head_sha`): mutmut as a plain commit status, gremlins
+as one check run (below). This design does not add either name to branch protection's
+required-checks list, so nothing here starts blocking merges on its own (a repo admin
+requiring one by name is a separate, later, explicit action,
 not something this change does or enables by itself).** `report_status`
 needs `[plan, report]` and declares `statuses: write` for its
-`GITHUB_TOKEN` in both workflows (the existing workflow-level token grants
+`GITHUB_TOKEN` in mutmut and `checks: write` in gremlins (the existing workflow-level token grants
 only `contents: read`; every scope a job doesn't list itself becomes
 `none`), with `if: always() && needs.plan.outputs.pr_number != ''` (the
 `always()` is required: without it, GitHub Actions would skip
@@ -368,7 +368,7 @@ workflow. When
 checkout, or a docs-only PR the `[pr_selection] inert` allowlist ruled out)
 the status is `success` with a "skipped by design" description rather
 than silence; a `report` job that itself failed or was skipped maps to
-`failure`. In between those two, `report` can also exit 0 having merged
+`failure` (mutmut; gremlins: `neutral`, see below). In between those two, `report` can also exit 0 having merged
 one or more PR-closed placeholder modules (issue #64, above: `merge_dirs`'s
 `skipped_modules`) -- not a tool error, but not a real measurement either,
 so `report_status` reads `report`'s own `skipped_count` output (a `jq`
@@ -377,8 +377,38 @@ own `skip` step) and posts `failure` with a "skipped (PR closed)"
 description instead: this must never read as `success`, which would claim
 every module was measured when some were only a stub. Only when none of
 that applies does the status mirror `report`'s own result as `success`.
-The two contexts, `mutation-mutmut/pr` and `mutation/pr`, are distinct from
-each other and from the `Tests` check.
+The two names, `mutation-mutmut/pr` (commit status) and `mutation/pr` (check run),
+are distinct from each other and from the `Tests` check.
+
+**`mutation/pr` (gremlins workflow) has three outcomes**, posted by `report_status`
+as ONE check run (`checks: write`, never a commit status, so a rerun on the same SHA
+supersedes the earlier result; mutmut's status is unchanged). The `report` job's
+`classify` step runs `tools/mutation_pr_status.py` over the merged report
+(`summary.json`, `results.jsonl`) and the files the PR changed (plain
+`git diff --name-only --no-renames base...head`; attribution is by FILE, no diff parsing):
+
+- **failure (red)**: a surviving mutant in a file the PR changed, or the PR's tests fail
+  (a module run exit code 1..127). Evaluated first, from whatever input is usable.
+- **success (green)**: a clean measured run of every planned module (merge `complete`, no
+  tool error or failure reasons, no skipped module, exit code 0, no gremlin ERROR results),
+  readable rows, a non-empty changed-file list, and no survivor in a changed file.
+- **neutral (grey)**: everything else: nothing measured, infra or tool error (timeout, signal,
+  skipped, incomplete merge, null or missing exit code), and any missing, degraded or unexpected
+  input. The description gives a short reason and says "not a pass".
+
+User decision 2026-10-13: any malformed or partial report is neutral, even if some result
+rows are readable; partial evidence is not salvaged for this advisory check. A test failure
+that main also shows is still red (no baseline; the `Tests` job is the gate). The tool exits 0
+for every classified or degraded input; only argument errors and an unwritable
+`--github-output` file exit nonzero (after classification, so the step fails loudly).
+`mutation/pr` is not a required check. The PR-closed placeholder guard and the empty-plan
+`success` above are unchanged; a `report` job that failed before classification is
+neutral for gremlins (red for mutmut).
+
+Gremlins `report_status` decision, first match wins (`classified` = the tool's `state`,
+empty if the classify step did not run): empty plan `success`; skipped modules `failure`;
+`classified` `failure`/`neutral` posted as is; `classified` `success` posted only if the report
+job succeeded; otherwise report job not succeeded `neutral`, else `success`.
 
 **The two scores measure different things and are never comparable.** mutmut's
 score is (killed + timeout) / checked -- every mutant the run considered,

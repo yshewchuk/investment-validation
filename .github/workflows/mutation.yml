@@ -694,8 +694,13 @@ jobs:
       # either. report_status reads this count to post "skipped (PR closed)"
       # rather than a false green "published" success.
       skipped_count: ${{ steps.skip.outputs.count }}
+      # tools/mutation_pr_status.py: failure / success / neutral.
+      state: ${{ steps.classify.outputs.state }}
+      description: ${{ steps.classify.outputs.description }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -760,10 +765,32 @@ jobs:
         run: |
           rc=$(cat "$RUNNER_TEMP/gremlin-merge-rc" 2>/dev/null || echo -1)
           if [ "$rc" != 0 ]; then echo "::error::report merge exited $rc"; exit 1; fi
+      # Red (a surviving mutant in a file the PR changed, or the PR's tests fail), green (a
+      # clean measured run) or grey (everything else). Attribution is by FILE: plain
+      # `git diff --name-only`, no diff parsing. Unreadable inputs make the result neutral; the
+      # step fails only when $GITHUB_OUTPUT cannot be written (deliberately loud).
+      - name: Classify the mutation result
+        id: classify
+        if: always() && needs.plan.outputs.pr_number != ''
+        env:
+          PR: ${{ needs.plan.outputs.pr_number }}
+          BASE_SHA: ${{ needs.plan.outputs.base_sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -uo pipefail
+          args=(--merged-dir merged)
+          if git fetch -q --no-tags origin "+refs/pull/$PR/head:refs/remotes/pr/head" \
+              && git -c core.quotepath=off diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > changed_files.txt; then
+            args+=(--changed-files changed_files.txt)
+          else
+            echo "::warning::could not compute the PR's changed files"
+          fi
+          python tools/mutation_pr_status.py "${args[@]}"
 
   report_status:
-    # Posts the run's outcome onto the PR's own head commit as a plain
-    # commit status. This run's own event is `workflow_run`, so `plan`/
+    # Posts the run's outcome onto the PR's own head commit as ONE check run
+    # named mutation/pr (success, failure or neutral; never a commit status, so
+    # a rerun on the same SHA supersedes the earlier result). This run's own event is `workflow_run`, so `plan`/
     # `mutate`/`report` only ever show up under the DEFAULT branch's own
     # Actions history -- never on the PR's Checks tab -- and without this
     # job a fully successful (or a failed) run is invisible from the PR
@@ -777,7 +804,7 @@ jobs:
     if: always() && needs.plan.outputs.pr_number != ''
     runs-on: ubuntu-latest
     permissions:
-      statuses: write
+      checks: write
     steps:
       - name: Post mutation status to the PR head commit
         env:
@@ -788,14 +815,13 @@ jobs:
           MODULES: ${{ needs.plan.outputs.modules }}
           REPORT_RESULT: ${{ needs.report.result }}
           SKIPPED_COUNT: ${{ needs.report.outputs.skipped_count }}
+          CLASSIFIED_STATE: ${{ needs.report.outputs.state }}
+          CLASSIFIED_DESC: ${{ needs.report.outputs.description }}
         run: |
           set -euo pipefail
           if [ "$MODULES" = "[]" ]; then
             state=success
             desc="gremlins: skipped (closed PR or no eligible module) by design"
-          elif [ "$REPORT_RESULT" != "success" ]; then
-            state=failure
-            desc="gremlins: report job ${REPORT_RESULT} -- see run for detail"
           # issue #64 (Opus gate on 733fd56): a merge race can stub a module's
           # results (0-mutant placeholder) while `report` itself still exits
           # 0 -- not a tool error, but not a real measurement either. This
@@ -804,10 +830,27 @@ jobs:
           elif [ "${SKIPPED_COUNT:-0}" != "0" ]; then
             state=failure
             desc="gremlins: skipped (PR closed) for $SKIPPED_COUNT of $(jq -r 'length' <<< "$MODULES") module(s) -- partial coverage, not a valid full run"
+          # tools/mutation_pr_status.py: red for a surviving mutant in a changed file or a
+          # failing PR test run, green only for a clean measured run, grey otherwise. A
+          # classified `success` never overrides a report job that did not succeed.
+          elif [ -n "${CLASSIFIED_STATE:-}" ] && { [ "$CLASSIFIED_STATE" != success ] || [ "$REPORT_RESULT" = success ]; }; then
+            state="$CLASSIFIED_STATE"
+            desc="$CLASSIFIED_DESC"
+          # No trusted classified verdict and the report job did not succeed (checkout,
+          # setup or merge error, cancel): grey, never red.
+          elif [ "$REPORT_RESULT" != "success" ]; then
+            state=neutral
+            desc="gremlins: report job ${REPORT_RESULT} before classification -- infra; not a pass"
           else
             state=success
             desc="gremlins: report published for $(jq -r 'length' <<< "$MODULES") module(s)"
           fi
-          gh api "repos/$REPO/statuses/$SHA" \
-            -f state="$state" -f context="mutation/pr" \
-            -f description="$desc" -f target_url="$RUN_URL"
+          # The decision is made above; the check run itself is posted with gh api below.
+          # Every state (a grey `neutral` too) is a check run of the same name, so the
+          # latest run of mutation/pr on this SHA is the only one that counts.
+          gh api "repos/$REPO/check-runs" \
+            -f name="mutation/pr" -f head_sha="$SHA" \
+            -f status=completed -f conclusion="$state" \
+            -f details_url="$RUN_URL" \
+            -f "output[title]=Mutation testing: $state" \
+            -f "output[summary]=$desc"
