@@ -25,12 +25,14 @@ refresh cadences, per the 2026-09-14 decision:
   resumable without a separate state file.
 
 Daily resumability is keyed on **coverage**, not on fetch arrival: a daily
-ticker is skipped only when some cached fetch's BODY already contains the
-session's (or, for a weekend/holiday session, the last trading day's) bar —
-see :func:`load_fetch_coverage`. The ``fetched_at`` date alone is not
-coverage: a pre-market fetch lands today but its last bar is yesterday's
-close, and counting it as covering today would skip the very session this
-pull exists to capture (the 2026-10-12 defect). And when the plan *does* ask
+ticker is skipped only when some cached fetch's BODY already holds a VALID bar
+for the session's (or, for a weekend/holiday session, the last trading day's)
+date — see :func:`load_fetch_coverage`, which borrows capture's own row
+validity instead of running a second rule that could drift from it. The
+``fetched_at`` date alone is not coverage: a pre-market fetch lands today but
+its last bar is yesterday's close, and counting it as covering today would
+skip the very session this pull exists to capture (the 2026-10-12 defect).
+And when the plan *does* ask
 for the session, :func:`run_refresh` gives each daily call a fresh
 ``refetch_token`` — today's cached body is a known-stale answer, so the token
 guarantees a real network call rather than a same-day cache hit. Monthly
@@ -62,12 +64,9 @@ the ``load_*`` helpers below, and calls :func:`run_refresh` against a real
 """
 from __future__ import annotations
 
-import gzip
-import io
-import zlib
 from datetime import date as date_cls
 from datetime import datetime, timezone
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 import pandas as pd
 
@@ -215,9 +214,10 @@ def plan_refresh(
         instead, because ``fetched_at`` says when bytes arrived, not which
         bars they contain. Omit (or ``{}``) for a from-scratch plan.
     fetch_coverage:
-        ``{ticker: [date, ...]}`` — per dated Tier-1 fetch, the newest BAR
-        date its body actually holds (see :func:`load_fetch_coverage`; these
-        are DATA dates, never ``fetched_at``). Governs DAILY resumability: a
+        ``{ticker: [date, ...]}`` — per dated Tier-1 fetch, the newest VALID
+        BAR date its body actually holds (see :func:`load_fetch_coverage`;
+        valid means valid to capture's own reader, and these are DATA dates,
+        never ``fetched_at``). Governs DAILY resumability: a
         ticker on the board is skipped only if some fetch covers
         ``_required_daily_bar_date`` (the latest trading day on or before
         ``session``) or is newer; anything else — an old body, a corrupt one,
@@ -433,18 +433,34 @@ def load_fetch_history(*, fetch_root=None) -> dict[str, list[date_cls]]:
     return out
 
 
-def load_fetch_coverage(session, *, fetch_root=None) -> dict[str, list[date_cls]]:
-    """``{ticker: [newest_bar_date, ...]}`` — the newest bar date each dated
-    Tier-1 ``period=max`` yfinance ``history`` fetch on disk actually holds.
+def load_fetch_coverage(session, *, read_bars: Callable[[bytes], Iterable],
+                        fetch_root=None) -> dict[str, list[date_cls]]:
+    """``{ticker: [newest_valid_bar_date, ...]}`` — the newest valid bar date
+    each dated Tier-1 ``period=max`` yfinance ``history`` fetch on disk
+    actually holds.
 
-    The dates returned are DATA dates taken from the body's first column,
-    never the fetch's ``fetched_at``: what a fetch *covers* is the bars it
-    carries. A fetch stamped today but ending at yesterday's close — the
-    pre-market fetch that caused the 2026-10-12 skip defect — contributes
-    yesterday, which :func:`plan_refresh` refuses to accept for today's
-    session. The one entry-per-fetch shape mirrors
-    :func:`load_fetch_history`, so a ticker with several fetches gets several
-    candidate dates and the plan asks only "does any of them reach far enough".
+    The dates returned are DATA dates read out of the body, never the fetch's
+    ``fetched_at``: what a fetch *covers* is the bars it carries. A fetch
+    stamped today but ending at yesterday's close — the pre-market fetch that
+    caused the 2026-10-12 skip defect — contributes yesterday, which
+    :func:`plan_refresh` refuses to accept for today's session. The one
+    entry-per-fetch shape mirrors :func:`load_fetch_history`, so a ticker with
+    several fetches gets several candidate dates and the plan asks only "does
+    any of them reach far enough".
+
+    WHICH rows of a body count as valid bars is not decided here: it is
+    capture's rule, injected as ``read_bars`` — a callable handed the
+    decompressed body bytes that returns the valid bar dates in it. The real
+    caller passes ``engine.v2.data.price_download_sources.read_tier1_body``'s
+    ``date`` column (see ``engine/v2/ops/legacy_adapter.py``
+    ``invoke_price_refresh``), the same reader the ``price_history`` capture
+    uses: a row with a null date or a null ``Adj Close`` is not a bar capture
+    would store, and a body missing ``Close``/``Adj Close``/``High``, or with
+    one of them parsing entirely NaN, is a typed contract refusal rather than a
+    coverage answer. Legacy cannot import ``engine.v2``
+    (``checks/import_layers.py``), so the rule arrives as a parameter instead of
+    being reimplemented here as a second rule that could drift from capture's:
+    a bar the capture would not write is a bar this loader never counts.
 
     ``fetched_at`` is read for one purpose only, a cheap prefilter: a fetch
     stamped before :func:`_required_daily_bar_date` (the latest trading day on
@@ -455,18 +471,21 @@ def load_fetch_coverage(session, *, fetch_root=None) -> dict[str, list[date_cls]
     Monday-holiday session IS read, because Friday's close is exactly the bar
     those sessions require.
 
-    Body dates parse the way ``computed_moves.fetch_history`` parses them —
-    ``pd.to_datetime(..., utc=True)`` through the per-row UTC offsets yfinance
-    writes (they flip at DST), then ``tz_localize(None)`` and ``normalize()``
-    to midnight, so the trade date is what survives. No ``newest_bar`` meta key
-    is read or written here: a shortcut stamped by the writer would be exactly
-    the arrival-time assumption this loader exists to stop trusting.
+    The dates ``read_bars`` returns are normalized the way
+    ``computed_moves.fetch_history`` normalizes them — ``pd.to_datetime(...,
+    utc=True)`` through the per-row UTC offsets yfinance writes (they flip at
+    DST), then ``tz_localize(None)`` and ``normalize()`` to midnight, so the
+    trade date is what survives. No ``newest_bar`` meta key is read or written
+    here: a shortcut stamped by the writer would be exactly the arrival-time
+    assumption this loader exists to stop trusting.
 
-    Any failure to read one fetch — unreadable or corrupt body, no parseable
-    dates, an unusable ``fetched_at`` — makes that fetch contribute NOTHING.
-    Unknown is treated as not covered, which can only ever lengthen today's
-    daily list, never shorten it: a fetch nobody can read is never evidence
-    that a session's close is already on disk.
+    Any failure to read one fetch — an unreadable or corrupt body, ANY
+    exception raised by ``entry.body()`` or ``read_bars`` (a broken gzip
+    stream, a ``ValueError`` from the CSV parse, capture's own typed refusal),
+    no valid dates in the result, an unusable ``fetched_at`` — makes that fetch
+    contribute NOTHING. Unknown is treated as not covered, which can only ever
+    lengthen today's daily list, never shorten it: a fetch nobody can read is
+    never evidence that a session's close is already on disk.
 
     ``fetch_root`` defaults to ``engine.paths.RAW_FETCH`` and exists only so
     tests can point this at a throwaway tree.
@@ -489,18 +508,15 @@ def load_fetch_coverage(session, *, fetch_root=None) -> dict[str, list[date_cls]
                 continue
         except (TypeError, ValueError):
             continue
+        # Broad on purpose: a broken stream, a CSV that will not parse or
+        # capture's own typed refusal all mean the same thing here — this
+        # fetch is evidence of nothing, so it covers nothing.
         try:
-            frame = pd.read_csv(io.BytesIO(entry.body()))
-        except (OSError, EOFError, ValueError, gzip.BadGzipFile, zlib.error):
+            bars = pd.to_datetime(list(read_bars(entry.body())), errors="coerce", utc=True)
+            bars = bars.tz_localize(None).normalize().dropna()
+        except Exception:
             continue
-        if frame.empty:
+        if bars.empty:
             continue
-        try:
-            dates = pd.to_datetime(frame[frame.columns[0]], errors="coerce", utc=True)
-            dates = dates.dt.tz_localize(None).dt.normalize().dropna()
-        except (ValueError, TypeError):
-            continue
-        if dates.empty:
-            continue
-        out.setdefault(str(ticker), []).append(dates.max().date())
+        out.setdefault(str(ticker), []).append(bars.max().date())
     return out

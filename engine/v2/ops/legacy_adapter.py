@@ -312,13 +312,21 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
         plan_refresh,
         run_refresh,
     )
+    from engine.v2.data.price_download_sources import read_tier1_body
     from engine.v2.data.price_history_table import CALENDAR_TICKER
 
+    # ``price_refresh`` is legacy and cannot import ``engine.v2``, so capture's
+    # own row-validity rule is injected: a body's coverage is its newest bar
+    # that ``read_tier1_body`` would actually return (a null-date or
+    # null-``Adj Close`` row is dropped, a contract-mismatched body refuses),
+    # never a second validity rule that could drift from the capture's.
     fetch_root = None
     if planned_tickers is None:
         plan = plan_refresh(session, events=load_events(), price_universe=load_price_universe(),
                             fetch_history=load_fetch_history(),
-                            fetch_coverage=load_fetch_coverage(session),
+                            fetch_coverage=load_fetch_coverage(
+                                session,
+                                read_bars=lambda body: read_tier1_body(body)["date"]),
                             always_daily=(CALENDAR_TICKER,))
     else:
         import pandas as pd
@@ -328,7 +336,9 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
         fetch_root = Path(source_root) / "data" / "raw" / "fetch"
         plan = plan_refresh(session, events=pd.DataFrame(columns=["ticker", "event_date"]),
                             price_universe=(), fetch_history=load_fetch_history(fetch_root=fetch_root),
-                            fetch_coverage=load_fetch_coverage(session, fetch_root=fetch_root),
+                            fetch_coverage=load_fetch_coverage(
+                                session, fetch_root=fetch_root,
+                                read_bars=lambda body: read_tier1_body(body)["date"]),
                             always_daily=(*planned_tickers, CALENDAR_TICKER))
     if dry_run:
         return {"plan": plan, "report": None}

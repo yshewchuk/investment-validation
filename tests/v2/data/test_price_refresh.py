@@ -305,7 +305,7 @@ class TestDryRun:
         monkeypatch.setattr(pr, "load_events", lambda: _events([("AAA", "2026-09-14")]))
         monkeypatch.setattr(pr, "load_price_universe", lambda: {"ZZZ"})
         monkeypatch.setattr(pr, "load_fetch_history", lambda: {})
-        monkeypatch.setattr(pr, "load_fetch_coverage", lambda session: {})
+        monkeypatch.setattr(pr, "load_fetch_coverage", lambda session, **kw: {})
 
         def _boom(*a, **k):
             raise AssertionError("Fetcher must not be constructed on --dry-run")
@@ -327,7 +327,7 @@ class TestDryRun:
         monkeypatch.setattr(pr, "load_events", lambda: _events([("AAA", "2026-09-14")]))
         monkeypatch.setattr(pr, "load_price_universe", lambda: {"ZZZ"})
         monkeypatch.setattr(pr, "load_fetch_history", lambda: {})
-        monkeypatch.setattr(pr, "load_fetch_coverage", lambda session: {})
+        monkeypatch.setattr(pr, "load_fetch_coverage", lambda session, **kw: {})
 
         result = invoke_price_refresh("2026-09-14", dry_run=True)
         assert result["plan"]["daily"] == sorted(["AAA", CALENDAR_TICKER])

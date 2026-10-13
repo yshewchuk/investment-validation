@@ -18,6 +18,7 @@ from engine.data import fetch
 from engine.data.pulls import price_refresh
 from engine.v2.contracts import PriceQuery
 from engine.v2.data import reference_catalog
+from engine.v2.data.errors import DataError
 from engine.v2.data.reference_catalog import ReferenceInput
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
@@ -267,10 +268,19 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
                 "INVENTORY_CACHED": ["2026-09-01"], "INVENTORY_OLD": ["2026-08-31"],
                 "SPY": ["2026-09-10"]}
 
-    def load_fetch_coverage(session):
-        """Only the cached event ticker's body reaches today's required bar."""
+    def load_fetch_coverage(session, *, read_bars):
+        """Only the cached event ticker's body reaches today's required bar.
+
+        The reader the adapter injects is proven here to be capture's own rule:
+        a row with an empty ``Adj Close`` is not a valid bar, and a body with no
+        ``Adj Close`` column at all is capture's typed refusal, not a date."""
         loaders.append("coverage")
         assert session == SESSION
+        bars = read_bars(b"Date,Open,High,Low,Close,Adj Close,Volume\n"
+                         b"2026-09-10,1,1,1,1,1,1\n2026-09-11,2,2,2,2,,1\n")
+        assert [str(pd.Timestamp(d).date()) for d in bars] == ["2026-09-10"]
+        with pytest.raises(DataError):
+            read_bars(b"Date,Open,High,Low,Close,Volume\n2026-09-11,1,1,1,1,1\n")
         return {"EVENT_CACHED": [SESSION], "EVENT_DAILY": ["2026-09-10"],
                 "SPY": ["2026-09-10"]}
 
