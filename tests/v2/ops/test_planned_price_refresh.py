@@ -95,7 +95,7 @@ def install_fetcher(monkeypatch):
                 """Verify writes target the selected source root."""
                 assert root == expected_root
 
-            def fetch(self, source, endpoint, params, *, live, note):
+            def fetch(self, source, endpoint, params, *, live, note, refetch_token=None):
                 """Write synthetic history or return the configured failure."""
                 ticker = params["ticker"]
                 assert (source, endpoint, params, live, note) == (
@@ -244,7 +244,7 @@ def test_planned_dry_run_never_constructs_fetcher_or_writes(tmp_path, monkeypatc
 def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
         isolated_legacy_sources, monkeypatch, dry_run):
     """Standalone calls retain event, inventory, cache, coverage and calendar inputs."""
-    loaders, fetcher_roots, requests = [], [], []
+    loaders, fetcher_roots, requests, refetch_tokens = [], [], [], []
 
     def load_events():
         """Supply event-only daily, cached and out-of-window monthly tickers."""
@@ -281,9 +281,10 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
             """Record the standalone default-root selection."""
             fetcher_roots.append(root)
 
-        def fetch(self, source, endpoint, params, *, live, note):
+        def fetch(self, source, endpoint, params, *, live, note, refetch_token=None):
             """Return success for each request executed by the real refresh loop."""
             requests.append((source, endpoint, params, live, note))
+            refetch_tokens.append((params["ticker"], refetch_token))
             return SimpleNamespace(status=200)
 
     monkeypatch.setattr(price_refresh, "load_events", load_events)
@@ -316,6 +317,14 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
                        "INVENTORY_OLD")
     ]
     assert requests == ([] if dry_run else expected_requests)
+    # Daily requests carry a unique per-call refetch nonce; monthly stay tokenless.
+    if dry_run:
+        assert refetch_tokens == []
+    else:
+        assert [t for t, tok in refetch_tokens if tok is not None] == ["EVENT_DAILY", "SPY"]
+        assert len({tok for _, tok in refetch_tokens if tok is not None}) == 2
+        assert [t for t, tok in refetch_tokens if tok is None] == [
+            "EVENT_ONLY_MONTHLY", "INVENTORY_MONTHLY", "INVENTORY_OLD"]
     assert not isolated_legacy_sources.exists()
 
 

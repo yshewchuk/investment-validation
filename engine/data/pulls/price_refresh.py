@@ -30,9 +30,12 @@ session's (or, for a weekend/holiday session, the last trading day's) bar —
 see :func:`load_fetch_coverage`. The ``fetched_at`` date alone is not
 coverage: a pre-market fetch lands today but its last bar is yesterday's
 close, and counting it as covering today would skip the very session this
-pull exists to capture (the 2026-10-12 defect). Monthly resumability keeps
-using ``fetched_at`` dates, which is the right key for "did we refresh this
-month at all".
+pull exists to capture (the 2026-10-12 defect). And when the plan *does* ask
+for the session, :func:`run_refresh` gives each daily call a fresh
+``refetch_token`` — today's cached body is a known-stale answer, so the token
+guarantees a real network call rather than a same-day cache hit. Monthly
+resumability keeps using ``fetched_at`` dates, which is the right key for "did
+we refresh this month at all".
 
 Delisted or otherwise failing tickers are **never pruned** from either group
 — they stay in the universe and every run's report lists them, so a human
@@ -61,7 +64,9 @@ from __future__ import annotations
 
 import gzip
 import io
+import zlib
 from datetime import date as date_cls
+from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
 import pandas as pd
@@ -288,11 +293,16 @@ def plan_refresh(
 # --------------------------------------------------------------------------
 
 
-def fetch_one(fetcher: Fetcher, ticker: str) -> dict:
+def fetch_one(fetcher: Fetcher, ticker: str, *, refetch_token: str | None = None) -> dict:
     """One ticker's full-history dated fetch. Never raises for an ordinary
     per-ticker failure — a delisted or renamed ticker is a fact about that
     name, not a reason to abort a 200-ticker run (the lesson
     ``computed_moves.py``'s BF_B comment, lines ~150-153, already paid for).
+
+    ``refetch_token`` is passed through to ``fetcher.fetch``: a token makes the
+    call a guaranteed cache miss (a distinct Tier-1 entry) when the cached
+    answer — e.g. today's pre-market body — is known stale. ``None`` is the
+    ordinary cache-first path.
 
     ``CredentialRotated`` is the one exception and is left to propagate: it
     means every subsequent call will fail identically until a human updates
@@ -304,7 +314,7 @@ def fetch_one(fetcher: Fetcher, ticker: str) -> dict:
     try:
         rec = fetcher.fetch(
             "yfinance", "history", {"ticker": ticker, "period": "max"},
-            live=True, note="price-refresh",
+            live=True, note="price-refresh", refetch_token=refetch_token,
         )
     except (FetchError, OSError, ValueError) as exc:
         return {"ticker": ticker, "ok": False, "error_class": type(exc).__name__}
@@ -320,13 +330,24 @@ def run_refresh(plan: Mapping, fetcher: Fetcher) -> dict:
     Never aborts on a per-ticker failure (see :func:`fetch_one`). Returns
     per-group counts plus a flat list of failures (ticker, group, error
     class — never a payload; a failure never carries fetched bytes).
+
+    The daily group gets a fresh ``refetch_token`` per ticker call: a daily
+    ticker is on the list precisely because no body on disk holds the required
+    bar, so a same-day cached (typically pre-market) entry must not satisfy the
+    request out of cache — the token forces a real network call and a second,
+    append-only Tier-1 entry. The monthly group keeps the plain cache-first
+    call: its resumability is arrival-based, so an already-answered same-day
+    request should be a cache hit, not a re-fetch.
     """
     fetched: dict[str, list[str]] = {"daily": [], "monthly": []}
     failed: list[dict] = []
 
     for group in ("daily", "monthly"):
         for ticker in plan.get(group, ()):
-            outcome = fetch_one(fetcher, ticker)
+            token = (
+                datetime.now(timezone.utc).isoformat() if group == "daily" else None
+            )
+            outcome = fetch_one(fetcher, ticker, refetch_token=token)
             if outcome["ok"]:
                 fetched[group].append(ticker)
             else:
@@ -426,11 +447,13 @@ def load_fetch_coverage(session, *, fetch_root=None) -> dict[str, list[date_cls]
     candidate dates and the plan asks only "does any of them reach far enough".
 
     ``fetched_at`` is read for one purpose only, a cheap prefilter: a fetch
-    stamped earlier than ``session`` minus one calendar day cannot possibly
-    hold that session's bar — the market had not opened yet when the bytes
-    arrived — so its body is never opened. A fetch stamped the day before
-    ``session`` does get read, because the session can be a weekend or a
-    holiday and that fetch is the one holding the required bar.
+    stamped before :func:`_required_daily_bar_date` (the latest trading day on
+    or before ``session``) cannot possibly hold that required bar — the market
+    had not opened yet on that day when the bytes arrived — so its body is
+    never opened. The floor is the required BAR date, not ``session`` minus one
+    day: a fetch stamped the Friday before a Saturday, Sunday or
+    Monday-holiday session IS read, because Friday's close is exactly the bar
+    those sessions require.
 
     Body dates parse the way ``computed_moves.fetch_history`` parses them —
     ``pd.to_datetime(..., utc=True)`` through the per-row UTC offsets yfinance
@@ -449,7 +472,7 @@ def load_fetch_coverage(session, *, fetch_root=None) -> dict[str, list[date_cls]
     tests can point this at a throwaway tree.
     """
     session_ts = pd.Timestamp(session).normalize()
-    floor = session_ts - pd.Timedelta(days=1)
+    required = _required_daily_bar_date(session_ts)
     out: dict[str, list[date_cls]] = {}
     for entry in iter_cached("yfinance", "history", root=fetch_root):
         if entry.params.get("period") != "max":
@@ -462,13 +485,13 @@ def load_fetch_coverage(session, *, fetch_root=None) -> dict[str, list[date_cls]
             when = pd.Timestamp(fetched_at)
             if when.tzinfo is not None:
                 when = when.tz_convert("UTC").tz_localize(None)
-            if when.normalize() < floor:
+            if when.normalize() < required:
                 continue
         except (TypeError, ValueError):
             continue
         try:
             frame = pd.read_csv(io.BytesIO(entry.body()))
-        except (OSError, EOFError, ValueError, gzip.BadGzipFile):
+        except (OSError, EOFError, ValueError, gzip.BadGzipFile, zlib.error):
             continue
         if frame.empty:
             continue

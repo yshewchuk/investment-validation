@@ -25,6 +25,10 @@ a retry after the outage is a clean miss rather than a permanent bad entry.
 ``live=True`` marks an endpoint whose answer changes: the key gets today's date
 appended, giving one cache entry per day. Historical endpoints are immutable and
 cached forever.
+
+``refetch_token``: caller-supplied nonce for a request whose cached answer is
+known stale; distinct token => distinct entry => real network call. The stale
+body is kept beside the fresh one — the store stays append-only.
 """
 from __future__ import annotations
 
@@ -101,7 +105,8 @@ def canonical_params(params: Mapping[str, Any] | None) -> str:
 
 
 def cache_key(
-    source: str, endpoint: str, params: Mapping[str, Any] | None, *, live: bool = False
+    source: str, endpoint: str, params: Mapping[str, Any] | None, *,
+    live: bool = False, refetch_token: str | None = None,
 ) -> str:
     payload = {
         "source": source,
@@ -110,6 +115,8 @@ def cache_key(
     }
     if live:
         payload["day"] = date.today().isoformat()
+    if refetch_token is not None:
+        payload["refetch"] = refetch_token
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()
 
@@ -270,8 +277,18 @@ class Fetcher:
         live: bool = False,
         timeout: float | None = None,
         note: str = "",
+        refetch_token: str | None = None,
     ) -> RawRecord:
-        key = cache_key(source, endpoint, params, live=live)
+        """Cache-first fetch.
+
+        ``refetch_token`` is a caller-supplied nonce: a distinct token yields a
+        distinct cache key, so a request whose cached answer is known stale is a
+        guaranteed miss (a real network call) without evicting the stale body —
+        the store stays append-only. ``None`` (the default) is the ordinary
+        cache-first path. ``has()`` is deliberately unchanged: it asks about the
+        untokenized entry.
+        """
+        key = cache_key(source, endpoint, params, live=live, refetch_token=refetch_token)
         cached = self._read_cache(source, key)
         if cached is not None:
             return cached
@@ -559,8 +576,10 @@ def fetch(
     live: bool = False,
     timeout: float | None = None,
     note: str = "",
+    refetch_token: str | None = None,
 ) -> RawRecord:
     """Cache-first fetch. See :class:`Fetcher` for the guarantees."""
     return _default().fetch(
-        source, endpoint, params, live=live, timeout=timeout, note=note
+        source, endpoint, params, live=live, timeout=timeout, note=note,
+        refetch_token=refetch_token,
     )

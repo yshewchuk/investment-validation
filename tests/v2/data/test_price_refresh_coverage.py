@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import zlib
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -19,7 +20,7 @@ import pandas as pd
 import pytest
 
 from engine.data import fetch as fetch_mod
-from engine.data.fetch import Fetcher
+from engine.data.fetch import Fetcher, cache_key
 from engine.data.pulls import price_refresh as pr
 from engine.data.sources.base import Response
 from engine.data.throttle import SourceConfig, Throttle
@@ -65,6 +66,42 @@ class _CsvYFAdapter:
         return False
 
 
+class _ScriptedYFAdapter:
+    """Replays a QUEUE of scripted CSV bodies per ticker.
+
+    Same shape as ``tests/v2/data/test_price_refresh.py``'s ``_FakeYFAdapter``
+    (a scripted :class:`Response` per request, recording every request), but
+    successive requests for one ticker walk the queue: the pre-market body,
+    then the post-close body. An unexpected extra call raises rather than
+    silently replaying, so "exactly two network calls" is a real assertion.
+    """
+
+    name = "yfinance"
+
+    def __init__(self, queues: dict[str, list[bytes]]):
+        self.queues = {t: list(q) for t, q in queues.items()}
+        self.requests: list[str] = []
+
+    def request(self, endpoint, params, timeout):
+        ticker = params.get("ticker")
+        self.requests.append(ticker)
+        body = self.queues[ticker].pop(0)
+        return Response(200, body, {}, f"https://example/{ticker}")
+
+    def quota_from(self, response):
+        return None
+
+    def is_auth_failure(self, response):
+        return False
+
+
+def _throttled_fetcher(fetch_root, adapter):
+    """A real ``Fetcher`` over a throwaway root with the fake adapter under it."""
+    return Fetcher(fetch_root, throttle=Throttle(
+        {"yfinance": SourceConfig("yfinance", 0.0, 0.0, 2, 10.0)}, sleep_fn=lambda s: None),
+        adapters={"yfinance": adapter})
+
+
 def _frozen(day: date):
     """``date``/``datetime`` substitutes whose ``today()``/``now()`` are ``day``.
 
@@ -93,7 +130,7 @@ def fetch_root(tmp_path):
     return tmp_path / "fetch"
 
 
-def _fetch(fetch_root, bodies, tickers, *, on, monkeypatch):
+def _fetch(fetch_root, bodies, tickers, *, on, monkeypatch, refetch_token=None):
     """One real ``Fetcher`` write per ticker, all stamped on ``on``."""
     adapter = _CsvYFAdapter(bodies)
     fetcher = Fetcher(fetch_root, throttle=Throttle(
@@ -103,7 +140,7 @@ def _fetch(fetch_root, bodies, tickers, *, on, monkeypatch):
     monkeypatch.setattr(fetch_mod, "date", day_cls)
     monkeypatch.setattr(fetch_mod, "datetime", now_cls)
     for ticker in tickers:
-        assert pr.fetch_one(fetcher, ticker)["ok"] is True
+        assert pr.fetch_one(fetcher, ticker, refetch_token=refetch_token)["ok"] is True
     return adapter
 
 
@@ -154,13 +191,16 @@ def test_a_fetch_holding_the_session_bar_is_coverage(fetch_root, monkeypatch):
 
 
 def test_the_newest_bar_wins_across_a_ticker_s_fetches(fetch_root, monkeypatch):
-    """One entry per fetch, each carrying its own body date: a ticker fetched
-    Sunday holding Friday's close and again Monday holding Monday's close has
-    both dates, and any of them reaching the requirement skips it."""
+    """One entry per fetch, each carrying its own body date: a Monday
+    pre-market fetch holding Friday's close and a tokenized Monday refetch
+    holding Monday's close give the plan both candidate dates, and any of
+    them reaching the requirement skips it. (A Sunday-stamped Friday body is
+    no longer even read for a full Monday — the prefilter floor is the
+    required bar date now, see the weekend tests below.)"""
     _fetch(fetch_root, {"AAA": _csv_bytes({PRIOR_SESSION: 100.0})}, ["AAA"],
-           on=date(2026, 9, 13), monkeypatch=monkeypatch)
-    _fetch(fetch_root, {"AAA": _csv_bytes({SESSION: 101.0})}, ["AAA"],
            on=date(2026, 9, 14), monkeypatch=monkeypatch)
+    _fetch(fetch_root, {"AAA": _csv_bytes({SESSION: 101.0})}, ["AAA"],
+           on=date(2026, 9, 14), monkeypatch=monkeypatch, refetch_token="post-close")
 
     coverage = pr.load_fetch_coverage(SESSION, fetch_root=fetch_root)
     assert sorted(coverage["AAA"]) == [date(2026, 9, 11), date(2026, 9, 14)]
@@ -171,8 +211,9 @@ def test_the_newest_bar_wins_across_a_ticker_s_fetches(fetch_root, monkeypatch):
 
 def test_the_body_of_a_fetch_stamp_too_old_to_hold_the_bar_is_never_opened(
         fetch_root, monkeypatch):
-    """Cheap prefilter only: ``fetched_at`` older than ``session - 1 day``
-    cannot contain the session's bar, so it contributes nothing."""
+    """Cheap prefilter only: a ``fetched_at`` before the required bar date
+    (here: Friday stamped, full Monday session requiring Monday's own bar)
+    cannot contain that bar, so the body is skipped and contributes nothing."""
     _write_raw_fetch(fetch_root, "AAA", key="stalefr", fetched_at="2026-09-11T20:00:00+00:00",
                      body_bytes=_csv_bytes({SESSION: 101.0}))
     assert pr.load_fetch_coverage(SESSION, fetch_root=fetch_root) == {}
@@ -262,3 +303,185 @@ def test_a_holiday_session_is_skipped_by_a_fetch_holding_the_prior_friday(
     assert plan["skipped_already_fetched"] == ["AAA", "MONTHLY"]
     assert plan["daily"] == []
     assert plan["monthly"] == []
+
+
+# --------------------------------------------------------------------------
+# the prefilter floor is the required BAR date, not session - 1 day
+# --------------------------------------------------------------------------
+
+
+def test_a_friday_stamped_fetch_is_read_for_the_weekend_and_holiday_sessions(fetch_root):
+    """Sat 09-05, Sun 09-06 and the Labor-Day Monday 09-07 all require
+    Friday 2026-09-04's close, so a fetch stamped that very Friday is read
+    for every one of them — its age relative to the session is not what the
+    floor measures."""
+    _write_raw_fetch(fetch_root, "AAA", key="friday-stamp",
+                     fetched_at="2026-09-04T20:00:00+00:00",
+                     body_bytes=_csv_bytes({"2026-09-03": 99.0, "2026-09-04": 100.0}))
+    for session in ("2026-09-05", "2026-09-06", "2026-09-07"):
+        coverage = pr.load_fetch_coverage(session, fetch_root=fetch_root)
+        assert coverage == {"AAA": [date(2026, 9, 4)]}, session
+        plan = pr.plan_refresh(session, events=_events([]), price_universe=[],
+                               always_daily=("AAA",), fetch_coverage=coverage)
+        assert plan["skipped_already_fetched"] == ["AAA"], session
+        assert plan["daily"] == [], session
+
+
+def test_a_fetch_stamped_before_the_required_day_is_never_read(fetch_root, monkeypatch):
+    """Thursday 09-03's bytes cannot hold the Friday bar the 09-05..09-07
+    sessions require. The body even *contains* 09-04 (physically impossible,
+    the point of the fixture): were it opened it would count as coverage, so
+    an empty result — reached with ``read_csv`` rigged to explode — proves
+    the prefilter skipped it before opening."""
+    _write_raw_fetch(fetch_root, "ZZZ", key="thursday-stamp",
+                     fetched_at="2026-09-03T21:00:00+00:00",
+                     body_bytes=_csv_bytes({"2026-09-04": 100.0}))
+
+    def _no_body_reads(*args, **kwargs):
+        raise AssertionError("a fetch before the required bar date must not open its body")
+
+    monkeypatch.setattr(pd, "read_csv", _no_body_reads)
+    coverage = pr.load_fetch_coverage("2026-09-07", fetch_root=fetch_root)
+    assert coverage == {}
+    plan = pr.plan_refresh("2026-09-07", events=_events([]), price_universe=[],
+                           always_daily=("ZZZ",), fetch_coverage=coverage)
+    assert plan["daily"] == ["ZZZ"]
+
+
+# --------------------------------------------------------------------------
+# a corrupt gzip body is a contributing zero, not a crash
+# --------------------------------------------------------------------------
+
+
+def test_a_corrupt_gzip_body_raising_zlib_error_contributes_nothing(fetch_root):
+    """Valid gzip header, garbage deflate stream: ``entry.body()`` dies with
+    ``zlib.error`` inside the read, and the ticker simply goes on today's
+    daily list instead of taking the coverage load down with it."""
+    corrupt = gzip.compress(_csv_bytes({SESSION: 101.0}))[:10] + b"\xff\xff\xff\xff no deflate"
+    with pytest.raises(zlib.error):
+        gzip.decompress(corrupt)
+    _write_raw_fetch(fetch_root, "BAD", key="zlib-error",
+                     fetched_at=f"{SESSION}T20:00:00+00:00",
+                     body_bytes=corrupt, compressed=False)
+
+    coverage = pr.load_fetch_coverage(SESSION, fetch_root=fetch_root)
+    assert coverage == {}
+    plan = pr.plan_refresh(SESSION, events=_events([("BAD", SESSION)]), price_universe=[],
+                           fetch_coverage=coverage)
+    assert plan["daily"] == ["BAD"]
+
+
+# --------------------------------------------------------------------------
+# bar-date parsing edges in plan_refresh
+# --------------------------------------------------------------------------
+
+
+def test_tz_aware_bar_dates_parse_to_their_trade_date(fetch_root):
+    """yfinance writes per-row UTC offsets that flip at DST; ``2026-10-09
+    00:00:00-04:00`` is 04:00Z and must still name Friday 2026-10-09 — the
+    required bar of the Sunday 10-11 session its Friday stamp is read for."""
+    _write_raw_fetch(fetch_root, "AAA", key="tz-aware-bar",
+                     fetched_at="2026-10-09T20:00:00+00:00",
+                     body_bytes=b"Date,Close\n2026-10-09 00:00:00-04:00,100.0\n")
+    coverage = pr.load_fetch_coverage("2026-10-11", fetch_root=fetch_root)
+    assert coverage == {"AAA": [date(2026, 10, 9)]}
+
+
+def test_coverage_newer_than_the_required_bar_date_still_skips():
+    """>=, not ==: a body whose newest bar is PAST the required date still
+    covers the session. This test fails if ``>= required`` ever becomes
+    ``== required``."""
+    plan = pr.plan_refresh("2026-10-12", events=_events([("AAA", "2026-10-12")]),
+                           price_universe=[], fetch_coverage={"AAA": [date(2026, 10, 13)]})
+    assert plan["skipped_already_fetched"] == ["AAA"]
+    assert plan["daily"] == []
+
+
+# --------------------------------------------------------------------------
+# refetch_token: a known-stale cached answer must not answer the call
+# --------------------------------------------------------------------------
+
+
+def test_cache_key_refetch_token_is_distinct_and_optional():
+    params = {"ticker": "AAPL", "period": "max"}
+    live_base = cache_key("yfinance", "history", params, live=True)
+    assert live_base == cache_key("yfinance", "history", params, live=True)
+    assert cache_key("yfinance", "history", params, live=True, refetch_token=None) == live_base
+
+    tok1 = cache_key("yfinance", "history", params, live=True, refetch_token="nonce-1")
+    tok2 = cache_key("yfinance", "history", params, live=True, refetch_token="nonce-2")
+    assert tok1 != tok2
+    assert len({live_base, tok1, tok2}) == 3
+
+    plain = cache_key("yfinance", "history", params)
+    assert plain == cache_key("yfinance", "history", params)
+    assert cache_key("yfinance", "history", params, refetch_token="nonce-1") != plain
+
+
+def test_fetcher_fetch_with_token_does_not_read_the_cached_entry(fetch_root):
+    body1 = _csv_bytes({PRIOR_SESSION: 100.0})
+    body2 = _csv_bytes({SESSION: 101.0})
+    adapter = _ScriptedYFAdapter({"AAA": [body1, body2]})
+    fetcher = _throttled_fetcher(fetch_root, adapter)
+    params = {"ticker": "AAA", "period": "max"}
+
+    first = fetcher.fetch("yfinance", "history", params, live=True)
+    assert first.from_cache is False
+    calls = fetcher.network_calls
+
+    plain_hit = fetcher.fetch("yfinance", "history", params, live=True)
+    assert plain_hit.from_cache is True
+    assert plain_hit.body == body1
+    assert fetcher.network_calls == calls, "the untokenized retry stays a cache hit"
+
+    refetched = fetcher.fetch("yfinance", "history", params, live=True, refetch_token="nonce-1")
+    assert refetched.from_cache is False, "a token must not read the entry it made stale"
+    assert refetched.body == body2
+    assert refetched.key != first.key
+    assert fetcher.network_calls == calls + 1
+
+    reuse = fetcher.fetch("yfinance", "history", params, live=True, refetch_token="nonce-1")
+    assert reuse.from_cache is True, "the same token re-reads the entry it created"
+
+
+def test_daily_refresh_refetches_past_todays_cached_premarket_body(fetch_root, monkeypatch):
+    """Execution-level walk of the 2026-10-12 defect's fix: a pre-market body
+    stamped today caches the plain ``live=True`` key, planning still demands
+    the session bar, and ``run_refresh``'s daily token makes the second
+    network call genuinely happen — adapter, not cache — leaving BOTH bodies
+    on disk (append-only) so the next plan skips the ticker."""
+    premarket = _csv_bytes({PRIOR_SESSION: 100.0})
+    with_session_bar = _csv_bytes({PRIOR_SESSION: 100.0, SESSION: 101.0})
+    adapter = _ScriptedYFAdapter({"AAA": [premarket, with_session_bar]})
+    fetcher = _throttled_fetcher(fetch_root, adapter)
+    day_cls, now_cls = _frozen(date(2026, 9, 14))
+    monkeypatch.setattr(fetch_mod, "date", day_cls)
+    monkeypatch.setattr(fetch_mod, "datetime", now_cls)
+
+    assert pr.fetch_one(fetcher, "AAA")["ok"] is True
+    assert adapter.requests == ["AAA"]
+    assert fetcher.network_calls == 1
+
+    coverage = pr.load_fetch_coverage(SESSION, fetch_root=fetch_root)
+    history = pr.load_fetch_history(fetch_root=fetch_root)
+    plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]), price_universe=[],
+                           fetch_history=history, fetch_coverage=coverage)
+    assert plan["daily"] == ["AAA"], "stamped today, holds only Friday's bar"
+    assert plan["skipped_already_fetched"] == []
+
+    report = pr.run_refresh(plan, fetcher)
+    assert report["failed"] == []
+    assert report["fetched"]["daily"] == ["AAA"]
+    assert adapter.requests == ["AAA", "AAA"], "the daily refetch reached the adapter again"
+    assert fetcher.network_calls == 2
+
+    coverage = pr.load_fetch_coverage(SESSION, fetch_root=fetch_root)
+    assert max(coverage["AAA"]) >= date(2026, 9, 14)
+    next_plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]),
+                                price_universe=[], fetch_coverage=coverage)
+    assert next_plan["daily"] == []
+    assert next_plan["skipped_already_fetched"] == ["AAA"]
+
+    entries = fetch_mod.iter_cached("yfinance", "history", root=fetch_root)
+    assert len(entries) == 2 and len({e.key for e in entries}) == 2, (
+        "append-only: the stale pre-market body is kept beside the fresh one")
