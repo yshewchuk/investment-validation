@@ -385,7 +385,9 @@ each other and from the `Tests` check.
 report, the PR's `git diff -U0` and main's newest recent push report that has
 one, and `report_status` posts its `state`/`description` when present. An empty
 plan and a merged PR-closed placeholder module keep the earlier mapping above
-(checked first). A run in which no module was measured is GREY: the tool's
+(checked first). A merge tool error or incomplete run (for example a provenance mismatch) is never
+`success` either, and a classified `success` never overrides a failed `report` job.
+A run in which no module was measured is GREY: the tool's
 `neutral` state is posted by the `report_neutral` job as a `neutral` check run named
 `mutation/pr` (commit statuses have no grey state; the job alone holds
 `checks: write`), and `report_status` posts no commit status for it. The description

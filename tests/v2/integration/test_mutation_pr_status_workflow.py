@@ -62,9 +62,11 @@ def test_report_status_uses_the_classification_when_present():
     assert env["CLASSIFIED_DESC"] == "${{ needs.report.outputs.description }}"
     assert _decide(CLASSIFIED_STATE="failure", CLASSIFIED_DESC="PR-owned problem in a") == \
         ("failure", "PR-owned problem in a")
-    # Infra problems arrive as success: a failed report job must not turn them red.
-    assert _decide(CLASSIFIED_STATE="success", CLASSIFIED_DESC="1 infra warning(s)",
-                   REPORT_RESULT="failure") == ("success", "1 infra warning(s)")
+    # A PR-owned verdict is posted as is, whatever the report job result.
+    assert _decide(CLASSIFIED_STATE="failure", CLASSIFIED_DESC="PR-owned problem in a",
+                   REPORT_RESULT="failure") == ("failure", "PR-owned problem in a")
+    assert _decide(CLASSIFIED_STATE="success", CLASSIFIED_DESC="1 infra warning(s)") == \
+        ("success", "1 infra warning(s)")
 
 
 def test_report_status_without_classification_keeps_the_old_decision():

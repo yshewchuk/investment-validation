@@ -449,6 +449,7 @@ def test_published_descriptions_and_degradation_messages_are_exact(tmp_path, cap
     assert notes == ["::warning::merged mutation report unavailable; "
                      "not reporting red for infra"]
     assert verdict == {"state": "neutral", "pr_owned": [], "infra": ["report"], "modules": {},
+                       "merge_issues": [],
                        "description": "gremlins: merged report unavailable (infra); "
                                       "no PR-owned result"}
 
@@ -463,7 +464,8 @@ def test_exact_degradation_warnings(tmp_path, capsys):
     assert notes == [
         "::warning::PR diff unavailable; survivors cannot be attributed to the PR",
         "::warning::main baseline summary unreadable; no failure is excused as pre-existing"]
-    assert set(verdict) == {"state", "description", "pr_owned", "infra", "modules"}
+    assert set(verdict) == {"state", "description", "pr_owned", "infra", "modules",
+                            "merge_issues"}
     (d / "results.jsonl").write_text("{bad\n")
     ps.main(["--merged-dir", str(d), "--diff-file", str(diff), "--github-output", str(out)])
     notes, _ = _split(capsys.readouterr().out)
@@ -501,3 +503,62 @@ def test_neutral_state_only_when_nothing_was_measured():
     assert verdict(merged(a=mod(run_exit_code=-1), b=mod()))["state"] == "success"
     assert verdict(merged(a=mod(run_exit_code=-1), b=mod(run_exit_code=1)))["state"] == "failure"
     assert verdict({"modules": {}, "expected_modules": []})["state"] == "success"
+
+
+def _merged_with(**extra):
+    m = merged(a=mod(), b=mod())
+    m.update(extra)
+    return m
+
+
+def test_every_merged_report_shape_maps_to_a_state(capsys):
+    """Self-review table: each input the merged report can carry -> resulting state."""
+    clean = ps.classify(_merged_with(), [], {})
+    assert clean["state"] == "success" and clean["merge_issues"] == []
+    # merge-level tool error with every module looking clean: never success
+    for extra in ({"tool_error": True}, {"complete": False},
+                  {"tool_error": True, "complete": False,
+                   "failure_reasons": ["RUN_PROVENANCE_MISMATCH: x"]}):
+        v = ps.classify(_merged_with(**extra), [], {})
+        assert v["state"] == "neutral", extra
+        assert v["description"] == ("gremlins: report incomplete or tool error "
+                                    "(0 infra warning(s)); not a pass")
+    # complete=True / tool_error=False explicitly: still success
+    assert ps.classify(_merged_with(tool_error=False, complete=True), [], {})["state"] == "success"
+    # merge-level reasons are listed, per-module reasons are not
+    v = ps.classify(_merged_with(
+        tool_error=True,
+        failure_reasons=["a: ERROR_RESULTS", "RUN_PROVENANCE_MISMATCH: x", "MISSING_MODULES: y",
+                         "DUPLICATE_MODULES: z", "UNEXPECTED_MODULES: w", "NO_MODULE_REPORTS: v"]),
+        [], {})
+    assert v["merge_issues"] == ["RUN_PROVENANCE_MISMATCH: x", "MISSING_MODULES: y",
+                                 "DUPLICATE_MODULES: z", "UNEXPECTED_MODULES: w",
+                                 "NO_MODULE_REPORTS: v"]
+    # PR-owned still wins over a merge tool error
+    v = ps.classify(_merged_with(tool_error=True), [row("a", "engine/v2/a.py", 5)], CHANGED)
+    assert v["state"] == "failure" and v["pr_owned"] == ["a"]
+    assert v["description"].startswith("gremlins: PR-owned problem in a")
+    # all modules infra: the nothing-measured wording wins over the tool-error wording
+    v = ps.classify({"modules": {}, "expected_modules": ["a"], "tool_error": True}, [], {})
+    assert v["state"] == "neutral" and "no module measured" in v["description"]
+    # a module that reports tool_error is infra even with no other reason
+    v = ps.classify(merged(a=mod(tool_error=True), b=mod()), [], {})
+    assert v["modules"]["a"] == {"class": "infra", "reason": "module reported a tool error"}
+    assert v["state"] == "success"  # b was measured and nothing at the merge level failed
+    # skipped placeholder: merge reports complete=False -> never success from the tool
+    v = ps.classify(_merged_with(complete=False, skipped_modules={"a": "pr_closed_mid_run"}),
+                    [], {})
+    assert v["state"] == "neutral"
+    # empty plan with a tool error is still neutral, not success
+    assert ps.classify({"modules": {}, "tool_error": True}, [], {})["state"] == "neutral"
+
+
+def test_merge_issues_are_warned_by_main(tmp_path, capsys):
+    m = _merged_with(tool_error=True, failure_reasons=["RUN_PROVENANCE_MISMATCH: x"])
+    d, diff = _write_report(tmp_path, m, [])
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                    "--github-output", str(out)]) == 0
+    assert "state=neutral\n" in out.read_text()
+    notes, _ = _split(capsys.readouterr().out)
+    assert notes == ["::warning::merge: RUN_PROVENANCE_MISMATCH: x"]

@@ -43,8 +43,8 @@ def test_empty_plan_is_checked_before_everything():
 def test_classified_verdict_is_posted_when_nothing_was_skipped():
     assert _decide(CLASSIFIED_STATE="failure", CLASSIFIED_DESC="PR-owned problem in a") == \
         ("failure", "PR-owned problem in a")
-    assert _decide(CLASSIFIED_STATE="success", CLASSIFIED_DESC="no module measured",
-                   REPORT_RESULT="failure") == ("success", "no module measured")
+    assert _decide(CLASSIFIED_STATE="success", CLASSIFIED_DESC="all measured") == \
+        ("success", "all measured")
 
 
 def test_baseline_search_walks_recent_push_runs_and_warns_when_none_has_the_artifact():
@@ -52,6 +52,11 @@ def test_baseline_search_walks_recent_push_runs_and_warns_when_none_has_the_arti
     run = step["run"]
     assert "--limit 10" in run
     assert "for run_id in" in run
+    assert "--branch main" in run
+    assert "--event push" in run
+    assert "--status completed" in run
+    assert "break" in run  # stop at the newest run that has the artifact
+    assert "-n mutation-report" in run
     assert "--baseline-summary baseline/summary.json" in run
     assert "::warning::no recent main push run has a mutation-report artifact" in run
     assert "--limit 1 " not in run

@@ -19,6 +19,9 @@ import sys
 from pathlib import Path
 
 DESC_MAX = 140
+# failure_reasons entries that gremlin_results.merge writes without a module prefix.
+_MERGE_CODES = ("RUN_PROVENANCE_MISMATCH", "NO_MODULE_REPORTS", "DUPLICATE_MODULES",
+                "MISSING_MODULES", "UNEXPECTED_MODULES")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _SIMPLE_ESC = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
 
@@ -127,6 +130,8 @@ def classify_module(name: str, mod, rows: list[dict], changed: dict[str, set[int
         if name in failing_on_main:
             return "infra", f"module run fails on main too (exit {rc})"
         return "pr_owned", f"module run failed (exit {rc})"
+    if mod.get("tool_error") is True:
+        return "infra", "module reported a tool error"
     return "ok", ""
 
 
@@ -139,8 +144,9 @@ def _truncate(text: str, keep_tail: str = "") -> str:
 
 
 def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=None) -> dict:
-    """Pure verdict: ``failure`` only when a module is PR-owned, ``neutral`` when no
-    module was measured (all infra), else ``success``."""
+    """Pure verdict: ``failure`` only when a module is PR-owned; ``neutral`` when no
+    module was measured (all infra) or the merge reported a tool error / incomplete
+    run; else ``success``."""
     rows = [r for r in rows if _valid_row(r)]
     modules = merged.get("modules") if isinstance(merged, dict) else None
     modules = modules if isinstance(modules, dict) else {}
@@ -155,6 +161,13 @@ def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=No
         result[name] = {"class": cls, "reason": reason}
     owned = [n for n, v in result.items() if v["class"] == "pr_owned"]
     infra = [n for n, v in result.items() if v["class"] == "infra"]
+    # The merge itself can report a tool error (provenance mismatch, missing or duplicate
+    # modules, ...) while every module looks clean: that is never a pass.
+    unsafe = isinstance(merged, dict) and (merged.get("tool_error") is True
+                                           or merged.get("complete") is False)
+    reasons = merged.get("failure_reasons") if isinstance(merged, dict) else None
+    merge_issues = [r for r in reasons if isinstance(r, str) and r.startswith(_MERGE_CODES)] \
+        if isinstance(reasons, list) else []
     tail = ""
     if owned:
         desc = f"gremlins: PR-owned problem in {', '.join(owned)}"
@@ -163,14 +176,16 @@ def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=No
     elif infra and len(infra) == len(names):
         # Nothing was measured: still not red (infra), but never worded as a pass.
         desc = f"gremlins: no module measured ({len(infra)} infra warning(s)); not a pass"
+    elif unsafe:
+        desc = f"gremlins: report incomplete or tool error ({len(infra)} infra warning(s)); not a pass"
     elif infra:
         desc = f"gremlins: no PR-owned problems; {len(infra)} infra warning(s)"
     else:
         desc = f"gremlins: no PR-owned problems in {len(names)} module(s)"
     nothing_measured = bool(names) and len(infra) == len(names)
-    state = "failure" if owned else "neutral" if nothing_measured else "success"
+    state = "failure" if owned else "neutral" if (nothing_measured or unsafe) else "success"
     return {"state": state, "description": _truncate(desc, tail),
-            "pr_owned": owned, "infra": infra, "modules": result}
+            "pr_owned": owned, "infra": infra, "modules": result, "merge_issues": merge_issues}
 
 
 def _load_json(path: str | None):
@@ -224,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     merged = _load_json(str(merged_dir / "summary.json"))
     if not _valid_summary(merged):
         verdict = {"state": "neutral", "pr_owned": [], "infra": ["report"], "modules": {},
+                   "merge_issues": [],
                    "description": _truncate("gremlins: merged report unavailable (infra); "
                                             "no PR-owned result")}
         print("::warning::merged mutation report unavailable; not reporting red for infra")
@@ -242,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.baseline_summary and baseline is None:
             print("::warning::main baseline summary unreadable; no failure is excused as pre-existing")
         verdict = classify(merged, _load_rows(merged_dir / "results.jsonl"), changed, baseline)
+    for issue in verdict["merge_issues"]:
+        print(f"::warning::merge: {issue}")
     for name, v in verdict["modules"].items():
         if v["class"] == "infra":
             print(f"::warning::{name}: {v['reason']} (infra, not PR-owned)")

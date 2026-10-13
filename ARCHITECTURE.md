@@ -276,7 +276,10 @@ evidence. See the models and data component contracts.
     annotations, and `state` (`success`|`failure`|`neutral`) and `description` (within the
     commit-status length limit, the infra count never cut) appended to `--github-output`, which
     `report_status` posts as the `mutation/pr` commit status. `neutral` means no module
-    was measured (every module infra, or the merged report unavailable): commit statuses
+    was measured (every module infra, or the merged report unavailable) or the merge
+    itself reported a tool error or an incomplete run (merge-level reasons such as a
+    provenance mismatch are listed as `merge_issues` and warned), never `success`; a
+    classified `success` also never overrides a failed `report` job. Commit statuses
     have no grey state, so the `report_neutral` job posts it as a `neutral` check run
     instead, and no commit status is posted for it. `mutation/pr` is not a required check. The module set is the summary's
     `expected_modules` and `modules` plus every module named in a result row.
