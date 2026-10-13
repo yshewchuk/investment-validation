@@ -555,7 +555,7 @@ message `f"{code}: {detail}"`.
 | a feature resolved from `tier4_row`, non-null, whose own base metric's `fold_start` is missing, or missing-and-present-but-dated-after `as_of` (a null resolved value — legacy's own "no forecast" — skips this check entirely, whatever its `fold_start` holds) | `MISSING_STAGED_INPUT` / `POST_AS_OF_ROW` |
 | `calendar_row["spot"]` not coercible to `float`, non-finite, or `<= 0.0` | `INVALID_SPOT` |
 | `feature_names` a bare `str`/`bytes`, not a `Sequence`, or containing a non-`str`, empty, or duplicate entry | `INVALID_FEATURE_NAMES` |
-| a quote row missing `right`/`strike`/`expiry`/`bid`/`ask`, an unrecognized `right`, non-finite/negative `bid`, a crossed `ask`, two rows disagreeing on the same contract key, or `quote_rows`/`quote_status` disagreeing on whether the domain is empty (`quote_domain_map`, an extracted, behavior-identical copy of `tools/capture_tier0_corpus.py`'s `_quote_map`) | `NightlySourceBundleRefusal` (that module's own call site wraps it back into its own exception type) |
+| a quote row missing `right`/`strike`/`expiry`/`bid`/`ask`, an unrecognized `right`, non-finite/negative `bid`, a crossed `ask`, two rows disagreeing on the same contract key, or `quote_rows`/`quote_status` disagreeing on whether the domain is empty (`quote_domain_map`, the quote-map builder `tools/capture_tier0_corpus.py` shares; each quote also carries its row's `observed_date`) | `NightlySourceBundleRefusal` (that module's own call site wraps it back into its own exception type) |
 
 - **Values pass through unclassified.** A resolved feature value is
   projected into `feature_vector` exactly as staged (`None`, any NaN
@@ -634,8 +634,9 @@ unlike `compatibility.py`.
   `release_bindings.py` without either reaching into the other's inputs.
 - **Native vs. legacy independence.** `nightly_source_bundle.py` imports no
   legacy `engine.*` module and is never imported by one. `quote_domain_map`
-  is a byte-identical port of `tools/capture_tier0_corpus.py`'s
-  `_quote_map`, moved (not copied) so the two never drift.
+  is the quote-map builder `tools/capture_tier0_corpus.py` imports (one
+  implementation, so the two never drift); it adds `observed_date` to each
+  quote.
 - **Layering.** Scoring (5.0) never imports ops (7.0) or serving (7.0);
   `nightly_source_bundle.py` follows that rule even where it costs a small
   duplicated validator (`validated_as_of`) rather than an upward import.
