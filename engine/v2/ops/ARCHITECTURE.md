@@ -1029,8 +1029,8 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
 `identity`/`application`), `engine.v2.ledger` (6.0), `engine.v2.parity`
-(6.5). `engine.v2.models` (3.5) and `engine.v2.domain.generation` (2.0,
-`Geometry`/`Pricing`) are lazy-only, never at module top level. Ops does not import the native experiment adapter; the executor selects a fixed child module.
+(6.5). `engine.v2.models` (3.5) permits top-level `payoff_artifact_key` in `native_score_batch` and `PayoffSurfaceArtifact`/`payoff_artifact_key`/`DriverResidualPoolArtifact` in `native_runup_inputs`; all other direct model imports are lazy.
+`engine.v2.domain.generation` (2.0, `Geometry`/`Pricing`) remains lazy-only. Ops does not import the native experiment adapter; the executor selects a fixed child module.
 `engine.v2.domain.generation` supplies geometry to the rescore decoder
 (`native/input_decoding.py::_load_native_score_inputs`). The pending PR-6 calendar
 helper uses its public expiry-only API lazily. Native foundation supplies calendar arithmetic;
