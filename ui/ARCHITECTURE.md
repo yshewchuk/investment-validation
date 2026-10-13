@@ -1,15 +1,19 @@
 # `ui/` architecture
 
 ## Purpose
+
 Layer 8 presentation in the [root architecture](../ARCHITECTURE.md): the existing
 React/TypeScript app owns application components, layout, navigation and rendering.
 Its presentation scope includes the legacy dashboard views still awaiting migration.
+
 ## Primary contracts and public interfaces
+
 `src/App.tsx` composes board/event/score and native-parity views; `src/routes.ts` handles routes.
 `src/api/client.ts` is the sole fetch boundary to the authenticated serving API.
 Wire shapes and shipped views are detailed in the [README](README.md).
 
 ## Inputs
+
 Saved JSON release metadata, paginated events, score details and operations data
 from [serving](../engine/v2/serving/ARCHITECTURE.md), plus route/filter state.
 Native parity renders the summary from `/api/v1/native_parity`, including its
@@ -21,10 +25,12 @@ does not request those pages. The retired `/native_parity.json` HTML paths are
 not part of this React screen.
 
 ## Outputs
+
 React DOM and chart pixels, navigation/deep links, loading/error/refusal states
 and links to the same pinned compatibility release. No engine records are written.
 
 ## Financial display units
+
 The serving contract defines wire units for both legacy-via-v2 and native rows;
 the React app formats those values once. `fmtPercentagePoint` displays
 `driver_forecast` and `market_implied_move` with `%` and no multiplication by
@@ -36,15 +42,18 @@ operations HTML and legacy previews remain compatibility exceptions; this
 formatting contract applies to the React presentation layer.
 
 ## Dependencies
+
 React components use typed client/hooks; the browser calls serving over HTTP.
 No direct scoring/model/ledger/evaluation/provider access; browser users enter
 through `App`; integration/browser tests exercise the same API contract.
 
 ## External systems and libraries
+
 React, TypeScript and Vite; browser fetch with the same-origin `operations_token`
 cookie. Build output is static assets; serving those bytes is transport.
 
 ## Failure semantics
+
 | Condition | Outcome |
 |---|---|
 | Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
@@ -60,6 +69,7 @@ cookie. Build output is static assets; serving those bytes is transport.
 | Retry or navigation | Reads keep pinned identity; reload opts into current. Failed operations-status reads leave the board and pin in place, with status unknown; failed current-release discovery clears the displayed publication identity and prior drift hint. No read retries immediately, and no durable transaction or partial publication is left behind. |
 
 ## Invariants
+
 All new application rendering belongs here. Serving returns data/API responses
 and transports commands; application HTML/DOM scripts there violate the boundary.
 Format saved financial values; do not fit, rescore, derive financial evidence or
@@ -68,7 +78,9 @@ Existing operations HTML/legacy previews are compatibility exceptions with
 migration outstanding, not evidence that a React application view is shipped.
 Native parity summary presentation belongs here; mismatch/unpaired detail is
 outside this component. The operations parity HTML/JSON preview is retired.
+
 ## Diagrams
+
 ```mermaid
 flowchart LR
   App[React App and components] --> Hooks[release-pinned hooks]

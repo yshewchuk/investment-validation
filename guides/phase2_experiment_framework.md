@@ -34,6 +34,7 @@ experiments/
 ```
 
 `spec.yaml`:
+
 ```yaml
 id: EXP-101
 title: CAL-P exact-spec backtest

@@ -90,10 +90,13 @@ def test_missing_required_state_refuses_only_runup_without_inventing_inputs(tmp_
 @pytest.mark.parametrize("change", [
     {"model_id": "wrong-model"}, {"fold": "2026-01-01"}, {"fold": "2026-02-01"},
     {"residuals": ()}, {"residuals": (float("nan"),)}, {"residuals": (float("inf"),)},
+    pytest.param({"residuals": (1.0, float("nan"))}, id="mixed-flat-invalid-after-finite"),
     {"buckets": {"edges": (0.0,), "pools": ()}},
     {"buckets": {"edges": (1.0, 0.0), "pools": ((1.0,),)}},
     {"buckets": {"edges": (0.0, float("nan")), "pools": ((1.0,),)}},
     {"buckets": {"edges": (-float("inf"), float("inf")), "pools": ((float("nan"),),)}},
+    pytest.param({"buckets": {"edges": (-float("inf"), float("inf")),
+                             "pools": ((1.0, float("nan")),)}}, id="mixed-bucket-invalid-after-finite"),
     {"buckets": {"edges": (-float("inf"), float("inf")), "pools": ((),)}, "min_pool": 0},
 ])
 def test_hash_valid_but_unusable_champion_pool_is_refused(tmp_path, role, change):
@@ -128,6 +131,7 @@ def test_nonempty_bucket_with_zero_floor_remains_usable(tmp_path):
     {"coefficients": (float("nan"),) + (0.0,) * 5},
     {"coefficients": (float("inf"),) + (0.0,) * 5},
     {"residuals": ()}, {"residuals": (float("nan"),)}, {"residuals": (float("inf"),)},
+    pytest.param({"residuals": (1.0, float("nan"))}, id="mixed-surface-invalid-after-finite"),
 ])
 def test_hash_valid_but_unusable_surface_is_refused(tmp_path, changes):
     _assert_model_refusal(_binding(tmp_path, surfaces=[surface(**changes)]))

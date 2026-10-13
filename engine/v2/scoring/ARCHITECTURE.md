@@ -385,9 +385,11 @@ recipe selecting another output such as a quantile, raises `ValueError`
 before execution (batch: sanitized `NATIVE_INPUT_BUILD_FAILED`). Multi-output
 selection retains the existing explicit-output/target rules. This also covers
 chooser producer recipes; historical `score_frozen` singleton compatibility
-is unchanged. Both paths share the raw/final name vocabulary, never scaling
-inside the executor; forecast and model stages retain their separate raw and
-scaled values.
+is unchanged. Both paths share the raw/final name vocabulary. Source-bound
+`FrozenRecipeExecutor` maps outputs without scaling; native forecast/model
+stages own horizon scaling. Historical `score_frozen` retains separate
+`_CanonicalFrozenExecutor` wrappers: one preserves raw D14, the other clamps
+and scales the published move inside `predict`.
 
 **`score_frozen`'s release-binding scope (issue #93).** A `ModelRelease`
 binds every strategy's models together (e.g. STR-THRU's and STR-RUNUP's own
