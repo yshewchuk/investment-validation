@@ -81,14 +81,15 @@ _OPEN_TAG = (r"""<[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*"""
              r"""(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t]*/?>""")
 _CLOSE_TAG = r"</[A-Za-z][A-Za-z0-9-]*[ \t]*>"
 _HTML_START = (
-    (1, re.compile(r"^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)", re.I)),
-    (2, re.compile(r"^ {0,3}<!--")),
-    (3, re.compile(r"^ {0,3}<\?")),
-    (4, re.compile(r"^ {0,3}<![A-Za-z]")),
-    (5, re.compile(r"^ {0,3}<!\[CDATA\[")),
-    (6, re.compile(r"^ {0,3}</?(?:" + _HTML_BLOCK_TAGS + r")(?:[ \t]|/?>|$)", re.I)),
-    (7, re.compile(r"^ {0,3}(?:" + _OPEN_TAG + "|" + _CLOSE_TAG + r")[ \t]*$")),
+    (1, re.compile(r"^ *<(?:script|pre|style|textarea)(?:[ \t>]|$)", re.I)),
+    (2, re.compile(r"^ *<!--")),
+    (3, re.compile(r"^ *<\?")),
+    (4, re.compile(r"^ *<![A-Za-z]")),
+    (5, re.compile(r"^ *<!\[CDATA\[")),
+    (6, re.compile(r"^ *</?(?:" + _HTML_BLOCK_TAGS + r")(?:[ \t]|/?>|$)", re.I)),
+    (7, re.compile(r"^ *(?:" + _OPEN_TAG + "|" + _CLOSE_TAG + r")[ \t]*$")),
 )
+_THEMATIC = re.compile(r"^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$")
 _HTML_END = {
     1: re.compile(r"</(?:script|pre|style|textarea)>", re.I),
     2: re.compile(r"-->"),
@@ -98,9 +99,13 @@ _HTML_END = {
 }
 
 
-def _html_start(line: str, in_paragraph: bool) -> int:
+def _html_start(line: str, in_paragraph: bool, container: int = 0) -> int:
     """The HTML block start condition (1-7) ``line`` matches, else 0. Type 7
-    cannot interrupt a paragraph, so it is skipped when ``in_paragraph``."""
+    cannot interrupt a paragraph, so it is skipped when ``in_paragraph``. The line
+    must sit less than 4 columns beyond ``container`` (the enclosing list item's
+    content column, 0 at top level); 4 or more is indented code."""
+    if len(line) - len(line.lstrip(" ")) - container >= 4:
+        return 0
     for kind, rx in _HTML_START:
         if kind == 7 and in_paragraph:
             continue
@@ -197,9 +202,11 @@ def lint_text(text: str) -> list[Violation]:
     fence = None  # (char, length, indent, opening 1-based line, container indent)
     items: list[int] = []  # content columns of the open list items, outermost first
     html = 0  # start condition (1-7) of the HTML block being skipped, else 0
+    para = False  # the last line processed is paragraph text (what type 7 cannot interrupt)
     i = 0
     while i < n:
         s = lines[i]
+        prev_para, para = para, bool(s.strip()) and not _THEMATIC.match(s)
         m = _FENCE.match(s)
         if m and m.group(2)[0] == "`" and "`" in m.group(3):
             m = None  # an inline code span such as ```json```, not a fence
@@ -212,6 +219,7 @@ def lint_text(text: str) -> list[Violation]:
                 if fence[2] == 0 and not blank(i + 1):
                     found.append(Violation(i + 1, i + 2, "fence-after"))
                 fence = None
+                para = False  # a closed fence is not paragraph text
             i += 1
             continue
         if html:
@@ -221,14 +229,18 @@ def lint_text(text: str) -> list[Violation]:
                 # Inside an HTML block nothing is Markdown: no fence, heading or table.
                 if html < 6 and _HTML_END[html].search(s):
                     html = 0
+                    para = False  # an ended HTML block is not paragraph text
                 i += 1
                 continue
         else:
-            kind = _html_start(s, in_paragraph=i > 0 and not blank(i - 1))
+            ws = len(s) - len(s.lstrip(" "))
+            kind = _html_start(s, prev_para, max((x for x in items if x <= ws), default=0))
             if kind:
                 if not s[:1].isspace():
                     items.clear()
                 html = 0 if kind < 6 and _HTML_END[kind].search(s) else kind
+                if not html:
+                    para = False
                 i += 1
                 continue
         indent = len(m.group(1)) if m else 0
@@ -271,6 +283,7 @@ def lint_text(text: str) -> list[Violation]:
                 found.append(Violation(i + 1, i, "heading-before"))
             if not blank(i + 1):
                 found.append(Violation(i + 1, i + 2, "heading-after"))
+            para = False  # a heading is not paragraph text
             i += 1
             continue
         if ("|" in s and not _DELIM.match(s) and not s[:1].isspace()

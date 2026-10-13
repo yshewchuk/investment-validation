@@ -51,7 +51,9 @@ headers. Known limit: under a pipeless-edge table header, a line with the
 header's cell count is a row by GFM rules and is not flagged. A line that
 starts another block (heading, fence, list item, blockquote, thematic break,
 HTML block) ends a table and is never a row or a header. HTML blocks follow
-CommonMark 4.6 (start conditions 1-7, type 7 not interrupting a paragraph); their
+CommonMark 4.6 (start conditions 1-7, type 7 not interrupting a paragraph line
+but allowed after a heading, closed fence, thematic break or ended HTML block;
+indent measured from the enclosing list item's content column); their
 lines are not scanned as Markdown until the block ends. A table needs
 equal header and delimiter cell counts; unescaped pipes separate cells. Table
 violations are scoped by the whole block (header, delimiter, rows, absorbing

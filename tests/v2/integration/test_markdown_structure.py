@@ -544,6 +544,28 @@ def test_every_html_start_ends_a_table_case_insensitively():
     assert ms._starts_block("<div>") is True
 
 
+def test_type_7_html_block_may_start_after_a_non_paragraph_line():
+    # After a heading, a closed fence, a thematic break and an ended HTML block the
+    # lone tag starts a block, so the "# h" line after it is not scanned.
+    assert located("# H\n<custom-tag>\n# h\n\nz\n") == [("heading-after", 1)]
+    assert located("```\nx\n```\n<custom-tag>\n# h\n\nz\n") == [("fence-after", 3)]
+    assert located("***\n<custom-tag>\n# h\n\nz\n") == []
+    assert located("<!-- x -->\n<custom-tag>\n# h\n\nz\n") == []
+    # After a real paragraph line (also a list item or a table row) it does not.
+    assert located("a\n<custom-tag>\n# H\n\nz\n") == [("heading-before", 3)]
+    assert located("- a\n<custom-tag>\n# H\n\nz\n") == [("heading-before", 3)]
+
+
+def test_html_blocks_inside_list_items_use_the_container_indent():
+    # 6 columns absolute but only 2 beyond the nested item's content column 4.
+    assert rules("- a\n  - b\n\n      <div>\n      # x\n      ```\n\nz\n") == []
+    # A comment 2 columns beyond "- item" (content column 2) is an HTML block.
+    assert rules("- item\n\n    <!--\n    ```\n    -->\n") == []
+    # 4 columns beyond the container is indented code, not an HTML block: the
+    # following fence is scanned (and unclosed).
+    assert [v.rule for v in ms.lint_text("- item\n\n      <div>\n  ```\n  y\n")] == ["fence-unclosed"]
+
+
 def test_nested_list_closer_uses_the_innermost_container():
     # Innermost content column 4: a closer at 7 closes, one at 2 does not.
     assert rules("- a\n  - b\n\n    ```\n    x\n       ```\n") == []
