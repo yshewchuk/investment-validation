@@ -162,6 +162,7 @@ def test_superset_reuse_clips_bindings_without_rewriting_original_evidence(harne
     assert protocol["completed_ids"] == [content_hash(subset)] and not protocol["no_work"]
     assert protocol["outputs"][0]["schema"] == "massive_history_acquisition.v1"
     plan = second["coverage"]
+    assert (plan["candidate_count"], plan["candidate_limit"]) == (1, 100)
     assert plan["plan_hash"] == content_hash({k: v for k, v in plan.items() if k != "plan_hash"})
     assert plan == coverage.plan(h.conn, h.store, subset, "initial")
     assert calls == [request()] and len(occurrences(h)) == 1
@@ -682,6 +683,9 @@ def test_interval_planning_cli_is_readonly_clipped_gap_aware_and_legacy_compatib
     assert captured.err == "" and result["schema_version"] == "massive_interval_plan.v1"
     assert result["plan_only"] is True
     daily = next(p for p in result["plans"] if p["request"]["dataset"] == "daily")
+    assert (daily["candidate_count"], daily["candidate_limit"]) == (2, 100)
+    assert all((p["candidate_count"], p["candidate_limit"]) == (0, 100)
+               for p in result["plans"] if p["request"]["dataset"] != "daily")
     assert [(b["start"], b["end"]) for b in daily["bindings"]] == [
         ("2026-08-05", "2026-08-10"), ("2026-08-20", "2026-08-25")]
     assert daily["gaps"] == [request("2026-08-11", "2026-08-19")]
@@ -853,12 +857,27 @@ def test_real_service_launches_each_cached_history_job_and_publishes_own_output(
         conn.close()
 
 
+def test_candidate_count_is_scoped_and_includes_boundary_overlaps(harness):
+    h = harness
+    scopes = [request("2026-08-01", "2026-08-10"), request("2026-08-05", "2026-08-15"),
+              request("2026-08-16", "2026-08-20"), request(ticker="OTHER"), request(dataset="splits")]
+    for index, scope in enumerate(scopes):
+        seed_overlap(h, f"count-{index}", scope, "2026-09-10T12:00:00.000000Z")
+    acquire(h, "other-generation", generation="refresh", fetch=fetching([]))
+    for start, end, expected in (("10", "16", 3), ("11", "15", 1), ("21", "22", 0)):
+        planned = coverage.plan(h.conn, h.store, request(f"2026-08-{start}", f"2026-08-{end}"), "initial")
+        assert (planned["candidate_count"], planned["candidate_limit"]) == (expected, 100)
+        assert planned["plan_hash"] == content_hash({k: v for k, v in planned.items() if k != "plan_hash"})
+
+
 def test_candidate_limit_is_inclusive_and_overflow_precedes_object_reads(harness, monkeypatch):
     h = harness
     assert coverage.MAX_OCCURRENCES == 100
     for index in range(100):
         seed_overlap(h, f"candidate-{index}", request(), "2026-09-10T12:00:00.000000Z")
-    assert coverage.plan(h.conn, h.store, request(), "initial")["gaps"] == []
+    planned = coverage.plan(h.conn, h.store, request(), "initial")
+    assert planned["gaps"] == []
+    assert (planned["candidate_count"], planned["candidate_limit"]) == (100, 100)
     seed_overlap(h, "candidate-overflow", request(), "2026-09-10T12:00:00.000000Z")
     monkeypatch.setattr(h.store, "read_verified", no_fetch)
     with pytest.raises(OpsError) as refused:

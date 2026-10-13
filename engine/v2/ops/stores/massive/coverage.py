@@ -155,5 +155,6 @@ def plan(conn, store, request, generation):
         else:
             bindings.append({**interval, "occurrence_id": identity, "evidence": documents[identity]})
     result = {"schema_version": VERSION, "request": request, "generation": generation,
+              "candidate_count": len(rows), "candidate_limit": MAX_OCCURRENCES,
               "bindings": bindings, "gaps": gaps}
     return {**result, "plan_hash": content_hash(result)}
