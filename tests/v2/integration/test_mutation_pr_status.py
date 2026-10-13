@@ -41,19 +41,22 @@ def test_failure_cases():
     assert verdict["reasons"] == ["1 surviving mutant(s) in engine/v2/a.py"]
     assert verdict["state"] == "failure"
     for rc in (1, 127):
-        verdict = ps.classify({"modules": {"a": mod(run_exit_code=rc)}}, [],
+        verdict = ps.classify({"modules": {"a": mod(run_exit_code=rc)},
+                               "expected_modules": ["a"]}, [],
                               {"engine/v2/z.py"})
         assert verdict["state"] == "failure", rc
         assert verdict["description"] == "gremlins: PR-owned problem: tests fail in a", rc
         assert verdict["reasons"] == ["tests fail in a"], rc
-    degraded = {"modules": {"a": mod(run_exit_code=1, complete=False, tool_error=True)}}
+    degraded = {"modules": {"a": mod(run_exit_code=1, complete=False, tool_error=True)},
+                "expected_modules": ["a"]}
     verdict = ps.classify(degraded, None, None)
     assert verdict["state"] == "neutral"
     assert verdict["reasons"][0] == "result rows unreadable"
     verdict = ps.classify(degraded, [], {"engine/v2/z.py"})
     assert verdict["state"] == "failure"
     assert verdict["description"] == "gremlins: PR-owned problem: tests fail in a"
-    two = ps.classify({"modules": {"b": mod(run_exit_code=1)}},
+    two = ps.classify({"modules": {"b": mod(run_exit_code=1)},
+                       "expected_modules": ["b"]},
                       [row("a", "engine/v2/a.py"), row("c", "engine/v2/c.py")],
                       {"engine/v2/a.py", "engine/v2/c.py"})
     assert two["state"] == "failure"
@@ -127,9 +130,69 @@ def test_success_cases():
         verdict = ps.classify(clean("a"), [row("a", "engine/v2/a.py", status)],
                               {"engine/v2/a.py"})
         assert verdict["state"] == "success", status
-    planned = {"modules": {"a": mod()}, "expected_modules": None, "complete": True,
-               "tool_error": False, "failure_reasons": []}
-    assert ps.classify(planned, [], {"engine/v2/z.py"})["state"] == "success"
+    planned_unknown = {"modules": {"a": mod()}, "expected_modules": None,
+                       "complete": True, "tool_error": False, "failure_reasons": []}
+    planned_unknown_verdict = ps.classify(planned_unknown, [], {"engine/v2/z.py"})
+    assert planned_unknown_verdict["state"] == "neutral"
+    assert planned_unknown_verdict["reasons"][0] == "planned modules unknown"
+
+
+def _malformed_cases():
+    cases = []
+
+    def add_exp(id_, fn):
+        cases.append((id_, fn))
+
+    for id_, setup in (
+            ("expected_modules_deleted", lambda s: s.pop("expected_modules")),
+            ("expected_modules_none", lambda s: s.__setitem__("expected_modules", None)),
+            ("expected_modules_str", lambda s: s.__setitem__("expected_modules", "a")),
+            ("expected_modules_int_items", lambda s: s.__setitem__("expected_modules", [1]))):
+        add_exp(id_, setup)
+
+    def field_case(field, value, id_):
+        def fn(s):
+            m = s["modules"]["a"]
+            if value is _DELETED:
+                m.pop(field)
+            else:
+                m[field] = value
+        return id_, fn
+
+    for field in ("complete", "tool_error", "failure_reasons"):
+        cases.append(field_case(field, _DELETED, f"{field}_missing"))
+        cases.append(field_case(field, None, f"{field}_none"))
+        cases.append(field_case(field, "x", f"{field}_wrong_type"))
+    cases.append(field_case("complete", False, "complete_false"))
+    cases.append(field_case("tool_error", True, "tool_error_true"))
+    cases.append(field_case("failure_reasons", ["X"], "failure_reasons_nonempty"))
+
+    def cb_case(cb, id_):
+        def fn(s):
+            s["modules"]["a"]["counts_backend"] = cb
+        return id_, fn
+
+    cases.append(cb_case({}, "counts_backend_error_missing"))
+    cases.append(cb_case({"error": None}, "counts_backend_error_none"))
+    cases.append(cb_case({"error": "0"}, "counts_backend_error_str"))
+    cases.append(cb_case({"error": True}, "counts_backend_error_bool"))
+    return cases
+
+
+class _Deleted:
+    pass
+
+
+_DELETED = _Deleted()
+
+
+@pytest.mark.parametrize("id_,mutate", _malformed_cases(),
+                         ids=[c[0] for c in _malformed_cases()])
+def test_malformed_planned_or_module_fields_are_neutral(id_, mutate):
+    summary = clean("a")
+    mutate(summary)
+    verdict = ps.classify(summary, [], {"engine/v2/z.py"})
+    assert verdict["state"] == "neutral", id_
 
 
 NEUTRAL_CASES = [

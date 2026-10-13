@@ -10,9 +10,12 @@ planned module (a module entry whose measured ``run_exit_code`` is missing or
 null is not clean), ``neutral`` otherwise; attribution by FILE, never by line. Exit
 is 0 for classified/degraded input; nonzero only for argparse errors (exit 2)
 or an unwritable output file (the ``OSError`` propagates AFTER the verdict).
-Integrity first: an unavailable summary, a planned module missing, unreadable
-rows or no changed-file list is neutral before any attribution; only a
-complete, well-formed report can be failure or success. Exception: a module run exit code of 1..127 (the PR's tests failed) is red even if the summary is incomplete.
+Integrity first: an unavailable summary, a planned module missing (planned
+modules come from ``expected_modules``, which must be a non-empty list of
+strings), unreadable rows or no changed-file list is neutral before any
+attribution; only a complete, well-formed report can be failure or success.
+Exception: a module run exit code of 1..127 (the PR's tests failed) is red even
+if the summary is incomplete.
 """
 from __future__ import annotations
 
@@ -45,9 +48,12 @@ def classify(summary, rows, changed) -> dict:
     elif not isinstance(modules, dict) or not modules:
         reasons.append("no module measured")
     exp = summary.get("expected_modules") if isinstance(summary, dict) else None
-    names = (list(exp) if isinstance(exp, list) and exp
-             and all(isinstance(m, str) for m in exp)
-             else list(modules) if isinstance(modules, dict) else [])
+    if isinstance(exp, list) and exp and all(isinstance(m, str) for m in exp):
+        names = list(exp)
+    else:
+        names = []
+        if isinstance(summary, dict) and isinstance(modules, dict) and modules:
+            reasons.append("planned modules unknown")
     if isinstance(summary, dict) and isinstance(modules, dict):
         for name in names:
             if not isinstance(modules.get(name), dict):
@@ -82,11 +88,17 @@ def classify(summary, rows, changed) -> dict:
     for name in names:
         e = modules.get(name)
         rc = e.get("run_exit_code") if isinstance(e, dict) else None
+        fr = e.get("failure_reasons") if isinstance(e, dict) else None
+        cb = e.get("counts_backend") if isinstance(e, dict) else None
+        cb_err = cb.get("error") if isinstance(cb, dict) else None
         if (not isinstance(e, dict)
                 or e.get("skipped_reason")
                 or not (type(rc) is int and rc == 0)
-                or not isinstance(e.get("counts_backend"), dict)
-                or e["counts_backend"].get("error")):
+                or e.get("complete") is not True
+                or e.get("tool_error") is not False
+                or not (isinstance(fr, list) and fr == [])
+                or not isinstance(cb, dict)
+                or not (type(cb_err) is int and cb_err == 0)):
             reasons.append(f"module {name} not clean")
     if reasons:
         desc = f"gremlins: not a clean measured run ({reasons[0]}); not a pass"
