@@ -853,6 +853,99 @@ def test_planner_http_cap_counts_only_units_with_gaps(harness, capsys, cap):
     assert tuple(h.conn.iterdump()) == before
 
 
+@pytest.mark.parametrize("generation", [None, "initial", "refresh"])
+@pytest.mark.parametrize("missing", ["data_raw_receipts", "ops_massive_occurrences", "ops_massive_pages"])
+def test_planner_missing_schema_depends_on_tables_actually_queried(harness, capsys, generation, missing):
+    h = harness
+    # Remove only an empty synthetic table, retaining the rest of the real schema.
+    h.conn.execute(f"DROP TABLE {missing}")
+    before = tuple(h.conn.iterdump())
+    args = ["--catalog", str(h.root / "ops.sqlite"), "--store-root", str(h.store.root),
+            "--ticker", "SYNTH", "--start", "2026-08-01", "--end", "2026-08-31",
+            "--as-of", "2026-09-12", "--adjustment", "raw", "--max-calls-per-request", "1"]
+    if generation is not None:
+        args += ["--generation", generation]
+    code = ("VALIDATION_FAILED" if generation is None and missing == "data_raw_receipts" else
+            "RESOURCE_UNAVAILABLE" if generation is not None and missing == "ops_massive_occurrences" else None)
+    assert plan_cli._main(args) == (2 if code else 0)
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert captured.err == ""
+    if code:
+        assert result == ({"refused": code, "reason": None} if code == "VALIDATION_FAILED" else {"refused": code})
+    elif generation is None:
+        assert result["minimum_initial_calls"] == 3
+    else:
+        assert result["maximum_http_attempts"] == 3
+        assert all(p["candidate_count"] == 0 and p["bindings"] == [] and len(p["gaps"]) == 1
+                   for p in result["plans"])
+    assert tuple(h.conn.iterdump()) == before
+    assert not h.store.root.exists()
+
+
+@pytest.mark.parametrize("missing,generation,code,calls_expected", [
+    ("data_raw_receipts", None, "VALIDATION_FAILED", 0),
+    ("data_raw_receipts", "initial", "VALIDATION_FAILED", 0),
+    ("data_raw_receipts", "refresh", "RESOURCE_UNAVAILABLE", 1),
+    ("ops_massive_occurrences", "initial", "RESOURCE_UNAVAILABLE", 0),
+    ("ops_massive_occurrences", "refresh", "RESOURCE_UNAVAILABLE", 0),
+    ("ops_massive_pages", "initial", "RESOURCE_UNAVAILABLE", 0),
+    ("ops_massive_pages", "refresh", "RESOURCE_UNAVAILABLE", 0),
+])
+def test_worker_missing_schema_refusal_and_charge_boundary(harness, missing, generation, code, calls_expected):
+    h = harness
+    params = parameters(generation=generation)
+    (enqueue_exact if generation is None else enqueue)(h, params=params)
+    attempt = claim(h)
+    assert attempt is not None
+    h.conn.execute(f"DROP TABLE {missing}")
+    before = tuple(h.conn.iterdump())
+    calls = []
+    with pytest.raises(OpsError) as refused:
+        run(h, attempt, fetching(calls) if calls_expected else no_fetch, params)
+    assert refused.value.code == code
+    assert refused.value.problem.retryable == (code == "RESOURCE_UNAVAILABLE")
+    assert calls == ([request()] if calls_expected else [])
+    assert h.conn.execute("SELECT SUM(used_calls) FROM provider_reservations").fetchone()[0] == calls_expected
+    for table in ("data_raw_receipts", "ops_massive_occurrences", "ops_massive_pages"):
+        if table != missing:
+            assert h.conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    assert h.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (missing,)).fetchone() is None
+    if not calls_expected:
+        assert tuple(h.conn.iterdump()) == before
+    assert not h.store.root.exists()
+    assert not (h.root / attempt.attempt_id / "massive_acquisition.json").exists()
+
+
+def test_selected_generation_evidence_needs_raw_schema_without_fetch(harness, capsys):
+    h = harness
+    acquire(h, "original")
+    # Retain genuine evidence, but hide its raw table from the production SQL.
+    h.conn.execute("ALTER TABLE data_raw_receipts RENAME TO saved_synthetic_raw_receipts")
+    before = tuple(h.conn.iterdump())
+    objects = {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()}
+    args = ["--catalog", str(h.root / "ops.sqlite"), "--store-root", str(h.store.root),
+            "--ticker", "SYNTH", "--start", "2026-08-01", "--end", "2026-08-31",
+            "--as-of", "2026-09-12", "--adjustment", "raw", "--max-calls-per-request", "1",
+            "--generation", "initial"]
+    assert plan_cli._main(args) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"refused": "RESOURCE_UNAVAILABLE"} and captured.err == ""
+    assert tuple(h.conn.iterdump()) == before
+    enqueue(h, "reuse")
+    attempt = claim(h)
+    assert attempt is not None
+    before = tuple(h.conn.iterdump())
+    with pytest.raises(OpsError) as refused:
+        run(h, attempt, no_fetch, parameters())
+    assert refused.value.code == "RESOURCE_UNAVAILABLE" and refused.value.problem.retryable
+    assert tuple(h.conn.iterdump()) == before
+    assert h.conn.execute("SELECT used_calls FROM provider_reservations WHERE attempt_id=?",
+                          (attempt.attempt_id,)).fetchone()[0] == 0
+    assert {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()} == objects
+    assert not (h.root / attempt.attempt_id / "massive_acquisition.json").exists()
+
+
 @pytest.mark.parametrize("generation", ["initial", "refresh"])
 @pytest.mark.parametrize("observed,end", [
     ("2026-09-12T02:00:00+00:00", "2026-09-11"),

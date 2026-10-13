@@ -42,7 +42,9 @@ No refusal emits a success artifact or invents whole-scope coverage. Completed g
 | Condition | Outcome |
 |---|---|
 | Invalid scope, future `as_of`, policy, identity, account, dependencies, trusted context or parameters | `INVALID_REQUEST` before provider access; validation precedes storage. |
-| Catalog lacks raw-receipt schema | `VALIDATION_FAILED`; no migration. |
+| Exact-cache lookup lacks `data_raw_receipts` (exact mode or initial-generation first-page acquisition) | `VALIDATION_FAILED` before HTTP; no migration. |
+| Generation CLI/worker evidence lookup queries an absent occurrence, page or raw-receipt table | `RESOURCE_UNAVAILABLE`; no migration or general schema preflight. Gap-only planning need not read raw/page tables. |
+| Fresh-generation acquisition reaches raw persistence without `data_raw_receipts` | `RESOURCE_UNAVAILABLE` after the charged fetch; no raw object/receipt or completion is published. |
 | Missing/invalid credential or HTTP 401 | `CREDENTIAL_INVALID`; an observed 401 blocks the account pending operator action. |
 | HTTP 403 | `SOURCE_INVALID` with `CAPABILITY_UNAVAILABLE`; does not mark the credential invalid. |
 | Other rejected HTTP/envelope, non-bytes body, unsupported compression or credential echo | `SOURCE_INVALID`. |

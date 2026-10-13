@@ -6,12 +6,49 @@ import pytest
 from engine.v2.data.incremental import RawPayload, cache_raw_receipt
 from engine.v2.foundation import canonical_json, content_hash, format_timestamp
 from engine.v2.ops.catalog import transaction
+from engine.v2.ops.errors import OpsError
+from engine.v2.ops.lifecycle import verify_fence
 from engine.v2.ops.stores.massive import coverage
 from tests.v2.ops import test_massive_coverage as support
 from tests.v2.ops import test_massive_pagination as pagination
 
 harness = support.harness
 forbid_network = pagination.forbid_network
+
+
+@pytest.mark.parametrize("changed", [None, "observed_at", "raw_hash"])
+def test_occurrence_replay_is_idempotent_but_conflicting_evidence_refuses(harness, changed):
+    h = harness
+    support.enqueue(h)
+    attempt = support.claim(h)
+    calls = []
+    _, result = support.run(h, attempt, support.fetching(calls), support.parameters())
+    binding = result["coverage"]["bindings"][0]
+    original = binding["evidence"]
+    document = dict(original)
+    if changed is not None:
+        document[changed] = ("2026-09-12T00:00:01.000000Z" if changed == "observed_at" else "sha256:" + "0" * 64)
+        assert content_hash(document) != binding["occurrence_id"]
+    before = tuple(h.conn.iterdump())
+    objects = {p.relative_to(h.store.root): (p.read_bytes(), p.stat().st_mtime_ns)
+               for p in h.store.root.rglob("*") if p.is_file()}
+    def replay():
+        with transaction(h.conn):
+            verify_fence(h.conn, attempt.attempt_id, attempt.fence, h.clock.now())
+            coverage.record(h.conn, document)
+    if changed is None:
+        assert replay() is None
+    else:
+        with pytest.raises(OpsError) as refused:
+            replay()
+        assert refused.value.code == "INTEGRITY_FAILED" and not refused.value.problem.retryable
+        assert str(refused.value) == "INTEGRITY_FAILED: Massive acquisition occurrence conflicts"
+    assert tuple(h.conn.iterdump()) == before
+    assert len(support.occurrences(h)) == 1
+    assert json.loads(support.occurrences(h)[0]["document_json"]) == original
+    assert {p.relative_to(h.store.root): (p.read_bytes(), p.stat().st_mtime_ns)
+            for p in h.store.root.rglob("*") if p.is_file()} == objects
+    assert calls == [support.request()]
 
 
 def rewrite_occurrence(h, row, document):
