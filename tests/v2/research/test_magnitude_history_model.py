@@ -54,10 +54,10 @@ def _dataset():
     return events + excluded, moves + [_move(event, None) for event in excluded]
 
 
-def _source(tmp_path, *, register=True, build=True, events=None, moves=None, folds=("2024", "2025")):
+def _source(tmp_path, *, register=True, build=True, events=None, moves=None, folds=("2024", "2025"), mixed_days=()):
     if events is None:
         events, moves = _dataset()
-    conn, original, snapshot = _commit(tmp_path, events, moves,
+    conn, original, snapshot = _commit(tmp_path, events, moves, mixed_days=mixed_days,
         days=_calendar("2022-05-25", "2025-12-05").days)
     spec = _prior_spec(experiment_id="synthetic-stored-magnitude", primary_arm_id="history",
         arms=("history",), folds=folds)
@@ -154,6 +154,16 @@ def _metrics(pairs):
                 mae=sum(errors) / len(errors))
 
 
+def _assert_fold_metrics(source, result):
+    expected = _expected(source)
+    event_years = {event["event_id"]: event["event_date"].year for event in source.events}
+    assert [fold["year"] for fold in result["folds"]] == ["2024", "2025"]
+    for fold, year, count in zip(result["folds"], (2024, 2025), (12, 6)):
+        pairs = [pair for (event_id, _), pair in expected.items() if event_years[event_id] == year]
+        assert len(pairs) == count and fold["test_count"] == count // 3
+        assert fold["metrics"] == pytest.approx(_metrics(pairs)), "fold metrics must use only that fold's pairs"
+
+
 def test_real_stored_rows_produce_issuer_and_horizon_specific_read_only_forecasts(source, monkeypatch):
     _no_rebuild(monkeypatch)
     # Pre-window history is needed by the stored model, but must never be decoded again.
@@ -185,10 +195,44 @@ def test_real_stored_rows_produce_issuer_and_horizon_specific_read_only_forecast
         assert {key: value for key, value in horizon.items() if key != "horizon_sessions"} == pytest.approx(
             _metrics(pair for (_, count), pair in expected.items() if count == horizon["horizon_sessions"]))
     assert {row["horizon_sessions"] for row in result["per_horizon"]} == {5, 3, 1}
+    _assert_fold_metrics(source, result)
     assert result["metrics"]["rmse"] != pytest.approx(sum(fold["metrics"]["rmse"] for fold in result["folds"]) / 2)
     assert result["result_id"] == content_hash({key: value for key, value in result.items() if key != "result_id"})
     assert json.loads(json.dumps(result, allow_nan=False)) == result
     assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+def test_fold_oracle_rejects_cumulative_later_fold_diagnostics(source):
+    result = model.prediction_result(source.repository, source.registration)
+    _assert_fold_metrics(source, result)
+    # Exact counterfactual to _metrics(predictions) instead of _metrics(scored):
+    # the second fold would score all 18 forecasts rather than its own six.
+    cumulative = json.loads(json.dumps(result))
+    cumulative["folds"][1]["metrics"] = _metrics(_expected(source).values())
+    with pytest.raises(AssertionError, match="fold metrics must use only that fold's pairs"):
+        _assert_fold_metrics(source, cumulative)
+
+
+def test_direct_reporter_preflights_later_label_before_feature_or_label_payloads(tmp_path, monkeypatch):
+    events, moves = _dataset()
+    # This unselected sibling shares the last admitted label's physical object.
+    # Neither row is historical input to any forecast, so the stored build is valid.
+    moves.append(_move(_event("2025-01-08", ticker="SYNTH_A"), None))
+    source = _source(tmp_path, events=events, moves=moves, mixed_days=("2025-01-07", "2025-01-08"))
+    try:
+        before = _catalog(source.conn), _objects(source.store)
+        _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
+        for name in ("read_stored", "qualify_magnitude_training_targets", "load_magnitude_targets"):
+            monkeypatch.setattr(model, name, _forbid)
+        with _refuses(DataError, "HOLDOUT_ACCESS_DENIED"):
+            model.prediction_result(source.repository, source.registration)
+        assert (_catalog(source.conn), _objects(source.store)) == before
+        # Without run-wide label preflight, the forbidden feature read is reached.
+        monkeypatch.setattr(model, "preflight_magnitude_targets", lambda *args, **kwargs: {})
+        with pytest.raises(AssertionError, match="forbidden access"):
+            model.prediction_result(source.repository, source.registration)
+    finally:
+        source.conn.close()
 
 
 def test_genuine_zero_history_does_not_take_the_empty_history_fallback(tmp_path, monkeypatch):
