@@ -138,6 +138,63 @@ def test_complete_query_moneyness_is_relative_to_spot(spot, strike, band):
     assert out["moneyness_band"] == band
 
 
+_BAD_NUMBERS = [
+    pytest.param(None, id="none"),
+    pytest.param(float("nan"), id="nan"),
+    pytest.param(float("inf"), id="inf"),
+    pytest.param(float("-inf"), id="-inf"),
+    pytest.param("abc", id="string"),
+    pytest.param(True, id="bool"),
+]
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_query_base_drops_mcap_for_every_bad_mcap_log(bad):
+    # Dropped (None), never bucketed: -inf would otherwise be exp(-inf)=0 -> "<1B".
+    got = analog_query_base({"mcap_log": bad, "im": 0.06, "mean_prior_or_implied": 0.05})
+    assert got["mcap_bucket"] is None
+    assert got["implied_ratio"] == pytest.approx(1.2)
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_query_base_drops_ratio_for_every_bad_im_or_prior(bad):
+    base = {"mcap_log": math.log(5e9)}
+    assert analog_query_base({**base, "im": bad, "mean_prior_or_implied": 0.05})[
+        "implied_ratio"] is None
+    assert analog_query_base({**base, "im": 0.06, "mean_prior_or_implied": bad})[
+        "implied_ratio"] is None
+
+
+def test_query_base_ratio_edge_cases():
+    base = {"mcap_log": math.log(5e9)}
+    # A non-finite quotient (overflow) is dropped; a negative divisor is a valid number.
+    assert analog_query_base({**base, "im": 1e308, "mean_prior_or_implied": 1e-308})[
+        "implied_ratio"] is None
+    assert analog_query_base({**base, "im": 0.06, "mean_prior_or_implied": -0.05})[
+        "implied_ratio"] == pytest.approx(-1.2)
+    assert analog_query_base({**base, "im": 0.0, "mean_prior_or_implied": 0.05})[
+        "implied_ratio"] == 0.0
+
+
+def test_query_base_negative_mcap_log_is_a_small_cap():
+    assert analog_query_base({"mcap_log": -3.0})["mcap_bucket"] == "<1B"
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_complete_query_drops_bands_for_every_bad_input(bad):
+    query = {"mcap_bucket": "1-10B", "implied_ratio": None}
+    assert complete_analog_query(query, {"dte_entry": bad})["dte_band"] is None
+    for values in ({"spot": 100.0, "strike": bad}, {"spot": bad, "strike": 100.0}):
+        assert complete_analog_query(query, values)["moneyness_band"] is None
+
+
+def test_complete_query_negative_spot_is_not_a_missing_input():
+    # Only a zero/absent/non-finite spot is unusable: |strike/spot - 1| is computed otherwise.
+    out = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None},
+                                {"spot": -100.0, "strike": 100.0})
+    assert out["moneyness_band"] == ">5%"
+
+
 def test_complete_query_zero_spot_is_none():
     out = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None},
                                 {"spot": 0.0, "strike": 100.0})
