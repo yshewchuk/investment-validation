@@ -115,6 +115,7 @@ The entrypoint fingerprints its installed source closure and numerical environme
 callers cannot submit features, a context document or an alternative producer.
 Research owns the native contract, protected build and stored-only reader; ops
 supplies existing bootstrap/fingerprinting, with no peer-layer import added.
+The CLI uses `engine.v2.data` Repository/errors and foundation ArtifactStore/errors/clock.
 Build returns the source/context/output identities; read returns stored rows.
 Both are explicit local operations, never implicit provider downloads or model
 runs. Data/ops failures retain code/message; artifact failures retain only their

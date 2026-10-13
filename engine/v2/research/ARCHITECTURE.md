@@ -552,7 +552,8 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 | Replay/conflict | Matching success receipt returns the original artifact without moving a head. Conflicting receipts/heads refuse; no automatic retry or failed-receipt poisoning. |
 | Stored read | Supported entrypoint reconstructs context; engine verifies exact receipt/output and complete object isolation, then all row metadata before feature-column decoding. Checksum verification reads bytes. No historical outcomes or arithmetic; malformed reads return no partial rows. |
 | Trust/authority | Native inspected catalog metadata is trusted, not independent attestation against malicious catalog writers. Schedule/source-publication availability remain unverified reconstruction. No experiment/final-read authority; registration v1.0–v1.3 and fixed baseline are unchanged. |
-| Refusals | Context/receipt drift: `IDENTITY_CONFLICT`; unprovable isolation: `HOLDOUT_ACCESS_DENIED`; bad stored schema/metadata/missingness: `CONTRACT_MISMATCH`. Native catalog/object/source-admission errors propagate. |
+| Refusals | Missing or changed context/receipt: `IDENTITY_CONFLICT`; unprovable isolation: `HOLDOUT_ACCESS_DENIED`; bad stored schema/metadata/missingness: `CONTRACT_MISMATCH`. |
+| Source/publication failures | Unresolved exact pin: `SNAPSHOT_UNRESOLVED`; empty fold: `POPULATION_COLLAPSED`; invalid eligible label/features: `EXPERIMENT_VARIANT_FAILED`; competing head: `SNAPSHOT_CONFLICT`. Other native catalog/object/source-admission errors propagate. |
 
 ## External systems and libraries
 
@@ -583,12 +584,12 @@ else it reads (see Failure semantics, Invariants). No third-party service.
 
 ## Failure semantics
 
-The 4c R1–R6 template covers data-boundary refusals, which generally use `DataError`
-(`engine.v2.data.errors.DataError`) carrying one of the registered
-`DATA_FAILURE_CODES`, which CLI leaves catch at `main()` and exit 2.
-Stored-history runtime refusals are JSON on stdout; other tools print code/message on stderr. CLI argument
-validation is described separately because it can refuse before `main()`
-reaches that handler. One pre-existing data-path exception, called out below
+The 4c R1–R6 template covers data-boundary refusals, generally `DataError`
+(`engine.v2.data.errors.DataError`) carrying a registered `DATA_FAILURE_CODES` code.
+CLI leaves catch these at `main()` and exit 2: stored-history runtime refusals
+are JSON on stdout; other tools print code/message on stderr.
+Argument validation is separate because it can refuse before that handler.
+One pre-existing data-path exception, called out below
 where it applies (`_snapshot.py`'s bare `ValueError`, issue #70), escapes as
 an uncaught traceback instead.
 

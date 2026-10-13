@@ -1,8 +1,10 @@
 """Synthetic native publication/read oracles, including physical poison guards."""
+import hashlib
 import json
 import sqlite3
 from collections import Counter
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -73,7 +75,11 @@ def test_native_roundtrip_math_lineage_units_identity_and_replay(source, monkeyp
     assert output.knowledge_mode_by_table == {TABLE: "reconstructed"}
     assert context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
     assert context["source_snapshot"]["snapshot_id"] == source.snapshot.snapshot_id
-    assert context["producer"]["source_closure"]["experiments/magnitude_history_store.py"].startswith("sha256:")
+    closure = context["producer"]["source_closure"]
+    root = Path(entry.__file__).resolve().parents[1]
+    assert {"experiments/magnitude_history_store.py", "engine/v2/research/magnitude_history_store.py",
+            "engine/v2/research/event_history.py"} <= closure.keys()
+    assert closure == {name: "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest() for name in closure}
     assert context["feature_recipe"]["features"] == [
         {"name": name, "on_missing": "zero_count" if name == "n_prior" else "null"} for name in FEATURES]
     before = _catalog(source.conn), _objects(source.store)
@@ -455,6 +461,23 @@ def test_context_or_source_mismatch_refuses_before_any_source_or_feature_payload
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
+@pytest.mark.parametrize("action", ["materialize", "read_stored"])
+@pytest.mark.parametrize("missing", ["context_id", "source_snapshot", "not_a_context"])
+def test_missing_direct_context_identity_has_a_typed_refusal_before_payloads(source, monkeypatch, action, missing):
+    binding = entry.context(source.repository, source.snapshot, **REQUEST)
+    if missing == "not_a_context":
+        binding = None
+    else:
+        del binding[missing]
+        if missing != "context_id":
+            binding["context_id"] = content_hash({k: v for k, v in binding.items() if k != "context_id"})
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        getattr(stored, action)(source.repository, source.snapshot, binding)
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
 @pytest.mark.parametrize("scope,name,value", [
     ("event", "ticker", "OTHER"), ("event", "event_date", "2024-06-18"),
     ("event", "session", "BMO"), ("event", "population_use", "wrong"),
@@ -464,15 +487,18 @@ def test_context_or_source_mismatch_refuses_before_any_source_or_feature_payload
     ("cutoff", "session", "BMO"), ("cutoff", "source_session_ceiling", "2024-06-18"),
     ("cutoff", "source_session_ceiling", "2024-06-17"),
     ("cutoff", "source_session_ceiling", "2021-12-31"),
+    ("event_and_cutoffs", "event_date", "2024-06-18"),
 ])
 def test_rehashed_direct_context_guards_all_targets_before_outcomes(source, monkeypatch, scope, name, value):
     binding = entry.context(source.repository, source.snapshot, **REQUEST)
     plan = binding["temporal_plan"]
     event = plan["events"][-1]  # A malformed later target must stop earlier safe-target reads too.
     assert event["event_date"] == "2024-06-17"
-    target = event if scope == "event" else event["forecasts"][-1]
+    target = event if scope != "cutoff" else event["forecasts"][-1]
     target[name] = source.forbidden[0]["event_id"] if value == "protected" else value
     for forecast in event["forecasts"]:
+        if scope == "event_and_cutoffs":
+            forecast[name] = value
         forecast["cutoff_id"] = content_hash({k: v for k, v in forecast.items() if k != "cutoff_id"})
     plan["plan_id"] = content_hash({k: v for k, v in plan.items() if k != "plan_id"})
     binding["context_id"] = content_hash({k: v for k, v in binding.items() if k != "context_id"})
@@ -684,15 +710,24 @@ def test_inconsistent_stored_history_status_refuses_before_feature_columns(sourc
         _read(source, output)
 
 
-@pytest.mark.parametrize("change", ["missing", "extra"])
-def test_fragment_set_coverage_refuses_before_any_feature_object(source, monkeypatch, change):
+@pytest.mark.parametrize("change", ["missing", "extra", "row_count", "partition_key",
+                                    "primary_key_min", "primary_key_max", "time_min", "time_max"])
+def test_fragment_coverage_and_bounds_refuse_before_any_feature_object(source, monkeypatch, change):
     _, output = _build(source)
     records = source.repository.fragment_records(output, TABLE)
     original = source.repository.fragment_records
 
     def malformed(snapshot, table):
         if table == TABLE:
-            return records[:-1] if change == "missing" else (*records, records[-1])
+            if change == "missing":
+                return records[:-1]
+            if change == "extra":
+                return (*records, records[-1])
+            changed = {"row_count": 2, "partition_key": "wrong",
+                "primary_key_min": (*records[-1].primary_key_min[:-1], 0),
+                "primary_key_max": (*records[-1].primary_key_max[:-1], 6),
+                "time_min": "2024-06-16", "time_max": "2024-06-18"}
+            return (*records[:-1], replace(records[-1], **{change: changed[change]}))
         return original(snapshot, table)
 
     monkeypatch.setattr(source.repository, "fragment_records", malformed)
@@ -706,6 +741,62 @@ def test_fragment_set_coverage_refuses_before_any_feature_object(source, monkeyp
     monkeypatch.setattr(objects, "verify_object_path", guarded)
     with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
         _read(source, output)
+
+
+@pytest.mark.parametrize("change", ["history_content", "read_inputs_content", "history_id", "noncanonical",
+                                    "history_type", "omitted_history_type", "read_inputs_type", "extra_key"])
+def test_lineage_digest_encoding_and_closed_types_refuse_before_features(source, monkeypatch, change):
+    original = stored._event_rows
+
+    def malformed(*args):
+        rows = original(*args)
+        if rows[0]["event_date"] == "2024-06-17":
+            history = json.loads(rows[-1]["history_json"])
+            if change.endswith("_content"):
+                history[change.removesuffix("_content")][0]["object_id"] = "wrong"
+            elif change == "history_id":
+                history["history_id"] = "wrong"
+            elif change.endswith("_type"):
+                name = change.removesuffix("_type")
+                history[name] = {"one": 1, "two": 2, "three": 3} if name == "history" else {}
+            elif change == "extra_key":
+                history["extra"] = "unused"
+            if change.endswith("_type") or change == "extra_key":
+                history["history_id"] = content_hash({k: v for k, v in history.items()
+                    if k not in ("history_id", "history_status", "holdout_exclusions")})
+            rows[-1]["history_json"] = json.dumps(history, indent=2) if change == "noncanonical" else canonical_json(history)
+        return rows
+
+    monkeypatch.setattr(stored, "_event_rows", malformed)
+    _, output = _build(source)
+    scan = stored._scan
+
+    def guarded(repository, snapshot, context, columns, count):
+        assert not set(columns) & set(FEATURES)
+        return scan(repository, snapshot, context, columns, count)
+
+    monkeypatch.setattr(stored, "_scan", guarded)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        _read(source, output)
+
+
+@pytest.mark.parametrize("name", stored.METADATA)
+def test_feature_pass_metadata_drift_with_equal_counts_never_returns_partial_rows(source, monkeypatch, name):
+    _, output = _build(source)
+    scan = stored._scan
+    seen = []
+
+    def changed(repository, snapshot, context, columns, count):
+        rows = scan(repository, snapshot, context, columns, count)
+        if set(columns) & set(FEATURES):
+            rows[-1][name] = 2 if name == "horizon_sessions" else "changed"
+        seen.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(stored, "_scan", changed)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        _read(source, output)
+    assert seen == [12, 12]
 
 
 @pytest.mark.parametrize("phase", ["metadata", "features"])

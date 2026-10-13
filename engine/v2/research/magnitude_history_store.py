@@ -40,7 +40,8 @@ def build_context(repository, snapshot, *, producer, history_start, **request):
 
 def _names(context):
     """One immutable catalog success slot per complete build context."""
-    if context["context_id"] != content_hash({k: v for k, v in context.items() if k != "context_id"}):
+    if (not isinstance(context, dict)
+            or context.get("context_id") != content_hash({k: v for k, v in context.items() if k != "context_id"})):
         raise errors.fail("IDENTITY_CONFLICT", "history context digest differs")
     key = context["context_id"].removeprefix("sha256:")
     return "magnitude-history-" + key, "magnitude-history-build-" + key
@@ -146,7 +147,8 @@ def _event_rows(repository, snapshot, context, event, prepared):
 
 def materialize(repository, snapshot, context):
     """Publish one complete context; replay returns its original stored artifact."""
-    if context["source_snapshot"] != to_document(snapshot) or repository.resolve(snapshot.snapshot_id) != snapshot:
+    if (not isinstance(context, dict) or context.get("source_snapshot") != to_document(snapshot)
+            or repository.resolve(snapshot.snapshot_id) != snapshot):
         raise errors.fail("IDENTITY_CONFLICT", "history source differs from its build context")
     existing = _existing(repository, context)
     if existing is not None:
