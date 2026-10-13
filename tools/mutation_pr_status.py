@@ -10,6 +10,9 @@ planned module (a module entry whose measured ``run_exit_code`` is missing or
 null is not clean), ``neutral`` otherwise; attribution by FILE, never by line. Exit
 is 0 for classified/degraded input; nonzero only for argparse errors (exit 2)
 or an unwritable output file (the ``OSError`` propagates AFTER the verdict).
+Integrity first: an unavailable summary, a planned module missing, unreadable
+rows or no changed-file list is neutral before any attribution; only a
+complete, well-formed report can be failure or success.
 """
 from __future__ import annotations
 
@@ -33,51 +36,60 @@ def _list(label: str, items) -> str:
 
 
 def classify(summary, rows, changed) -> dict:
-    """Pure verdict ``failure`` > ``success`` > ``neutral``; ``reasons[0]`` sets
-    the neutral description."""
+    """Pure verdict ``neutral`` (integrity) first, then ``failure``, then
+    ``success``; ``reasons[0]`` sets the neutral description."""
     reasons: list[str] = []
     modules = summary.get("modules") if isinstance(summary, dict) else None
-    hits = ([r["file"] for r in rows
-             if r["status"] == "survived" and r["file"] in changed]
-            if rows is not None and changed else [])
-    failing = ([str(n) for n, e in modules.items()
-                if isinstance(e, dict) and not e.get("skipped_reason")
-                and type(e.get("run_exit_code")) is int
-                and 1 <= e["run_exit_code"] <= 127]
-               if isinstance(modules, dict) else [])
-    if hits or failing:
-        parts = [p for p in (
-            f"{len(hits)} " + _list("surviving mutant(s) in", set(hits)) if hits else None,
-            _list("tests fail in", failing) if failing else None) if p]
-        desc = "gremlins: PR-owned problem: " + "; ".join(parts)
-        return {"state": "failure", "description": _cut(desc), "reasons": parts}
     if not isinstance(summary, dict):
         reasons.append("merged report unavailable")
     elif not isinstance(modules, dict) or not modules:
         reasons.append("no module measured")
-    else:
-        if summary.get("complete") is not True:
-            reasons.append("run incomplete")
-        if summary.get("tool_error") is not False:
-            reasons.append("tool error")
-        if summary.get("failure_reasons") != []:
-            reasons.append("failure reasons reported")
-        exp = summary.get("expected_modules")
-        names = (list(exp) if isinstance(exp, list) and exp
-                 and all(isinstance(m, str) for m in exp) else list(modules))
+    exp = summary.get("expected_modules") if isinstance(summary, dict) else None
+    names = (list(exp) if isinstance(exp, list) and exp
+             and all(isinstance(m, str) for m in exp)
+             else list(modules) if isinstance(modules, dict) else [])
+    if isinstance(summary, dict) and isinstance(modules, dict):
         for name in names:
-            e = modules.get(name)
-            rc = e.get("run_exit_code") if isinstance(e, dict) else None
-            if (not isinstance(e, dict)
-                    or e.get("skipped_reason")
-                    or not (type(rc) is int and rc == 0)
-                    or not isinstance(e.get("counts_backend"), dict)
-                    or e["counts_backend"].get("error")):
-                reasons.append(f"module {name} not clean")
+            if not isinstance(modules.get(name), dict):
+                reasons.append(f"module {name} missing")
     if rows is None:
         reasons.append("result rows unreadable")
     if not changed:
         reasons.append("changed files unavailable")
+    if reasons:
+        desc = f"gremlins: not a clean measured run ({reasons[0]}); not a pass"
+        return {"state": "neutral", "description": _cut(desc), "reasons": reasons}
+    hits = [r["file"] for r in rows
+            if r["status"] == "survived" and r["file"] in changed]
+    failing = [str(n) for n, e in modules.items()
+               if isinstance(e, dict) and not e.get("skipped_reason")
+               and type(e.get("run_exit_code")) is int
+               and 1 <= e["run_exit_code"] <= 127]
+    if failing:
+        parts = [p for p in (
+            f"{len(hits)} " + _list("surviving mutant(s) in", set(hits)) if hits else None,
+            _list("tests fail in", failing)) if p]
+        desc = "gremlins: PR-owned problem: " + "; ".join(parts)
+        return {"state": "failure", "description": _cut(desc), "reasons": parts}
+    if hits and summary.get("complete") is True and summary.get("tool_error") is False:
+        parts = [f"{len(hits)} " + _list("surviving mutant(s) in", set(hits))]
+        desc = "gremlins: PR-owned problem: " + "; ".join(parts)
+        return {"state": "failure", "description": _cut(desc), "reasons": parts}
+    if summary.get("complete") is not True:
+        reasons.append("run incomplete")
+    if summary.get("tool_error") is not False:
+        reasons.append("tool error")
+    if summary.get("failure_reasons") != []:
+        reasons.append("failure reasons reported")
+    for name in names:
+        e = modules.get(name)
+        rc = e.get("run_exit_code") if isinstance(e, dict) else None
+        if (not isinstance(e, dict)
+                or e.get("skipped_reason")
+                or not (type(rc) is int and rc == 0)
+                or not isinstance(e.get("counts_backend"), dict)
+                or e["counts_backend"].get("error")):
+            reasons.append(f"module {name} not clean")
     if not reasons:
         return {"state": "success", "reasons": [],
                 "description": f"gremlins: no PR-owned problems in {len(names)} module(s)"}

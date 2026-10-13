@@ -54,7 +54,8 @@ def test_classify_step_wiring():
     names = [s.get("id") or s.get("name") or "" for s in _steps(JOBS["report"])]
     assert names.index("classify") > _steps(JOBS["report"]).index(checkout)
     assert "permissions" not in JOBS["report"]
-    assert set(JOBS["report"]["outputs"]) >= {"state", "description"}
+    assert JOBS["report"]["outputs"]["state"] == "${{ steps.classify.outputs.state }}"
+    assert JOBS["report"]["outputs"]["description"] == "${{ steps.classify.outputs.description }}"
 
 
 def _run_bash(script: str, env_over: dict, functions: str) -> subprocess.CompletedProcess:
@@ -190,6 +191,8 @@ def test_report_status_wiring():
     for step in _steps(JOBS["report_status"]):
         if "Post mutation status to the PR head commit" in step.get("name", ""):
             assert step["env"]["SHA"] == "${{ github.event.workflow_run.head_sha }}"
+            assert step["env"]["CLASSIFIED_STATE"] == "${{ needs.report.outputs.state }}"
+            assert step["env"]["CLASSIFIED_DESC"] == "${{ needs.report.outputs.description }}"
             break
     else:
         raise AssertionError("report status step not found")
