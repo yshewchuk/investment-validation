@@ -96,9 +96,11 @@ parameters for an eligible pinned-snapshot identity. See the component
 architecture contract.
 
 The internal `native_score_batch._STRATEGY_REGISTRY` declares each admitted
-row's driver/alias, gate, policy key and source-bundle strategy. Only STR-THRU
-is registered; it is a single-driver assembly seam, with no runtime
-registration API or chooser execution contract.
+row's ordered forecast outputs and exact/alias driver roles, gate, policy key,
+source-bundle strategy and optional driver-name override. All resolved drivers
+contribute features, recipes, identities and request artifact references.
+Only STR-THRU is registered; the two-driver RUNUP descriptor is unregistered.
+There is no runtime registration API or chooser execution contract.
 
 `carried_set.CarriedTickerExclusion`, `carried_set.CarriedSetResolution`,
 `carried_set.resolve_carried_set`, and

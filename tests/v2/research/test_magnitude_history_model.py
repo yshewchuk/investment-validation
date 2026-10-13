@@ -172,6 +172,12 @@ def test_real_stored_rows_produce_issuer_and_horizon_specific_read_only_forecast
     result = model.prediction_result(source.repository, source.registration)
     assert result == model.prediction_result(source.repository, source.registration)
     assert result["schema_version"] == "native_magnitude_history_result.v1"
+    assert result["model"] == "stored_ticker_arithmetic_mean"
+    assert result["features"] == ["n_prior", "mean_prior_abs_move"]
+    assert result["weighting"] == "equal_event_and_horizon"
+    assert result["population_labels"] == ["post-release selection"]
+    assert result["registered_population_count"] == 10
+    assert result["quantile_calibration"] == "not_implemented"
     assert result["event_count"] == 6 and result["forecast_count"] == 18
     assert result["attempted_variants"] == 1
     assert result["variant_id"] == source.registration.variant_id
@@ -581,12 +587,20 @@ def test_history_registration_cannot_prepare_final_holdout_authority(source, mon
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
-@pytest.mark.parametrize("field", ["variant_id", "run_id", "provenance", "result_id"])
+@pytest.mark.parametrize("field", ["variant_id", "run_id", "provenance", "result_id", "schema_version"])
 def test_renderer_refuses_identity_and_digest_drift(source, field):
     result = model.prediction_result(source.repository, source.registration)
-    result[field] = "another-result"
+    # Positive control: this same real result renders before its identity changes.
+    assert model.render_prediction_report(source.registration, result, spec=source.spec, no_ledger=True)
+    result[field] = "native_magnitude_result.v1" if field == "schema_version" else "another-result"
     if field != "result_id":
         result["result_id"] = content_hash({key: value for key, value in result.items() if key != "result_id"})
+    if field == "schema_version":
+        # Otherwise-valid identity and checksum isolate the incompatible-schema guard.
+        assert result["variant_id"] == source.registration.variant_id
+        assert result["run_id"] == source.registration.run_id
+        assert result["provenance"] == source.registration.document
+        assert result["result_id"] == content_hash({key: value for key, value in result.items() if key != "result_id"})
     with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.render_prediction_report(source.registration, result, spec=source.spec, no_ledger=True)
 
