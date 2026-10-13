@@ -16,12 +16,16 @@ needs_node = pytest.mark.skipif(
     shutil.which("npx") is None,
     reason="node/npx not installed; markdownlint-cli2 cannot run here (CI has Node)",
 )
-# One MD022 (heading), one MD031 (fence) and one MD058 (table) violation.
-BAD = (
-    "intro\n# Heading\ntext\n\n"
-    "para\n```\ncode\n```\nafter\n\n"
-    "para\n| a | b |\n|---|---|\n| 1 | 2 |\n"
-)
+# (rule, text, reported line, marker): each fixture misses the blank line on ONE side only,
+# so a config that requires only one side cannot pass both cases of a rule.
+CASES = [
+    ("MD022", "intro\n# Heading\n\ntext\n", 2, "Above"),
+    ("MD022", "# Heading\ntext\n", 1, "Below"),
+    ("MD031", "para\n```\ncode\n```\n\nafter\n", 2, ""),
+    ("MD031", "para\n\n```\ncode\n```\nafter\n", 5, ""),
+    ("MD058", "para\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter\n", 2, ""),
+    ("MD058", "| a | b |\n|---|---|\n| 1 | 2 |\n- item\n", 3, ""),
+]
 
 
 def _pin() -> str:
@@ -51,16 +55,18 @@ def _run_hook(hook, cwd, env=None):
 
 
 @needs_node
-def test_config_enables_all_three_rules(tmp_path):
-    (tmp_path / "bad.md").write_text(BAD, encoding="utf-8")
+@pytest.mark.parametrize("rule, text, line, marker", CASES)
+def test_config_reports_each_side_of_each_rule(tmp_path, rule, text, line, marker):
+    (tmp_path / "bad.md").write_text(text, encoding="utf-8")
     proc = subprocess.run(
         ["npx", "--yes", _pin(), "--config", str(CONFIG), "bad.md"],
         cwd=tmp_path, capture_output=True, text=True, timeout=300,
     )
     out = proc.stdout + proc.stderr
-    assert proc.returncode != 0
-    for rule in ("MD022", "MD031", "MD058"):
-        assert rule in out, f"{rule} not reported:\n{out}"
+    assert proc.returncode != 0, out
+    rows = [r for r in out.splitlines() if re.match(rf"bad\.md:{line}(:\d+)? {rule}", r)]
+    assert rows, f"{rule} not reported on line {line}:\n{out}"
+    assert any(marker in r for r in rows), f"{rule} {marker} not reported:\n{out}"
 
 
 @needs_node
