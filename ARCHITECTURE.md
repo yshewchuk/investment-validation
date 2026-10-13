@@ -800,9 +800,8 @@ second inventory of the same kind.
   when a maintained tool or library does it. Use the tool and keep the
   wrapper thin: configuration plus invocation. Custom code needs a reason
   stated in the PR Spec: a needed rule no tool has, a private format, or a
-  dependency the repo cannot take. Example: a hand-written Markdown parser
-  took about 30 review rounds on CommonMark edge cases where wrapping
-  markdownlint would not have.
+  dependency the repo cannot take. Example: custom Markdown parsing can
+  misclassify valid CommonMark input; use a maintained Markdown tool.
 
 ## 7. Writing an architecture-doc update
 
