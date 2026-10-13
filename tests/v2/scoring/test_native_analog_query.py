@@ -246,7 +246,15 @@ def test_complete_query_keeps_existing_and_passes_non_mapping():
                                  {"dte_entry": 30, "spot": 100.0, "strike": 101.0})
     assert kept["dte_band"] is None
     assert kept["moneyness_band"] is None
-    assert complete_analog_query(None, {}) is None
+
+
+@pytest.mark.parametrize("not_a_mapping", [
+    None, [("mcap_bucket", "1-10B")], (("mcap_bucket", "1-10B"),), "1-10B", 7])
+def test_complete_query_returns_every_non_mapping_unchanged(not_a_mapping):
+    # The evaluator then refuses it with INVALID_ANALOG_INPUT; completion never
+    # converts, fills or wraps it.
+    out = complete_analog_query(not_a_mapping, {"dte_entry": 5, "spot": 100.0, "strike": 101.0})
+    assert out is not_a_mapping
 
 
 @dataclass(frozen=True, kw_only=True)

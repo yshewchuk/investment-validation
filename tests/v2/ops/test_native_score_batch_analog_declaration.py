@@ -153,3 +153,32 @@ def test_analog_only_release_with_null_entry_date_refuses_the_row(tmp_path):
     assembled, refusals = _assemble(binding, [event])
     assert assembled == {}
     assert [r.code for r in refusals] == ["MISSING_STAGED_INPUT"]
+
+
+def _declared_recipe(tmp_path, *, snapshot_id, ticker, event_day, expiry):
+    pool = _real_pool("2026-01-08")
+    binding = dataclasses.replace(
+        _stage(tmp_path, [SIZE, GATE]), analog_artifacts={"STR-THRU": (pool,)})
+    event = _event_inputs(
+        ticker=ticker, event_date=pd.Timestamp(event_day),
+        calendar_row=_calendar_row(ticker=ticker, event_date=event_day,
+                                   entry_date="2026-01-08", expiry=expiry),
+        panel_row={"date": event_day, "signal": 1.5, "mcap_log": math.log(5e9)})
+    assembled, refusals = _assemble(binding, [event], snapshot_id=snapshot_id)
+    assert refusals == ()
+    return assembled[event.key][1].analogs["analog_artifact_recipe"]
+
+
+def test_each_row_recipe_carries_its_own_snapshot_and_request_key(tmp_path):
+    # Two rows differ in snapshot, ticker, event date and expiry: hard-coding
+    # either the snapshot or the request key (to one row's value) fails one case.
+    first = _declared_recipe(tmp_path, snapshot_id="snap-A", ticker="TEST",
+                             event_day="2026-01-15", expiry="2026-01-16")
+    second = _declared_recipe(tmp_path, snapshot_id="snap-B", ticker="OTHR",
+                              event_day="2026-01-14", expiry="2026-01-17")
+    assert first["seed_snapshot"] == "snap-A"
+    assert first["request_key"] == (
+        "TEST|STR-THRU|2026-01-10|2026-01-15||2026-01-16|0.5000||||c2026-01-10|")
+    assert second["seed_snapshot"] == "snap-B"
+    assert second["request_key"] == (
+        "OTHR|STR-THRU|2026-01-10|2026-01-14||2026-01-17|0.5000||||c2026-01-10|")
