@@ -765,8 +765,8 @@ jobs:
         run: |
           rc=$(cat "$RUNNER_TEMP/gremlin-merge-rc" 2>/dev/null || echo -1)
           if [ "$rc" != 0 ]; then echo "::error::report merge exited $rc"; exit 1; fi
-      # Red (a surviving mutant in a file the PR changed, or the PR's tests fail), green (a
-      # clean measured run) or grey (everything else). Attribution is by FILE: plain
+      # Red (a surviving mutant in a file the PR changed, in a complete, clean report), green
+      # (a clean measured run) or grey (everything else, incl. a nonzero module exit). Attribution is by FILE: plain
       # `git diff --name-only`, no diff parsing. Unreadable inputs make the result neutral; the
       # step fails only when $GITHUB_OUTPUT cannot be written (deliberately loud).
       - name: Classify the mutation result
@@ -830,8 +830,9 @@ jobs:
           elif [ "${SKIPPED_COUNT:-0}" != "0" ]; then
             state=failure
             desc="gremlins: skipped (PR closed) for $SKIPPED_COUNT of $(jq -r 'length' <<< "$MODULES") module(s) -- partial coverage, not a valid full run"
-          # tools/mutation_pr_status.py: red for a surviving mutant in a changed file or a
-          # failing PR test run, green only for a clean measured run, grey otherwise. A
+          # tools/mutation_pr_status.py: red only for a surviving mutant in a changed file in a
+          # complete, clean report, green only for a clean measured run, grey otherwise (a
+          # nonzero module exit is grey). A
           # classified `success` never overrides a report job that did not succeed.
           elif [ -n "${CLASSIFIED_STATE:-}" ] && { [ "$CLASSIFIED_STATE" != success ] || [ "$REPORT_RESULT" = success ]; }; then
             state="$CLASSIFIED_STATE"
