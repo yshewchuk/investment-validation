@@ -333,11 +333,11 @@ Other experiment report/ledger publication remains outside this library seam.
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
 snapshot-read helpers), `_pricing.py` (except the names carved out above),
-`_trades_revisions.py`.
+`_trades_revisions.py`, `_final_population.py`.
 
 ### Proposed authorized final read (#490)
 
-Request preparation and the private ops authorization/spend primitive are implemented; no production authorization entrypoint, final read or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
+Request preparation, the private ops authorization/spend primitive and the private metadata-only final population reader are implemented; no production authorization entrypoint, final read or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
 The [user decision](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6072905454)
 permits agents/supervisors to prepare requests, never to authorize them.
 
@@ -353,6 +353,17 @@ Both sets are bound together; changing month, version, snapshot or winner cannot
 `native_registration.prepare_final_holdout_request` verifies existing catalog/artifact registration metadata only; it never resolves a head, scans a population or reads results.
 Native registration's optional `final_read` declaration seals recipe, completeness-bar and frozen-model artifact references before authorization; preparation derives them, never accepts replacements. Registrations without that declaration refuse preparation.
 Request validity proves neither winner selection nor read eligibility. The later metadata-only preflight must verify the preregistered completeness artifact and refuse an unmet bar before any holdout outcome read; declared references alone do not prove completeness.
+
+**Population reader.** Private `_final_population.load_final_population(repository, request)` is the only final-read reader that returns separate held-out event-ID sets. It accepts a validated `FinalHoldoutRequest` (never a caller population) and returns a frozen `FinalPopulation` with sorted random and rolling IDs, overlap and ambiguity counts, and bound snapshot/month/version context. It reads only canonical `earnings_events` metadata with the loaders' shared membership/ambiguity rules, excludes ambiguous events from both sets, performs no writes, and does not inspect ops state or hold a grant. It is not exported or reachable from loaders, training, selection or sweep.
+
+| Population reader condition | Outcome |
+|---|---|
+| Invalid request object, unsupported membership version, or as-of month later than the current UTC month | Non-retryable `HOLDOUT_ACCESS_DENIED` before any scan. |
+| Snapshot unresolved, or resolved identity differs from `request.snapshot_id` | `SNAPSHOT_UNRESOLVED`; no fallback. |
+| `earnings_events` absent from the snapshot | `CONTRACT_MISMATCH`; no partial population. Present with no fragments, the scan yields no events and the empty-population row applies. |
+| `resolve` raising a non-integrity `DataError` (such as not-found), `ValueError`, `TypeError` or `KeyError` | `SNAPSHOT_UNRESOLVED`. An integrity-category `DataError` (such as `MANIFEST_CORRUPT`) and any other exception propagate unchanged. Integrity failures during the scan propagate as the repository's typed refusal. |
+| Both sets empty after ambiguity exclusion | `POPULATION_COLLAPSED`; never an empty success. Preregistered completeness remains the later preflight's refusal. |
+| Retry, cache, write | None; read-only, identical pinned inputs return identical populations. |
 
 **Authority/ownership.** A proposed `tools/v2_final_holdout.py` leaf composes ops'
 private authorization/state owner with a private research final evaluator. It is
@@ -477,7 +488,9 @@ This bounds retained unmatched rows, not total process RSS.
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`), `engine.v2.
 contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`),
-`engine.v2.foundation` (`ArtifactStore`, `SystemClock`) — the package's own
+`engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
+`engine.v2.foundation` (`ArtifactStore`, `SystemClock`, plus
+`final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
 at a lower layer" rule (`only_imports` is unset for this package in
 `checks/layer_map.py`, i.e. no narrower restriction than that generic

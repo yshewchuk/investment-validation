@@ -7,6 +7,14 @@ from engine.v2.research._scan import read_table
 from engine.v2.research.experiment_trades import _exclude_holdouts, _holdout_context
 
 
+def _canonical_events(repository, snapshot):
+    """Canonical event metadata with same-ticker/date duplicates flagged; shared with the final reader."""
+    events = read_table(repository, snapshot, "earnings_events", (
+        "event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"))
+    events.loc[events.duplicated(["ticker", "event_date"], keep=False), "date_conflict"] = True
+    return events
+
+
 def load_population(repository, snapshot, *, as_of_month, purpose="selection",
                     event_ids=None):
     """Read canonical metadata only; explicit excluded IDs refuse the whole read."""
@@ -20,9 +28,7 @@ def load_population(repository, snapshot, *, as_of_month, purpose="selection",
     if resolved != snapshot:
         raise errors.fail("SNAPSHOT_UNRESOLVED", "snapshot differs from its committed identity")
     policy, context = _holdout_context(snapshot, as_of_month, purpose, event_ids)
-    events = read_table(repository, snapshot, "earnings_events", (
-        "event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"))
-    events.loc[events.duplicated(["ticker", "event_date"], keep=False), "date_conflict"] = True
+    events = _canonical_events(repository, snapshot)
     if event_ids is not None:
         if not event_ids or set(event_ids) - set(events["event_id"]):
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "requested event membership cannot be resolved")

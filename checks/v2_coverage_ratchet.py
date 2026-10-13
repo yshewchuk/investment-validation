@@ -184,6 +184,8 @@ PHASE1_SUITE_VERSION = "phase1_coverage_suite.v10"
 PHASE1_RENAMED = {
     "tests/test_v2_ops_experiment_reports.py": "tests/v2/ops/test_experiment_reports.py",
     "tests/test_v2_ops_legacy_defects.py": "tests/v2/ops/test_legacy_defects.py",
+    "tests/test_v2_ops_nightly_raw_rows.py": "tests/v2/ops/test_nightly_raw_rows.py",
+    "tests/test_v2_scoring_nightly_source_bundle.py": "tests/v2/scoring/test_nightly_source_bundle.py",
     "tests/test_v2_ops_price_history.py": "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/test_v2_data_computed_moves.py": "tests/v2/data/test_computed_moves.py",
     "tests/test_v2_data_computed_moves_table.py": "tests/v2/data/test_computed_moves_table.py",
