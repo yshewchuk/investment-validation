@@ -29,6 +29,7 @@ Report(context).write(out_dir)   # -> REPORT.md + figures/*.png [+ report.html]
   (grid/secondary results).
 
 ### Accuracy checklist — auto-evaluated
+
 Each item renders PASS / FAIL / N/A **with an evidence pointer**, and the
 generator computes them, it doesn't take the caller's word:
 1. Real prices only (input trades' `src` fields all ORATS/Polygon).
@@ -43,6 +44,7 @@ A report with any FAIL renders a red banner at the top — it can exist as a
 diagnostic, but promote.py and publish paths treat FAIL as blocking.
 
 ### Provenance block — the regeneration contract
+
 - Input files: path + sha256 (files >100 MB: size+mtime+first-MB hash).
 - Data snapshot hash (`data/features/SNAPSHOT`), spec hash, all seeds.
 - Code state: sha256 of every `engine/` module imported during the run
@@ -58,6 +60,7 @@ ledger/predictions/YYYY-MM-DD.jsonl   # one row per event x strategy x structure
 ledger/outcomes/YYYY-MM-DD.jsonl      # joined after the event resolves
 ledger/calibration/                   # generated calibration reports
 ```
+
 - Prediction row: everything needed to score it later — full ScoreResult
   fields + structure legs + intended prices at MID — written by the Phase 3
   nightly job BEFORE outcomes exist.

@@ -535,6 +535,7 @@ mutate = [
     "engine/v2/scoring/native_gate_features.py",
 ]
 tests = [
+    "tests/v2/scoring/test_runup_raw_outputs.py",
     "tests/test_phase4_acceptance_independence.py",
     "tests/test_phase4_capture_strict.py",
     "tests/test_phase4_frozen_resources.py",
@@ -569,6 +570,7 @@ mutate = [
     "engine/v2/scoring/source_inputs.py",
 ]
 tests = [
+    "tests/v2/scoring/test_runup_raw_outputs.py",
     "tests/v2/scoring/test_runup_calendar_horizon.py",
     "tests/v2/ops/test_runup_horizon_production.py",
     "tests/test_phase4_acceptance_independence.py",
@@ -991,6 +993,9 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_runup_model_inputs.py",
+    "tests/v2/ops/test_runup_worker_activation.py",
+    "tests/v2/ops/test_native_driver_declarations.py",
     "tests/v2/ops/test_runup_horizon_production.py",
     "tests/v2/ops/test_native_strategy_registry.py",
     "tests/v2/ops/test_native_score_batch_driver_alias.py",

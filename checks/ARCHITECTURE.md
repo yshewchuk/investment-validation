@@ -31,6 +31,14 @@ decreases, and a root-level test cannot be modified in place (move it first).
 `phase1_suite()` in `v2_coverage_ratchet.py` resolves baseline tests where they
 now live and raises `FileNotFoundError` if one is missing.
 
+Markdown is linted by `markdownlint-cli2` (rules in `.markdownlint-cli2.jsonc`),
+run by the pre-commit hook on the working-tree copy of each staged `.md` file and by
+the Tests workflow on all `.md`. In the hook, checks 1-4 and 6 are stdlib-only, check 5
+runs Ruff, and check 7 needs Node. Default-mode inputs: checks 1, 2, 3 and 5 read staged
+blobs (1 also reads the working-tree `.env`); check 4 layers staged blobs over the
+working-tree copy of every tracked unstaged file; check 6 reads staged blobs against the
+base ref; check 7 reads the working-tree copy of each staged `.md`.
+
 The Phase 1 check binds the active test inventory to source and test
 contents. It reports suite-version, inventory, or source drift when the
 measurement differs from the active profile.
@@ -75,6 +83,7 @@ check defines missing-input and failure outcomes:
 | `repo_hygiene.py` scan | Clean: exit 0; violations: exit 1 |
 | Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
 | Worktree hygiene read failure | Default returns empty bytes; `strict=True` raises `OSError`; missing non-symlink paths return empty bytes in either mode |
+| The pre-commit hook finds no `npx` | One-line install hint on stderr; commit blocked (fails closed) |
 | Cache | No shared cache contract; reuse is check-specific |
 | Retry | No automatic package retry; check-specific if any |
 | Transaction | No package-wide transaction contract |
