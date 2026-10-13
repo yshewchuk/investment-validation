@@ -1,6 +1,5 @@
 """The nightly path declares the frozen board analog pool (#681); synthetic stand-ins only."""
 import dataclasses
-import hashlib
 import math
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -71,14 +70,6 @@ def test_matching_pool_is_seeded_with_the_native_snapshot_and_request_key():
     native_key = "TEST|STR-THRU|2026-01-10|2026-01-15||2026-01-16|0.5000||||c2026-01-10|"
     assert recipe["seed_snapshot"] == "snap-1"
     assert recipe["request_key"] == native_key
-
-    def seed(snapshot, request_key):
-        payload = "|".join([snapshot, "STR-THRU", "0.5000", request_key, "mcap_bucket=1-10B"])
-        return hashlib.sha256(payload.encode()).hexdigest()
-
-    assert seed(recipe["seed_snapshot"], recipe["request_key"]) == seed("snap-1", native_key)
-    assert seed(recipe["seed_snapshot"], recipe["request_key"]) != seed(
-        "legacy-snapshot-digest", "legacy|request|key")
     assert result.context["snapshot"] == "snap-1"
     # mean_prior_or_implied is absent until #651, so the ratio stays None.
     assert result.analog_query == {"mcap_bucket": "1-10B", "implied_ratio": None}

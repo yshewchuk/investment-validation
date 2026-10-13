@@ -122,14 +122,16 @@ def _entry_cost_pct(row: Mapping[str, Any]) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def _dimension_view(row: Mapping[str, Any], dimension: str) -> dict[str, Any]:
+def _dimension_view(row: Mapping[str, Any], dimension: str, *,
+                    legacy: bool = False) -> dict[str, Any]:
     """One row's values for one dimension, read by the checker's field names.
 
-    Legacy score rows never carry ``entry_cost_pct`` (#681), so a row without
-    the key has it derived from its own ``entry_cost`` and ``spot``.
+    Legacy score rows never carry ``entry_cost_pct`` (#681), so a LEGACY row
+    without the key has it derived from its own ``entry_cost`` and ``spot``. A
+    native row is never derived for: a missing native value stays missing.
     """
     view = {name: row.get(name) for name in _dimension_fields(dimension)}
-    if "entry_cost_pct" in view and "entry_cost_pct" not in row:
+    if legacy and "entry_cost_pct" in view and "entry_cost_pct" not in row:
         view["entry_cost_pct"] = _entry_cost_pct(row)
     return view
 
@@ -141,8 +143,8 @@ def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, An
     mismatches = []
     for dimension in dimensions:
         result = compare_dimension(
-            _dimension_view(legacy, dimension), _dimension_view(native, dimension), dimension,
-            tolerance_policy=tolerance_policy)
+            _dimension_view(legacy, dimension, legacy=True), _dimension_view(native, dimension),
+            dimension, tolerance_policy=tolerance_policy)
         if not result["agree"]:
             mismatches.append({
                 "row_key": key,

@@ -97,7 +97,7 @@ def analog_declarations(
     and pinned by its ``content_hash``. No matching pool gives ``{}`` (the
     analog block stays undeclared).
     """
-    # Lazy: engine.v2.ops must not load engine.v2.models at module top level.
+    # Lazy: engine.v2.ops imports this module and keeps engine.v2.models off its top-level import chain.
     from engine.v2.models.analog_artifact import board_analog_pool_key
 
     key = board_analog_pool_key(strategy, alpha, cutoff)

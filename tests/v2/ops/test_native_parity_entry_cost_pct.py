@@ -15,12 +15,12 @@ from engine.v2.parity.tolerance import SCORE_RECORD_V1
 def test_legacy_row_derives_entry_cost_pct(cost, spot, pct):
     # Different spots and results: a constant, un-normalised or cost*100 value fails.
     row = {"entry_cost": cost, "spot": spot}
-    assert _dimension_view(row, "financial_diagnostics")["entry_cost_pct"] == pytest.approx(pct)
+    assert _dimension_view(row, "financial_diagnostics", legacy=True)["entry_cost_pct"] == pytest.approx(pct)
 
 
 def test_row_carrying_entry_cost_pct_keeps_its_value():
     row = {"entry_cost_pct": 7.5, "entry_cost": 1.0, "spot": 10.0}
-    assert _dimension_view(row, "financial_diagnostics")["entry_cost_pct"] == 7.5
+    assert _dimension_view(row, "financial_diagnostics", legacy=True)["entry_cost_pct"] == 7.5
 
 
 @pytest.mark.parametrize("row", [
@@ -30,20 +30,20 @@ def test_row_carrying_entry_cost_pct_keeps_its_value():
     {},
 ])
 def test_entry_cost_pct_is_none_when_undefined(row):
-    assert _dimension_view(row, "financial_diagnostics")["entry_cost_pct"] is None
+    assert _dimension_view(row, "financial_diagnostics", legacy=True)["entry_cost_pct"] is None
 
 
 def test_explicit_none_entry_cost_pct_is_kept():
     row = {"entry_cost_pct": None, "entry_cost": 2.0, "spot": 100.0}
-    assert _dimension_view(row, "financial_diagnostics")["entry_cost_pct"] is None
+    assert _dimension_view(row, "financial_diagnostics", legacy=True)["entry_cost_pct"] is None
 
 
 def test_non_finite_entry_cost_gives_none():
     nan_row = _dimension_view({"entry_cost": float("nan"), "spot": 100.0},
-                              "financial_diagnostics")
+                              "financial_diagnostics", legacy=True)
     assert nan_row["entry_cost_pct"] is None
     inf_row = _dimension_view({"entry_cost": float("inf"), "spot": 100.0},
-                              "financial_diagnostics")
+                              "financial_diagnostics", legacy=True)
     assert inf_row["entry_cost_pct"] is None
 
 
@@ -77,3 +77,17 @@ def test_row_mismatches_flag_a_wrong_native_entry_cost_pct(cost, spot, pct):
     # The OTHER case's value: a constant-output implementation fails one of the two cases.
     other = next(p for _, _, p in _CASES if p != pct)
     assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": other})
+
+
+def test_native_view_never_derives_entry_cost_pct():
+    row = {"entry_cost": 3.0, "spot": 250.0}
+    assert _dimension_view(row, "financial_diagnostics")["entry_cost_pct"] is None
+    assert _dimension_view(row, "financial_diagnostics", legacy=False)["entry_cost_pct"] is None
+
+
+def test_row_mismatches_flags_a_native_row_missing_its_own_entry_cost_pct():
+    # The native row carries matching entry_cost/spot but no entry_cost_pct output:
+    # the comparator must see the missing native value, not derive it.
+    legacy_row = {"entry_cost": 3.0, "spot": 250.0}
+    native_row = {"entry_cost": 3.0, "spot": 250.0}
+    assert _entry_cost_pct_findings(legacy_row, native_row)

@@ -122,36 +122,22 @@ load-bearing entrypoints:
   native arithmetic for the analog stage, the DYN-SV chooser, the entry-rule
   gates, payoff-calibration/model layer and frozen residual-state reading.
   Each is pure arithmetic over declared inputs; none performs I/O.
-  **Nightly frozen analog declaration (issue #681).** `native_analog_query.py`
-  holds the pure helpers for the frozen board analog matcher (it imports only
-  `engine.v2.models.analog_artifact.board_analog_pool_key`).
-  `analog_declarations(artifacts, strategy, alpha, cutoff, panel_row,
-  snapshot, request_key)` picks the one pool whose
-  `board_analog_pool_key(strategy, alpha, cutoff)` equals the row's key and
-  returns `analog_artifact`, `analog_artifact_recipe` (cutoff, pinned
-  `content_hash`, `min_analogs=30`, `bootstrap_draws=2000`, `ci_quantiles=
-  (0.05, 0.95)` as legacy `match`'s defaults, and native's own
-  `seed_snapshot` and `request_key`) and
-  the bundle-time part of `analog_query` (`mcap_bucket` from
-  `exp(panel_row["mcap_log"])`, `implied_ratio = im / mean_prior_or_implied`,
-  `None` unless both are finite and the divisor non-zero). No matching pool
-  returns `{}` (block stays undeclared, as before). The query's
-  `dte_band`/`moneyness_band` need the priced leg, so `complete_analog_query
-  (query, values)` adds them inside `_execute_frozen_analogs` from the
-  scorer-computed `values["dte_entry"]` (the priced first leg's days to
-  expiry, written before the analog stage) and `abs(values["strike"] /
-  values["spot"] - 1) * 100`, with legacy's band edges; an input that is
-  absent or non-finite gives `None`, and a non-positive `strike` or `spot`
-  gives a `None` moneyness band (the matcher drops that dimension, as
-  legacy does with no chain). A query that already carries a band key keeps
-  it. A non-mapping query is returned unchanged so the evaluator's
-  `INVALID_ANALOG_INPUT` still fires. The analogs stage receipt records this
-  completed query, the one the matcher and its bootstrap seed used. The
-  bootstrap seed uses native's own snapshot id and native request key, not
-  legacy's identity (user decision 2026-10-13, as for the MC seed), so
-  interval drift against legacy is expected parity drift. While `implied_ratio` is `None` (no
-  `mean_prior_or_implied`, #651) the implied-tercile dimension is dropped
-  from matching, so `n_analogs` and the interval can differ from legacy.
+  **Nightly frozen analog declaration** (`native_analog_query.py`, pure).
+  - *Selection:* the release's board analog pool whose
+    `(strategy, fill alpha, cutoff)` key matches the row, pinned by its
+    `content_hash`; no match leaves the analog block undeclared.
+  - *Query:* `mcap_bucket` and `implied_ratio` come from the panel row at
+    bundle time; `dte_band` and `moneyness_band` are completed in the analog
+    stage from the scorer-computed `dte_entry`, `strike` and `spot` with
+    legacy's band edges. An absent, non-finite or (for strike and spot)
+    non-positive input gives a `None` band, so the matcher drops that
+    dimension. A band key already present is kept; a non-mapping query is
+    returned unchanged and refused by the evaluator.
+  - *Receipt:* the analogs stage records the completed query the matcher used.
+  - *Seed:* native's own snapshot id and native request key, not legacy's
+    identity (user decision 2026-10-13), so interval drift against legacy is
+    expected parity drift. While `implied_ratio` is `None` (#651) the
+    implied-tercile dimension is dropped, so `n_analogs` can also differ.
 - `compatibility.py` — `score_legacy_request`, the one legacy adapter this
   package owns (see Dependencies).
 
