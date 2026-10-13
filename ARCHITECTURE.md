@@ -546,6 +546,7 @@ Only a tracked path absent from the worktree reads as empty.
   | Compared values differ | Preserve both values and shared-comparator findings |
   | Same verified inputs and code on retry | Same semantic report; output publication is atomic |
   | Output targets the retained corpus | Refuse; no partial source write |
+
 - **Native parity summary projection (serving, read-only).**
 
   `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`
@@ -792,6 +793,16 @@ second inventory of the same kind.
   `concurrency` group (keyed on the ref/PR) and `cancel-in-progress: true`,
   older runs queue up behind newer ones instead of being cancelled, burning
   CI minutes on a result a newer push already superseded.
+- **Hand-rolling a standard format or tool.** Principle: wrap standard
+  tools; do not hand-roll standard formats. Code here must not parse,
+  validate or lint standard formats (Markdown, YAML, TOML, JSON Schema, CSV
+  dialects, dates and times, URLs, CLI arguments, semver), nor re-implement
+  linters, formatters, retries and backoff, caching, diffing or templating,
+  when a maintained tool or library does it. Use the tool and keep the
+  wrapper thin: configuration plus invocation. Custom code needs a reason
+  stated in the PR Spec: a needed rule no tool has, a private format, or a
+  dependency the repo cannot take. Example: custom Markdown parsing can
+  misclassify valid CommonMark input; use a maintained Markdown tool.
 
 ## 7. Writing an architecture-doc update
 

@@ -1,6 +1,7 @@
 # `engine/v2/serving` architecture
 
 ## Purpose
+
 Layer 7 in the [root architecture](../../../ARCHITECTURE.md): authenticated
 API/projection contracts over saved records, financial display values and release publication.
 Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
@@ -27,16 +28,20 @@ and `native_parity_projection` summary/detail/freshness helpers, and the row bui
 `native_render.native_display_row` and `native_shadow_render.shadow_serving_row_source`.
 
 ## Inputs
+
 Verified saved score documents, legacy bundle bytes, immutable artifacts, serving
 SQLite index, health/model/calibration documents and retained parity reports.
 API/projection requests authenticate; compatibility HTML is public. Scoped reads carry pins; current discovery is unpinned.
+
 ## Outputs
+
 Saved-record JSON reads (bounds vary by route), typed refusals, immutable candidate releases and
 projection bindings. Operations transport can return queued command job identities.
 The existing operations HTML/JavaScript shells and pinned legacy bundle hosting
 remain a compatibility exception; their presentation still requires React migration.
 
 ### Financial display units
+
 Serving preserves producer values; `legacy_via_v2` and native projections do not
 rescale them. These units are part of the JSON contract and apply to board and
 detail projections from either producer:
@@ -57,6 +62,7 @@ by 100 for percent display; counts use integer formatting. No consumer may infer
 units from a generic number type or apply a second conversion.
 
 ## Dependencies
+
 Imports `contracts`, `foundation`, `data.repository` (`projections`), `models.deployment`
 (`operations`), `registry.strategies` (`derivation_projection`) and `parity`
 (shared field groups for retained mismatch details). `native_render` and
@@ -77,10 +83,12 @@ only stores them and does not require them to enqueue work, so each callback mus
 its refresh or what-if job and return.
 
 ## External systems and libraries
+
 FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
 storage. Authentication supports bearer or cookie; React uses same-origin cookie.
 
 ## Failure semantics
+
 The authenticated `GET /api/v1/operations` reads the publisher's
 `operations_status.json` sidecar without importing ops or mutating the
 release. The document carries the published and attempted release ids,
@@ -181,6 +189,7 @@ ceiling, while a larger population retains the lookup limit.
 | Idempotency | `release_id` derives from content and index writes are `INSERT OR IGNORE`: a repeated candidate writes no new rows. |
 
 ## Invariants
+
 Score population validation uses `foundation.score_population.population_difference`,
 the same rule as ops scoring: an extra `DYN-SV` chooser row is allowed only for
 an exact ticker/date with a planned non-chooser key. Explicit planned keys remain
@@ -191,8 +200,11 @@ Reject new application markup, inline DOM scripts and page builders here; hostin
 built assets is transport. Keep saved financial values, clocks and provenance;
 saved replay evidence does not imply current nightly/full-population qualification.
 Existing compatibility views do not establish ownership of new application screens.
+
 ## Diagrams
+
 Read path: "current" resolves through one pointer chain; pinned routes carry their own release_id.
+
 ```mermaid
 flowchart LR
   React[React typed client] -->|cookie| API[authenticated JSON API]
@@ -204,7 +216,9 @@ flowchart LR
   Index -->|score detail only - detail_artifact_id| Ref[immutable artifact reference]
   Ref -->|store.read_verified| Objects[immutable artifact objects]
 ```
+
 Offline publication, composed by the projection tool:
+
 ```mermaid
 flowchart LR
   In[score document + bundle rows + pinned repository snapshot] --> Findings[findings artifact: diagnostic reference]
@@ -214,6 +228,7 @@ flowchart LR
   Commit --> Binding[tool prints projection_binding for the committed release]
   Binding -.->|operator supplies as a publication input| Ops[ops publisher]
 ```
+
 Operations listener: `create_server` serves health files, shell/view pages, model-release
 resources, the release pointer and release bytes, the legacy shell, analog and derivation
 documents, and what-if results. Native parity has no operations HTML or JSON

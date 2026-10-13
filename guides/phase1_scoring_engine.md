@@ -19,6 +19,7 @@ identical to the backtests.
 ## 2. Model registry
 
 `engine/models/registry.json` — list of entries:
+
 ```json
 {"id": "size_v1_3", "strategy": "*", "role": "size",
  "artifact": "engine/models/artifacts/size_v1_3.joblib",
@@ -26,6 +27,7 @@ identical to the backtests.
  "train_window": "<=2022", "eval": {"oos_r": 0.459, "source": "EXP-040"},
  "champion": true, "promoted": "2026-08-29", "evidence": "opf/VERDICT_2026-08-29.md"}
 ```
+
 Roles: `size` (predicted |move|), `implied_t1` (OPF GBM predicted T−1 implied),
 `gate` (mid-fill GBM gate). Loader enforces: valid schema, exactly one
 champion per (strategy, role), artifact file exists and loads, feature list
@@ -50,11 +52,13 @@ class ScoreResult:
     flags: list[str]                  # e.g. LAYER_DISAGREE, WIDE_MARKET, THIN_HISTORY
     model_versions: dict; snapshot_hash: str; as_of: date
 ```
+
 Plus `score_calendar(as_of, horizon_days=21, strategies=ALL) -> DataFrame`
 (the dashboard's input): for each upcoming event × strategy, the default
 structure (ATM, per-strategy expiry rules) and the top alternative strikes.
 
 ### Model layer
+
 1. Build the as-of feature vector from Tier 3 (leak-audited — every feature
    carries `feature_as_of`; `engine.audit.assert_causal(features, as_of)`
    runs on EVERY call, not just in tests). Stamps are the true observation
@@ -74,6 +78,7 @@ structure (ATM, per-strategy expiry rules) and the top alternative strikes.
    that distribution.
 
 ### Analog layer
+
 Matched historical trades from the Tier-2 `trades` table (sim trades from the
 Phase 2 backtests):
 - Buckets: mcap {<1B, 1–10B, ≥10B} × implied-vs-own-history terciles ×
@@ -86,6 +91,7 @@ Phase 2 backtests):
   (snapshot_hash, request) so results are deterministic.
 
 ### Disagreement & flags
+
 `LAYER_DISAGREE` when sign(exp_pnl_model) ≠ sign(exp_pnl_analog) or the model
 mean falls outside the analog CI. Never average the layers — both are shown
 everywhere downstream. `THIN_HISTORY` when the ticker has <4 prior events
