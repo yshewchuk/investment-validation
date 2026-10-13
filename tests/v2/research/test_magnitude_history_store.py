@@ -398,6 +398,22 @@ def test_cli_event_subset_build_and_read_keep_full_eligible_history(source, monk
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
+def test_cli_missing_store_refuses_source_admission_without_initializing_it(source, capsys, action):
+    _, output = _build(source)
+    missing = source.root / "missing-store"
+    args = _cli_args(source)
+    args[3] = str(missing)
+    if action == "read":
+        args += ["--feature-snapshot-id", output.snapshot_id]
+    before = _catalog(source.conn), _objects(source.store)
+    assert entry.main([action, *args]) == 2
+    refusal = json.loads(capsys.readouterr().out)
+    assert refusal["refused"] == "OBJECT_CORRUPT" and set(refusal) == {"refused", "message"}
+    assert not missing.exists()
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+@pytest.mark.parametrize("action", ["build", "read"])
 @pytest.mark.parametrize("fault", ["stat_os", "open_os", "open_sqlite", "store_os", "store_artifact"])
 def test_cli_raw_local_failures_are_redacted_and_close_open_catalogs(source, monkeypatch, capsys, action, fault):
     args = _cli_args(source)
@@ -462,7 +478,7 @@ def test_context_or_source_mismatch_refuses_before_any_source_or_feature_payload
 
 
 @pytest.mark.parametrize("action", ["materialize", "read_stored"])
-@pytest.mark.parametrize("missing", ["context_id", "source_snapshot", "not_a_context"])
+@pytest.mark.parametrize("missing", ["context_id", "source_snapshot", "temporal_plan", "history_start", "not_a_context"])
 def test_missing_direct_context_identity_has_a_typed_refusal_before_payloads(source, monkeypatch, action, missing):
     binding = entry.context(source.repository, source.snapshot, **REQUEST)
     if missing == "not_a_context":
