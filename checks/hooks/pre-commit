@@ -38,8 +38,9 @@ python3 "$ROOT/checks/rearchitecture_phase1_lint.py" --quiet
 #    refactor needed first). See checks/architecture_doc_budgets.py.
 python3 "$ROOT/checks/architecture_doc_budgets.py" --quiet
 
-# 7. Markdown structure (blank lines around headings, tables and fences; closed
-#    fences), staged blobs, only on lines this commit adds or changes.
+# 7. Markdown structure (markdownlint-cli2: blank lines around headings, tables and
+#    fences), staged blobs, only on lines this commit adds or changes. Fails closed
+#    if node/npx is missing.
 python3 "$ROOT/checks/markdown_structure.py" --quiet
 
 echo "pre-commit: hygiene, layers, budgets, READMEs, v2 lint, doc budgets and markdown structure all green"

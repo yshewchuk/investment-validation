@@ -1,93 +1,18 @@
-"""Tests for checks/markdown_structure.py: one failing and one passing fixture per rule."""
+"""Tests for checks/markdown_structure.py: a thin wrapper over markdownlint-cli2."""
 # packages: ops
 
+import re
+import shutil
 import subprocess
 
 import pytest
 
 from checks import markdown_structure as ms
 
-
-def rules(text):
-    return sorted(v.rule for v in ms.lint_text(text))
-
-
-def test_heading_needs_blank_before():
-    assert rules("para\n# Title\n\nbody\n") == ["heading-before"]
-    assert rules("# First line\n\nbody\n\n## Two\n\nbody\n") == []
-
-
-def test_heading_needs_blank_after_but_may_end_file():
-    assert rules("# Title\nbody\n") == ["heading-after"]
-    assert rules("body\n\n# Title\n") == []
-
-
-def test_table_needs_blank_before():
-    assert rules("para\n| a | b |\n|---|---|\n| 1 | 2 |\n") == ["table-before"]
-    assert rules("para\n\n| a | b |\n|---|---|\n| 1 | 2 |\n") == []
-
-
-def test_table_must_not_absorb_following_paragraph():
-    assert rules("| a | b |\n|---|---|\n| 1 | 2 |\nclosing sentence\n") == ["table-after"]
-    assert rules("| a | b |\n|---|---|\n| 1 | 2 |\n\nclosing sentence\n") == []
-    assert rules("| a | b |\n|---|---|\n| 1 | 2 |") == []
-
-
-def test_pipe_in_following_paragraph_is_not_a_table_row():
-    text = "| a | b |\n|---|---|\n| 1 | 2 |\nuse a | b here\n"
-    assert rules(text) == ["table-after"]
-    assert rules("a | b\n--|--\n1 | 2\n\nafter\n") == []
-    assert rules("a | b\n--|--\n1 | 2\nx | y\n\nafter\n") == []
-
-
-def test_fence_needs_blank_before_and_after():
-    assert rules("para\n```\ncode\n```\n\nnext\n") == ["fence-before"]
-    assert rules("para\n\n```\ncode\n```\nnext\n") == ["fence-after"]
-    assert rules("para\n\n```\ncode\n```\n\nnext\n") == []
-
-
-def test_unclosed_fence_is_reported_at_opening_line():
-    found = ms.lint_text("para\n\n```\ncode\n")
-    assert [(v.line, v.rule) for v in found] == [(3, "fence-unclosed")]
-
-
-def test_fenced_content_is_not_read_as_heading_or_table():
-    text = "intro\n\n```\n# not a heading\n| a | b |\n|---|---|\nplain\n```\n\nend\n"
-    assert rules(text) == []
-    tilde = "intro\n\n~~~\n# x\n```\n# still inside\n~~~\n\nend\n"
-    assert rules(tilde) == []
-
-
-def test_shorter_or_other_fence_does_not_close():
-    assert rules("a\n\n````\n```\ncode\n````\n\nb\n") == []
-    assert [v.rule for v in ms.lint_text("a\n\n````\n```\ncode\n")] == ["fence-unclosed"]
-
-
-def test_indented_fence_in_list_is_exempt_from_blank_rules():
-    assert rules("- item\n  ```\n  code\n  ```\n- next\n") == []
-
-
-def test_lists_are_not_checked():
-    assert rules("para\n- a\n- b\npara two\n") == []
-
-
-def test_inline_code_span_at_line_start_is_not_a_fence():
-    assert rules("para\n\n   ```json``` appendix\nmore\n") == []
-
-
-def test_changed_lines_parses_hunks_and_deletions():
-    diff = "@@ -1,0 +2,2 @@\n+a\n+b\n@@ -9,3 +11 @@\n-x\n+y\n@@ -20,2 +22,0 @@\n-gone\n"
-    assert ms.changed_lines(diff) == {2, 3, 11, 22, 23}
-
-
-def test_scoped_keeps_only_violations_touching_changed_lines():
-    found = ms.lint_text("# A\ntext\n\n# B\ntext\n")
-    assert len(found) == 2
-    assert [v.line for v in ms.scoped(found, {5})] == [4]
-    assert ms.scoped(found, set()) == []
-    unclosed = ms.lint_text("para\n\n```\ncode\n")
-    assert ms.scoped(unclosed, {4}) == unclosed
-    assert ms.scoped(found, None) == found
+needs_node = pytest.mark.skipif(
+    shutil.which("npx") is None,
+    reason="node/npx not installed; the linter cannot run here (CI has node)",
+)
 
 
 def _git(repo, *args):
@@ -109,63 +34,224 @@ def repo(tmp_path, monkeypatch):
     return tmp_path
 
 
+def test_changed_lines_parses_hunks_and_deletions():
+    diff = "@@ -1,0 +2,2 @@\n+a\n+b\n@@ -9,3 +11 @@\n-x\n+y\n@@ -20,2 +22,0 @@\n-gone\n"
+    assert ms.changed_lines(diff) == {2, 3, 11, 22, 23}
+
+
+@needs_node
+@pytest.mark.parametrize("rule, text", [
+    ("MD022", "intro\n# Bad\n\nbody\n"),
+    ("MD031", "intro\n\n```\ncode\n```\nafter\n"),
+    ("MD058", "intro\n| a | b |\n|---|---|\n| 1 | 2 |\n\nend\n"),
+])
+def test_each_enabled_rule_fires_on_a_tiny_fixture(repo, capsys, rule, text):
+    (repo / "new.md").write_text(text, encoding="utf-8")
+    _git(repo, "add", "new.md")
+    assert ms.main(["--quiet"]) == 1
+    assert f": {rule} " in capsys.readouterr().out
+
+
+@needs_node
+def test_only_the_configured_rules_run(repo):
+    # Everything else (line length, bare URLs, trailing spaces, ...) is off.
+    (repo / "new.md").write_text("# Title\n\n" + "x" * 300 + " \n\nhttp://example.com\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    assert ms.main(["--quiet"]) == 0
+
+
+@needs_node
 def test_staged_mode_ignores_untouched_legacy_defects(repo, capsys):
     (repo / "new.md").write_text("# New\n\nbody\n", encoding="utf-8")
     _git(repo, "add", "new.md")
     assert ms.main(["--quiet"]) == 0
     assert ms.main(["--all", "--quiet"]) == 1
-    assert "old.md:1: heading-after" in capsys.readouterr().out
+    assert "old.md:1: MD022" in capsys.readouterr().out
 
 
+@needs_node
 def test_staged_legacy_file_flags_only_touched_defect(repo, capsys):
-    # old.md has a legacy defect on line 1 (heading-after). Change an unrelated line.
+    # old.md has a legacy defect on line 1. Change an unrelated line: not reported.
     (repo / "old.md").write_text("# Old\nlegacy defect\n\nbody\n\nmore\n", encoding="utf-8")
     _git(repo, "add", "old.md")
     assert ms.main(["--quiet"]) == 0
     capsys.readouterr()
-    # Now touch the defect line itself.
+    # Now touch the defect line itself: reported.
     (repo / "old.md").write_text("# Older\nlegacy defect\n\nbody\n\nmore\n", encoding="utf-8")
     _git(repo, "add", "old.md")
     assert ms.main(["--quiet"]) == 1
-    assert "old.md:1: heading-after" in capsys.readouterr().out
+    assert "old.md:1: MD022" in capsys.readouterr().out
 
 
-def test_unclosed_fence_reported_when_closing_fence_deleted(repo, capsys):
-    (repo / "f.md").write_text("intro\n\n```\ncode\n```\n\nend\n", encoding="utf-8")
-    _git(repo, "add", "f.md")
-    _git(repo, "commit", "-qm", "add f")
-    (repo / "f.md").write_text("intro\n\n```\ncode\n\nend\n", encoding="utf-8")
-    _git(repo, "add", "f.md")
-    assert ms.main(["--quiet"]) == 1
-    assert "f.md:3: fence-unclosed" in capsys.readouterr().out
-
-
-def test_unclosed_fence_reported_when_text_added_after_it(repo, capsys):
-    (repo / "g.md").write_text("intro\n\n```\ncode\n", encoding="utf-8")
-    _git(repo, "add", "g.md")
-    _git(repo, "commit", "-qm", "add g (already unclosed)")
-    (repo / "g.md").write_text("intro\n\n```\ncode\nmore\n", encoding="utf-8")
-    _git(repo, "add", "g.md")
-    assert ms.main(["--quiet"]) == 1
-    assert "g.md:3: fence-unclosed" in capsys.readouterr().out
-
-
-def test_staged_mode_flags_a_new_defect(repo, capsys):
-    (repo / "new.md").write_text("intro\n# Bad\n\nbody\n", encoding="utf-8")
-    _git(repo, "add", "new.md")
-    assert ms.main(["--quiet"]) == 1
-    assert "new.md:2: heading-before" in capsys.readouterr().out
-
-
+@needs_node
 def test_base_ref_mode_checks_only_the_branch_diff(repo, capsys):
     _git(repo, "branch", "base")
-    (repo / "old.md").write_text("# Old\nlegacy defect\n\n| a | b |\n|---|---|\n| 1 | 2 |\nabsorbed\n",
+    (repo / "old.md").write_text("# Old\nlegacy defect\n\npara\n| a | b |\n|---|---|\n| 1 | 2 |\n",
                                  encoding="utf-8")
     _git(repo, "commit", "-qam", "edit")
     assert ms.main(["--base-ref", "base", "--quiet"]) == 1
     out = capsys.readouterr().out
-    assert "old.md:7: table-after" in out
-    assert "heading-after" not in out
+    assert "MD058" in out
+    assert "MD022" not in out
+
+
+@needs_node
+def test_staged_mode_reads_the_index_not_the_worktree(repo, capsys):
+    bad, fine = "intro\n# Bad\n\nbody\n", "# Fine\n\nbody\n"
+    f = repo / "w.md"
+    # Staged version is bad, the worktree was then fixed but not staged: still flagged.
+    f.write_text(bad, encoding="utf-8")
+    _git(repo, "add", "w.md")
+    f.write_text(fine, encoding="utf-8")
+    assert ms.main(["--quiet"]) == 1
+    assert "w.md:2: MD022" in capsys.readouterr().out
+    # Staged version is fine, the worktree was then broken but not staged: clean.
+    f.write_text(fine, encoding="utf-8")
+    _git(repo, "add", "w.md")
+    f.write_text(bad, encoding="utf-8")
+    assert ms.main(["--quiet"]) == 0
+
+
+@needs_node
+def test_base_ref_mode_reads_committed_content_not_the_worktree(repo, capsys):
+    bad, fine = "intro\n# Bad\n\nbody\n", "# Fine\n\nbody\n"
+    f = repo / "w.md"
+    _git(repo, "branch", "base")
+    f.write_text(bad, encoding="utf-8")
+    _git(repo, "add", "w.md")
+    _git(repo, "commit", "-qm", "bad")
+    f.write_text(fine, encoding="utf-8")
+    assert ms.main(["--base-ref", "base", "--quiet"]) == 1
+    assert "w.md:2: MD022" in capsys.readouterr().out
+    _git(repo, "commit", "-qam", "fix")
+    f.write_text(bad, encoding="utf-8")
+    assert ms.main(["--base-ref", "base", "--quiet"]) == 0
+
+
+@needs_node
+def test_base_that_moved_after_branching_does_not_flag_main_s_own_changes(repo, capsys):
+    # CI checks out a merge commit; the base branch tip is newer than the PR's
+    # recorded base sha. Three-dot against the CURRENT base tip flags only the
+    # branch's own lines, while a stale base sha also flags what main added since.
+    _git(repo, "branch", "-M", "main")
+    stale_base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                check=True, capture_output=True, text=True).stdout.strip()
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "feat.md").write_text("# Ok\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "feat.md")
+    _git(repo, "commit", "-qm", "feature work")
+    _git(repo, "checkout", "-q", "main")
+    (repo / "moved.md").write_text("# Bad\nno blank after heading\n", encoding="utf-8")
+    _git(repo, "add", "moved.md")
+    _git(repo, "commit", "-qm", "main moved")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "merge", "-q", "--no-edit", "main")
+    assert ms.main(["--base-ref", "main", "--quiet"]) == 0
+    assert ms.main(["--base-ref", stale_base, "--quiet"]) == 1
+    assert "moved.md:1: MD022" in capsys.readouterr().out
+
+
+@needs_node
+def test_crlf_files_are_linted_like_lf_files(repo, capsys):
+    (repo / "ok.md").write_bytes(b"# Title\r\n\r\n```\r\ncode\r\n```\r\n\r\nend\r\n")
+    _git(repo, "add", "ok.md")
+    assert ms.main(["--quiet"]) == 0
+    (repo / "bad.md").write_bytes(b"intro\r\n# Bad\r\n\r\nbody\r\n")
+    _git(repo, "add", "bad.md")
+    assert ms.main(["--quiet"]) == 1
+    assert "bad.md:2: MD022" in capsys.readouterr().out
+
+
+@needs_node
+def test_staged_deletion_of_a_markdown_file_is_not_read(repo):
+    _git(repo, "rm", "-q", "old.md")
+    assert ms.main(["--quiet"]) == 0
+
+
+@needs_node
+def test_quiet_suppresses_the_clean_message(repo, capsys):
+    (repo / "ok.md").write_text("# Ok\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "ok.md")
+    assert ms.main(["--quiet"]) == 0
+    assert capsys.readouterr().out == ""
+    assert ms.main([]) == 0
+    assert "clean" in capsys.readouterr().out
+
+
+@needs_node
+def test_user_git_color_and_external_diff_config_do_not_hide_violations(repo, monkeypatch, capsys):
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "color.ui")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "diff.external")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "false")
+    (repo / "new.md").write_text("intro\n# Bad\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    assert ms.main(["--quiet"]) == 1
+    assert "new.md:2: MD022" in capsys.readouterr().out
+
+
+def test_tool_missing_fails_closed_with_an_install_hint(repo, monkeypatch, capsys):
+    (repo / "new.md").write_text("# New\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    monkeypatch.setattr(ms.shutil, "which", lambda name: None)
+    assert ms.main(["--quiet"]) == 2
+    err = capsys.readouterr().err
+    assert "npx" in err and "install" in err
+
+
+def _fake_linter(monkeypatch, returncode, stdout="", stderr=""):
+    real = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "git":
+            return real(cmd, *args, **kwargs)
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    monkeypatch.setattr(ms.shutil, "which", lambda name: "/usr/bin/npx")
+    monkeypatch.setattr(ms.subprocess, "run", run)
+
+
+def test_linter_crash_fails_closed(repo, monkeypatch, capsys):
+    (repo / "new.md").write_text("# New\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    _fake_linter(monkeypatch, 3, stderr="boom")
+    assert ms.main(["--quiet"]) == 2
+    assert "crashed" in capsys.readouterr().err
+
+
+def test_linter_failure_without_findings_fails_closed(repo, monkeypatch, capsys):
+    (repo / "new.md").write_text("# New\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    _fake_linter(monkeypatch, 1, stderr="config error")
+    assert ms.main(["--quiet"]) == 2
+
+
+def test_linter_timeout_fails_closed(repo, monkeypatch, capsys):
+    (repo / "new.md").write_text("# New\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    real = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "git":
+            return real(cmd, *args, **kwargs)
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=300)
+
+    monkeypatch.setattr(ms.shutil, "which", lambda name: "/usr/bin/npx")
+    monkeypatch.setattr(ms.subprocess, "run", run)
+    assert ms.main(["--quiet"]) == 2
+    assert "could not run" in capsys.readouterr().err
+
+
+def test_parsed_findings_are_filtered_to_touched_lines(repo, monkeypatch, capsys):
+    (repo / "new.md").write_text("intro\n# Bad\n\nbody\n", encoding="utf-8")
+    _git(repo, "add", "new.md")
+    row = "new.md:2 MD022/blanks-around-headings Headings should be surrounded by blank lines [x]"
+    _fake_linter(monkeypatch, 1, stderr=row + "\nnew.md:99 MD031/blanks-around-fences untouched")
+    assert ms.main(["--quiet"]) == 1
+    out = capsys.readouterr().out
+    assert "new.md:2: MD022" in out
+    assert "new.md:99" not in out
 
 
 def test_undecodable_file_and_bad_ref_exit_2_never_clean(repo, capsys):
@@ -176,13 +262,10 @@ def test_undecodable_file_and_bad_ref_exit_2_never_clean(repo, capsys):
     assert ms.main(["--base-ref", "no-such-ref", "--quiet"]) == 2
 
 
-def test_quiet_suppresses_the_clean_message(repo, capsys):
-    (repo / "ok.md").write_text("# Ok\n\nbody\n", encoding="utf-8")
-    _git(repo, "add", "ok.md")
-    assert ms.main(["--quiet"]) == 0
-    assert capsys.readouterr().out == ""
-    assert ms.main([]) == 0
-    assert "clean" in capsys.readouterr().out
+def test_empty_base_ref_is_a_usage_error_not_staged_mode(repo, capsys):
+    assert ms.main(["--base-ref", "", "--quiet"]) == 2
+    assert "non-empty" in capsys.readouterr().err
+    assert ms.main(["--base-ref", "   ", "--quiet"]) == 2
 
 
 def test_git_timeout_exits_2(repo, monkeypatch, capsys):
@@ -212,478 +295,8 @@ def test_unreadable_file_exits_2(repo, monkeypatch, capsys):
     assert "unreadable" in capsys.readouterr().err
 
 
-def test_user_git_color_and_external_diff_config_do_not_hide_violations(repo, monkeypatch, capsys):
-    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
-    monkeypatch.setenv("GIT_CONFIG_KEY_0", "color.ui")
-    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
-    monkeypatch.setenv("GIT_CONFIG_KEY_1", "diff.external")
-    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "false")
-    (repo / "new.md").write_text("intro\n# Bad\n\nbody\n", encoding="utf-8")
-    _git(repo, "add", "new.md")
-    assert ms.main(["--quiet"]) == 1
-    assert "new.md:2: heading-before" in capsys.readouterr().out
-
-
-def test_list_content_is_ignored_for_headings_and_tables():
-    indented_table = "- item\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n  tail\n"
-    assert rules(indented_table) == []
-    marker_pipe = "- a | b\n- --|--\n- 1 | 2\nafter\n"
-    assert rules(marker_pipe) == []
-    assert rules("- item\n  # not a heading\n  text\n") == []
-    assert rules("1. item\n   | a | b |\n   |---|---|\n") == []
-
-
-def test_unclosed_indented_fence_in_list_item_is_reported():
-    found = ms.lint_text("- item\n  ```\n  code\n- next\n")
-    assert [(v.line, v.rule) for v in found] == [(2, "fence-unclosed")]
-    assert ms.scoped(found, {4}) == found
-
-
-def test_fence_opening_on_a_list_marker_line_is_recognised():
-    assert rules("- ```\n  code\n  ```\n- next\n") == []
-    assert rules("1. ```python\n   code\n   ```\n") == []
-    found = ms.lint_text("- ```\n  code\n- next\n")
-    assert [(v.line, v.rule) for v in found] == [(1, "fence-unclosed")]
-
-
-def test_empty_base_ref_is_a_usage_error_not_staged_mode(repo, capsys):
-    assert ms.main(["--base-ref", "", "--quiet"]) == 2
-    assert "non-empty" in capsys.readouterr().err
-    assert ms.main(["--base-ref", "   ", "--quiet"]) == 2
-
-
-def test_pipeless_header_table_uses_column_count_for_rows():
-    # Rows with the header's column count stay in the table.
-    assert rules("a | b\n--|--\n1 | 2\nx | y\n\nafter\n") == []
-    # A pipe-bearing paragraph with a different column count is not a row.
-    assert rules("a | b\n--|--\n1 | 2\nsee x | y | z\n") == ["table-after"]
-    # A line with a pipe-less body is not a row either.
-    assert rules("a | b\n--|--\n1 | 2\nplain text\n") == ["table-after"]
-
-
-def test_known_limit_cell_count_paragraph_under_pipeless_header_is_a_row():
-    # By GFM rules a line with the header's cell count IS a table row, and nothing
-    # distinguishes it from an intended one, so it is deliberately not flagged.
-    assert rules("a | b\n--|--\n1 | 2\nuse a | b here\n") == []
-
-
-def test_closer_less_indented_than_a_list_item_opener_does_not_close():
-    found = ms.lint_text("- item\n  ```\n  code\n```\nafter\n")
-    assert [(v.line, v.rule) for v in found] == [(2, "fence-unclosed")]
-    # Same indent as the opener closes it.
-    assert rules("- item\n  ```\n  code\n  ```\n\nafter\n") == []
-    # A marker-line opener (content column 2) behaves the same.
-    found = ms.lint_text("- ```\n  code\n```\nafter\n")
-    assert [v.rule for v in found] == ["fence-unclosed"]
-
-
-def test_gfm_fence_rules_matrix():
-    # Opener indent 1-3 spaces at top level: a column-0 closer is valid.
-    assert rules("a\n\n   ```\ncode\n```\n\nb\n") == []
-    assert rules("- item\n\ntext\n\n   ```\ncode\n```\n\nb\n") == []
-    # 4+ spaces outside a list is an indented code block, not a fence.
-    assert rules("a\n\n    ```\n    x\n\nb\n") == []
-    # Closer needs at least the opener's length and the same character.
-    assert [v.rule for v in ms.lint_text("a\n\n````\ncode\n```\n")] == ["fence-unclosed"]
-    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n~~~\n")] == ["fence-unclosed"]
-    assert rules("a\n\n```\ncode\n`````\n\nb\n") == []
-    # An info string is allowed on the opener only.
-    assert rules("a\n\n```python\ncode\n```\n\nb\n") == []
-    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n```python\n")] == ["fence-unclosed"]
-    # A tilde opener's info string may contain backticks.
-    assert rules("a\n\n~~~ a`b\ncode\n~~~\n\nb\n") == []
-    # Closer indent is at most 3 beyond the opener's.
-    assert rules("a\n\n```\ncode\n   ```\n\nb\n") == []
-    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n    ```\n")] == ["fence-unclosed"]
-
-
-def test_staged_mode_reads_the_index_not_the_worktree(repo, capsys):
-    bad, fine = "intro\n# Bad\n\nbody\n", "# Fine\n\nbody\n"
-    f = repo / "w.md"
-    # Staged version is bad, the worktree was then fixed but not staged: still flagged.
-    f.write_text(bad, encoding="utf-8")
-    _git(repo, "add", "w.md")
-    f.write_text(fine, encoding="utf-8")
-    assert ms.main(["--quiet"]) == 1
-    assert "w.md:2: heading-before" in capsys.readouterr().out
-    # Staged version is fine, the worktree was then broken but not staged: clean.
-    f.write_text(fine, encoding="utf-8")
-    _git(repo, "add", "w.md")
-    f.write_text(bad, encoding="utf-8")
-    assert ms.main(["--quiet"]) == 0
-
-
-def test_base_ref_mode_reads_committed_content_not_the_worktree(repo, capsys):
-    bad, fine = "intro\n# Bad\n\nbody\n", "# Fine\n\nbody\n"
-    f = repo / "w.md"
-    _git(repo, "branch", "base")
-    # Committed version is bad, the worktree was then fixed (uncommitted): still flagged.
-    f.write_text(bad, encoding="utf-8")
-    _git(repo, "add", "w.md")
-    _git(repo, "commit", "-qm", "bad")
-    f.write_text(fine, encoding="utf-8")
-    assert ms.main(["--base-ref", "base", "--quiet"]) == 1
-    assert "w.md:2: heading-before" in capsys.readouterr().out
-    # Committed version is fine, the worktree was then broken (uncommitted): clean.
-    _git(repo, "commit", "-qam", "fix")
-    f.write_text(bad, encoding="utf-8")
-    assert ms.main(["--base-ref", "base", "--quiet"]) == 0
-
-
-def test_each_blank_line_rule_reports_exact_positions():
-    def fields(text):
-        return sorted((v.rule, v.line, v.near) for v in ms.lint_text(text))
-
-    cases = [
-        ("para\n# Title\n\nbody\n", [("heading-before", 2, 1)], {1}),
-        ("# Title\nbody\n", [("heading-after", 1, 2)], {2}),
-        ("para\n| a | b |\n|---|---|\n| 1 | 2 |\n", [("table-before", 2, 1)], {1}),
-        ("| a | b |\n|---|---|\n| 1 | 2 |\nclosing\n", [("table-after", 4, 3)], {3}),
-        ("para\n```\ncode\n```\n\nnext\n", [("fence-before", 2, 1)], {1}),
-        ("para\n\n```\ncode\n```\nnext\n", [("fence-after", 5, 6)], {6}),
-    ]
-    for text, expected, neighbour in cases:
-        assert fields(text) == expected, text
-        found = ms.lint_text(text)
-        # A change to ONLY the neighbouring line is in scope; an unrelated line is not.
-        assert ms.scoped(found, neighbour) == found, text
-        assert ms.scoped(found, {99}) == [], text
-
-
-def test_table_scope_covers_the_whole_block():
-    text = "| a | b |\n|---|---|\n| 1 | 2 |\nclosing\n"
-    found = ms.lint_text(text)
-    for line in (1, 2, 3, 4):
-        assert ms.scoped(found, {line}) == found, line
-    before = ms.lint_text("para\n| a | b |\n|---|---|\n| 1 | 2 |\n")
-    assert ms.scoped(before, {3}) == before  # the delimiter row alone
-
-
-def test_delimiter_only_edit_that_creates_a_table_is_flagged(repo, capsys):
-    f = repo / "t.md"
-    f.write_text("| a | b |\n| c | d |\n| e | f |\nparagraph\n", encoding="utf-8")
-    _git(repo, "add", "t.md")
-    _git(repo, "commit", "-qm", "text rows")
-    _git(repo, "branch", "base")
-    f.write_text("| a | b |\n|---|---|\n| e | f |\nparagraph\n", encoding="utf-8")
-    _git(repo, "add", "t.md")
-    assert ms.main(["--quiet"]) == 1
-    assert "t.md:4: table-after" in capsys.readouterr().out
-    _git(repo, "commit", "-qm", "delimiter")
-    assert ms.main(["--base-ref", "base", "--quiet"]) == 1
-    assert "t.md:4: table-after" in capsys.readouterr().out
-
-
-def test_escaped_pipes_and_unequal_counts():
-    assert ms._cells("a \\| b | c") == 2
-    assert ms._cells("| a | b |") == 2
-    assert ms._cells("| a \\| b |") == 1
-    assert rules("a \\| b | c\n--|--\n1 | 2\n\nafter\n") == []
-    assert rules("a \\| b | c\n--|--\n1 | 2\nafter\n") == ["table-after"]
-    assert rules("| a \\| b |\n|---|\n| 1 |\nafter\n") == ["table-after"]
-    # Header and delimiter cell counts differ: not a table, so no table rules.
-    assert rules("para\na | b\n--|--|--\n1 | 2\nafter\n") == []
-
-
-def test_closer_bounds_use_the_container_indent():
-    # Top level, opener indented 3: a 3-space closer closes, a 6-space one is content.
-    assert rules("a\n\n   ```\ncode\n   ```\n\nb\n") == []
-    assert [v.rule for v in ms.lint_text("a\n\n   ```\ncode\n      ```\n")] == ["fence-unclosed"]
-    # Inside "- item" (content column 2): a 4-space opener is closed by a 2-space closer.
-    assert rules("- item\n\n    ```\n  code\n  ```\n\nb\n") == []
-    # Closers up to 3 beyond the container column close; 4 beyond do not.
-    assert rules("- item\n  ```\n  code\n     ```\n") == []
-    assert [v.rule for v in ms.lint_text("- item\n  ```\n  code\n      ```\n")] == ["fence-unclosed"]
-
-
-def test_nested_list_items_pick_the_right_container():
-    assert rules("- a\n  - b\n\n    ```\n  x\n    ```\n") == []
-    assert rules("- a\n  - b\n\n  ```\n  x\n  ```\n\nz\n") == []
-
-
-def test_fence_four_columns_beyond_the_container_is_indented_code():
-    # (a) inside "- item" (content column 2), 6 spaces = container + 4: indented code.
-    assert rules("- item\n\n      ```\n      x\n\nb\n") == []
-    # 5 columns (container + 3) is still a fence, and unclosed here.
-    assert [v.rule for v in ms.lint_text("- item\n\n     ```\n     x\n")] == ["fence-unclosed"]
-    # Top level: 4 spaces is indented code, 3 is a fence.
-    assert rules("para\n\n    ```\n    x\n\nb\n") == []
-    assert [v.rule for v in ms.lint_text("para\n\n   ```\n   x\n")] == ["fence-unclosed"]
-
-
-def test_list_marker_four_columns_beyond_its_container_is_not_an_item():
-    # (b) a 4-space marker line at top level is indented code, not a fence opener.
-    assert rules("para\n\n    - ```\n    x\n") == []
-    # ... and inside a paragraph (no blank line) it is a lazy continuation.
-    assert rules("text\n    - ```\n    x\n") == []
-    # It does not become a container either: a later 3-space fence closes at column 0.
-    assert rules("para\n\n    - item\n\n   ```\ncode\n```\n\nb\n") == []
-    # A marker at 0-3 columns does interrupt a paragraph and opens a fence.
-    assert rules("text\n- ```\n  x\n  ```\n") == []
-    assert [v.rule for v in ms.lint_text("text\n- ```\n  x\n")] == ["fence-unclosed"]
-    # A nested marker 2 columns beyond its parent's content is still an item.
-    assert [v.rule for v in ms.lint_text("- a\n    - ```\n      x\n")] == ["fence-unclosed"]
-
-
-def test_tab_indentation_expands_to_four_column_stops():
-    # (c) tabs: opener and closer indented with a tab inside a list item.
-    assert [v.rule for v in ms.lint_text("- item\n\t```\n\tcode\n")] == ["fence-unclosed"]
-    assert rules("- item\n\t```\n\tcode\n\t```\n") == []
-    # A tab after the list marker reaches column 4 (content column 4).
-    assert rules("-\t```\n\tcode\n\t```\n") == []
-    assert [v.rule for v in ms.lint_text("-\t```\n\tcode\n") ] == ["fence-unclosed"]
-    # Top level: a tab-indented fence is indented code.
-    assert rules("para\n\n\t```\n\tx\n") == []
-    # A tab and spaces mix to the next stop: "  \t" is column 4.
-    assert ms._expand("  \t```") == "    ```"
-    assert ms._expand("-\tx\ty") == "-   x\ty"
-
-
-def test_each_block_starter_ends_a_table_instead_of_being_a_row():
-    head = "a | b\n--|--\n1 | 2\n"
-    # Each starter has the header's cell count, so a cell-count test alone would
-    # swallow it as a row. Every one must end the table (table-after).
-    assert rules(head + "# Alpha | Beta\n\nz\n") == ["heading-before", "table-after"]
-    assert rules(head + "```x | y\ncode\n```\n\nz\n") == ["fence-before", "table-after"]
-    assert rules(head + "- c | d\n") == ["table-after"]
-    assert rules(head + "1. c | d\n") == ["table-after"]
-    assert rules(head + "> e | f\n") == ["table-after"]
-    assert rules(head + "* * *\n") == ["table-after"]
-    assert rules(head + "<div>x | y\n") == ["table-after"]
-    # Positions: the starter line is the one reported.
-    assert [(v.rule, v.line) for v in ms.lint_text(head + "> e | f\n")] == [("table-after", 4)]
-    # A genuine two-cell row still continues the table.
-    assert rules(head + "3 | 4\n\nz\n") == []
-
-
-def test_a_block_starter_cannot_be_a_table_header():
-    assert rules("> a | b\n> --|--\n") == []
-    assert rules("<div>a | b\n--|--\n1 | 2\n") == []
-    assert rules("- a | b\n--|--\n1 | 2\nafter\n") == []
-
-
-def test_marker_followed_by_five_or_more_spaces_is_code_not_a_fence():
-    # The rest after "marker + 5+ spaces" is indented code; content column = marker + 1.
-    assert rules("-     ```\n      x\n") == []
-    assert rules("1.     ```\n       x\n") == []
-    # Up to four spaces after the marker is still a fence opener.
-    assert [v.rule for v in ms.lint_text("-    ```\n     x\n")] == ["fence-unclosed"]
-    # Content column of "-     x" is 2: a fence 6 columns in is code (6 - 2 = 4) ...
-    assert rules("-     x\n\n      ```\n      y\n") == []
-    # ... while 5 columns in (5 - 2 = 3) is a fence.
-    assert [v.rule for v in ms.lint_text("-     x\n\n     ```\n     y\n")] == ["fence-unclosed"]
-
-
-def located(text):
-    return sorted((v.rule, v.line) for v in ms.lint_text(text))
-
-
-def test_html_block_type_1_script_pre_style_textarea():
-    # Inside: nothing is Markdown (heading, table, fence). Case-insensitive.
-    assert rules("<pre>\n# h\na | b\n--|--\n```\n</pre>\n") == []
-    assert rules("<PRE>\n```\n</PRE>\n") == []
-    assert rules("<textarea>\n# h\n</textarea>\n") == []
-    assert rules("<script>\n# h\n</script>\n") == []
-    assert rules("<style>\n# h\n</style>\n") == []
-    # Ends at the line containing the closing tag (not at a blank line): the
-    # heading right after is scanned again.
-    assert located("<pre>\n\n# h\n</pre>\n# H\n\nx\n") == [("heading-before", 5)]
-    assert located("<style>x</style>\n# H\n\nx\n") == [("heading-before", 2)]
-
-
-def test_html_block_type_2_comment():
-    assert rules("<!--\n```\n# x\n| a | b |\n|---|---|\n-->\n") == []
-    assert rules("<!--\n```\n-->\n\ntext\n") == []  # no fence-unclosed
-    assert located("<!-- a -->\n# H\n\nx\n") == [("heading-before", 2)]  # same-line end
-    assert located("<!--\n\n# still comment\n-->\n# H\n\nx\n") == [("heading-before", 5)]
-
-
-def test_html_block_type_3_processing_instruction():
-    assert rules("<?php\n# x\n```\n?>\n") == []
-    assert located("<?php ?>\n# H\n\nx\n") == [("heading-before", 2)]
-
-
-def test_html_block_type_4_declaration():
-    assert rules("<!DOCTYPE html\n# x\n```\n>\n") == []
-    assert located("<!DOCTYPE html>\n# H\n\nx\n") == [("heading-before", 2)]
-
-
-def test_html_block_type_5_cdata():
-    assert rules("<![CDATA[\n# x\n```\n]]>\n") == []
-    assert located("<![CDATA[ x ]]>\n# H\n\nx\n") == [("heading-before", 2)]
-
-
-def test_html_block_type_6_block_tags_end_at_a_blank_line():
-    assert rules("<div>\n# x\n```\n| a | b |\n|---|---|\n\n# Real\n\nz\n") == []
-    assert rules("<DIV>\n# x\n\n") == []  # case-insensitive
-    assert rules("</div>\n```\n\nz\n") == []  # a closing tag starts it too
-    assert rules("<search>\n```\n\nz\n") == []  # tag list is the spec's (0.31.2)
-    assert located("<div>\n\n# H\n\nz\n") == []  # the heading after the blank line is fine
-    # It can interrupt a paragraph.
-    assert rules("para\n<div>\n```\n\nz\n") == []
-    # Not in the list: not a block, so the content IS scanned.
-    assert located("<span>x\n# H\n\nz\n") == [("heading-before", 2)]
-
-
-def test_html_block_type_7_lone_tag_cannot_interrupt_a_paragraph():
-    assert rules('a\n\n<custom-tag attr="v">\n# x\n```\n\nz\n') == []
-    assert rules("a\n\n</custom-tag>\n```\n\nz\n") == []
-    # Interrupting a paragraph is not allowed: the heading is scanned.
-    assert located("a\n<span>\n# H\n\nx\n") == [("heading-before", 3)]
-    # Text after the tag: not type 7.
-    assert located("a\n\n<span>text\n# H\n\nx\n") == [("heading-before", 4)]
-
-
-def test_every_html_start_ends_a_table_case_insensitively():
-    head = "a | b\n--|--\n1 | 2\n"
-    for starter in ("<div>x | y", "<DIV>x | y", "<!-- x | y", "<?x | y", "<!DOCTYPE x | y",
-                    "<![CDATA[x | y", "<pre>x | y", "<TABLE>x | y"):
-        assert [(v.rule, v.line) for v in ms.lint_text(head + starter + "\n")] == [("table-after", 4)], starter
-    # Type 7 cannot interrupt a paragraph (a table row), so a lone tag is not a starter.
-    assert ms._starts_block("<custom-tag>") is False
-    assert ms._starts_block("<div>") is True
-
-
-def test_type_7_html_block_may_start_after_a_non_paragraph_line():
-    # After a heading, a closed fence, a thematic break and an ended HTML block the
-    # lone tag starts a block, so the "# h" line after it is not scanned.
-    assert located("# H\n<custom-tag>\n# h\n\nz\n") == [("heading-after", 1)]
-    assert located("```\nx\n```\n<custom-tag>\n# h\n\nz\n") == [("fence-after", 3)]
-    assert located("***\n<custom-tag>\n# h\n\nz\n") == []
-    assert located("<!-- x -->\n<custom-tag>\n# h\n\nz\n") == []
-    # After a real paragraph line (also a list item or a table row) it does not.
-    assert located("a\n<custom-tag>\n# H\n\nz\n") == [("heading-before", 3)]
-    assert located("- a\n<custom-tag>\n# H\n\nz\n") == [("heading-before", 3)]
-
-
-def test_html_blocks_inside_list_items_use_the_container_indent():
-    # 6 columns absolute but only 2 beyond the nested item's content column 4.
-    assert rules("- a\n  - b\n\n      <div>\n      # x\n      ```\n\nz\n") == []
-    # A comment 2 columns beyond "- item" (content column 2) is an HTML block.
-    assert rules("- item\n\n    <!--\n    ```\n    -->\n") == []
-    # 4 columns beyond the container is indented code, not an HTML block: the
-    # following fence is scanned (and unclosed).
-    assert [v.rule for v in ms.lint_text("- item\n\n      <div>\n  ```\n  y\n")] == ["fence-unclosed"]
-
-
-def test_html_after_a_list_marker_is_detected_on_the_remainder():
-    # The comment starts after the marker; its content (incl. a fence line) is HTML.
-    assert rules("- <!--\n  ```\n  -->\n") == []
-    assert rules("- <!-- ``` -->\n") == []
-    assert rules("- <div>\n  ```\n\nz\n") == []
-    # Type 7 after a marker, with the item's content column as the container.
-    assert rules("- <custom-tag>\n  ```\n\nz\n") == []
-
-
-def test_unindented_line_ends_a_list_contained_html_block():
-    # The item ended at "# H" (column 0), so its HTML block ended too: the heading
-    # is scanned again.
-    assert located("- <div>\n  x\n# H\n\nz\n") == [("heading-before", 3)]
-    assert located("- <!--\n  x\n# H\n\nz\n") == [("heading-before", 3)]
-    # An indented continuation stays inside the block.
-    assert located("- <div>\n  x\n  # not scanned\n\nz\n") == []
-    # A top-level block is not ended by an unindented line (only blank / its end marker).
-    assert located("<div>\nx\n# H\n\nz\n") == []
-
-
-def test_indented_code_is_not_paragraph_text_for_type_7():
-    # Indented code, then a lone tag: the tag may start an HTML block.
-    assert located("    code\n<custom-tag>\n# h\n\nz\n") == []
-    # A 4-space line right after a paragraph is a continuation: the tag cannot start.
-    assert located("para\n    cont\n<custom-tag>\n# H\n\nz\n") == [("heading-before", 4)]
-
-
-def test_nested_list_closer_uses_the_innermost_container():
-    # Innermost content column 4: a closer at 7 closes, one at 2 does not.
-    assert rules("- a\n  - b\n\n    ```\n    x\n       ```\n") == []
-    assert [v.rule for v in ms.lint_text("- a\n  - b\n\n    ```\n    x\n  ```\n")] == ["fence-unclosed"]
-
-
-def test_blockquoted_fence_is_not_checked():
-    assert rules("> ```\n> # x\n") == []
-
-
-def test_alignment_delimiters_are_tables():
-    assert rules("| a | b |\n|:---|---:|\n| 1 | 2 |\nafter\n") == ["table-after"]
-    assert rules("| a | b |\n|:---:|:---:|\n| 1 | 2 |\n\nafter\n") == []
-    assert rules("a | b\n:-:|-:\n1 | 2\nafter\n") == ["table-after"]
-
-
-def test_heading_regex_edges():
-    assert rules("para\n#hashtag\n") == []
-    assert rules("para\n####### seven\n") == []
-    assert rules("para\n#\n") == ["heading-before"]
-
-
-def test_delimiter_like_lines_are_not_table_headers():
-    assert rules("para\n|---|---|\n|---|---|\n") == []
-    assert rules("para\na | b\n---\n") == []
-    assert rules("1. a | b\n--|--\n1 | 2\nafter\n") == []
-
-
-def test_every_list_marker_style_opens_a_fence():
-    for opener in ("- ```", "* ```", "+ ```", "2) ```", "3. ```"):
-        found = ms.lint_text(opener + "\n  code\n")
-        assert [v.rule for v in found] == ["fence-unclosed"], opener
-
-
-def test_closing_fence_must_have_no_info_string():
-    assert rules("a\n\n```\ncode\n```python\nmore\n```\n\nb\n") == []
-    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n```python\nmore\n")] == ["fence-unclosed"]
-
-
-def test_scoped_matches_the_reported_line_as_well_as_the_neighbour():
-    found = ms.lint_text("# A\ntext\n\n# B\ntext\n")
-    assert [v.line for v in ms.scoped(found, {1})] == [1]
-    assert [v.line for v in ms.scoped(found, {2})] == [1]
-
-
-def test_staged_deletion_of_a_markdown_file_is_not_read(repo):
-    _git(repo, "rm", "-q", "old.md")
-    assert ms.main(["--quiet"]) == 0
-
-
-def test_base_that_moved_after_branching_does_not_flag_main_s_own_changes(repo, capsys):
-    # CI checks out a merge commit; the base branch tip is newer than the PR's
-    # recorded base sha. Three-dot against the CURRENT base tip must flag only the
-    # branch's own lines, while a stale base sha also flags what main added since.
-    _git(repo, "branch", "-M", "main")
-    stale_base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                                check=True, capture_output=True, text=True).stdout.strip()
-    _git(repo, "checkout", "-q", "-b", "feature")
-    (repo / "feat.md").write_text("# Ok\n\nbody\n", encoding="utf-8")
-    _git(repo, "add", "feat.md")
-    _git(repo, "commit", "-qm", "feature work")
-    _git(repo, "checkout", "-q", "main")
-    (repo / "moved.md").write_text("# Bad\nno blank after heading\n", encoding="utf-8")
-    _git(repo, "add", "moved.md")
-    _git(repo, "commit", "-qm", "main moved")
-    _git(repo, "checkout", "-q", "feature")
-    _git(repo, "merge", "-q", "--no-edit", "main")
-    assert ms.main(["--base-ref", "main", "--quiet"]) == 0
-    assert ms.main(["--base-ref", stale_base, "--quiet"]) == 1
-    assert "moved.md:1: heading-after" in capsys.readouterr().out
-
-
-def test_closer_follows_commonmark_not_the_opener_regex():
-    # A list-marker line or a 4-space-indented fence run inside an open fence is content.
-    assert rules("a\n\n```\n- ```\ncode\n```\n\nb\n") == []
-    assert rules("a\n\n```\n    ```\ncode\n```\n\nb\n") == []
-    # A valid closer indented up to 3 spaces still closes.
-    assert rules("a\n\n```\ncode\n   ```\n\nb\n") == []
-    # Nested list opener (content column 4): closer at the same column closes it ...
-    assert rules("- a\n  - ```\n    code\n    ```\n") == []
-    # ... but 8 spaces is more than 3 beyond the opener's column, so it is content.
-    found = ms.lint_text("- a\n  - ```\n    code\n        ```\n")
-    assert [v.rule for v in found] == ["fence-unclosed"]
-    # A closer with trailing text is not a closer.
-    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n``` x\n")] == ["fence-unclosed"]
-
-
+@needs_node
 def test_the_versioned_pre_commit_hook_blocks_a_staged_violation(tmp_path, monkeypatch):
-    import re
-    import shutil
-
     for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
         monkeypatch.delenv(var, raising=False)
     hook_text = (ms.ROOT / "checks" / "hooks" / "pre-commit").read_text(encoding="utf-8")
@@ -692,6 +305,7 @@ def test_the_versioned_pre_commit_hook_blocks_a_staged_violation(tmp_path, monke
     for name in set(re.findall(r"checks/([a-z_0-9]+\.py)", hook_text)):
         (tmp_path / "checks" / name).write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
     shutil.copy(ms.__file__, tmp_path / "checks" / "markdown_structure.py")
+    shutil.copy(ms.CONFIG, tmp_path / ".markdownlint-cli2.jsonc")
     hook = tmp_path / "pre-commit"
     hook.write_text(hook_text, encoding="utf-8")
     _git(tmp_path, "init", "-q")
@@ -703,21 +317,8 @@ def test_the_versioned_pre_commit_hook_blocks_a_staged_violation(tmp_path, monke
     _git(tmp_path, "add", "bad.md")
     blocked = run_hook()
     assert blocked.returncode != 0
-    assert "bad.md:1: heading-after" in blocked.stdout
+    assert "bad.md:1: MD022" in blocked.stdout
 
     (tmp_path / "bad.md").write_text("# Title\n\nbody\n", encoding="utf-8")
     _git(tmp_path, "add", "bad.md")
     assert run_hook().returncode == 0
-
-
-def test_crlf_files_are_linted_like_lf_files():
-    clean = "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\ncode\n```\n\nend\n"
-    assert rules(clean.replace("\n", "\r\n")) == []
-    # Violations are still found, on the same line numbers, in a CRLF file.
-    bad = "# Title\nbody\n\n```\ncode\n```\nafter\n"
-    assert ms.lint_text(bad.replace("\n", "\r\n")) == ms.lint_text(bad)
-    assert sorted(v.rule for v in ms.lint_text(bad)) == ["fence-after", "heading-after"]
-    # An unclosed fence is still unclosed with CRLF endings.
-    assert [v.rule for v in ms.lint_text("a\r\n\r\n```\r\ncode\r\n")] == ["fence-unclosed"]
-
-

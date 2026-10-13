@@ -1,0 +1,18 @@
+// markdownlint-cli2 config for checks/markdown_structure.py (pre-commit hook + CI).
+// Only the house blank-line rules are on; every other rule is off ("default": false).
+// Pinned CLI version: see MDLINT in checks/markdown_structure.py.
+{
+  "config": {
+    "default": false,
+    // MD022: a heading needs a blank line above and below, so it renders as a heading
+    // and diffs stay clean.
+    "MD022": true,
+    // MD031: a fenced code block needs a blank line above and below.
+    "MD031": true,
+    // MD058: a table needs a blank line above and below, so a following paragraph is
+    // not absorbed as a table row.
+    "MD058": true
+  },
+  // Lint exactly the files we pass in, whether or not git ignores them.
+  "gitignore": false
+}
