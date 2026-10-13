@@ -170,6 +170,21 @@ def test_hook_lints_a_renamed_and_edited_file(tmp_path, monkeypatch):
     assert "MD022" in proc.stdout + proc.stderr
 
 
+@needs_node
+def test_hook_lints_every_staged_file_not_just_the_first(tmp_path, monkeypatch):
+    # Staged paths are listed sorted: the clean files come first, the bad one is LAST.
+    hook = _hook_repo(tmp_path, monkeypatch)
+    for name in ("a.md", "b.md"):
+        (tmp_path / name).write_text("# Heading\n\ntext\n", encoding="utf-8")
+    (tmp_path / "z.md").write_text("intro\n# Heading\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "a.md", "b.md", "z.md")
+    proc = _run_hook(hook, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0
+    assert "z.md" in out and "MD022" in out
+    assert "a.md:" not in out and "b.md:" not in out
+
+
 def test_hook_fails_closed_without_npx(tmp_path, monkeypatch):
     hook = _hook_repo(tmp_path, monkeypatch)
     (tmp_path / "ok.md").write_text("# Heading\n\ntext\n", encoding="utf-8")
