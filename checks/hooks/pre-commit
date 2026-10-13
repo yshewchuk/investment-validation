@@ -38,9 +38,14 @@ python3 "$ROOT/checks/rearchitecture_phase1_lint.py" --quiet
 #    refactor needed first). See checks/architecture_doc_budgets.py.
 python3 "$ROOT/checks/architecture_doc_budgets.py" --quiet
 
-# 7. Markdown structure (markdownlint-cli2: blank lines around headings, tables and
-#    fences), staged blobs, only on lines this commit adds or changes. Fails closed
-#    if node/npx is missing.
-python3 "$ROOT/checks/markdown_structure.py" --quiet
+# 7. Markdown lint: markdownlint-cli2 (pinned; rules in .markdownlint-cli2.jsonc) on
+#    the staged .md files, reading their working-tree copies. CI is the authority.
+#    Fails closed when npx is missing.
+command -v npx >/dev/null 2>&1 || {
+    echo "pre-commit: npx not found; install Node.js (e.g. apt install nodejs npm) to lint Markdown" >&2
+    exit 1
+}
+git -C "$ROOT" diff --cached --name-only -z --diff-filter=ACMR -- '*.md' |
+    (cd "$ROOT" && xargs -0 -r npx --yes markdownlint-cli2@0.18.1)
 
-echo "pre-commit: hygiene, layers, budgets, READMEs, v2 lint, doc budgets and markdown structure all green"
+echo "pre-commit: hygiene, layers, budgets, READMEs, v2 lint, doc budgets and markdown lint all green"

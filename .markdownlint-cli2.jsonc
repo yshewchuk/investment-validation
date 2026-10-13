@@ -1,6 +1,7 @@
-// markdownlint-cli2 config for checks/markdown_structure.py (pre-commit hook + CI).
+// markdownlint-cli2 config, used by the pre-commit hook (checks/hooks/pre-commit) and the
+// Tests workflow ("Lint Markdown" step).
 // Only the house blank-line rules are on; every other rule is off ("default": false).
-// Pinned CLI version: see MDLINT in checks/markdown_structure.py.
+// Pinned CLI version 0.18.1: the hook's npx call and the workflow action (v20) must match.
 {
   "config": {
     "default": false,

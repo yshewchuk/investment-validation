@@ -31,17 +31,8 @@ decreases, and a root-level test cannot be modified in place (move it first).
 `phase1_suite()` in `v2_coverage_ratchet.py` resolves baseline tests where they
 now live and raises `FileNotFoundError` if one is missing.
 
-`markdown_structure.py` is a thin wrapper over the pinned `markdownlint-cli2`
-(`MDLINT`, run as `npx --yes`), configured by `.markdownlint-cli2.jsonc` at the
-repo root: only MD022 (headings), MD031 (fences) and MD058 (tables), each a
-blank-line rule. Inputs: default mode reads staged blobs; `--base-ref REF`
-reads `HEAD` content for `REF...HEAD` (run in CI by the Tests workflow);
-`--all` lints every tracked `.md` in full. The blobs are written to a temp
-directory and linted there, so the worktree is never read. Output: one
-`path:line: MDnnn message` row per violation on a line the change added or
-modified (`git diff -U0` hunks), so existing debt never blocks. Unclosed fences
-are not covered, since no markdownlint rule detects them. The pre-commit hook
-runs the default mode.
+Markdown is linted by `markdownlint-cli2` (rules in `.markdownlint-cli2.jsonc`),
+run by the pre-commit hook on staged `.md` files and by the Tests workflow on all `.md`.
 
 The Phase 1 check binds the active test inventory to source and test
 contents. It reports suite-version, inventory, or source drift when the
@@ -87,9 +78,7 @@ check defines missing-input and failure outcomes:
 | `repo_hygiene.py` scan | Clean: exit 0; violations: exit 1 |
 | Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
 | Worktree hygiene read failure | Default returns empty bytes; `strict=True` raises `OSError`; missing non-symlink paths return empty bytes in either mode |
-| `markdown_structure.py` finds a violation on a changed line | Prints `path:line: MDnnn message`; exit 1 |
-| `markdown_structure.py` git or file read fails, a file is not UTF-8, or `--base-ref` is empty | Message on stderr; exit 2; never read as clean, never staged mode |
-| `markdown_structure.py` finds no `npx`, or the linter crashes, times out (300 s) or fails without findings | One-line message (install Node.js hint) on stderr; exit 2; fails closed, never passes |
+| The pre-commit hook finds no `npx` | One-line install hint on stderr; commit blocked (fails closed) |
 | Cache | No shared cache contract; reuse is check-specific |
 | Retry | No automatic package retry; check-specific if any |
 | Transaction | No package-wide transaction contract |
