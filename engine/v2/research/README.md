@@ -164,6 +164,8 @@ the pure magnitude window and metadata-only planner to bind research registratio
 `experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`.
 `experiments/magnitude_report.py` consumes that preflight, `load_magnitude_targets`
 and `qualify_magnitude_training_targets` for the admitted mean baseline.
+`experiments/magnitude_history_store.py` consumes `build_context`, `materialize`
+and `read_stored` from `magnitude_history_store` for explicit stored-feature build/read.
 
 <!-- consumers: none -->
 

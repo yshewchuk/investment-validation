@@ -980,6 +980,8 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_native_strategy_registry.py",
+    "tests/v2/ops/test_native_score_batch_driver_alias.py",
     "tests/v2/ops/test_native_gate_worker.py",
     "tests/v2/ops/test_planned_price_refresh.py",
     "tests/v2/ops/test_planned_price_recovery.py",

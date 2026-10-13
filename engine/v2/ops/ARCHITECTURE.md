@@ -1221,11 +1221,11 @@ Per row (collected as a refusal, never sinks the batch):
 | `MISSING_STAGED_INPUT` | the staged `calendar_row` has no non-empty string `event_id` |
 | `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its `event_date`, `expiry`, or non-null `entry_date` does not parse |
 | `CALENDAR_ROW_KEY_MISMATCH` | the staged row's ticker/event_date disagrees with the row's own key |
-| `UNSUPPORTED_STRATEGY` | the row's strategy is outside this assembler's supported set |
-| `RELEASE_MISSING_ROLE` | no `driver:{strategy}` identity and no `_DRIVER_ROLE_ALIAS` identity (below), or no gate identity, for the strategy |
+| `UNSUPPORTED_STRATEGY` | the row's strategy has no `_STRATEGY_REGISTRY` entry; no bundle is built |
+| `RELEASE_MISSING_ROLE` | neither the registered driver role nor its optional alias resolves, or the registered gate role is absent |
 | `RELEASE_MISSING_FEATURE_ORDER` | `feature_names` is empty and the driver or gate identity has an empty `feature_order` |
 | `AMBIGUOUS_DECISION_CLOCK` | the resolved driver/gate identities disagree on decision clock |
-| `GATE_POLICY_NOT_STAGED` | the selected policy has no threshold for the row's strategy: a non-empty supplied policy is used as is (the release is not consulted); otherwise the release's gate `threshold` members, which may omit it |
+| `GATE_POLICY_NOT_STAGED` | the selected policy lacks the registered `gate_policy_key`: a non-empty supplied policy is used as is (the release is not consulted); otherwise the release's gate `threshold` members, which may omit it |
 | `POST_AS_OF_ROW` | the row's panel anchor is dated after `as_of` |
 | re-wrapped | any other source-bundle refusal, or an input-assembly `ValueError` |
 
@@ -1235,7 +1235,7 @@ never staged keys, values or messages (`refusals.json` is published). The releas
 every row. Assembly is a pure function of its inputs (no clock, no RNG) —
 a newly promoted release genuinely changing the output is by design.
 
-**Driver alias (TEMPORARY).** No real release carries `driver:STR-THRU` (the inventory emits `size`, not `driver`). `_DRIVER_ROLE_ALIAS` (one constant, strategy -> identity key; `STR-THRU` -> `size:*`, legacy `PAYOFF_DRIVER`) is consulted only when the exact `driver:{strategy}` identity is absent; a present exact binding always wins. When the alias is used the bundle's `model_identity` is keyed by the alias key (`size:*`), so the record shows it. Removal: a release carrying the dedicated binding (inventory change); `test_dedicated_driver_binding_wins_over_alias` fails if one is ignored.
+**Strategy registry / driver aliases.** `_STRATEGY_REGISTRY` is an immutable internal mapping from row strategy to a frozen `_StrategySpec`: exact `driver_role`, optional `driver_role_alias`, `gate_role`, `gate_policy_key`, and explicit `bundle_strategy`. Only `STR-THRU` is registered; RUNUP, DYN-SV and the seven sized put structures remain refused. Registration configures the existing single-driver assembler, not a chooser or second-driver executor. A present exact driver always wins; otherwise STR-THRU uses `size:*` (the release inventory emits `size`, not `driver`). The bundle records the actual resolved driver key and registered gate key; policy and bundle strategy come from the same entry. Missing roles/policy retain the typed row refusals above; other rows continue. Lookup has no I/O, cache, retry, transaction or partial write, and the same inputs retain byte-identical STR-THRU outputs. The alias can be removed when releases carry the dedicated binding; `test_dedicated_driver_binding_wins_over_alias` protects its precedence.
 
 **Feature names.** At the assembly boundary a non-empty `feature_names` is used as given and any malformed shape (`0`, `False`, `{}`, `""`, non-str element) refuses `INVALID_FEATURE_NAMES`; only `None` or an empty list/tuple derive: per row, the sorted de-duplicated union of the driver and gate `feature_order`s, minus the stage-derived gate columns (`GATE_FORECAST_COLUMNS`, `GATE_ANALOG_COLUMNS`: projecting them would suppress native derivation). A pure function of the recorded identities, so it changes with the model's inputs; the leakage denylist still applies (`LEAKED_FEATURE_NAME`).
 
