@@ -162,6 +162,14 @@ def test_everything_else_is_neutral(make, reason):
     assert verdict["description"].startswith("gremlins: not a clean measured run")
 
 
+def test_only_the_last_module_with_a_null_exit_code_is_neutral():
+    summary = clean("a", "b", "c")
+    summary["modules"]["c"] = mod(run_exit_code=None)
+    verdict = ps.classify(summary, [], {"engine/v2/z.py"})
+    assert verdict["state"] == "neutral"
+    assert verdict["reasons"] == ["module c not clean"]
+
+
 def test_neutral_when_rows_or_changed_files_are_missing():
     verdict = ps.classify(clean("a"), None, {"engine/v2/z.py"})
     assert verdict["state"] == "neutral" and "rows" in verdict["reasons"][0]
