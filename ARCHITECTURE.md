@@ -275,14 +275,15 @@ evidence. See the models and data component contracts.
     JSON verdict on stdout, `::error::` (PR-owned) and `::warning::` (infra)
     annotations, and `state` (`success`|`failure`|`neutral`) and `description` (within the
     commit-status length limit, the infra count never cut) appended to `--github-output`, which
-    `report_status` posts as the `mutation/pr` commit status. `neutral` means no module
+    `report_status` posts as the `mutation/pr` commit status when it is `success` or
+    `failure`. `neutral` means no module
     was measured (every module infra, or the merged report unavailable) or the merge
     itself reported a tool error or an incomplete run (merge-level reasons such as a
     provenance mismatch are listed as `merge_issues` and warned), never `success`; a
     classified `success` never overrides a `report` job that did not succeed, and a
     `report` job that fails before classification is infra: `neutral`. Commit statuses
-    have no grey state, so the `report_neutral` job posts it as a `neutral` check run
-    instead, and no commit status is posted for it. `mutation/pr` is not a required check. The module set is the summary's
+    have no grey state, so a `neutral` verdict goes only to the `report_neutral` job's
+    `neutral` check run, and `report_status` posts no commit status for it. `mutation/pr` is not a required check. The module set is the summary's
     `expected_modules` and `modules` plus every module named in a result row.
     A module is `pr_owned` when a `survived` row sits on a line the PR added or
     changed (checked first, from the rows alone, so it wins over every infra
