@@ -300,14 +300,19 @@ def main(argv: list[str] | None = None) -> int:
     else:
         changed: dict[str, set[int]] = {}
         problems: list[str] = []
+        # Diff unavailable (not given, unreadable, empty text, or hunks without any file
+        # header) => neutral; a parsed diff with zero added lines is valid.
         try:
             if not args.diff_file:
                 raise OSError("no --diff-file given")
             diff_text = Path(args.diff_file).read_text()
-            if not diff_text.strip(): raise ValueError("PR diff is empty")
+            if not diff_text.strip():
+                raise ValueError("PR diff is empty")
+            lines = diff_text.splitlines()
+            if any(x.startswith("@@") for x in lines) and not any(
+                    x.startswith("+++ ") for x in lines):
+                raise ValueError("diff has hunks but no file header")
             changed = parse_changed_lines(diff_text)
-            if not changed and any(x.startswith("@@") for x in diff_text.splitlines()):
-                raise ValueError("diff has hunks but no recognizable file header")
         except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
             changed = {}
             problems.append("PR diff unavailable -- survivors not attributed; not a pass")

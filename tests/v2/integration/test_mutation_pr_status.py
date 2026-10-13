@@ -384,6 +384,56 @@ def test_missing_or_undecodable_results_file_warns_unreadable(tmp_path, capsys):
     assert "results.jsonl unreadable" in capsys.readouterr().out
 
 
+def test_deletion_only_diff_is_a_valid_diff(tmp_path):
+    DELETION_DIFF = """\
+diff --git a/engine/v2/gone.py b/engine/v2/gone.py
+deleted file mode 100644
+--- a/engine/v2/gone.py
++++ /dev/null
+@@ -1,3 +0,0 @@
+-a
+-b
+-c
+diff --git a/engine/v2/a.py b/engine/v2/a.py
+--- a/engine/v2/a.py
++++ b/engine/v2/a.py
+@@ -4,2 +3,0 @@
+-x
+-y
+"""
+    assert ps.parse_changed_lines(DELETION_DIFF) and not any(
+        ps.parse_changed_lines(DELETION_DIFF).values())
+
+    def run(name, m, rows=(), diff_text=DELETION_DIFF, diff=True):
+        root = tmp_path / name
+        root.mkdir()
+        d = root / "m"
+        d.mkdir()
+        (d / "summary.json").write_text(json.dumps(m))
+        (d / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        out = root / "out"
+        args = ["--merged-dir", str(d), "--github-output", str(out)]
+        if diff:
+            dfile = root / "pr.diff"
+            dfile.write_text(diff_text)
+            args += ["--diff-file", str(dfile)]
+        assert ps.main(args) == 0
+        return next(x.split("=", 1)[1] for x in out.read_text().splitlines()
+                    if x.startswith("state="))
+
+    # (a) clean measured run over a deletion-only diff: no changed line exists, success.
+    assert run("clean", merged(a=mod())) == "success"
+    # (b) a survivor row cannot sit on a changed line: still success.
+    assert run("survivor", merged(a=mod()), [row("a", "engine/v2/a.py", 4)]) == "success"
+    # (c) independent test failure, no baseline: failure.
+    assert run("failed", merged(a=mod(run_exit_code=1))) == "failure"
+    # (d) controls: hunks without any file header, a missing diff file and an empty diff
+    # file are all diff-unavailable => neutral.
+    assert run("hunks", merged(a=mod()), diff_text="@@ -1 +5 @@\n+x\n") == "neutral"
+    assert run("missing", merged(a=mod()), diff=False) == "neutral"
+    assert run("empty", merged(a=mod()), diff_text="") == "neutral"
+
+
 def test_list_valued_modules_in_summary_or_baseline_never_crash(tmp_path, capsys):
     d, diff = _write_report(tmp_path, {"modules": [], "expected_modules": ["a"]}, [])
     out = tmp_path / "gh_output"

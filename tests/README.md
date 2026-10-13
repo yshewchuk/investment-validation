@@ -409,7 +409,9 @@ failure that is still evidenced (a retained changed-line survivor, or an indepen
 failure) still wins as `failure`. The degraded inputs are: an unreadable merged summary or
 one that is not a mapping with a mapping `modules`, boolean `complete` and `tool_error`
 and a list `failure_reasons` (and a non-empty `modules` or `expected_modules`); a merge
-tool error or incomplete run; a missing, empty or unreadable PR diff; and unreadable or
+tool error or incomplete run; a missing, unreadable or empty-text PR diff, or one with hunks but no file header (a
+parsed diff with zero added lines, such as a deletion-only PR, is valid: no changed-line
+survivor is possible and the run is classified from its measured results); and unreadable or
 partly malformed result rows (a missing, null or unknown `status`, a non-positive or
 non-integer `line`, a non-string or empty `module` or `file`). Survivors that cannot be
 attributed are listed as `attribution_problems`, merge-level reasons as `merge_issues`. A
