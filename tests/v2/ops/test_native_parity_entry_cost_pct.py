@@ -10,10 +10,12 @@ from engine.v2.ops.native_parity_report import (
 from engine.v2.parity.tolerance import SCORE_RECORD_V1
 
 
-def test_legacy_row_derives_entry_cost_pct():
-    # spot is not 100, so an un-normalised cost (3.0) or cost*100 (300.0) fails.
-    row = {"entry_cost": 3.0, "spot": 250.0}
-    assert _dimension_view(row, "financial_diagnostics")["entry_cost_pct"] == pytest.approx(1.2)
+@pytest.mark.parametrize(("cost", "spot", "pct"), [
+    (3.0, 250.0, 1.2), (5.0, 80.0, 6.25), (-2.0, 40.0, -5.0)])
+def test_legacy_row_derives_entry_cost_pct(cost, spot, pct):
+    # Different spots and results: a constant, un-normalised or cost*100 value fails.
+    row = {"entry_cost": cost, "spot": spot}
+    assert _dimension_view(row, "financial_diagnostics")["entry_cost_pct"] == pytest.approx(pct)
 
 
 def test_row_carrying_entry_cost_pct_keeps_its_value():
@@ -58,12 +60,20 @@ def _entry_cost_pct_findings(legacy_row, native_row):
     return [m for m in mismatches if "entry_cost_pct" in m["finding_fields"]]
 
 
-def test_row_mismatches_agree_on_normalised_entry_cost_pct_end_to_end():
-    legacy_row = {"entry_cost": 3.0, "spot": 250.0}
-    assert not _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": 1.2})
+_CASES = [(3.0, 250.0, 1.2), (5.0, 80.0, 6.25)]
 
 
-def test_row_mismatches_flag_an_unnormalised_native_entry_cost_pct():
-    legacy_row = {"entry_cost": 3.0, "spot": 250.0}
-    assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": 3.0})
-    assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": 300.0})
+@pytest.mark.parametrize(("cost", "spot", "pct"), _CASES)
+def test_row_mismatches_agree_on_normalised_entry_cost_pct_end_to_end(cost, spot, pct):
+    legacy_row = {"entry_cost": cost, "spot": spot}
+    assert not _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": pct})
+
+
+@pytest.mark.parametrize(("cost", "spot", "pct"), _CASES)
+def test_row_mismatches_flag_a_wrong_native_entry_cost_pct(cost, spot, pct):
+    legacy_row = {"entry_cost": cost, "spot": spot}
+    assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": cost})
+    assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": pct * 100})
+    # The OTHER case's value: a constant-output implementation fails one of the two cases.
+    other = next(p for _, _, p in _CASES if p != pct)
+    assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": other})

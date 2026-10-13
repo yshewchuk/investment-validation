@@ -66,7 +66,12 @@ def test_query_base_buckets_and_ratio():
     [
         (1, "1-3"),
         (3, "1-3"),
+        (0, None),
+        (2, "1-3"),
         (4, "4-10"),
+        (10, "4-10"),
+        (11, "11-25"),
+        (25, "11-25"),
         (26, "26-45"),
         (45, "26-45"),
         (46, None),
@@ -145,6 +150,11 @@ def test_complete_query_keeps_existing_and_passes_non_mapping():
                                  {"dte_entry": 30, "spot": 100.0, "strike": 100.0})
     assert kept["dte_band"] == "1-3"
     assert kept["moneyness_band"] == "ATM"
+    kept = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None,
+                                  "moneyness_band": "ATM"},
+                                 {"dte_entry": 30, "spot": 100.0, "strike": 120.0})
+    assert kept["moneyness_band"] == "ATM"
+    assert kept["dte_band"] == "26-45"
     assert complete_analog_query(None, {}) is None
 
 
@@ -190,14 +200,30 @@ def test_declarations_pick_matching_pool():
                                panel_row, "snap-1", "req-key") == {}
 
 
+def test_declarations_use_the_given_alpha():
+    panel_row = {"mcap_log": math.log(5e9)}
+    half = _FakeArtifact(key=board_analog_pool_key("STR-THRU", 0.5, "2026-01-09"),
+                         content_hash="sha256:half")
+    quarter = _FakeArtifact(key=board_analog_pool_key("STR-THRU", 0.25, "2026-01-09"),
+                            content_hash="sha256:quarter")
+    picked = analog_declarations([half, quarter], "STR-THRU", 0.25, "2026-01-09",
+                                 panel_row, "snap-1", "req-key")
+    assert picked["analog_artifact"] is quarter
+    assert picked["analog_artifact_recipe"]["content_hash"] == "sha256:quarter"
+    assert analog_declarations([half], "STR-THRU", 0.25, "2026-01-09",
+                               panel_row, "snap-1", "req-key") == {}
+
+
 def _pool_rows():
-    # 35 rows in the "4-10" dte band and 25 in "26-45", all other bands equal:
-    # only the dte band tells the two groups apart (min_analogs is 30).
-    return [
-        (f"r{i:03d}", "2025-01-01", "2025-02-01", "1-10B",
-         "4-10" if i < 35 else "26-45", "ATM", "mid", 0.01 * (i % 7 - 3))
-        for i in range(60)
-    ]
+    # A: dte "4-10" + ATM (40 rows); B: "4-10" + ">5%" (35); C: "26-45" + ATM (31).
+    groups = [("4-10", "ATM", 40), ("4-10", ">5%", 35), ("26-45", "ATM", 31)]
+    rows = []
+    for dte, moneyness, count in groups:
+        for _ in range(count):
+            i = len(rows)
+            rows.append((f"r{i:03d}", "2025-01-01", "2025-02-01", "1-10B", dte,
+                         moneyness, "mid", 0.01 * (i % 7 - 3)))
+    return rows
 
 
 def _pool_block():
@@ -223,21 +249,21 @@ def _n_analogs(values):
     return output
 
 
-def test_real_frozen_path_end_to_end():
-    # dte 5 completes to "4-10" and strike 101 to "ATM": exactly the 35 rows.
-    output = _n_analogs({"fill": 0.5, "spot": 100.0, "strike": 101.0, "dte_entry": 5})
-    assert output["n_analogs"] == 35
+@pytest.mark.parametrize(("dte", "strike", "n"), [
+    (5, 101.0, 40),     # "4-10" + ATM
+    (5, 110.0, 35),     # "4-10" + ">5%"; forcing moneyness to None would give 75
+    (30, 101.0, 31),    # "26-45" + ATM; forcing dte to None would give 71
+    (30, 110.0, 31),    # nothing matches both: moneyness widens away first
+    (None, 101.0, 71),  # no dte: ATM rows of both dte bands
+    (5, None, 75),      # no strike: every "4-10" row
+    (None, None, 106),  # neither: the whole pool
+])
+def test_real_frozen_path_end_to_end(dte, strike, n):
+    values = {"fill": 0.5, "spot": 100.0}
+    if dte is not None:
+        values["dte_entry"] = dte
+    if strike is not None:
+        values["strike"] = strike
+    output = _n_analogs(values)
+    assert output["n_analogs"] == n
     assert output["ci_low"] is not None and output["ci_low"] <= output["ci_high"]
-
-    # dte 30 completes to "26-45": 25 rows < min_analogs, so the matcher widens
-    # (moneyness, then dte) and the answer holds the whole pool.
-    output = _n_analogs({"fill": 0.5, "spot": 100.0, "strike": 101.0, "dte_entry": 30})
-    assert output["n_analogs"] == 60
-
-    # An unavailable dte/moneyness input drops that dimension, not the row.
-    output = _n_analogs({"fill": 0.5, "spot": 100.0})
-    assert output["n_analogs"] == 60
-
-    # ">5%" moneyness matches no frozen row; the matcher widens it away.
-    output = _n_analogs({"fill": 0.5, "spot": 100.0, "strike": 110.0, "dte_entry": 5})
-    assert output["n_analogs"] == 35
