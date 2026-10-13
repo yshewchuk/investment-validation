@@ -253,11 +253,11 @@ def test_neither_binding_refuses_release_missing_role(tmp_path):
 
 
 def test_alias_is_data_driven(tmp_path, monkeypatch):
-    """The alias is one data table, not a per-strategy code path: emptying
-    it must make even a ``size:*``-backed release refuse, exactly as if no
-    alias existed."""
+    """The registry owns aliases: clearing one makes a size-backed row refuse."""
     binding = _stage(tmp_path, [SIZE, GATE])
-    monkeypatch.setattr(native_score_batch, "_DRIVER_ROLE_ALIAS", {})
+    spec = native_score_batch._STRATEGY_REGISTRY["STR-THRU"]
+    monkeypatch.setattr(native_score_batch, "_STRATEGY_REGISTRY", {
+        "STR-THRU": dataclasses.replace(spec, driver_role_alias=None)})
     assembled, refusals = _assemble(binding, [_event_inputs()])
     assert assembled == {}
     assert len(refusals) == 1

@@ -92,6 +92,11 @@ process. `Service._reconcile_native_score_batch_shadow` only submits producer
 parameters for an eligible pinned-snapshot identity. See the component
 architecture contract.
 
+The internal `native_score_batch._STRATEGY_REGISTRY` declares each admitted
+row's driver/alias, gate, policy key and source-bundle strategy. Only STR-THRU
+is registered; it is a single-driver assembly seam, with no runtime
+registration API or chooser execution contract.
+
 `carried_set.CarriedTickerExclusion`, `carried_set.CarriedSetResolution`,
 `carried_set.resolve_carried_set`, and
 `carried_set.build_uncarried_exclusions` expose slice-1 carried-set evidence.
