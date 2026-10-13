@@ -37,7 +37,7 @@ from engine.v2.scoring.nightly_source_bundle import (
     assemble_nightly_source_bundle,
     validated_as_of,
 )
-from engine.v2.scoring.release_bindings import ScoringReleaseBinding
+from engine.v2.scoring.release_bindings import ModelIdentity, ScoringReleaseBinding
 from engine.v2.scoring.source_inputs import (
     AnswerFieldsInSource,
     SourceBundle,
@@ -58,21 +58,50 @@ _SHADOW_FILL_ALPHA = 0.5  # engine.fills.MID.alpha; do not import engine.fills
                           # legacy-derived fact.
 
 @dataclass(frozen=True, slots=True)
-class _StrategySpec:
-    """Release and bundle keys for the existing single-driver assembly path."""
+class _DriverSpec:
+    """One forecast output and its exact release role, then optional alias."""
 
-    driver_role: str
-    driver_role_alias: str | None
+    output: str
+    role: str
+    alias: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _StrategySpec:
+    """Ordered drivers and release/bundle keys; registration alone admits rows."""
+
+    drivers: tuple[_DriverSpec, ...]
     gate_role: str
     gate_policy_key: str
     bundle_strategy: str
+    driver_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.drivers, tuple) or not self.drivers
+                or any(not isinstance(driver, _DriverSpec) for driver in self.drivers)):
+            raise ValueError("strategy drivers must be a nonempty tuple of driver specs")
+        if len({driver.output for driver in self.drivers}) != len(self.drivers):
+            raise ValueError("strategy driver outputs must be unique")
 
 
-# Code-owned admission, not a runtime registration API. Adding an entry does
-# not supply second-driver inputs or implement a chooser/meta-strategy.
+@dataclass(frozen=True, slots=True)
+class _ResolvedDriver:
+    output: str
+    identity_key: str
+    identity: ModelIdentity
+
+
+# Concrete declarations, deliberately NOT admitted until residual/surface wiring.
+_RUNUP_SPEC = _StrategySpec(
+    drivers=(_DriverSpec("driver_prediction", "driver:STR-RUNUP", "implied_t1:*"),
+             _DriverSpec("runup_move_prediction", "runup_move:*")),
+    gate_role="gate:STR-RUNUP", gate_policy_key="STR-RUNUP",
+    bundle_strategy="STR-RUNUP", driver_name="im_t1")
+
+# Code-owned admission, not a runtime registration API or chooser contract.
 _STRATEGY_REGISTRY: Mapping[str, _StrategySpec] = MappingProxyType({
     "STR-THRU": _StrategySpec(
-        driver_role="driver:STR-THRU", driver_role_alias="size:*",
+        drivers=(_DriverSpec("driver_prediction", "driver:STR-THRU", "size:*"),),
         gate_role="gate:STR-THRU", gate_policy_key="STR-THRU",
         bundle_strategy="STR-THRU"),
 })
@@ -130,34 +159,37 @@ def _iso(value: Any) -> str | None:
 
 
 def _matched_decision_clock(
-    model_identity: Mapping[str, Any],
+    model_identity: Mapping[str, ModelIdentity],
     spec: _StrategySpec,
-) -> tuple[str | None, str | None, tuple[str, Any, Any] | None]:
-    """The one decision clock this assembler assumes per strategy, or a refusal.
+) -> tuple[str | None, str | None, tuple[tuple[_ResolvedDriver, ...], ModelIdentity] | None]:
+    """Resolve every declared driver and gate, then require one decision clock.
 
-    Returns a tagged 3-tuple: ``(code, detail, None)`` on failure (missing
-    ``driver``/``gate`` role, or the two roles disagreeing on
-    ``decision_clock_id``), ``(None, None, (driver_key, driver_identity,
-    gate_identity))`` on success. ``driver_key`` is the release identity key
-    the driver came from: the registered exact role, or -- only when that
-    binding is absent -- its optional alias. The caller scopes refusals to
-    the row; registry keys, never invented identities, are recorded.
+    Returns ``(code, detail, None)`` for the first missing role (drivers in
+    declaration order, then gate) or clock mismatch; otherwise returns
+    ``(None, None, (drivers, gate_identity))``. Each exact role wins over its
+    optional alias. Actual identity keys and every forecast output survive;
+    missing roles or conflicting clocks never produce a partial declaration.
+    The caller attaches the row key to each refusal.
     """
-    driver_key = spec.driver_role
-    driver_identity = model_identity.get(driver_key)
-    if driver_identity is None and spec.driver_role_alias is not None:
-        driver_key = spec.driver_role_alias
-        driver_identity = model_identity.get(driver_key)
+    drivers = []
+    for declaration in spec.drivers:
+        identity_key = declaration.role
+        identity = model_identity.get(identity_key)
+        if identity is None and declaration.alias is not None:
+            identity_key = declaration.alias
+            identity = model_identity.get(identity_key)
+        if identity is None:
+            return ("RELEASE_MISSING_ROLE", declaration.role, None)
+        drivers.append(_ResolvedDriver(declaration.output, identity_key, identity))
     gate_identity = model_identity.get(spec.gate_role)
-    if driver_identity is None:
-        return ("RELEASE_MISSING_ROLE", spec.driver_role, None)
     if gate_identity is None:
         return ("RELEASE_MISSING_ROLE", spec.gate_role, None)
-    if driver_identity.decision_clock_id != gate_identity.decision_clock_id:
-        return ("AMBIGUOUS_DECISION_CLOCK",
-                f"{spec.driver_role}={driver_identity.decision_clock_id!r} "
-                f"{spec.gate_role}={gate_identity.decision_clock_id!r}", None)
-    return (None, None, (driver_key, driver_identity, gate_identity))
+    for declaration, driver in zip(spec.drivers, drivers, strict=True):
+        if driver.identity.decision_clock_id != gate_identity.decision_clock_id:
+            return ("AMBIGUOUS_DECISION_CLOCK",
+                    f"{declaration.role}={driver.identity.decision_clock_id!r} "
+                    f"{spec.gate_role}={gate_identity.decision_clock_id!r}", None)
+    return (None, None, (tuple(drivers), gate_identity))
 
 
 def _feature_names_or_refusal(
@@ -359,9 +391,8 @@ def _bundle_or_refusal(
     event: NightlyEventInputs,
     *,
     spec: _StrategySpec,
-    driver_identity: Any,
-    driver_key: str,
-    gate_identity: Any,
+    drivers: tuple[_ResolvedDriver, ...],
+    gate_identity: ModelIdentity,
     gate_policy: Mapping[str, Mapping[str, Any]],
     as_of: Any,
     feature_names: Sequence[str],
@@ -385,11 +416,13 @@ def _bundle_or_refusal(
             tier4_row=event.tier4_row, quote_rows=event.quote_rows,
             quote_status=event.quote_status, feature_names=feature_names,
             quote_max_age_sessions=event.quote_max_age_sessions,
-            driver_name=driver_name,
-            model_identity={driver_key: to_document(driver_identity),
+            driver_name=spec.driver_name if spec.driver_name is not None else driver_name,
+            model_identity={**{driver.identity_key: to_document(driver.identity)
+                               for driver in drivers},
                             spec.gate_role: to_document(gate_identity)},
-            model_artifact_refs={"driver_prediction": driver_identity.artifact_hash},
-            forecast_recipes={"driver_prediction": {"binding_id": driver_identity.binding_id}},
+            model_artifact_refs={driver.output: driver.identity.artifact_hash for driver in drivers},
+            forecast_recipes={driver.output: {"binding_id": driver.identity.binding_id}
+                              for driver in drivers},
             gate_recipe={**gate_policy[spec.gate_policy_key],
                          "binding_id": gate_identity.binding_id},
         )
@@ -435,17 +468,17 @@ def _assemble_one_event(
     code, detail, pair = _matched_decision_clock(binding.model_identity, spec)
     if code is not None:
         return NativeScoreBatchRowRefusal(key, code, detail)
-    driver_key, driver_identity, gate_identity = pair
+    drivers, gate_identity = pair
+    driver_identity = drivers[0].identity
     if spec.gate_policy_key not in gate_policy:
         return NativeScoreBatchRowRefusal(
             key, "GATE_POLICY_NOT_STAGED", f"no gate policy staged for {strategy!r}")
     feature_names, problem = _feature_names_or_refusal(
-        feature_names, driver_identity, gate_identity)
+        feature_names, *(driver.identity for driver in drivers), gate_identity)
     if problem is not None:
         return NativeScoreBatchRowRefusal(key, *problem)
     bundle = _bundle_or_refusal(
-        key, event, spec=spec, driver_key=driver_key,
-        driver_identity=driver_identity, gate_identity=gate_identity,
+        key, event, spec=spec, drivers=drivers, gate_identity=gate_identity,
         gate_policy=gate_policy, as_of=as_of,
         feature_names=feature_names, driver_name=driver_name)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
@@ -474,7 +507,7 @@ def _assemble_one_event(
         requested_decision_at=_iso(as_of) or "", snapshot_id=str(snapshot_id),
         mode="shadow", fill_model={"alpha": _SHADOW_FILL_ALPHA},
         model_artifact_refs=tuple(dict.fromkeys(
-            (driver_identity.artifact_hash, gate_identity.artifact_hash))),
+            (*[driver.identity.artifact_hash for driver in drivers], gate_identity.artifact_hash))),
     )
     return (request, native_inputs)
 
@@ -554,7 +587,7 @@ def assemble_score_batch_inputs(
     per-row gap is a collected :class:`NativeScoreBatchRowRefusal` instead, so
     one bad row never sinks the batch: ``UNSUPPORTED_STRATEGY`` (not
     registered), ``RELEASE_MISSING_ROLE``/``AMBIGUOUS_DECISION_CLOCK`` (the
-    release's driver/gate identities for the strategy),
+    release's declared driver/gate identities for the strategy),
     ``RELEASE_MISSING_FEATURE_ORDER`` (empty ``feature_names`` and an
     identity without ``feature_order``), ``GATE_POLICY_NOT_
     STAGED`` (no caller-supplied threshold for the strategy -- gate thresholds

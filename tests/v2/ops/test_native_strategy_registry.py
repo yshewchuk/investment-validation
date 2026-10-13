@@ -13,13 +13,13 @@ def test_registry_is_immutable_and_only_through_is_enabled():
     registry = batch._STRATEGY_REGISTRY
     assert tuple(registry) == ("STR-THRU",)
     assert registry["STR-THRU"] == batch._StrategySpec(
-        driver_role="driver:STR-THRU", driver_role_alias="size:*",
+        drivers=(batch._DriverSpec("driver_prediction", "driver:STR-THRU", "size:*"),),
         gate_role="gate:STR-THRU", gate_policy_key="STR-THRU",
         bundle_strategy="STR-THRU")
     with pytest.raises(TypeError):
         registry["STR-RUNUP"] = registry["STR-THRU"]
     with pytest.raises(FrozenInstanceError):
-        registry["STR-THRU"].driver_role_alias = "implied_t1:*"
+        registry["STR-THRU"].drivers[0].alias = "implied_t1:*"
 
 
 def test_unregistered_rows_are_all_retained_as_refusals(tmp_path):
@@ -46,7 +46,7 @@ def test_admission_comes_from_registry_not_a_second_allowlist(tmp_path, monkeypa
 def test_registered_exact_driver_key_is_used(tmp_path, monkeypatch):
     binding = _stage(tmp_path, [DRIVER, SIZE, GATE])
     spec = replace(batch._STRATEGY_REGISTRY["STR-THRU"],
-                   driver_role="size:*", driver_role_alias=None)
+                   drivers=(batch._DriverSpec("driver_prediction", "size:*"),))
     monkeypatch.setattr(batch, "_STRATEGY_REGISTRY", {"STR-THRU": spec})
     event = _event_inputs()
     assembled, refusals = _assemble(binding, [event])
@@ -102,9 +102,9 @@ def test_registered_keys_reach_real_bundle_and_preserve_downstream_refusal(
 
 
 @pytest.mark.parametrize("field,value,roles,policy,code,detail", [
-    ("driver_role", "driver:missing", [GATE], {"STR-THRU": {}},
+    ("role", "driver:missing", [GATE], {"STR-THRU": {}},
      "RELEASE_MISSING_ROLE", "driver:missing"),
-    ("driver_role_alias", "size:missing", [SIZE, GATE], {"STR-THRU": {}},
+    ("alias", "size:missing", [SIZE, GATE], {"STR-THRU": {}},
      "RELEASE_MISSING_ROLE", "driver:STR-THRU"),
     ("gate_role", "gate:missing", [DRIVER, GATE], {"STR-THRU": {}},
      "RELEASE_MISSING_ROLE", "gate:missing"),
@@ -114,7 +114,9 @@ def test_registered_keys_reach_real_bundle_and_preserve_downstream_refusal(
 def test_missing_registered_dependency_refuses_without_bundle(
         tmp_path, monkeypatch, field, value, roles, policy, code, detail):
     binding = _stage(tmp_path, roles)
-    spec = replace(batch._STRATEGY_REGISTRY["STR-THRU"], **{field: value})
+    spec = batch._STRATEGY_REGISTRY["STR-THRU"]
+    spec = (replace(spec, drivers=(replace(spec.drivers[0], **{field: value}),))
+            if field in {"role", "alias"} else replace(spec, **{field: value}))
     monkeypatch.setattr(batch, "_STRATEGY_REGISTRY", {"STR-THRU": spec})
 
     def never_build(**kwargs):

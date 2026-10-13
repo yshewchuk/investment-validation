@@ -257,7 +257,8 @@ def test_alias_is_data_driven(tmp_path, monkeypatch):
     binding = _stage(tmp_path, [SIZE, GATE])
     spec = native_score_batch._STRATEGY_REGISTRY["STR-THRU"]
     monkeypatch.setattr(native_score_batch, "_STRATEGY_REGISTRY", {
-        "STR-THRU": dataclasses.replace(spec, driver_role_alias=None)})
+        "STR-THRU": dataclasses.replace(
+            spec, drivers=(dataclasses.replace(spec.drivers[0], alias=None),))})
     assembled, refusals = _assemble(binding, [_event_inputs()])
     assert assembled == {}
     assert len(refusals) == 1
