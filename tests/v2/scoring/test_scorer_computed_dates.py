@@ -786,6 +786,21 @@ def test_legs_priced_from_different_dates_use_the_first_legs_date(
     assert values["dte_entry"] == expected
 
 
+@pytest.mark.parametrize("observed_date", [
+    "junk", "2026-02-30", "2026-10-09T15:00:00", "", 20261009,
+])
+def test_junk_observed_date_leaves_the_leg_undated_and_falls_back(observed_date):
+    # A junk observed_date must not parse into the leg's quote_date, so the
+    # priced leg stays undated and dte_entry falls back to the context
+    # quote_date 2026-10-08 (expiry 2026-11-20 minus it is 43).
+    values = assemble_native_values(
+        _inputs(quotes=_dated_quotes(observed_date, observed_date)))
+    assert values["legs"][0].get("quote_date") is None
+    assert values["dte_entry"] == 43
+    assert not any(str(flag).startswith("INVALID_QUOTE")
+                   for flag in values["flags"])
+
+
 _CONTRACT = ("C", 100.0, "2026-11-20")
 
 

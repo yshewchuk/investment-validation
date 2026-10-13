@@ -1,6 +1,7 @@
 """Native deterministic structure generation and quote pricing."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from math import isfinite
@@ -58,7 +59,7 @@ class PricedLeg:
     ask: float
     fill: float
     cash_flow: float
-    quote_date: str | None = None
+    quote_date: str | None = None  # ISO date of the quote row that priced the leg, None when the quote has none or it is not an exact ISO date
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,18 @@ class Pricing:
     entry_cost: float
     legs: tuple[PricedLeg, ...]
     refusal: str | None = None
+
+
+def _iso_date_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None:
+        return None
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
 
 
 def _finite_float(value: Any, name: str) -> float:
@@ -721,10 +734,9 @@ def price(geometry: Geometry, quotes: Mapping[Any, Mapping[str, Any]],
             raise PricingRefusal(f"INVALID_QUOTE:{leg.name}")
         fill = ask - alpha * (ask - bid) if leg.side == "buy" else bid + alpha * (ask - bid)
         cash = (-1.0 if leg.side == "buy" else 1.0) * fill * leg.quantity
-        observed = quote.get("observed_date")
         priced.append(PricedLeg(leg.name, leg.right, leg.side, leg.quantity,
                                 leg.strike, leg.expiry, bid, ask, fill, cash,
-                                quote_date=observed if isinstance(observed, str) else None))
+                                quote_date=_iso_date_or_none(quote.get("observed_date"))))
     return Pricing(geometry.strategy, geometry.spot,
                    -sum(item.cash_flow for item in priced), tuple(priced))
 

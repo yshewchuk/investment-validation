@@ -39,8 +39,8 @@ Exported from `engine/v2/domain/generation/__init__.py`
   `detail`), `NativeLeg` (`name`, `right`, `side`, `quantity`, `strike`,
   `expiry`), `Pricing` (`strategy`, `spot`, `entry_cost`, `legs`, `refusal`),
   `PricedLeg` (`NativeLeg`'s fields plus `bid`, `ask`, `fill`, `cash_flow`,
-  `quote_date` — the optional ISO date of the quote row that priced the leg;
-  the first leg's date drives `dte_entry`).
+  `quote_date` — the exact ISO date (YYYY-MM-DD) of the quote row that priced
+  the leg; None otherwise. The first leg's date drives `dte_entry`).
 - Exceptions: `GeometryRefusal` (raised by `generate`,
   `has_resolvable_expiry` helpers, and `resolve_expiry`; carries the refusal
   code as both its message and `.code`, plus an optional `.detail`) and
@@ -73,9 +73,10 @@ computed by this package:
   value is the fallback); and every put-ladder strategy.
 - `quotes` — a mapping keyed by `(right, strike, expiry)` (or an equivalent
   `"right:strike:expiry"` string), each value `{"bid", "ask"}` plus an optional
-  `observed_date` (ISO string; `price` copies it to `PricedLeg.quote_date`, and
-  the first leg's drives `dte_entry`; any other value is ignored). The contract
-  domain native selects from whenever `strike`/`expiry` is missing.
+  `observed_date` (exact ISO string; `price` copies it to
+  `PricedLeg.quote_date`, the first leg's drives `dte_entry`; anything else is
+  ignored). The contract domain native selects from whenever `strike`/`expiry`
+  is missing.
 - `event_date`, `session` — the print date/session, read by the
   `first_post_event` expiry rule (STR-THRU and every put-ladder strategy).
 - `entry_date`, `quote_date` — both raw facts, not calculated answers (see
