@@ -302,16 +302,50 @@ def test_mismatch_table_shows_only_differing_fields(browser, server):
         expect(page.get_by_test_id("parity-mismatch-row")).to_have_count(2)
         aapl = page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")
         expect(aapl).to_contain_text("gate_score")
+        expect(aapl.locator("td").nth(1)).to_have_text("verdicts")
         expect(aapl.get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
         expect(aapl.get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
         msft = page.get_by_test_id("parity-mismatch-row").filter(has_text="MSFT|2026-09-18|STR-THRU")
         expect(msft).to_contain_text("model_vs_market")
+        expect(msft.locator("td").nth(1)).to_have_text("financial_diagnostics")
         expect(msft.get_by_test_id("parity-mismatch-legacy")).to_have_text("-0.015")
         expect(msft.get_by_test_id("parity-mismatch-native")).to_have_text("0.02")
         page_text = page.get_by_test_id("parity-mismatch-table").inner_text()
         assert "gate_threshold" not in page_text
         assert "entry_cost_pct" not in page_text
         expect(page.get_by_test_id("parity-mismatch-next")).to_be_disabled()
+    finally:
+        context.close()
+
+def test_mismatch_item_with_multiple_differing_fields_and_value_kinds(browser, server):
+    page_body = {"status": "available", "as_of": None, "generated_at": None, "tolerance_policy_id": None,
+        "items": [{"row_key": "KO|2026-09-10|STR-THRU", "dimension": "verdicts", "fields": {
+            "gate_pass": {"status": "differ", "legacy": True, "native": False},
+            "reason": {"status": "differ", "legacy": "ok", "native": "withheld"},
+            "gate_score": {"status": "differ", "legacy": None, "native": 0.5},
+            "gate_threshold": {"status": "differ", "native": 0.7},
+            "n_analogs": {"status": "agree"}}}],
+        "next_cursor": None}
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, page_body))
+    try:
+        page.goto(base + "/#/native-parity")
+        rows = page.get_by_test_id("parity-mismatch-row")
+        expect(rows).to_have_count(4)
+        expect(rows.filter(has_text="KO|2026-09-10|STR-THRU")).to_have_count(4)
+        gate_pass = rows.filter(has_text="gate_pass")
+        expect(gate_pass.get_by_test_id("parity-mismatch-legacy")).to_have_text("true")
+        expect(gate_pass.get_by_test_id("parity-mismatch-native")).to_have_text("false")
+        reason = rows.filter(has_text="reason")
+        expect(reason.get_by_test_id("parity-mismatch-legacy")).to_have_text("ok")
+        expect(reason.get_by_test_id("parity-mismatch-native")).to_have_text("withheld")
+        gate_score = rows.filter(has_text="gate_score")
+        expect(gate_score.get_by_test_id("parity-mismatch-legacy")).to_have_text("—")
+        expect(gate_score.get_by_test_id("parity-mismatch-native")).to_have_text("0.5")
+        gate_threshold = rows.filter(has_text="gate_threshold")
+        expect(gate_threshold.get_by_test_id("parity-mismatch-legacy")).to_have_text("—")
+        expect(gate_threshold.get_by_test_id("parity-mismatch-native")).to_have_text("0.7")
+        table_text = page.get_by_test_id("parity-mismatch-table").inner_text()
+        assert "n_analogs" not in table_text
     finally:
         context.close()
 
