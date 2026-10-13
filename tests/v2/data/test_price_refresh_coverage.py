@@ -2,15 +2,17 @@
 
 A daily ticker's cached fetch covers the session only if its ``fetched_at``
 (UTC-aware) is AFTER the close of the required trading day — the latest
-trading day on or before the session, 16:00 America/New_York and 13:00 on
-NYSE early-close days (``engine/calendar.py``) — plus ``COVERAGE_CLOSE_BUFFER``
-(30 minutes). A pre-market fetch lands on the session's date but predates its
-close (the 2026-10-12 defect), so it never excuses the session. Bodies are
-never parsed on this path: a bad or truncated response is capture's job — it
-fails there and the next refresh retries (accepted trade-off, 2026-10-13
-simplification decision). Store-level fixtures write into a real ``Fetcher``
-over a throwaway root through a fake yfinance adapter, stamping arrival by
-freezing the clock or writing the sidecar meta directly.
+trading day on or before the session, the regular 16:00 America/New_York
+close for every trading day (``price_refresh._regular_market_close``) — plus
+``COVERAGE_CLOSE_BUFFER`` (30 minutes). On the ~3 NYSE half-days a year a
+fetch made between the early close and 16:30 ET is refetched once (accepted
+harmless extra refetch). A pre-market fetch lands on the session's date but
+predates its close (the 2026-10-12 defect), so it never excuses the session.
+Bodies are never parsed on this path: a bad or truncated response is
+capture's job — it fails there and the next refresh retries (accepted
+trade-off, 2026-10-13 simplification decision). Store-level fixtures write
+into a real ``Fetcher`` over a throwaway root through a fake yfinance adapter,
+stamping arrival by freezing the clock or writing the sidecar meta directly.
 """
 from __future__ import annotations
 
@@ -129,17 +131,26 @@ def test_a_stamp_at_or_before_close_plus_buffer_never_excuses_the_session(
     assert ("AAA" in plan["skipped_already_fetched"]) is not expect_daily
 
 
-@pytest.mark.parametrize("stamp,expect_daily", [
-    ("2026-11-27T18:10:00+00:00", True),   # 13:10 ET: 13:00 close + 30m is 18:30Z
-    ("2026-11-27T18:45:00+00:00", False),  # 13:45 ET: after the early close + buffer
-])
-def test_an_early_close_day_uses_its_1300_et_close(stamp, expect_daily):
-    """Session 2026-11-27 is Black Friday: the required day's close is
-    13:00 ET (18:00Z), not 16:00, so the buffer sits at 18:30Z."""
+def test_coverage_is_strictly_after_close_plus_buffer():
+    """The comparison is a strict ``>``: a fetch stamped EXACTLY at the
+    cutoff (16:00 ET close + 30 min = 20:30Z on this EDT session) is not
+    coverage and refetches; one microsecond past it excuses the session."""
+    at_cutoff = _plan({"AAA": [pd.Timestamp(f"{SESSION}T20:30:00+00:00")]})
+    assert at_cutoff["daily"] == ["AAA"]
+    assert at_cutoff["skipped_already_fetched"] == []
+    one_microsecond_later = _plan(
+        {"AAA": [pd.Timestamp(f"{SESSION}T20:30:00.000001+00:00")]})
+    assert one_microsecond_later["daily"] == []
+    assert one_microsecond_later["skipped_already_fetched"] == ["AAA"]
+
+
+def test_a_half_day_fetch_after_the_early_close_is_refetched_once():
+    """2026-11-27 is Black Friday: a 13:45 ET fetch predates the plain 16:30 ET
+    cutoff, so it is refetched — the accepted harmless extra refetch."""
     plan = pr.plan_refresh("2026-11-27", events=_events([("AAA", "2026-11-27")]),
                            price_universe=[],
-                           fetch_times={"AAA": [pd.Timestamp(stamp)]})
-    assert ("AAA" in plan["daily"]) is expect_daily
+                           fetch_times={"AAA": [pd.Timestamp("2026-11-27T18:45:00+00:00")]})
+    assert plan["daily"] == ["AAA"]
 
 
 def test_a_monday_holiday_session_is_covered_by_friday_post_close():
@@ -208,6 +219,36 @@ def test_a_post_close_stamp_covers_even_when_the_body_is_garbage(fetch_root):
         "fetched_at": POST_CLOSE_STAMP, "status": 200}))
     plan = _plan(pr.load_fetch_times(fetch_root=fetch_root))
     assert plan["skipped_already_fetched"] == ["AAA"]
+
+
+# --------------------------------------------------------------------------
+# production entry point: one unreadable stamp never aborts the plan
+# --------------------------------------------------------------------------
+
+
+def test_invoke_price_refresh_planned_path_survives_an_unparseable_stamp(tmp_path):
+    """``load_fetch_history`` runs BEFORE ``load_fetch_times`` on the real
+    path, so a garbage ``fetched_at`` there once aborted planning outright.
+    Through the production entry point the bad-stamp ticker must instead
+    contribute nothing (monthly/daily refetch), while the valid post-close
+    ticker is skipped."""
+    from engine.v2.ops.legacy_adapter import invoke_price_refresh
+
+    source_root = tmp_path / "source"
+    fetch_root = source_root / "data" / "raw" / "fetch"
+    _write_raw_fetch(fetch_root, "BADSTAMP", key="k-garbage-stamp", fetched_at="garbage")
+    _write_raw_fetch(fetch_root, "GOODSTAMP", key="k-post-close", fetched_at=POST_CLOSE_STAMP)
+
+    result = invoke_price_refresh(SESSION, dry_run=True,
+                                  planned_tickers=("BADSTAMP", "GOODSTAMP"),
+                                  source_root=source_root)
+
+    plan = result["plan"]
+    assert "BADSTAMP" in plan["daily"], "unknown is never coverage: it refetches"
+    assert "GOODSTAMP" in plan["skipped_already_fetched"]
+    assert "BADSTAMP" not in plan["skipped_already_fetched"]
+    assert plan["monthly"] == []
+    assert result["report"] is None, "dry run fetches nothing"
 
 
 # --------------------------------------------------------------------------

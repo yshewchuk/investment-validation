@@ -27,9 +27,11 @@ refresh cadences, per the 2026-09-14 decision:
 Daily resumability is keyed on the fetch's STAMP against the session's close:
 a cached dated fetch covers the session only if its ``fetched_at`` (UTC-aware)
 is later than the close of the required trading day — the latest trading day
-on or before the session, per :func:`_required_daily_bar_date`, closing at
-16:00 America/New_York (13:00 on NYSE early-close days;
-:func:`engine.calendar.market_close`) — plus :data:`COVERAGE_CLOSE_BUFFER`.
+on or before the session, per :func:`_required_daily_bar_date`, closing at the
+regular 16:00 America/New_York every trading day — plus
+:data:`COVERAGE_CLOSE_BUFFER`. On the ~3 NYSE half-days a year a fetch stamped
+between the early close and 16:30 ET is refetched once (accepted harmless
+extra refetch).
 A pre-market fetch lands on the session's date but its last bar is yesterday's
 close, so stamping alone was never coverage until the close-time test was
 added (the 2026-10-12 defect); reading bodies to re-derive bar coverage was
@@ -102,10 +104,26 @@ HORIZON_DAYS = 35
 POST_EVENT_TRADING_SESSIONS = 5
 
 #: Grace after the required trading day's close before a cached fetch's
-#: ``fetched_at`` counts as covering that day. A body fetched at, or seconds
-#: after, the closing bell can lag the real close print, so only a clearly
-#: post-close stamp excuses the session.
+#: ``fetched_at`` counts as covering that day: coverage is STRICTLY AFTER
+#: that close plus this buffer (a stamp exactly at the cutoff refetches).
+#: A body fetched at, or seconds after, the closing bell can lag the real
+#: close print, so only a clearly post-close stamp excuses the session.
 COVERAGE_CLOSE_BUFFER = timedelta(minutes=30)
+
+
+def _regular_market_close(day) -> pd.Timestamp:
+    """The close of trading day ``day``: 16:00 America/New_York, every day.
+
+    No early-close rules are applied here — on the ~3 NYSE half-days a year a
+    fetch stamped between the 13:00 ET early close and the 16:30 ET cutoff
+    (close + :data:`COVERAGE_CLOSE_BUFFER`) is refetched once, an accepted
+    harmless extra refetch. DST is carried by the zone name, and the result is
+    converted to UTC so it compares directly against a fetch's UTC
+    ``fetched_at`` stamp.
+    """
+    d = pd.Timestamp(day).normalize()
+    ts = pd.Timestamp(year=d.year, month=d.month, day=d.day, tz="America/New_York")
+    return (ts + timedelta(hours=16)).tz_convert("UTC")
 
 
 # --------------------------------------------------------------------------
@@ -228,11 +246,13 @@ def plan_refresh(
         ``{ticker: [timestamp, ...]}`` — every dated Tier-1 fetch's own
         ``fetched_at`` for that ticker, UTC-aware (see
         :func:`load_fetch_times`). Governs DAILY resumability: a ticker on the
-        board is skipped only if one of those stamps is LATER than
-        :func:`engine.calendar.market_close` of
-        :func:`_required_daily_bar_date` (the latest trading day on or before
-        ``session``; 16:00 America/New_York, 13:00 on NYSE early-close days)
-        plus :data:`COVERAGE_CLOSE_BUFFER`. Anything else — a pre-market or
+        board is skipped only if one of those stamps is STRICTLY AFTER
+        :func:`_regular_market_close` of :func:`_required_daily_bar_date` (the
+        latest trading day on or before ``session``; the regular 16:00
+        America/New_York close every trading day) plus
+        :data:`COVERAGE_CLOSE_BUFFER`. On a half-day a fetch stamped between
+        the early close and 16:30 ET is refetched once (accepted). Anything
+        else — a pre-market or
         at-the-close fetch, a fetch on the wrong day, no fetch at all — goes
         on today's daily list. The body is never read: a bad or truncated
         response is capture's job (accepted trade-off), and unknown is never
@@ -252,7 +272,7 @@ def plan_refresh(
     history = fetch_history or {}
     times = fetch_times or {}
     coverage_cutoff = (
-        engine_calendar.market_close(_required_daily_bar_date(session_ts))
+        _regular_market_close(_required_daily_bar_date(session_ts))
         + COVERAGE_CLOSE_BUFFER
     )
 
@@ -434,6 +454,10 @@ def load_fetch_history(*, fetch_root=None) -> dict[str, list[date_cls]]:
     yfinance ``history`` fetch already on disk, keyed by the fetch's own
     ``fetched_at`` (UTC — ``engine/data/fetch.py``'s ``_persist``, the field
     downstream already orders by, per the task's own verified design facts).
+    A missing or unparseable ``fetched_at`` is skipped — it contributes
+    nothing, the same way :func:`load_fetch_times` treats unknown: the
+    ticker's month is refetched rather than the whole plan aborting on one
+    bad stamp.
 
     ``fetch_root`` defaults to ``engine.paths.RAW_FETCH`` and exists only so
     tests can point this at a throwaway tree.
@@ -446,8 +470,11 @@ def load_fetch_history(*, fetch_root=None) -> dict[str, list[date_cls]]:
         fetched_at = entry.meta.get("fetched_at")
         if not ticker or not fetched_at:
             continue
-        when = pd.Timestamp(fetched_at).normalize().date()
-        out.setdefault(str(ticker), []).append(when)
+        try:
+            when = pd.Timestamp(fetched_at)
+        except (TypeError, ValueError):
+            continue
+        out.setdefault(str(ticker), []).append(when.normalize().date())
     return out
 
 
@@ -461,8 +488,9 @@ def load_fetch_times(*, fetch_root=None) -> dict[str, list[pd.Timestamp]]:
     a ticker, a present ``fetched_at``), but keeping the full timestamp
     rather than its date: the daily skip asks whether a fetch was stamped
     AFTER the required trading day's close plus :data:`COVERAGE_CLOSE_BUFFER`
-    (16:00 America/New_York, 13:00 on NYSE early-close days —
-    :func:`engine.calendar.market_close`), which a date alone cannot answer.
+    (the regular 16:00 ET close every trading day — a fetch on a half-day
+    between the early close and 16:30 ET is refetched once, accepted), which
+    a date alone cannot answer.
     A missing or unparseable ``fetched_at`` contributes nothing: unknown is
     never coverage, which can only lengthen the daily list, never shorten it.
     The body is never opened — bar validity is capture's job, and a bad or

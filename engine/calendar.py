@@ -50,8 +50,6 @@ __all__ = [
     "trading_calendar",
     "us_market_holidays",
     "projected_trading_days",
-    "market_close",
-    "early_close_days",
     "load_orats_earnings",
     "load_oquants_event_dates",
     "load_nasdaq_earnings",
@@ -190,54 +188,6 @@ def projected_trading_days(start, end) -> pd.DatetimeIndex:
     for year in range(start.year, end.year + 1):
         holidays |= us_market_holidays(year)
     return days[~days.isin(pd.DatetimeIndex(sorted(holidays)))]
-
-
-# --------------------------------------------------------------------------
-# intraday session ends (close times)
-# --------------------------------------------------------------------------
-
-#: Trading sessions close at this wall-clock time in this zone — 16:00 normal,
-#: 13:00 on the days :func:`early_close_days` names.
-MARKET_CLOSE_TZ = "America/New_York"
-
-#: Minutes of the day (ET wall clock) of the two session ends.
-_NORMAL_CLOSE_MINUTES, _EARLY_CLOSE_MINUTES = 16 * 60, 13 * 60
-
-
-def early_close_days(year: int) -> set[pd.Timestamp]:
-    """The NYSE 13:00-ET half-day closes of ``year``.
-
-    Three rules, per the published NYSE schedule: the day after Thanksgiving;
-    Dec 24 when it is a weekday trading day (when Christmas itself is the
-    observed holiday, Dec 24 is closed, not early); Jul 3 when it is a weekday
-    trading day AND Jul 4 falls Tue–Fri — the NYSE early-closes Jul 3 only
-    when the Jul 4 holiday takes a weekday AFTER it, so when Jul 4 is a
-    Saturday the holiday is observed on Fri Jul 3 (closed, no early close)
-    and when Jul 4 is a Sunday the observed Mon Jul 5 leaves Jul 3 a full
-    session. A day in :func:`us_market_holidays` is never an early close.
-    """
-    holidays = us_market_holidays(year)
-    days = {_nth_weekday(year, 11, 3, 4) + pd.Timedelta(days=1)}  # Black Friday
-    dec24 = pd.Timestamp(year=year, month=12, day=24)
-    if dec24.weekday() < 5 and dec24 not in holidays:
-        days.add(dec24)
-    jul3, jul4 = pd.Timestamp(year=year, month=7, day=3), pd.Timestamp(year=year, month=7, day=4)
-    if jul3.weekday() < 5 and jul3 not in holidays and jul4.weekday() in (1, 2, 3, 4):
-        days.add(jul3)
-    return {d for d in days if d not in holidays}
-
-
-def market_close(day) -> pd.Timestamp:
-    """The close of trading day ``day`` as a UTC-aware timestamp.
-
-    16:00 ``America/New_York``, or 13:00 on an :func:`early_close_days` date;
-    DST is carried by the zone name, and the result is converted to UTC so it
-    compares directly against a fetch's UTC ``fetched_at`` stamp.
-    """
-    d = pd.Timestamp(day).normalize()
-    minutes = _EARLY_CLOSE_MINUTES if d in early_close_days(d.year) else _NORMAL_CLOSE_MINUTES
-    ts = pd.Timestamp(year=d.year, month=d.month, day=d.day, tz=MARKET_CLOSE_TZ)
-    return (ts + pd.Timedelta(minutes=minutes)).tz_convert("UTC")
 
 
 # --------------------------------------------------------------------------

@@ -864,7 +864,7 @@
       "package": "engine.v2.ops",
       "module": "engine.v2.ops.legacy_adapter",
       "legacy_symbol": "engine.data.pulls.price_refresh.load_fetch_times",
-      "reason": "ops price-refresh's read-only Tier-1 stamp loader: every dated yfinance history fetch's own fetched_at as a UTC-aware timestamp, so the daily skip is a pure metadata comparison against the required trading day's close plus the coverage buffer (engine/calendar.py market_close) -- no body parsing, no second copy of capture's rules",
+      "reason": "ops price-refresh's read-only Tier-1 stamp loader: every dated yfinance history fetch's own fetched_at as a UTC-aware timestamp, so the daily skip is a pure metadata comparison against the required trading day's regular 16:00 ET close plus the coverage buffer (price_refresh._regular_market_close) -- no body parsing, no second copy of capture's rules",
       "declared_on": "2026-10-13",
       "runtime": "invoke_price_refresh",
       "read_set": "Tier-1 fetch store (yfinance history metadata): period=max fetches' fetched_at stamps",
