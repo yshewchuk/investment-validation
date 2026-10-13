@@ -401,6 +401,44 @@ def test_nested_list_items_pick_the_right_container():
     assert rules("- a\n  - b\n\n  ```\n  x\n  ```\n\nz\n") == []
 
 
+def test_fence_four_columns_beyond_the_container_is_indented_code():
+    # (a) inside "- item" (content column 2), 6 spaces = container + 4: indented code.
+    assert rules("- item\n\n      ```\n      x\n\nb\n") == []
+    # 5 columns (container + 3) is still a fence, and unclosed here.
+    assert [v.rule for v in ms.lint_text("- item\n\n     ```\n     x\n")] == ["fence-unclosed"]
+    # Top level: 4 spaces is indented code, 3 is a fence.
+    assert rules("para\n\n    ```\n    x\n\nb\n") == []
+    assert [v.rule for v in ms.lint_text("para\n\n   ```\n   x\n")] == ["fence-unclosed"]
+
+
+def test_list_marker_four_columns_beyond_its_container_is_not_an_item():
+    # (b) a 4-space marker line at top level is indented code, not a fence opener.
+    assert rules("para\n\n    - ```\n    x\n") == []
+    # ... and inside a paragraph (no blank line) it is a lazy continuation.
+    assert rules("text\n    - ```\n    x\n") == []
+    # It does not become a container either: a later 3-space fence closes at column 0.
+    assert rules("para\n\n    - item\n\n   ```\ncode\n```\n\nb\n") == []
+    # A marker at 0-3 columns does interrupt a paragraph and opens a fence.
+    assert rules("text\n- ```\n  x\n  ```\n") == []
+    assert [v.rule for v in ms.lint_text("text\n- ```\n  x\n")] == ["fence-unclosed"]
+    # A nested marker 2 columns beyond its parent's content is still an item.
+    assert [v.rule for v in ms.lint_text("- a\n    - ```\n      x\n")] == ["fence-unclosed"]
+
+
+def test_tab_indentation_expands_to_four_column_stops():
+    # (c) tabs: opener and closer indented with a tab inside a list item.
+    assert [v.rule for v in ms.lint_text("- item\n\t```\n\tcode\n")] == ["fence-unclosed"]
+    assert rules("- item\n\t```\n\tcode\n\t```\n") == []
+    # A tab after the list marker reaches column 4 (content column 4).
+    assert rules("-\t```\n\tcode\n\t```\n") == []
+    assert [v.rule for v in ms.lint_text("-\t```\n\tcode\n") ] == ["fence-unclosed"]
+    # Top level: a tab-indented fence is indented code.
+    assert rules("para\n\n\t```\n\tx\n") == []
+    # A tab and spaces mix to the next stop: "  \t" is column 4.
+    assert ms._expand("  \t```") == "    ```"
+    assert ms._expand("-\tx\ty") == "-   x\ty"
+
+
 def test_blockquoted_fence_is_not_checked():
     assert rules("> ```\n> # x\n") == []
 

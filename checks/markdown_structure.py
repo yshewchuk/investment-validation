@@ -61,6 +61,7 @@ _CLOSER = re.compile(r"^( *)(`{3,}|~{3,})[ \t]*$")
 _HEADING = re.compile(r"^#{1,6}(\s|$)")
 _LIST_ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
 _ITEM = re.compile(r"^( *)([-*+]|\d+[.)])( +|$)")  # any-indent list item line
+_LEAD = re.compile(r"^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?")  # indent + optional list marker
 _DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -113,12 +114,28 @@ def _is_table_row(row: str, header: str) -> bool:
     return _cells(stripped) == _cells(header)
 
 
+def _expand(line: str) -> str:
+    """Expand tabs in the leading indent (and the gap after a list marker) to the
+    next multiple of 4 columns, so every indent below is measured in columns."""
+    end = _LEAD.match(line).end()
+    out, col = [], 0
+    for ch in line[:end]:
+        if ch == "\t":
+            out.append(" " * (4 - col % 4))
+            col += 4 - col % 4
+        else:
+            out.append(ch)
+            col += 1
+    return "".join(out) + line[end:]
+
+
 def lint_text(text: str) -> list[Violation]:
     # CRLF files: every line regex is anchored with $, so drop the \r of each
     # line ending first. Line numbers still match git's, which counts \n only.
     lines = text.replace("\r\n", "\n").split("\n")
     if lines and lines[-1] == "":
         lines.pop()
+    lines = [_expand(x) for x in lines]
     n = len(lines)
     found: list[Violation] = []
 
@@ -142,27 +159,32 @@ def lint_text(text: str) -> list[Violation]:
                 fence = None
             i += 1
             continue
-        if m and (m.group(1).strip() or len(m.group(1)) < 4 or items):
-            # (else: 4+ spaces outside a list is an indented code block, not a fence)
+        indent = len(m.group(1)) if m else 0
+        lead = indent - len(m.group(1).lstrip(" ")) if m else 0
+        base = max((x for x in items if x <= lead), default=0)
+        if m and lead - base < 4:
+            # (else: 4+ columns beyond the enclosing container is indented code,
+            # not a fence -- also for a marker line like "    - ```")
             # The container's content column: this line's own list marker, else the
             # innermost open list item whose content starts at or left of the fence,
             # else 0 (top level). A closer may sit 0-3 spaces beyond that column.
-            indent = len(m.group(1))
             if m.group(1).strip():
-                lead = indent - len(m.group(1).lstrip(" "))
                 while items and items[-1] > lead:
                     items.pop()
                 items.append(indent)
                 container = indent
             else:
-                container = max((x for x in items if x <= indent), default=0)
+                container = base
             fence = (m.group(2)[0], len(m.group(2)), indent, i + 1, container)
             if not m.group(1) and not blank(i - 1):
                 found.append(Violation(i + 1, i, "fence-before"))
             i += 1
             continue
         item = _ITEM.match(s)
-        if item and (len(item.group(1)) < 4 or items):
+        # A marker indented 4+ columns beyond its container is indented code or a
+        # paragraph continuation, not a list item.
+        if item and len(item.group(1)) - max(
+                (x for x in items if x <= len(item.group(1))), default=0) < 4:
             while items and items[-1] > len(item.group(1)):
                 items.pop()
             items.append(len(item.group(0)) if item.group(3) else len(item.group(0)) + 1)

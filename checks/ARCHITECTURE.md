@@ -39,7 +39,9 @@ a table needs one before (unless at file start) and after (unless it ends the
 file); an unindented fenced block needs one before and after. Indented
 and list-marker fences are tracked too, and every fence must be closed (a
 closer needs the opener's character, at least its length, no info string, and an indent 0-3 spaces beyond its container's content column
-(0 at top level, the list item's content column inside an item);
+(0 at top level, the list item's content column inside an item). Indents are
+columns (tabs go to 4-column stops), and a fence or list marker 4+ columns beyond
+its container is indented code, not a fence or item;
 only unindented fences get the blank-line rule. Fences inside a blockquote (after a `>` marker)
 are not checked. Fenced content is never
 scanned as headings or tables. There is no list rule, and list content is
