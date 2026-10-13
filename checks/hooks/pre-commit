@@ -3,14 +3,25 @@
 #
 # `.git/hooks` is not versioned, so a fresh clone has none of this and
 # `--no-verify` bypasses the one that exists. The hook is a convenience; the
-# nightly is the control, and it re-runs every check below over HEAD and
+# nightly is the control, and it re-runs checks 1-5 below over HEAD and
 # reports whether this file is installed at all (system_rearchitecture.md
 # §4.6). A control that cannot detect its own absence is not a control.
+# Checks 6 (doc budgets) and 7 (Markdown) are not in the nightly gate; the
+# Markdown check is enforced by CI's "Lint Markdown" step.
 #
-# Every check here reads STAGED BLOBS, not the working tree: checking the
-# working tree passes or fails on content that is not what would be committed.
-# All four are stdlib-only and parse with `ast` rather than importing, because
-# importing `engine.score` loads a panel and a two-minute hook gets deleted.
+# Inputs in the hook's default mode (checked against each check's code):
+#   1 hygiene, 2 import layers, 3 code budgets, 5 v2 lint: STAGED BLOBS of the staged
+#     files, so the result is about what would be committed (1 also reads the
+#     working-tree .env for secret values; 5 reads requirements.txt staged).
+#   4 package READMEs: staged blobs layered over the WORKING-TREE copy of every
+#     tracked, unstaged file (the import graph needs the whole tree).
+#   6 ARCHITECTURE.md budgets: staged blobs of tracked ARCHITECTURE.md files, compared
+#     with the base ref.
+#   7 Markdown: the WORKING-TREE copy of each staged .md file (markdownlint-cli2 cannot
+#     read a blob). CI lints every .md and is the authority.
+# Checks 1-4 and 6 are stdlib-only and parse with `ast` rather than importing, because
+# importing `engine.score` loads a panel and a two-minute hook gets deleted. Check 5
+# runs the pinned Ruff; check 7 needs Node.
 #
 # Order is cheapest-and-most-catastrophic first: a leaked credential is
 # permanent, a layer violation is not.
@@ -38,4 +49,14 @@ python3 "$ROOT/checks/rearchitecture_phase1_lint.py" --quiet
 #    refactor needed first). See checks/architecture_doc_budgets.py.
 python3 "$ROOT/checks/architecture_doc_budgets.py" --quiet
 
-echo "pre-commit: hygiene, layers, budgets, READMEs, v2 lint and doc budgets all green"
+# 7. Markdown lint: markdownlint-cli2 (pinned; rules in .markdownlint-cli2.jsonc) on
+#    the staged .md files, reading their working-tree copies. CI is the authority.
+#    Fails closed when npx is missing.
+command -v npx >/dev/null 2>&1 || {
+    echo "pre-commit: npx not found; install Node.js (e.g. apt install nodejs npm) to lint Markdown" >&2
+    exit 1
+}
+git -C "$ROOT" diff --cached --name-only -z --diff-filter=ACMR -- '*.md' |
+    (cd "$ROOT" && xargs -0 -r npx --yes markdownlint-cli2@0.18.1)
+
+echo "pre-commit: hygiene, layers, budgets, READMEs, v2 lint, doc budgets and markdown lint all green"

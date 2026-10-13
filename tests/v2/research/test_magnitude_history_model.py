@@ -535,8 +535,9 @@ def test_absent_or_colliding_original_receipt_refuses_without_payloads(tmp_path,
         before = _catalog(source.conn), _objects(source.store)
         _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
         monkeypatch.setattr(source.repository, "scan", _forbid)
-        with _refuses(DataError, "IDENTITY_CONFLICT"):
-            admit_stored(source.repository, source.snapshot, context)
+        for operation in (admit_stored, stored.read_stored):
+            with _refuses(DataError, "IDENTITY_CONFLICT"):
+                operation(source.repository, source.snapshot, context)
         assert (_catalog(source.conn), _objects(source.store)) == before
     finally:
         source.conn.close()
@@ -570,8 +571,9 @@ def test_real_native_feature_contract_and_fragment_isolation_precede_payloads(tm
         before = _catalog(source.conn), _objects(source.store)
         monkeypatch.setattr(objects, "verify_object_path", verify)
         _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
-        with _refuses(DataError, code):
-            admit_stored(source.repository, source.feature_snapshot, source.build["context"])
+        for operation in (admit_stored, stored.read_stored):
+            with _refuses(DataError, code):
+                operation(source.repository, source.feature_snapshot, source.build["context"])
         with _refuses(OpsError if kind == "old-contract" else DataError,
                       "EXPERIMENT_IDENTITY_CONFLICT" if kind == "old-contract" else code):
             _register(source)

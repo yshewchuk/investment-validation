@@ -207,8 +207,26 @@ reviews:
         with a legacy row already occupying the same key space (e.g. a
         ledger "ran" row keyed `(experiment_id, stage)` that a legacy run
         already wrote) — /ARCHITECTURE.md §6.
+    - path: "**/*.py"
+      instructions: |
+        Wrap standard tools; do not hand-roll standard formats
+        (/ARCHITECTURE.md §6). Flag Python code that hand-rolls parsing,
+        validation or linting of a standard format (Markdown, YAML, TOML,
+        JSON Schema, CSV dialects, dates and times, URLs, CLI arguments,
+        semver); a thin wrapper that configures and invokes a maintained
+        tool is fine. Also flag code that
+        re-implements a linter, formatter, retry/backoff, cache, diff or
+        templating engine that a maintained tool or library already
+        provides. The wrapper should be thin: configuration plus
+        invocation. Custom code is acceptable only when the PR Spec states
+        why (a needed rule no tool has, a private format, or a dependency
+        the repo cannot take); otherwise ask for the standard tool.
     - path: ".github/workflows/**"
       instructions: |
+        Do not hand-roll parsing of a standard format (YAML, JSON,
+        semver, dates) in shell inside a workflow when a maintained tool
+        (yq, jq, an existing action) does it (/ARCHITECTURE.md §6).
+
         A workflow change must not skip pre-commit hooks, bypass the secret
         scan (checks/repo_hygiene.py) or GitHub push protection, run with
         elevated (admin) merge permissions, or add a step that could push to

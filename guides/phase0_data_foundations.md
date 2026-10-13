@@ -55,6 +55,7 @@ checks/phase0_checks.py
 ```
 
 ### paths.py
+
 Single dict of logical→physical paths. Grandfathered raw stays where it is:
 `RAW_ORATS = earnings_predictions/data/raw/orats`, `RAW_OQUANTS = .../oquants`,
 `RAW_YF = .../yfinance`, `RAW_POLYGON_LEGACY = polygon_cache/`, plus
@@ -63,10 +64,12 @@ move or rename these directories.** New tiers live under
 `/root/investing-plan/data/`.
 
 ### fetch.py contract
+
 ```python
 def fetch(source, endpoint, params, *, live=False, timeout=120) -> RawRecord
 # RawRecord: .body (bytes), .meta (dict), .path, .from_cache (bool)
 ```
+
 - Cache key = sha256 of canonical JSON `{source, endpoint, sorted(params)}`;
   `live=True` appends today's date to the key (historical endpoints are
   immutable → cached forever; live endpoints get one entry per day).
@@ -85,18 +88,21 @@ def fetch(source, endpoint, params, *, live=False, timeout=120) -> RawRecord
   `quota_log.csv`.
 
 ### fills.py
+
 ```python
 class FillModel:            # alpha in [0,1]
     def buy(self, bid, ask):  return ask - alpha*(ask-bid)
     def sell(self, bid, ask): return bid + alpha*(ask-bid)
 WORST, MID, BEST = FillModel(0), FillModel(0.5), FillModel(1)
 ```
+
 Guard: if bid > ask or bid < 0 → raise (bad chain row reached pricing;
 validation should have caught it upstream). Missing/zero bid with positive ask
 is a real market state — price it, but flag `wide_market=True` when
 (ask−bid)/mid > 0.5.
 
 ### calendar.py
+
 Canonical forward + historical calendar from ORATS `hist/earnings`
 (`anncTod` → session: <1200 = BMO else AMC), cross-checked against the
 oquants panel dates; disagreement → `date_agree=False` flag, ORATS wins
@@ -104,6 +110,7 @@ oquants panel dates; disagreement → `date_agree=False` flag, ORATS wins
 between refreshes and emits a flag list (stale dates are a known loss source).
 
 ### structures.py
+
 Each structure returns legs: `[(right, strike_rule, expiry_rule, side, qty)]`
 plus entry/exit day rules. Implement: `put_calendar` (short front put ~1 DTE +
 long back put, back-DTE parameter, SAME open and close timestamps for both
@@ -227,6 +234,7 @@ remotes, first push after hygiene passes.
 
 **Allowlist `.gitignore` sketch** (default-deny; later rules win, so hard
 blocks come LAST and override the allows):
+
 ```gitignore
 # default-deny
 *
@@ -259,6 +267,7 @@ config/thesis/universe.yaml
 .venv/
 __pycache__/
 ```
+
 After writing it, verify with `git status --ignored` and review the FULL
 `git ls-files` output line by line before the first push — the first push is
 the one that matters; public history is forever.

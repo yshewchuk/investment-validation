@@ -23,6 +23,7 @@ config/thesis/
 ```
 
 ### universe.py — vulnerability map
+
 - Start from STRATEGY.md's 51-name semis classification + the AI-compute
   list; extend with hyperscalers/AI-adjacent large caps as the user names
   them.
@@ -39,6 +40,7 @@ config/thesis/
   output `data/features/thesis_universe.csv` ranked, rebuilt weekly.
 
 ### tripwires.py — observable, none predictive
+
 Each tripwire: id, series source, computation, threshold, direction, weight.
 Initial set (thresholds are placeholders — **the user signs off on final
 values before the arming logic goes live**, then they freeze):
@@ -58,6 +60,7 @@ tripwire board. Every state CHANGE is ledgered (Phase 4 writer) — the record
 of when tripwires armed is itself a forward test of the framework.
 
 ### staging.py — mechanical responses (from the plan, frozen in budget.yaml)
+
 - Stage 1 (2 of 5 armed): deploy the stage-1 fraction of the quarterly
   insurance budget in put diagonals (long back put ~90–180 DTE financed by
   short front put — reuse `engine.structures`; the CAL-P pricing path prices
@@ -72,6 +75,7 @@ of when tripwires armed is itself a forward test of the framework.
   quarterly cap regardless of how armed the board looks.
 
 ### replay.py — what the structures did in past unwinds
+
 Through the Phase 2 harness (real chains, 2017+ coverage): put diagonals and
 put spreads on the vulnerability list replayed over 2018Q4, 2020-02..04,
 2022, plus the 2021 melt-up and 2023-24 rallies as the cost-of-carry control.

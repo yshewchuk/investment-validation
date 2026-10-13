@@ -144,8 +144,9 @@ It owns short catalog transactions; artifact and CSV effects stay outside them.
 `experiments/magnitude_inputs.py` consumes `native_registration.magnitude_execution_document`;
 `experiments/magnitude_report.py` consumes `native_registration.validate_magnitude_execution`
 and `errors.fail` before computing/reporting the admitted mean baseline.
-The registrar also consumes the history constructors; `experiments/magnitude_history_report.py`
-consumes `validate_magnitude_history_execution`, and the history admission bridge uses `errors.fail`.
+The registrar also consumes the history constructors and `validate_magnitude_history_execution`;
+`experiments/magnitude_history_report.py` consumes the same validator,
+and the history admission bridge uses `errors.fail`.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection

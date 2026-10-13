@@ -21,6 +21,7 @@ config/golive_rules.yaml             # the plan's rules, encoded — frozen now
 ```
 
 ### paper.py
+
 Runs inside the Phase 3 nightly job after scoring: for each gate-passing
 candidate (respecting per-strategy caps and the 5% sizing), record a paper
 trade: decision_ts, structure legs, **intended limit = MID at decision time**
@@ -29,6 +30,7 @@ always joinable). Paper trades go through the Phase 4 append-only writer —
 logged before outcomes, no retro edits, corrections via `supersedes`.
 
 ### fill_verify.py — the heart of the phase
+
 For each paper leg, over the holding window, determine whether the limit
 would plausibly have filled:
 - **ORATS EOD path (all names):** on subsequent trade dates, compare the
@@ -44,6 +46,7 @@ would plausibly have filled:
   could have gotten under the classification), days-to-fill.
 
 ### alpha_hat.py
+
 α̂ = where the achievable price sits between worst and mid-or-better, i.e.
 `(worst_side_price − achievable) / (worst_side_price − mid)` clipped to
 [0, 1.5], aggregated per bucket: spread-width quartile × mcap band ×
@@ -54,12 +57,14 @@ Phase 1 scoring and Phase 2 evaluation defaults once ≥100 verified legs per
 bucket exist — conservative by construction.
 
 ### weekly_report.py
+
 Generator format, every Friday of an active season: paper P&L vs
 model-expected with CIs (per strategy), fill-quality distribution + α̂ table,
 gate trigger log with hindsight outcomes, missed-trade log, MC-band overlay
 (is the season inside the backtest's Monte Carlo envelope?).
 
 ### golive.py
+
 Reads `config/golive_rules.yaml` (encode the plan's §P5 rules verbatim: full
 season of paper data; α̂_p25 ≥ breakeven_alpha + 0.1 margin per strategy;
 CAL-P blocked until EXP-101/102 promoted; start sizing 5%; escalation and
