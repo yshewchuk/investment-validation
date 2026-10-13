@@ -8,12 +8,13 @@ from experiments.native_registration import require_native_registration
 
 def admit_magnitude_inputs(conn, store, repository, spec, *, code_root, as_of_month,
                            magnitude_training_start, magnitude_labels_before,
-                           scope="shadow", event_ids=None):
+                           scope="shadow", event_ids=None, magnitude_feature_snapshot_id=None, magnitude_history_start=None):
     """Bind the original execution plan and prove every actual participant before labels."""
     magnitude_execution_document(magnitude_labels_before)
     registration = require_native_registration(conn, store, repository, spec,
         code_root=code_root, as_of_month=as_of_month, scope=scope, event_ids=event_ids,
-        magnitude_training_start=magnitude_training_start, magnitude_labels_before=magnitude_labels_before)
+        magnitude_training_start=magnitude_training_start, magnitude_labels_before=magnitude_labels_before,
+        magnitude_feature_snapshot_id=magnitude_feature_snapshot_id, magnitude_history_start=magnitude_history_start)
     binding = registration.document
     participants = sorted({event_id for fold in binding["magnitude_plan"]["folds"]
         for field in ("training_candidate_event_ids", "evaluation_event_ids") for event_id in fold[field]})

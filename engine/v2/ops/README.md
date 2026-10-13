@@ -45,8 +45,8 @@ Native experiment registration also exposes these existing submodule APIs:
 `native_registration.magnitude_execution_document` (the fixed mean-baseline
 execution policy with an explicit evaluation-label cutoff) and
 `native_registration.validate_magnitude_execution` (pure closed-envelope validation).
-The stored-history model additionally exposes `magnitude_history_request`,
-`magnitude_history_execution_document` and `validate_magnitude_history_execution`
+The stored-history model additionally exposes `native_registration.magnitude_history_request`,
+`native_registration.magnitude_history_execution_document` and `native_registration.validate_magnitude_history_execution`
 from that module for closed v1.4 construction/validation without read authority.
 They compose one resolved plan, source/environment binding and primary catalog
 reservation; the caller owns the transaction around the reservation helper.

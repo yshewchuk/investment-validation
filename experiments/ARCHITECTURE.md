@@ -123,7 +123,7 @@ feature or outcome payload. Missing/changed feature identity refuses
 `EXPERIMENT_IDENTITY_CONFLICT` before attempt/replay; protected isolation refusals retain
 `HOLDOUT_ACCESS_DENIED`. There is no implicit build, repair, alternative pin or retry.
 
-`magnitude_history_report` reads the original stored rows once; it never recomputes history.
+`magnitude_history_report` uses the original stored-only reader; it never recomputes history.
 Each fold qualifies training labels and freezes their arithmetic mean, then fixes every
 evaluation forecast before opening evaluation labels. Positive `n_prior` uses stored
 `mean_prior_abs_move`, including zero; only empty history uses the fold mean.
