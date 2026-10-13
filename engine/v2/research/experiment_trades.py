@@ -94,11 +94,17 @@ def load_trades(repository, snapshot, strategy: str, *, as_of_month=None,
     return _exclude_holdouts(rows, events, policy, context, purpose, event_ids)
 
 
+def _policy(as_of_month):
+    """Shared membership policy; raises ValueError for a malformed or future month."""
+    policy = ExperimentHoldouts(as_of_month)
+    if as_of_month > SystemClock().now().strftime("%Y-%m"):
+        raise ValueError("as-of month is in the future")
+    return policy
+
+
 def _holdout_context(snapshot, as_of_month, purpose, event_ids):
     try:
-        policy = ExperimentHoldouts(as_of_month)
-        if as_of_month > SystemClock().now().strftime("%Y-%m"):
-            raise ValueError
+        policy = _policy(as_of_month)
         if not isinstance(purpose, str) or purpose not in ("training", "selection", "sweep"):
             raise ValueError
         if event_ids is not None and (
@@ -121,7 +127,8 @@ def _ambiguous(row, duplicates):
             or pd.isna(row.date_conflict) or bool(row.date_conflict))
 
 
-def _exclude_holdouts(rows, events, policy, context, purpose, event_ids):
+def _membership_labels(rows, events, policy):
+    """Shared membership/ambiguity labelling: (rows merged with canonical events, event_id -> labels)."""
     events["event_date"] = pd.to_datetime(events["event_date"], errors="coerce")
     duplicates = set(events.loc[events["event_id"].duplicated(False), "event_id"])
     duplicates.update(events.loc[events["event_cluster_id"].notna()
@@ -141,6 +148,11 @@ def _exclude_holdouts(rows, events, policy, context, purpose, event_ids):
         if labels:
             key = row.event_id if isinstance(row.event_id, str) else None
             exclusions.setdefault(key, set()).update(labels)
+    return rows, exclusions
+
+
+def _exclude_holdouts(rows, events, policy, context, purpose, event_ids):
+    rows, exclusions = _membership_labels(rows, events, policy)
     labels = [{"event_id": key, "memberships": sorted(value)}
               for key, value in sorted(exclusions.items(), key=lambda item: (item[0] is not None, item[0] or ""))]
     excluded = rows["event_id"].isin(exclusions) | rows["event_id"].isna()
