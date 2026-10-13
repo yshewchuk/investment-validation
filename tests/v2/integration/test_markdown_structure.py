@@ -367,3 +367,14 @@ def test_the_versioned_pre_commit_hook_blocks_a_staged_violation(tmp_path, monke
     assert run_hook().returncode == 0
 
 
+def test_crlf_files_are_linted_like_lf_files():
+    clean = "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\ncode\n```\n\nend\n"
+    assert rules(clean.replace("\n", "\r\n")) == []
+    # Violations are still found, on the same line numbers, in a CRLF file.
+    bad = "# Title\nbody\n\n```\ncode\n```\nafter\n"
+    assert ms.lint_text(bad.replace("\n", "\r\n")) == ms.lint_text(bad)
+    assert sorted(v.rule for v in ms.lint_text(bad)) == ["fence-after", "heading-after"]
+    # An unclosed fence is still unclosed with CRLF endings.
+    assert [v.rule for v in ms.lint_text("a\r\n\r\n```\r\ncode\r\n")] == ["fence-unclosed"]
+
+
