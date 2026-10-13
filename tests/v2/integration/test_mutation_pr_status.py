@@ -182,6 +182,56 @@ def test_malformed_planned_or_module_fields_are_neutral(id_, mutate):
     assert verdict["state"] == "neutral", id_
 
 
+def _strict_type_cases():
+    def classify_case(mutate):
+        def build(tmp_path):
+            summary = clean("a")
+            mutate(summary)
+            return ps.classify(summary, [], {"engine/v2/z.py"})
+        return build
+
+    def set_module(field, value):
+        return lambda s: s["modules"].__setitem__("a", mod(**{field: value}))
+
+    cases = [
+        ("expected_modules_empty",
+         classify_case(lambda s: s.__setitem__("expected_modules", []))),
+        ("counts_backend_error_float_zero",
+         classify_case(set_module("counts_backend", {"error": 0.0}))),
+        ("counts_backend_error_bool_false",
+         classify_case(set_module("counts_backend", {"error": False}))),
+        ("module_complete_int", classify_case(set_module("complete", 1))),
+        ("module_tool_error_int", classify_case(set_module("tool_error", 0))),
+        ("row_module_unexpected_str",
+         lambda tmp_path: ps.classify(clean("a"),
+                                      [row("zzz", "engine/v2/a.py")],
+                                      {"engine/v2/a.py"})),
+    ]
+
+    def row_module_int(tmp_path):
+        argv, out = _report(tmp_path, clean("a"),
+                            [json.dumps({"module": 5, "file": "engine/v2/a.py",
+                                         "status": "survived"})],
+                            ["engine/v2/a.py"])
+        assert ps.main(argv) == 0
+        text = out.read_text()
+        assert "state=neutral" in text
+        return text
+
+    cases.append(("row_module_int", row_module_int))
+    return cases
+
+
+@pytest.mark.parametrize("id_,build", _strict_type_cases(),
+                         ids=[c[0] for c in _strict_type_cases()])
+def test_strict_types_and_row_modules_are_neutral(id_, build, tmp_path):
+    result = build(tmp_path)
+    if isinstance(result, dict):
+        assert result["state"] == "neutral", id_
+    else:
+        assert "state=neutral" in result, id_
+
+
 def _top_level_cases():
     cases = []
     for key in ("complete", "tool_error", "failure_reasons"):
