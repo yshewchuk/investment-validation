@@ -233,9 +233,7 @@ def _tier1_retrievals(source_root: Path) -> dict[str, list[dict]]:
         ticker = entry.params.get("ticker")
         if not ticker:
             continue
-        fetched_at = entry.meta.get("fetched_at") or _iso_from_epoch(entry.path.stat().st_mtime)
-        by_ticker.setdefault(ticker, []).append(
-            {"ticker": ticker, "entry": entry, "fetched_at": fetched_at})
+        by_ticker.setdefault(ticker, []).append(sources.tier1_retrieval_entry(entry))
     for items in by_ticker.values():
         items.sort(key=lambda item: (item["fetched_at"],
                                      hashlib.sha256(item["entry"].body()).hexdigest()))
@@ -258,23 +256,22 @@ def _parse_px(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
     return frame, raw, retrieved_at
 
 
-def _tier1_meta_bytes(entry) -> bytes:
-    import json
-    return json.dumps(entry.meta, sort_keys=True).encode("utf-8")
-
-
-def _parse_tier1(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
-    body = entry["entry"].body()
-    meta_bytes = _tier1_meta_bytes(entry["entry"])
-    # ``read_tier1_body`` now parses real close_raw/high_raw values (Close/
-    # High) alongside close_adj (Adj Close) -- fixed 2026-09-15; this used to
-    # force both to NaN here, which was itself part of the defect (see
-    # ``price_download_sources``'s module docstring).
-    frame = sources.read_tier1_body(body)
-    frame = _stringify_dates(frame)
-    retrieved_at = entry["fetched_at"]
-    combined = body + b"\x00" + meta_bytes
-    return frame, combined, retrieved_at
+def _parse_tier1(entry: dict) -> tuple[pd.DataFrame, bytes, str, str]:
+    """One Tier-1 retrieval entry (``sources.tier1_retrieval_entry``'s shape)
+    through the shared ``sources.parse_tier1_retrieval`` -- the same parse,
+    the same ``sha256(body + NUL + meta_bytes)`` retrieval identity the
+    price-refresh coverage hook reads -- with capture's own
+    ``_stringify_dates`` frame shape applied on top.
+    ``engine.v2.ops.legacy_adapter.read_tier1_retrieval`` calls the SAME
+    shared pair, so the builder, parser and identity are one rule, never a
+    copy that could drift from the capture's (the pair lives at the
+    ``engine.v2.data`` parsing layer rather than here because the ops
+    dependency ratchet -- ``checks/ops_dependencies.json`` -- forbids
+    ``legacy_adapter`` importing this module: a ``legacy``-level module
+    reaching UP into ``stores`` would be both a level violation and a cycle
+    through this module's own ``iter_raw_fetch_cache`` import)."""
+    frame, raw, retrieved_at, source_hash = sources.parse_tier1_retrieval(entry)
+    return _stringify_dates(frame), raw, retrieved_at, source_hash
 
 
 _OVERLAP_COLUMNS = ("close_adj", "close_raw", "high_raw")
@@ -459,13 +456,15 @@ def _parse_and_order_entries(ticker: str, entries: list[tuple[str, dict]],
     parsed: list[dict] = []
     for source_kind, entry in entries:
         try:
-            frame, raw, retrieved_at = (_parse_px(entry) if source_kind == "legacy_px_csv"
-                                        else _parse_tier1(entry))
+            if source_kind == "legacy_px_csv":
+                frame, raw, retrieved_at = _parse_px(entry)
+                source_hash = hashlib.sha256(raw).hexdigest()
+            else:
+                frame, raw, retrieved_at, source_hash = _parse_tier1(entry)
         except Exception as exc:  # noqa: BLE001 -- see the docstring above.
             results.append({"ticker": ticker, "outcome": "error",
                            "error": getattr(exc, "code", type(exc).__name__)})
             continue
-        source_hash = hashlib.sha256(raw).hexdigest()
         parsed.append({"source_kind": source_kind, "frame": frame, "raw": raw,
                        "retrieved_at": retrieved_at, "source_hash": source_hash})
     parsed.sort(key=lambda item: (item["retrieved_at"], item["source_hash"]))

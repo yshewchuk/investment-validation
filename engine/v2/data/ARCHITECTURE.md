@@ -591,9 +591,9 @@ Root doc §5 invariants this package is responsible for:
   nightly derives its session calendar from the pinned `price_history` series of
   `price_history_table.CALENDAR_TICKER` (`SPY`), independent of any scoring
   scope or board universe. The source feeding capture must therefore carry it:
-  `ops price-refresh` schedules it daily (skipped only when a fetch already
-  holds the bar for the latest trading day <= that session), and
-  `ops price-history capture` refuses `SOURCE_NOT_FOUND`
+  `ops price-refresh` schedules it daily (skipped only when the newest
+  parseable retrieval already holds the bar for the latest trading day <=
+  that session), and `ops price-history capture` refuses `SOURCE_NOT_FOUND`
   (details name the ticker) before writing any fragment unless it has a live
   (non-tombstoned) latest-state row: for a ticker the source lists, in the
   capture's resulting state (the prior version is not consulted, so a listed

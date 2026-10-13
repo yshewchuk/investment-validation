@@ -268,19 +268,44 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
                 "INVENTORY_CACHED": ["2026-09-01"], "INVENTORY_OLD": ["2026-08-31"],
                 "SPY": ["2026-09-10"]}
 
-    def load_fetch_coverage(session, *, read_bars):
-        """Only the cached event ticker's body reaches today's required bar.
+    class _StubTier1Entry:
+        """A stand-in for the ``CachedEntry`` the coverage hook receives: the
+        read surface the production hook touches (meta, params, body), with no
+        filesystem behind it."""
 
-        The reader the adapter injects is proven here to be capture's own rule:
-        a row with an empty ``Adj Close`` is not a valid bar, and a body with no
-        ``Adj Close`` column at all is capture's typed refusal, not a date."""
+        def __init__(self, body: bytes):
+            self._body = body
+            self.meta = {"source": "yfinance", "endpoint": "history", "key": "stub",
+                         "params": {"ticker": "AAA", "period": "max"},
+                         "fetched_at": "2026-09-11T20:00:00+00:00", "status": 200}
+
+        @property
+        def params(self):
+            return dict(self.meta["params"])
+
+        def body(self):
+            return self._body
+
+    def load_fetch_coverage(session, *, read_retrieval):
+        """Only the cached event ticker's newest retrieval reaches today's
+        required bar.
+
+        The retrieval reader the adapter injects is proven here to be capture's
+        own rule: it returns the capture's ordering identity
+        ``(retrieved_at, source_hash)`` plus the valid bar dates, a row with an
+        empty ``Adj Close`` is not a valid bar, and a body with no ``Adj Close``
+        column at all is capture's typed refusal, not a date."""
         loaders.append("coverage")
         assert session == SESSION
-        bars = read_bars(b"Date,Open,High,Low,Close,Adj Close,Volume\n"
-                         b"2026-09-10,1,1,1,1,1,1\n2026-09-11,2,2,2,2,,1\n")
-        assert [str(pd.Timestamp(d).date()) for d in bars] == ["2026-09-10"]
+        retrieved_at, source_hash, dates = read_retrieval(
+            _StubTier1Entry(b"Date,Open,High,Low,Close,Adj Close,Volume\n"
+                            b"2026-09-10,1,1,1,1,1,1\n2026-09-11,2,2,2,2,,1\n"))
+        assert retrieved_at == "2026-09-11T20:00:00+00:00"
+        assert len(source_hash) == 64
+        assert [str(pd.Timestamp(d).date()) for d in dates] == ["2026-09-10"]
         with pytest.raises(DataError):
-            read_bars(b"Date,Open,High,Low,Close,Volume\n2026-09-11,1,1,1,1,1\n")
+            read_retrieval(_StubTier1Entry(
+                b"Date,Open,High,Low,Close,Volume\n2026-09-11,1,1,1,1,1\n"))
         return {"EVENT_CACHED": [SESSION], "EVENT_DAILY": ["2026-09-10"],
                 "SPY": ["2026-09-10"]}
 

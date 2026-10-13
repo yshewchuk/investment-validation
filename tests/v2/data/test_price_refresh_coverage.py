@@ -2,18 +2,26 @@
 
 The 2026-09-16 defect: a daily ticker was skipped because SOME fetch carried a
 ``fetched_at`` dated today, even when that fetch's body ended at yesterday's
-close (a pre-market run). These tests write into a real ``Fetcher`` over a
+close (a pre-market run). The newest-parseable-retrieval rule these tests pin
+is the ``price_history`` capture's own replay: retrievals sorted ascending by
+``(retrieved_at, source_hash)`` exactly as capture processes them, an older
+retrieval never counting once a newer valid one arrived (a date a later valid
+retrieval omits is tombstoned), and an unparseable newest skipped into the
+next-newest parseable one. These tests write into a real ``Fetcher`` over a
 throwaway root through a fake yfinance adapter that returns a CSV body per
 ticker, so the coverage read goes through the genuine gzip sidecar layout; the
 fetch's arrival stamp is frozen per write so "stamped today, last bar Friday"
 is an actual fixture rather than a comment.
 
-Which rows of a body count as valid bars is capture's rule, not a second one
-written for this loader: the tests inject the same wrapper
-``legacy_adapter.invoke_price_refresh`` passes in production
-(``engine.v2.data.price_download_sources.read_tier1_body``'s ``date`` column),
-so every fixture body here is a real 7-column Tier-1 body and a row capture
-would drop (null date, null ``Adj Close``) is dropped by the loader too.
+Which retrieval a fetch is and which rows of its body count as valid bars is
+capture's rule, not a second one written for this loader: the tests inject the
+same hook ``legacy_adapter.invoke_price_refresh`` passes in production
+(``engine.v2.ops.legacy_adapter.read_tier1_retrieval``, which builds, parses
+and hashes the entry through ``engine.v2.data.price_download_sources``'s
+shared ``tier1_retrieval_entry``/``parse_tier1_retrieval`` -- the very pair
+the capture's own ``_parse_tier1`` delegates to), so every fixture body here
+is a real 7-column Tier-1 body and a row capture would drop (null date, null
+``Adj Close``) is dropped by the loader too.
 """
 from __future__ import annotations
 
@@ -32,10 +40,12 @@ from engine.data.pulls import price_refresh as pr
 from engine.data.sources.base import Response
 from engine.data.throttle import SourceConfig, Throttle
 from engine.v2.data.errors import DataError
-from engine.v2.data.price_download_sources import read_tier1_body
+from engine.v2.ops.legacy_adapter import read_tier1_retrieval
 
 SESSION = "2026-09-14"  # a Monday; the prior trading day is Friday 2026-09-11
 PRIOR_SESSION = "2026-09-11"
+PREMARKET_STAMP = f"{SESSION}T13:30:00+00:00"
+POST_CLOSE_STAMP = f"{SESSION}T20:00:00+00:00"
 
 
 def _events(rows: list[tuple[str, str]]) -> pd.DataFrame:
@@ -44,11 +54,6 @@ def _events(rows: list[tuple[str, str]]) -> pd.DataFrame:
                              "event_date": pd.Series(dtype="datetime64[ns]")})
     tickers, dates = zip(*rows)
     return pd.DataFrame({"ticker": list(tickers), "event_date": pd.to_datetime(list(dates))})
-
-
-def _read_bars(body: bytes):
-    """The production wrapper: capture's reader, its valid bar dates."""
-    return read_tier1_body(body)["date"]
 
 
 def _tier1_bytes(rows: list[tuple[str, float, float | None]], *,
@@ -137,15 +142,18 @@ def _throttled_fetcher(fetch_root, adapter):
         adapters={"yfinance": adapter})
 
 
-def _frozen(day: date):
-    """``date``/``datetime`` substitutes whose ``today()``/``now()`` are ``day``.
+def _frozen(day: date, *, hour: int = 13, minute: int = 30):
+    """``date``/``datetime`` substitutes whose ``today()``/``now()`` are ``day``
+    at ``hour:minute`` UTC.
 
     ``Fetcher._persist`` stamps ``fetched_at`` from ``datetime.now(timezone.utc)``
     and ``cache_key`` takes the day from ``date.today()``, so patching both in
-    ``engine.data.fetch`` makes one write look like it arrived at 13:30 UTC on
-    ``day`` — pre-market, which is exactly the fetch that must not count.
+    ``engine.data.fetch`` makes one write look like it arrived at that moment —
+    pre-market (the default) is exactly the fetch that must not count, and a
+    post-close refetch needs its own, LATER stamp so "the newest retrieval"
+    is a fact of the fixture, not of the ``source_hash`` tie-break.
     """
-    moment = datetime(day.year, day.month, day.day, 13, 30, tzinfo=timezone.utc)
+    moment = datetime(day.year, day.month, day.day, hour, minute, tzinfo=timezone.utc)
 
     class _Day(date):
         @classmethod
@@ -165,13 +173,14 @@ def fetch_root(tmp_path):
     return tmp_path / "fetch"
 
 
-def _fetch(fetch_root, bodies, tickers, *, on, monkeypatch, refetch_token=None):
-    """One real ``Fetcher`` write per ticker, all stamped on ``on``."""
+def _fetch(fetch_root, bodies, tickers, *, on, monkeypatch, refetch_token=None,
+           hour: int = 13, minute: int = 30):
+    """One real ``Fetcher`` write per ticker, all stamped on ``on`` at that time."""
     adapter = _CsvYFAdapter(bodies)
     fetcher = Fetcher(fetch_root, throttle=Throttle(
         {"yfinance": SourceConfig("yfinance", 0.0, 0.0, 2, 10.0)}, sleep_fn=lambda s: None),
         adapters={"yfinance": adapter})
-    day_cls, now_cls = _frozen(on)
+    day_cls, now_cls = _frozen(on, hour=hour, minute=minute)
     monkeypatch.setattr(fetch_mod, "date", day_cls)
     monkeypatch.setattr(fetch_mod, "datetime", now_cls)
     for ticker in tickers:
@@ -191,21 +200,22 @@ def _write_raw_fetch(fetch_root, ticker, *, key, fetched_at, body_bytes, compres
         "fetched_at": fetched_at, "status": 200}))
 
 
-def test_the_reader_is_injected_because_legacy_has_no_validity_rule_of_its_own():
-    """Coverage validity is capture's rule, not a second one written here:
-    ``engine/data`` may not import ``engine.v2`` (``checks/import_layers.py``),
-    so ``load_fetch_coverage`` takes the reader as a required parameter and has
-    no CSV/row parsing of its own to fall back on. A call without ``read_bars``
-    is a TypeError, not a silent reimplementation of the rule."""
+def test_the_retrieval_reader_is_injected_because_legacy_has_no_rule_of_its_own():
+    """Coverage identity and validity are capture's rules, not a second pair
+    written here: ``engine/data`` may not import ``engine.v2``
+    (``checks/import_layers.py``), so ``load_fetch_coverage`` takes the
+    retrieval reader as a required parameter and has no CSV/row parsing or
+    retrieval-ordering rule of its own to fall back on. A call without
+    ``read_retrieval`` is a TypeError, not a silent reimplementation."""
     import inspect
 
     with pytest.raises(TypeError):
         pr.load_fetch_coverage(SESSION)
-    assert "read_bars" in inspect.signature(pr.load_fetch_coverage).parameters
+    assert "read_retrieval" in inspect.signature(pr.load_fetch_coverage).parameters
 
 
 # --------------------------------------------------------------------------
-# what a fetch covers is its bars, not its arrival stamp
+# what a ticker covers is its newest retrieval's bars, not any fetch's arrival
 # --------------------------------------------------------------------------
 
 
@@ -214,7 +224,8 @@ def test_a_same_day_fetch_ending_at_the_prior_session_is_not_coverage(fetch_root
     _fetch(fetch_root, {"AAA": _csv_bytes({PRIOR_SESSION: 100.0})}, ["AAA"],
            on=date(2026, 9, 14), monkeypatch=monkeypatch)
 
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     history = pr.load_fetch_history(fetch_root=fetch_root)
     assert coverage == {"AAA": [date(2026, 9, 11)]}
     assert history == {"AAA": [date(2026, 9, 14)]}, "fetched_at still says today"
@@ -229,7 +240,8 @@ def test_a_fetch_holding_the_session_bar_is_coverage(fetch_root, monkeypatch):
     _fetch(fetch_root, {"AAA": _csv_bytes({PRIOR_SESSION: 100.0, SESSION: 101.0})}, ["AAA"],
            on=date(2026, 9, 14), monkeypatch=monkeypatch)
 
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     assert coverage == {"AAA": [date(2026, 9, 14)]}
 
     plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]), price_universe=[],
@@ -238,33 +250,121 @@ def test_a_fetch_holding_the_session_bar_is_coverage(fetch_root, monkeypatch):
     assert plan["skipped_already_fetched"] == ["AAA"]
 
 
-def test_the_newest_bar_wins_across_a_ticker_s_fetches(fetch_root, monkeypatch):
-    """One entry per fetch, each carrying its own body date: a Monday
-    pre-market fetch holding Friday's close and a tokenized Monday refetch
-    holding Monday's close give the plan both candidate dates, and any of
-    them reaching the requirement skips it. (A Sunday-stamped Friday body is
-    no longer even read for a full Monday — the prefilter floor is the
-    required bar date now, see the weekend tests below.)"""
+def test_the_newest_retrieval_alone_is_the_coverage(fetch_root, monkeypatch):
+    """Capture replays retrievals in ascending ``(retrieved_at, source_hash)``
+    order, so the ticker's state is the NEWEST retrieval's bars: a Monday
+    13:30 pre-market fetch holding Friday's close followed by a Monday 20:00
+    tokenized refetch holding Monday's close leaves exactly ONE date on the
+    coverage list — Monday's, from the newest retrieval — and the plan skips."""
     _fetch(fetch_root, {"AAA": _csv_bytes({PRIOR_SESSION: 100.0})}, ["AAA"],
            on=date(2026, 9, 14), monkeypatch=monkeypatch)
     _fetch(fetch_root, {"AAA": _csv_bytes({SESSION: 101.0})}, ["AAA"],
-           on=date(2026, 9, 14), monkeypatch=monkeypatch, refetch_token="post-close")
+           on=date(2026, 9, 14), hour=20, monkeypatch=monkeypatch,
+           refetch_token="post-close")
 
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
-    assert sorted(coverage["AAA"]) == [date(2026, 9, 11), date(2026, 9, 14)]
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
+    assert coverage == {"AAA": [date(2026, 9, 14)]}, "newest retrieval only"
     plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]), price_universe=[],
                            fetch_coverage=coverage)
     assert plan["skipped_already_fetched"] == ["AAA"]
+
+
+def test_an_older_retrieval_covering_the_session_is_not_coverage_once_a_newer_omits_it(
+        fetch_root):
+    """The replay of ``price_history.diff_retrieval``'s tombstone rule: a date
+    the newest VALID retrieval omits is gone from the ticker's state even
+    though an older retrieval carried it — so the session is NOT covered and
+    the ticker goes back on the daily list, which is exactly what re-puts
+    Monday's close into the newest body."""
+    _write_raw_fetch(fetch_root, "AAA", key="older-with-session",
+                     fetched_at=PREMARKET_STAMP,
+                     body_bytes=_csv_bytes({PRIOR_SESSION: 100.0, SESSION: 101.0}))
+    _write_raw_fetch(fetch_root, "AAA", key="newer-without-session",
+                     fetched_at=POST_CLOSE_STAMP,
+                     body_bytes=_csv_bytes({PRIOR_SESSION: 100.0}))
+
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
+    assert coverage == {"AAA": [date(2026, 9, 11)]}, "older retrieval never counts"
+    plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]), price_universe=[],
+                           fetch_coverage=coverage)
+    assert plan["daily"] == ["AAA"]
+    assert plan["skipped_already_fetched"] == []
+
+
+def test_a_newer_retrieval_holding_the_bar_the_older_one_lacked_is_coverage(fetch_root):
+    """The other direction of the same replay: the older retrieval lacks
+    Monday, the newest holds it — coverage is the newest retrieval's date and
+    the ticker skips."""
+    _write_raw_fetch(fetch_root, "AAA", key="older-without-session",
+                     fetched_at=PREMARKET_STAMP,
+                     body_bytes=_csv_bytes({PRIOR_SESSION: 100.0}))
+    _write_raw_fetch(fetch_root, "AAA", key="newer-with-session",
+                     fetched_at=POST_CLOSE_STAMP,
+                     body_bytes=_csv_bytes({PRIOR_SESSION: 100.0, SESSION: 101.0}))
+
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
+    assert coverage == {"AAA": [date(2026, 9, 14)]}
+    plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]), price_universe=[],
+                           fetch_coverage=coverage)
+    assert plan["skipped_already_fetched"] == ["AAA"]
+
+
+def test_a_corrupt_newest_retrieval_falls_back_to_the_next_newest_parseable_one(
+        fetch_root):
+    """Capture skips the retrieval whose parse raises (an ``error`` outcome
+    that changes nothing) and keeps the ticker's state at the newest retrieval
+    that DID parse — coverage mirrors it: an undecodable newest body falls
+    back to the older parseable retrieval, which still covers the session."""
+    _write_raw_fetch(fetch_root, "AAA", key="older-good",
+                     fetched_at=PREMARKET_STAMP,
+                     body_bytes=_csv_bytes({PRIOR_SESSION: 100.0, SESSION: 101.0}))
+    _write_raw_fetch(fetch_root, "AAA", key="newer-corrupt",
+                     fetched_at=POST_CLOSE_STAMP,
+                     body_bytes=b"this is not a gzip stream at all", compressed=False)
+
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
+    assert coverage == {"AAA": [date(2026, 9, 14)]}
+    plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]), price_universe=[],
+                           fetch_coverage=coverage)
+    assert plan["skipped_already_fetched"] == ["AAA"]
+
+
+def test_a_newer_retrieval_whose_session_row_has_a_null_adj_close_is_not_coverage(
+        fetch_root):
+    """The newest retrieval parses, but capture's reader drops its Monday row
+    (null ``Adj Close`` is not a row capture stores), so the state — and the
+    coverage — ends at Friday even though the older retrieval held a valid
+    Monday bar: not covered, refetch."""
+    _write_raw_fetch(fetch_root, "AAA", key="older-good",
+                     fetched_at=PREMARKET_STAMP,
+                     body_bytes=_csv_bytes({PRIOR_SESSION: 100.0, SESSION: 101.0}))
+    _write_raw_fetch(fetch_root, "AAA", key="newer-null-adj-session-row",
+                     fetched_at=POST_CLOSE_STAMP,
+                     body_bytes=_tier1_bytes([(PRIOR_SESSION, 100.0, 100.0),
+                                              (SESSION, 101.0, None)]))
+
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
+    assert coverage == {"AAA": [date(2026, 9, 11)]}
+    plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]), price_universe=[],
+                           fetch_coverage=coverage)
+    assert plan["daily"] == ["AAA"]
 
 
 def test_the_body_of_a_fetch_stamp_too_old_to_hold_the_bar_is_never_opened(
         fetch_root, monkeypatch):
     """Cheap prefilter only: a ``fetched_at`` before the required bar date
     (here: Friday stamped, full Monday session requiring Monday's own bar)
-    cannot contain that bar, so the body is skipped and contributes nothing."""
+    cannot contain that bar, so the body is skipped and contributes nothing —
+    and it never enters the newest-retrieval ordering either."""
     _write_raw_fetch(fetch_root, "AAA", key="stalefr", fetched_at="2026-09-11T20:00:00+00:00",
                      body_bytes=_csv_bytes({SESSION: 101.0}))
-    assert pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root) == {}
+    assert pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                  fetch_root=fetch_root) == {}
 
 
 # --------------------------------------------------------------------------
@@ -286,10 +386,11 @@ def test_an_unreadable_fetch_contributes_nothing(fetch_root, key, body, compress
     shapes: an undecodable body, an empty one, one with no usable dates, and
     the two bodies ``read_tier1_body`` refuses typed (no ``Adj Close`` column;
     an ``Adj Close`` that parses entirely NaN) all contribute nothing."""
-    _write_raw_fetch(fetch_root, "BAD", key=key, fetched_at=f"{SESSION}T20:00:00+00:00",
+    _write_raw_fetch(fetch_root, "BAD", key=key, fetched_at=POST_CLOSE_STAMP,
                      body_bytes=body, compressed=compressed)
 
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     assert coverage == {}
     plan = pr.plan_refresh(SESSION, events=_events([("BAD", SESSION)]), price_universe=[],
                            fetch_coverage=coverage)
@@ -298,18 +399,20 @@ def test_an_unreadable_fetch_contributes_nothing(fetch_root, key, body, compress
 
 def test_a_body_missing_the_adj_close_column_is_not_coverage_and_does_not_raise(fetch_root):
     """The loader swallows capture's typed refusal rather than re-deriving its
-    own rule: ``read_tier1_body`` raises ``CONTRACT_MISMATCH`` on this body —
-    proved directly above — and the coverage read turns that into "this fetch
-    covers nothing", which only ever lengthens the daily list."""
+    own rule: the injected hook raises ``CONTRACT_MISMATCH`` on this body —
+    proved directly on the entry here — and the coverage read turns that into
+    "this fetch covers nothing", which only ever lengthens the daily list."""
     body = _tier1_bytes([(PRIOR_SESSION, 100.0, 100.0), (SESSION, 101.0, 101.0)],
                         with_adj_close=False)
+    _write_raw_fetch(fetch_root, "BAD", key="no-adj-column",
+                     fetched_at=POST_CLOSE_STAMP, body_bytes=body)
+    entry = fetch_mod.iter_cached("yfinance", "history", root=fetch_root)[0]
     with pytest.raises(DataError) as refusal:
-        _read_bars(body)
+        read_tier1_retrieval(entry)
     assert refusal.value.code == "CONTRACT_MISMATCH"
 
-    _write_raw_fetch(fetch_root, "BAD", key="no-adj-column",
-                     fetched_at=f"{SESSION}T20:00:00+00:00", body_bytes=body)
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     assert coverage == {}
     plan = pr.plan_refresh(SESSION, events=_events([("BAD", SESSION)]), price_universe=[],
                            fetch_coverage=coverage)
@@ -323,15 +426,16 @@ def test_a_latest_row_with_an_empty_adj_close_is_not_the_session_bar(fetch_root)
     stays planned daily — while the identical body whose last row does carry an
     ``Adj Close`` covers the session and skips."""
     _write_raw_fetch(fetch_root, "NOADJ", key="latest-row-no-adj",
-                     fetched_at=f"{SESSION}T20:00:00+00:00",
+                     fetched_at=POST_CLOSE_STAMP,
                      body_bytes=_tier1_bytes([(PRIOR_SESSION, 100.0, 100.0),
                                               (SESSION, 101.0, None)]))
     _write_raw_fetch(fetch_root, "WITHADJ", key="latest-row-with-adj",
-                     fetched_at=f"{SESSION}T20:00:00+00:00",
+                     fetched_at=POST_CLOSE_STAMP,
                      body_bytes=_tier1_bytes([(PRIOR_SESSION, 100.0, 100.0),
                                               (SESSION, 101.0, 101.0)]))
 
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     assert coverage == {"NOADJ": [date(2026, 9, 11)], "WITHADJ": [date(2026, 9, 14)]}
 
     plan = pr.plan_refresh(SESSION,
@@ -342,7 +446,8 @@ def test_a_latest_row_with_an_empty_adj_close_is_not_the_session_bar(fetch_root)
 
 
 def test_a_ticker_with_no_entry_at_all_is_daily(fetch_root):
-    assert pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root) == {}
+    assert pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                  fetch_root=fetch_root) == {}
     plan = pr.plan_refresh(SESSION, events=_events([("NEWCO", SESSION)]), price_universe=[],
                            always_daily=("SPY",))
     assert plan["daily"] == ["NEWCO", "SPY"]
@@ -362,8 +467,9 @@ def test_a_mixed_board_partitions_into_exactly_one_bucket_each(fetch_root, monke
     _fetch(fetch_root, bodies, ["COVERED", "PREMARKET", "STALE"],
            on=date(2026, 9, 14), monkeypatch=monkeypatch)
     _write_raw_fetch(fetch_root, "CORRUPT", key="corrupt",
-                     fetched_at=f"{SESSION}T20:00:00+00:00", body_bytes=b"nope", compressed=False)
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
+                     fetched_at=POST_CLOSE_STAMP, body_bytes=b"nope", compressed=False)
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     events = _events([("COVERED", SESSION), ("PREMARKET", SESSION), ("STALE", SESSION),
                       ("CORRUPT", SESSION), ("UNSEEN", SESSION)])
 
@@ -393,7 +499,8 @@ def test_a_holiday_session_is_skipped_by_a_fetch_holding_the_prior_friday(
     holiday = "2026-09-07"
     _fetch(fetch_root, {"AAA": _csv_bytes({"2026-09-03": 99.0, "2026-09-04": 100.0})}, ["AAA"],
            on=date(2026, 9, 6), monkeypatch=monkeypatch)
-    coverage = pr.load_fetch_coverage(holiday, read_bars=_read_bars, fetch_root=fetch_root)
+    coverage = pr.load_fetch_coverage(holiday, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     assert coverage == {"AAA": [date(2026, 9, 4)]}
 
     plan = pr.plan_refresh(holiday, events=_events([("AAA", holiday)]),
@@ -419,7 +526,8 @@ def test_a_friday_stamped_fetch_is_read_for_the_weekend_and_holiday_sessions(fet
                      fetched_at="2026-09-04T20:00:00+00:00",
                      body_bytes=_csv_bytes({"2026-09-03": 99.0, "2026-09-04": 100.0}))
     for session in ("2026-09-05", "2026-09-06", "2026-09-07"):
-        coverage = pr.load_fetch_coverage(session, read_bars=_read_bars, fetch_root=fetch_root)
+        coverage = pr.load_fetch_coverage(session, read_retrieval=read_tier1_retrieval,
+                                          fetch_root=fetch_root)
         assert coverage == {"AAA": [date(2026, 9, 4)]}, session
         plan = pr.plan_refresh(session, events=_events([]), price_universe=[],
                                always_daily=("AAA",), fetch_coverage=coverage)
@@ -442,11 +550,11 @@ def test_a_fetch_stamped_before_the_required_day_is_never_read(fetch_root):
 
     reached = []
 
-    def _no_body_reads(body: bytes):
-        reached.append(body)
-        raise AssertionError("a fetch before the required bar date must not open its body")
+    def _no_retrieval_reads(entry):
+        reached.append(entry)
+        raise AssertionError("a fetch before the required bar date must not be read")
 
-    coverage = pr.load_fetch_coverage("2026-09-07", read_bars=_no_body_reads,
+    coverage = pr.load_fetch_coverage("2026-09-07", read_retrieval=_no_retrieval_reads,
                                       fetch_root=fetch_root)
     assert reached == []
     assert coverage == {}
@@ -461,17 +569,18 @@ def test_a_fetch_stamped_before_the_required_day_is_never_read(fetch_root):
 
 
 def test_a_corrupt_gzip_body_raising_zlib_error_contributes_nothing(fetch_root):
-    """Valid gzip header, garbage deflate stream: ``entry.body()`` dies with
-    ``zlib.error`` inside the read, and the ticker simply goes on today's
+    """Valid gzip header, garbage deflate stream: the retrieval read dies with
+    ``zlib.error`` inside the hook, and the ticker simply goes on today's
     daily list instead of taking the coverage load down with it."""
     corrupt = gzip.compress(_csv_bytes({SESSION: 101.0}))[:10] + b"\xff\xff\xff\xff no deflate"
     with pytest.raises(zlib.error):
         gzip.decompress(corrupt)
     _write_raw_fetch(fetch_root, "BAD", key="zlib-error",
-                     fetched_at=f"{SESSION}T20:00:00+00:00",
+                     fetched_at=POST_CLOSE_STAMP,
                      body_bytes=corrupt, compressed=False)
 
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     assert coverage == {}
     plan = pr.plan_refresh(SESSION, events=_events([("BAD", SESSION)]), price_universe=[],
                            fetch_coverage=coverage)
@@ -492,7 +601,8 @@ def test_tz_aware_bar_dates_parse_to_their_trade_date(fetch_root):
     _write_raw_fetch(fetch_root, "AAA", key="tz-aware-bar",
                      fetched_at="2026-10-09T20:00:00+00:00",
                      body_bytes=_tier1_bytes([("2026-10-09 00:00:00-04:00", 100.0, 100.0)]))
-    coverage = pr.load_fetch_coverage("2026-10-11", read_bars=_read_bars, fetch_root=fetch_root)
+    coverage = pr.load_fetch_coverage("2026-10-11", read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     assert coverage == {"AAA": [date(2026, 10, 9)]}
 
 
@@ -555,10 +665,14 @@ def test_fetcher_fetch_with_token_does_not_read_the_cached_entry(fetch_root):
 
 def test_daily_refresh_refetches_past_todays_cached_premarket_body(fetch_root, monkeypatch):
     """Execution-level walk of the 2026-10-12 defect's fix: a pre-market body
-    stamped today caches the plain ``live=True`` key, planning still demands
+    stamped 13:30 caches the plain ``live=True`` key, planning still demands
     the session bar, and ``run_refresh``'s daily token makes the second
     network call genuinely happen — adapter, not cache — leaving BOTH bodies
-    on disk (append-only) so the next plan skips the ticker."""
+    on disk (append-only) so the NEXT plan skips the ticker. The refetch's own
+    ``fetched_at`` is stamped later (20:00), because capture orders
+    retrievals by ``(retrieved_at, source_hash)`` and a same-minute tie would
+    make "the newest retrieval" a coin flip of body hashes rather than
+    arrival."""
     premarket = _csv_bytes({PRIOR_SESSION: 100.0})
     with_session_bar = _csv_bytes({PRIOR_SESSION: 100.0, SESSION: 101.0})
     adapter = _ScriptedYFAdapter({"AAA": [premarket, with_session_bar]})
@@ -571,21 +685,25 @@ def test_daily_refresh_refetches_past_todays_cached_premarket_body(fetch_root, m
     assert adapter.requests == ["AAA"]
     assert fetcher.network_calls == 1
 
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
     history = pr.load_fetch_history(fetch_root=fetch_root)
     plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]), price_universe=[],
                            fetch_history=history, fetch_coverage=coverage)
     assert plan["daily"] == ["AAA"], "stamped today, holds only Friday's bar"
     assert plan["skipped_already_fetched"] == []
 
+    _, post_close_cls = _frozen(date(2026, 9, 14), hour=20)
+    monkeypatch.setattr(fetch_mod, "datetime", post_close_cls)
     report = pr.run_refresh(plan, fetcher)
     assert report["failed"] == []
     assert report["fetched"]["daily"] == ["AAA"]
     assert adapter.requests == ["AAA", "AAA"], "the daily refetch reached the adapter again"
     assert fetcher.network_calls == 2
 
-    coverage = pr.load_fetch_coverage(SESSION, read_bars=_read_bars, fetch_root=fetch_root)
-    assert max(coverage["AAA"]) >= date(2026, 9, 14)
+    coverage = pr.load_fetch_coverage(SESSION, read_retrieval=read_tier1_retrieval,
+                                      fetch_root=fetch_root)
+    assert coverage == {"AAA": [date(2026, 9, 14)]}, "the newest retrieval alone counts"
     next_plan = pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]),
                                 price_universe=[], fetch_coverage=coverage)
     assert next_plan["daily"] == []

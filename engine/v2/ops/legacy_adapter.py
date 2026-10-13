@@ -45,8 +45,8 @@ _LEGACY_FINALITY_ORIGINALS = {
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
            "invoke_price_refresh", "invoke_score_calendar", "iter_raw_fetch_cache",
            "manifest_files", "overlay_read_set", "projected_trading_sessions",
-           "run_engineering_gate", "run_legacy_rebuild", "run_legacy_script",
-           "run_security_scan", "verify_export_generation"]
+           "read_tier1_retrieval", "run_engineering_gate", "run_legacy_rebuild",
+           "run_legacy_script", "run_security_scan", "verify_export_generation"]
 
 
 def projected_trading_sessions(start, end) -> tuple[str, ...]:
@@ -291,6 +291,31 @@ def invoke_score_calendar(root, as_of, *, scorer, tickers=None, horizon_days=35)
                           scorer=scorer, tickers=tickers, progress_every=10)
 
 
+def read_tier1_retrieval(cached_entry):
+    """One cached Tier-1 entry as ``(retrieved_at, source_hash, valid bar
+    dates)``, built and parsed through the SAME shared pair the capture runs
+    (``engine.v2.data.price_download_sources.tier1_retrieval_entry``/
+    ``parse_tier1_retrieval``, which ``price_history_store._parse_tier1``
+    itself delegates to): capture's entry shape and ``fetched_at``/mtime
+    fallback, capture's ``read_tier1_body`` row validity, and capture's own
+    ``sha256(body + NUL + sorted-meta JSON)`` ordering identity. Injected into
+    ``engine.data.pulls.price_refresh.load_fetch_coverage`` so the daily skip
+    replays the capture's ``(retrieved_at, source_hash)`` ordering and newest
+    valid retrieval's bars rather than restating a rule that could drift from
+    it; a fetch whose parse raises is skipped exactly as capture skips it. The
+    pair lives at the parsing layer because the ops dependency ratchet
+    (``checks/ops_dependencies.json``) forbids this module importing
+    ``price_history_store`` (it already imports THIS module)."""
+    from engine.v2.data.price_download_sources import (
+        parse_tier1_retrieval,
+        tier1_retrieval_entry,
+    )
+
+    frame, _raw, retrieved_at, source_hash = parse_tier1_retrieval(
+        tier1_retrieval_entry(cached_entry))
+    return retrieved_at, source_hash, frame["date"]
+
+
 def invoke_price_refresh(session, *, dry_run: bool = False,
                          planned_tickers=None, source_root=None):
     """Plan (and, unless ``dry_run``, run) one ``ops price-refresh`` pass.
@@ -312,21 +337,20 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
         plan_refresh,
         run_refresh,
     )
-    from engine.v2.data.price_download_sources import read_tier1_body
     from engine.v2.data.price_history_table import CALENDAR_TICKER
 
     # ``price_refresh`` is legacy and cannot import ``engine.v2``, so capture's
-    # own row-validity rule is injected: a body's coverage is its newest bar
-    # that ``read_tier1_body`` would actually return (a null-date or
-    # null-``Adj Close`` row is dropped, a contract-mismatched body refuses),
-    # never a second validity rule that could drift from the capture's.
+    # own retrieval rule is injected: each dated fetch is read through
+    # :func:`read_tier1_retrieval` -- capture's entry builder, parser and
+    # ordering identity -- so a daily ticker is skipped only when the NEWEST
+    # parseable retrieval's own valid bars cover the required session bar,
+    # exactly the replay that decides the ticker's ``price_history`` state.
     fetch_root = None
     if planned_tickers is None:
         plan = plan_refresh(session, events=load_events(), price_universe=load_price_universe(),
                             fetch_history=load_fetch_history(),
                             fetch_coverage=load_fetch_coverage(
-                                session,
-                                read_bars=lambda body: read_tier1_body(body)["date"]),
+                                session, read_retrieval=read_tier1_retrieval),
                             always_daily=(CALENDAR_TICKER,))
     else:
         import pandas as pd
@@ -338,7 +362,7 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
                             price_universe=(), fetch_history=load_fetch_history(fetch_root=fetch_root),
                             fetch_coverage=load_fetch_coverage(
                                 session, fetch_root=fetch_root,
-                                read_bars=lambda body: read_tier1_body(body)["date"]),
+                                read_retrieval=read_tier1_retrieval),
                             always_daily=(*planned_tickers, CALENDAR_TICKER))
     if dry_run:
         return {"plan": plan, "report": None}

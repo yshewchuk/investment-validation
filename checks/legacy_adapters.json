@@ -864,15 +864,15 @@
       "package": "engine.v2.ops",
       "module": "engine.v2.ops.legacy_adapter",
       "legacy_symbol": "engine.data.pulls.price_refresh.load_fetch_coverage",
-      "reason": "ops price-refresh's read-only Tier-1 coverage loader: newest valid bar date per dated yfinance history fetch, validity per capture's own reader (read_tier1_body, injected), so a daily ticker is skipped only when its fetch holds the session's bar",
+      "reason": "ops price-refresh's read-only Tier-1 coverage loader: the newest valid bar date of each ticker's newest successfully-parsed dated yfinance history fetch, retrieval ordering and row validity per capture's own reader (read_tier1_retrieval, injected through the price_download_sources entry builder/parser the capture itself delegates to), so the daily skip replays the capture",
       "declared_on": "2026-10-13",
       "runtime": "invoke_price_refresh",
-      "read_set": "Tier-1 fetch store (yfinance history bodies): fetches stamped on or after the latest trading day <= session; valid bars per capture's reader",
+      "read_set": "Tier-1 fetch store (yfinance history bodies): fetches stamped on or after the latest trading day <= session; retrieval order and valid bars per capture's own parse",
       "write_set": "none",
       "credentials": "none",
       "hidden_subprocesses": "none",
       "retry": "none",
-      "output": "{ticker: [date, ...]}",
+      "output": "{ticker: [date]} (newest parseable retrieval only)",
       "removal_phase": "phase-4 data extraction"
     },
     {
