@@ -9,14 +9,19 @@
 # Checks 6 (doc budgets) and 7 (Markdown) are not in the nightly gate; the
 # Markdown check is enforced by CI's "Lint Markdown" step.
 #
-# Checks 1-6 read STAGED BLOBS, not the working tree: checking the working tree
-# passes or fails on content that is not what would be committed. Checks 1-4 and 6
-# are stdlib-only and parse with `ast` rather than importing, because importing
-# `engine.score` loads a panel and a two-minute hook gets deleted. Check 5 runs the
-# pinned Ruff.
-# Exception: check 7 (Markdown) needs Node and lints the WORKING-TREE copy of each
-# staged .md file (markdownlint-cli2 cannot read a blob). CI lints every .md and is
-# the authority.
+# Inputs in the hook's default mode (checked against each check's code):
+#   1 hygiene, 2 import layers, 3 code budgets, 5 v2 lint: STAGED BLOBS of the staged
+#     files, so the result is about what would be committed (1 also reads the
+#     working-tree .env for secret values; 5 reads requirements.txt staged).
+#   4 package READMEs: staged blobs layered over the WORKING-TREE copy of every
+#     tracked, unstaged file (the import graph needs the whole tree).
+#   6 ARCHITECTURE.md budgets: staged blobs of tracked ARCHITECTURE.md files, compared
+#     with the base ref.
+#   7 Markdown: the WORKING-TREE copy of each staged .md file (markdownlint-cli2 cannot
+#     read a blob). CI lints every .md and is the authority.
+# Checks 1-4 and 6 are stdlib-only and parse with `ast` rather than importing, because
+# importing `engine.score` loads a panel and a two-minute hook gets deleted. Check 5
+# runs the pinned Ruff; check 7 needs Node.
 #
 # Order is cheapest-and-most-catastrophic first: a leaked credential is
 # permanent, a layer violation is not.

@@ -34,7 +34,10 @@ now live and raises `FileNotFoundError` if one is missing.
 Markdown is linted by `markdownlint-cli2` (rules in `.markdownlint-cli2.jsonc`),
 run by the pre-commit hook on the working-tree copy of each staged `.md` file and by
 the Tests workflow on all `.md`. In the hook, checks 1-4 and 6 are stdlib-only, check 5
-runs Ruff, and check 7 needs Node; check 7 is the only one that reads the working tree.
+runs Ruff, and check 7 needs Node. Default-mode inputs: checks 1, 2, 3 and 5 read staged
+blobs (1 also reads the working-tree `.env`); check 4 layers staged blobs over the
+working-tree copy of every tracked unstaged file; check 6 reads staged blobs against the
+base ref; check 7 reads the working-tree copy of each staged `.md`.
 
 The Phase 1 check binds the active test inventory to source and test
 contents. It reports suite-version, inventory, or source drift when the
