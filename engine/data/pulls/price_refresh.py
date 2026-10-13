@@ -373,10 +373,11 @@ def fetch_one(fetcher: Fetcher, ticker: str, *, refetch_token: str | None = None
     name, not a reason to abort a 200-ticker run (the lesson
     ``computed_moves.py``'s BF_B comment, lines ~150-153, already paid for).
 
-    ``refetch_token`` is passed through to ``fetcher.fetch``: a token makes the
-    call a guaranteed cache miss (a distinct Tier-1 entry) when the cached
-    answer — e.g. today's pre-market body — is known stale. ``None`` is the
-    ordinary cache-first path.
+    ``refetch_token`` is passed through to ``fetcher.fetch``: a fresh token
+    (one per refetch call) misses the cache and forces a network call (a
+    distinct Tier-1 entry) when the cached answer — e.g. today's pre-market
+    body — is known stale; reusing the same request with the same token hits
+    the cached entry. ``None`` is the ordinary cache-first path.
 
     ``CredentialRotated`` is the one exception and is left to propagate: it
     means every subsequent call will fail identically until a human updates
