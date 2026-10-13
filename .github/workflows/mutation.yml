@@ -788,13 +788,22 @@ jobs:
           else
             echo "::warning::could not compute the PR diff"
           fi
-          # main's last completed push report: failures it shows too are not PR-owned.
-          run_id=$(gh run list --repo "$REPO" --workflow mutation.yml --branch main \
-            --event push --status completed --limit 1 --json databaseId \
-            --jq '.[0].databaseId' 2>/dev/null || true)
-          if [ -n "$run_id" ] && gh run download "$run_id" --repo "$REPO" \
-              -n mutation-report -D baseline 2>/dev/null && [ -f baseline/summary.json ]; then
-            args+=(--baseline-summary baseline/summary.json)
+          # main's newest recent push run that HAS a mutation-report artifact (a
+          # docs-only push runs no mutation jobs): failures it shows too are not PR-owned.
+          have_baseline=0
+          for run_id in $(gh run list --repo "$REPO" --workflow mutation.yml --branch main \
+              --event push --status completed --limit 10 --json databaseId \
+              --jq '.[].databaseId' 2>/dev/null || true); do
+            rm -rf baseline
+            if gh run download "$run_id" --repo "$REPO" -n mutation-report -D baseline 2>/dev/null \
+                && [ -f baseline/summary.json ]; then
+              args+=(--baseline-summary baseline/summary.json)
+              have_baseline=1
+              break
+            fi
+          done
+          if [ "$have_baseline" = 0 ]; then
+            echo "::warning::no recent main push run has a mutation-report artifact; no failure is excused as pre-existing"
           fi
           python tools/mutation_pr_status.py "${args[@]}"
 
@@ -832,6 +841,15 @@ jobs:
           if [ "$MODULES" = "[]" ]; then
             state=success
             desc="gremlins: skipped (closed PR or no eligible module) by design"
+          # issue #64 (Opus gate on 733fd56): a merge race can stub a module's
+          # results (0-mutant placeholder) while `report` itself still exits
+          # 0 -- not a tool error, but not a real measurement either. This
+          # must never post `success`: that would claim every module was
+          # measured when some were only a placeholder. Checked BEFORE the
+          # classified verdict, which counts such a module as infra.
+          elif [ "${SKIPPED_COUNT:-0}" != "0" ]; then
+            state=failure
+            desc="gremlins: skipped (PR closed) for $SKIPPED_COUNT of $(jq -r 'length' <<< "$MODULES") module(s) -- partial coverage, not a valid full run"
           # tools/mutation_pr_status.py: red only for PR-owned problems; infra
           # problems (timeouts, cancels, runner errors, failures main shows too)
           # are warnings and never change the state.
@@ -841,14 +859,6 @@ jobs:
           elif [ "$REPORT_RESULT" != "success" ]; then
             state=failure
             desc="gremlins: report job ${REPORT_RESULT} -- see run for detail"
-          # issue #64 (Opus gate on 733fd56): a merge race can stub a module's
-          # results (0-mutant placeholder) while `report` itself still exits
-          # 0 -- not a tool error, but not a real measurement either. This
-          # must never post `success`: that would claim every module was
-          # measured when some were only a placeholder.
-          elif [ "${SKIPPED_COUNT:-0}" != "0" ]; then
-            state=failure
-            desc="gremlins: skipped (PR closed) for $SKIPPED_COUNT of $(jq -r 'length' <<< "$MODULES") module(s) -- partial coverage, not a valid full run"
           else
             state=success
             desc="gremlins: report published for $(jq -r 'length' <<< "$MODULES") module(s)"
