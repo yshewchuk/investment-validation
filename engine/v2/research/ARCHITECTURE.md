@@ -519,6 +519,7 @@ Callers: no `engine/` modules import this package (checked by `checks/import_lay
 `load_magnitude_targets` and `qualify_magnitude_training_targets`.
 `experiments/native_registration.py` consumes
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
+`experiments/magnitude_history_store.py` consumes the stored-history context, build and read APIs.
 Other consumers include `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
 trade, calendar, and chain inputs from pinned v2 data. The archived
 trade-read caller omits required holdout context and is refused.
@@ -536,52 +537,27 @@ parsed by the layering hook (it only parses `engine*` importers, and
 
 ### Stored magnitude-history materialization
 
-`experiments.magnitude_history_store` is the explicit build/read entrypoint for
-`research_magnitude_history.v1`. It derives a closed context from an exact source
-snapshot, admitted temporal plan, explicit history start, fixed 5/3/1 clocks,
-per-feature missingness and its own source/environment closure. The source stays
-unchanged; a dedicated context scope holds a features-only output snapshot.
-Every row physically binds the context digest. No experiment output is an input.
-Engine materialization requires that derived context and globally checks target identity/windows.
+`experiments.magnitude_history_store` derives the supported build/read context.
+The engine accepts digest-consistent contexts; materialization independently guards target identity/windows.
+It does not authenticate arbitrary rehashed calendars as builder-derived.
 
-The builder preflights the complete eligible historical candidate union before
-any outcome opens, then uses the existing protected history arithmetic at build
-time. Protected/ambiguous objects never open; admitted late labels may decode
-availability and be omitted. Planning reads the calendar once; one further
-population scan prepares the candidate union. A lazy build-local cache decodes
-at most one row per admitted candidate, only after its forecast window selects it.
-Shared arithmetic preserves availability and numeric-refusal ordering.
-Cache memory is O(admitted candidates), without a byte cap; no cache survives a build.
-Production scale is unmeasured; objects, omissions and availability are stored with the columns.
-`n_prior` is zero for empty history; other missing features stay null with explicit
-`on_missing=null`, never runtime imputation or production v4 aggregates.
-
-Three ordered horizons share one event-isolated object. The native primary key
-is `(event_id, context_id, horizon_sessions)` with a context partition. Publication
-inspects new objects and atomically commits their manifests and success receipt
-under an initially empty deterministic scope. Failed publication leaves no
-admitted snapshot; complete unreferenced objects may remain for normal cleanup.
-A matching success receipt returns the original artifact without moving a head.
-Conflicting receipts/heads refuse; no automatic retry or failed-receipt poisoning.
-
-The reader reconstructs the context, verifies its exact committed receipt/output,
-and preflights the complete object set before opening feature objects. It then
-validates all row identity/cutoff/context metadata before decoding feature columns.
-Object checksum verification reads bytes; the second boundary is column decoding,
-not a claim that feature bytes were untouched. Missing/mixed/stale contexts or
-malformed values refuse the whole read. No historical outcomes or arithmetic are
-used by the reader. Native inspected catalog metadata is the trust anchor, not
-independent attestation against an arbitrary malicious catalog writer.
-Context/receipt drift refuses `IDENTITY_CONFLICT`; unprovable physical isolation
-refuses `HOLDOUT_ACCESS_DENIED`; bad stored schema/metadata/missingness refuses
-`CONTRACT_MISMATCH`. Native catalog, object and source-admission errors propagate.
-Schedule-as-known and source-publication availability remain unverified
-reconstruction. This prerequisite grants no experiment/final-read authority and
-does not change registration v1.0–v1.3 or the fixed-intercept baseline.
+| Boundary | Contract |
+|---|---|
+| Inputs | Exact source snapshot, admitted temporal plan, history start, fixed 5/3/1 clocks, per-feature missingness and installed producer source/environment identity. No experiment outputs. |
+| Protected reads | The complete eligible singleton candidate union is preflighted before any outcome opens. Protected/ambiguous objects never open; admitted late labels may decode availability and be omitted before arithmetic. |
+| Build cost | One calendar pass and two population passes. Lazy, build-local outcome caching retains at most one singleton row per admitted candidate; O(candidate union) memory, no fixed byte cap. Scale is unmeasured. |
+| Per-forecast features | Shared history arithmetic preserves availability and numeric-refusal order. Consumed objects, omissions and availability accompany all eleven columns. Empty `n_prior` is zero; other missing values are null with `on_missing=null`. No runtime imputation or production v4 aggregates. |
+| Output | Features-only `research_magnitude_history.v1` snapshot, separate from unchanged source. Three ordered horizons per event-isolated object; primary key `(event_id, context_id, horizon_sessions)`, physical context field and context partition. |
+| Publication | Inspected objects/manifests and success receipt commit atomically under an initially empty deterministic scope. Failure admits no snapshot; complete unreferenced objects remain for normal cleanup. |
+| Replay/conflict | Matching success receipt returns the original artifact without moving a head. Conflicting receipts/heads refuse; no automatic retry or failed-receipt poisoning. |
+| Stored read | Supported entrypoint reconstructs context; engine verifies exact receipt/output and complete object isolation, then all row metadata before feature-column decoding. Checksum verification reads bytes. No historical outcomes or arithmetic; malformed reads return no partial rows. |
+| Trust/authority | Native inspected catalog metadata is trusted, not independent attestation against malicious catalog writers. Schedule/source-publication availability remain unverified reconstruction. No experiment/final-read authority; registration v1.0–v1.3 and fixed baseline are unchanged. |
+| Refusals | Context/receipt drift: `IDENTITY_CONFLICT`; unprovable isolation: `HOLDOUT_ACCESS_DENIED`; bad stored schema/metadata/missingness: `CONTRACT_MISMATCH`. Native catalog/object/source-admission errors propagate. |
 
 ## External systems and libraries
 
-None directly: no network call (Polygon/ORATS pulls stay in
+Direct libraries include pandas/numpy for tabular/numerical work and pyarrow
+for native stored-history Parquet. No network call (Polygon/ORATS pulls stay in
 `engine/data/pulls/`, legacy and unmoved). Snapshot access uses
 `ArtifactStore` and the sqlite catalog connection it is handed. Two
 exceptions, both plain local files outside `ArtifactStore` and never
@@ -604,14 +580,13 @@ caller that leaves `calendar` unset — so every path to a calendar in this
 package ends at a pinned snapshot or an explicit argument, never a local
 file, and a run's calendar is fixed by its `snapshot_id` like everything
 else it reads (see Failure semantics, Invariants). No third-party service.
-`pandas`/`numpy`/`pyarrow` for frame arithmetic.
 
 ## Failure semantics
 
 The 4c R1–R6 template covers data-boundary refusals, which generally use `DataError`
 (`engine.v2.data.errors.DataError`) carrying one of the registered
-`DATA_FAILURE_CODES`, which a CLI catches at `main()` and exits 2 with the
-code and message on stderr rather than a bare traceback. CLI argument
+`DATA_FAILURE_CODES`, which CLI leaves catch at `main()` and exit 2.
+Stored-history runtime refusals are JSON on stdout; other tools print code/message on stderr. CLI argument
 validation is described separately because it can refuse before `main()`
 reaches that handler. One pre-existing data-path exception, called out below
 where it applies (`_snapshot.py`'s bare `ValueError`, issue #70), escapes as

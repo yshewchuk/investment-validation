@@ -10,7 +10,7 @@ import pytest
 from engine.v2.data import catalog, objects
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import SystemClock, canonical_json, content_hash
+from engine.v2.foundation import ArtifactError, SystemClock, canonical_json, content_hash
 from engine.v2.research import event_history, magnitude_features
 from engine.v2.research import magnitude_history_store as stored
 from engine.v2.research.magnitude_history_table import CONTRACT, FEATURES, TABLE
@@ -328,11 +328,15 @@ def test_replay_after_head_moves_returns_original_artifact_without_head_effect(s
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
-def test_cli_build_read_and_typed_refusal(source, capsys):
-    args = ["--catalog", str(source.root / "catalog.sqlite"), "--store-root", str(source.store.root),
+def _cli_args(source):
+    return ["--catalog", str(source.root / "catalog.sqlite"), "--store-root", str(source.store.root),
         "--source-snapshot-id", source.snapshot.snapshot_id, "--as-of-month", REQUEST["as_of_month"],
         "--evaluation-years", *REQUEST["evaluation_years"], "--training-start", REQUEST["training_start"],
         "--history-start", REQUEST["history_start"]]
+
+
+def test_cli_build_read_and_typed_refusal(source, capsys):
+    args = _cli_args(source)
     assert entry.main(["build", *args]) == 0
     built = json.loads(capsys.readouterr().out)
     assert entry.main(["read", *args, "--feature-snapshot-id", built["feature_snapshot"]["snapshot_id"]]) == 0
@@ -343,10 +347,12 @@ def test_cli_build_read_and_typed_refusal(source, capsys):
     assert row["ema2_prior_abs_move"] == pytest.approx(46 / 9)
     assert entry.main(["read", *args, "--feature-snapshot-id", source.snapshot.snapshot_id]) == 2
     assert json.loads(capsys.readouterr().out)["refused"] == "IDENTITY_CONFLICT"
-    with pytest.raises(SystemExit, match="2"):
+    with pytest.raises(SystemExit) as error:
         entry.main(["read", *args])
-    with pytest.raises(SystemExit, match="2"):
+    assert error.value.code == 2
+    with pytest.raises(SystemExit) as error:
         entry.main(["build", *args, "--feature-snapshot-id", source.snapshot.snapshot_id])
+    assert error.value.code == 2
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
@@ -358,10 +364,76 @@ def test_cli_missing_catalog_refuses_before_bootstrap_or_directory_creation(tmp_
     if action == "read":
         args += ["--feature-snapshot-id", "features"]
     monkeypatch.setattr(entry, "open_catalog", _forbid)
-    with pytest.raises(SystemExit, match="2"):
+    with pytest.raises(SystemExit) as error:
         entry.main(args)
+    assert error.value.code == 2
     assert "existing native catalog file" in capsys.readouterr().err
     assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_event_subset_build_and_read_keep_full_eligible_history(source, monkeypatch, capsys):
+    selected = [source.events[1]["event_id"], source.events[-1]["event_id"]]
+    args = _cli_args(source)
+    for event_id in selected:
+        args += ["--event-id", event_id]
+    _poison(monkeypatch, source.repository, source.snapshot,
+            [e["event_date"].date().isoformat() for e in [*source.forbidden, source.events[-1]]])
+    assert entry.main(["build", *args]) == 0
+    built = json.loads(capsys.readouterr().out)
+    assert [e["event_id"] for e in built["context"]["temporal_plan"]["events"]] == selected
+    before = _catalog(source.conn), _objects(source.store)
+    assert entry.main(["read", *args, "--feature-snapshot-id", built["feature_snapshot"]["snapshot_id"]]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["context"] == built["context"]
+    assert {r["event_id"] for r in result["rows"]} == set(selected) and len(result["rows"]) == 6
+    latest = {r["horizon_sessions"]: r for r in result["rows"] if r["event_id"] == selected[-1]}
+    assert {h: r["mean_prior_abs_move"] for h, r in latest.items()} == {1: 5.5, 3: 4., 5: 4.}
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+@pytest.mark.parametrize("action", ["build", "read"])
+@pytest.mark.parametrize("fault", ["stat_os", "open_os", "open_sqlite", "store_os", "store_artifact"])
+def test_cli_raw_local_failures_are_redacted_and_close_open_catalogs(source, monkeypatch, capsys, action, fault):
+    args = _cli_args(source)
+    if action == "read":
+        args += ["--feature-snapshot-id", "unused"]
+    opened = []
+    original = entry.open_catalog
+
+    def fail(*args, **kwargs):
+        if fault == "store_artifact":
+            raise ArtifactError("UNSAFE_PATH", "unpublishable exception detail")
+        raise OSError("unpublishable exception detail")
+
+    def track(*args, **kwargs):
+        conn = original(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    if fault == "stat_os":
+        monkeypatch.setattr(entry, "Path", lambda path: SimpleNamespace(is_file=fail))
+        monkeypatch.setattr(entry, "open_catalog", _forbid)
+    elif fault == "open_os":
+        monkeypatch.setattr(entry, "open_catalog", fail)
+        monkeypatch.setattr(entry, "ArtifactStore", _forbid)
+    elif fault == "open_sqlite":
+        invalid = source.root / "invalid.sqlite"
+        invalid.write_text("synthetic invalid SQLite contents")
+        args[1] = str(invalid)
+        monkeypatch.setattr(entry, "ArtifactStore", _forbid)
+    else:
+        monkeypatch.setattr(entry, "open_catalog", track)
+        monkeypatch.setattr(entry, "ArtifactStore", fail)
+    before = _catalog(source.conn), _objects(source.store)
+    assert entry.main([action, *args]) == 2
+    captured = capsys.readouterr()
+    expected = "UNSAFE_PATH" if fault == "store_artifact" else "INPUT_CHANGED"
+    assert json.loads(captured.out) == {"refused": expected} and captured.err == ""
+    assert (_catalog(source.conn), _objects(source.store)) == before
+    assert len(opened) == (1 if fault.startswith("store_") else 0)
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
 
 
 def test_recipe_and_physical_contract_are_closed():

@@ -117,9 +117,10 @@ Research owns the native contract, protected build and stored-only reader; ops
 supplies existing bootstrap/fingerprinting, with no peer-layer import added.
 Build returns the source/context/output identities; read returns stored rows.
 Both are explicit local operations, never implicit provider downloads or model
-runs. Typed failures produce a refusal and nonzero exit; no partial successful
-output, report, registration or ledger entry is created. A future feature-model
-registration must bind both snapshots and this context before consuming rows.
+runs. Data/ops failures retain code/message; artifact failures retain only their
+code. Raw local OS/SQLite failures produce `INPUT_CHANGED` without exception text.
+Handled runtime failures are stdout JSON and exit 2; argument refusals use argparse stderr.
+No partial successful output or ledger entry is returned.
 
 ## Native outcome publication
 

@@ -134,7 +134,7 @@ def _event_rows(repository, snapshot, context, event, prepared):
         plans = [p for p in by_ticker.get(event["ticker"], ()) if p[0].event_date.date() < decision]
         history = event_history._assemble_history(snapshot, target, population, plans,
             start=start, decision=decision, purpose="selection", read_rows=read_rows)
-        _feature_recipe(history["features"])
+        _feature_recipe(history["features"])  # Validate names/numbers; the stored recipe is already pinned.
         lineage = {k: v for k, v in history.items() if k != "features"}
         rows.append({"event_id": event["event_id"], "context_id": context["context_id"],
             "horizon_sessions": cutoff["horizon_sessions"], "event_date": event["event_date"],

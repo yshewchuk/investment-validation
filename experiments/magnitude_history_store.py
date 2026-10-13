@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from pathlib import Path
 
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, SystemClock, to_document
+from engine.v2.foundation import ArtifactError, ArtifactStore, SystemClock, to_document
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, source_closure
@@ -34,6 +35,20 @@ def read(repository, snapshot, feature_snapshot, **request):
     return history.read_stored(repository, feature_snapshot, context(repository, snapshot, **request))
 
 
+def _execute(args):
+    """Close the native catalog before returning a complete CLI result."""
+    conn = open_catalog(args.catalog, clock=SystemClock())
+    try:
+        repository = Repository(conn, ArtifactStore(args.store_root))
+        snapshot = repository.resolve(args.source_snapshot_id)
+        request = dict(as_of_month=args.as_of_month, evaluation_years=args.evaluation_years,
+                       training_start=args.training_start, history_start=args.history_start, event_ids=args.event_id)
+        return build(repository, snapshot, **request) if args.action == "build" else read(
+            repository, snapshot, repository.resolve(args.feature_snapshot_id), **request)
+    finally:
+        conn.close()
+
+
 def main(argv=None):
     """Local rebuild/read command; never providers, experiment evaluation or repair."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -46,23 +61,21 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if (args.action == "read") != (args.feature_snapshot_id is not None):
         parser.error("read requires --feature-snapshot-id; build does not accept it")
-    if not Path(args.catalog).is_file():
-        parser.error("--catalog must name an existing native catalog file")
-    conn = open_catalog(args.catalog, clock=SystemClock())
     try:
-        repository = Repository(conn, ArtifactStore(args.store_root))
-        snapshot = repository.resolve(args.source_snapshot_id)
-        request = dict(as_of_month=args.as_of_month, evaluation_years=args.evaluation_years,
-                       training_start=args.training_start, history_start=args.history_start, event_ids=args.event_id)
-        result = build(repository, snapshot, **request) if args.action == "build" else read(
-            repository, snapshot, repository.resolve(args.feature_snapshot_id), **request)
-        print(json.dumps(result, sort_keys=True, allow_nan=False))
-        return 0
+        if not Path(args.catalog).is_file():
+            parser.error("--catalog must name an existing native catalog file")
+        result = _execute(args)
     except (DataError, OpsError) as exc:
         print(json.dumps({"refused": exc.code, "message": str(exc)}, sort_keys=True))
         return 2
-    finally:
-        conn.close()
+    except ArtifactError as exc:
+        print(json.dumps({"refused": exc.code}, sort_keys=True))
+        return 2
+    except (OSError, sqlite3.Error):
+        print(json.dumps({"refused": "INPUT_CHANGED"}, sort_keys=True))
+        return 2
+    print(json.dumps(result, sort_keys=True, allow_nan=False))
+    return 0
 
 
 if __name__ == "__main__":
