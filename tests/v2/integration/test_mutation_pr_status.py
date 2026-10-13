@@ -37,14 +37,38 @@ def test_failure_cases():
     summary = clean("a")
     changed = {"engine/v2/a.py"}
     verdict = ps.classify(summary, [row("a", "engine/v2/a.py")], changed)
-    assert verdict["state"] == "failure" and "engine/v2/a.py" in verdict["description"]
+    assert verdict["description"] == "gremlins: PR-owned problem: 1 surviving mutant(s) in engine/v2/a.py"
+    assert verdict["reasons"] == ["1 surviving mutant(s) in engine/v2/a.py"]
+    assert verdict["state"] == "failure"
     for rc in (1, 127):
-        verdict = ps.classify({"modules": {"a": mod(run_exit_code=1 if rc == 1 else rc)}},
-                              [], set())
-        assert verdict["state"] == "failure" and "a" in verdict["description"], rc
+        verdict = ps.classify({"modules": {"a": mod(run_exit_code=rc)}}, [], set())
+        assert verdict["state"] == "failure", rc
+        assert verdict["description"] == "gremlins: PR-owned problem: tests fail in a", rc
+        assert verdict["reasons"] == ["tests fail in a"], rc
     degraded = {"modules": {"a": mod(run_exit_code=1, complete=False, tool_error=True)}}
     verdict = ps.classify(degraded, None, None)
-    assert verdict["state"] == "failure" and "a" in verdict["description"]
+    assert verdict["state"] == "failure"
+    assert verdict["description"] == "gremlins: PR-owned problem: tests fail in a"
+    assert verdict["reasons"] == ["tests fail in a"]
+    two = ps.classify({"modules": {"b": mod(run_exit_code=1)}},
+                      [row("a", "engine/v2/a.py"), row("c", "engine/v2/c.py")],
+                      {"engine/v2/a.py", "engine/v2/c.py"})
+    assert two["state"] == "failure"
+    assert two["description"] == ("gremlins: PR-owned problem: 2 surviving mutant(s) in "
+                                  "engine/v2/a.py, engine/v2/c.py; tests fail in b")
+    assert two["reasons"] == ["2 surviving mutant(s) in engine/v2/a.py, engine/v2/c.py",
+                              "tests fail in b"]
+
+
+def test_survivor_in_a_changed_file_wins_over_an_unavailable_summary():
+    for summary in (None, {"modules": None}):
+        verdict = ps.classify(summary, [row("a", "engine/v2/a.py")], {"engine/v2/a.py"})
+        assert verdict["state"] == "failure", summary
+        assert verdict["description"] == "gremlins: PR-owned problem: 1 surviving mutant(s) in engine/v2/a.py"
+        assert verdict["reasons"] == ["1 surviving mutant(s) in engine/v2/a.py"]
+    for changed in (None, {"engine/v2/other.py"}):
+        verdict = ps.classify(None, [row("a", "engine/v2/a.py")], changed)
+        assert verdict["state"] == "neutral", changed
 
 
 def test_success_cases():
@@ -79,6 +103,7 @@ NEUTRAL_CASES = [
     (lambda: {**clean("a"), "failure_reasons": ["RAW_INCONSISTENT"]}, "failure reasons"),
     (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code="0")}}, "module a not clean"),
     (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code=True)}}, "module a not clean"),
+    (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code=None)}}, "module a not clean"),
     (lambda: {**clean("a"), "modules": {"a": {"skipped_reason": None,
                                               "counts_backend": {"error": 0},
                                               "failure_reasons": [], "complete": True,
@@ -177,6 +202,17 @@ def test_cli_malformed_rows_are_neutral(tmp_path):
                         ["engine/v2/a.py"], subdir="control")
     assert ps.main(argv) == 0
     assert "state=success\n" in out.read_text()
+
+
+def test_one_malformed_row_makes_the_whole_report_neutral(tmp_path):
+    survivor = json.dumps(row("a", "engine/v2/a.py"))
+    argv, out = _report(tmp_path, clean("a"), [survivor, "{not json"], ["engine/v2/a.py"],
+                        subdir="with_junk")
+    assert ps.main(argv) == 0
+    assert "state=neutral\n" in out.read_text()
+    argv, out = _report(tmp_path, clean("a"), [survivor], ["engine/v2/a.py"], subdir="control")
+    assert ps.main(argv) == 0
+    assert "state=failure\n" in out.read_text()
 
 
 def test_cli_absent_or_empty_changed_files_is_neutral(tmp_path, capsys):

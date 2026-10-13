@@ -6,7 +6,8 @@ Inputs: ``DIR/summary.json`` + ``DIR/results.jsonl`` and ``--changed-files FILE`
 ``description=`` appended to ``--github-output`` (default env ``$GITHUB_OUTPUT``).
 ``failure`` only for a PR-owned problem (a surviving mutant in a changed file or
 a failing PR test run), ``success`` only for a clean measured run of every
-planned module, ``neutral`` otherwise; attribution by FILE, never by line. Exit
+planned module (a module entry whose measured ``run_exit_code`` is missing or
+null is not clean), ``neutral`` otherwise; attribution by FILE, never by line. Exit
 is 0 for classified/degraded input; nonzero only for argparse errors (exit 2)
 or an unwritable output file (the ``OSError`` propagates AFTER the verdict).
 """
@@ -67,9 +68,9 @@ def classify(summary, rows, changed) -> dict:
         for name in names:
             e = modules.get(name)
             rc = e.get("run_exit_code") if isinstance(e, dict) else None
-            if (not isinstance(e, dict) or "run_exit_code" not in e
+            if (not isinstance(e, dict)
                     or e.get("skipped_reason")
-                    or not (rc is None or type(rc) is int and rc == 0)
+                    or not (type(rc) is int and rc == 0)
                     or not isinstance(e.get("counts_backend"), dict)
                     or e["counts_backend"].get("error")):
                 reasons.append(f"module {name} not clean")
@@ -84,6 +85,7 @@ def classify(summary, rows, changed) -> dict:
     return {"state": "neutral", "description": _cut(desc), "reasons": reasons}
 
 
+# Any malformed or partial report is neutral, even if some rows are readable (user decision 2026-10-13): no salvaging of partial evidence for this advisory check.
 def _load_rows(path: Path) -> list | None:
     """``results.jsonl`` rows, or ``None`` if unreadable/undecodable or any
     non-blank line is not JSON of a valid row (empty file is valid)."""
