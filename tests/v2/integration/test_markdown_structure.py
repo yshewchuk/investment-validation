@@ -256,6 +256,12 @@ def test_pipeless_header_table_uses_column_count_for_rows():
     assert rules("a | b\n--|--\n1 | 2\nplain text\n") == ["table-after"]
 
 
+def test_known_limit_cell_count_paragraph_under_pipeless_header_is_a_row():
+    # By GFM rules a line with the header's cell count IS a table row, and nothing
+    # distinguishes it from an intended one, so it is deliberately not flagged.
+    assert rules("a | b\n--|--\n1 | 2\nuse a | b here\n") == []
+
+
 def test_blockquoted_fence_is_not_checked():
     assert rules("> ```\n> # x\n") == []
 

@@ -43,7 +43,8 @@ are not checked. Fenced content is never
 scanned as headings or tables. There is no list rule, and list content is
 skipped for the heading and table rules: only column-0 headings and tables are
 read, so indented lines and list-marker lines are never headings or table
-headers. Default mode reads
+headers. Known limit: under a pipeless-edge table header, a line with the
+header's cell count is a row by GFM rules and is not flagged. Default mode reads
 staged blobs and flags only violations touching lines the commit adds or
 changes, except that an unclosed fence is a file-level error reported for any
 changed file (`--base-ref REF` does the same for `REF...HEAD`, run in CI by the

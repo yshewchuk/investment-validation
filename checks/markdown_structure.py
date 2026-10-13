@@ -14,7 +14,9 @@ Rules (no other style opinions):
 * a table needs a blank line before it (unless it starts the file) and after it
   (unless it ends the file), so a following paragraph is not absorbed as a row;
   a body row starts with a pipe when the header does, else it has the header's
-  column count;
+  column count. Known limit: under a pipeless-edge header, a line with the
+  header's cell count (``use a | b here`` under ``a | b``) is a row by GFM
+  rules, indistinguishable from an intended one, and is not flagged;
 * an unindented fenced code block needs a blank line before and after.
 
 Unindented, indented and list-marker fences (``- ```python``) are tracked, and
