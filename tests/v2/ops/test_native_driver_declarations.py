@@ -15,6 +15,7 @@ from tests.v2.ops.test_native_score_batch_driver_alias import (
     _event_doc,
     _event_inputs,
     _stage,
+    _staged_driver_pool,
     _worker_parameters,
 )
 
@@ -61,7 +62,7 @@ def test_runup_descriptor_is_frozen_and_not_registered():
 
 
 @pytest.mark.parametrize("drivers", [
-    (), [], (None,),
+    (), [], [batch._DriverSpec("driver_prediction", "one")], (None,),
     (batch._DriverSpec("driver_prediction", "one"), batch._DriverSpec("driver_prediction", "two")),
 ])
 def test_malformed_code_owned_declarations_cannot_silently_drop_outputs(drivers):
@@ -108,6 +109,34 @@ def test_every_recipe_identity_reference_and_frozen_consumer_survives(
             assert executor.predict(inputs.features["model_inputs"]) == {output: value}
 
 
+@pytest.mark.parametrize("reverse,driver_keys,primary_role", [
+    (False, ("implied_t1:*", "runup_move:*"), "implied_t1"),
+    (True, ("runup_move:*", "implied_t1:*"), "runup_move"),
+])
+def test_declaration_order_controls_references_and_primary_residual_pool(
+        tmp_path, monkeypatch, reverse, driver_keys, primary_role):
+    pools, pool_rows = {}, []
+    for role in ("implied_t1", "runup_move"):
+        pools[role], row = _staged_driver_pool(tmp_path, role=role, model_id=f"m-{role}-*")
+        pool_rows.append(row)
+    assert pools["implied_t1"].content_hash != pools["runup_move"].content_hash
+    binding = _stage(tmp_path, [IMPLIED, MOVE, RUNUP_GATE], rows=pool_rows)
+    spec = batch._RUNUP_SPEC
+    if reverse:
+        spec = replace(spec, drivers=spec.drivers[::-1])
+    monkeypatch.setattr(batch, "_STRATEGY_REGISTRY", {"STR-RUNUP": spec})
+    rows, refusals, event = _build(binding)
+    assert refusals == ()
+    request, inputs = rows[event.key]
+    assert request.model_artifact_refs == tuple(
+        binding.model_identity[key].artifact_hash for key in (*driver_keys, "gate:STR-RUNUP"))
+    primary = pools[primary_role]
+    assert inputs.model["model_residual_artifacts"] == {"driver": primary}
+    assert inputs.model["model_residual_artifact_recipe"] == {"driver": {
+        "role": primary_role, "model_id": f"m-{primary_role}-*", "fold": None,
+        "content_hash": primary.content_hash}}
+
+
 @pytest.mark.parametrize("missing,detail", [
     (IMPLIED, "driver:STR-RUNUP"), (MOVE, "runup_move:*"), (RUNUP_GATE, "gate:STR-RUNUP"),
 ])
@@ -118,6 +147,18 @@ def test_missing_role_refuses_only_its_row(tmp_path, monkeypatch, missing, detai
     rows, refusals = _assemble(binding, [runup, through], gate_policy=POLICY)
     assert list(rows) == [through.key]
     assert [(r.key, r.code, r.detail) for r in refusals] == [(runup.key, "RELEASE_MISSING_ROLE", detail)]
+
+
+@pytest.mark.parametrize("missing,detail", [(MOVE, "runup_move:*"), (RUNUP_GATE, "gate:STR-RUNUP")])
+def test_later_missing_dependency_precedes_earlier_driver_clock_mismatch(
+        tmp_path, monkeypatch, missing, detail):
+    _enable_test_runup(monkeypatch)
+    binding = _stage(tmp_path, [role for role in (IMPLIED, MOVE, RUNUP_GATE) if role != missing])
+    identities = dict(binding.model_identity)
+    identities["implied_t1:*"] = replace(identities["implied_t1:*"], decision_clock_id="wrong")
+    rows, refusals, event = _build(replace(binding, model_identity=identities))
+    assert rows == {}
+    assert [(r.key, r.code, r.detail) for r in refusals] == [(event.key, "RELEASE_MISSING_ROLE", detail)]
 
 
 @pytest.mark.parametrize("role", ["implied_t1:*", "runup_move:*", "gate:STR-RUNUP"])
