@@ -3,9 +3,11 @@
 #
 # `.git/hooks` is not versioned, so a fresh clone has none of this and
 # `--no-verify` bypasses the one that exists. The hook is a convenience; the
-# nightly is the control, and it re-runs every check below over HEAD and
+# nightly is the control, and it re-runs checks 1-5 below over HEAD and
 # reports whether this file is installed at all (system_rearchitecture.md
 # §4.6). A control that cannot detect its own absence is not a control.
+# Checks 6 (doc budgets) and 7 (Markdown) are not in the nightly gate; the
+# Markdown check is enforced by CI's "Lint Markdown" step.
 #
 # Checks 1-6 read STAGED BLOBS, not the working tree: checking the working tree
 # passes or fails on content that is not what would be committed. They are
