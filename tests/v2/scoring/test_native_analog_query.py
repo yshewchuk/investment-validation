@@ -282,6 +282,34 @@ def test_declarations_use_the_given_alpha():
                                panel_row, "snap-1", "req-key") == {}
 
 
+@pytest.mark.parametrize(("bucket", "ratio"), [
+    ("<1B", 0.5), ("1-10B", 1.2), (">=10B", 2.5), (None, None)])
+def test_complete_query_passes_mcap_bucket_and_ratio_through(bucket, ratio):
+    # Distinct bucket/ratio values: overwriting them with a constant fails.
+    out = complete_analog_query({"mcap_bucket": bucket, "implied_ratio": ratio},
+                                {"dte_entry": 5, "spot": 100.0, "strike": 101.0})
+    assert out["mcap_bucket"] == bucket
+    assert out["implied_ratio"] == ratio
+    assert out["dte_band"] == "4-10" and out["moneyness_band"] == "ATM"
+
+
+def test_declarations_carry_the_given_snapshot_request_key_and_row():
+    key = board_analog_pool_key("STR-THRU", 0.5, "2026-01-09")
+    pool = _FakeArtifact(key=key, content_hash="sha256:p")
+    small = {"mcap_log": math.log(5e8), "im": 0.09, "mean_prior_or_implied": 0.06}
+    large = {"mcap_log": math.log(5e10), "im": 0.04, "mean_prior_or_implied": 0.08}
+    first = analog_declarations([pool], "STR-THRU", 0.5, "2026-01-09",
+                                small, "snap-A", "key-A")
+    second = analog_declarations([pool], "STR-THRU", 0.5, "2026-01-09",
+                                 large, "snap-B", "key-B")
+    assert first["analog_artifact_recipe"]["seed_snapshot"] == "snap-A"
+    assert first["analog_artifact_recipe"]["request_key"] == "key-A"
+    assert second["analog_artifact_recipe"]["seed_snapshot"] == "snap-B"
+    assert second["analog_artifact_recipe"]["request_key"] == "key-B"
+    assert first["analog_query"] == {"mcap_bucket": "<1B", "implied_ratio": pytest.approx(1.5)}
+    assert second["analog_query"] == {"mcap_bucket": ">=10B", "implied_ratio": pytest.approx(0.5)}
+
+
 def _pool_rows():
     # A: dte "4-10" + ATM (40 rows); B: "4-10" + ">5%" (35); C: "26-45" + ATM (31).
     groups = [("4-10", "ATM", 40), ("4-10", ">5%", 35), ("26-45", "ATM", 31)]
