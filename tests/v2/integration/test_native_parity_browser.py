@@ -293,8 +293,12 @@ def test_unpaired_available_page_round_trips_exactly(browser, server, tmp_path):
     finally:
         context.close()
 
+def _page(items, next_cursor=None, as_of="2026-09-30", generated_at="2026-10-01T02:00:00Z"):
+    return {"status": "available", "as_of": as_of, "generated_at": generated_at,
+        "tolerance_policy_id": "tol-1", "items": items, "next_cursor": next_cursor}
+
 def test_mismatch_table_shows_only_differing_fields(browser, server):
-    first = dict(MISMATCH_PAGE, next_cursor=None)
+    first = _page(MISMATCH_PAGE["items"])
     base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, first))
     try:
         page.goto(base + "/#/native-parity")
@@ -314,24 +318,26 @@ def test_mismatch_table_shows_only_differing_fields(browser, server):
         assert "gate_threshold" not in page_text
         assert "entry_cost_pct" not in page_text
         expect(page.get_by_test_id("parity-mismatch-next")).to_be_disabled()
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_contain_text("2026-10-01T02:00:00Z")
     finally:
         context.close()
 
 def test_mismatch_item_with_multiple_differing_fields_and_value_kinds(browser, server):
-    page_body = {"status": "available", "as_of": None, "generated_at": None, "tolerance_policy_id": None,
-        "items": [{"row_key": "KO|2026-09-10|STR-THRU", "dimension": "verdicts", "fields": {
+    page_body = _page([{"row_key": "KO|2026-09-10|STR-THRU", "dimension": "verdicts", "fields": {
             "gate_pass": {"status": "differ", "legacy": True, "native": False},
             "reason": {"status": "differ", "legacy": "ok", "native": "withheld"},
             "gate_score": {"status": "differ", "legacy": None, "native": 0.5},
             "gate_threshold": {"status": "differ", "native": 0.7},
-            "n_analogs": {"status": "agree"}}}],
-        "next_cursor": None}
+            "zero_flag": {"status": "differ", "legacy": 0, "native": 1},
+            "zero_count": {"status": "differ", "legacy": 2, "native": 0},
+            "n_analogs": {"status": "agree"}}}])
     base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, page_body))
     try:
         page.goto(base + "/#/native-parity")
         rows = page.get_by_test_id("parity-mismatch-row")
-        expect(rows).to_have_count(4)
-        expect(rows.filter(has_text="KO|2026-09-10|STR-THRU")).to_have_count(4)
+        expect(rows).to_have_count(6)
+        expect(rows.filter(has_text="KO|2026-09-10|STR-THRU")).to_have_count(6)
         gate_pass = rows.filter(has_text="gate_pass")
         expect(gate_pass.get_by_test_id("parity-mismatch-legacy")).to_have_text("true")
         expect(gate_pass.get_by_test_id("parity-mismatch-native")).to_have_text("false")
@@ -344,8 +350,15 @@ def test_mismatch_item_with_multiple_differing_fields_and_value_kinds(browser, s
         gate_threshold = rows.filter(has_text="gate_threshold")
         expect(gate_threshold.get_by_test_id("parity-mismatch-legacy")).to_have_text("—")
         expect(gate_threshold.get_by_test_id("parity-mismatch-native")).to_have_text("0.7")
+        zero_flag = rows.filter(has_text="zero_flag")
+        expect(zero_flag.get_by_test_id("parity-mismatch-legacy")).to_have_text("0")
+        expect(zero_flag.get_by_test_id("parity-mismatch-native")).to_have_text("1")
+        zero_count = rows.filter(has_text="zero_count")
+        expect(zero_count.get_by_test_id("parity-mismatch-legacy")).to_have_text("2")
+        expect(zero_count.get_by_test_id("parity-mismatch-native")).to_have_text("0")
         table_text = page.get_by_test_id("parity-mismatch-table").inner_text()
         assert "n_analogs" not in table_text
+        assert table_text.count("—") == 2
     finally:
         context.close()
 
@@ -385,14 +398,71 @@ def test_mismatch_empty_and_no_report(browser, server):
     try:
         page.goto(base + "/#/native-parity")
         expect(page.get_by_test_id("parity-mismatch-empty")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-no-report")).to_have_count(0)
         expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-summary")).to_be_visible()
     finally:
         context.close()
     base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, {"status": "no_report"}))
     try:
         page.goto(base + "/#/native-parity")
         expect(page.get_by_test_id("parity-mismatch-no-report")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_have_count(0)
         expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-pager")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_have_count(0)
+    finally:
+        context.close()
+
+def test_mismatch_table_walks_three_pages_with_re_read(browser, server):
+    page1 = _page([{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}], next_cursor="c2")
+    page2 = _page([{"row_key": "NVDA|2026-09-22|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 1.0, "native": 2.0}}}], next_cursor="c3")
+    page3 = _page([{"row_key": "TSLA|2026-09-29|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 3.0, "native": 4.0}}}])
+
+    def mismatches(cursor):
+        return (200, {None: page1, "c2": page2, "c3": page3}[cursor])
+
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=mismatches)
+    try:
+        page.goto(base + "/#/native-parity")
+        rows = page.get_by_test_id("parity-mismatch-row")
+        expect(rows).to_have_count(1)
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(rows).to_have_count(1)
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(rows).to_have_count(1)
+        expect(rows.filter(has_text="TSLA|2026-09-29|STR-THRU")).to_be_visible()
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_have_count(0)
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 3")
+        expect(page.get_by_test_id("parity-mismatch-next")).to_be_disabled()
+        page.get_by_test_id("parity-mismatch-prev").click()
+        expect(rows).to_have_count(1)
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_have_count(0)
+        expect(rows.filter(has_text="TSLA|2026-09-29|STR-THRU")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        page.get_by_test_id("parity-mismatch-prev").click()
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        cursors = [u.split("cursor=")[1].split("&")[0] if "cursor=" in u else None
+            for u in page.mismatch_calls]
+        assert cursors == [None, "c2", "c3", "c2", None, "c2"]
     finally:
         context.close()
 
@@ -430,6 +500,42 @@ def test_mismatch_error_state(browser, server):
     base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (503, PROBLEM))
     try:
         page.goto(base + "/#/native-parity")
-        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_contain_text("NO_CURRENT_RELEASE")
+        unavailable = page.get_by_test_id("parity-mismatch-unavailable")
+        expect(unavailable).to_contain_text("NO_CURRENT_RELEASE")
+        expect(unavailable).to_contain_text("no release")
+        expect(unavailable).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-no-report")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_have_count(0)
+        expect(page.get_by_test_id("parity-summary")).to_be_visible()
+    finally:
+        context.close()
+
+def test_mismatch_error_recovery_restarts(browser, server):
+    failing = {"on": True}
+    base, context, page, parity, _ = _open_parity(browser, server,
+        mismatches=lambda c: (503, PROBLEM) if failing["on"] else (200, EMPTY_MISMATCH_PAGE[1]))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_be_visible()
+        failing["on"] = False
+        page.get_by_test_id("parity-mismatch-restart").click()
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        assert len(parity) == 2
+    finally:
+        context.close()
+
+def test_mismatch_identity_changing_detail_banner(browser, server):
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, _page(
+        [{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+            "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}],
+        as_of="2026-10-01", generated_at="2026-10-02T02:00:00Z")))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_contain_text("2026-10-02T02:00:00Z")
     finally:
         context.close()
