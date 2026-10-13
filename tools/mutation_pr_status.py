@@ -206,8 +206,18 @@ def _load_json(path: str | None):
 
 
 def _valid_summary(s) -> bool:
-    """A merged/baseline summary: a mapping whose ``modules`` (if any) is a mapping."""
-    return isinstance(s, dict) and (s.get("modules") is None or isinstance(s["modules"], dict))
+    """A merged/baseline summary: a mapping whose ``modules`` is a non-empty mapping
+    or whose ``expected_modules`` is a non-empty list -- it measured or planned
+    something. ``modules`` must be a mapping (absent, null, a list, ... are invalid)
+    and ``expected_modules``, when present, must be a list. An invalid summary is
+    never success: ``main`` treats an invalid merged summary as an unavailable
+    report (neutral) and drops an invalid baseline."""
+    if not isinstance(s, dict) or not isinstance(s.get("modules"), dict):
+        return False
+    expected = s.get("expected_modules")
+    if expected is not None and not isinstance(expected, list):
+        return False
+    return bool(s["modules"]) or bool(expected)
 
 
 def _valid_row(r) -> bool:

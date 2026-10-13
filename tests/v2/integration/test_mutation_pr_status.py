@@ -624,14 +624,18 @@ def test_degraded_inputs_other_than_attribution_never_produce_success(tmp_path):
     d = tmp_path / "s1"
     d.mkdir()
     (d / "summary.json").write_text("{not json")
-    for name, summary in (("s2", {"modules": []}), ("s3", _merged_with(tool_error=True)),
-                          ("s4", _merged_with(complete=False))):
+    cases = (("s2", {"modules": []}), ("s3", _merged_with(tool_error=True)),
+             ("s4", _merged_with(complete=False)), ("s5", {}),
+             ("s6", {"modules": None}), ("s7", {"modules": {}}),
+             ("s9", {"expected_modules": ["a"]}),
+             ("s10", {"modules": {"a": {}}, "expected_modules": "a"}))
+    for name, summary in cases:
         dd = tmp_path / name
         dd.mkdir()
         (dd / "summary.json").write_text(json.dumps(summary))
         (dd / "results.jsonl").write_text("")
         (dd / "pr.diff").write_text(DIFF)
-    for name in ("s1", "s2", "s3", "s4"):
+    for name in ("s1", *(name for name, _ in cases)):
         out = tmp_path / f"{name}.out"
         assert ps.main(["--merged-dir", str(tmp_path / name), "--diff-file",
                         str(tmp_path / name / "pr.diff"), "--github-output", str(out)]) == 0
