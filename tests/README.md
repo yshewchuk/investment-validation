@@ -368,7 +368,8 @@ workflow. When
 checkout, or a docs-only PR the `[pr_selection] inert` allowlist ruled out)
 the status is `success` with a "skipped by design" description rather
 than silence; a `report` job that itself failed or was skipped maps to
-`failure`. In between those two, `report` can also exit 0 having merged
+`failure` (mutmut; for the gremlins workflow it is an infra result, see the
+decision table below). In between those two, `report` can also exit 0 having merged
 one or more PR-closed placeholder modules (issue #64, above: `merge_dirs`'s
 `skipped_modules`) -- not a tool error, but not a real measurement either,
 so `report_status` reads `report`'s own `skipped_count` output (a `jq`
@@ -395,8 +396,20 @@ says "no module measured ... not a pass". `mutation/pr` is not a required check.
 PR changed, or a module run that failed with a test-failure exit code main does
 not also show. Infra (a `::warning::`, never red): no report, skipped, timeout or
 cancel, signal kill, gremlin ERROR results, an invalid raw report, a failure main
-shows too. Unreadable inputs degrade to warnings. If the classify step did not run
-at all, the old mapping above still applies.
+shows too. Unreadable inputs degrade to warnings.
+
+Gremlins `report_status` decision table, first match wins (`report` = the report job
+result, `classified` = the classifier's `state`, empty if its step did not run):
+
+| plan modules | skipped modules | classified | report | posted |
+|---|---|---|---|---|
+| `[]` | any | any | any | `success` (skipped by design) |
+| non-empty | > 0 | any | any | `failure` (PR-closed placeholder, partial coverage) |
+| non-empty | 0 | `failure` | any | `failure` |
+| non-empty | 0 | `neutral` | any | `neutral` (grey check run) |
+| non-empty | 0 | `success` | success | `success` |
+| non-empty | 0 | empty or `success` | failure, cancelled or skipped | `neutral` (infra, grey check run) |
+| non-empty | 0 | empty | success | `success` |
 
 **The two scores measure different things and are never comparable.** mutmut's
 score is (killed + timeout) / checked -- every mutant the run considered,

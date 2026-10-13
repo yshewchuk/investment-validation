@@ -279,7 +279,8 @@ evidence. See the models and data component contracts.
     was measured (every module infra, or the merged report unavailable) or the merge
     itself reported a tool error or an incomplete run (merge-level reasons such as a
     provenance mismatch are listed as `merge_issues` and warned), never `success`; a
-    classified `success` also never overrides a failed `report` job. Commit statuses
+    classified `success` never overrides a `report` job that did not succeed, and a
+    `report` job that fails before classification is infra: `neutral`. Commit statuses
     have no grey state, so the `report_neutral` job posts it as a `neutral` check run
     instead, and no commit status is posted for it. `mutation/pr` is not a required check. The module set is the summary's
     `expected_modules` and `modules` plus every module named in a result row.
@@ -289,8 +290,8 @@ evidence. See the models and data component contracts.
     in a test failure that main's summary does not show for the same module
     (a skipped module in main's summary excuses nothing). Otherwise it is `infra`
     (no summary entry, `skipped_reason`, timeout/cancel `-1`, killed by a
-    signal, gremlin `ERROR` results, an invalid raw report, or a failure
-    main shows too) or `ok`. Only `pr_owned` modules make the state `failure`;
+    signal, gremlin `ERROR` results, an invalid raw report, a module that
+    reports `tool_error`, or a failure main shows too) or `ok`. Only `pr_owned` modules make the state `failure`;
     infra modules are counted in the description, never red. Failure semantics:
     the tool exits 0 for every classified or degraded input (only argument errors
     and an unwritable `--github-output` file exit nonzero, the latter deliberately
