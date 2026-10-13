@@ -226,6 +226,8 @@ skip = [
     "*/canonical.py",
 ]
 tests = [
+    "tests/v2/foundation/test_market_horizon.py",
+    "tests/v2/foundation/test_v2_foundation_market_calendar.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/serving/test_score_population.py",
     "tests/v2/foundation/test_experiment_holdouts.py",
@@ -564,6 +566,8 @@ mutate = [
     "engine/v2/scoring/source_inputs.py",
 ]
 tests = [
+    "tests/v2/scoring/test_runup_calendar_horizon.py",
+    "tests/v2/ops/test_runup_horizon_production.py",
     "tests/test_phase4_acceptance_independence.py",
     "tests/test_phase4_capture_strict.py",
     "tests/test_phase4_frozen_bridge_rows.py",
@@ -980,6 +984,7 @@ mutate = [
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
+    "tests/v2/ops/test_runup_horizon_production.py",
     "tests/v2/ops/test_native_strategy_registry.py",
     "tests/v2/ops/test_native_score_batch_driver_alias.py",
     "tests/v2/ops/test_native_gate_worker.py",

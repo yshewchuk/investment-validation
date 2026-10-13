@@ -16,6 +16,7 @@ module never imports ``engine.score``/``engine.structures``/``engine.replay``/
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Any
 
 from engine.v2.contracts import DataQuery, KeyPredicate, PriceQuery, SnapshotRef
@@ -28,6 +29,7 @@ from engine.v2.foundation.market_calendar import (
     build_calendar_sessions,
     planned_exit_date,
 )
+from engine.v2.foundation.market_horizon import CalendarCoverageError, trading_days_before_print
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_score_batch_types import (
@@ -200,9 +202,11 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
     repository failure still fails the whole call. The key's strategy and
     session domains are checked first, so an unsupported value is
     ``INVALID_REQUEST`` rather than a masked expiry refusal; an empty eligible
-    expiry domain, or the native no-expiry geometry refusals, are the one
-    per-key ``NO_RESOLVABLE_EXPIRY`` refusal -- every other geometry/input
-    error propagates."""
+    expiry domain or native no-expiry geometry refusal becomes per-key
+    ``NO_RESOLVABLE_EXPIRY``. Missing RUNUP pre-print coverage becomes per-key
+    ``RUNUP_HORIZON_NOT_AVAILABLE``; a negative distance becomes per-key
+    ``INVALID_RUNUP_HORIZON``. Malformed calendar input and other unhandled
+    geometry/input errors propagate."""
     from engine.v2.domain.generation import GeometryRefusal, resolve_expiry
 
     _require_key(key)
@@ -231,10 +235,30 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
         if refusal.code.startswith(_TRANSLATABLE_REFUSALS):
             raise _no_resolvable(key) from refusal
         raise
+    timing = _runup_timing(key, calendar, session_day)
     exit_date = planned_exit_date(key, calendar)
-    return scan_calendar_row(repository, snapshot, key, entry_date=session_day,
-                             exit_date=exit_date, expiry=expiry, spot=spot,
-                             calendar_observed_through=calendar.observed_through)
+    row = scan_calendar_row(repository, snapshot, key, entry_date=session_day,
+                            exit_date=exit_date, expiry=expiry, spot=spot,
+                            calendar_observed_through=calendar.observed_through)
+    return replace(row, calendar_row={**row.calendar_row, **timing}) if timing else row
+
+
+def _runup_timing(key: BoardRequest, calendar: CalendarSessions,
+                  entry_date: str) -> dict[str, int]:
+    """Stage only RUNUP's calendar-owned horizon, retaining per-key refusals."""
+    if key.strategy != "STR-RUNUP":
+        return {}
+    try:
+        days = trading_days_before_print(
+            calendar, entry_date=entry_date, event_date=key.event_date, session=key.session)
+    except CalendarCoverageError as exc:
+        raise NativeScoreBatchRowRefusal(
+            key, "RUNUP_HORIZON_NOT_AVAILABLE",
+            "the pinned calendar does not cover the RUNUP horizon") from exc
+    if days < 0:
+        raise NativeScoreBatchRowRefusal(
+            key, "INVALID_RUNUP_HORIZON", "RUNUP entry is after the pre-print close")
+    return {"days_before_print": days}
 
 
 def _no_resolvable(key: BoardRequest) -> NativeScoreBatchRowRefusal:
