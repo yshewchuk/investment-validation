@@ -51,6 +51,26 @@ def source(tmp_path):
     source.conn.close()
 
 
+def _long_source(tmp_path, count):
+    dates = ("2022-06-02", "2022-07-05", "2022-08-02", "2022-09-06",
+        "2022-10-04", "2022-11-01", "2022-12-06", "2023-01-03",
+        "2023-02-07", "2023-03-07", "2023-04-04", "2023-05-02")
+    events = [_event(day) for day in (*dates[:count], "2024-06-17")]
+    values = [float((-1 if n % 2 else 1) * 2 * n) for n in range(1, count + 1)]
+    moves = [_move(event, value) for event, value in zip(events, [*values, None])]
+    conn, repository, snapshot = _commit(tmp_path, events, moves,
+        days=_calendar("2022-05-25", "2024-06-18").days)
+    return SimpleNamespace(conn=conn, repository=repository, snapshot=snapshot,
+        store=repository._store, events=events, root=tmp_path)
+
+
+@pytest.fixture
+def long_source(tmp_path):
+    source = _long_source(tmp_path, 12)
+    yield source
+    source.conn.close()
+
+
 def _build(source, **changes):
     result = entry.build(source.repository, source.snapshot, **{**REQUEST, **changes})
     return result, source.repository.resolve(result["feature_snapshot"]["snapshot_id"])
@@ -148,6 +168,46 @@ def test_empty_and_zero_history_keep_distinct_missingness(source):
     assert json.loads(empty["history_json"])["history"] == []
     zero = next(r for r in rows if r["event_date"] == "2024-06-12")
     assert zero["n_prior"] == 2 and zero["mean_prior_move"] == 1 and zero["mean_prior_abs_move"] == 5
+
+
+@pytest.mark.parametrize("count,expected", [
+    (8, {2: (6014 / 729, 32806 / 2187), 4: (324278 / 78125, 1022186 / 78125),
+         8: (2912650 / 1594323, 48811522 / 4782969)}),
+    (12, {2: (723350 / 59049, 4074382 / 177147),
+          4: (301891518 / 48828125, 1025922066 / 48828125),
+          8: (31443810178 / 10460353203, 547319300554 / 31381059609),
+          12: (3219945174670 / 1792160394037, 26436513499202 / 1792160394037)}),
+])
+def test_eight_and_twelve_event_histories_store_independent_emas(tmp_path, monkeypatch, count, expected):
+    # Rational oracles use q**(n-1)*x[0] + sum(a*q**(n-i-1)*x[i]),
+    # where a=2/(span+1), q=1-a; no production EMA helper or recurrence.
+    source = _long_source(tmp_path, count)
+    try:
+        target = source.events[-1]
+        _poison(monkeypatch, source.repository, source.snapshot, ["2024-06-17"])
+        _, output = _build(source)
+        _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+        monkeypatch.setattr(stored, "_prepare_history", _forbid)
+        before = _catalog(source.conn), _objects(source.store)
+        rows = [row for row in _read(source, output)["rows"] if row["event_id"] == target["event_id"]]
+        assert [row["horizon_sessions"] for row in rows] == [1, 3, 5]
+        for row in rows:
+            assert row["n_prior"] == count
+            assert row["mean_prior_move"] == 1 and row["mean_prior_abs_move"] == count + 1
+            lineage = json.loads(row["history_json"])
+            assert [item["event_id"] for item in lineage["history"]] == [
+                event["event_id"] for event in source.events[:-1]]
+            for span in (2, 4, 8, 12):
+                if span <= count:
+                    signed, absolute = expected[span]
+                    assert row[f"ema{span}_prior_move"] == pytest.approx(signed, rel=1e-12)
+                    assert row[f"ema{span}_prior_abs_move"] == pytest.approx(absolute, rel=1e-12)
+                else:
+                    assert row[f"ema{span}_prior_move"] is None
+                    assert row[f"ema{span}_prior_abs_move"] is None
+        assert (_catalog(source.conn), _objects(source.store)) == before
+    finally:
+        source.conn.close()
 
 
 def test_later_mixed_candidate_refuses_before_even_first_safe_outcome(tmp_path, monkeypatch):
@@ -339,6 +399,82 @@ def test_real_stored_bad_feature_or_missingness_refuses_without_partial_return(s
     before = _catalog(source.conn), _objects(source.store)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+def _observe_long_target_validation(source, monkeypatch, field):
+    validate, observed = stored._validate_features, []
+
+    def checked(row, count):
+        if row["event_id"] == source.events[-1]["event_id"] and row["horizon_sessions"] == 5:
+            assert count == row["n_prior"] == 12
+            observed.append(row[field])
+        return validate(row, count)
+
+    monkeypatch.setattr(stored, "_validate_features", checked)
+    return observed
+
+
+@pytest.mark.parametrize("field,value", [
+    ("ema8_prior_move", None), ("ema8_prior_abs_move", None),
+    ("ema12_prior_move", None), ("ema12_prior_abs_move", None),
+    ("ema2_prior_abs_move", -1.), ("ema4_prior_abs_move", -1.),
+    ("ema8_prior_abs_move", -1.), ("ema12_prior_abs_move", -1.),
+])
+def test_sufficient_history_stored_null_and_negative_emas_refuse(long_source, monkeypatch, field, value):
+    source, original, changed = long_source, stored._event_rows, []
+
+    def malformed(*args):
+        rows = original(*args)
+        if rows[-1]["event_id"] == source.events[-1]["event_id"]:
+            assert rows[-1]["n_prior"] == 12
+            rows[-1][field] = value
+            changed.append(field)
+        return rows
+
+    monkeypatch.setattr(stored, "_event_rows", malformed)
+    _, output = _build(source)  # Null and negative finite values pass native physical inspection.
+    assert changed == [field]
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    monkeypatch.setattr(stored, "_prepare_history", _forbid)
+    observed = _observe_long_target_validation(source, monkeypatch, field)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH") as failure:
+        _read(source, output)
+    assert failure.value.problem.message == "stored history feature or missingness is invalid"
+    assert observed == [value]
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+@pytest.mark.parametrize("field", ["ema8_prior_move", "ema8_prior_abs_move",
+                                  "ema12_prior_move", "ema12_prior_abs_move"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_sufficient_history_nonfinite_emas_refuse_after_real_feature_scan(long_source, monkeypatch, field, value):
+    source = long_source
+    _, output = _build(source)
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    monkeypatch.setattr(stored, "_prepare_history", _forbid)
+    scan, seen, changed = stored._scan, [], []
+
+    def malformed(repository, snapshot, context, columns, count):
+        rows = scan(repository, snapshot, context, columns, count)
+        seen.append(tuple(columns))
+        if tuple(columns) == (*stored.METADATA, *FEATURES):
+            for row in rows:
+                if row["event_id"] == source.events[-1]["event_id"] and row["horizon_sessions"] == 5:
+                    assert row["n_prior"] == 12
+                    row[field] = value  # Native inspection rejects infinities before publication.
+                    changed.append(field)
+        return rows
+
+    monkeypatch.setattr(stored, "_scan", malformed)
+    observed = _observe_long_target_validation(source, monkeypatch, field)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH") as failure:
+        _read(source, output)
+    assert failure.value.problem.message == "stored history feature or missingness is invalid"
+    assert len(observed) == 1 and observed[0] is value
+    assert seen == [tuple(stored.METADATA), (*stored.METADATA, *FEATURES)] and changed == [field]
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
