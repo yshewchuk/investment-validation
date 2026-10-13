@@ -164,6 +164,12 @@ def _assert_fold_metrics(source, result):
         assert fold["metrics"] == pytest.approx(_metrics(pairs)), "fold metrics must use only that fold's pairs"
 
 
+def _event_ids(source, dates):
+    return [event["event_id"] for event in sorted(source.events,
+        key=lambda event: (event["event_date"], event["event_id"]))
+        if event["event_date"].date().isoformat() in dates]
+
+
 def test_real_stored_rows_produce_issuer_and_horizon_specific_read_only_forecasts(source, monkeypatch):
     _no_rebuild(monkeypatch)
     # Pre-window history is needed by the stored model, but must never be decoded again.
@@ -193,6 +199,9 @@ def test_real_stored_rows_produce_issuer_and_horizon_specific_read_only_forecast
         assert row["absolute_move_pct"] == actual
         assert row["predicted_absolute_move_pct"] == pytest.approx(predicted)
         assert row["source"] == "stored_history"
+        day = sealed[key[0]]["event_date"]
+        assert row["n_prior"] == (5 if day == "2025-01-07" else
+                                 4 if day == "2024-06-17" and key[1] == 1 else 3)
         assert row["fold"] == sealed[key[0]]["event_date"][:4]
         assert row["forecast"] == next(clock for clock in sealed[key[0]]["forecasts"]
                                       if clock["horizon_sessions"] == key[1])
@@ -202,6 +211,12 @@ def test_real_stored_rows_produce_issuer_and_horizon_specific_read_only_forecast
             _metrics(pair for (_, count), pair in expected.items() if count == horizon["horizon_sessions"]))
     assert {row["horizon_sessions"] for row in result["per_horizon"]} == {5, 3, 1}
     _assert_fold_metrics(source, result)
+    for fold, count, dates, mean in zip(result["folds"], (4, 8), (
+        ("2023-01-03", "2023-06-02"),
+        ("2023-01-03", "2023-06-02", "2024-06-12", "2024-06-17")), (7.5, 9.)):
+        assert fold["train_count"] == count
+        assert fold["train_event_ids"] == _event_ids(source, dates)
+        assert fold["mean_absolute_move_pct"] == mean
     assert result["metrics"]["rmse"] != pytest.approx(sum(fold["metrics"]["rmse"] for fold in result["folds"]) / 2)
     assert result["result_id"] == content_hash({key: value for key, value in result.items() if key != "result_id"})
     assert json.loads(json.dumps(result, allow_nan=False)) == result
@@ -314,6 +329,135 @@ def test_result_binds_exact_stored_feature_objects_rows_columns_and_input_digest
         assert fold["training_inputs"]["labels_before"] == fold["training_labels_before"]
         assert fold["evaluation_inputs"]["labels_before"] == CUTOFF
         assert {row["event_id"] for row in fold["evaluation_inputs"]["consumed_inputs"]} == set(fold["test_event_ids"])
+
+
+def _qualification_source(tmp_path):
+    # New issuers in each evaluation year force the fallback in both folds.
+    days = ("2023-01-03", "2023-06-02", "2023-06-05", "2023-06-06",
+            "2023-06-07", "2023-06-08", "2024-06-12", "2025-01-07")
+    events = [_event(day, ticker=ticker) for day, ticker in zip(days,
+        ("TRAIN_A", "TRAIN_B", "LATE", "SKIP", "UNKNOWN", "FUTURE", "NEW_A", "NEW_B"))]
+    moves = [_move(event, value) for event, value in zip(events, (-2., 8., 12., None, None, None, -10., -4.))]
+    moves[2]["available_as_of_date"] = "2024-01-01"
+    moves[3].update(skipped=True, available_as_of_date=None)
+    moves[4]["available_as_of_date"] = None
+    moves[5]["available_as_of_date"] = CUTOFF
+    return _source(tmp_path, events=events, moves=moves)
+
+
+def _expected_label_evidence(source):
+    # Construct membership from fixture identities and physical catalog records,
+    # never the model result, returned attrs, target loader or sealed fold fields.
+    keys = [event["event_id"] for event in source.events]
+    records = {(record.partition_key, record.time_min): record for record in
+        source.repository.fragment_records(source.snapshot, "computed_moves")}
+    physical = {}
+    for event in source.events:
+        record = records[event["ticker"], event["event_date"].date().isoformat()]
+        physical[event["event_id"]] = {"event_id": event["event_id"], "fragment_id": record.fragment_id,
+            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash}
+    recipe = {"schema_version": "earnings_magnitude.v1", "units": "percentage_points",
+        "target": "absolute_earnings_close_to_close_return", "price_basis": "split_neutral_non_dividend_adjusted",
+        "estimand": "conditional_mean", "primary_loss": "pooled_rmse",
+        "secondary_diagnostics": ["mae", "quantile_calibration"]}
+    common = {"snapshot_id": source.snapshot.snapshot_id, "holdout_as_of_month": "2026-01",
+        "random_membership_version": "canonical-event-sha256.v1", "rolling_membership_version": "calendar-months.v1",
+        "population_use": "post-release selection", "purpose": "selection",
+        "computed_moves_version": source.snapshot.table_versions["computed_moves"].dataset_version_id}
+    preflight = {"schema_version": "research_magnitude_preflight.v1", **common,
+        "event_ids": keys, "planned_inputs": [physical[key] for key in keys]}
+    preflight["preflight_id"] = content_hash(preflight)
+    folds = []
+    for year, before, candidates, qualified, test in (
+        ("2024", "2024-01-01", keys[:6], keys[:2], keys[6:7]),
+        ("2025", "2024-12-30", keys[:7], [*keys[:3], keys[6]], keys[7:])):
+        omitted = ([{"event_id": keys[2], "reason": "not_available_before_fit"}] if year == "2024" else [])
+        omitted += [{"event_id": key, "reason": reason} for key, reason in zip(keys[3:6],
+            ("skipped", "unavailable", "not_available_before_fit"))]
+        training = {"schema_version": "research_magnitude_training_targets.v1", **common,
+            "labels_before": before, "target_recipe": recipe, "target_recipe_id": content_hash(recipe),
+            "candidate_event_ids": candidates, "qualified_event_ids": qualified,
+            "read_inputs": [physical[key] for key in candidates], "omitted_labels": omitted}
+        evaluation = {"schema_version": "research_magnitude_targets.v1", **common,
+            "labels_before": "2025-02-01", "target_recipe": recipe, "target_recipe_id": content_hash(recipe),
+            "consumed_inputs": [physical[key] for key in test], "excluded_future_events": []}
+        for evidence in (training, evaluation):
+            evidence.update(inputs_id=content_hash(evidence), holdout_exclusions=[])
+        folds.append({"year": year, "training_labels_before": before,
+            "training_candidate_event_ids": candidates, "evaluation_event_ids": test,
+            "train_count": len(qualified), "test_count": 1, "train_event_ids": qualified,
+            "test_event_ids": test, "training_inputs": training, "evaluation_inputs": evaluation})
+    return recipe, preflight, folds
+
+
+def _assert_label_evidence(source, result):
+    recipe, preflight, folds = _expected_label_evidence(source)
+    assert result["target"] == recipe
+    assert result["preflight"] == preflight
+    assert len(result["folds"]) == 2
+    for actual, expected in zip(result["folds"], folds):
+        assert {key: actual[key] for key in expected} == expected
+
+
+def _assert_fallbacks(source, result):
+    assert [fold["mean_absolute_move_pct"] for fold in result["folds"]] == [5., 8.]
+    expected = {(source.events[index]["event_id"], horizon): (year, mean, actual)
+        for index, year, mean, actual in ((6, "2024", 5., 10.), (7, "2025", 8., 4.))
+        for horizon in (5, 3, 1)}
+    assert len(result["predictions"]) == len(expected) == 6
+    assert {(row["event_id"], row["horizon_sessions"]) for row in result["predictions"]} == expected.keys()
+    for row in result["predictions"]:
+        assert (row["fold"], row["predicted_absolute_move_pct"], row["absolute_move_pct"]) == expected[
+            row["event_id"], row["horizon_sessions"]]
+        assert row["source"] == "fold_mean" and row["n_prior"] == 0
+    assert result["metrics"] == pytest.approx({"count": 6, "rmse": math.sqrt(20.5), "mae": 4.5})
+
+
+def test_two_fold_empty_histories_use_distinct_absolute_qualified_means_and_complete_evidence(tmp_path, monkeypatch):
+    source = _qualification_source(tmp_path)
+    try:
+        result = model.prediction_result(source.repository, source.registration)
+        _assert_label_evidence(source, result)
+        _assert_fallbacks(source, result)
+        # Execute both counterfactuals through the reporter: neither constant 4
+        # nor signed training means (3, 2) may pass the independent prediction oracle.
+        qualify = model.qualify_magnitude_training_targets
+
+        def signed_training(*args, **kwargs):
+            frame = qualify(*args, **kwargs)
+            frame["absolute_move_pct"] = frame.realized_move_pct
+            return frame
+
+        for name, replacement in (("mean", lambda _: 4.),
+            ("qualify_magnitude_training_targets", signed_training)):
+            with monkeypatch.context() as patch:
+                patch.setattr(model, name, replacement)
+                changed = model.prediction_result(source.repository, source.registration)
+            with pytest.raises(AssertionError):
+                _assert_fallbacks(source, changed)
+        for field in ("target", "preflight"):
+            changed = json.loads(json.dumps(result))
+            changed[field] = {}
+            with pytest.raises(AssertionError):
+                _assert_label_evidence(source, changed)
+        # A self-consistent digest cannot conceal a lost physical content hash.
+        for field, objects in (("training_inputs", "read_inputs"), ("evaluation_inputs", "consumed_inputs")):
+            changed = json.loads(json.dumps(result))
+            evidence = changed["folds"][0][field]
+            evidence[objects][0].pop("content_hash")
+            evidence["inputs_id"] = content_hash({key: value for key, value in evidence.items()
+                                                 if key not in ("inputs_id", "holdout_exclusions")})
+            with pytest.raises(AssertionError):
+                _assert_label_evidence(source, changed)
+        for field, key in (("training_inputs", "read_inputs"), ("training_inputs", "inputs_id"),
+            ("training_inputs", "qualified_event_ids"), ("training_inputs", "omitted_labels"),
+            ("evaluation_inputs", "consumed_inputs"), ("evaluation_inputs", "inputs_id")):
+            changed = json.loads(json.dumps(result))
+            changed["folds"][0][field].pop(key)
+            with pytest.raises(AssertionError):
+                _assert_label_evidence(source, changed)
+    finally:
+        source.conn.close()
 
 
 def test_history_binding_is_exact_metadata_only_and_registers_one_attempt(tmp_path, monkeypatch):
@@ -757,3 +901,155 @@ def test_invalid_model_options_refuse_before_store_or_spec(monkeypatch, capsys, 
     assert caught.value.code == 2
     captured = capsys.readouterr()
     assert ": error:" in captured.err and not captured.out
+
+
+@pytest.mark.parametrize("action", ["register", "run"])
+@pytest.mark.parametrize("option,value", [
+    ("--magnitude-feature-snapshot-id", "synthetic-feature-pin"),
+    ("--magnitude-history-start", HISTORY),
+])
+def test_history_cli_half_pair_refuses_at_exact_parser_guard(monkeypatch, capsys, action, option, value):
+    monkeypatch.setattr(cli.foundation, "ArtifactStore", _forbid)
+    monkeypatch.setattr(cli, "connect", _forbid)
+    monkeypatch.setattr(Path, "read_text", _forbid)
+    with pytest.raises(SystemExit) as caught:
+        cli.main([action, "--spec", "unused", "--catalog", "unused", "--store-root", "unused",
+            "--as-of-month", MONTH, "--no-ledger", "--target", "absolute_move",
+            "--magnitude-training-start", START, "--magnitude-labels-before", CUTOFF,
+            "--magnitude-model", "history_mean", option, value])
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert captured.err.split(": error: ")[-1] == (
+        "history_mean requires absolute_move and both history options; other models accept neither\n")
+
+
+@pytest.fixture
+def fresh_history_source(tmp_path):
+    source = _source(tmp_path, register=False, build=False)
+    yield source
+    source.conn.close()
+
+
+def _fresh_history_arguments(**changes):
+    return {"code_root": ROOT, "as_of_month": MONTH, "magnitude_training_start": START,
+        "magnitude_labels_before": CUTOFF, "magnitude_feature_snapshot_id": "synthetic-feature-pin",
+        "magnitude_history_start": HISTORY, **changes}
+
+
+def _assert_history_problem(error, code, message):
+    assert error.code == code
+    assert error.problem.retryable is False
+    assert error.problem.message == message
+
+
+def _forbid_native_history_effects(monkeypatch, source):
+    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
+    monkeypatch.setattr(native, "transaction", _forbid)
+    monkeypatch.setattr(native, "register_hypothesis_in_transaction", _forbid)
+    for name in ("publish_native_outcome", "export_native_report", "ledger_append"):
+        monkeypatch.setattr(outcomes, name, _forbid)
+
+
+def _assert_history_request_before_access(source, monkeypatch, changes, message, *, spec=None):
+    before = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(native, "source_closure", _forbid)
+    for name in ("resolve_pinned", "resolve", "scan"):
+        monkeypatch.setattr(source.repository, name, _forbid)
+    _forbid_native_history_effects(monkeypatch, source)
+    for operation in (native.register_native, native.require_native_registration):
+        with pytest.raises(OpsError) as caught:
+            operation(source.conn, source.store, source.repository, spec or source.spec,
+                      **_fresh_history_arguments(**changes))
+        _assert_history_problem(caught.value, "INVALID_EXPERIMENT_SPEC", message)
+        assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+@pytest.mark.parametrize("changes", [
+    {"magnitude_feature_snapshot_id": None}, {"magnitude_feature_snapshot_id": ""},
+    {"magnitude_feature_snapshot_id": " padded "}, {"magnitude_feature_snapshot_id": 123},
+    {"magnitude_feature_snapshot_id": []}, {"magnitude_history_start": None},
+    {"magnitude_history_start": ""}, {"magnitude_history_start": "20220101"},
+    {"magnitude_history_start": "2022-1-01"}, {"magnitude_history_start": "2022-02-30"},
+    {"magnitude_history_start": "2022-01-01T00:00:00Z"}, {"magnitude_history_start": 20220101},
+])
+def test_history_library_literal_guards_precede_all_access(fresh_history_source, monkeypatch, changes):
+    _assert_history_request_before_access(fresh_history_source, monkeypatch, changes,
+        "history requires an exact feature snapshot and canonical start")
+
+
+@pytest.mark.parametrize("kind", ["incompatible-runner", "missing-cutoff", "missing-execution"])
+def test_history_library_execution_guards_precede_all_access(fresh_history_source, monkeypatch, kind):
+    source = fresh_history_source
+    spec = replace(source.spec, runner="experiments/magnitude_report.py") if kind == "incompatible-runner" else source.spec
+    changes = {} if kind == "incompatible-runner" else {"magnitude_labels_before": None}
+    if kind == "missing-execution":
+        changes["magnitude_training_start"] = None
+    _assert_history_request_before_access(source, monkeypatch, changes,
+        "stored history requires magnitude execution and its native runner", spec=spec)
+
+
+def test_history_fresh_missing_pin_translates_real_resolution_before_effects(fresh_history_source, monkeypatch):
+    source = fresh_history_source
+    missing = "synthetic-feature-pin"
+    with pytest.raises(DataError) as caught:
+        source.repository.resolve(missing)
+    _assert_history_problem(caught.value, "SNAPSHOT_NOT_FOUND", "unknown snapshot id")
+    before = _catalog(source.conn), _objects(source.store)
+    resolve, resolved = source.repository.resolve, []
+
+    def track_resolve(snapshot_id):
+        resolved.append(snapshot_id)
+        return resolve(snapshot_id)
+
+    monkeypatch.setattr(source.repository, "resolve", track_resolve)
+    _metadata_only(monkeypatch)
+    _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
+    _forbid_native_history_effects(monkeypatch, source)
+    monkeypatch.setattr(stored, "read_stored", _forbid)
+    monkeypatch.setattr(model, "read_stored", _forbid)
+    with pytest.raises(OpsError) as caught:
+        native.register_native(source.conn, source.store, source.repository, source.spec,
+                               **_fresh_history_arguments())
+    _assert_history_problem(caught.value, "EXPERIMENT_IDENTITY_CONFLICT",
+                            "stored history identity could not be admitted")
+    assert resolved[-1] == missing and resolved.count(missing) == 1
+    assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
+    assert (_catalog(source.conn), _objects(source.store)) == before
+    assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))
+
+
+def test_history_reader_identity_translation_is_reached_after_real_admission(source, monkeypatch):
+    before = _catalog(source.conn), _objects(source.store)
+    _no_rebuild(monkeypatch)
+    _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
+    feature_objects = {r.object_ref.object_id
+                       for r in source.repository.fragment_records(source.feature_snapshot, TABLE)}
+    verify, calls = objects.verify_object_path, []
+
+    def metadata_only(store, ref):
+        assert ref.object_id not in feature_objects, "identity refusal opened feature bytes"
+        return verify(store, ref)
+
+    def changed_reader(repository, feature, context):
+        calls.append((feature, context))
+        # Substitute another real committed snapshot only at the reader boundary.
+        # The registrar and the reporter's metadata admission still see the valid pin.
+        return stored.read_stored(repository, source.snapshot, context)
+
+    monkeypatch.setattr(objects, "verify_object_path", metadata_only)
+    _forbid_native_history_effects(monkeypatch, source)
+    for name in ("qualify_magnitude_training_targets", "load_magnitude_targets"):
+        monkeypatch.setattr(model, name, _forbid)
+    with pytest.raises(DataError) as caught:
+        stored.read_stored(source.repository, source.snapshot, source.build["context"])
+    _assert_history_problem(caught.value, "IDENTITY_CONFLICT",
+                            "feature snapshot is not the committed context output")
+    monkeypatch.setattr(model, "read_stored", changed_reader)
+    with pytest.raises(OpsError) as caught:
+        model.prediction_result(source.repository, source.registration)
+    _assert_history_problem(caught.value, "EXPERIMENT_IDENTITY_CONFLICT",
+                            "stored feature identity changed after admission")
+    assert calls == [(source.feature_snapshot, source.build["context"])]
+    assert (_catalog(source.conn), _objects(source.store)) == before
+    assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))
