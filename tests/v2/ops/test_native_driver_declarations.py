@@ -1,4 +1,4 @@
-"""Ordered driver declarations over real synthetic releases; RUNUP stays gated."""
+"""Ordered driver declarations over real synthetic releases and model state."""
 import json
 from dataclasses import FrozenInstanceError, asdict, replace
 
@@ -8,15 +8,18 @@ from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops import native_score_batch as batch
 from engine.v2.scoring.frozen_executor import FrozenStageRefusal
 from engine.v2.scoring.identity import request_hash
+from tests.v2.ops.runup_helpers import stage_model_release as _stage
 from tests.v2.ops.test_native_score_batch_driver_alias import (
     GATE,
     SIZE,
     _assemble,
     _event_doc,
     _event_inputs,
-    _stage,
     _staged_driver_pool,
     _worker_parameters,
+)
+from tests.v2.ops.test_native_score_batch_driver_alias import (
+    _stage as _stage_without_model_state,
 )
 
 IMPLIED = ("implied_t1", "*", ("days_before_print", "implied_x", "shared"))
@@ -47,9 +50,10 @@ def _build(binding, event=None, **kwargs):
     return rows, refusals, event
 
 
-def test_runup_descriptor_is_frozen_and_not_registered():
-    assert tuple(batch._STRATEGY_REGISTRY) == ("STR-THRU",)
+def test_runup_descriptor_is_frozen_and_registered():
+    assert tuple(batch._STRATEGY_REGISTRY) == ("STR-THRU", "STR-RUNUP")
     spec = batch._RUNUP_SPEC
+    assert batch._STRATEGY_REGISTRY["STR-RUNUP"] is spec
     assert spec.drivers == (
         batch._DriverSpec("driver_prediction", "driver:STR-RUNUP", "implied_t1:*"),
         batch._DriverSpec("runup_move_prediction", "runup_move:*"))
@@ -74,7 +78,7 @@ def test_driver_output_name_is_declarative_without_enabling_another_strategy():
     spec = replace(batch._STRATEGY_REGISTRY["STR-THRU"],
                    drivers=(batch._DriverSpec("forecast_abs_move", "size:*"),))
     assert spec.drivers[0].output == "forecast_abs_move"
-    assert tuple(batch._STRATEGY_REGISTRY) == ("STR-THRU",)
+    assert tuple(batch._STRATEGY_REGISTRY) == ("STR-THRU", "STR-RUNUP")
 
 
 @pytest.mark.parametrize("exact,driver_key,expected", [
@@ -112,12 +116,12 @@ def test_every_recipe_identity_reference_and_frozen_consumer_survives(
             assert executor.predict(inputs.features["model_inputs"]) == {output: value}
 
 
-@pytest.mark.parametrize("reverse,driver_keys,primary_role", [
-    (False, ("implied_t1:*", "runup_move:*"), "implied_t1"),
-    (True, ("runup_move:*", "implied_t1:*"), "runup_move"),
+@pytest.mark.parametrize("reverse,driver_keys", [
+    (False, ("implied_t1:*", "runup_move:*")),
+    (True, ("runup_move:*", "implied_t1:*")),
 ])
-def test_declaration_order_controls_references_and_primary_residual_pool(
-        tmp_path, monkeypatch, reverse, driver_keys, primary_role):
+def test_declaration_order_controls_references_not_runup_residual_slot_meaning(
+        tmp_path, monkeypatch, reverse, driver_keys):
     pools, pool_rows = {}, []
     for role in ("implied_t1", "runup_move"):
         pools[role], row = _staged_driver_pool(tmp_path, role=role, model_id=f"m-{role}-*")
@@ -133,11 +137,12 @@ def test_declaration_order_controls_references_and_primary_residual_pool(
     request, inputs = rows[event.key]
     assert request.model_artifact_refs == tuple(
         binding.model_identity[key].artifact_hash for key in (*driver_keys, "gate:STR-RUNUP"))
-    primary = pools[primary_role]
-    assert inputs.model["model_residual_artifacts"] == {"driver": primary}
-    assert inputs.model["model_residual_artifact_recipe"] == {"driver": {
-        "role": primary_role, "model_id": f"m-{primary_role}-*", "fold": None,
-        "content_hash": primary.content_hash}}
+    assert inputs.model["model_residual_artifacts"] == {
+        "driver": pools["implied_t1"], "runup_move": pools["runup_move"]}
+    assert inputs.model["model_residual_artifact_recipe"] == {
+        slot: {"role": role, "model_id": f"m-{role}-*", "fold": None,
+               "content_hash": pools[role].content_hash}
+        for slot, role in (("driver", "implied_t1"), ("runup_move", "runup_move"))}
 
 
 @pytest.mark.parametrize("missing,detail", [
@@ -205,7 +210,10 @@ def test_explicit_features_keep_existing_override_and_executor_missing_feature_r
     assert error.value.missing_features == ("move_x",)
 
 
-@pytest.mark.parametrize("changes", [{"role": "size"}, {"output_names": ("left", "right")}])
+@pytest.mark.parametrize("changes", [
+    {"role": "size"}, {"output_names": ("left", "right")},
+    {"output_names": ("runup_move_prediction",)}, {"output_names": ("unknown_raw",)},
+])
 def test_wrong_secondary_binding_is_sanitized_input_build_refusal(tmp_path, monkeypatch, changes):
     _enable_test_runup(monkeypatch)
     binding = _stage(tmp_path, [IMPLIED, MOVE, RUNUP_GATE])
@@ -241,11 +249,11 @@ def test_through_preserves_public_driver_name_override(tmp_path):
     assert next(iter(rows.values()))[1].forecast["driver_name"] == "custom-driver"
 
 
-def test_healthy_two_driver_release_does_not_enable_runup(tmp_path):
-    binding = _stage(tmp_path, [IMPLIED, MOVE, RUNUP_GATE])
+def test_registered_runup_requires_verified_model_state(tmp_path):
+    binding = _stage_without_model_state(tmp_path, [IMPLIED, MOVE, RUNUP_GATE])
     rows, refusals, event = _build(binding)
     assert rows == {}
-    assert [(r.key, r.code) for r in refusals] == [(event.key, "UNSUPPORTED_STRATEGY")]
+    assert [(r.key, r.code) for r in refusals] == [(event.key, "MODEL_NOT_READY")]
 
 
 def test_missing_runup_policy_refuses_before_bundle(tmp_path, monkeypatch):
@@ -302,7 +310,7 @@ def test_derived_secondary_feature_gap_is_not_defaulted_or_dropped(tmp_path, mon
     assert (error.value.code, error.value.missing_features) == ("MISSING_FEATURES", ("move_x",))
 
 
-def test_worker_executes_both_forecasts_without_claiming_runup_readiness(tmp_path, monkeypatch):
+def test_worker_executes_both_forecasts_but_refuses_unavailable_gate_features(tmp_path, monkeypatch):
     _enable_test_runup(monkeypatch)
     binding = _stage(tmp_path, [IMPLIED, MOVE, RUNUP_GATE])
     event = _event()
@@ -321,7 +329,8 @@ def test_worker_executes_both_forecasts_without_claiming_runup_readiness(tmp_pat
     assert len(records["records"]) == 1
     record = next(iter(records["records"].values()))
     assert record["readiness"] == "refused"
-    assert "MISSING_SIMULATION_INPUT" in record["reason_codes"]
+    assert "MISSING_GATE_INPUT:forecast" in record["reason_codes"]
+    assert "MISSING_SIMULATION_INPUT" not in record["reason_codes"]
     assert record["forecasts"]["driver_prediction"] == 11.0
     assert record["forecasts"]["runup_move_raw_d14"] == 17.0
     assert record["forecasts"]["runup_move_prediction"] == pytest.approx(51.0 / 14.0)

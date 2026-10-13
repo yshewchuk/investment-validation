@@ -1,17 +1,22 @@
-"""Registry routing over real synthetic releases; no additional strategy enabled."""
+"""Registry routing over real synthetic releases; only THRU and RUNUP enabled."""
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
 from engine.v2.ops import native_score_batch as batch
 from tests.v2.ops.test_native_score_batch_driver_alias import (
-    DRIVER, GATE, SIZE, _assemble, _event_inputs, _stage,
+    DRIVER,
+    GATE,
+    SIZE,
+    _assemble,
+    _event_inputs,
+    _stage,
 )
 
 
-def test_registry_is_immutable_and_only_through_is_enabled():
+def test_registry_is_immutable_and_only_through_and_runup_are_enabled():
     registry = batch._STRATEGY_REGISTRY
-    assert tuple(registry) == ("STR-THRU",)
+    assert tuple(registry) == ("STR-THRU", "STR-RUNUP")
     assert registry["STR-THRU"] == batch._StrategySpec(
         drivers=(batch._DriverSpec("driver_prediction", "driver:STR-THRU", "size:*"),),
         gate_role="gate:STR-THRU", gate_policy_key="STR-THRU",
@@ -24,15 +29,15 @@ def test_registry_is_immutable_and_only_through_is_enabled():
 
 def test_unregistered_rows_are_all_retained_as_refusals(tmp_path):
     binding = _stage(tmp_path, [DRIVER, SIZE, GATE])
-    unsupported = ["STR-RUNUP", "BFLY-P", "BFLY-P5", "CND-PS", "CTR5",
+    unsupported = ["BFLY-P", "BFLY-P5", "CND-PS", "CTR5",
                    "RAMP7", "TWIN-P", "TWIN-P5", "DYN-SV", "UNKNOWN"]
     events = [_event_inputs(strategy=name) for name in ["STR-THRU", *unsupported]]
     assembled, refusals = _assemble(binding, events)
     assert list(assembled) == [events[0].key]
     assert [refusal.key for refusal in refusals] == [event.key for event in events[1:]]
-    assert [refusal.code for refusal in refusals] == ["UNSUPPORTED_STRATEGY"] * 10
+    assert [refusal.code for refusal in refusals] == ["UNSUPPORTED_STRATEGY"] * 9
     assert [refusal.detail for refusal in refusals] == [
-        f"only STR-THRU is supported, got {name!r}" for name in unsupported]
+        f"only STR-THRU, STR-RUNUP is supported, got {name!r}" for name in unsupported]
 
 
 def test_admission_comes_from_registry_not_a_second_allowlist(tmp_path, monkeypatch):
@@ -74,20 +79,22 @@ def test_registered_keys_reach_real_bundle_and_preserve_downstream_refusal(
                    gate_policy_key="test-policy", bundle_strategy=bundle_strategy)
     monkeypatch.setattr(batch, "_STRATEGY_REGISTRY", {"BFLY-P": spec})
     observed = []
-    real_builder = batch.build_native_score_inputs
+    real_builder = batch.assemble_nightly_source_bundle
 
-    def inspect_then_build(bundle):
+    def inspect_then_build(**kwargs):
+        bundle = real_builder(**kwargs)
         observed.append(bundle)
-        return real_builder(bundle)
+        return bundle
 
-    monkeypatch.setattr(batch, "build_native_score_inputs", inspect_then_build)
+    monkeypatch.setattr(batch, "assemble_nightly_source_bundle", inspect_then_build)
     event = _event_inputs(strategy="BFLY-P")
     # The test-only RUNUP bundle route requires its calendar-owned horizon.
     event = replace(event, calendar_row={**event.calendar_row, "days_before_print": 5})
     assembled, refusals = _assemble(
         binding, [event], gate_policy={"test-policy": {"threshold": 0.0}})
     assert assembled == {}
-    assert [refusal.code for refusal in refusals] == ["NATIVE_INPUT_BUILD_FAILED"]
+    expected_code = "MODEL_NOT_READY" if bundle_strategy == "STR-RUNUP" else "NATIVE_INPUT_BUILD_FAILED"
+    assert [refusal.code for refusal in refusals] == [expected_code]
     assert [refusal.key for refusal in refusals] == [event.key]
     assert len(observed) == 1
     bundle = observed[0]

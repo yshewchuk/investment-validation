@@ -85,8 +85,8 @@ def test_producer_horizon_reaches_both_real_frozen_consumers(tmp_path, monkeypat
     assert set(inputs.forecast["executors"]) == {"driver_prediction", "runup_move_prediction"}
     for output, executor in inputs.forecast["executors"].items():
         assert executor.predict(inputs.features["model_inputs"]) == {output: expected + 1.0}
-    # This prerequisite does not activate RUNUP batch dispatch.
-    assert _assemble(binding, [event])[1][0].code == "UNSUPPORTED_STRATEGY"
+    # Timing alone does not supply the separately required release gate policy.
+    assert _assemble(binding, [event])[1][0].code == "GATE_POLICY_NOT_STAGED"
 
 
 @pytest.mark.parametrize("decision,calendar,code,detail", [
