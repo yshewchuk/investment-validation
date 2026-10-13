@@ -91,3 +91,25 @@ def test_row_mismatches_flags_a_native_row_missing_its_own_entry_cost_pct():
     legacy_row = {"entry_cost": 3.0, "spot": 250.0}
     native_row = {"entry_cost": 3.0, "spot": 250.0}
     assert _entry_cost_pct_findings(legacy_row, native_row)
+
+
+@pytest.mark.parametrize("row", [
+    {"entry_cost": 3.0, "spot": "0"},
+    {"entry_cost": 3.0, "spot": "0.0"},
+    {"entry_cost": 3.0, "spot": "bad"},
+    {"entry_cost": "bad", "spot": 250.0},
+    {"entry_cost": "inf", "spot": 250.0},
+    {"entry_cost": 3.0, "spot": object()},
+])
+def test_malformed_or_zero_operands_give_none_not_an_exception(row):
+    assert _dimension_view(row, "financial_diagnostics", legacy=True)["entry_cost_pct"] is None
+
+
+def test_numeric_strings_are_converted_before_dividing():
+    row = {"entry_cost": "3.0", "spot": "250"}
+    assert _dimension_view(row, "financial_diagnostics", legacy=True)["entry_cost_pct"] == pytest.approx(1.2)
+
+
+def test_a_malformed_legacy_row_is_a_mismatch_not_an_abort():
+    legacy_row = {"entry_cost": "bad", "spot": 250.0}
+    assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": 1.2})

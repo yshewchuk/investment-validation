@@ -83,8 +83,14 @@ def complete_analog_query(query: Any, values: Mapping[str, Any]) -> Any:
         spot = _finite_or_none(values.get("spot"))
         usable = strike is not None and spot is not None and strike > 0 and spot > 0
         pct = abs(strike / spot - 1.0) * 100.0 if usable else None
+        if pct is not None and not isfinite(pct):
+            pct = None  # an overflowed ratio is unavailable, never the ">5%" bucket
         out["moneyness_band"] = _label(pct, MONEYNESS_EDGES, MONEYNESS_LABELS)
     return out
+
+
+class AmbiguousAnalogPool(ValueError):
+    """More than one frozen pool carries the row's (strategy, alpha, cutoff) key."""
 
 
 def analog_declarations(
@@ -95,22 +101,26 @@ def analog_declarations(
 
     The pool is picked by ``board_analog_pool_key(strategy, alpha, cutoff)``
     and pinned by its ``content_hash``. No matching pool gives ``{}`` (the
-    analog block stays undeclared).
+    analog block stays undeclared); more than one raises
+    :class:`AmbiguousAnalogPool` (never a first-wins pick).
     """
     # Lazy: engine.v2.ops imports this module and keeps engine.v2.models off its top-level import chain.
     from engine.v2.models.analog_artifact import board_analog_pool_key
 
     key = board_analog_pool_key(strategy, alpha, cutoff)
-    for artifact in artifacts:
-        if artifact.key == key:
-            return {
-                "analog_artifact": artifact,
-                "analog_artifact_recipe": {
-                    "cutoff": cutoff, "content_hash": artifact.content_hash,
-                    "min_analogs": MIN_ANALOGS, "bootstrap_draws": BOOTSTRAP_DRAWS,
-                    "ci_quantiles": CI_QUANTILES, "seed_snapshot": snapshot,
-                    "request_key": request_key,
-                },
-                "analog_query": analog_query_base(panel_row),
-            }
-    return {}
+    matches = [artifact for artifact in artifacts if artifact.key == key]
+    if len(matches) > 1:
+        raise AmbiguousAnalogPool("more than one analog pool matches the row key")
+    if not matches:
+        return {}
+    artifact = matches[0]
+    return {
+        "analog_artifact": artifact,
+        "analog_artifact_recipe": {
+            "cutoff": cutoff, "content_hash": artifact.content_hash,
+            "min_analogs": MIN_ANALOGS, "bootstrap_draws": BOOTSTRAP_DRAWS,
+            "ci_quantiles": CI_QUANTILES, "seed_snapshot": snapshot,
+            "request_key": request_key,
+        },
+        "analog_query": analog_query_base(panel_row),
+    }

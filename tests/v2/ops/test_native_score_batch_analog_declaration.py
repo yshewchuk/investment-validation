@@ -15,6 +15,7 @@ from engine.v2.models.lineage import Lineage
 from engine.v2.ops import native_score_batch
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_score_batch import _with_release_artifacts
+from engine.v2.ops.native_score_batch_types import NativeScoreBatchRowRefusal
 from engine.v2.scoring.source_inputs import SourceBundle
 from tests.v2.ops.test_native_score_batch_driver_alias import (
     GATE,
@@ -205,3 +206,12 @@ def test_runup_strategy_also_declares_the_matching_analog_pool(monkeypatch):
     assert recipe["seed_snapshot"] == "snap-1"
     assert recipe["request_key"] == (
         "TEST|STR-RUNUP|2026-01-10|2026-01-15||2026-01-16|0.5000||||c2026-01-10|")
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_conflicting_pools_refuse_the_row_in_either_order(order):
+    key = board_analog_pool_key("STR-THRU", 0.5, "2026-01-10")
+    pools = [_Pool(key, "sha256:one"), _Pool(key, "sha256:two")]
+    result = _declare([pools[i] for i in order])
+    assert isinstance(result, NativeScoreBatchRowRefusal)
+    assert result.code == "MODEL_NOT_READY"

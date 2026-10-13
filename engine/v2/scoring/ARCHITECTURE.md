@@ -125,7 +125,8 @@ load-bearing entrypoints:
   **Nightly frozen analog declaration** (`native_analog_query.py`, pure).
   - *Selection:* the release's board analog pool whose
     `(strategy, fill alpha, cutoff)` key matches the row, pinned by its
-    `content_hash`; no match leaves the analog block undeclared.
+    `content_hash`; no match leaves the analog block undeclared, and more than
+    one match refuses the row (`MODEL_NOT_READY`), never a first-wins pick.
   - *Query:* `mcap_bucket` and `implied_ratio` come from the panel row at
     bundle time; `dte_band` and `moneyness_band` are completed in the analog
     stage from the scorer-computed `dte_entry`, `strike` and `spot` with

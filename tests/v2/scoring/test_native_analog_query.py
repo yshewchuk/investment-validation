@@ -21,6 +21,7 @@ from engine.v2.scoring.native_analog_query import (
     BOOTSTRAP_DRAWS,
     CI_QUANTILES,
     MIN_ANALOGS,
+    AmbiguousAnalogPool,
     analog_declarations,
     analog_query_base,
     complete_analog_query,
@@ -394,3 +395,20 @@ def test_real_frozen_path_end_to_end(dte, strike, n):
     output = _n_analogs(values)
     assert output["n_analogs"] == n
     assert output["ci_low"] is not None and output["ci_low"] <= output["ci_high"]
+
+
+def test_moneyness_overflow_is_unavailable_not_the_far_bucket():
+    # Finite positive operands whose ratio overflows to inf: no band, never ">5%".
+    out = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None},
+                                {"spot": 1e-308, "strike": 1e308})
+    assert out["moneyness_band"] is None
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_two_pools_with_the_same_key_are_ambiguous_in_either_order(order):
+    key = board_analog_pool_key("STR-THRU", 0.5, "2026-01-09")
+    pools = [_FakeArtifact(key=key, content_hash="sha256:one"),
+             _FakeArtifact(key=key, content_hash="sha256:two")]
+    with pytest.raises(AmbiguousAnalogPool):
+        analog_declarations([pools[i] for i in order], "STR-THRU", 0.5, "2026-01-09",
+                            {"mcap_log": math.log(5e9)}, "snap-1", "req-key")

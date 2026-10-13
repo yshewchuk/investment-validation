@@ -114,11 +114,20 @@ def _dimension_fields(dimension: str) -> tuple[str, ...]:
 
 
 def _entry_cost_pct(row: Mapping[str, Any]) -> float | None:
-    """``entry_cost / spot * 100`` (checks/phase4_real._expected_financial_diagnostics)."""
-    cost, spot = row.get("entry_cost"), row.get("spot")
-    if cost is None or spot in (None, 0, 0.0):
+    """``entry_cost / spot * 100`` (checks/phase4_real._expected_financial_diagnostics).
+
+    Both operands are converted and validated first; a missing, non-numeric,
+    non-finite or (after conversion) zero ``spot`` gives ``None`` -- an unavailable
+    value that the comparator reports as a mismatch, never an exception.
+    """
+    try:
+        cost = float(row.get("entry_cost"))
+        spot = float(row.get("spot"))
+    except (TypeError, ValueError):
         return None
-    value = float(cost) / float(spot) * 100.0
+    if spot == 0.0 or not math.isfinite(cost) or not math.isfinite(spot):
+        return None
+    value = cost / spot * 100.0
     return value if math.isfinite(value) else None
 
 

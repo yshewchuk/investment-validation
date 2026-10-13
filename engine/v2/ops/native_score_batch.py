@@ -32,7 +32,7 @@ from engine.v2.ops.native_score_batch_types import (
 )
 from engine.v2.scoring.application import score_batch
 from engine.v2.scoring.identity import request_hash, score_request_key
-from engine.v2.scoring.native_analog_query import analog_declarations
+from engine.v2.scoring.native_analog_query import AmbiguousAnalogPool, analog_declarations
 from engine.v2.scoring.native_gate_features import GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
@@ -390,6 +390,9 @@ def _with_release_artifacts(
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
             key, exc.code, f"nightly_source_bundle refused: {exc.code}")
+    except AmbiguousAnalogPool:
+        return NativeScoreBatchRowRefusal(
+            key, "MODEL_NOT_READY", "release carries more than one analog pool for the row key")
     return replace(
         bundle, **declarations, context=context,
         model_release=binding.model_release, frozen_inference=binding.frozen_inference,
