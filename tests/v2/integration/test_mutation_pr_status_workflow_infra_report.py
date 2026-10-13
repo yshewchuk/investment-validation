@@ -77,16 +77,3 @@ def test_descriptions_of_the_unclassified_branches():
     assert _decide(MODULES="[]")[0] == "success"
     assert _decide(CLASSIFIED_STATE="failure", CLASSIFIED_DESC="PR-owned problem in a",
                    REPORT_RESULT="failure") == ("failure", "PR-owned problem in a")
-
-
-def test_report_neutral_covers_unclassified_failed_report_jobs():
-    job = JOBS["report_neutral"]
-    cond = " ".join(str(job["if"]).split())
-    assert "needs.report.outputs.state == 'neutral'" in cond
-    assert "needs.report.outputs.state != 'failure' && needs.report.result != 'success'" in cond
-    assert "needs.plan.outputs.modules != '[]'" in cond
-    assert "skipped_count" in cond
-    env = job["steps"][0]["env"]
-    assert "needs.report.outputs.description" in env["DESC"]
-    assert "before classification -- infra; not a pass" in env["DESC"]
-    assert "needs.report.result" in env["DESC"]

@@ -46,10 +46,7 @@ def test_report_job_exposes_classification_outputs():
 
 
 def test_classify_step_runs_after_the_merge_and_never_gates_the_job():
-    step = _classify_step()
-    assert step["if"] == "always() && needs.plan.outputs.pr_number != ''"
-    assert "tools/mutation_pr_status.py" in step["run"]
-    assert "--merged-dir merged" in step["run"]
+    step = _classify_step()  # its `if:` and `run:` are evaluated/executed in the _exec test file
     assert step["env"]["BASE_SHA"] == "${{ needs.plan.outputs.base_sha }}"
     steps = JOBS["report"]["steps"]
     merge = next(i for i, s in enumerate(steps) if s.get("name") == "Merge module reports")
