@@ -3,7 +3,8 @@
 Legacy builds the champion's 67 inputs in ``engine/score.py``
 ``Scorer._chooser_frame``. Seventeen are primitive facts it reads off the
 feature frame (the event-history recursions, the market/regime block and
-``dte_entry``); every other one is COMPUTED there from the scoring pass. This
+``dte_entry``); every other one is COMPUTED there from the scoring pass. Natively
+``dte_entry`` is scorer-computed (priced legs and quote date), no longer projected. This
 module is that arithmetic, a line-for-line port over native values:
 
 * :func:`entry_cost_pct` -- ``Scorer._entry_features``' ``entry_cost_pct``;

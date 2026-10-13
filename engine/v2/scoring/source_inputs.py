@@ -1,7 +1,9 @@
 """Build bounded native scoring inputs from answer-free source material."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import date
 from math import isfinite
 from typing import Any, Mapping, Sequence
 
@@ -617,7 +619,7 @@ def _quote_block(raw: Mapping[Any, Mapping[str, Any]]) -> dict[Any, dict[str, fl
     for contract, quote in raw.items():
         if not isinstance(quote, Mapping):
             raise ValueError("each raw quote must be a mapping")
-        extra = sorted(set(quote) - {"bid", "ask"})
+        extra = sorted(set(quote) - {"bid", "ask", "observed_date"})
         if extra:
             raise ValueError(f"raw quote contains unsupported fields: {extra}")
         if "bid" not in quote or "ask" not in quote:
@@ -626,9 +628,26 @@ def _quote_block(raw: Mapping[Any, Mapping[str, Any]]) -> dict[Any, dict[str, fl
             "bid": _finite_number(quote["bid"], "quote.bid"),
             "ask": _finite_number(quote["ask"], "quote.ask"),
         }
+        observed_date = quote.get("observed_date")
+        if observed_date is not None:
+            if not isinstance(observed_date, str) or not re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}", observed_date
+            ) or _is_out_of_range_date(observed_date):
+                raise ValueError(
+                    f"raw quote observed_date is not an ISO date: {observed_date!r}")
+            quotes[contract]["observed_date"] = observed_date
     if not quotes:
         raise ValueError("raw quote map must not be empty")
     return quotes
+
+
+def _is_out_of_range_date(value: str) -> bool:
+    """True when an ISO-shaped string is not a real calendar date (2026-02-30)."""
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return True
+    return False
 
 
 def _bounded_recipe(
