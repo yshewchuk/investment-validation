@@ -2,7 +2,7 @@
 bundle: ``days_to_print`` (legacy ``engine/features.py:1166-1168``) and
 ``dte_entry`` (legacy ``engine/score.py:2451``: ``dte_entry = int(priced.legs[0].dte)``).
 """
-import datetime
+from datetime import date, datetime
 import hashlib
 import json
 import types
@@ -16,7 +16,8 @@ from engine.v2.models.contracts import ArtifactMember
 from engine.v2.scoring import financial, stages
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
 from engine.v2.scoring.nightly_source_bundle import (
-    NightlySourceBundleRefusal, assemble_nightly_source_bundle, quote_domain_map)
+    NightlySourceBundleRefusal, _observed_date, assemble_nightly_source_bundle,
+    quote_domain_map)
 from engine.v2.scoring.source_inputs import _quote_block, build_native_score_inputs
 from engine.v2.scoring.stages import (
     NativeScoreInputs, STAGE_NAMES, StageReceipt, _check_pricing_boundary,
@@ -648,8 +649,8 @@ def test_date_helpers_reject_bad_types_and_suffixes(helper, position, bad):
 #: Exact ISO forms (objects or complete strings) that collapse to the same day.
 _GOOD_FORMS = [
     "2026-10-27",
-    datetime.date(2026, 10, 27),
-    datetime.datetime(2026, 10, 27, 15, 30),
+    date(2026, 10, 27),
+    datetime(2026, 10, 27, 15, 30),
     pd.Timestamp("2026-10-27"),
     "2026-10-27T00:00:00",
     "2026-10-27 00:00:00",
@@ -808,3 +809,25 @@ def test_quote_block_keeps_a_valid_observed_date():
     assert quotes[_CONTRACT]["observed_date"] == "2026-10-09"
     assert quotes[_CONTRACT]["bid"] == 1.9
     assert quotes[_CONTRACT]["ask"] == 2.1
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", "junk", float("nan"), pd.NaT, 0, 20261009, True, 1.5])
+def test_observed_date_omits_non_dates(value):
+    assert _observed_date(value) is None
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("2026-10-09", "2026-10-09"),
+    ("2026-10-09T15:00:00", "2026-10-09"),
+    (pd.Timestamp("2026-10-09 15:00"), "2026-10-09"),
+    (datetime(2026, 10, 9, 15, 0), "2026-10-09"),
+    (date(2026, 10, 9), "2026-10-09"),
+])
+def test_observed_date_parses_real_dates(value, expected):
+    assert _observed_date(value) == expected
+
+
+def test_quote_domain_map_omits_observed_date_for_empty_or_nat_rows():
+    for bad in ("", pd.NaT, float("nan"), 0):
+        quotes = quote_domain_map([_quote_row(100.0, bad)])
+        assert "observed_date" not in quotes["C:100.0:2026-11-20"]

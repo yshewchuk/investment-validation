@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import numbers
+from datetime import date, datetime
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -152,13 +153,26 @@ def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str,
 
 
 def _observed_date(value: Any) -> str | None:
-    """One quote row's observation date as an ISO string, or None when unparseable."""
+    """One quote row's observation date as an ISO string, or None when absent,
+    NaT/NaN, empty, unparseable or not a date/ISO string."""
     if value is None:
         return None
-    try:
-        return str(pd.Timestamp(value).date())
-    except (ValueError, TypeError):
-        return None
+    if isinstance(value, (datetime, date)):
+        if value != value:  # NaT
+            return None
+        return (value.date() if isinstance(value, datetime) else value).isoformat()
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            ts = pd.Timestamp(stripped)
+        except (ValueError, TypeError):
+            return None
+        if ts != ts:  # NaT
+            return None
+        return ts.date().isoformat()
+    return None
 
 
 def _merge_duplicate_quote(existing: dict[str, Any], quote: dict[str, Any],
