@@ -20,6 +20,8 @@ from engine.v2.models.residual_artifact import (
     PairedResidualPoolArtifact,
 )
 from engine.v2.scoring.frozen_executor import (
+    _RUNUP_FINAL_NAMES,
+    _RUNUP_RAW_NAMES,
     FrozenRecipeExecutor,
     FrozenStageExecutor,
 )
@@ -603,6 +605,12 @@ def _binding_output(binding: ModelBinding, target: str, declared: Any) -> str:
             f"{target} recipe names binding {binding.binding_id} of role {role!r}"
         )
     names = tuple(binding.output_names)
+    if role == "runup_move":
+        if set(names) & _RUNUP_FINAL_NAMES:
+            raise ValueError("runup_move binding declares a pretransformed forecast output")
+        selected = str(declared) if declared is not None else names[0] if len(names) == 1 else target
+        if selected not in _RUNUP_RAW_NAMES:
+            raise ValueError("runup_move recipe must select a raw D14 point output")
     if declared is not None:
         if str(declared) not in names:
             raise ValueError(f"{target} recipe output {declared!r} is not in {names}")

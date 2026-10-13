@@ -24,6 +24,7 @@
 !*.html
 !.gitignore
 !.env.example
+!.markdownlint-cli2.jsonc
 
 # ── docs: allow-listed by exact path (research findings stay private) ────
 !/README.md
