@@ -3,12 +3,13 @@
 Turns one ``ScoringReleaseBinding`` (PR-1, ``engine/v2/scoring/
 release_bindings.py``) plus per-event staged inputs (PR-2, ``engine/v2/
 scoring/nightly_source_bundle.py``) into ``{BoardRequest: (ScoreRequest,
-NativeScoreInputs)}``, bounded to ``STR-THRU`` only: batch-level malformed
+NativeScoreInputs)}``, admitting only registered strategies (currently
+``STR-THRU``): batch-level malformed
 input raises, every per-row gap is a collected
 :class:`NativeScoreBatchRowRefusal`, and ``run_native_score_batch_worker``
-scores the assembled batch under ``no_fit_guard``. There is no production
-caller yet -- see ``engine/v2/ops/ARCHITECTURE.md``'s
-``native_score_batch.py`` section for the full design.
+scores the assembled batch under ``no_fit_guard``. Production reaches this
+worker via the supervisor's native shadow sidecar -- see
+``engine/v2/ops/ARCHITECTURE.md`` for the worker contract.
 """
 from __future__ import annotations
 
@@ -51,20 +52,30 @@ __all__ = [
     "run_native_score_batch_worker",
 ]
 
-#: This bounded batch assembler's one supported strategy (matches
-#: nightly_source_bundle.py's own bounded-builder scope).
-_SUPPORTED_STRATEGY = "STR-THRU"
 _SHADOW_FILL_ALPHA = 0.5  # engine.fills.MID.alpha; do not import engine.fills
                           # (legacy) from this v2 module -- this is a shadow
                           # default, documented in ARCHITECTURE.md, not a
                           # legacy-derived fact.
 
-#: TEMPORARY (removal: a release carrying a dedicated `driver:{strategy}`
-#: binding, see ARCHITECTURE.md "Driver alias"). strategy -> the release
-#: identity key supplying the driver when `driver:{strategy}` is absent.
-#: STR-THRU's driver is the `size` champion (legacy PAYOFF_DRIVER,
-#: engine/payoff.py:81); feature roles are keyed with strategy id "*".
-_DRIVER_ROLE_ALIAS: Mapping[str, str] = MappingProxyType({"STR-THRU": "size:*"})
+@dataclass(frozen=True, slots=True)
+class _StrategySpec:
+    """Release and bundle keys for the existing single-driver assembly path."""
+
+    driver_role: str
+    driver_role_alias: str | None
+    gate_role: str
+    gate_policy_key: str
+    bundle_strategy: str
+
+
+# Code-owned admission, not a runtime registration API. Adding an entry does
+# not supply second-driver inputs or implement a chooser/meta-strategy.
+_STRATEGY_REGISTRY: Mapping[str, _StrategySpec] = MappingProxyType({
+    "STR-THRU": _StrategySpec(
+        driver_role="driver:STR-THRU", driver_role_alias="size:*",
+        gate_role="gate:STR-THRU", gate_policy_key="STR-THRU",
+        bundle_strategy="STR-THRU"),
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,35 +130,33 @@ def _iso(value: Any) -> str | None:
 
 
 def _matched_decision_clock(
-    _key: BoardRequest,
     model_identity: Mapping[str, Any],
-    strategy: str,
-) -> tuple[str | None, str | None, tuple[Any, Any] | None]:
+    spec: _StrategySpec,
+) -> tuple[str | None, str | None, tuple[str, Any, Any] | None]:
     """The one decision clock this assembler assumes per strategy, or a refusal.
 
     Returns a tagged 3-tuple: ``(code, detail, None)`` on failure (missing
     ``driver``/``gate`` role, or the two roles disagreeing on
     ``decision_clock_id``), ``(None, None, (driver_key, driver_identity,
     gate_identity))`` on success. ``driver_key`` is the release identity key
-    the driver came from: ``driver:{strategy}``, or -- only when that exact
-    binding is absent -- the ``_DRIVER_ROLE_ALIAS`` key. The row's ``key``
-    is passed in for the caller's error context; the refusal codes/details
-    are row-scoped by that caller.
+    the driver came from: the registered exact role, or -- only when that
+    binding is absent -- its optional alias. The caller scopes refusals to
+    the row; registry keys, never invented identities, are recorded.
     """
-    driver_key = f"driver:{strategy}"
+    driver_key = spec.driver_role
     driver_identity = model_identity.get(driver_key)
-    if driver_identity is None:
-        driver_key = _DRIVER_ROLE_ALIAS.get(strategy, driver_key)
+    if driver_identity is None and spec.driver_role_alias is not None:
+        driver_key = spec.driver_role_alias
         driver_identity = model_identity.get(driver_key)
-    gate_identity = model_identity.get(f"gate:{strategy}")
+    gate_identity = model_identity.get(spec.gate_role)
     if driver_identity is None:
-        return ("RELEASE_MISSING_ROLE", f"driver:{strategy}", None)
+        return ("RELEASE_MISSING_ROLE", spec.driver_role, None)
     if gate_identity is None:
-        return ("RELEASE_MISSING_ROLE", f"gate:{strategy}", None)
+        return ("RELEASE_MISSING_ROLE", spec.gate_role, None)
     if driver_identity.decision_clock_id != gate_identity.decision_clock_id:
         return ("AMBIGUOUS_DECISION_CLOCK",
-                f"driver:{strategy}={driver_identity.decision_clock_id!r} "
-                f"gate:{strategy}={gate_identity.decision_clock_id!r}", None)
+                f"{spec.driver_role}={driver_identity.decision_clock_id!r} "
+                f"{spec.gate_role}={gate_identity.decision_clock_id!r}", None)
     return (None, None, (driver_key, driver_identity, gate_identity))
 
 
@@ -349,7 +358,7 @@ def _bundle_or_refusal(
     key: BoardRequest,
     event: NightlyEventInputs,
     *,
-    strategy: str,
+    spec: _StrategySpec,
     driver_identity: Any,
     driver_key: str,
     gate_identity: Any,
@@ -369,8 +378,8 @@ def _bundle_or_refusal(
     """
     try:
         return assemble_nightly_source_bundle(
-            source_ref=f"native-score-batch:{key.ticker}:{_iso(key.event_date)}:{strategy}",
-            strategy=strategy, as_of=as_of,
+            source_ref=f"native-score-batch:{key.ticker}:{_iso(key.event_date)}:{key.strategy}",
+            strategy=spec.bundle_strategy, as_of=as_of,
             calendar_row=event.calendar_row, panel_row=event.panel_row,
             panel_anchor=event.panel_anchor,
             tier4_row=event.tier4_row, quote_rows=event.quote_rows,
@@ -378,10 +387,11 @@ def _bundle_or_refusal(
             quote_max_age_sessions=event.quote_max_age_sessions,
             driver_name=driver_name,
             model_identity={driver_key: to_document(driver_identity),
-                            f"gate:{strategy}": to_document(gate_identity)},
+                            spec.gate_role: to_document(gate_identity)},
             model_artifact_refs={"driver_prediction": driver_identity.artifact_hash},
             forecast_recipes={"driver_prediction": {"binding_id": driver_identity.binding_id}},
-            gate_recipe={**gate_policy[strategy], "binding_id": gate_identity.binding_id},
+            gate_recipe={**gate_policy[spec.gate_policy_key],
+                         "binding_id": gate_identity.binding_id},
         )
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
@@ -417,15 +427,16 @@ def _assemble_one_event(
     problem = _calendar_row_problem(key, event.calendar_row)
     if problem is not None:
         return NativeScoreBatchRowRefusal(key, *problem)
-    if strategy != _SUPPORTED_STRATEGY:
+    spec = _STRATEGY_REGISTRY.get(strategy)
+    if spec is None:
         return NativeScoreBatchRowRefusal(
             key, "UNSUPPORTED_STRATEGY",
-            f"only {_SUPPORTED_STRATEGY} is supported, got {strategy!r}")
-    code, detail, pair = _matched_decision_clock(key, binding.model_identity, strategy)
+            f"only {', '.join(_STRATEGY_REGISTRY)} is supported, got {strategy!r}")
+    code, detail, pair = _matched_decision_clock(binding.model_identity, spec)
     if code is not None:
         return NativeScoreBatchRowRefusal(key, code, detail)
     driver_key, driver_identity, gate_identity = pair
-    if strategy not in gate_policy:
+    if spec.gate_policy_key not in gate_policy:
         return NativeScoreBatchRowRefusal(
             key, "GATE_POLICY_NOT_STAGED", f"no gate policy staged for {strategy!r}")
     feature_names, problem = _feature_names_or_refusal(
@@ -433,7 +444,7 @@ def _assemble_one_event(
     if problem is not None:
         return NativeScoreBatchRowRefusal(key, *problem)
     bundle = _bundle_or_refusal(
-        key, event, strategy=strategy, driver_key=driver_key,
+        key, event, spec=spec, driver_key=driver_key,
         driver_identity=driver_identity, gate_identity=gate_identity,
         gate_policy=gate_policy, as_of=as_of,
         feature_names=feature_names, driver_name=driver_name)
@@ -542,7 +553,7 @@ def assemble_score_batch_inputs(
     ``BoardRequest`` key -- raises (the whole call is meaningless); every
     per-row gap is a collected :class:`NativeScoreBatchRowRefusal` instead, so
     one bad row never sinks the batch: ``UNSUPPORTED_STRATEGY`` (not
-    ``STR-THRU``), ``RELEASE_MISSING_ROLE``/``AMBIGUOUS_DECISION_CLOCK`` (the
+    registered), ``RELEASE_MISSING_ROLE``/``AMBIGUOUS_DECISION_CLOCK`` (the
     release's driver/gate identities for the strategy),
     ``RELEASE_MISSING_FEATURE_ORDER`` (empty ``feature_names`` and an
     identity without ``feature_order``), ``GATE_POLICY_NOT_
