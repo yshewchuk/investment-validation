@@ -80,6 +80,14 @@ def read(h, result, *, bound=1000):
     return [r for batch in Repository(h.conn, h.store).scan(query, table_name=massive_daily.TABLE) for r in batch.to_pylist()]
 
 
+def assert_fragment_provenance(h, result, artifact_id, original_receipts):
+    records = Repository(h.conn, h.store).fragment_records(result, "massive_daily")
+    assert len(records) == 1
+    assert records[0].input_receipt_refs == tuple(sorted(set(original_receipts)))
+    assert records[0].import_request_hash == content_hash([
+        artifact_id, "massive_daily_normalizer.v1", massive_daily.CONTRACT.definition_hash])
+
+
 @pytest.mark.parametrize("basis", ["raw", "split_adjusted"])
 def test_saved_acquisition_becomes_atomic_pinned_daily_snapshot(harness, monkeypatch, basis):
     h = harness
@@ -108,6 +116,7 @@ def test_saved_acquisition_becomes_atomic_pinned_daily_snapshot(harness, monkeyp
     resolved = Repository(h.conn, h.store).resolve_full(result.snapshot_id)
     assert resolved.table_manifests["massive_daily"].coverage_receipt_refs == (ref.artifact_id,)
     assert resolved.table_manifests["massive_daily"].availability_evidence_refs == ()
+    assert_fragment_provenance(h, result, ref.artifact_id, [original["evidence"]["raw_receipt_id"]])
     assert PRICE_HISTORY_CONTRACT.contract_id == "price_history.v3"
     assert h.conn.execute("SELECT count(*) FROM data_contracts").fetchone()[0] == 1
     assert h.conn.execute("SELECT generation FROM data_snapshot_heads").fetchone()[0] == 1
@@ -115,6 +124,24 @@ def test_saved_acquisition_becomes_atomic_pinned_daily_snapshot(harness, monkeyp
     before = tuple(h.conn.iterdump())
     assert execute(h, attempt, params)[1] == result
     assert tuple(h.conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("values", [
+    {"o": 7.25, "h": 7.25, "l": 7.25, "c": 7.25, "v": 0},
+    {"o": 17.5, "h": 19., "l": 16., "c": 17.5, "v": 23.5},
+    {"o": 30., "h": 32., "l": 30., "c": 32., "v": 41.25},
+], ids=["flat-zero-volume", "doji", "equal-ohlc-bounds"])
+def test_valid_equal_prices_and_zero_volume_publish(harness, values):
+    h = harness
+    payload = json.loads(support.body(support.request()))
+    payload["results"][0].update(values)
+    source, _, _ = acquired(h, payload=canonical_json(payload).encode())
+    attempt, params = prepare(h, source)
+    _, result = execute(h, attempt, params)
+    row = read(h, result, bound=1)[0]
+    assert {key: row[key] for key in ("open", "high", "low", "close", "volume")} == {
+        "open": values["o"], "high": values["h"], "low": values["l"],
+        "close": values["c"], "volume": values["v"]}
 
 
 @pytest.mark.parametrize("field,value", [("o", True), ("h", float("inf")), ("l", 0), ("c", -1),
@@ -192,7 +219,7 @@ def test_paginated_rows_retain_each_original_page_clock_and_receipt(harness):
     last = support.claim(h)
     _, document = support.run(h, last, pagination.fetcher(calls, current,
         daily_payload([("2026-08-02", 40)])), params)
-    committed_output(h, last, document)
+    artifact = committed_output(h, last, document)
     pages = [json.loads(row["document_json"]) for row in pagination.pages(h)]
     assert pages[0]["observed_at"] != pages[1]["observed_at"]
     attempt, params = prepare(h, last.job_id)
@@ -205,6 +232,9 @@ def test_paginated_rows_retain_each_original_page_clock_and_receipt(harness):
         assert {k: row[k] for k in ("raw_receipt_id", "raw_hash", "observed_at", "first_received_at")} == {
             k: page[k] for k in ("raw_receipt_id", "raw_hash", "observed_at", "first_received_at")}
     assert len({r["occurrence_id"] for r in rows}) == 1
+    receipts = [page["raw_receipt_id"] for page in pages]
+    assert len(set(receipts)) == 2
+    assert_fragment_provenance(h, result, artifact.artifact_id, receipts)
 
 
 def daily_payload(days):
@@ -222,8 +252,8 @@ def test_saved_clipped_mosaic_ignores_later_coverage_and_preserves_old_pin(harne
     acquired(h, key="wide", payload=daily_payload([("2026-08-01", 10), ("2026-08-10", 20), ("2026-08-20", 30)]))
     support.seed_overlap(h, "middle", support.request("2026-08-05", "2026-08-15"),
                          "2026-09-12T00:01:00.000000Z", payload=daily_payload([("2026-08-10", 40)]))
-    scope = support.request("2026-08-08", "2026-08-22")
-    source, _, saved = acquired(h, scope=scope, key="saved-mosaic")
+    scope = support.request("2026-08-01", "2026-08-22")
+    source, artifact, saved = acquired(h, scope=scope, key="saved-mosaic")
     support.seed_overlap(h, "later", support.request(), "2026-09-12T00:02:00.000000Z",
                          payload=daily_payload([("2026-08-10", 100), ("2026-08-20", 100)]))
     assert coverage.plan(h.conn, h.store, scope, "initial") != saved["coverage"]
@@ -231,9 +261,13 @@ def test_saved_clipped_mosaic_ignores_later_coverage_and_preserves_old_pin(harne
     monkeypatch.setattr(coverage, "plan", support.no_fetch)
     _, result = execute(h, attempt, params)
     assert [{k: r[k] for k in ("date", "open", "high", "low", "close", "volume")}
-            for r in read(h, result, bound=2)] == [
+            for r in read(h, result, bound=3)] == [
+        {"date": "2026-08-01", "open": 9.5, "high": 11.5, "low": 8.5, "close": 10., "volume": 100.25},
         {"date": "2026-08-10", "open": 39.5, "high": 41.5, "low": 38.5, "close": 40., "volume": 400.25},
         {"date": "2026-08-20", "open": 29.5, "high": 31.5, "low": 28.5, "close": 30., "volume": 300.25}]
+    receipts = [binding["evidence"]["raw_receipt_id"] for binding in saved["coverage"]["bindings"]]
+    assert len(receipts) == 3 and receipts[0] == receipts[2] != receipts[1]
+    assert_fragment_provenance(h, result, artifact.artifact_id, receipts)
     before = tuple(h.conn.iterdump())
     with pytest.raises(errors.DataError) as error:
         read(h, result, bound=1)
@@ -339,6 +373,52 @@ def test_malformed_saved_artifact_cannot_publish_or_replan(harness, monkeypatch,
     assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
     assert tuple(h.conn.iterdump()) == before
     assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["hole", "overlap", "lower_containment", "upper_containment", "family", "generation"])
+def test_rehashed_binding_guards_refuse_independently_valid_evidence(harness, monkeypatch, mode):
+    h = harness
+    alternate = None
+    if mode == "family":
+        identity, evidence = support.seed_overlap(h, "other-family", support.request(ticker="OTHER"),
+                                                 "2026-09-11T12:00:00.000000Z")
+        alternate = {"occurrence_id": identity, "evidence": evidence}
+    elif mode == "generation":
+        _, record = support.acquire(h, "other-generation", generation="refresh-guard")
+        alternate = record["coverage"]["bindings"][0]
+    else:
+        acquired(h, key="wide", payload=daily_payload([("2026-08-01", 10), ("2026-08-10", 20), ("2026-08-20", 30)]))
+        support.seed_overlap(h, "middle", support.request("2026-08-05", "2026-08-15"),
+                             "2026-09-12T00:01:00.000000Z", payload=daily_payload([("2026-08-10", 40)]))
+    def mutate(document):
+        plan = document["coverage"]
+        bindings = plan["bindings"]
+        if alternate is not None:
+            bindings[0].update({k: alternate[k] for k in ("occurrence_id", "evidence")})
+        elif mode in ("hole", "overlap"):
+            bindings[0]["end"] = "2026-08-03" if mode == "hole" else "2026-08-05"
+        elif mode == "lower_containment":
+            bindings[0]["end"], bindings[1]["start"] = "2026-08-03", "2026-08-04"
+        else:
+            bindings[1]["end"], bindings[2]["start"] = "2026-08-16", "2026-08-17"
+        plan["plan_hash"] = content_hash({k: v for k, v in plan.items() if k != "plan_hash"})
+    source, _, saved = acquired(h, key="saved", mutate=mutate)
+    plan = saved["coverage"]
+    assert pinned._plan_identity(plan) == support.request() and plan["generation"] == "initial"
+    for binding in plan["bindings"]:
+        row = h.conn.execute("SELECT * FROM ops_massive_occurrences WHERE occurrence_id=?",
+                             (binding["occurrence_id"],)).fetchone()
+        assert coverage._verified(h.conn, h.store, row, [coverage.MAX_VERIFIED_BYTES]) == binding["evidence"]
+    attempt, params = prepare(h, source)
+    before = tuple(h.conn.iterdump())
+    objects = sorted(p.relative_to(h.store.root) for p in h.store.root.rglob("*") if p.is_file())
+    monkeypatch.setattr(coverage, "plan", support.no_fetch)
+    with pytest.raises(OpsError) as error:
+        execute(h, attempt, params)
+    assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
+    assert tuple(h.conn.iterdump()) == before
+    assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
+    assert sorted(p.relative_to(h.store.root) for p in h.store.root.rglob("*") if p.is_file()) == objects
 
 
 def test_artifact_byte_limit_precedes_worker_read(harness, monkeypatch):
