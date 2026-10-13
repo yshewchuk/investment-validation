@@ -3,7 +3,7 @@
 Red comes only from a classified failure or the PR-closed placeholder guard; a report job
 that did not succeed without a trusted classified verdict is infra (neutral, grey), and a
 classified ``success`` never overrides a report job that did not succeed. The decision
-script is run under bash for every input combination (up to the neutral guard) and compared
+script is run under bash for every input combination (up to the final check-run post) and compared
 with an independent oracle.
 
 # packages: foundation, ops
@@ -25,7 +25,7 @@ def _decide(**env):
     step = next(s for s in JOBS["report_status"]["steps"]
                 if str(s.get("name", "")).startswith("Post mutation status"))
     run = step["run"]
-    guard = run.index('"$state" = neutral')
+    guard = run.index("gh api")
     script = "set -euo pipefail\n" + run[:guard].rsplit("\n", 1)[0] + '\necho "${state}|${desc}"\n'
     full = dict(os.environ, MODULES='["a","b"]', REPORT_RESULT="success", SKIPPED_COUNT="0",
                 CLASSIFIED_STATE="", CLASSIFIED_DESC="")

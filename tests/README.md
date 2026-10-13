@@ -347,7 +347,8 @@ list, so nothing here starts blocking merges on its own (a repo admin
 requiring a status context by name is a separate, later, explicit action,
 not something this change does or enables by itself).** `report_status`
 needs `[plan, report]` and declares `statuses: write` for its
-`GITHUB_TOKEN` in both workflows (the existing workflow-level token grants
+`GITHUB_TOKEN` in mutmut (gremlins posts a check run with `checks: write`
+instead, see below) (the existing workflow-level token grants
 only `contents: read`; every scope a job doesn't list itself becomes
 `none`), with `if: always() && needs.plan.outputs.pr_number != ''` (the
 `always()` is required: without it, GitHub Actions would skip
@@ -388,17 +389,22 @@ one, and `report_status` posts its `state`/`description` when present. An empty
 plan and a merged PR-closed placeholder module keep the earlier mapping above
 (checked first). A merge tool error or incomplete run (for example a provenance mismatch) is never
 `success` either, and a classified `success` never overrides a failed `report` job.
-A run in which no module was measured is GREY: the tool's
-`neutral` state is posted by the `report_neutral` job as a `neutral` check run named
-`mutation/pr` (commit statuses have no grey state; the job alone holds
-`checks: write`), and `report_status` posts no commit status for it. The description
-says "no module measured ... not a pass". `mutation/pr` is not a required check. PR-owned: a survivor on a line the
+The gremlins `report_status` job (`checks: write`, no `statuses`) posts all three
+states as ONE check run named `mutation/pr` (conclusion `success`, `failure` or
+`neutral`), never a commit status: a later check run of the same name supersedes an
+earlier one on the same SHA, whereas a commit status could not be replaced by a grey
+rerun. A run in which no module was measured is GREY (`neutral`); the description says
+"no module measured ... not a pass". (mutmut's `mutation-mutmut/pr` is unchanged.) `mutation/pr` is not a required check. PR-owned: a survivor on a line the
 PR changed, or a module run that failed with a test-failure exit code main does
 not also show. Infra (a `::warning::`, never red): no report, skipped, timeout or
 cancel, signal kill, gremlin ERROR results, an invalid raw report, a failure main
 shows too. Unreadable inputs degrade to warnings; none can produce `success`:
 an unreadable merged summary, a merge tool error or incomplete run, a missing or
-unreadable PR diff, and unreadable or partly malformed result rows all give `neutral`
+unreadable PR diff, and unreadable or partly malformed result rows (a missing, null or
+unknown `status`, a non-positive or non-integer `line`, a non-string `module` or `file`)
+all give `neutral`; so does a merged summary that is not a mapping with a mapping `modules`,
+boolean `complete` and `tool_error`, and a list `failure_reasons` (a module entry with a
+missing or mistyped `run_exit_code`, `counts_backend` or `failure_reasons` is infra)
 (survivors cannot be attributed; listed as `attribution_problems`, merge-level reasons as
 `merge_issues`), while a missing baseline only stops excusing failures. The tool exits 0
 for every classified or degraded input; only argument errors and an unwritable
@@ -412,9 +418,9 @@ result, `classified` = the classifier's `state`, empty if its step did not run):
 | `[]` | any | any | any | `success` (skipped by design) |
 | non-empty | > 0 | any | any | `failure` (PR-closed placeholder, partial coverage) |
 | non-empty | 0 | `failure` | any | `failure` |
-| non-empty | 0 | `neutral` | any | `neutral` (grey check run) |
+| non-empty | 0 | `neutral` | any | `neutral` (grey) |
 | non-empty | 0 | `success` | success | `success` |
-| non-empty | 0 | empty or `success` | failure, cancelled or skipped | `neutral` (infra, grey check run) |
+| non-empty | 0 | empty or `success` | failure, cancelled or skipped | `neutral` (infra, grey) |
 | non-empty | 0 | empty | success | `success` |
 
 **The two scores measure different things and are never comparable.** mutmut's

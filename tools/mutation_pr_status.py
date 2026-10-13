@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 DESC_MAX = 140
+_ROW_STATUSES = ("killed", "survived", "timeout", "suspicious", "excluded")
 # failure_reasons entries that gremlin_results.merge writes without a module prefix.
 _MERGE_CODES = ("RUN_PROVENANCE_MISMATCH", "NO_MODULE_REPORTS", "DUPLICATE_MODULES",
                 "MISSING_MODULES", "UNEXPECTED_MODULES")
@@ -115,6 +116,17 @@ def classify_module(name: str, mod, rows: list[dict], changed: dict[str, set[int
         return "infra", "no report: job cancelled, runner or setup error"
     if mod.get("skipped_reason"):
         return "infra", f"skipped ({mod['skipped_reason']})"
+    if "run_exit_code" not in mod or not (
+            mod["run_exit_code"] is None
+            or (isinstance(mod["run_exit_code"], int)
+                and not isinstance(mod["run_exit_code"], bool))):
+        return "infra", "malformed module entry (run_exit_code)"
+    if not isinstance(mod.get("counts_backend"), dict):
+        return "infra", "malformed module entry (counts_backend)"
+    if not isinstance(mod.get("failure_reasons"), list):
+        return "infra", "malformed module entry (failure_reasons)"
+    if not isinstance(mod.get("tool_error"), bool):
+        return "infra", "malformed module entry (tool_error)"
     rc = mod.get("run_exit_code")
     if rc == -1:
         return "infra", "timeout or cancelled"
@@ -141,6 +153,35 @@ def _truncate(text: str, keep_tail: str = "") -> str:
     if len(text) + len(keep_tail) <= DESC_MAX:
         return text + keep_tail
     return text[:DESC_MAX - 3 - len(keep_tail)] + "..." + keep_tail
+
+
+def _description(owned, infra, names, unattributed, problems, unsafe) -> str:
+    """Build the check-run description for :func:`classify`.
+
+    Invariant: whenever ``infra`` is non-empty, the returned string contains
+    ``<N> infra warning(s)`` and is <= DESC_MAX chars, the count surviving
+    truncation: the tail ``; N infra warning(s)`` is kept by ``_truncate``
+    (only the owned and unattributed headlines can be long and both pass it
+    as the tail; the other headlines embed the count directly)."""
+    tail = ""
+    if owned:
+        desc = f"gremlins: PR-owned problem in {', '.join(owned)}"
+        if infra:
+            tail = f"; {len(infra)} infra warning(s)"
+    elif infra and len(infra) == len(names):
+        # Nothing was measured: still not red (infra), but never worded as a pass.
+        desc = f"gremlins: no module measured ({len(infra)} infra warning(s)); not a pass"
+    elif unattributed:
+        desc = f"gremlins: {problems[0]}"
+        if infra:
+            tail = f"; {len(infra)} infra warning(s)"
+    elif unsafe:
+        desc = f"gremlins: report incomplete or tool error ({len(infra)} infra warning(s)); not a pass"
+    elif infra:
+        desc = f"gremlins: no PR-owned problems; {len(infra)} infra warning(s)"
+    else:
+        desc = f"gremlins: no PR-owned problems in {len(names)} module(s)"
+    return _truncate(desc, tail)
 
 
 def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=None,
@@ -172,26 +213,11 @@ def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=No
         if isinstance(reasons, list) else []
     problems = [p for p in attribution_problems if isinstance(p, str)]
     unattributed = bool(problems) and bool(names)
-    tail = ""
-    if owned:
-        desc = f"gremlins: PR-owned problem in {', '.join(owned)}"
-        if infra:
-            tail = f"; {len(infra)} infra warning(s)"
-    elif infra and len(infra) == len(names):
-        # Nothing was measured: still not red (infra), but never worded as a pass.
-        desc = f"gremlins: no module measured ({len(infra)} infra warning(s)); not a pass"
-    elif unattributed:
-        desc = f"gremlins: {problems[0]}"
-    elif unsafe:
-        desc = f"gremlins: report incomplete or tool error ({len(infra)} infra warning(s)); not a pass"
-    elif infra:
-        desc = f"gremlins: no PR-owned problems; {len(infra)} infra warning(s)"
-    else:
-        desc = f"gremlins: no PR-owned problems in {len(names)} module(s)"
     nothing_measured = bool(names) and len(infra) == len(names)
     state = ("failure" if owned
              else "neutral" if (nothing_measured or unsafe or unattributed) else "success")
-    return {"state": state, "description": _truncate(desc, tail),
+    return {"state": state,
+            "description": _description(owned, infra, names, unattributed, problems, unsafe),
             "pr_owned": owned, "infra": infra, "modules": result, "merge_issues": merge_issues,
             "attribution_problems": problems}
 
@@ -209,10 +235,14 @@ def _valid_summary(s) -> bool:
     """A merged/baseline summary: a mapping whose ``modules`` is a non-empty mapping
     or whose ``expected_modules`` is a non-empty list -- it measured or planned
     something. ``modules`` must be a mapping (absent, null, a list, ... are invalid)
-    and ``expected_modules``, when present, must be a list. An invalid summary is
+    and ``expected_modules``, when present, must be a list; ``complete`` and
+    ``tool_error`` must be bools and ``failure_reasons`` a list. An invalid summary is
     never success: ``main`` treats an invalid merged summary as an unavailable
     report (neutral) and drops an invalid baseline."""
     if not isinstance(s, dict) or not isinstance(s.get("modules"), dict):
+        return False
+    if not (isinstance(s.get("complete"), bool) and isinstance(s.get("tool_error"), bool)
+            and isinstance(s.get("failure_reasons"), list)):
         return False
     expected = s.get("expected_modules")
     if expected is not None and not isinstance(expected, list):
@@ -221,9 +251,11 @@ def _valid_summary(s) -> bool:
 
 
 def _valid_row(r) -> bool:
-    return (isinstance(r, dict) and isinstance(r.get("module"), str)
-            and isinstance(r.get("file"), str) and isinstance(r.get("line"), int)
-            and not isinstance(r.get("line"), bool))
+    return (isinstance(r, dict) and isinstance(r.get("module"), str) and r["module"] != ""
+            and isinstance(r.get("file"), str) and r["file"] != ""
+            and isinstance(r.get("line"), int) and not isinstance(r.get("line"), bool)
+            and r["line"] >= 1
+            and isinstance(r.get("status"), str) and r.get("status") in _ROW_STATUSES)
 
 
 def _load_rows(path: Path) -> tuple[list[dict], bool]:
@@ -269,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.diff_file:
                 raise OSError("no --diff-file given")
             diff_text = Path(args.diff_file).read_text()
+            if not diff_text.strip(): raise ValueError("PR diff is empty")
             changed = parse_changed_lines(diff_text)
             if not changed and any(x.startswith("@@") for x in diff_text.splitlines()):
                 raise ValueError("diff has hunks but no recognizable file header")

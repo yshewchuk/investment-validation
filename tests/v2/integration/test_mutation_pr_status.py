@@ -8,10 +8,12 @@ baseline, ``$GITHUB_OUTPUT``), so file reading and output writing are not stubbe
 """
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
 
+from tools import gremlin_results
 from tools import mutation_pr_status as ps
 
 DIFF = """\
@@ -49,7 +51,8 @@ def row(module, file, line, status="survived"):
 
 
 def merged(**modules):
-    return {"modules": modules, "expected_modules": sorted(modules)}
+    return {"modules": modules, "expected_modules": sorted(modules), "complete": True,
+            "tool_error": False, "failure_reasons": []}
 
 
 CHANGED = ps.parse_changed_lines(DIFF)
@@ -141,7 +144,7 @@ def test_main_writes_state_and_annotations(tmp_path, capsys):
 def test_main_reads_baseline_file(tmp_path):
     d, diff = _write_report(tmp_path, merged(a=mod(run_exit_code=1)), [])
     base = tmp_path / "base.json"
-    base.write_text(json.dumps({"modules": {"a": mod(run_exit_code=1)}}))
+    base.write_text(json.dumps(merged(a=mod(run_exit_code=1))))
     out = tmp_path / "gh_output"
     ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
              "--baseline-summary", str(base), "--github-output", str(out)])
@@ -354,8 +357,10 @@ def test_classify_tolerates_odd_shapes_in_parsed_json():
     m = {"modules": {"a": mod(counts_backend=[1], failure_reasons=7), 5: mod()},
          "expected_modules": ["b", 3, None]}
     v = ps.classify(m, [row("a", "x.py", 1), 5, None, {"module": 9}], {}, baseline={"modules": 3})
-    assert v["state"] == "success"
-    assert v["modules"]["a"]["class"] == "ok" and v["modules"]["b"]["class"] == "infra"
+    assert v["state"] == "neutral"  # the malformed entry is infra: nothing was measured
+    assert v["modules"] == {
+        "a": {"class": "infra", "reason": "malformed module entry (counts_backend)"},
+        "b": {"class": "infra", "reason": "no report: job cancelled, runner or setup error"}}
     v = ps.classify({"modules": {"a": mod()}, "expected_modules": "a"}, [], {}, [1])
     assert v["modules"] == {"a": {"class": "ok", "reason": ""}}
 
@@ -412,7 +417,7 @@ REASON_CASES = [
     (mod(counts_backend={"error": 2}), [], None, "warning",
      "gremlin ERROR results (tool errors)"),
     (mod(failure_reasons=["RAW_INVALID"]), [], None, "warning", "invalid raw report"),
-    (mod(run_exit_code=1), [], {"modules": {"a": mod(run_exit_code=1)}}, "warning",
+    (mod(run_exit_code=1), [], merged(a=mod(run_exit_code=1)), "warning",
      "module run fails on main too (exit 1)"),
     (mod(run_exit_code=2), [], None, "error", "module run failed (exit 2)"),
     (mod(), [row("a", "engine/v2/a.py", 5)], None, "error",
@@ -424,7 +429,8 @@ REASON_CASES = [
 def test_published_reason_text_in_annotation_and_json(tmp_path, capsys, summary_mod, rows,
                                                       baseline, level, reason):
     m = {"modules": {} if summary_mod is None else {"a": summary_mod},
-         "expected_modules": ["a"]}
+         "expected_modules": ["a"], "complete": True, "tool_error": False,
+         "failure_reasons": []}
     _run_main(tmp_path, "case", m, rows, baseline)
     notes, verdict = _split(capsys.readouterr().out)
     cls = "pr_owned" if level == "error" else "infra"
@@ -647,3 +653,149 @@ def test_degraded_inputs_other_than_attribution_never_produce_success(tmp_path):
     ps.main(["--merged-dir", str(d5), "--diff-file", str(diff5), "--baseline-summary",
              str(tmp_path / "nope.json"), "--github-output", str(out)])
     assert "state=failure\n" in out.read_text()
+
+
+def test_every_degraded_shape_is_never_success(tmp_path):
+    """One degradation per case: a valid clean report vs every invalid shape."""
+    base = merged(a=mod())
+    extra = row("a", "engine/v2/a.py", 99, "killed")
+    failures = []
+    counter = {"n": 0}
+
+    def run(label, want, summary, rows=(), raw_lines=None, diff_mode="ok"):
+        counter["n"] += 1
+        root = tmp_path / f"c{counter['n']}"
+        d = root / "m"
+        d.mkdir(parents=True)
+        (d / "summary.json").write_text(json.dumps(summary))
+        if raw_lines is None:
+            (d / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        else:
+            (d / "results.jsonl").write_text("".join(x + "\n" for x in raw_lines))
+        out = root / "out"
+        args = ["--merged-dir", str(d), "--github-output", str(out)]
+        diff = root / "pr.diff"
+        if diff_mode == "ok":
+            diff.write_text(DIFF)
+            args += ["--diff-file", str(diff)]
+        elif diff_mode == "missing":
+            args += ["--diff-file", str(root / "no.diff")]
+        elif diff_mode == "undecodable":
+            diff.write_bytes(b"\xff\xfe\n")
+            args += ["--diff-file", str(diff)]
+        elif diff_mode == "hunks_without_header":
+            diff.write_text("@@ -1 +5 @@\n+x\n")
+            args += ["--diff-file", str(diff)]
+        elif diff_mode == "empty":
+            diff.write_text("")
+            args += ["--diff-file", str(diff)]
+        elif diff_mode == "whitespace":
+            diff.write_text(" \n\t\n")
+            args += ["--diff-file", str(diff)]
+        assert ps.main(args) == 0, label
+        state = None
+        for line in out.read_text().splitlines():
+            if line.startswith("state="):
+                state = line.split("=", 1)[1]
+        if state != want:
+            failures.append(f"{label}: state={state}, want {want}")
+
+    # Control: the un-degraded report is a success.
+    run("control", "success", copy.deepcopy(base))
+    # Summary level: each key missing/ill-typed, or the whole summary replaced.
+    for key in ("complete", "tool_error"):
+        s = copy.deepcopy(base)
+        del s[key]
+        run(f"summary: delete {key}", "neutral", s)
+        for bad in (None, "true", "false", 0, 1, [], {}):
+            s = copy.deepcopy(base)
+            s[key] = bad
+            run(f"summary: {key}={bad!r}", "neutral", s)
+    s = copy.deepcopy(base)
+    del s["failure_reasons"]
+    run("summary: delete failure_reasons", "neutral", s)
+    for bad in (None, "x", {}, 0):
+        s = copy.deepcopy(base)
+        s["failure_reasons"] = bad
+        run(f"summary: failure_reasons={bad!r}", "neutral", s)
+    s = copy.deepcopy(base)
+    del s["modules"]
+    run("summary: delete modules", "neutral", s)
+    for bad in (None, [], "x", 5):
+        s = copy.deepcopy(base)
+        s["modules"] = bad
+        run(f"summary: modules={bad!r}", "neutral", s)
+    for bad in ("a", 5, {}):
+        s = copy.deepcopy(base)
+        s["expected_modules"] = bad
+        run(f"summary: expected_modules={bad!r}", "neutral", s)
+    for whole in ([], "x", None, 5, {}):
+        run(f"summary: whole={whole!r}", "neutral", whole)
+    # Module entry level (single module a, so a malformed entry is the only infra).
+    for key in ("run_exit_code", "counts_backend", "failure_reasons", "tool_error"):
+        s = copy.deepcopy(base)
+        del s["modules"]["a"][key]
+        run(f"module: delete {key}", "neutral", s)
+    for key, bads in (("run_exit_code", ("0", 0.0, True, [], {})),
+                      ("counts_backend", (None, [], "x", 0)),
+                      ("failure_reasons", (None, "x", {})),
+                      ("tool_error", (None, "no", 0, 1))):
+        for bad in bads:
+            s = copy.deepcopy(base)
+            s["modules"]["a"][key] = bad
+            run(f"module: {key}={bad!r}", "neutral", s)
+    # Row level: one extra row with a single bad field, or one raw junk line.
+    for field in ("module", "file", "status"):
+        r = copy.deepcopy(extra)
+        del r[field]
+        run(f"row: delete {field}", "neutral", copy.deepcopy(base), rows=[r])
+        for bad in (None, 1, "", []):
+            r = copy.deepcopy(extra)
+            r[field] = bad
+            run(f"row: {field}={bad!r}", "neutral", copy.deepcopy(base), rows=[r])
+    r = copy.deepcopy(extra)
+    del r["line"]
+    run("row: delete line", "neutral", copy.deepcopy(base), rows=[r])
+    for bad in (None, 0, -1, 1.5, True, "5"):
+        r = copy.deepcopy(extra)
+        r["line"] = bad
+        run(f"row: line={bad!r}", "neutral", copy.deepcopy(base), rows=[r])
+    for bad in ("KILLED", "zapped", "error"):
+        r = copy.deepcopy(extra)
+        r["status"] = bad
+        run(f"row: status={bad!r}", "neutral", copy.deepcopy(base), rows=[r])
+    for raw in ('"x"', "5", "null", "[]", "{", "{}"):
+        run(f"row: raw {raw!r}", "neutral", copy.deepcopy(base), raw_lines=[raw])
+    # Diff level: unavailable in every way.
+    for mode in ("missing", "undecodable", "hunks_without_header", "empty", "whitespace"):
+        run(f"diff: {mode}", "neutral", copy.deepcopy(base), diff_mode=mode)
+    # Control: one valid extra row on an untouched line is still a success.
+    run("control: valid extra row", "success", copy.deepcopy(base), rows=[extra])
+    assert failures == []
+
+
+def test_row_statuses_match_gremlin_results():
+    assert ps._ROW_STATUSES == tuple(gremlin_results.STATUSES)
+
+
+def test_description_always_carries_the_infra_count():
+    long_problem = "p" * 200
+    for owned in ([], ["m"]):
+        for n in (0, 1, 3):
+            for unattributed in (False, True):
+                for problem in (long_problem, "short problem"):
+                    for unsafe in (False, True):
+                        infra = [f"i{k}" for k in range(n)]
+                        names = sorted(set(owned + infra + ["ok1"]))
+                        desc = ps._description(owned, infra, names, unattributed,
+                                               [problem], unsafe)
+                        assert len(desc) <= ps.DESC_MAX
+                        if n > 0:
+                            assert f"{n} infra warning(s)" in desc
+    # The concrete bug: an unattributed problem must not drop the infra count.
+    m = merged(a=mod(), b=mod())
+    del m["modules"]["b"]
+    v = ps.classify(m, [], {}, None,
+                    ("PR diff unavailable -- survivors not attributed; not a pass",))
+    assert v["state"] == "neutral"
+    assert "1 infra warning(s)" in v["description"]

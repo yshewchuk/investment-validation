@@ -808,8 +808,9 @@ jobs:
           python tools/mutation_pr_status.py "${args[@]}"
 
   report_status:
-    # Posts the run's outcome onto the PR's own head commit as a plain
-    # commit status. This run's own event is `workflow_run`, so `plan`/
+    # Posts the run's outcome onto the PR's own head commit as ONE check run
+    # named mutation/pr (success, failure or neutral; never a commit status, so
+    # a rerun on the same SHA supersedes the earlier result). This run's own event is `workflow_run`, so `plan`/
     # `mutate`/`report` only ever show up under the DEFAULT branch's own
     # Actions history -- never on the PR's Checks tab -- and without this
     # job a fully successful (or a failed) run is invisible from the PR
@@ -823,7 +824,7 @@ jobs:
     if: always() && needs.plan.outputs.pr_number != ''
     runs-on: ubuntu-latest
     permissions:
-      statuses: write
+      checks: write
     steps:
       - name: Post mutation status to the PR head commit
         env:
@@ -869,45 +870,12 @@ jobs:
             state=success
             desc="gremlins: report published for $(jq -r 'length' <<< "$MODULES") module(s)"
           fi
-          # The decision is made above; the status itself is posted with gh api below.
-          # Nothing measured: grey, and commit statuses have no grey state. The
-          # report_neutral job posts a neutral check run instead; no status here.
-          if [ "$state" = neutral ]; then
-            echo "::notice::nothing measured; mutation/pr is posted by report_neutral as a neutral check run"
-            exit 0
-          fi
-          gh api "repos/$REPO/statuses/$SHA" \
-            -f state="$state" -f context="mutation/pr" \
-            -f description="$desc" -f target_url="$RUN_URL"
-
-  report_neutral:
-    # Grey result for a run in which no module was measured (every module infra or
-    # no report). A check run can conclude `neutral`; a commit status cannot. The
-    # PR-closed placeholder guard keeps its failure mapping in report_status, so
-    # this job stays out of that case. mutation/pr is not a required check.
-    needs: [plan, report]
-    if: >-
-      always() && needs.plan.outputs.pr_number != '' &&
-      needs.plan.outputs.modules != '[]' &&
-      (needs.report.outputs.state == 'neutral' ||
-       (needs.report.outputs.state != 'failure' && needs.report.result != 'success')) &&
-      (needs.report.outputs.skipped_count == '0' || needs.report.outputs.skipped_count == '')
-    runs-on: ubuntu-latest
-    permissions:
-      checks: write
-    steps:
-      - name: Post neutral mutation check run to the PR head commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          DESC: "${{ needs.report.outputs.state == 'neutral' && needs.report.outputs.description || format('gremlins: report job {0} before classification -- infra; not a pass', needs.report.result) }}"
-        run: |
-          set -euo pipefail
+          # The decision is made above; the check run itself is posted with gh api below.
+          # Every state (a grey `neutral` too) is a check run of the same name, so the
+          # latest run of mutation/pr on this SHA is the only one that counts.
           gh api "repos/$REPO/check-runs" \
             -f name="mutation/pr" -f head_sha="$SHA" \
-            -f status=completed -f conclusion=neutral \
+            -f status=completed -f conclusion="$state" \
             -f details_url="$RUN_URL" \
-            -f "output[title]=Mutation testing: nothing measured" \
-            -f "output[summary]=$DESC"
+            -f "output[title]=Mutation testing: $state" \
+            -f "output[summary]=$desc"

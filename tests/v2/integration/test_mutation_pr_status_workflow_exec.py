@@ -1,11 +1,11 @@
 """Execute the gremlins workflow wiring instead of matching substrings.
 
-* The ``if:`` conditions and the ``DESC`` expression of the status jobs are EVALUATED by a
-  tiny GitHub-expression evaluator (``==``, ``!=``, ``&&``, ``||``, parentheses, string
-  literals, ``always()``, ``format()``, dotted contexts) for every input combination and
-  compared with an independent oracle (the decision table in tests/README.md).
-* The ``run:`` scripts of the classify step, ``report_status`` and ``report_neutral`` are RUN
-  under bash with ``git`` / ``gh`` / ``python`` stubbed as functions that log their argv.
+* The ``if:`` conditions of the status jobs are EVALUATED by a tiny GitHub-expression
+  evaluator (``==``, ``!=``, ``&&``, ``||``, parentheses, string literals, ``always()``,
+  ``format()``, dotted contexts) for every input combination and compared with an
+  independent oracle (the decision table in tests/README.md).
+* The ``run:`` scripts of the classify step and ``report_status`` are RUN under bash with
+  ``git`` / ``gh`` / ``python`` stubbed as functions that log their argv.
 
 # packages: foundation, ops
 """
@@ -159,31 +159,6 @@ def _ctx(pr, modules, state, skipped, result, desc="classified text"):
     }
 
 
-def test_report_neutral_if_matches_the_decision_table_for_every_input():
-    cond = JOBS["report_neutral"]["if"]
-    combos = itertools.product(["", "7"], ["[]", '["a"]', ""], ["", "success", "failure", "neutral"],
-                               ["0", "", "2"], ["success", "failure", "cancelled", "skipped"])
-    runs = 0
-    for pr, modules, state, skipped, result in combos:
-        runs_job = bool(evaluate(cond, _ctx(pr, modules, state, skipped, result)))
-        want = pr != "" and expected_posted(modules, skipped, state, result) == "neutral"
-        assert runs_job == want, (pr, modules, state, skipped, result)
-        runs += runs_job
-    assert runs > 0
-
-
-def test_report_neutral_desc_expression_for_every_input():
-    expr = JOBS["report_neutral"]["steps"][0]["env"]["DESC"]
-    for state, desc, result in itertools.product(["", "success", "neutral"], ["", "grey text"],
-                                                 ["failure", "cancelled", "skipped"]):
-        got = evaluate(expr, _ctx("7", '["a"]', state, "0", result, desc))
-        if state == "neutral" and desc:
-            assert got == desc
-        else:
-            assert got == (f"gremlins: report job {result} before classification -- infra; "
-                           "not a pass")
-
-
 def test_classify_step_and_status_jobs_run_only_for_a_resolved_pr():
     for pr in ("", "7"):
         ctx = _ctx(pr, '["a"]', "", "0", "success")
@@ -263,33 +238,49 @@ def test_classify_step_without_a_diff_or_baseline_warns_and_still_runs_the_tool(
     assert not any(c.startswith("git -c") for c in calls)  # diff skipped after the fetch failed
 
 
+def _report_status_combos():
+    return itertools.product(["[]", '["a","b"]', ""], ["0", "2"],
+                             ["", "success", "failure", "neutral"],
+                             ["success", "failure", "cancelled", "skipped"])
+
+
 def test_report_status_script_posts_exactly_the_table_state(tmp_path):
     run = _step("report_status", lambda s: str(s.get("name", "")).startswith("Post mutation"))["run"]
-    combos = itertools.product(["[]", '["a","b"]', ""], ["0", "2"], ["", "success", "failure", "neutral"],
-                               ["success", "failure", "cancelled", "skipped"])
-    for modules, skipped, classified, report in combos:
+    for modules, skipped, classified, report in _report_status_combos():
         res, calls = _run(run, tmp_path, SHA="sha1", RUN_URL="https://x/run/5", MODULES=modules,
                           SKIPPED_COUNT=skipped, CLASSIFIED_STATE=classified,
                           CLASSIFIED_DESC="classified text", REPORT_RESULT=report)
         assert res.returncode == 0, (modules, skipped, classified, report, res.stderr)
         want = expected_posted(modules, skipped, classified, report)
         key = (modules, skipped, classified, report)
-        if want == "neutral":
-            assert calls == [], key  # grey: no commit status at all
-            assert "::notice::nothing measured" in res.stdout
+        assert len(calls) == 1, key  # every state, neutral included, posts ONE check run
+        prefix = (f"gh api repos/o/r/check-runs -f name=mutation/pr -f head_sha=sha1 "
+                  f"-f status=completed -f conclusion={want} -f details_url=https://x/run/5 "
+                  f"-f output[title]=Mutation testing: {want} -f output[summary]=")
+        assert calls[0].startswith(prefix), (key, calls[0])
+        summary = calls[0][len(prefix):]
+        assert summary, key  # the summary is never empty
+        if modules == "[]":
+            want_summary = "gremlins: skipped (closed PR or no eligible module) by design"
+        elif skipped != "0":
+            want_summary = None
+        elif classified in ("neutral", "failure"):
+            want_summary = "classified text"
+        elif classified == "" and report in ("failure", "cancelled", "skipped"):
+            want_summary = (f"gremlins: report job {report} before classification -- "
+                            "infra; not a pass")
         else:
-            assert len(calls) == 1, key
-            prefix = f"gh api repos/o/r/statuses/sha1 -f state={want} -f context=mutation/pr -f description="
-            assert calls[0].startswith(prefix), (key, calls[0])
-            assert calls[0].endswith(" -f target_url=https://x/run/5"), key
+            want_summary = None
+        if want_summary is not None:
+            assert summary == want_summary, (key, summary)
 
 
-def test_report_neutral_script_posts_a_completed_neutral_check_run(tmp_path):
-    step = JOBS["report_neutral"]["steps"][0]
-    res, calls = _run(step["run"], tmp_path, SHA="sha1", RUN_URL="https://x/run/5", DESC="grey text")
-    assert res.returncode == 0, res.stderr
-    assert calls == [
-        "gh api repos/o/r/check-runs -f name=mutation/pr -f head_sha=sha1 -f status=completed "
-        "-f conclusion=neutral -f details_url=https://x/run/5 "
-        "-f output[title]=Mutation testing: nothing measured -f output[summary]=grey text"]
-    assert JOBS["report_neutral"]["permissions"] == {"checks": "write"}
+def test_report_status_never_posts_a_commit_status(tmp_path):
+    run = _step("report_status", lambda s: str(s.get("name", "")).startswith("Post mutation"))["run"]
+    for modules, skipped, classified, report in _report_status_combos():
+        res, calls = _run(run, tmp_path, SHA="sha1", RUN_URL="https://x/run/5", MODULES=modules,
+                          SKIPPED_COUNT=skipped, CLASSIFIED_STATE=classified,
+                          CLASSIFIED_DESC="classified text", REPORT_RESULT=report)
+        assert res.returncode == 0, (modules, skipped, classified, report, res.stderr)
+        key = (modules, skipped, classified, report)
+        assert not any("/statuses/" in c for c in calls), key

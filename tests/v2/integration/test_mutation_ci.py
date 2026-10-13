@@ -1557,17 +1557,27 @@ def test_report_status_job_only_runs_when_plan_resolved_a_pr(jobs, context):
     job = jobs["report_status"]
     assert job["needs"] == ["plan", "report"]
     assert job["if"] == "always() && needs.plan.outputs.pr_number != ''"
-    assert job["permissions"] == {"statuses": "write"}
     step = _report_status_step(jobs)
     assert step["env"]["SHA"] == "${{ github.event.workflow_run.head_sha }}"
     assert step["env"]["MODULES"] == "${{ needs.plan.outputs.modules }}"
     assert step["env"]["REPORT_RESULT"] == "${{ needs.report.result }}"
     assert step["env"]["SKIPPED_COUNT"] == "${{ needs.report.outputs.skipped_count }}"
-    assert f'-f context="{context}"' in step["run"]
-    assert '-f state="$state"' in step["run"]
-    assert '-f description="$desc"' in step["run"]
-    assert '-f target_url="$RUN_URL"' in step["run"]
-    assert "/statuses/$SHA" in step["run"] and "gh api" in step["run"]
+    if jobs is MUT_JOBS:
+        assert job["permissions"] == {"statuses": "write"}
+        assert f'-f context="{context}"' in step["run"]
+        assert '-f state="$state"' in step["run"]
+        assert '-f description="$desc"' in step["run"]
+        assert '-f target_url="$RUN_URL"' in step["run"]
+        assert "/statuses/$SHA" in step["run"] and "gh api" in step["run"]
+    else:
+        assert job["permissions"] == {"checks": "write"}
+        run = step["run"]
+        assert "repos/$REPO/check-runs" in run
+        assert '-f name="mutation/pr"' in run
+        assert '-f conclusion="$state"' in run
+        assert '-f details_url="$RUN_URL"' in run
+        assert '-f "output[summary]=$desc"' in run
+        assert "/statuses/" not in run
 
 
 def _run_status_decision(run_script, modules, report_result, skipped_count="0"):

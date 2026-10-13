@@ -272,10 +272,9 @@ evidence. See the models and data component contracts.
     (survivors on lines the PR changed, or a test failure main does not show);
     `neutral` when nothing was measured, the merge reported a tool error, or survivors
     cannot be attributed to the PR; otherwise `success`. Infra problems are warnings,
-    never red. `report_status` posts `success`/`failure` as the `mutation/pr` commit
-    status; a `neutral` verdict is posted only as a `neutral` check run by
-    `report_neutral`, because commit statuses have no grey state. `mutation/pr` is not
-    a required check. The per-case rules and the `report_status` decision table are in
+    never red. `report_status` posts all three states as one check run named
+    `mutation/pr` (never a commit status, which a grey rerun could not supersede).
+    `mutation/pr` is not a required check. The per-case rules and the `report_status` decision table are in
     `tests/README.md` ("Mutation CI").
 
 The active PR workflow uses `tools/mutation_pilot.py select-tests` and the
