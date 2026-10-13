@@ -245,6 +245,23 @@ def test_corporate_history_reuses_its_own_family_only(harness, dataset):
         assert coverage.plan(h.conn, h.store, unrelated, "initial")["gaps"] == [unrelated]
 
 
+def test_split_adjusted_daily_plan_never_reuses_raw_occurrences(harness):
+    h = harness
+    raw = request()
+    calls = []
+    _, acquired = acquire(h, "raw-evidence", raw, fetch=fetching(calls))
+    adjusted = raw | {"adjustment_basis": "split_adjusted",
+                      "params": raw["params"] | {"adjusted": True}}
+    before = list(h.conn.iterdump())
+    assert coverage.plan(h.conn, h.store, raw, "initial") == acquired["coverage"]
+    plan = coverage.plan(h.conn, h.store, adjusted, "initial")
+    assert plan["bindings"] == []
+    assert plan["gaps"] == [adjusted] and plan["candidate_count"] == 0
+    assert coverage.family(adjusted) != coverage.family(raw)
+    assert calls == [raw] and len(occurrences(h)) == 1
+    assert list(h.conn.iterdump()) == before
+
+
 @pytest.mark.parametrize("dataset", ["daily", "splits", "dividends"])
 def test_initial_generation_promotes_legacy_receipt_at_original_observation(harness, dataset):
     h = harness
