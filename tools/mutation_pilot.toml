@@ -378,6 +378,7 @@ mutate = [
     "engine/v2/data/event_history.py",
 ]
 tests = [
+    "tests/v2/ops/test_massive_accounting_hooks.py",
     "tests/v2/ops/test_massive_acquisition.py",
     "tests/v2/data/test_computed_moves.py",
     "tests/v2/data/test_computed_moves_table.py",
@@ -686,6 +687,9 @@ mutate = [
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
+    "tests/v2/ops/test_massive_accounting_hooks.py",
+    "tests/v2/ops/test_massive_coverage.py",
+    "tests/v2/ops/test_massive_pagination.py",
     "tests/v2/ops/test_massive_acquisition.py",
     "tests/v2/ops/test_massive_http.py",
     "tests/v2/ops/test_massive_submission.py",
@@ -997,6 +1001,11 @@ tests = [
     "tests/v2/ops/test_native_parity_inputs_leaf.py",
     "tests/v2/ops/test_carried_set.py",
     "tests/v2/ops/test_massive_plan.py",
+    "tests/v2/ops/test_massive_coverage.py",
+    "tests/v2/ops/test_massive_journal.py",
+    "tests/v2/ops/test_massive_occurrence_integrity.py",
+    "tests/v2/ops/test_massive_pagination.py",
+    "tests/v2/ops/test_massive_pages.py",
     "tests/v2/ops/test_massive_acquisition.py",
     "tests/v2/ops/test_massive_submission.py",
     "tests/v2/ops/test_massive_plan_startup.py",
