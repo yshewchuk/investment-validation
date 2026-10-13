@@ -320,9 +320,11 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     # before 16:30 ET may be refetched, accepted). A bad post-close
     # response is not retried until a run targets a session whose close
     # (plus the buffer) is later than that fetch; that run refetches it.
-    # Capture is responsible for failing loudly. The
-    # loader reads fetch metadata only -- no body parsing anywhere on this
-    # path.
+    # Capture rejects a retrieval that starts later than the stored history
+    # but does not check coverage of the requested session, so a valid
+    # response missing trailing bars can pass capture and then counts as
+    # covered (accepted trade-off). The loader reads fetch metadata only --
+    # no body parsing anywhere on this path.
     fetch_root = None
     if planned_tickers is None:
         plan = plan_refresh(session, events=load_events(), price_universe=load_price_universe(),

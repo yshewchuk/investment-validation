@@ -300,10 +300,13 @@ def test_a_ticker_whose_only_stamps_are_unreadable_is_daily(fetch_root):
 
 def test_a_post_close_stamp_covers_even_when_the_body_is_garbage(fetch_root):
     """The accepted trade-off, pinned: coverage never opens the body, so a
-    truncated response stamped after the close counts as covered — capture
-    is responsible for failing loudly. A bad post-close response is not
-    retried until a run targets a session whose close (plus the buffer) is
-    later than that fetch; that run refetches it."""
+    truncated response stamped after the close counts as covered. Capture
+    rejects a retrieval that starts later than the stored history but does
+    not check coverage of the requested session, so a valid response missing
+    trailing bars can pass capture and then counts as covered (accepted
+    trade-off). A bad post-close response is not retried until a run targets
+    a session whose close (plus the buffer) is later than that fetch; that
+    run refetches it."""
     directory = Path(fetch_root) / "yfinance" / "gb"
     directory.mkdir(parents=True)
     (directory / "gb.body.gz").write_bytes(b"this is not even gzip")

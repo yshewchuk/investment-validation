@@ -36,8 +36,10 @@ close, so stamping alone was never coverage until the close-time test was
 added (the 2026-10-12 defect); reading bodies to re-derive bar coverage was
 dropped as over-engineering (the 2026-10-13 simplification decision). A bad
 post-close response is not retried until a run targets a session whose close
-(plus the buffer) is later than that fetch; that run refetches it. Capture is
-responsible for failing loudly. And when
+(plus the buffer) is later than that fetch; that run refetches it. Capture
+rejects a retrieval that starts later than the stored history but does not
+check coverage of the requested session, so a valid response missing trailing
+bars can pass capture and then counts as covered (accepted trade-off). And when
 the plan *does* ask
 for the session, :func:`run_refresh` gives each daily call a fresh
 ``refetch_token`` — today's cached body is a known-stale answer, so the token
@@ -286,9 +288,11 @@ def plan_refresh(
         and never excuses the session. The body is never read: A bad post-close
         response is not retried until a run targets a session whose close
         (plus the buffer) is later than that fetch; that run refetches it.
-        Capture is responsible for failing loudly. Unknown
-        is never coverage, which can only lengthen the daily list, never
-        shorten it.
+        Capture rejects a retrieval that starts later than the stored history
+        but does not check coverage of the requested session, so a valid
+        response missing trailing bars can pass capture and then counts as
+        covered (accepted trade-off). Unknown is never coverage, which can
+        only lengthen the daily list, never shorten it.
     always_daily:
         Tickers that are always on the daily schedule regardless of events,
         e.g. the native calendar series. A forced ticker with a post-close
