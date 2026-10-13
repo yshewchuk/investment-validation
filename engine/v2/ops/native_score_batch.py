@@ -610,7 +610,7 @@ def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:
 
     Date-shaped values are passed straight through as plain ISO strings --
     ``assemble_nightly_source_bundle`` already accepts them (exactly as
-    ``tests/test_v2_scoring_nightly_source_bundle.py``'s own fixtures do).
+    ``tests/v2/scoring/test_nightly_source_bundle.py``'s own fixtures do).
     """
     raw_event_date = doc["key"]["event_date"]
     _event_date_identity(raw_event_date)
