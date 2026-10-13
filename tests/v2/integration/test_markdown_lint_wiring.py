@@ -185,6 +185,38 @@ def test_hook_lints_every_staged_file_not_just_the_first(tmp_path, monkeypatch):
     assert "a.md:" not in out and "b.md:" not in out
 
 
+@needs_node
+def test_hook_lints_a_first_bad_file_followed_by_clean_ones(tmp_path, monkeypatch):
+    hook = _hook_repo(tmp_path, monkeypatch)
+    (tmp_path / "a.md").write_text("intro\n# Heading\ntext\n", encoding="utf-8")
+    for name in ("b.md", "z.md"):
+        (tmp_path / name).write_text("# Heading\n\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "a.md", "b.md", "z.md")
+    proc = _run_hook(hook, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0
+    assert "a.md:" in out and "MD022" in out
+    assert "b.md:" not in out and "z.md:" not in out
+
+
+def test_hook_with_only_non_markdown_staged_does_not_run_the_linter(tmp_path, monkeypatch):
+    # Needs no Node: with no .md staged, `xargs -r` must skip npx entirely. A fake npx that
+    # fails loudly proves it is never invoked.
+    hook = _hook_repo(tmp_path, monkeypatch)
+    (tmp_path / "notes.py").write_text("# heading\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "notes.py")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("git", "python3", "xargs"):
+        os.symlink(shutil.which(tool), bin_dir / tool)
+    npx = bin_dir / "npx"
+    npx.write_text("#!/bin/sh\necho NPX-WAS-RUN >&2\nexit 9\n", encoding="utf-8")
+    npx.chmod(0o755)
+    proc = _run_hook(hook, tmp_path, env={**os.environ, "PATH": str(bin_dir)})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "NPX-WAS-RUN" not in proc.stdout + proc.stderr
+
+
 def test_hook_fails_closed_without_npx(tmp_path, monkeypatch):
     hook = _hook_repo(tmp_path, monkeypatch)
     (tmp_path / "ok.md").write_text("# Heading\n\ntext\n", encoding="utf-8")
