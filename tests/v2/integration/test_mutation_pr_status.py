@@ -171,6 +171,13 @@ def test_neutral_when_rows_or_changed_files_are_missing():
     assert verdict["state"] == "neutral" and "changed files" in verdict["reasons"][0]
 
 
+def test_missing_module_description_is_exact():
+    summary = {"modules": {"b": mod()}, "expected_modules": ["a"], "complete": True,
+               "tool_error": False, "failure_reasons": []}
+    verdict = ps.classify(summary, [], {"engine/v2/z.py"})
+    assert verdict["description"] == "gremlins: not a clean measured run (module a missing); not a pass"
+
+
 def test_description_fits_the_limit():
     modules = {f"module_{i}_with_a_long_name": mod(run_exit_code=1) for i in range(30)}
     verdict = ps.classify({"modules": modules, "expected_modules": sorted(modules),
@@ -187,6 +194,15 @@ def test_description_fits_the_limit():
                            "tool_error": False, "failure_reasons": []}, [], {"engine/v2/z.py"})
     assert verdict["state"] == "neutral" and len(verdict["description"]) <= 140
     assert verdict["description"].endswith("; not a pass")
+
+
+def test_cut_truncates_at_exactly_the_limit():
+    files = [f"engine/v2/{c}_" + "x" * 60 + ".py" for c in "abc"]
+    rows = [row("a", f) for f in files]
+    verdict = ps.classify(clean("a"), rows, set(files))
+    assert verdict["state"] == "failure"
+    assert len(verdict["description"]) == 140
+    assert verdict["description"].endswith("...")
 
 
 def _report(tmp_path, summary, rows_lines, changed_lines, subdir="report"):

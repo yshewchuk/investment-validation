@@ -41,6 +41,13 @@ def _report_status_script() -> str:
     raise AssertionError("report status step not found")
 
 
+def test_classify_step_runs_after_the_merge_step():
+    names = [s.get("name", "") for s in _steps(JOBS["report"])]
+    merge_i = names.index("Merge module reports")
+    classify_i = next(i for i, s in enumerate(_steps(JOBS["report"])) if s.get("id") == "classify")
+    assert merge_i < classify_i
+
+
 def test_classify_step_wiring():
     step = _classify_step()
     assert re.match(r"^always\(\)\s*&&", step["if"])
@@ -131,6 +138,18 @@ def test_classify_script_does_not_forward_partial_diff_output(tmp_path):
         (ROOT / "changed_files.txt").unlink(missing_ok=True)
 
 
+def test_changed_files_holds_the_two_diff_paths(tmp_path):
+    script = _classify_step()["run"]
+    funcs = "git() { if [ \"$1\" = \"-c\" ]; then printf 'a/x.py\\nb/y.py\\n'; fi; return 0; }\npython() { return 0; }\n"
+    try:
+        proc = _run_bash(script, {"LOG": str(tmp_path / "log"), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1"}, funcs)
+        assert proc.returncode == 0, proc.stderr
+        content = (ROOT / "changed_files.txt").read_text().splitlines()
+        assert content == ["a/x.py", "b/y.py"]
+    finally:
+        (ROOT / "changed_files.txt").unlink(missing_ok=True)
+
+
 def _decision_script() -> str:
     run = _report_status_script()
     return run[: run.index("gh api")].rsplit("\n", 1)[0]
@@ -143,6 +162,8 @@ DECISION_TABLE = [
     ("[\"a\",\"b\"]", "2", "success", "classified text", "success", "failure"),
     ("[\"a\",\"b\"]", "0", "failure", "classified text", "success", "failure"),
     ("[\"a\",\"b\"]", "0", "neutral", "classified text", "success", "neutral"),
+    ("[\"a\",\"b\"]", "0", "failure", "classified text", "failure", "failure"),
+    ("[\"a\",\"b\"]", "0", "neutral", "classified text", "failure", "neutral"),
     ("[\"a\",\"b\"]", "0", "success", "classified text", "success", "success"),
     ("[\"a\",\"b\"]", "0", "success", "classified text", "failure", "neutral"),
     ("[\"a\",\"b\"]", "0", "", "", "failure", "neutral"),
