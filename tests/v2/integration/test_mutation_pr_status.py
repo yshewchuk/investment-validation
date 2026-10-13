@@ -81,7 +81,7 @@ def test_module_test_failure_is_pr_owned_unless_main_fails_too():
     assert verdict(m)["state"] == "failure"
     base = {"modules": {"a": mod(run_exit_code=1)}}
     v = verdict(m, baseline=base)
-    assert v["state"] == "success" and v["modules"]["a"]["class"] == "infra"
+    assert v["state"] == "neutral" and v["modules"]["a"]["class"] == "infra"
     assert "main" in v["modules"]["a"]["reason"]
 
 
@@ -97,7 +97,7 @@ def test_each_infra_class_is_a_warning_never_red():
     m = merged(**cases)
     m["expected_modules"].append("missing")
     v = verdict(m)
-    assert v["state"] == "success"
+    assert v["state"] == "neutral"
     assert sorted(v["infra"]) == sorted([*cases, "missing"])
     assert v["pr_owned"] == []
     assert "infra warning" in v["description"]
@@ -145,13 +145,13 @@ def test_main_reads_baseline_file(tmp_path):
     out = tmp_path / "gh_output"
     ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
              "--baseline-summary", str(base), "--github-output", str(out)])
-    assert "state=success\n" in out.read_text()
+    assert "state=neutral\n" in out.read_text()
 
 
 def test_main_unreadable_inputs_never_red(tmp_path, capsys):
     out = tmp_path / "gh_output"
     rc = ps.main(["--merged-dir", str(tmp_path / "nowhere"), "--github-output", str(out)])
-    assert rc == 0 and "state=success\n" in out.read_text()
+    assert rc == 0 and "state=neutral\n" in out.read_text()
     assert "::warning::merged mutation report unavailable" in capsys.readouterr().out
     d, _ = _write_report(tmp_path, merged(a=mod(run_exit_code=1)), [])
     out2 = tmp_path / "gh_output2"
@@ -205,7 +205,7 @@ def test_changed_line_survivor_wins_over_infra_and_baseline_excuses():
     assert sorted(v["pr_owned"]) == sorted(m["modules"])
     # The same modules without a changed-line survivor stay infra / excused.
     v2 = verdict(m, [row(n, "engine/v2/a.py", 99) for n in m["modules"]], baseline=base)
-    assert v2["state"] == "success" and v2["pr_owned"] == []
+    assert v2["state"] == "neutral" and v2["pr_owned"] == []
 
 
 def test_survivor_from_rows_without_summary_entry_is_pr_owned():
@@ -214,7 +214,7 @@ def test_survivor_from_rows_without_summary_entry_is_pr_owned():
     v = verdict(m, [row("dup", "engine/v2/a.py", 5)])
     assert v["state"] == "failure" and v["pr_owned"] == ["dup"]
     v = verdict(m, [row("dup", "engine/v2/a.py", 99)])
-    assert v["state"] == "success" and v["modules"]["dup"]["class"] == "infra"
+    assert v["state"] == "success" and v["modules"]["dup"]["class"] == "infra"  # "ok" was measured
 
 
 def test_truncation_keeps_the_infra_count():
@@ -245,7 +245,7 @@ def test_baseline_that_is_not_a_test_exit_failure_excuses_nothing():
     for junk in ([], "x", 3, {"modules": []}, {"modules": {"a": "bad"}}, {"modules": None}):
         assert verdict(pr, baseline=junk)["state"] == "failure", junk
     # Positive control: a test-exit failure on main for the same module excuses it.
-    assert verdict(pr, baseline={"modules": {"a": mod(run_exit_code=127)}})["state"] == "success"
+    assert verdict(pr, baseline={"modules": {"a": mod(run_exit_code=127)}})["state"] == "neutral"
 
 
 def test_survivor_rows_of_another_module_are_not_attributed():
@@ -331,7 +331,7 @@ def test_list_valued_modules_in_summary_or_baseline_never_crash(tmp_path, capsys
     out = tmp_path / "gh_output"
     assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
                     "--github-output", str(out)]) == 0
-    assert "state=success\n" in out.read_text()
+    assert "state=neutral\n" in out.read_text()
     assert "merged mutation report unavailable" in capsys.readouterr().out
     d2 = tmp_path / "two"
     d2.mkdir()
@@ -361,7 +361,7 @@ def test_unparsable_summary_or_baseline_json_degrades(tmp_path, capsys):
     out = tmp_path / "gh_output"
     assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
                     "--github-output", str(out)]) == 0
-    assert "state=success\n" in out.read_text()
+    assert "state=neutral\n" in out.read_text()
     assert "merged mutation report unavailable" in capsys.readouterr().out
     (d / "summary.json").write_text(json.dumps(merged(a=mod(run_exit_code=1))))
     base = tmp_path / "base.json"
@@ -426,7 +426,7 @@ def test_published_reason_text_in_annotation_and_json(tmp_path, capsys, summary_
     assert verdict["modules"]["a"] == {"class": cls, "reason": reason}
     suffix = "" if level == "error" else " (infra, not PR-owned)"
     assert notes == [f"::{level}::a: {reason}{suffix}"]
-    assert verdict["state"] == ("failure" if level == "error" else "success")
+    assert verdict["state"] == ("failure" if level == "error" else "neutral")
 
 
 def test_published_descriptions_and_degradation_messages_are_exact(tmp_path, capsys):
@@ -442,13 +442,13 @@ def test_published_descriptions_and_degradation_messages_are_exact(tmp_path, cap
     # unavailable report
     out = tmp_path / "gh_unavailable"
     assert ps.main(["--merged-dir", str(tmp_path / "nowhere"), "--github-output", str(out)]) == 0
-    assert out.read_text() == ("state=success\n"
+    assert out.read_text() == ("state=neutral\n"
                                "description=gremlins: merged report unavailable (infra); "
                                "no PR-owned result\n")
     notes, verdict = _split(capsys.readouterr().out)
     assert notes == ["::warning::merged mutation report unavailable; "
                      "not reporting red for infra"]
-    assert verdict == {"state": "success", "pr_owned": [], "infra": ["report"], "modules": {},
+    assert verdict == {"state": "neutral", "pr_owned": [], "infra": ["report"], "modules": {},
                        "description": "gremlins: merged report unavailable (infra); "
                                       "no PR-owned result"}
 
@@ -488,8 +488,16 @@ def test_all_infra_run_is_not_red_but_never_worded_as_a_pass(tmp_path):
     # Every scheduled job died: no summary entry for any module.
     m = {"modules": {}, "expected_modules": ["a", "b"]}
     v = verdict(m)
-    assert v["state"] == "success" and v["pr_owned"] == []
+    assert v["state"] == "neutral" and v["pr_owned"] == []
     assert v["description"] == "gremlins: no module measured (2 infra warning(s)); not a pass"
     # One measured module changes the wording back.
     v = verdict({"modules": {"a": mod()}, "expected_modules": ["a", "b"]})
+    assert v["state"] == "success"
     assert v["description"] == "gremlins: no PR-owned problems; 1 infra warning(s)"
+
+
+def test_neutral_state_only_when_nothing_was_measured():
+    assert verdict(merged(a=mod(run_exit_code=-1)))["state"] == "neutral"
+    assert verdict(merged(a=mod(run_exit_code=-1), b=mod()))["state"] == "success"
+    assert verdict(merged(a=mod(run_exit_code=-1), b=mod(run_exit_code=1)))["state"] == "failure"
+    assert verdict({"modules": {}, "expected_modules": []})["state"] == "success"

@@ -385,8 +385,11 @@ each other and from the `Tests` check.
 report, the PR's `git diff -U0` and main's newest recent push report that has
 one, and `report_status` posts its `state`/`description` when present. An empty
 plan and a merged PR-closed placeholder module keep the earlier mapping above
-(checked first). A run in which no module was measured stays non-red but its
-description says "no module measured ... not a pass". PR-owned: a survivor on a line the
+(checked first). A run in which no module was measured is GREY: the tool's
+`neutral` state is posted by the `report_neutral` job as a `neutral` check run named
+`mutation/pr` (commit statuses have no grey state; the job alone holds
+`checks: write`), and `report_status` posts no commit status for it. The description
+says "no module measured ... not a pass". `mutation/pr` is not a required check. PR-owned: a survivor on a line the
 PR changed, or a module run that failed with a test-failure exit code main does
 not also show. Infra (a `::warning::`, never red): no report, skipped, timeout or
 cancel, signal kill, gremlin ERROR results, an invalid raw report, a failure main

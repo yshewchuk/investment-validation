@@ -273,9 +273,12 @@ evidence. See the models and data component contracts.
     merged `summary.json` and `results.jsonl` in the merged directory, the PR's
     `git diff -U0`, and optionally main's last merged `summary.json`. Outputs: a
     JSON verdict on stdout, `::error::` (PR-owned) and `::warning::` (infra)
-    annotations, and `state` (`success`|`failure`) and `description` (within the
+    annotations, and `state` (`success`|`failure`|`neutral`) and `description` (within the
     commit-status length limit, the infra count never cut) appended to `--github-output`, which
-    `report_status` posts as `mutation/pr`. The module set is the summary's
+    `report_status` posts as the `mutation/pr` commit status. `neutral` means no module
+    was measured (every module infra, or the merged report unavailable): commit statuses
+    have no grey state, so the `report_neutral` job posts it as a `neutral` check run
+    instead, and no commit status is posted for it. `mutation/pr` is not a required check. The module set is the summary's
     `expected_modules` and `modules` plus every module named in a result row.
     A module is `pr_owned` when a `survived` row sits on a line the PR added or
     changed (checked first, from the rows alone, so it wins over every infra
@@ -288,7 +291,7 @@ evidence. See the models and data component contracts.
     infra modules are counted in the description, never red. Failure semantics:
     the tool exits 0 for every classified or degraded input (only argument errors
     and an unwritable `--github-output` file exit nonzero, the latter deliberately
-    so a CI step fails loudly). A missing or unparsable merged summary yields `success`, an
+    so a CI step fails loudly). A missing or unparsable merged summary yields `neutral`, an
     "unavailable" description and a warning. An omitted, missing or undecodable
     diff, or an unreadable `results.jsonl` (malformed rows are dropped with a warning), warns and attributes no survivor to
     the PR; an unreadable baseline warns and excuses nothing. Survivors on lines

@@ -4,7 +4,9 @@ Inputs: the merged ``summary.json`` (+ ``results.jsonl``) written by
 ``gremlin_results.py merge``, the PR's ``git diff -U0`` text and, optionally,
 main's last merged ``summary.json``. Output: a JSON verdict on stdout and
 ``state`` / ``description`` lines in ``$GITHUB_OUTPUT``. Only PR-owned problems
-make ``state`` ``failure``; infra problems are ``::warning::`` lines. This tool
+make ``state`` ``failure``; infra problems are ``::warning::`` lines. When no
+module was measured at all, ``state`` is ``neutral`` (the workflow posts it as a
+grey check run, never a pass). This tool
 never exits nonzero for a classified result.
 """
 from __future__ import annotations
@@ -137,7 +139,8 @@ def _truncate(text: str, keep_tail: str = "") -> str:
 
 
 def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=None) -> dict:
-    """Pure verdict: ``state`` is ``failure`` only when a module is PR-owned."""
+    """Pure verdict: ``failure`` only when a module is PR-owned, ``neutral`` when no
+    module was measured (all infra), else ``success``."""
     rows = [r for r in rows if _valid_row(r)]
     modules = merged.get("modules") if isinstance(merged, dict) else None
     modules = modules if isinstance(modules, dict) else {}
@@ -164,7 +167,9 @@ def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=No
         desc = f"gremlins: no PR-owned problems; {len(infra)} infra warning(s)"
     else:
         desc = f"gremlins: no PR-owned problems in {len(names)} module(s)"
-    return {"state": "failure" if owned else "success", "description": _truncate(desc, tail),
+    nothing_measured = bool(names) and len(infra) == len(names)
+    state = "failure" if owned else "neutral" if nothing_measured else "success"
+    return {"state": state, "description": _truncate(desc, tail),
             "pr_owned": owned, "infra": infra, "modules": result}
 
 
@@ -218,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     merged_dir = Path(args.merged_dir)
     merged = _load_json(str(merged_dir / "summary.json"))
     if not _valid_summary(merged):
-        verdict = {"state": "success", "pr_owned": [], "infra": ["report"], "modules": {},
+        verdict = {"state": "neutral", "pr_owned": [], "infra": ["report"], "modules": {},
                    "description": _truncate("gremlins: merged report unavailable (infra); "
                                             "no PR-owned result")}
         print("::warning::merged mutation report unavailable; not reporting red for infra")
