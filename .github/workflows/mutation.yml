@@ -863,6 +863,43 @@ jobs:
             state=success
             desc="gremlins: report published for $(jq -r 'length' <<< "$MODULES") module(s)"
           fi
+          # Nothing measured: grey, and commit statuses have no grey state. The
+          # report_neutral job posts a neutral check run instead; no status here.
+          if [ "$state" = neutral ]; then
+            echo "::notice::nothing measured; mutation/pr is posted by report_neutral as a neutral check run"
+            exit 0
+          fi
           gh api "repos/$REPO/statuses/$SHA" \
             -f state="$state" -f context="mutation/pr" \
             -f description="$desc" -f target_url="$RUN_URL"
+
+  report_neutral:
+    # Grey result for a run in which no module was measured (every module infra or
+    # no report). A check run can conclude `neutral`; a commit status cannot. The
+    # PR-closed placeholder guard keeps its failure mapping in report_status, so
+    # this job stays out of that case. mutation/pr is not a required check.
+    needs: [plan, report]
+    if: >-
+      always() && needs.plan.outputs.pr_number != '' &&
+      needs.plan.outputs.modules != '[]' &&
+      needs.report.outputs.state == 'neutral' &&
+      (needs.report.outputs.skipped_count == '0' || needs.report.outputs.skipped_count == '')
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    steps:
+      - name: Post neutral mutation check run to the PR head commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DESC: ${{ needs.report.outputs.description }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/check-runs" \
+            -f name="mutation/pr" -f head_sha="$SHA" \
+            -f status=completed -f conclusion=neutral \
+            -f details_url="$RUN_URL" \
+            -f "output[title]=Mutation testing: nothing measured" \
+            -f "output[summary]=$DESC"
