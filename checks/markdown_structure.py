@@ -60,6 +60,7 @@ _FENCE = re.compile(r"^( *(?:(?:[-*+]|\d+[.)]) +)?)(`{3,}|~{3,})(.*)$")  # optio
 _CLOSER = re.compile(r"^( *)(`{3,}|~{3,})[ \t]*$")
 _HEADING = re.compile(r"^#{1,6}(\s|$)")
 _LIST_ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
+_ITEM = re.compile(r"^( *)([-*+]|\d+[.)])( +|$)")  # any-indent list item line
 _DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -73,20 +74,39 @@ class Violation:
     line: int  # 1-based line the rule is reported on
     near: int  # 1-based neighbouring line whose change can cause it
     rule: str
+    # Table violations only: the whole table block (header .. last row, or the
+    # absorbing line) is in scope, because a change to ANY of its lines (e.g. a
+    # delimiter row turning text into a table) can create the violation.
+    lo: int = 0
+    hi: int = 0
+
+
+_UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
 
 
 def _cells(row: str) -> int:
-    return len(row.strip().strip("|").split("|"))
+    """Cell count of a table row. Unescaped pipes separate cells (also inside code
+    spans, per GFM); one leading and one trailing unescaped pipe are edges."""
+    body = row.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|") and not body.endswith("\\|"):
+        body = body[:-1]
+    return len(_UNESCAPED_PIPE.split(body))
 
 
 def _is_table_row(row: str, header: str) -> bool:
     """Whether ``row`` continues the table under ``header``, as this lint models
-    it. GFM itself absorbs any following non-blank line into the table; the lint
-    instead ends the table at the first line not shaped like a row (a leading
-    pipe when the header has one, else the header's column count), so that
-    ``table-after`` can flag the paragraph GFM would absorb."""
+    it. GFM ends a table at a blank line or at the start of another block-level
+    structure (heading, fence, blockquote, list, HTML block); any other non-blank
+    line is absorbed as a row, however it is shaped. The lint is stricter: it
+    ends the table at the first line not shaped like a row (a leading pipe when
+    the header has one, else the header's column count), so that ``table-after``
+    can flag a following line that is, or may be mistaken for, an absorbed
+    paragraph. A line after a table that starts another block is flagged as the
+    house blank-line rule, not as an absorbed row."""
     stripped = row.strip()
-    if not stripped or "|" not in stripped:
+    if not stripped or not _UNESCAPED_PIPE.search(stripped):
         return False
     if header.strip().startswith("|"):
         return stripped.startswith("|")
@@ -105,8 +125,8 @@ def lint_text(text: str) -> list[Violation]:
     def blank(i: int) -> bool:
         return i < 0 or i >= n or not lines[i].strip()
 
-    fence = None  # (char, length, indent, opening 1-based line, min closer indent)
-    in_list = False  # last column-0 line seen outside fences was a list item
+    fence = None  # (char, length, indent, opening 1-based line, container indent)
+    items: list[int] = []  # content columns of the open list items, outermost first
     i = 0
     while i < n:
         s = lines[i]
@@ -116,30 +136,38 @@ def lint_text(text: str) -> list[Violation]:
         if fence:
             c = _CLOSER.match(s)
             if (c and c.group(2)[0] == fence[0] and len(c.group(2)) >= fence[1]
-                    and fence[4] <= len(c.group(1)) <= fence[2] + 3):
+                    and fence[4] <= len(c.group(1)) <= fence[4] + 3):
                 if fence[2] == 0 and not blank(i + 1):
                     found.append(Violation(i + 1, i + 2, "fence-after"))
                 fence = None
             i += 1
             continue
-        if m and (m.group(1).strip() or len(m.group(1)) < 4 or in_list):
+        if m and (m.group(1).strip() or len(m.group(1)) < 4 or items):
             # (else: 4+ spaces outside a list is an indented code block, not a fence)
-            # Inside a list item (marker on this line, or an earlier list item with
-            # no column-0 text since) the closer may not be less indented than the
-            # opener; at top level any indent from 0 is fine.
-            in_item = bool(m.group(1).strip()) or in_list
+            # The container's content column: this line's own list marker, else the
+            # innermost open list item whose content starts at or left of the fence,
+            # else 0 (top level). A closer may sit 0-3 spaces beyond that column.
+            indent = len(m.group(1))
             if m.group(1).strip():
-                in_list = True
-            fence = (m.group(2)[0], len(m.group(2)), len(m.group(1)), i + 1,
-                     len(m.group(1)) if in_item else 0)
+                lead = indent - len(m.group(1).lstrip(" "))
+                while items and items[-1] > lead:
+                    items.pop()
+                items.append(indent)
+                container = indent
+            else:
+                container = max((x for x in items if x <= indent), default=0)
+            fence = (m.group(2)[0], len(m.group(2)), indent, i + 1, container)
             if not m.group(1) and not blank(i - 1):
                 found.append(Violation(i + 1, i, "fence-before"))
             i += 1
             continue
-        if _LIST_ITEM.match(s):
-            in_list = True
+        item = _ITEM.match(s)
+        if item and (len(item.group(1)) < 4 or items):
+            while items and items[-1] > len(item.group(1)):
+                items.pop()
+            items.append(len(item.group(0)) if item.group(3) else len(item.group(0)) + 1)
         elif s.strip() and not s[:1].isspace():
-            in_list = False
+            items.clear()
         if _HEADING.match(s):
             if not blank(i - 1):
                 found.append(Violation(i + 1, i, "heading-before"))
@@ -149,14 +177,15 @@ def lint_text(text: str) -> list[Violation]:
             continue
         if ("|" in s and not _DELIM.match(s) and not s[:1].isspace()
                 and not _LIST_ITEM.match(s) and i + 1 < n
-                and "|" in lines[i + 1] and _DELIM.match(lines[i + 1])):
-            if not blank(i - 1):
-                found.append(Violation(i + 1, i, "table-before"))
+                and "|" in lines[i + 1] and _DELIM.match(lines[i + 1])
+                and _cells(s) == _cells(lines[i + 1])):
             j = i + 2
             while j < n and _is_table_row(lines[j], s):
                 j += 1
+            if not blank(i - 1):
+                found.append(Violation(i + 1, i, "table-before", i + 1, j))
             if j < n and lines[j].strip():
-                found.append(Violation(j + 1, j, "table-after"))
+                found.append(Violation(j + 1, j, "table-after", i + 1, j + 1))
             i = j
             continue
         i += 1
@@ -190,7 +219,8 @@ def scoped(violations: list[Violation], touched: set[int] | None) -> list[Violat
     if touched is None:
         return violations
     return [v for v in violations
-            if v.rule == "fence-unclosed" or v.line in touched or v.near in touched]
+            if v.rule == "fence-unclosed" or v.line in touched or v.near in touched
+            or any(v.lo <= t <= v.hi for t in touched)]
 
 
 def _git(*args: str) -> bytes:

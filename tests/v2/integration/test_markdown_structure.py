@@ -186,12 +186,17 @@ def test_quiet_suppresses_the_clean_message(repo, capsys):
 
 
 def test_git_timeout_exits_2(repo, monkeypatch, capsys):
+    seen = []
+
     def boom(*args, **kwargs):
+        seen.append(kwargs.get("timeout"))
         raise subprocess.TimeoutExpired(cmd="git", timeout=60)
 
     monkeypatch.setattr(ms.subprocess, "run", boom)
     assert ms.main(["--quiet"]) == 2
     assert "timed out" in capsys.readouterr().err
+    # Every git call must carry the timeout, or a stalled git hangs the hook.
+    assert seen and all(t == 60 for t in seen)
 
 
 def test_unreadable_file_exits_2(repo, monkeypatch, capsys):
@@ -323,6 +328,77 @@ def test_base_ref_mode_reads_committed_content_not_the_worktree(repo, capsys):
     _git(repo, "commit", "-qam", "fix")
     f.write_text(bad, encoding="utf-8")
     assert ms.main(["--base-ref", "base", "--quiet"]) == 0
+
+
+def test_each_blank_line_rule_reports_exact_positions():
+    def fields(text):
+        return sorted((v.rule, v.line, v.near) for v in ms.lint_text(text))
+
+    cases = [
+        ("para\n# Title\n\nbody\n", [("heading-before", 2, 1)], {1}),
+        ("# Title\nbody\n", [("heading-after", 1, 2)], {2}),
+        ("para\n| a | b |\n|---|---|\n| 1 | 2 |\n", [("table-before", 2, 1)], {1}),
+        ("| a | b |\n|---|---|\n| 1 | 2 |\nclosing\n", [("table-after", 4, 3)], {3}),
+        ("para\n```\ncode\n```\n\nnext\n", [("fence-before", 2, 1)], {1}),
+        ("para\n\n```\ncode\n```\nnext\n", [("fence-after", 5, 6)], {6}),
+    ]
+    for text, expected, neighbour in cases:
+        assert fields(text) == expected, text
+        found = ms.lint_text(text)
+        # A change to ONLY the neighbouring line is in scope; an unrelated line is not.
+        assert ms.scoped(found, neighbour) == found, text
+        assert ms.scoped(found, {99}) == [], text
+
+
+def test_table_scope_covers_the_whole_block():
+    text = "| a | b |\n|---|---|\n| 1 | 2 |\nclosing\n"
+    found = ms.lint_text(text)
+    for line in (1, 2, 3, 4):
+        assert ms.scoped(found, {line}) == found, line
+    before = ms.lint_text("para\n| a | b |\n|---|---|\n| 1 | 2 |\n")
+    assert ms.scoped(before, {3}) == before  # the delimiter row alone
+
+
+def test_delimiter_only_edit_that_creates_a_table_is_flagged(repo, capsys):
+    f = repo / "t.md"
+    f.write_text("| a | b |\n| c | d |\n| e | f |\nparagraph\n", encoding="utf-8")
+    _git(repo, "add", "t.md")
+    _git(repo, "commit", "-qm", "text rows")
+    _git(repo, "branch", "base")
+    f.write_text("| a | b |\n|---|---|\n| e | f |\nparagraph\n", encoding="utf-8")
+    _git(repo, "add", "t.md")
+    assert ms.main(["--quiet"]) == 1
+    assert "t.md:4: table-after" in capsys.readouterr().out
+    _git(repo, "commit", "-qm", "delimiter")
+    assert ms.main(["--base-ref", "base", "--quiet"]) == 1
+    assert "t.md:4: table-after" in capsys.readouterr().out
+
+
+def test_escaped_pipes_and_unequal_counts():
+    assert ms._cells("a \\| b | c") == 2
+    assert ms._cells("| a | b |") == 2
+    assert ms._cells("| a \\| b |") == 1
+    assert rules("a \\| b | c\n--|--\n1 | 2\n\nafter\n") == []
+    assert rules("a \\| b | c\n--|--\n1 | 2\nafter\n") == ["table-after"]
+    assert rules("| a \\| b |\n|---|\n| 1 |\nafter\n") == ["table-after"]
+    # Header and delimiter cell counts differ: not a table, so no table rules.
+    assert rules("para\na | b\n--|--|--\n1 | 2\nafter\n") == []
+
+
+def test_closer_bounds_use_the_container_indent():
+    # Top level, opener indented 3: a 3-space closer closes, a 6-space one is content.
+    assert rules("a\n\n   ```\ncode\n   ```\n\nb\n") == []
+    assert [v.rule for v in ms.lint_text("a\n\n   ```\ncode\n      ```\n")] == ["fence-unclosed"]
+    # Inside "- item" (content column 2): a 4-space opener is closed by a 2-space closer.
+    assert rules("- item\n\n    ```\n  code\n  ```\n\nb\n") == []
+    # Closers up to 3 beyond the container column close; 4 beyond do not.
+    assert rules("- item\n  ```\n  code\n     ```\n") == []
+    assert [v.rule for v in ms.lint_text("- item\n  ```\n  code\n      ```\n")] == ["fence-unclosed"]
+
+
+def test_nested_list_items_pick_the_right_container():
+    assert rules("- a\n  - b\n\n    ```\n  x\n    ```\n") == []
+    assert rules("- a\n  - b\n\n  ```\n  x\n  ```\n\nz\n") == []
 
 
 def test_blockquoted_fence_is_not_checked():
