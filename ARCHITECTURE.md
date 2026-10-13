@@ -265,9 +265,10 @@ evidence. See the models and data component contracts.
     taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
-  - **Mutation PR status** (`tools/mutation_pr_status.py`; once wired, the gremlins
-    `report` job runs it on a PR; the workflow step lands in a follow-up commit
-    on this PR, so until then `mutation.yml` does not call it). Inputs
+  - **Mutation PR status** (`tools/mutation_pr_status.py`; the gremlins
+    `report` job runs it on a PR, and `report_status` posts its verdict unless
+    the plan was empty or a PR-closed placeholder module was merged, which keep
+    their earlier mapping). Inputs
     (`--merged-dir`, `--diff-file`, `--baseline-summary`, `--github-output`): the
     merged `summary.json` and `results.jsonl` in the merged directory, the PR's
     `git diff -U0`, and optionally main's last merged `summary.json`. Outputs: a

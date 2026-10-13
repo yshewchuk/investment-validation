@@ -380,12 +380,13 @@ that applies does the status mirror `report`'s own result as `success`.
 The two contexts, `mutation-mutmut/pr` and `mutation/pr`, are distinct from
 each other and from the `Tests` check.
 
-**Once the gremlins `report` job runs the classifier, `mutation/pr` is red only for PR-owned problems.** Once
-wired (the workflow edit lands in a follow-up commit on the slice B PR; until then
-`mutation.yml` does not call it), the `report` job's last step runs
-`tools/mutation_pr_status.py` over the merged
-report, the PR's `git diff -U0` and main's last push report, and `report_status`
-posts its `state`/`description` when present. PR-owned: a survivor on a line the
+**`mutation/pr` (gremlins workflow) is red only for PR-owned problems.** The
+`report` job's last step runs `tools/mutation_pr_status.py` over the merged
+report, the PR's `git diff -U0` and main's newest recent push report that has
+one, and `report_status` posts its `state`/`description` when present. An empty
+plan and a merged PR-closed placeholder module keep the earlier mapping above
+(checked first). A run in which no module was measured stays non-red but its
+description says "no module measured ... not a pass". PR-owned: a survivor on a line the
 PR changed, or a module run that failed with a test-failure exit code main does
 not also show. Infra (a `::warning::`, never red): no report, skipped, timeout or
 cancel, signal kill, gremlin ERROR results, an invalid raw report, a failure main

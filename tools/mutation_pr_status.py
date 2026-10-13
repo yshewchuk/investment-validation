@@ -157,6 +157,9 @@ def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=No
         desc = f"gremlins: PR-owned problem in {', '.join(owned)}"
         if infra:
             tail = f"; {len(infra)} infra warning(s)"
+    elif infra and len(infra) == len(names):
+        # Nothing was measured: still not red (infra), but never worded as a pass.
+        desc = f"gremlins: no module measured ({len(infra)} infra warning(s)); not a pass"
     elif infra:
         desc = f"gremlins: no PR-owned problems; {len(infra)} infra warning(s)"
     else:

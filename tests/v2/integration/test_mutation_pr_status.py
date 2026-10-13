@@ -482,3 +482,14 @@ def test_survivor_reason_lists_first_five_sorted_hits_with_full_count():
     assert v["modules"]["a"]["reason"] == (
         "7 survivor(s) on changed lines: engine/v2/a.py:1, engine/v2/a.py:2, "
         "engine/v2/a.py:3, engine/v2/a.py:5, engine/v2/a.py:6")
+
+
+def test_all_infra_run_is_not_red_but_never_worded_as_a_pass(tmp_path):
+    # Every scheduled job died: no summary entry for any module.
+    m = {"modules": {}, "expected_modules": ["a", "b"]}
+    v = verdict(m)
+    assert v["state"] == "success" and v["pr_owned"] == []
+    assert v["description"] == "gremlins: no module measured (2 infra warning(s)); not a pass"
+    # One measured module changes the wording back.
+    v = verdict({"modules": {"a": mod()}, "expected_modules": ["a", "b"]})
+    assert v["description"] == "gremlins: no PR-owned problems; 1 infra warning(s)"
