@@ -99,6 +99,10 @@ def test_row_mismatches_flags_a_native_row_missing_its_own_entry_cost_pct():
     {"entry_cost": 3.0, "spot": "bad"},
     {"entry_cost": "bad", "spot": 250.0},
     {"entry_cost": "inf", "spot": 250.0},
+    {"entry_cost": 3.0, "spot": "inf"},
+    {"entry_cost": 3.0, "spot": float("inf")},
+    {"entry_cost": 3.0, "spot": float("-inf")},
+    {"entry_cost": 3.0, "spot": float("nan")},
     {"entry_cost": 3.0, "spot": object()},
 ])
 def test_malformed_or_zero_operands_give_none_not_an_exception(row):
@@ -112,4 +116,10 @@ def test_numeric_strings_are_converted_before_dividing():
 
 def test_a_malformed_legacy_row_is_a_mismatch_not_an_abort():
     legacy_row = {"entry_cost": "bad", "spot": 250.0}
+    assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": 1.2})
+
+
+def test_unavailable_on_both_sides_agrees_but_one_sided_is_a_mismatch():
+    legacy_row = {"entry_cost": "bad", "spot": 250.0}
+    assert not _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": None})
     assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": 1.2})
