@@ -51,6 +51,7 @@ def test_classify_step_runs_after_the_merge_step():
 def test_classify_step_wiring():
     step = _classify_step()
     assert re.match(r"^always\(\)\s*&&", step["if"])
+    assert step["if"].strip() == "always() && needs.plan.outputs.pr_number != ''"
     env = step["env"]
     assert env["PR"] == "${{ needs.plan.outputs.pr_number }}"
     assert env["BASE_SHA"] == "${{ needs.plan.outputs.base_sha }}"
@@ -63,6 +64,17 @@ def test_classify_step_wiring():
     assert "permissions" not in JOBS["report"]
     assert JOBS["report"]["outputs"]["state"] == "${{ steps.classify.outputs.state }}"
     assert JOBS["report"]["outputs"]["description"] == "${{ steps.classify.outputs.description }}"
+
+
+def test_classify_step_fails_loudly_when_the_classifier_fails(tmp_path):
+    script = _classify_step()["run"]
+    funcs = "git() { printf 'a/x.py\\n'; return 0; }\npython() { return 3; }\n"
+    try:
+        proc = _run_bash(script, {"LOG": str(tmp_path / "log"), "PR": "7",
+                                  "BASE_SHA": "base1", "HEAD_SHA": "head1"}, funcs)
+        assert proc.returncode == 3
+    finally:
+        (ROOT / "changed_files.txt").unlink(missing_ok=True)
 
 
 def _run_bash(script: str, env_over: dict, functions: str) -> subprocess.CompletedProcess:

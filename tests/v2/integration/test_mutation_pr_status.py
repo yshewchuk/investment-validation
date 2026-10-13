@@ -79,6 +79,17 @@ def test_two_survivors_in_one_file_are_counted(tmp_path):
             "engine/v2/a.py\n") in out.read_text()
 
 
+def test_cli_attribution_is_by_changed_file(tmp_path):
+    argv, out = _report(tmp_path, clean("a"), [json.dumps(row("a", "engine/v2/a.py"))],
+                        ["engine/v2/b.py"], subdir="other")
+    assert ps.main(argv) == 0
+    assert "state=success\n" in out.read_text()
+    argv, out = _report(tmp_path, clean("a"), [json.dumps(row("a", "engine/v2/a.py"))],
+                        ["engine/v2/a.py", "engine/v2/b.py"], subdir="both")
+    assert ps.main(argv) == 0
+    assert "state=failure\n" in out.read_text()
+
+
 def test_integrity_comes_before_attribution():
     for summary in (None, {"modules": None},
                     {"modules": {"a": mod()}, "expected_modules": ["a", "b"],
@@ -288,7 +299,9 @@ def test_cli_malformed_rows_are_neutral(tmp_path):
                 json.dumps({"module": "a", "file": "f", "status": "zapped"}),
                 json.dumps({"module": "a", "status": "survived"}),
                 json.dumps({"file": "f", "status": "survived"}),
-                json.dumps({"module": "a", "file": 7, "status": "survived"}))
+                json.dumps({"module": "a", "file": 7, "status": "survived"}),
+                "[1, 2]",
+                '"x"')
     for i, bad in enumerate(bad_rows):
         argv, out = _report(tmp_path, clean("a"), [bad], ["engine/v2/a.py"],
                             subdir=f"bad{i}")
