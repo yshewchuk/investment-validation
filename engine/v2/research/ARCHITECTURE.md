@@ -142,8 +142,10 @@ history identities before any outcome access. Candidates are the same ticker's
 events in `[history_start, min(target day, decision_session))`.
 
 Every candidate query is planned before any outcome scan, using the same
-fragment planner as Repository. Preflight loads fragment metadata once and
-reuses each planned bound for query construction, avoiding a second bound lookup.
+fragment planner as Repository. Preflight indexes fragment metadata once by
+partition and canonical time intervals; unsafe leading-key or time bounds stay
+in a conservative fallback. Selected records retain manifest order and pass the
+unchanged planner. Each planned bound is reused for query construction.
 Its entire surviving membership must be one
 inspected singleton with the exact ticker/day key, partition and time bounds.
 The resolved committed catalog/manifest identity is the metadata trust anchor;
@@ -255,9 +257,10 @@ features refuse `EXPERIMENT_VARIANT_FAILED` rather than reaching a model.
 Provenance explicitly says reconstructed date bounds, with event-schedule
 as-known and source-publication evidence unverified. Calendar reconstruction
 and source hashes do not establish that evidence; strict PIT experiment
-admission remains a later prerequisite. This seam has no fitting, target
-join, CLI, provider, report, ledger or final-read caller. Repository failures
-propagate with no cache, retry, write or partial result.
+admission remains a later prerequisite. The stored build uses `plan_magnitude_folds`,
+`event_history._assemble_history` and `_feature_recipe`, not this adapter.
+The adapter has no fitting, target-join, CLI, provider, report, ledger or final-read
+caller, and no cache, retry, write or partial result; Repository failures propagate.
 
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
 evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
@@ -486,10 +489,13 @@ This bounds retained unmatched rows, not total process RSS.
 
 ## Dependencies
 
-`engine.v2.data` (`Repository`, `errors`, `generic_incremental`), `engine.v2.
-contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`),
+`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `catalog`,
+`objects`, `manifests`, `query`, `computed_moves_table`), `engine.v2.
+contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
+`ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
-`engine.v2.foundation` (`ArtifactStore`, `SystemClock`, plus
+`engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`,
+`content_hash`, `to_document`, `market_calendar`, plus
 `final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
 at a lower layer" rule (`only_imports` is unset for this package in
@@ -502,6 +508,8 @@ connection to this package (see Inputs); nothing under
 `engine/v2/research/` imports `engine.v2.ops` itself, even though layer
 7.0 (ops) is not below this package's own enforced layer (also 7.0) and
 so could not be imported under the generic rule regardless.
+Stored history publishes new objects/manifests through `data.catalog.commit_snapshot`;
+this native write path advances only its dedicated context scope, never source heads.
 `_pricing.py` holds pure pricing primitives copied from legacy
 `engine.structures`/`engine.fills`/`engine.calendar` rather than reached
 through a legacy adapter (supervisor decision: no legacy adapter for this
@@ -527,6 +535,7 @@ Callers: no `engine/` modules import this package (checked by `checks/import_lay
 `load_magnitude_targets` and `qualify_magnitude_training_targets`.
 `experiments/native_registration.py` consumes
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
+`experiments/magnitude_history_store.py` consumes the stored-history context, build and read APIs.
 Other consumers include `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
 trade, calendar, and chain inputs from pinned v2 data. The archived
 trade-read caller omits required holdout context and is refused.
@@ -542,9 +551,30 @@ handing it to `price_candidate_grid`. None of these research callers are
 parsed by the layering hook (it only parses `engine*` importers, and
 `experiments/` is outside it too).
 
+### Stored magnitude-history materialization
+
+`experiments.magnitude_history_store` derives the supported build/read context.
+The engine accepts digest-consistent contexts; materialization independently guards target identity/windows.
+It does not authenticate arbitrary rehashed calendars as builder-derived.
+
+| Boundary | Contract |
+|---|---|
+| Inputs | Exact source snapshot, admitted temporal plan, history start, fixed 5/3/1 clocks, per-feature missingness and installed producer source/environment identity. No experiment outputs. |
+| Protected reads | The complete eligible singleton candidate union is preflighted before any outcome opens. Protected/ambiguous objects never open; admitted late labels may decode availability and be omitted before arithmetic. |
+| Build boundaries | Full candidate preflight completes before any outcome opens. Each admitted candidate outcome is decoded at most once per build; no cache persists across builds. Memory has no fixed byte cap; production scale is unmeasured. |
+| Per-forecast features | Shared history arithmetic preserves availability and numeric-refusal order. Consumed objects, omissions and availability accompany all eleven columns. Exclusion rosters remain transient; persisted lineage omits `holdout_exclusions` and the stored reader refuses it. Empty `n_prior` is zero; other missing values are null with `on_missing=null`. No runtime imputation or production v4 aggregates. |
+| Output | Features-only `research_magnitude_history.v1` snapshot, separate from unchanged source. Three ordered horizons per event-isolated object; primary key `(event_id, context_id, horizon_sessions)`, physical context field and context partition. |
+| Publication | Inspected objects/manifests and success receipt commit atomically under an initially empty deterministic scope. Failure admits no snapshot; complete unreferenced objects remain for normal cleanup. |
+| Replay/conflict | Matching success receipt returns the original artifact without moving a head. A failed/conflict receipt for the same context refuses with `IDENTITY_CONFLICT`; conflicting receipts/heads also refuse. Nothing retries automatically. |
+| Stored read | Supported entrypoint reconstructs context; engine verifies exact receipt/output and complete object isolation, then all row metadata before feature-column decoding. Checksum verification reads bytes. No historical outcomes or arithmetic; malformed reads return no partial rows. |
+| Trust/authority | Native inspected catalog metadata is trusted, not independent attestation against malicious catalog writers. Schedule/source-publication availability remain unverified reconstruction. No experiment/final-read authority; registration v1.0–v1.3 and fixed baseline are unchanged. |
+| Refusals | Missing or changed context/receipt: `IDENTITY_CONFLICT`; unprovable isolation: `HOLDOUT_ACCESS_DENIED`; bad stored schema/metadata/missingness: `CONTRACT_MISMATCH`. |
+| Source/publication failures | Unknown source/feature snapshot ID: `SNAPSHOT_NOT_FOUND`; resolved source-pin mismatch during public build/read context derivation: `SNAPSHOT_UNRESOLVED`; direct `materialize` source/context mismatch: `IDENTITY_CONFLICT`. Non-native computed-moves contract: `CONTRACT_MISMATCH`; empty fold: `POPULATION_COLLAPSED`; invalid eligible label/features: `EXPERIMENT_VARIANT_FAILED`; competing head: `SNAPSHOT_CONFLICT`. Other native catalog/object/source-admission errors propagate. |
+
 ## External systems and libraries
 
-None directly: no network call (Polygon/ORATS pulls stay in
+Direct libraries include pandas/numpy for tabular/numerical work and pyarrow
+for native stored-history Parquet. No network call (Polygon/ORATS pulls stay in
 `engine/data/pulls/`, legacy and unmoved). Snapshot access uses
 `ArtifactStore` and the sqlite catalog connection it is handed. Two
 exceptions, both plain local files outside `ArtifactStore` and never
@@ -567,16 +597,15 @@ caller that leaves `calendar` unset — so every path to a calendar in this
 package ends at a pinned snapshot or an explicit argument, never a local
 file, and a run's calendar is fixed by its `snapshot_id` like everything
 else it reads (see Failure semantics, Invariants). No third-party service.
-`pandas`/`numpy`/`pyarrow` for frame arithmetic.
 
 ## Failure semantics
 
-The 4c R1–R6 template covers data-boundary refusals, which generally use `DataError`
-(`engine.v2.data.errors.DataError`) carrying one of the registered
-`DATA_FAILURE_CODES`, which a CLI catches at `main()` and exits 2 with the
-code and message on stderr rather than a bare traceback. CLI argument
-validation is described separately because it can refuse before `main()`
-reaches that handler. One pre-existing data-path exception, called out below
+The 4c R1–R6 template covers data-boundary refusals, generally `DataError`
+(`engine.v2.data.errors.DataError`) carrying a registered `DATA_FAILURE_CODES` code.
+CLI leaves catch these at `main()` and exit 2: stored-history runtime refusals
+are JSON on stdout; other tools print code/message on stderr.
+Argument validation is separate because it can refuse before that handler.
+One pre-existing data-path exception, called out below
 where it applies (`_snapshot.py`'s bare `ValueError`, issue #70), escapes as
 an uncaught traceback instead.
 

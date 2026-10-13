@@ -252,4 +252,44 @@ MIGRATIONS = (
         WHEN EXISTS (SELECT 1 FROM final_holdout_state_events WHERE event_id=NEW.event_id)
         BEGIN SELECT RAISE(ABORT, 'final holdout state events are immutable'); END""",
     )),
+    Migration(version=12, name="massive_acquisition_occurrences", statements=(
+        """CREATE TABLE ops_massive_occurrences (
+            occurrence_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            request_hash TEXT NOT NULL,
+            family TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL CHECK(end_date >= start_date),
+            raw_receipt_id TEXT NOT NULL REFERENCES data_raw_receipts(raw_receipt_id),
+            document_json TEXT NOT NULL,
+            UNIQUE(job_id, request_hash)
+        ) STRICT""",
+        "CREATE INDEX massive_occurrence_coverage ON ops_massive_occurrences(family,generation,start_date,end_date)",
+        """CREATE TRIGGER massive_occurrences_no_update BEFORE UPDATE ON ops_massive_occurrences
+        BEGIN SELECT RAISE(ABORT, 'Massive occurrences are immutable'); END""",
+        """CREATE TRIGGER massive_occurrences_no_delete BEFORE DELETE ON ops_massive_occurrences
+        BEGIN SELECT RAISE(ABORT, 'Massive occurrences are immutable'); END""",
+        """CREATE TRIGGER massive_occurrences_no_replace BEFORE INSERT ON ops_massive_occurrences
+        WHEN EXISTS (SELECT 1 FROM ops_massive_occurrences WHERE occurrence_id=NEW.occurrence_id
+                     OR (job_id=NEW.job_id AND request_hash=NEW.request_hash))
+        BEGIN SELECT RAISE(ABORT, 'Massive occurrences are immutable'); END""",
+        """CREATE TABLE ops_massive_pages (
+            page_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            request_hash TEXT NOT NULL,
+            page_index INTEGER NOT NULL CHECK(page_index >= 0),
+            raw_receipt_id TEXT NOT NULL REFERENCES data_raw_receipts(raw_receipt_id),
+            document_json TEXT NOT NULL,
+            UNIQUE(job_id, request_hash, page_index)
+        ) STRICT""",
+        """CREATE TRIGGER massive_pages_no_update BEFORE UPDATE ON ops_massive_pages
+        BEGIN SELECT RAISE(ABORT, 'Massive pages are immutable'); END""",
+        """CREATE TRIGGER massive_pages_no_delete BEFORE DELETE ON ops_massive_pages
+        BEGIN SELECT RAISE(ABORT, 'Massive pages are immutable'); END""",
+        """CREATE TRIGGER massive_pages_no_replace BEFORE INSERT ON ops_massive_pages
+        WHEN EXISTS (SELECT 1 FROM ops_massive_pages WHERE page_id=NEW.page_id OR
+                     (job_id=NEW.job_id AND request_hash=NEW.request_hash AND page_index=NEW.page_index))
+        BEGIN SELECT RAISE(ABORT, 'Massive pages are immutable'); END""",
+    )),
 )

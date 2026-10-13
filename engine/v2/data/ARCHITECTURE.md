@@ -199,6 +199,9 @@ object verification on existing-receipt replay, before returning. Omitted checks
 preserve unfenced callers; object I/O remains outside SQL. A refused fence
 can leave unreferenced immutable bytes but no new catalog receipt. Existing
 identical content retains its original receipt metadata and acquisition time.
+The optional `record_receipt(record)` callback runs after fencing and insertion
+inside that same transaction, including verified replay. Its failure rolls back
+both the new receipt and caller-owned occurrence; raw content identity is unchanged.
 
 **Original panel COPY identity.** Offline size-fold authoring uses `Repository`
 and the existing object verifier to bind the named committed snapshot's
