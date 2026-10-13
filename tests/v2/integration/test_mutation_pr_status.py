@@ -384,6 +384,10 @@ def test_cut_truncates_at_exactly_the_limit():
     assert verdict["description"] == full[:137] + "..."
 
 
+def _printed_verdict(text):
+    return json.loads(text[text.index("\n{") + 1:] if not text.startswith("{") else text)
+
+
 def _report(tmp_path, summary, rows_lines, changed_lines, subdir="report"):
     root = tmp_path / subdir
     root.mkdir()
@@ -397,29 +401,52 @@ def _report(tmp_path, summary, rows_lines, changed_lines, subdir="report"):
             "--github-output", str(out)], out
 
 
-def test_neutral_description_is_exact_and_exported(tmp_path):
+def test_neutral_description_is_exact_and_exported(tmp_path, capsys):
     argv, out = _report(tmp_path, {**clean("a"), "complete": False}, [],
                         ["engine/v2/a.py"])
     assert ps.main(argv) == 0
     expected = "gremlins: not a clean measured run (run incomplete); not a pass"
-    assert f"description={expected}\n" in out.read_text()
+    out_text = out.read_text()
+    assert f"description={expected}\n" in out_text
     assert ps.classify({**clean("a"), "complete": False}, [],
                        {"engine/v2/a.py"})["description"] == expected
+    cap_text = capsys.readouterr().out
+    v = _printed_verdict(cap_text)
+    assert set(v) == {"state", "description", "reasons"}
+    assert v["description"] and v["description"] == expected
+    assert v["description"] == out_text.split("description=", 1)[1].splitlines()[0]
+    assert v["state"] == "neutral"
+    assert v["reasons"] == ["run incomplete"]
+    assert "::warning::run incomplete\n" in cap_text
 
 
 def test_cli_clean_run_success(tmp_path, capsys):
     argv, out = _report(tmp_path, clean("a"), [], ["engine/v2/a.py"])
     assert ps.main(argv) == 0
-    assert "state=success\n" in out.read_text()
-    assert '"state": "success"' in capsys.readouterr().out
+    out_text = out.read_text()
+    assert "state=success\n" in out_text
+    v = _printed_verdict(capsys.readouterr().out)
+    assert set(v) == {"state", "description", "reasons"}
+    assert v["description"]
+    assert v["description"] == out_text.split("description=", 1)[1].splitlines()[0]
+    assert v["state"] == "success"
+    assert v["reasons"] == []
 
 
 def test_cli_survivor_on_changed_file_fails(tmp_path, capsys):
     argv, out = _report(tmp_path, clean("a"),
                         [json.dumps(row("a", "engine/v2/a.py"))], ["engine/v2/a.py"])
     assert ps.main(argv) == 0
-    assert "state=failure\n" in out.read_text()
-    assert "::error::" in capsys.readouterr().out
+    out_text = out.read_text()
+    assert "state=failure\n" in out_text
+    cap_text = capsys.readouterr().out
+    v = _printed_verdict(cap_text)
+    assert set(v) == {"state", "description", "reasons"}
+    assert v["description"]
+    assert v["description"] == out_text.split("description=", 1)[1].splitlines()[0]
+    assert v["state"] == "failure"
+    assert v["reasons"] == ["1 surviving mutant(s) in engine/v2/a.py"]
+    assert "::error::1 surviving mutant(s) in engine/v2/a.py\n" in cap_text
 
 
 def test_cli_invalid_summary_is_neutral(tmp_path, capsys):
@@ -432,11 +459,16 @@ def test_cli_invalid_summary_is_neutral(tmp_path, capsys):
     out = tmp_path / "gh_output"
     assert ps.main(["--merged-dir", str(merged), "--changed-files", str(changed),
                     "--github-output", str(out)]) == 0
-    assert "state=neutral\n" in out.read_text()
     out_text = out.read_text()
+    assert "state=neutral\n" in out_text
     cap_text = capsys.readouterr().out
-    assert "merged report unavailable" in out_text or "merged report unavailable" in cap_text
-    assert "::warning::" in cap_text
+    v = _printed_verdict(cap_text)
+    assert set(v) == {"state", "description", "reasons"}
+    assert v["description"]
+    assert v["description"] == out_text.split("description=", 1)[1].splitlines()[0]
+    assert v["state"] == "neutral"
+    assert v["reasons"] == ["merged report unavailable"]
+    assert "::warning::merged report unavailable\n" in cap_text
 
 
 def test_cli_missing_summary_is_neutral(tmp_path, capsys):
