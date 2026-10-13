@@ -70,6 +70,7 @@ the ``load_*`` helpers below, and calls :func:`run_refresh` against a real
 """
 from __future__ import annotations
 
+import uuid
 from datetime import date as date_cls
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Mapping
@@ -402,9 +403,12 @@ def run_refresh(plan: Mapping, fetcher: Fetcher) -> dict:
     the required trading day's close plus the coverage buffer, so a same-day
     cached (typically pre-market) entry must not satisfy the request out of
     cache — the token forces a real network call and a second, append-only
-    Tier-1 entry. The monthly group keeps the plain cache-first call: its
-    resumability is arrival-based, so an already-answered same-day request
-    should be a cache hit, not a re-fetch.
+    Tier-1 entry. The token is unique per call — a wall-clock timestamp plus
+    a ``uuid4`` suffix, so two calls at the same instant (a frozen or coarse
+    clock) can never collide into one key and turn the second into a cache
+    hit. The monthly group keeps the plain cache-first call: its resumability
+    is arrival-based, so an already-answered same-day request should be a
+    cache hit, not a re-fetch.
     """
     fetched: dict[str, list[str]] = {"daily": [], "monthly": []}
     failed: list[dict] = []
@@ -412,7 +416,8 @@ def run_refresh(plan: Mapping, fetcher: Fetcher) -> dict:
     for group in ("daily", "monthly"):
         for ticker in plan.get(group, ()):
             token = (
-                datetime.now(timezone.utc).isoformat() if group == "daily" else None
+                f"{datetime.now(timezone.utc).isoformat()}-{uuid.uuid4().hex}"
+                if group == "daily" else None
             )
             outcome = fetch_one(fetcher, ticker, refetch_token=token)
             if outcome["ok"]:

@@ -26,7 +26,7 @@ import pandas as pd
 import pytest
 
 from engine.data import fetch as fetch_mod
-from engine.data.fetch import Fetcher, cache_key
+from engine.data.fetch import Fetcher, cache_key, iter_cached
 from engine.data.pulls import price_refresh as pr
 from engine.data.sources.base import Response
 from engine.data.throttle import SourceConfig, Throttle
@@ -93,6 +93,18 @@ def _freeze(monkeypatch, moment: datetime):
 
     monkeypatch.setattr(fetch_mod, "date", _Day)
     monkeypatch.setattr(fetch_mod, "datetime", _Now)
+
+
+def _freeze_refresh_clock(monkeypatch, moment: datetime):
+    """Pin ``price_refresh``'s OWN ``datetime.now`` — the clock
+    ``run_refresh``'s per-call refetch token reads — to ``moment``."""
+
+    class _Now(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment if tz is None else moment.astimezone(tz)
+
+    monkeypatch.setattr(pr, "datetime", _Now)
 
 
 def _write_raw_fetch(fetch_root, ticker, *, key, fetched_at, period="max"):
@@ -351,6 +363,45 @@ def test_run_refresh_refetches_past_a_cached_premarket_body(fetch_root, monkeypa
     times = pr.load_fetch_times(fetch_root=fetch_root)
     assert len(times["AAA"]) == 2, "append-only: the stale entry is kept beside the fresh"
     assert _plan(times)["skipped_already_fetched"] == ["AAA"]
+
+
+def test_two_runs_at_one_frozen_instant_each_spend_their_own_network_call(
+        fetch_root, monkeypatch):
+    """``run_refresh``'s token is generated from the clock, so two runs of the
+    same plan at the SAME frozen instant must not collapse onto one token:
+    each run spends exactly one extra real network call (pre-market fetch +
+    two runs = three adapter requests), the queue serves a different body
+    each time, and run 2's stored entry holds run 2's own fresh body — never
+    run 1's cached one."""
+    adapter = _QueueAdapter({"AAA": [b"Date,Close\n2026-09-11,100\n",
+                                     b"Date,Close\n2026-09-14,101\n",
+                                     b"Date,Close\n2026-09-14,102\n"]})
+    fetcher = _fetcher(fetch_root, adapter)
+
+    _freeze(monkeypatch, datetime(2026, 9, 14, 13, 30, tzinfo=timezone.utc))
+    assert pr.fetch_one(fetcher, "AAA")["ok"]
+    plan = _plan(pr.load_fetch_times(fetch_root=fetch_root))
+    assert plan["daily"] == ["AAA"], "both runs below plan the same refetch"
+
+    frozen = datetime(2026, 9, 14, 20, 45, tzinfo=timezone.utc)
+    _freeze(monkeypatch, frozen)
+    _freeze_refresh_clock(monkeypatch, frozen)
+    first = pr.run_refresh(plan, fetcher)
+    second = pr.run_refresh(plan, fetcher)
+
+    assert first["fetched"]["daily"] == ["AAA"]
+    assert second["fetched"]["daily"] == ["AAA"]
+    assert adapter.requests == ["AAA", "AAA", "AAA"], \
+        "one extra network call per run: a frozen clock must not turn run 2 " \
+        "into a cache hit on run 1's token"
+
+    entries = [e for e in iter_cached("yfinance", "history", root=fetch_root)
+               if e.params.get("ticker") == "AAA"]
+    bodies = [e.body() for e in entries]
+    assert len(entries) == 3, "append-only: pre-market, run 1 and run 2 each own an entry"
+    assert b"Date,Close\n2026-09-14,102\n" in bodies, \
+        "run 2 stored its own served body, not run 1's cached one"
+    assert len(set(bodies)) == 3, "all three scripted bodies are distinct entries"
 
 
 def test_cache_key_refetch_token_is_distinct_and_optional():
