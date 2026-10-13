@@ -388,25 +388,25 @@ supersedes the earlier result; mutmut's status is unchanged). The `report` job's
 (`summary.json`, `results.jsonl`) and the files the PR changed (plain
 `git diff --name-only --no-renames base...head`; attribution is by FILE, no diff parsing):
 
-- **failure (red)**: a surviving mutant in a file the PR changed, or the PR's tests fail
-  (a module run exit code 1..127). Only a complete, well-formed report can be red: integrity
-  is checked first (an unavailable summary, a missing planned module, unreadable rows or no
-  changed-file list is neutral before any attribution). Exception: a module whose run exit
-  code is 1..127 (the PR's tests failed) is red even if the summary is incomplete, since the
-  run itself measured the failure; every other incompleteness is neutral.
+- **failure (red)**: a surviving mutant in a file the PR changed, in a complete, clean report
+  (valid `expected_modules`; every planned module complete, no tool error, no failure reasons,
+  no gremlin ERROR results). Integrity is checked first (an unavailable summary, a missing
+  planned module, unreadable rows or no changed-file list is neutral before any attribution).
+  A nonzero module exit code is never red: a failing PR test suite is caught by the normal CI
+  `test` job, and real merged reports show nonzero exits come from the tool dying (issue #713).
 - **success (green)**: a clean measured run of every planned module (merge `complete`, no
   tool error or failure reasons, no skipped module, exit code 0, no gremlin ERROR results),
   readable rows, a non-empty changed-file list, and no survivor in a changed file.
 - **neutral (grey)**: everything else: nothing measured, infra or tool error (timeout, signal,
-  skipped, incomplete merge, null or missing exit code), and any missing, degraded or unexpected
+  skipped, incomplete merge, null, missing or nonzero exit code: "module X exited N; not a pass"), and any missing, degraded or unexpected
   input. The description gives a short reason and says "not a pass".
 
 User decision 2026-10-13: any malformed or partial report is neutral, even if some result
 rows are readable; partial evidence is not salvaged for this advisory check. A test failure
-that main also shows is still red (no baseline; the `Tests` job is the gate). Stated exceptions:
-a failing PR test run (module exit code 1..127) is red even if the summary is incomplete, and
-row-count reconciliation is out of scope (a truncated-but-valid row file can at worst miss a
-survivor: grey or green instead of red). The tool exits 0
+that main also shows is not attributed here (no baseline; the `Tests` job is the gate).
+Row-count reconciliation is out of scope (a truncated-but-valid row file can at worst miss a
+survivor: grey or green instead of red). Until #713 (mutation runs on main never complete
+cleanly) is fixed, `mutation/pr` will mostly read neutral. The tool exits 0
 for every classified or degraded input; only argument errors and an unwritable
 `--github-output` file exit nonzero (after classification, so the step fails loudly).
 `mutation/pr` is not a required check. The PR-closed placeholder guard and the empty-plan

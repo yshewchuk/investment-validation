@@ -41,29 +41,16 @@ def test_failure_cases():
     assert verdict["reasons"] == ["1 surviving mutant(s) in engine/v2/a.py"]
     assert verdict["state"] == "failure"
     for rc in (1, 127):
-        verdict = ps.classify({"modules": {"a": mod(run_exit_code=rc)},
-                               "expected_modules": ["a"]}, [],
-                              {"engine/v2/z.py"})
-        assert verdict["state"] == "failure", rc
-        assert verdict["description"] == "gremlins: PR-owned problem: tests fail in a", rc
-        assert verdict["reasons"] == ["tests fail in a"], rc
-    degraded = {"modules": {"a": mod(run_exit_code=1, complete=False, tool_error=True)},
-                "expected_modules": ["a"]}
-    verdict = ps.classify(degraded, None, None)
-    assert verdict["state"] == "neutral"
-    assert verdict["reasons"][0] == "result rows unreadable"
-    verdict = ps.classify(degraded, [], {"engine/v2/z.py"})
-    assert verdict["state"] == "failure"
-    assert verdict["description"] == "gremlins: PR-owned problem: tests fail in a"
-    two = ps.classify({"modules": {"b": mod(run_exit_code=1)},
-                       "expected_modules": ["b"]},
-                      [row("a", "engine/v2/a.py"), row("c", "engine/v2/c.py")],
-                      {"engine/v2/a.py", "engine/v2/c.py"})
-    assert two["state"] == "failure"
-    assert two["description"] == ("gremlins: PR-owned problem: 2 surviving mutant(s) in "
-                                  "engine/v2/a.py, engine/v2/c.py; tests fail in b")
-    assert two["reasons"] == ["2 surviving mutant(s) in engine/v2/a.py, engine/v2/c.py",
-                              "tests fail in b"]
+        summary = clean("a")
+        summary["modules"]["a"] = mod(run_exit_code=rc)
+        verdict = ps.classify(summary, [], {"engine/v2/z.py"})
+        assert verdict["state"] == "neutral", rc
+        assert verdict["description"] == (
+            f"gremlins: not a clean measured run (module a exited {rc}); not a pass"), rc
+        assert verdict["reasons"][0] == f"module a exited {rc}", rc
+        verdict = ps.classify(summary, [row("a", "engine/v2/a.py")],
+                              {"engine/v2/a.py"})
+        assert verdict["state"] == "neutral", rc
 
 
 def test_two_survivors_in_one_file_are_counted(tmp_path):
@@ -199,9 +186,10 @@ NEUTRAL_CASES = [
     (lambda: {"modules": {}, "expected_modules": []}, "no module measured"),
     (lambda: {"modules": {"b": mod()}, "expected_modules": ["a"], "complete": True,
               "tool_error": False, "failure_reasons": []}, "module a missing"),
-    (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code=-1)}}, "module a not clean"),
-    (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code=128)}}, "module a not clean"),
-    (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code=137)}}, "module a not clean"),
+    (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code=1)}}, "module a exited 1"),
+    (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code=-1)}}, "module a exited -1"),
+    (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code=128)}}, "module a exited 128"),
+    (lambda: {**clean("a"), "modules": {"a": mod(run_exit_code=137)}}, "module a exited 137"),
     (lambda: {**clean("a"), "modules": {"a": mod(skipped_reason="x")}}, "module a not clean"),
     (lambda: {**clean("a"), "modules": {"a": mod(counts_backend={"error": 2})}},
              "module a not clean"),
@@ -265,12 +253,10 @@ def test_description_fits_the_limit():
     verdict = ps.classify({"modules": modules, "expected_modules": sorted(modules),
                            "complete": True, "tool_error": True,
                            "failure_reasons": ["x"]}, [], {"engine/v2/z.py"})
-    assert verdict["state"] == "failure" and len(verdict["description"]) <= 140
-    assert verdict["description"] and verdict["description"].endswith("...")
-    assert verdict["description"] == (
-        "gremlins: PR-owned problem: tests fail in "
-        "module_0_with_a_long_name, module_10_with_a_long_name, "
-        "module_11_with_a_long_name, ...")
+    assert verdict["state"] == "neutral" and len(verdict["description"]) <= 140
+    assert verdict["description"]
+    assert verdict["description"].endswith("; not a pass")
+    assert verdict["description"].startswith("gremlins: not a clean measured run (")
     bad = {f"module_{i}_with_a_long_name": mod(skipped_reason="x") for i in range(30)}
     verdict = ps.classify({"modules": bad, "expected_modules": sorted(bad), "complete": True,
                            "tool_error": False, "failure_reasons": []}, [], {"engine/v2/z.py"})

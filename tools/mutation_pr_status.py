@@ -4,18 +4,19 @@ Inputs: ``DIR/summary.json`` + ``DIR/results.jsonl`` and ``--changed-files FILE`
 (one changed repo path per line). Output: JSON ``{"state", "description",
 "reasons"}``, ``::error::``/``::warning::`` annotations, and ``state=``/
 ``description=`` appended to ``--github-output`` (default env ``$GITHUB_OUTPUT``).
-``failure`` only for a PR-owned problem (a surviving mutant in a changed file or
-a failing PR test run), ``success`` only for a clean measured run of every
+``failure`` only for a PR-owned problem (a surviving mutant in a file the PR
+changed), ``success`` only for a clean measured run of every
 planned module (a module entry whose measured ``run_exit_code`` is missing or
-null is not clean), ``neutral`` otherwise; attribution by FILE, never by line. Exit
+null is not clean), ``neutral`` otherwise; attribution by FILE, never by line.
+A nonzero module exit code is neutral. Exit
 is 0 for classified/degraded input; nonzero only for argparse errors (exit 2)
 or an unwritable output file (the ``OSError`` propagates AFTER the verdict).
 Integrity first: an unavailable summary, a planned module missing (planned
 modules come from ``expected_modules``, which must be a non-empty list of
 strings), unreadable rows or no changed-file list is neutral before any
-attribution; only a complete, well-formed report can be failure or success.
-Exception: a module run exit code of 1..127 (the PR's tests failed) is red even
-if the summary is incomplete.
+attribution; only a complete, well-formed report can be failure or success,
+where failure is a surviving mutant in a file the PR changed, in a complete,
+clean report.
 """
 from __future__ import annotations
 
@@ -67,17 +68,6 @@ def classify(summary, rows, changed) -> dict:
         return {"state": "neutral", "description": _cut(desc), "reasons": reasons}
     hits = [r["file"] for r in rows
             if r["status"] == "survived" and r["file"] in changed]
-    failing = [str(n) for n, e in modules.items()
-               if isinstance(e, dict) and not e.get("skipped_reason")
-               and type(e.get("run_exit_code")) is int
-               and 1 <= e["run_exit_code"] <= 127]
-    # Exception: a module whose run exit code is 1..127 (the PR's tests failed) is red even if the summary is incomplete, since the run itself measured the failure; every other incompleteness is neutral.
-    if failing:
-        parts = [p for p in (
-            f"{len(hits)} " + _list("surviving mutant(s) in", set(hits)) if hits else None,
-            _list("tests fail in", failing)) if p]
-        desc = "gremlins: PR-owned problem: " + "; ".join(parts)
-        return {"state": "failure", "description": _cut(desc), "reasons": parts}
     # Survivor-red below needs a complete, clean report: complete=True, no tool error, every planned module clean.
     if summary.get("complete") is not True:
         reasons.append("run incomplete")
@@ -99,7 +89,11 @@ def classify(summary, rows, changed) -> dict:
                 or not (isinstance(fr, list) and fr == [])
                 or not isinstance(cb, dict)
                 or not (type(cb_err) is int and cb_err == 0)):
-            reasons.append(f"module {name} not clean")
+            if (isinstance(e, dict) and not e.get("skipped_reason")
+                    and type(rc) is int and rc != 0):
+                reasons.append(f"module {name} exited {rc}")
+            else:
+                reasons.append(f"module {name} not clean")
     if reasons:
         desc = f"gremlins: not a clean measured run ({reasons[0]}); not a pass"
         return {"state": "neutral", "description": _cut(desc), "reasons": reasons}

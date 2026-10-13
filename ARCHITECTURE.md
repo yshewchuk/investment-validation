@@ -268,10 +268,10 @@ evidence. See the models and data component contracts.
   - **Mutation PR status** (`tools/mutation_pr_status.py`): the gremlins `report` job
     classifies the merged mutation report by FILE (inputs: the merged `summary.json` and
     `results.jsonl`, and the PR's changed-file list from `git diff --name-only`). `state` is
-    `failure` for a surviving mutant in a file the PR changed or a failing PR test run,
+    `failure` for a surviving mutant in a file the PR changed (in a complete, clean report),
     `success` only for a clean measured run of every planned module, and `neutral` for
     everything else, including any malformed or partial report (integrity is checked before
-    any attribution; only a complete, well-formed report can be red or green; exception: a module run exit code 1..127, the PR's tests failing, is red even if the summary is incomplete). `report_status` posts the state
+    any attribution; only a complete, well-formed report can be red or green; a nonzero module exit code is neutral, never red). `report_status` posts the state
     as one check run named `mutation/pr` (never a commit status; not a required check). The rules
     and the decision table are in `tests/README.md` ("Mutation CI").
 
