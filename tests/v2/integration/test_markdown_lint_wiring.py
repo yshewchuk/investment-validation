@@ -32,6 +32,18 @@ def _pin() -> str:
     return re.search(r"markdownlint-cli2@[\d.]+", HOOK.read_text(encoding="utf-8")).group(0)
 
 
+# The hook's npx pin and the workflow's action must run the same CLI. Action v20 (this
+# commit) bundles markdownlint-cli2 0.18.1; bump the three together or this test fails.
+EXPECTED_CLI = "markdownlint-cli2@0.18.1"
+ACTION_SHA = "992badcdf24e3b8eb7e87ff9287fe931bcb00c6e"
+
+
+def test_hook_and_workflow_action_pin_the_same_cli():
+    assert _pin() == EXPECTED_CLI
+    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert f"DavidAnson/markdownlint-cli2-action@{ACTION_SHA}" in workflow
+
+
 def _git(repo, *args):
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
@@ -88,6 +100,37 @@ def test_hook_blocks_a_staged_violation_and_passes_a_clean_file(tmp_path, monkey
     _git(tmp_path, "add", "notes.py")
     proc = _run_hook(hook, tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@needs_node
+def test_hook_lints_only_staged_files(tmp_path, monkeypatch):
+    hook = _hook_repo(tmp_path, monkeypatch)
+    (tmp_path / "ok.md").write_text("# Heading\n\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "ok.md")
+    # Tracked-but-unstaged and untracked bad files must not be linted: a hook built on
+    # `git ls-files` instead of the staged diff would fail here.
+    (tmp_path / "tracked.md").write_text("# Heading\n\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "tracked.md")
+    _git(tmp_path, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "base")
+    (tmp_path / "tracked.md").write_text("intro\n# Heading\ntext\n", encoding="utf-8")
+    (tmp_path / "untracked.md").write_text("intro\n# Heading\ntext\n", encoding="utf-8")
+    (tmp_path / "ok.md").write_text("# Heading\n\ntext\n\nmore\n", encoding="utf-8")
+    _git(tmp_path, "add", "ok.md")
+    proc = _run_hook(hook, tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@needs_node
+def test_hook_lints_the_working_tree_copy_of_a_staged_file(tmp_path, monkeypatch):
+    # Documented exception (hook header): markdownlint cannot read a blob, so a clean
+    # staged copy with a bad working copy is reported.
+    hook = _hook_repo(tmp_path, monkeypatch)
+    (tmp_path / "w.md").write_text("# Heading\n\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "w.md")
+    (tmp_path / "w.md").write_text("intro\n# Heading\ntext\n", encoding="utf-8")
+    proc = _run_hook(hook, tmp_path)
+    assert proc.returncode != 0
+    assert "MD022" in proc.stdout + proc.stderr
 
 
 def test_hook_fails_closed_without_npx(tmp_path, monkeypatch):
