@@ -55,6 +55,12 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 checks/test_layout_budget.py --base-ref "$BASE_SHA"
 
+      - name: Set up Node
+        if: github.event_name == 'pull_request'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Check Markdown structure
         if: github.event_name == 'pull_request'
         env:

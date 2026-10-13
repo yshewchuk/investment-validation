@@ -290,6 +290,8 @@ EXPECTED_WORKFLOW = {
                 {"name": "Select PR test files", "if": PR, "env": BASE_SHA, "run": SELECT_RUN},
                 {"name": "Check test layout ratchet", "if": PR, "env": BASE_SHA,
                  "run": 'python3 checks/test_layout_budget.py --base-ref "$BASE_SHA"'},
+                {"name": "Set up Node", "if": PR, "uses": "actions/setup-node@v4",
+                 "with": {"node-version": "22"}},
                 {"name": "Check Markdown structure", "if": PR,
                  "env": {"BASE_REF": "origin/${{ github.base_ref }}"},
                  "run": 'python3 checks/markdown_structure.py --base-ref "$BASE_REF"'},
