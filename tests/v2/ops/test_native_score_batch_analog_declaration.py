@@ -12,6 +12,7 @@ from engine.v2.models.analog_artifact import (
     make_board_analog_pool_artifact,
 )
 from engine.v2.models.lineage import Lineage
+from engine.v2.ops import native_score_batch
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_score_batch import _with_release_artifacts
 from engine.v2.scoring.source_inputs import SourceBundle
@@ -175,3 +176,32 @@ def test_each_row_recipe_carries_its_own_snapshot_and_request_key(tmp_path):
     assert second["seed_snapshot"] == "snap-B"
     assert second["request_key"] == (
         "OTHR|STR-THRU|2026-01-10|2026-01-14||2026-01-17|0.5000||||c2026-01-10|")
+
+
+def test_runup_strategy_also_declares_the_matching_analog_pool(monkeypatch):
+    # The STR-RUNUP branch builds its model declarations with
+    # runup_model_declarations (stubbed to {} here: this test is about the
+    # analog declaration applied on top of it, not RUNUP's model state).
+    monkeypatch.setattr(native_score_batch, "runup_model_declarations",
+                        lambda *args, **kwargs: {})
+    pool = _Pool(board_analog_pool_key("STR-RUNUP", 0.5, "2026-01-10"))
+    binding = SimpleNamespace(
+        analog_artifacts={"STR-RUNUP": (pool,)}, payoff_artifacts={},
+        driver_residual_artifacts={}, model_release="rel", frozen_inference="inf")
+    key = BoardRequest(ticker="TEST", strategy="STR-RUNUP",
+                       event_date=pd.Timestamp("2026-01-15"), session="am")
+    drivers = tuple(
+        SimpleNamespace(output=name, identity_key=f"{name}:STR-RUNUP",
+                        identity=SimpleNamespace(role=name, model_id="m"))
+        for name in ("driver_prediction", "runup_move_prediction"))
+    result = _with_release_artifacts(
+        _bundle(), binding=binding, key=key, strategy="STR-RUNUP", drivers=drivers,
+        as_of="2026-01-10", snapshot_id="snap-1", calendar_row=_CALENDAR,
+        quote_max_age_sessions=None,
+        panel_row={"date": "2026-01-15", "mcap_log": math.log(5e9), "im": 0.06})
+    assert result.analog_artifact is pool
+    recipe = result.analog_artifact_recipe
+    assert recipe["cutoff"] == "2026-01-10"
+    assert recipe["seed_snapshot"] == "snap-1"
+    assert recipe["request_key"] == (
+        "TEST|STR-RUNUP|2026-01-10|2026-01-15||2026-01-16|0.5000||||c2026-01-10|")
