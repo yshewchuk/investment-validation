@@ -52,7 +52,10 @@ def expected_posted(modules, skipped, classified, report):
 
 
 def report_status_combos():
-    """Every input combination the exhaustive report_status tests iterate over."""
-    return itertools.product(["[]", '["a","b"]', ""], ["0", "2"],
+    """Every input combination the exhaustive report_status tests iterate over.
+
+    The skipped count includes ``""``: an empty skip-count output means zero
+    skipped modules (the oracle already treats ``""`` as ``0``)."""
+    return itertools.product(["[]", '["a","b"]', ""], ["0", "2", ""],
                              ["", "success", "failure", "neutral"],
                              ["success", "failure", "cancelled", "skipped"])

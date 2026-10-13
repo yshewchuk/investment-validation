@@ -1,11 +1,13 @@
 """Execute the gremlins workflow wiring instead of matching substrings.
 
-* The ``if:`` conditions of the status jobs are EVALUATED by a tiny GitHub-expression
-  evaluator (``==``, ``!=``, ``&&``, ``||``, parentheses, string literals, ``always()``,
-  ``format()``, dotted contexts) for every input combination and compared with an
-  independent oracle (the decision table in tests/README.md).
-* The ``run:`` scripts of the classify step and ``report_status`` are RUN under bash with
-  ``git`` / ``gh`` / ``python`` stubbed as functions that log their argv.
+* The ``if:`` conditions of the classify step and ``report_status`` are EVALUATED by a
+  tiny GitHub-expression evaluator (``==``, ``!=``, ``&&``, ``||``, parentheses, string
+  literals, ``always()``, ``format()``, dotted contexts) for the resolved-PR cases
+  (empty and non-empty ``pr_number``) and for every report/plan result.
+* The ``run:`` script of ``report_status`` is RUN under bash for EVERY combination of
+  the decision table (``mutation_status_support``); the classify step's ``run:`` script
+  is RUN under bash with ``git`` / ``gh`` / ``python`` stubbed as functions that log
+  their argv.
 
 # packages: foundation, ops
 """
@@ -147,6 +149,40 @@ def test_classify_step_and_status_jobs_run_only_for_a_resolved_pr():
         classify = next(s for s in JOBS["report"]["steps"] if s.get("id") == "classify")
         assert bool(evaluate(classify["if"], ctx)) == (pr != "")
         assert bool(evaluate(JOBS["report_status"]["if"], ctx)) == (pr != "")
+
+
+def test_classify_and_report_status_if_keep_always_so_they_run_after_failures():
+    classify = next(s for s in JOBS["report"]["steps"] if s.get("id") == "classify")
+    for cond in (classify["if"], JOBS["report_status"]["if"]):
+        assert re.match(r"^always\(\)\s*&&", cond)
+        for plan_result in ("success", "failure", "cancelled", "skipped"):
+            for report_result in ("success", "failure", "cancelled", "skipped"):
+                ctx = _ctx("7", '["a"]', "", "0", "success")
+                ctx["needs.plan.result"] = plan_result
+                ctx["needs.report.result"] = report_result
+                assert bool(evaluate(cond, ctx)) is True, (cond, plan_result, report_result)
+                ctx = _ctx("", '["a"]', "", "0", "success")
+                ctx["needs.plan.result"] = plan_result
+                ctx["needs.report.result"] = report_result
+                assert bool(evaluate(cond, ctx)) is False, (cond, plan_result, report_result)
+
+
+def test_empty_skip_output_means_zero_skipped():
+    assert decide(MODULES='["a"]', SKIPPED_COUNT="", CLASSIFIED_STATE="success",
+                  CLASSIFIED_DESC="ok", REPORT_RESULT="success") == ("success", "ok")
+    # a report-setup infra failure is never red
+    assert decide(MODULES='["a"]', SKIPPED_COUNT="", CLASSIFIED_STATE="",
+                  REPORT_RESULT="failure")[0] == "neutral"
+
+
+def test_report_job_checks_out_full_history_before_classifying():
+    steps = JOBS["report"]["steps"]
+    checkout = next(i for i, s in enumerate(steps)
+                    if str(s.get("uses", "")).startswith("actions/checkout"))
+    classify = next(i for i, s in enumerate(steps) if s.get("id") == "classify")
+    # the classify step diffs base...head, which needs full history
+    assert steps[checkout]["with"]["fetch-depth"] == 0
+    assert checkout < classify
 
 
 GH_STUB = r'''

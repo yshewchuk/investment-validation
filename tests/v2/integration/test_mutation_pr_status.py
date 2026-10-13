@@ -9,7 +9,12 @@ baseline, ``$GITHUB_OUTPUT``), so file reading and output writing are not stubbe
 from __future__ import annotations
 
 import copy
+import inspect
 import json
+import re
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -178,6 +183,19 @@ def test_each_infra_class_is_a_warning_never_red():
     assert "infra warning" in v["description"]
 
 
+def test_every_producer_raw_failure_code_is_infra():
+    codes = sorted(set(re.findall(r'reasons\.append\("(RAW_[A-Z_]+)"\)',
+                                  inspect.getsource(gremlin_results))))
+    # a new producer failure code must be added to this test on purpose
+    assert codes == ["RAW_INCONSISTENT", "RAW_INVALID"]
+    for code in codes:
+        for run_exit_code in (0, 1):
+            v = verdict(merged(a=mod(run_exit_code=run_exit_code, failure_reasons=[code])))
+            assert v["modules"]["a"]["class"] == "infra"
+            assert v["modules"]["a"]["reason"] == "invalid raw report"
+            assert v["state"] == "neutral"  # never failure, even with rc 1
+
+
 def test_mixed_result_is_red_and_description_fits_status_limit():
     modules = {f"module_{i}_with_a_long_name": mod(run_exit_code=1) for i in range(30)}
     v = verdict(merged(**modules, infra_one=mod(run_exit_code=-1)))
@@ -253,6 +271,28 @@ def test_main_unreadable_inputs_never_red(tmp_path, capsys):
     assert "baseline summary unreadable" in capsys.readouterr().out
 
 
+def test_unwritable_github_output_fails_loudly_after_classification(tmp_path):
+    d, diff = _write_report(tmp_path, merged(a=mod()), [])
+    args = ["--merged-dir", str(d), "--diff-file", str(diff)]
+    with pytest.raises(OSError):  # a directory cannot be opened for appending
+        ps.main([*args, "--github-output", str(tmp_path)])
+    with pytest.raises(OSError):  # the parent directory does not exist
+        ps.main([*args, "--github-output", str(tmp_path / "missing_dir" / "out")])
+    ROOT = Path(__file__).resolve().parents[3]
+    res = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "mutation_pr_status.py"), *args,
+         "--github-output", str(tmp_path)],
+        capture_output=True, text=True)
+    assert res.returncode != 0
+    # classification and the verdict JSON were printed BEFORE the write ...
+    assert '"state": "success"' in res.stdout
+    assert res.stderr  # ... and the error is not swallowed
+    # an argument error exits nonzero too
+    res = subprocess.run([sys.executable, str(ROOT / "tools" / "mutation_pr_status.py")],
+                         capture_output=True, text=True)
+    assert res.returncode == 2
+
+
 def test_missing_or_undecodable_diff_attributes_no_survivor(tmp_path, capsys):
     d = tmp_path / "m"
     d.mkdir()
@@ -286,6 +326,18 @@ def test_exit_band_boundaries():
     classes = {n: m["class"] for n, m in v["modules"].items()}
     assert classes == {"lo": "ok", "top": "pr_owned", "sig": "infra", "neg": "infra",
                        "timeout": "infra"}
+
+
+def test_signal_boundary_exit_codes():
+    cases = [
+        (127, "pr_owned", "module run failed (exit 127)"),
+        (128, "infra", "killed by signal (exit 128)"),
+        (-9, "infra", "killed by signal (exit -9)"),
+        (-1, "infra", "timeout or cancelled"),
+    ]
+    for rc, cls, reason in cases:
+        v = verdict(merged(a=mod(run_exit_code=rc)))
+        assert v["modules"]["a"] == {"class": cls, "reason": reason}, rc
 
 
 def test_changed_line_survivor_wins_over_infra_and_baseline_excuses():
@@ -562,7 +614,7 @@ def test_unparsable_summary_or_baseline_json_degrades(tmp_path, capsys):
 
 
 def _run_main(tmp_path, name, m, rows=(), baseline=None, diff=True):
-    """Run main() over real files; return (annotation lines, verdict JSON, github output)."""
+    """Run main() over real files; return (merged report dir, github output path)."""
     root = tmp_path / name
     root.mkdir()
     d, dfile = _write_report(root, m, list(rows))
@@ -693,6 +745,16 @@ def test_neutral_state_only_when_nothing_was_measured():
     assert verdict(merged(a=mod(run_exit_code=-1), b=mod()))["state"] == "neutral"
     assert verdict(merged(a=mod(run_exit_code=-1), b=mod(run_exit_code=1)))["state"] == "failure"
     assert verdict({"modules": {}, "expected_modules": []})["state"] == "success"
+
+
+def test_empty_plan_with_attribution_problem_is_not_neutral():
+    # Nothing was planned, so there is nothing to attribute: the workflow never
+    # classifies an empty plan (report_status posts success by design).
+    v = ps.classify({"modules": {}, "expected_modules": [], "complete": True,
+                     "tool_error": False, "failure_reasons": []},
+                    [], {}, None,
+                    ["PR diff unavailable -- survivors not attributed; not a pass"])
+    assert v["state"] == "success"
 
 
 def _merged_with(**extra):
@@ -908,6 +970,12 @@ def test_every_degraded_shape_is_never_success(tmp_path):
         s = copy.deepcopy(base)
         s["expected_modules"] = bad
         run(f"summary: expected_modules={bad!r}", "neutral", s)
+    # A report that measured nothing and planned nothing is malformed.
+    for expected in (None, []):
+        s = copy.deepcopy(base)
+        s["modules"] = {}
+        s["expected_modules"] = expected
+        run(f"summary: modules={{}}, expected_modules={expected!r}", "neutral", s)
     for whole in ([], "x", None, 5, {}):
         run(f"summary: whole={whole!r}", "neutral", whole)
     # Module entry level (single module a, so a malformed entry is the only infra).
