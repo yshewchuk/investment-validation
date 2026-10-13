@@ -153,6 +153,32 @@ load-bearing entrypoints:
 
 ## Inputs
 
+### Native nightly DYN-SV boundary
+
+`source_inputs.SUPPORTED_STRATEGIES` contains the seven `DYNAMIC_MENU`
+structures, but not DYN-SV, which has no independent forecast-output recipe.
+`SourceBundle.chooser_recipe` names a frozen champion, optional producers and
+state keys; `chooser_fold_pools`, `chooser_analog_pool` and
+`chooser_admissible_table` carry their declared inputs. `chooser_inputs`
+builds that block only for menu candidates; state without a recipe or a recipe
+for another strategy raises `ValueError`. The chooser k-NN pool is distinct
+from the board bucket-analog pool.
+
+`native_chooser`/`native_chooser_features` derive candidate features after
+native pricing and simulation. Invalid declared frozen state flags
+`MODEL_NOT_READY`; missing/nonfinite champion inputs flag the advisory
+`CHOOSER_MISSING_FEATURES` and withhold `chooser_score`.
+Feature math never fits; frozen executors own model inference. `release_bindings` does
+not expose the chooser pool/depth table, and nightly declares no chooser block.
+
+`application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores
+its members and resolves DYN-SV over finite simulation-bearing candidates:
+available chooser scores rank first, otherwise simulation is the ranking key.
+It retains the winner's economics and gate verdict; ties use stable menu
+order. No eligible candidate yields a refused record with
+`NO_CHOOSER_CANDIDATE`. `score_batch` only preserves request order and never
+calls this menu resolver, so these interfaces do not enable nightly DYN-SV.
+
 **Forward forecast assembly (design; not implemented).** STR-THRU forward
 inputs use native market/history features from the pinned snapshot (cutover
 6c), plus the verified release. The full-refit `size:*` champion supplies

@@ -38,11 +38,15 @@ def reserve(conn, claim, account, calls, *, clock):
                      "VALUES (?,?,?,?)", (account, claim.attempt_id, claim.fence, calls))
 
 
-def before_request(conn, claim, account, *, clock, minimum_interval_seconds=0):
+def before_request(conn, claim, account, *, clock, minimum_interval_seconds=0,
+                   max_calls_per_job=None):
     if type(minimum_interval_seconds) is not int or minimum_interval_seconds < 0:
         raise fail("INVALID_REQUEST", "invalid provider pacing interval")
+    if max_calls_per_job is not None and (
+            type(max_calls_per_job) is not int or max_calls_per_job <= 0):
+        raise fail("INVALID_REQUEST", "invalid provider job call limit")
     with transaction(conn):
-        verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
+        _, attempt = verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
         row = conn.execute("SELECT r.*,a.blocked_code,a.next_eligible_at FROM provider_reservations r "
                            "JOIN provider_accounts a USING(account) WHERE account = ? "
                            "AND attempt_id = ? AND released_at IS NULL",
@@ -51,6 +55,14 @@ def before_request(conn, claim, account, *, clock, minimum_interval_seconds=0):
             raise fail("CREDENTIAL_INVALID", "provider lease is unavailable")
         if row["next_eligible_at"] and row["next_eligible_at"] > format_timestamp(clock.now()):
             raise fail("RATE_LIMITED", "account backoff has not elapsed")
+        if max_calls_per_job is not None:
+            # Released reservations still carry spent calls from earlier attempts.
+            used = conn.execute(
+                "SELECT COALESCE(SUM(r.used_calls),0) FROM provider_reservations r "
+                "JOIN attempts a USING(attempt_id) WHERE r.account = ? AND a.job_id = ?",
+                (account, attempt["job_id"])).fetchone()[0]
+            if used >= max_calls_per_job:
+                raise fail("RESOURCE_LIMIT_EXCEEDED", "provider job call limit exhausted")
         if row["used_calls"] >= row["reserved_calls"]:
             raise fail("RESOURCE_UNAVAILABLE", "provider retry budget exhausted")
         conn.execute("UPDATE provider_reservations SET used_calls = used_calls + 1 "

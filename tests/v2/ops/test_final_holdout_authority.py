@@ -309,18 +309,23 @@ def test_spend_is_append_only_and_confirmation_overrides_are_not_supported(conte
 
 def test_migration_is_atomic_and_does_not_rewrite_prior_versions(tmp_path):
     clock = SimpleNamespace(now=lambda: datetime(2026, 10, 10, tzinfo=timezone.utc))
+    # Exercise the state-events migration even after unrelated versions are appended.
+    migrations = tuple(step for step in schema.MIGRATIONS if step.version <= 11)
     conn = connect(tmp_path / "old.sqlite")
     try:
-        migrate(conn, schema.OWNER, schema.MIGRATIONS[:-1], clock=clock)
+        migrate(conn, schema.OWNER, migrations[:-1], clock=clock)
         prior = applied_versions(conn, schema.OWNER)
+        faults = []
         def crash(point):
+            faults.append(point)
             raise RuntimeError("synthetic migration interruption")
-        with pytest.raises(RuntimeError):
-            migrate(conn, schema.OWNER, schema.MIGRATIONS, clock=clock, fault=crash)
+        with pytest.raises(RuntimeError, match="^synthetic migration interruption$"):
+            migrate(conn, schema.OWNER, migrations, clock=clock, fault=crash)
+        assert faults == ["ops:11:0"]
         assert applied_versions(conn, schema.OWNER) == prior
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='final_holdout_state_events'").fetchone()
-        assert migrate(conn, schema.OWNER, schema.MIGRATIONS, clock=clock) == [11]
-        assert migrate(conn, schema.OWNER, schema.MIGRATIONS, clock=clock) == []
+        assert migrate(conn, schema.OWNER, migrations, clock=clock) == [11]
+        assert migrate(conn, schema.OWNER, migrations, clock=clock) == []
     finally:
         conn.close()
 

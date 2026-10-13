@@ -12,6 +12,7 @@ from engine.v2.ops.calendar_moves_jobs import (
 from engine.v2.ops.core.snapshot_contracts import SNAPSHOT_BINDINGS
 from engine.v2.ops.errors import fail
 from engine.v2.ops.incremental_data import refresh_job_kind
+from engine.v2.ops.stores.massive.acquisition import history_kind as massive_history_kind
 from engine.v2.ops.stores.massive.acquisition import job_kind as massive_acquisition_kind
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
 from engine.v2.ops.training import promote_job_kind, rollback_job_kind, training_job_kind
@@ -428,7 +429,7 @@ def _core_kinds():
 
 
 def registry():
-    kinds = [*_core_kinds(), _native_gate_kind(), massive_acquisition_kind()]
+    kinds = [*_core_kinds(), _native_gate_kind(), massive_acquisition_kind(), massive_history_kind()]
     # P2-5/Task5: the export/publication/backup outbox effects, wired into the
     # nightly job DAG (guide §9.4 item 3). Each worker is trivial (it emits a
     # small receipt); the supervisor's coordinator effect
