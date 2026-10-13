@@ -68,6 +68,21 @@ def _apply(stored, rows, *, retrieved_at, source_kind="legacy_px_csv", source_ha
     return pd.concat([stored, new_rows], ignore_index=True), new_rows
 
 
+def _tombstone(stored, date, *, retrieved_at, source_kind="legacy_px_csv", source_hash="h",
+               capture_id="c"):
+    """Append a hand-made ``deleted=True`` version row.
+
+    ``diff_retrieval`` refuses an omitted live date instead of tombstoning it
+    (issue #719), so a test that needs a tombstone in the stored frame -- the
+    shape older captures actually wrote, which the read side still honours --
+    builds one directly."""
+    row = {"date": date, "close_adj": float("nan"), "close_raw": float("nan"),
+           "high_raw": float("nan"), "retrieved_at": retrieved_at, "deleted": True,
+           "source_kind": source_kind, "source_hash": source_hash, "capture_id": capture_id}
+    return pd.concat([stored, pd.DataFrame([row], columns=_STORED_COLUMNS)],
+                     ignore_index=True)
+
+
 def test_diff_retrieval_first_capture_adds_every_row():
     stored, new_rows = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1),
                                                 "2024-01-02": (2.0, 2.0, 2.1)},
@@ -98,13 +113,73 @@ def test_diff_retrieval_nan_equal_to_nan_is_unchanged():
     assert new_rows.empty
 
 
-def test_diff_retrieval_missing_date_tombstones():
+def test_diff_retrieval_omitted_date_refuses_the_whole_retrieval():
+    """Issue #719: a retrieval that drops a live stored date used to
+    tombstone it; now the WHOLE response is refused ``CONTRACT_MISMATCH``,
+    with the offending date named in ``details``."""
     stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1)},
                        retrieved_at="2024-01-05T00:00:00Z")
-    _, new_rows = _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1)}, retrieved_at="2024-01-06T00:00:00Z")
-    assert len(new_rows) == 1
-    assert new_rows.iloc[0]["date"] == "2024-01-02"
-    assert bool(new_rows.iloc[0]["deleted"]) is True
+    with pytest.raises(DataError) as exc:
+        _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1)}, retrieved_at="2024-01-06T00:00:00Z")
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"missing_count": 1, "missing_dates": ["2024-01-02"]}
+
+
+def test_diff_retrieval_mid_history_gap_refuses():
+    stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1),
+                                         "2024-01-03": (3.0, 3.0, 3.1)},
+                       retrieved_at="2024-01-05T00:00:00Z")
+    with pytest.raises(DataError) as exc:
+        _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-03": (3.0, 3.0, 3.1)},
+               retrieved_at="2024-01-06T00:00:00Z")
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"missing_count": 1, "missing_dates": ["2024-01-02"]}
+
+
+def test_diff_retrieval_empty_retrieval_against_live_history_refuses():
+    stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1)},
+                       retrieved_at="2024-01-05T00:00:00Z")
+    with pytest.raises(DataError) as exc:
+        _apply(stored, {}, retrieved_at="2024-01-06T00:00:00Z")
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"missing_count": 2,
+                                         "missing_dates": ["2024-01-01", "2024-01-02"]}
+
+
+def test_diff_retrieval_omitting_more_than_20_dates_reports_count_first_and_last():
+    dates = [f"2024-01-{day:02d}" for day in range(1, 26)]  # 25 live dates
+    stored, _ = _apply(_empty_stored(), {d: (float(i), float(i), float(i))
+                                         for i, d in enumerate(dates, start=1)},
+                       retrieved_at="2024-02-01T00:00:00Z")
+    with pytest.raises(DataError) as exc:
+        _apply(stored, {dates[0]: (1.0, 1.0, 1.0)}, retrieved_at="2024-02-02T00:00:00Z")
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"missing_count": 24,
+                                         "first_missing_date": "2024-01-02",
+                                         "last_missing_date": "2024-01-25"}
+
+
+def test_diff_retrieval_full_history_with_a_new_later_date_appends_the_new_bar():
+    stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1)},
+                       retrieved_at="2024-01-05T00:00:00Z")
+    _, new_rows = _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1),
+                                  "2024-01-03": (3.0, 3.0, 3.1)},
+                         retrieved_at="2024-01-06T00:00:00Z")
+    assert list(new_rows["date"]) == ["2024-01-03"]
+    assert not new_rows["deleted"].any()
+
+
+def test_diff_retrieval_revives_a_previously_deleted_row():
+    """Tombstones written before issue #719 still exist in stored fragments;
+    a later retrieval carrying that date again must revive it (never re-refuse
+    on a date whose latest version is ``deleted=True``)."""
+    stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1)},
+                       retrieved_at="2024-01-05T00:00:00Z")
+    stored = _tombstone(stored, "2024-01-02", retrieved_at="2024-01-06T00:00:00Z")
+    _, new_rows = _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1)},
+                         retrieved_at="2024-01-07T00:00:00Z")
+    assert list(new_rows["date"]) == ["2024-01-02"]
+    assert not new_rows["deleted"].any()
 
 
 def test_diff_retrieval_reversion_to_earlier_value_diffs_against_latest_state():
@@ -194,8 +269,9 @@ def test_as_of_view_picks_version_at_cutoff_and_drops_tombstones():
     # 2024-01-02 unchanged and still present -- stays live.
     stored, _ = _apply(stored, {"2024-01-01": (9.0, None, None), "2024-01-02": (2.0, None, None)},
                        retrieved_at="2024-01-10T00:00:00Z")
-    # 2024-01-02 dropped from this retrieval -> tombstoned here.
-    stored, _ = _apply(stored, {"2024-01-01": (9.0, None, None)}, retrieved_at="2024-01-20T00:00:00Z")
+    # 2024-01-02 dropped -- a hand-made tombstone, since ``diff_retrieval``
+    # now refuses an omission instead of writing one (issue #719).
+    stored = _tombstone(stored, "2024-01-02", retrieved_at="2024-01-20T00:00:00Z")
 
     before_change = price_history.as_of_view(stored, "2024-01-07T00:00:00Z")
     assert dict(zip(before_change["date"], before_change["close_adj"])) == {
@@ -240,12 +316,11 @@ def test_as_of_view_never_filters_by_source_kind_across_restatement_and_tombston
                                 "2024-01-03": (3.0, None, None), "2024-01-04": (4.0, None, None)},
                        retrieved_at="2024-02-01T00:00:00Z", source_kind="tier1_fetch",
                        source_hash="h2", capture_id="c2")
-    # T3 (tier1): drops 2024-01-04 -> tombstones it; the earliest date stays
-    # present so this is not a partial-window refusal.
-    stored, _ = _apply(stored, {"2024-01-01": (1.0, None, None), "2024-01-02": (20.0, None, None),
-                                "2024-01-03": (3.0, None, None)},
-                       retrieved_at="2024-03-01T00:00:00Z", source_kind="tier1_fetch",
-                       source_hash="h3", capture_id="c3")
+    # T3 (tier1): 2024-01-04 dropped -- a hand-made tombstone (a live-date
+    # omission is refused by ``diff_retrieval`` since issue #719); the
+    # earliest date stays present so the view is unchanged for it.
+    stored = _tombstone(stored, "2024-01-04", retrieved_at="2024-03-01T00:00:00Z",
+                        source_kind="tier1_fetch", source_hash="h3", capture_id="c3")
 
     before_t1 = price_history.as_of_view(stored, "2024-01-01T00:00:00Z")
     assert dict(zip(before_t1["date"], before_t1["close_adj"])) == {
@@ -275,8 +350,12 @@ def _simulate_full_history_captures(retrievals):
 _DATES = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
 
 
-def _random_full_history(rng):
-    dates = [_DATES[0]] + [d for d in _DATES[1:] if rng.random() < 0.7]
+def _random_full_history(rng, seen=()):
+    """A random subset of ``_DATES`` that always starts at ``_DATES[0]`` and
+    never drops a date already seen by an earlier capture -- ``diff_retrieval``
+    refuses a live-date omission (issue #719), so each later retrieval is a
+    superset of the previous ones."""
+    dates = [_DATES[0]] + [d for d in _DATES[1:] if d in set(seen) or rng.random() < 0.7]
     return {d: round(rng.uniform(1, 100), 4) for d in dates}
 
 
@@ -290,7 +369,12 @@ def test_as_of_view_property_full_history_equals_own_retrieval_and_is_stable():
         n = rng.randint(1, 4)
         stamps = sorted({rng.randint(1, 50) for _ in range(n)})
         retrieved_ats = [f"2024-06-{s:02d}T00:00:00Z" for s in stamps]
-        retrievals = [(ts, _random_full_history(rng)) for ts in retrieved_ats]
+        seen: set = set()
+        retrievals = []
+        for ts in retrieved_ats:
+            values = _random_full_history(rng, seen)
+            retrievals.append((ts, values))
+            seen |= set(values)
         stored = _simulate_full_history_captures(retrievals)
 
         for ts, values in retrievals:
@@ -300,7 +384,7 @@ def test_as_of_view_property_full_history_equals_own_retrieval_and_is_stable():
 
         later_stamp = max(stamps) + rng.randint(1, 10)
         later_ts = f"2024-06-{later_stamp:02d}T00:00:00Z"
-        later_values = _random_full_history(rng)
+        later_values = _random_full_history(rng, seen)
         stored_after, _ = _apply(stored, {d: (v, v, v) for d, v in later_values.items()},
                                  retrieved_at=later_ts, source_hash="later", capture_id="later")
         for ts, _values in retrievals:
@@ -557,7 +641,9 @@ def test_get_price_series_uses_latest_retrieval_when_ceiling_precedes_all(tmp_pa
 def test_get_price_series_drops_a_tombstoned_date(tmp_path):
     stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.0), "2024-01-02": (2.0, 2.0, 2.0)},
                        retrieved_at="2024-01-03T00:00:00Z")
-    stored, _ = _apply(stored, {"2024-01-01": (1.0, 1.0, 1.0)}, retrieved_at="2024-01-10T00:00:00Z")
+    # 2024-01-02 dropped -- hand-made tombstone (``diff_retrieval`` refuses an
+    # omission instead of writing one since issue #719).
+    stored = _tombstone(stored, "2024-01-02", retrieved_at="2024-01-10T00:00:00Z")
     conn, clock, store = catalog_and_store(tmp_path)
     snapshot = _commit_price_history_snapshot(conn, clock, store, {"AAPL": stored})
     repository = Repository(conn, store)

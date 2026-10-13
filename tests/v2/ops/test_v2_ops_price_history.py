@@ -455,41 +455,55 @@ def test_capture_same_value_at_a_later_retrieved_at_gives_no_change(tmp_path):
     assert len(stored) == 1  # still just the original 09-10 row
 
 
-def test_capture_tombstone_then_reappearance_via_a_byte_identical_reversion(tmp_path):
-    """A date drops out of a retrieval (tombstoned), then reappears in a
-    LATER retrieval whose bytes are byte-identical to the ORIGINAL (pre-
-    tombstone) retrieval. Exercises the same class of bug: the reappearance
-    retrieval's source_hash matches an old, non-immediately-prior successful
-    attempt, so it must not be discarded as a duplicate -- the tombstoned row
-    must be revived under the reappearance's own retrieved_at.
+def test_capture_refuses_a_ticker_whose_retrieval_omits_stored_dates_and_keeps_capturing(tmp_path):
+    """Issue #719: a retrieval that omits dates live in the ticker's stored
+    history refuses that ticker only -- ``refused_partial``, nothing written
+    for it -- while every other ticker in the same run still captures. The
+    capture report names the refusal under ``failures``/``failed_tickers``.
     """
     conn, clock, store, _base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
 
-    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 100.0})
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 101.0})
+    os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    px_path = _write_px(source_root, "MSFT", {"2024-01-01": 200.0})
     os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
     first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
-    assert first["by_outcome"] == {"added": 1}
-    assert first["rows_added"] == 2
+    assert first["by_outcome"] == {"added": 2}
+    assert first["failures"] == []
 
-    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})  # 01-02 dropped
+    # AAPL comes back TRUNCATED at the end (2024-01-02 dropped); MSFT grows a
+    # brand-new later bar. Both rewritten at a later mtime -> later retrieved_at.
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})
+    os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
+    px_path = _write_px(source_root, "MSFT", {"2024-01-01": 200.0, "2024-01-02": 201.0})
     os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
     second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
-    assert second["by_outcome"] == {"added": 1}
-    assert second["rows_tombstoned"] == 1
 
-    # Byte-identical to the FIRST (pre-tombstone) retrieval.
-    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 100.0})
-    os.utime(px_path, (_epoch("2024-09-12T00:00:00+00:00"),) * 2)
-    third = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
-    assert third["by_outcome"] == {"added": 1}
-    assert third["rows_added"] == 1
-    assert third["rows_tombstoned"] == 0
+    assert second["by_outcome"] == {"added": 1, "error": 1}
+    assert second["failed_tickers"] == 1
+    assert second["failures"] == [{"ticker": "AAPL", "error": "CONTRACT_MISMATCH",
+                                   "details": {"missing_count": 1,
+                                               "missing_dates": ["2024-01-02"]}}]
 
-    stored = _scan_price_history(conn, store, third["result_snapshot_id"])
-    view = price_history.as_of_view(stored, "2024-12-01T00:00:00+00:00")
-    assert view.set_index("date")["close_adj"].to_dict() == {
-        "2024-01-01": 100.0, "2024-01-02": 100.0}
+    # The refused ticker's stored history is untouched; MSFT's new bar landed.
+    stored_aapl = _scan_price_history(conn, store, second["result_snapshot_id"])
+    assert sorted(stored_aapl["date"]) == ["2024-01-01", "2024-01-02"]
+    assert sorted(stored_aapl["close_adj"]) == [100.0, 101.0]
+    assert not stored_aapl["deleted"].astype(bool).any()
+    stored_msft = _scan_price_history(conn, store, second["result_snapshot_id"], ticker="MSFT")
+    assert sorted(stored_msft["date"]) == ["2024-01-01", "2024-01-02"]
+    assert sorted(stored_msft["close_adj"]) == [200.0, 201.0]
+
+    # The refused attempt is on the capture log as refused_partial, so a later
+    # run re-reads the (still-truncated) source and refuses again, never
+    # silently as a duplicate.
+    retried = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert retried["by_outcome"]["error"] == 1
+    assert "added" not in retried["by_outcome"]
+    assert [(f["ticker"], f["error"]) for f in retried["failures"]] == \
+        [("AAPL", "CONTRACT_MISMATCH")]
+    assert retried["failed_tickers"] == 1
 
 
 # --------------------------------------------------------------------------

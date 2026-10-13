@@ -206,7 +206,7 @@ def test_supervisor_report_drops_long_keys_and_non_finite_floats(capsys):
     assert "Infinity" not in line
 
 
-def test_capture_with_all_dates_tombstoned_required_ticker_refuses(tmp_path):
+def test_capture_empty_retrieval_for_required_ticker_is_refused_and_spy_stays_usable(tmp_path):
     conn, clock, store, _base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
     _write_sources(source_root, with_spy=True)
@@ -216,17 +216,19 @@ def test_capture_with_all_dates_tombstoned_required_ticker_refuses(tmp_path):
             required_tickers=("SPY",))
 
     # A header-only px file parses as a valid, empty retrieval; a later mtime
-    # makes it a legitimate later retrieval whose diff tombstones every prior
-    # live SPY row.
+    # makes it a legitimate later retrieval, but for a required ticker an
+    # empty retrieval (which would drop every stored date) refuses
+    # CONTRACT_MISMATCH instead of tombstoning, so SPY stays live.
     second_root = tmp_path / "legacy_tombstoned"
     tomb_path = _px_dir(second_root) / "px_SPY.csv"
     tomb_path.write_bytes(b"date,close_adj,close_raw,high_raw\n")
     os.utime(tomb_path, (_epoch("2024-06-01T00:00:00+00:00"),) * 2)
-    with pytest.raises(OpsError) as exc:
-        capture(conn, store, second_root, root=tmp_path, scope="shadow", clock=clock,
-                required_tickers=("SPY",))
-    assert exc.value.problem.code == "SOURCE_NOT_FOUND"
-    assert exc.value.problem.details == {"tickers": ["SPY"]}
+    report = capture(conn, store, second_root, root=tmp_path, scope="shadow", clock=clock,
+                     required_tickers=("SPY",))
+    assert report["by_outcome"] == {"error": 1}
+    assert [(f["ticker"], f["error"]) for f in report["failures"]] == \
+        [("SPY", "CONTRACT_MISMATCH")]
+    assert report["failed_tickers"] == 1
 
 
 class _NonProblemError(Exception):

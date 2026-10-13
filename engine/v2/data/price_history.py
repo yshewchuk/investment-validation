@@ -9,8 +9,11 @@ lives in ``tests/v2/data/test_price_downloads.py``).
 ``price_history`` is a normalized table of per-``(ticker, date)`` price
 versions: ``ticker, date, close_adj, close_raw, high_raw, retrieved_at,
 deleted, source_kind, source_hash, capture_id``. A capture never rewrites a
-row; it appends a new version only for a date that is new, that changed
-value, or that dropped out of the retrieval (a tombstone, ``deleted=True``).
+row; it appends a new version only for a date that is new or that changed
+value. A retrieval omitting any currently live stored date refuses the whole
+response instead (issue #719), so ``diff_retrieval`` never emits a tombstone
+(``deleted=True``); tombstoned rows still exist from earlier captures and are
+still honoured by the read side.
 Everything in this module is pure pandas-in, pandas/dataclass-out -- no
 filesystem, catalog or object-store I/O. ``engine.v2.ops.price_history_store``
 is where captures actually get written, read back and materialized.
@@ -19,7 +22,8 @@ Two operations:
 
 * :func:`diff_retrieval` -- one capture's delta against a ticker's current
   latest state (design doc §2's capture rules, including the
-  full-history-only / no-partial-window refusal).
+  full-history-only / no-partial-window refusal, extended by issue #719 to
+  any omitted live date).
 * :func:`as_of_view` -- the design doc §3 reconstruction for one ticker,
   decided once for the whole ticker, never per row/date. A string cutoff
   preserves retrieval-time replay; ``latest_snapshot=True`` selects the
@@ -150,47 +154,62 @@ def latest_state(stored_rows: pd.DataFrame) -> pd.DataFrame:
 def diff_retrieval(stored_rows: pd.DataFrame, retrieval: pd.DataFrame, *, retrieved_at: str,
                    source_kind: str, source_hash: str, capture_id: str) -> pd.DataFrame:
     """The new version rows one capture contributes, or an empty frame for a
-    no-change retrieval. Never mutates or returns any existing row.
+    no-change retrieval. Never mutates or returns any existing row, and never
+    emits a tombstone (``deleted=True``): it refuses instead (issue #719).
+    A previously deleted row is still revived by a later retrieval that
+    carries its date again (the ``prior.deleted`` branch below), so legacy
+    tombstoned rows stay fixable.
 
     ``stored_rows``: every version row known for this ticker so far (any
     order; only ``latest_state`` of it is used). ``retrieval``: this
     capture's freshly parsed full history (columns ``date, close_adj,
     close_raw, high_raw``; sorted or not).
 
-    Refuses ``CONTRACT_MISMATCH`` if ``retrieval`` starts strictly later than
-    the ticker's currently-live (non-tombstoned) stored history -- design doc
-    §2's "full history only" rule. A genuine period=max re-download only ever
-    holds or extends its start date; a shorter window would tombstone real
-    history as "missing from the retrieval" and silently splice two
+    Refuses ``CONTRACT_MISMATCH`` -- the WHOLE response for this ticker is
+    refused, nothing written -- when ``retrieval`` starts strictly later
+    than the ticker's currently-live (non-tombstoned) stored history
+    (design doc §2's "full history only" rule), or when it omits ANY
+    currently live stored date (issue #719: a truncated end, a mid-history
+    gap, or an empty retrieval against a non-empty live history). An
+    omission is reported in ``details`` as ``missing_count`` plus either
+    ``missing_dates`` (a sorted list, when there are at most 20) or
+    ``first_missing_date``/``last_missing_date`` (past 20). A genuine
+    period=max re-download only ever holds or extends its start date; a
+    shorter window would silently drop real history and splice two
     adjustment bases together.
     """
     current = latest_state(stored_rows)
     live = current[~current["deleted"].astype(bool)] if len(current) else current
-    if len(live) and len(retrieval):
-        stored_min = live["date"].min()
-        retrieval_min = retrieval["date"].min()
-        if retrieval_min > stored_min:
+    retrieval_dates = set(retrieval["date"]) if len(retrieval) else set()
+    if len(live):
+        if retrieval_dates and min(retrieval["date"]) > live["date"].min():
             raise errors.fail(
                 "CONTRACT_MISMATCH",
                 "retrieval starts later than the ticker's stored history; a partial "
                 "window cannot be captured without stitching adjustment bases",
-                details={"stored_min_date": str(stored_min), "retrieval_min_date": str(retrieval_min)})
+                details={"stored_min_date": str(live["date"].min()),
+                         "retrieval_min_date": str(min(retrieval["date"]))})
+        missing = sorted({str(date_) for date_ in live["date"] if date_ not in retrieval_dates})
+        if missing:
+            details = {"missing_count": len(missing)}
+            if len(missing) <= 20:
+                details["missing_dates"] = missing
+            else:
+                details["first_missing_date"] = missing[0]
+                details["last_missing_date"] = missing[-1]
+            raise errors.fail(
+                "CONTRACT_MISMATCH",
+                "retrieval omits dates that are live in the ticker's stored history; "
+                "the whole response is refused",
+                details=details)
     by_date = {row.date: row for row in current.itertuples(index=False)}
-    seen = set()
     new_rows = []
     for row in retrieval.itertuples(index=False):
-        seen.add(row.date)
         prior = by_date.get(row.date)
         if prior is None or prior.deleted or not _values_equal(prior, row):
             new_rows.append({"date": row.date, "close_adj": row.close_adj,
                              "close_raw": row.close_raw, "high_raw": row.high_raw,
                              "retrieved_at": retrieved_at, "deleted": False,
-                             "source_kind": source_kind, "source_hash": source_hash,
-                             "capture_id": capture_id})
-    for date_, prior in by_date.items():
-        if date_ not in seen and not prior.deleted:
-            new_rows.append({"date": date_, "close_adj": float("nan"), "close_raw": float("nan"),
-                             "high_raw": float("nan"), "retrieved_at": retrieved_at, "deleted": True,
                              "source_kind": source_kind, "source_hash": source_hash,
                              "capture_id": capture_id})
     return pd.DataFrame(new_rows, columns=list(_STORED_ROW_COLUMNS))

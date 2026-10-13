@@ -279,6 +279,7 @@ and never computed per run by a reader:
 | duplicate or unsorted event dates, or duplicate or unsorted `daily_market` dates, for a ticker | `build_rows` raises `CONTRACT_MISMATCH`; the refresh fails before any catalog commit, surfaced by the store as `OpsError` `INPUT_CHANGED` (`details.data_code` = the data code) |
 | the `daily_market` frame, empty or not, lacks `date`, `implied_move` or `src_iv` | `build_rows` raises `CONTRACT_MISMATCH` (the store's own scan refuses a missing table column first, per the ops doc) |
 | no `src_iv` row before an event | `implied_move_pct` null, no contribution to the aggregate |
+| a full-history `price_history` retrieval omits any currently live stored date (truncated end, mid-history gap, or empty), or starts later than the live history | `diff_retrieval` raises `CONTRACT_MISMATCH` for the whole response; `details` hold the missing dates (or `missing_count`, `first_missing_date`, `last_missing_date` past 20). Nothing is written for that ticker and its stored rows stay live; the next refresh retries. `diff_retrieval` never emits a tombstone |
 
 A refresh over a parent that still holds v3 partitions refuses `VALIDATION_FAILED`
 ("full rebuild required", ops doc) when it neither rewrites nor attempts every non-v4
