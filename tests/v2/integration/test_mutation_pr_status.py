@@ -38,6 +38,20 @@ diff --git a/engine/v2/dead.py b/engine/v2/dead.py
 -c
 """
 
+# The third line after the "@@ -3,0 +4,2 @@" hunk is an ADDED line whose content
+# is "++ b/engine/v2/evil.py": only hunk-line counting keeps it from becoming a
+# file header.
+LOOKALIKE_DIFF = """\
+--- a/engine/v2/a.py
++++ b/engine/v2/a.py
+@@ -3,0 +4,2 @@
++x
++++ b/engine/v2/evil.py
+@@ -9 +10 @@
+-old
++new
+"""
+
 
 def mod(**kw):
     """A module summary whose complete/tool_error/failure_reasons follow gremlin_results rules."""
@@ -383,6 +397,45 @@ def test_parse_changed_lines_handles_quoted_and_spaced_paths():
         'engine/v2/q"t\t.py': {2},
         "engine/v2/plain.py": {9},
     }
+
+
+def test_added_line_that_looks_like_a_file_header_is_hunk_content():
+    assert ps.parse_changed_lines(LOOKALIKE_DIFF) == {"engine/v2/a.py": {4, 5, 10}}
+    second = (
+        "--- a/engine/v2/b.py\n"
+        "+++ b/engine/v2/b.py\n"
+        "@@ -7,2 +7,3 @@\n"
+        "--- foo\n"
+        "-gone\n"
+        "\\ No newline at end of file\n"
+        "+++ b/engine/v2/evil.py\n"
+        "+tail\n"
+        "+tail2\n"
+        "@@ -20 +21 @@\n"
+        "-last\n"
+        "+added\n"
+    )
+    assert ps.parse_changed_lines(second) == {"engine/v2/b.py": {7, 8, 9, 21}}
+
+
+def test_main_header_lookalike_inside_a_hunk_is_not_a_file_header(tmp_path):
+    def state(name, diff_text, rows=()):
+        root = tmp_path / name
+        root.mkdir()
+        d = root / "m"
+        d.mkdir()
+        (d / "summary.json").write_text(json.dumps(merged(a=mod())))
+        (d / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        diff = root / "pr.diff"
+        diff.write_text(diff_text)
+        out = root / "out"
+        assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
+                        "--github-output", str(out)]) == 0
+        return next(x.split("=", 1)[1] for x in out.read_text().splitlines()
+                    if x.startswith("state="))
+
+    assert state("hunk_only", "@@ -0,0 +1 @@\n+++ b/x\n") == "neutral"
+    assert state("survivor", LOOKALIKE_DIFF, [row("a", "engine/v2/a.py", 10)]) == "failure"
 
 
 def test_one_bad_results_line_does_not_discard_the_good_ones(tmp_path, capsys):

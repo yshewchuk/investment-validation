@@ -13,37 +13,27 @@ from pathlib import Path
 
 import yaml
 
+from tests.v2.integration.mutation_status_support import decide
+
 ROOT = Path(__file__).resolve().parents[3]
 JOBS = yaml.safe_load((ROOT / ".github" / "workflows" / "mutation.yml").read_text())["jobs"]
 
 
-def _decide(**env):
-    step = next(s for s in JOBS["report_status"]["steps"]
-                if str(s.get("name", "")).startswith("Post mutation status"))
-    run = step["run"]
-    script = "set -euo pipefail\n" + run[:run.index("gh api")] + '\necho "${state}|${desc}"\n'
-    full = dict(os.environ, MODULES='["a","b"]', REPORT_RESULT="success", SKIPPED_COUNT="0")
-    full.update(env)
-    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                         check=True, env=full).stdout.strip()
-    return tuple(out.split("|", 1))
-
-
 def test_pr_closed_placeholder_guard_runs_before_the_classified_branch():
-    state, desc = _decide(CLASSIFIED_STATE="success", CLASSIFIED_DESC="x", SKIPPED_COUNT="1")
+    state, desc = decide(CLASSIFIED_STATE="success", CLASSIFIED_DESC="x", SKIPPED_COUNT="1")
     assert state == "failure" and "skipped (PR closed)" in desc
 
 
 def test_empty_plan_is_checked_before_everything():
-    state, desc = _decide(MODULES="[]", CLASSIFIED_STATE="failure", CLASSIFIED_DESC="x",
+    state, desc = decide(MODULES="[]", CLASSIFIED_STATE="failure", CLASSIFIED_DESC="x",
                           SKIPPED_COUNT="2")
     assert state == "success" and "by design" in desc
 
 
 def test_classified_verdict_is_posted_when_nothing_was_skipped():
-    assert _decide(CLASSIFIED_STATE="failure", CLASSIFIED_DESC="PR-owned problem in a") == \
+    assert decide(CLASSIFIED_STATE="failure", CLASSIFIED_DESC="PR-owned problem in a") == \
         ("failure", "PR-owned problem in a")
-    assert _decide(CLASSIFIED_STATE="success", CLASSIFIED_DESC="all measured") == \
+    assert decide(CLASSIFIED_STATE="success", CLASSIFIED_DESC="all measured") == \
         ("success", "all measured")
 
 

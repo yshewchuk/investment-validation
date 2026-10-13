@@ -25,7 +25,7 @@ _ROW_STATUSES = ("killed", "survived", "timeout", "suspicious", "excluded")
 # failure_reasons entries that gremlin_results.merge writes without a module prefix.
 _MERGE_CODES = ("RUN_PROVENANCE_MISMATCH", "NO_MODULE_REPORTS", "DUPLICATE_MODULES",
                 "MISSING_MODULES", "UNEXPECTED_MODULES")
-_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _SIMPLE_ESC = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
 
 
@@ -65,20 +65,57 @@ def _head_path(line: str) -> str | None:
     return rest[2:] if rest.startswith("b/") else None
 
 
-def parse_changed_lines(diff_text: str) -> dict[str, set[int]]:
-    """Map each file in a ``git diff -U0`` to the head-side line numbers it added or changed."""
-    changed: dict[str, set[int]] = {}
-    current: str | None = None
+def _walk(diff_text: str):
+    """Yield ``("header", path_or_None)`` for a real file header and ``("hunk", start, count)``.
+
+    Each hunk's old/new line counts are tracked so a line inside a hunk (an added
+    line whose content merely looks like ``+++ b/<path>``, a removed line starting
+    with ``---``, the ``\\ No newline at end of file`` marker) is consumed as hunk
+    content and never examined as a file header. A line matching none of those
+    rules ends the hunk (``-U0`` diffs have no context lines) and is then processed
+    normally."""
+    old_left = new_left = 0
     for line in diff_text.splitlines():
-        if line.startswith("+++ "):  # +++ /dev/null: a deleted file has no head lines
-            current = _head_path(line)
-            if current is not None:
-                changed.setdefault(current, set())
+        if old_left > 0 or new_left > 0:
+            if line.startswith("-") and old_left > 0:
+                old_left -= 1
+                continue
+            if line.startswith("+") and new_left > 0:
+                new_left -= 1
+                continue
+            if line.startswith("\\"):
+                continue
+            old_left = new_left = 0
+        if line.startswith("+++ "):
+            yield "header", _head_path(line)
             continue
         m = _HUNK.match(line)
-        if m and current is not None:
-            start = int(m.group(1))
-            count = 1 if m.group(2) is None else int(m.group(2))
+        if m:
+            old_left = 1 if m.group(1) is None else int(m.group(1))
+            new_count = 1 if m.group(3) is None else int(m.group(3))
+            new_left = new_count
+            yield "hunk", int(m.group(2)), new_count
+
+
+def has_file_header(diff_text: str) -> bool:
+    """True if ``_walk`` yields at least one real file-header event."""
+    return any(event[0] == "header" for event in _walk(diff_text))
+
+
+def parse_changed_lines(diff_text: str) -> dict[str, set[int]]:
+    """Map each file in a ``git diff -U0`` to the head-side line numbers it added or changed.
+
+    Added lines that look like file headers are recognised as hunk content by
+    counting the lines of each hunk, not by their ``+++ `` prefix."""
+    changed: dict[str, set[int]] = {}
+    current: str | None = None
+    for event in _walk(diff_text):
+        if event[0] == "header":
+            current = event[1]  # +++ /dev/null: a deleted file has no head lines
+            if current is not None:
+                changed.setdefault(current, set())
+        elif current is not None:
+            _, start, count = event
             changed[current].update(range(start, start + count))
     return changed
 
@@ -308,9 +345,8 @@ def main(argv: list[str] | None = None) -> int:
             diff_text = Path(args.diff_file).read_text()
             if not diff_text.strip():
                 raise ValueError("PR diff is empty")
-            lines = diff_text.splitlines()
-            if any(x.startswith("@@") for x in lines) and not any(
-                    x.startswith("+++ ") for x in lines):
+            if (any(x.startswith("@@") for x in diff_text.splitlines())
+                    and not has_file_header(diff_text)):
                 raise ValueError("diff has hunks but no file header")
             changed = parse_changed_lines(diff_text)
         except (OSError, ValueError):  # ValueError covers UnicodeDecodeError

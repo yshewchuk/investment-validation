@@ -400,9 +400,11 @@ rerun. A run in which no module was measured is GREY (`neutral`); the descriptio
 
 PR-owned: a survivor on a line the PR changed, or a module run that failed with a
 test-failure exit code main does not also show. Infra (a `::warning::`, never red): no
-report, skipped, timeout or cancel, signal kill, gremlin ERROR results, an invalid raw
+report, a skipped module report (`skipped_reason`) in the classifier, timeout or cancel, signal kill, gremlin ERROR results, an invalid raw
 report, a module entry with a missing or mistyped `run_exit_code`, `counts_backend`,
-`failure_reasons` or `tool_error`, a failure main shows too.
+`failure_reasons` or `tool_error`, a failure main shows too. (Separately, `report_status`
+posts `failure` before the classified verdict when a non-empty plan has PR-closed placeholder
+modules: that is partial coverage, not an infra warning; see the table below.)
 
 Degraded inputs never produce `success`. They give `neutral`, except that a PR-owned
 failure that is still evidenced (a retained changed-line survivor, or an independent test

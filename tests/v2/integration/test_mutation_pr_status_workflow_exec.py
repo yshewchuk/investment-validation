@@ -11,16 +11,16 @@
 """
 from __future__ import annotations
 
-import itertools
 import os
 import re
 import subprocess
-from pathlib import Path
 
-import yaml
-
-ROOT = Path(__file__).resolve().parents[3]
-JOBS = yaml.safe_load((ROOT / ".github" / "workflows" / "mutation.yml").read_text())["jobs"]
+from tests.v2.integration.mutation_status_support import (
+    JOBS,
+    decide,
+    expected_posted,
+    report_status_combos,
+)
 
 _TOKEN = re.compile(r"\s*(?:(&&|\|\||==|!=|\(|\)|,)|'((?:[^']|'')*)'|([A-Za-z_][\w.]*))")
 
@@ -127,24 +127,6 @@ def test_evaluator_semantics():
     assert evaluate("format('{0}-{1}', a, 'y')", ctx) == "x-y"
     assert evaluate("always() && (a == 'x' || b == 'z')", ctx) is True
     assert evaluate("${{ 'it''s' }}", ctx) == "it's"
-
-
-def expected_posted(modules, skipped, classified, report):
-    """Independent oracle: the decision table of tests/README.md (skipped '' means 0)."""
-    skipped = skipped or "0"
-    if modules == "[]":
-        return "success"
-    if skipped != "0":
-        return "failure"
-    if classified == "failure":
-        return "failure"
-    if classified == "neutral":
-        return "neutral"
-    if classified == "success" and report == "success":
-        return "success"
-    if report != "success":
-        return "neutral"
-    return "success"
 
 
 def _ctx(pr, modules, state, skipped, result, desc="classified text"):
@@ -257,20 +239,18 @@ def test_classify_step_without_a_diff_or_baseline_warns_and_still_runs_the_tool(
     assert not any(c.startswith("git -c") for c in calls)  # diff skipped after the fetch failed
 
 
-def _report_status_combos():
-    return itertools.product(["[]", '["a","b"]', ""], ["0", "2"],
-                             ["", "success", "failure", "neutral"],
-                             ["success", "failure", "cancelled", "skipped"])
-
-
 def test_report_status_script_posts_exactly_the_table_state(tmp_path):
     run = _step("report_status", lambda s: str(s.get("name", "")).startswith("Post mutation"))["run"]
-    for modules, skipped, classified, report in _report_status_combos():
+    seen = set()
+    for modules, skipped, classified, report in report_status_combos():
         res, calls = _run(run, tmp_path, SHA="sha1", RUN_URL="https://x/run/5", MODULES=modules,
                           SKIPPED_COUNT=skipped, CLASSIFIED_STATE=classified,
                           CLASSIFIED_DESC="classified text", REPORT_RESULT=report)
         assert res.returncode == 0, (modules, skipped, classified, report, res.stderr)
         want = expected_posted(modules, skipped, classified, report)
+        seen.add(want)
+        assert decide(MODULES=modules, SKIPPED_COUNT=skipped, CLASSIFIED_STATE=classified,
+                      CLASSIFIED_DESC="classified text", REPORT_RESULT=report)[0] == want
         key = (modules, skipped, classified, report)
         assert len(calls) == 1, key  # every state, neutral included, posts ONE check run
         prefix = (f"gh api repos/o/r/check-runs -f name=mutation/pr -f head_sha=sha1 "
@@ -292,6 +272,7 @@ def test_report_status_script_posts_exactly_the_table_state(tmp_path):
             want_summary = None
         if want_summary is not None:
             assert summary == want_summary, (key, summary)
+    assert seen == {"success", "failure", "neutral"}
 
 
 def test_classify_step_identity_comes_from_the_triggering_workflow_run():
@@ -310,7 +291,7 @@ def test_classify_step_identity_comes_from_the_triggering_workflow_run():
 
 def test_report_status_never_posts_a_commit_status(tmp_path):
     run = _step("report_status", lambda s: str(s.get("name", "")).startswith("Post mutation"))["run"]
-    for modules, skipped, classified, report in _report_status_combos():
+    for modules, skipped, classified, report in report_status_combos():
         res, calls = _run(run, tmp_path, SHA="sha1", RUN_URL="https://x/run/5", MODULES=modules,
                           SKIPPED_COUNT=skipped, CLASSIFIED_STATE=classified,
                           CLASSIFIED_DESC="classified text", REPORT_RESULT=report)
