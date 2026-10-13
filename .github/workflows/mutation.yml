@@ -682,6 +682,9 @@ jobs:
     needs: [plan, mutate]
     if: always() && needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     env:
       # The plan's module list, passed to merge as a variable (never interpolated
       # into the script text), so a module set that is not exactly the one the
@@ -694,8 +697,13 @@ jobs:
       # either. report_status reads this count to post "skipped (PR closed)"
       # rather than a false green "published" success.
       skipped_count: ${{ steps.skip.outputs.count }}
+      # tools/mutation_pr_status.py: `failure` only for PR-owned problems.
+      state: ${{ steps.classify.outputs.state }}
+      description: ${{ steps.classify.outputs.description }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -760,6 +768,35 @@ jobs:
         run: |
           rc=$(cat "$RUNNER_TEMP/gremlin-merge-rc" 2>/dev/null || echo -1)
           if [ "$rc" != 0 ]; then echo "::error::report merge exited $rc"; exit 1; fi
+      # PR-owned (red) versus infra (warning) classification of the merged report.
+      # Never fails the step: unreadable inputs degrade to warnings.
+      - name: Classify PR-owned and infra results
+        id: classify
+        if: always() && needs.plan.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.plan.outputs.pr_number }}
+          BASE_SHA: ${{ needs.plan.outputs.base_sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -uo pipefail
+          args=(--merged-dir merged)
+          if git fetch -q --no-tags origin "+refs/pull/$PR/head:refs/remotes/pr/head" \
+              && git -c core.quotepath=off diff -U0 --no-color --no-ext-diff "$BASE_SHA...$HEAD_SHA" > pr.diff; then
+            args+=(--diff-file pr.diff)
+          else
+            echo "::warning::could not compute the PR diff"
+          fi
+          # main's last completed push report: failures it shows too are not PR-owned.
+          run_id=$(gh run list --repo "$REPO" --workflow mutation.yml --branch main \
+            --event push --status completed --limit 1 --json databaseId \
+            --jq '.[0].databaseId' 2>/dev/null || true)
+          if [ -n "$run_id" ] && gh run download "$run_id" --repo "$REPO" \
+              -n mutation-report -D baseline 2>/dev/null && [ -f baseline/summary.json ]; then
+            args+=(--baseline-summary baseline/summary.json)
+          fi
+          python tools/mutation_pr_status.py "${args[@]}"
 
   report_status:
     # Posts the run's outcome onto the PR's own head commit as a plain
@@ -788,11 +825,19 @@ jobs:
           MODULES: ${{ needs.plan.outputs.modules }}
           REPORT_RESULT: ${{ needs.report.result }}
           SKIPPED_COUNT: ${{ needs.report.outputs.skipped_count }}
+          CLASSIFIED_STATE: ${{ needs.report.outputs.state }}
+          CLASSIFIED_DESC: ${{ needs.report.outputs.description }}
         run: |
           set -euo pipefail
           if [ "$MODULES" = "[]" ]; then
             state=success
             desc="gremlins: skipped (closed PR or no eligible module) by design"
+          # tools/mutation_pr_status.py: red only for PR-owned problems; infra
+          # problems (timeouts, cancels, runner errors, failures main shows too)
+          # are warnings and never change the state.
+          elif [ -n "${CLASSIFIED_STATE:-}" ]; then
+            state="$CLASSIFIED_STATE"
+            desc="$CLASSIFIED_DESC"
           elif [ "$REPORT_RESULT" != "success" ]; then
             state=failure
             desc="gremlins: report job ${REPORT_RESULT} -- see run for detail"
