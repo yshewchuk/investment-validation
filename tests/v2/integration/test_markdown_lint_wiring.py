@@ -82,6 +82,13 @@ def test_hook_blocks_a_staged_violation_and_passes_a_clean_file(tmp_path, monkey
     _git(tmp_path, "add", "bad.md")
     assert _run_hook(hook, tmp_path).returncode == 0
 
+    # A non-Markdown file whose content would violate MD022 if it were linted must be
+    # ignored: dropping the '*.md' pathspec from the hook makes this fail.
+    (tmp_path / "notes.py").write_text("# heading\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "notes.py")
+    proc = _run_hook(hook, tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
 
 def test_hook_fails_closed_without_npx(tmp_path, monkeypatch):
     hook = _hook_repo(tmp_path, monkeypatch)
