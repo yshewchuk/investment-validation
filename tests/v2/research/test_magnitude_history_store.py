@@ -211,6 +211,32 @@ def test_colliding_native_success_receipt_refuses_before_outcomes(source, monkey
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
+@pytest.mark.parametrize("status", ["failed", "conflict"])
+@pytest.mark.parametrize("action", ["build", "read"])
+def test_noncommitted_matching_receipt_refuses_before_result_resolution(source, monkeypatch, status, action):
+    binding = entry.context(source.repository, source.snapshot, **REQUEST)
+    scope, receipt = stored._names(binding)
+    # The failed-import helper leaves scope empty; insert a valid native row so only status differs.
+    source.conn.execute("INSERT INTO data_import_receipts "
+        "(receipt_id, attempt_id, fence, source_manifest_hash, result_snapshot_id, status, registered_at, scope) "
+        "VALUES (?, ?, 1, ?, NULL, ?, '2026-01-01T00:00:00Z', ?)",
+        (receipt, receipt, binding["context_id"], status, scope))
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    monkeypatch.setattr(stored, "_preflight_source", _forbid)
+    monkeypatch.setattr(stored, "_scan", _forbid)
+    resolve = source.repository.resolve
+
+    def guarded(snapshot_id):
+        assert snapshot_id is not None, "noncommitted result was resolved"
+        return resolve(snapshot_id)
+
+    monkeypatch.setattr(source.repository, "resolve", guarded)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        _build(source) if action == "build" else _read(source, source.snapshot)
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
 def test_all_metadata_is_admitted_before_any_feature_column_decode(source, monkeypatch):
     original = stored._event_rows
 

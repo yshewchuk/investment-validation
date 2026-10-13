@@ -255,10 +255,10 @@ features refuse `EXPERIMENT_VARIANT_FAILED` rather than reaching a model.
 Provenance explicitly says reconstructed date bounds, with event-schedule
 as-known and source-publication evidence unverified. Calendar reconstruction
 and source hashes do not establish that evidence; strict PIT experiment
-admission remains a later prerequisite. The explicit stored-history build
-command now consumes this seam; fitting, target joins, providers, reports,
-ledger and final-read callers remain absent. The adapter itself has no cache,
-retry, write or partial result; Repository failures propagate.
+admission remains a later prerequisite. The stored build uses `plan_magnitude_folds`,
+`event_history._assemble_history` and `_feature_recipe`, not this adapter.
+The adapter has no fitting, target-join, CLI, provider, report, ledger or final-read
+caller, and no cache, retry, write or partial result; Repository failures propagate.
 
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
 evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
@@ -478,7 +478,8 @@ This bounds retained unmatched rows, not total process RSS.
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `catalog`,
 `objects`, `manifests`, `query`, `computed_moves_table`), `engine.v2.
-contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`),
+contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
+`ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`,
 `content_hash`, `to_document`, `market_calendar`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
