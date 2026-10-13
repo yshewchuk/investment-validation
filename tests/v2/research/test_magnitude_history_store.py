@@ -162,6 +162,26 @@ def test_later_mixed_candidate_refuses_before_even_first_safe_outcome(tmp_path, 
         source.conn.close()
 
 
+def test_non_native_computed_moves_contract_refuses_before_outcome_objects(tmp_path, monkeypatch):
+    from engine.v2.data.manifests import table_contract_hash
+    foreign = replace(stored.COMPUTED_MOVES_CONTRACT, contract_id="computed_moves.v0", semantic_version="0.0.0")
+    foreign = replace(foreign, definition_hash=table_contract_hash(foreign))
+    with monkeypatch.context() as fixture_contract:
+        fixture_contract.setattr("tests.v2.research.test_magnitude_features.COMPUTED_MOVES_CONTRACT", foreign)
+        source = _source(tmp_path)
+    try:
+        assert source.repository.table_contract(source.snapshot, "computed_moves") == foreign
+        assert stored.COMPUTED_MOVES_CONTRACT != foreign
+        assert source.repository.resolve(source.snapshot.snapshot_id) == source.snapshot
+        _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+        before = _catalog(source.conn), _objects(source.store)
+        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+            _build(source)
+        assert (_catalog(source.conn), _objects(source.store)) == before
+    finally:
+        source.conn.close()
+
+
 @pytest.mark.parametrize("change", [
     {"as_of_month": "2026-02"}, {"history_start": "2022-02-01"},
     {"training_start": "2023-02-01"},
@@ -408,9 +428,13 @@ def test_cli_build_read_and_typed_refusal(source, capsys):
     with pytest.raises(SystemExit) as error:
         entry.main(["read", *args])
     assert error.value.code == 2
+    captured = capsys.readouterr()
+    assert "read requires --feature-snapshot-id; build does not accept it" in captured.err and captured.out == ""
     with pytest.raises(SystemExit) as error:
         entry.main(["build", *args, "--feature-snapshot-id", source.snapshot.snapshot_id])
     assert error.value.code == 2
+    captured = capsys.readouterr()
+    assert "read requires --feature-snapshot-id; build does not accept it" in captured.err and captured.out == ""
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
@@ -765,6 +789,9 @@ def test_candidate_on_latest_ceiling_is_never_opened(tmp_path, monkeypatch):
 def test_lazy_cache_preserves_invalid_label_order_without_catalog_or_receipt_effect(tmp_path, monkeypatch, invalid_index):
     source = _source(tmp_path, overrides={invalid_index: {"realized_move_pct": None}})
     try:
+        # Same-ticker IDs place the ISO date before the membership suffix; hash choice cannot reorder dates.
+        ids = [e["event_id"] for e in source.events]
+        assert ids == sorted(ids)
         _poison(monkeypatch, source.repository, source.snapshot,
                 [e["event_date"].date().isoformat() for e in source.events[invalid_index + 1:] + source.forbidden])
         context = entry.context(source.repository, source.snapshot, **REQUEST)
