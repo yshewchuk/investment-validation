@@ -193,6 +193,20 @@ def test_changed_context_cannot_reuse_feature_snapshot(source, monkeypatch, chan
         _read(source, output, **change)
 
 
+@pytest.mark.parametrize("changes,code", [
+    ({"evaluation_years": ["2021"], "training_start": "2020-01-01"}, "POPULATION_COLLAPSED"),
+    ({"evaluation_years": ["2022"], "training_start": "2021-01-01"}, "POPULATION_COLLAPSED"),
+    ({"history_start": "2024-01-01"}, "CONTRACT_MISMATCH"),
+])
+def test_empty_folds_and_late_history_start_refuse_before_build_payloads(source, monkeypatch, changes, code):
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    monkeypatch.setattr(stored, "_prepare_history", _forbid)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(DataError, match=code):
+        _build(source, **changes)
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
 def test_source_or_output_reference_drift_refuses_before_feature_payload(source, monkeypatch):
     _, output = _build(source)
     monkeypatch.setattr(stored, "_scan", _forbid)
@@ -590,13 +604,17 @@ def test_context_or_source_mismatch_refuses_before_any_source_or_feature_payload
 
 
 @pytest.mark.parametrize("action", ["materialize", "read_stored"])
-@pytest.mark.parametrize("missing", ["context_id", "source_snapshot", "temporal_plan", "history_start", "not_a_context"])
+@pytest.mark.parametrize("missing", ["context_id", "source_snapshot", "temporal_plan", "history_start",
+                                    "not_a_context", "null_plan"])
 def test_missing_direct_context_identity_has_a_typed_refusal_before_payloads(source, monkeypatch, action, missing):
     binding = entry.context(source.repository, source.snapshot, **REQUEST)
     if missing == "not_a_context":
         binding = None
     else:
-        del binding[missing]
+        if missing == "null_plan":
+            binding["temporal_plan"] = None
+        else:
+            del binding[missing]
         if missing != "context_id":
             binding["context_id"] = content_hash({k: v for k, v in binding.items() if k != "context_id"})
     _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)

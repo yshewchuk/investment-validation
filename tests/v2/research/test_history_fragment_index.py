@@ -1,0 +1,270 @@
+"""Metadata-only index equivalence and native synthetic preflight poison tests."""
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pandas as pd
+import pytest
+
+from engine.v2.data import query as query_planner
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
+from engine.v2.data.errors import DataError, fail
+from engine.v2.research import event_history
+from engine.v2.research.prediction_inputs import _target_filters
+from tests.v2.research.test_event_history import _commit, _event, _poison, _read
+from tests.v2.research.test_prediction_inputs import _move
+
+DAY = "2023-03-02"
+TICKER = "SYNTH"
+
+
+@pytest.fixture
+def committed(tmp_path):
+    event = _event(DAY)
+    conn, repository, snapshot = _commit(tmp_path, [event], [_move(event)])
+    try:
+        record, = repository.fragment_records(snapshot, "computed_moves")
+        yield repository, snapshot, record
+    finally:
+        conn.close()
+
+
+def _record(base, label, lo=DAY, hi=DAY, **changes):
+    """Clone inspected synthetic metadata only; these objects are never scanned."""
+    return replace(base, fragment_id=label, time_min=lo, time_max=hi, **changes)
+
+
+def _event_query(day=DAY, ticker=TICKER):
+    return _target_filters(SimpleNamespace(ticker=ticker, event_date=pd.Timestamp(day)))
+
+
+def _population(records, *, day=DAY, ticker=TICKER):
+    keys, interval = _event_query(day, ticker)
+    try:
+        return query_planner.plan_scan_population(COMPUTED_MOVES_CONTRACT, records,
+            key_filter=keys, time_interval=interval)
+    except DataError as exc:
+        return exc.problem
+
+
+def _equivalent(records, *, day=DAY, ticker=TICKER):
+    index = event_history._record_index(records)
+    indexed = event_history._indexed_records(index, ticker, day)
+    full = _population(records, day=day, ticker=ticker)
+    assert _population(indexed, day=day, ticker=ticker) == full
+    return full
+
+
+def _ids(population):
+    return [record.fragment_id for record in population.records]
+
+
+def test_large_point_corpus_is_enumerated_once_and_planner_sees_one_record_per_target(
+        committed, monkeypatch):
+    repository, snapshot, base = committed
+    days = pd.date_range("2000-01-01", periods=4096)
+    records = [_record(base, f"point-{index}", day.date().isoformat(), day.date().isoformat(),
+        primary_key_min=(TICKER, day.date().isoformat()),
+        primary_key_max=(TICKER, day.date().isoformat())) for index, day in enumerate(days)]
+    # Neither manifest order nor candidate order agrees with tree traversal order.
+    records = records[::2][::-1] + records[1::2]
+    candidates = pd.DataFrame({"event_id": [f"candidate-{i}" for i in range(0, len(days), 17)],
+        "ticker": TICKER, "event_date": days[::17]}).iloc[::-1]
+    enumerations, yielded, calls = [], [], []
+
+    def metadata(received_snapshot, table_name):
+        assert received_snapshot is snapshot and table_name == "computed_moves"
+        enumerations.append(table_name)
+        assert len(enumerations) == 1
+        for record in records:
+            yielded.append(record.fragment_id)
+            yield record
+
+    original = query_planner.plan_scan_population
+
+    def plan(contract, selected, **kwargs):
+        selected = tuple(selected)
+        assert len(selected) == 1
+        calls.append(selected[0].fragment_id)
+        return original(contract, selected, **kwargs)
+
+    def no_second_lookup(*args, **kwargs):
+        pytest.fail("a supplied population bound must not enumerate metadata again")
+
+    monkeypatch.setattr(repository, "fragment_records", metadata)
+    monkeypatch.setattr(repository, "scan_population_bound", no_second_lookup)
+    monkeypatch.setattr(query_planner, "plan_scan_population", plan)
+    plans = event_history._plans(repository, snapshot, candidates, COMPUTED_MOVES_CONTRACT)
+    expected = [f"point-{i}" for i in reversed(range(0, len(days), 17))]
+    assert enumerations == ["computed_moves"]
+    assert yielded == [record.fragment_id for record in records]
+    assert calls == expected == [record.fragment_id for _, _, record in plans]
+    assert [event.event_id for event, _, _ in plans] == candidates.event_id.tolist()
+    for event, request, _ in plans:
+        keys, interval = _target_filters(event)
+        assert request.key_filter == keys and request.time_interval == interval
+        assert request.snapshot_id == snapshot.snapshot_id
+        assert request.max_result_rows == request.max_batch_rows == 1
+    assert repository.scans == []
+
+
+@pytest.mark.parametrize("day, expected", [
+    ("2022-12-31", []),
+    ("2023-01-01", ["outer", "left-edge"]),
+    ("2023-01-02", ["outer"]),
+    ("2023-03-01", ["nested", "outer", "overlap"]),
+    (DAY, ["duplicate", "nested", "outer", "point", "overlap", "duplicate"]),
+    ("2023-03-03", ["nested", "outer", "overlap"]),
+    ("2023-03-04", ["outer"]),
+    ("2023-12-31", ["outer", "right-edge"]),
+    ("2024-01-01", []),
+])
+def test_nested_overlapping_duplicate_intervals_and_inclusive_edges_keep_manifest_order(
+        committed, day, expected):
+    _, _, base = committed
+    duplicate = _record(base, "duplicate")
+    records = [duplicate, _record(base, "nested", "2023-02-01", "2023-03-03"),
+        _record(base, "outer", "2023-01-01", "2023-12-31"), _record(base, "point"),
+        _record(base, "right-edge", "2023-12-31", "2023-12-31"),
+        _record(base, "overlap", "2023-03-01", "2023-03-03"), duplicate,
+        _record(base, "left-edge", "2023-01-01", "2023-01-01")]
+    population = _equivalent(records, day=day)
+    assert _ids(population) == expected
+    assert population.row_count == len(expected)
+    assert _ids(_equivalent(records, day=day, ticker="ABSENT")) == []
+
+
+@pytest.mark.parametrize("lo, hi, selected", [
+    (None, None, True), (None, "invalid", True), ("invalid", None, True),
+    ("20230302", "20230302", True),
+    ("2023-03-02T12:00:00", "2023-03-02T12:00:00", True),
+    ("2023-03-02T00:00:00Z", "2023-03-02T00:00:00Z", True),
+    ("2023-03-01T23:30:00-01:00", "2023-03-01T23:30:00-01:00", True),
+    ("2023-03-03T00:30:00+01:00", "2023-03-03T00:30:00+01:00", True),
+    ("2023-03-02T00:30:00+01:00", "2023-03-02T00:30:00+01:00", False),
+    ("2023-03-03", "2023-03-01", False),
+    (DAY, "2023-03-01", False),
+])
+def test_uncertain_missing_noncanonical_timezone_and_reversed_bounds_use_real_planner(
+        committed, lo, hi, selected):
+    _, _, base = committed
+    record = _record(base, "uncertain", lo, hi)
+    assert event_history._canonical_interval(record) is None
+    population = _equivalent([record])
+    assert _ids(population) == (["uncertain"] if selected else [])
+    assert population.row_count == int(selected)
+
+
+@pytest.mark.parametrize("lo, hi", [
+    ("bad", DAY), ("2023-02-30", DAY), ("2023-3-2", DAY), (DAY, "bad"),
+    (7, DAY), (DAY, False),
+])
+def test_invalid_time_bounds_preserve_full_typed_failure(committed, lo, hi):
+    _, _, base = committed
+    problem = _equivalent([_record(base, "invalid", lo, hi)])
+    assert problem == fail("CONTRACT_MISMATCH",
+        "a time bound is not a parseable date or timestamp").problem
+
+
+@pytest.mark.parametrize("day", ["0001-01-01", "0999-03-02", DAY])
+def test_years_below_1000_follow_planner_timestamp_normalization(committed, day):
+    _, _, base = committed
+    records = [_record(base, "ancient", "0001-01-01", "0999-12-31"),
+        _record(base, "ancient-point", "0999-03-02", "0999-03-02"),
+        _record(base, "canonical-wide", "1000-01-01", "9999-12-31"),
+        _record(base, "modern")]
+    for record in records[:2]:
+        assert event_history._canonical_interval(record) is None
+    index = event_history._record_index(records)
+    if day[:4] < "1000":
+        # strftime may omit year padding; canonical ranges must also reach the planner.
+        assert event_history._indexed_records(index, TICKER, day) == records
+    _equivalent(records, day=day)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("primary_key_min", (7, DAY)), ("primary_key_min", (False, DAY)),
+    ("primary_key_min", (None, DAY)), ("primary_key_min", ({}, DAY)),
+    ("primary_key_max", (7, DAY)), ("primary_key_max", (False, DAY)),
+])
+def test_unsafe_leading_key_errors_are_not_hidden_by_nonoverlapping_time_bounds(
+        committed, field, value):
+    _, _, base = committed
+    record = _record(base, "unsafe-key", "2024-01-01", "2024-01-01", **{field: value})
+    assert event_history._canonical_interval(record) is None
+    assert _equivalent([record]) == fail("CONTRACT_MISMATCH",
+        "key_filter values are incompatible with fragment key bounds").problem
+
+
+def test_wrong_primary_key_day_does_not_prune_overlapping_time_bounds(committed):
+    _, _, base = committed
+    wrong_day = _record(base, "wrong-key-day", primary_key_min=(TICKER, "1999-01-01"),
+        primary_key_max=(TICKER, "1999-01-01"))
+    missing_key = _record(base, "missing-key", primary_key_min=None, primary_key_max=None)
+    list_key = _record(base, "list-key", primary_key_min=[TICKER, DAY],
+        primary_key_max=[TICKER, DAY])
+    population = _equivalent([wrong_day, missing_key, list_key])
+    assert _ids(population) == ["wrong-key-day", "missing-key", "list-key"]
+    assert population.row_count == 3
+
+
+@pytest.mark.parametrize("count", [True, -1, 1.5, "1", None])
+@pytest.mark.parametrize("fallback_first", [False, True])
+def test_bad_row_counts_preserve_first_manifest_failure_and_details(
+        committed, count, fallback_first):
+    _, _, base = committed
+    canonical = _record(base, "bad-canonical", row_count=count)
+    fallback = _record(base, "bad-fallback", None, None, row_count=count)
+    records = [fallback, canonical] if fallback_first else [canonical, fallback]
+    # Invalid counts in pruned records never supersede a surviving failure.
+    records.insert(0, _record(base, "pruned-count", "2024-01-01", "2024-01-01", row_count=None))
+    assert _equivalent(records) == fail("MANIFEST_CORRUPT",
+        "a surviving fragment's recorded row_count is not valid metadata",
+        details={"fragment_id": "bad-fallback" if fallback_first else "bad-canonical"}).problem
+
+
+@pytest.mark.parametrize("key_first", [False, True])
+def test_membership_failures_precede_row_count_validation_in_original_order(committed, key_first):
+    _, _, base = committed
+    bad_time = _record(base, "bad-time", "bad", DAY)
+    bad_key = _record(base, "bad-key", "2024-01-01", "2024-01-01", primary_key_min=(7, DAY))
+    failures = [bad_key, bad_time] if key_first else [bad_time, bad_key]
+    records = [_record(base, "bad-count", row_count=-1), *failures]
+    message = ("key_filter values are incompatible with fragment key bounds" if key_first
+        else "a time bound is not a parseable date or timestamp")
+    assert _equivalent(records) == fail("CONTRACT_MISMATCH", message).problem
+
+
+def test_irrelevant_malformed_metadata_and_future_min_preserve_short_circuit(committed):
+    _, _, base = committed
+    records = [_record(base, "other-partition", "bad", "bad", partition_key="OTHER",
+            primary_key_min=(7, DAY), row_count=None),
+        _record(base, "future-min", "2024-01-01", "bad", row_count=None),
+        _record(base, "other-leading-key", "bad", "bad", primary_key_min=("ZZZ", DAY),
+            primary_key_max=("ZZZ", DAY), row_count=None),
+        _record(base, "matching")]
+    population = _equivalent(records)
+    assert _ids(population) == ["matching"]
+    assert population.row_count == 1
+
+
+def test_late_competing_native_range_refuses_before_opening_earlier_safe_object(tmp_path, monkeypatch):
+    first, second, target = _event("2023-01-02"), _event(DAY), _event("2024-06-20")
+    competing_days = (f"{DAY}T12:00:00", f"{DAY}T15:00:00")
+    moves = [_move(first), _move(second), *[_move(second, event_date=day) for day in competing_days]]
+    conn, repository, snapshot = _commit(tmp_path, [first, second, target], moves,
+        mixed_days=competing_days)
+    try:
+        records = repository.fragment_records(snapshot, "computed_moves")
+        first_population = _equivalent(records, day="2023-01-02")
+        late_population = _equivalent(records)
+        assert first_population.row_count == len(first_population.records) == 1
+        assert late_population.row_count == 3 and len(late_population.records) == 2
+        opened = _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        with pytest.raises(DataError) as failure:
+            _read(repository, snapshot, target)
+        assert failure.value.problem == fail("HOLDOUT_ACCESS_DENIED",
+            "research requires event-isolated outcome fragments").problem
+        assert all(name == "earnings_events" for name, _ in repository.scans)
+        assert not ({record.object_ref.object_id for record in records} & set(opened))
+    finally:
+        conn.close()

@@ -1061,6 +1061,7 @@ tests = [
     "tests/v2/research/test_gate_variant.py",
     "tests/v2/research/test_prediction_inputs.py",
     "tests/v2/research/test_event_history.py",
+    "tests/v2/research/test_history_fragment_index.py",
     "tests/v2/research/test_magnitude_inputs.py",
     "tests/v2/research/test_magnitude_features.py",
     "tests/v2/research/test_magnitude_history_store.py",

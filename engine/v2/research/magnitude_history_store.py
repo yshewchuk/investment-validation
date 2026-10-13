@@ -42,6 +42,7 @@ def _names(context):
     """One immutable catalog success slot per complete build context."""
     if (not isinstance(context, dict)
             or not {"source_snapshot", "temporal_plan", "history_start"} <= context.keys()
+            or not isinstance(context["temporal_plan"], dict)
             or context.get("context_id") != content_hash({k: v for k, v in context.items() if k != "context_id"})):
         raise errors.fail("IDENTITY_CONFLICT", "history context digest differs")
     key = context["context_id"].removeprefix("sha256:")

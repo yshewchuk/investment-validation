@@ -25,15 +25,88 @@ def _window(history_start, decision_session):
     return start, decision
 
 
+def _canonical_interval(record):
+    """Index only bounds whose pruning cannot hide an earlier planner error."""
+    if record.primary_key_min is not None and not all(
+            isinstance(key, (tuple, list)) and key and isinstance(key[0], str)
+            for key in (record.primary_key_min, record.primary_key_max)):
+        return None
+    lo, hi = record.time_min, record.time_max
+    try:
+        if (not all(isinstance(value, str) and value[:4] >= "1000"
+                    and _calendar_date(value).isoformat() == value for value in (lo, hi)) or lo > hi):
+            return None
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return lo, hi
+
+
+def _interval_node(entries):
+    """Balanced centered intervals; input is already sorted by lower bound."""
+    if not entries:
+        return None
+    center = entries[len(entries) // 2][0]
+    left, middle, right = [], [], []
+    for entry in entries:
+        (left if entry[1] < center else right if entry[0] > center else middle).append(entry)
+    by_end = sorted(middle, key=lambda entry: entry[1])
+    return center, _interval_node(left), _interval_node(right), middle, by_end
+
+
+def _point_entries(node, day):
+    """Yield every inclusive interval overlap without scanning unrelated ranges."""
+    if node is None:
+        return
+    center, left, right, by_start, by_end = node
+    if day < center:
+        for entry in by_start:
+            if entry[0] > day:
+                break
+            yield entry
+        yield from _point_entries(left, day)
+    elif day > center:
+        for entry in reversed(by_end):
+            if entry[1] < day:
+                break
+            yield entry
+        yield from _point_entries(right, day)
+    else:
+        yield from by_start
+
+
+def _record_index(records):
+    """One metadata pass; uncertain bounds retain their conservative fallback."""
+    partitions = {}
+    for ordinal, record in enumerate(records):
+        entries, fallback, all_records = partitions.setdefault(record.partition_key, ([], [], []))
+        all_records.append((ordinal, record))
+        bounds = _canonical_interval(record)
+        if bounds is None:
+            fallback.append((ordinal, record))
+        else:
+            entries.append((*bounds, ordinal, record))
+    return {key: (_interval_node(sorted(entries, key=lambda entry: entry[0])), fallback, all_records)
+            for key, (entries, fallback, all_records) in partitions.items()}
+
+
+def _indexed_records(index, ticker, day):
+    """Restore manifest order before the unchanged planner validates survivors."""
+    node, fallback, all_records = index.get(ticker, (None, (), ()))
+    if day[:4] < "1000":  # Platform timestamp normalization may not zero-pad these years.
+        return [record for _, record in all_records]
+    selected = [*fallback, *((ordinal, record) for _, _, ordinal, record in _point_entries(node, day))]
+    return [record for _, record in sorted(selected, key=lambda entry: entry[0])]
+
+
 def _plans(repository, snapshot, candidates, contract):
     """Shared history/target guard: prove all object membership before any opens."""
-    records = repository.fragment_records(snapshot, "computed_moves")
+    index = _record_index(repository.fragment_records(snapshot, "computed_moves"))
     plans = []
     for event in candidates.itertuples(index=False):
         keys, interval = _target_filters(event)
-        population = query_planner.plan_scan_population(
-            contract, records, key_filter=keys, time_interval=interval)
         day = event.event_date.date().isoformat()
+        population = query_planner.plan_scan_population(
+            contract, _indexed_records(index, event.ticker, day), key_filter=keys, time_interval=interval)
         key = (event.ticker, day)
         if len(population.records) != 1 or population.row_count != 1:
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "research requires event-isolated outcome fragments")

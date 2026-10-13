@@ -12,7 +12,7 @@ from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_inputs import forecast_cutoff, magnitude_recipe
 
 HISTORY_FEATURE_COLUMNS = ("n_prior", "mean_prior_move", "mean_prior_abs_move",
-             *(f"ema{span}_prior_{kind}" for span in (2, 4, 8, 12) for kind in ("move", "abs_move")))
+                           *(f"ema{span}_prior_{kind}" for span in (2, 4, 8, 12) for kind in ("move", "abs_move")))
 
 
 def _calendar_input(repository, snapshot):
