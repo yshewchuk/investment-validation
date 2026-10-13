@@ -44,9 +44,17 @@ def _events(rows: list[tuple[str, str]]) -> pd.DataFrame:
     return pd.DataFrame({"ticker": list(tickers), "event_date": pd.to_datetime(list(dates))})
 
 
-def _plan(times: dict) -> dict:
+def _plan(times: dict, history: dict | None = None) -> dict:
+    """``plan_refresh`` the way the CLI calls it: BOTH loaders from the same
+    store, so the default history carries the pre-market fetch's own arrival
+    date. The daily skip reads stamps only — the removed date-only rule
+    (already fetched on ``session`` ⇒ skip) must fail these tests if it
+    ever returns."""
     return pr.plan_refresh(SESSION, events=_events([("AAA", SESSION)]),
-                           price_universe=[], fetch_times=times)
+                           price_universe=[],
+                           fetch_history={"AAA": [date(2026, 9, 14)]}
+                           if history is None else history,
+                           fetch_times=times)
 
 
 class _QueueAdapter:
@@ -157,6 +165,17 @@ def test_coverage_is_strictly_after_close_plus_buffer():
     assert one_microsecond_later["skipped_already_fetched"] == ["AAA"]
 
 
+def test_a_fetch_the_morning_after_covers_the_prior_session():
+    """The rule compares the stamp to the cutoff, not to the session's day:
+    session Mon 2026-09-14 (cutoff 20:30Z) and a Tue 2026-09-15 09:00 ET
+    fetch (13:00Z) — the next morning — is past Monday's close plus buffer,
+    so it excuses the session."""
+    plan = _plan({"AAA": [pd.Timestamp("2026-09-15T09:00:00", tz="America/New_York")]})
+    assert plan["skipped_already_fetched"] == ["AAA"]
+    assert plan["daily"] == []
+    assert plan["monthly"] == []
+
+
 @pytest.mark.parametrize("value", ["garbage", None, pd.Timestamp("2026-09-14 21:00")])
 def test_a_stamp_that_is_not_a_tz_aware_instant_is_ignored_never_raises(value):
     """Only a tz-aware ``pd.Timestamp``/``datetime`` has a side of the
@@ -208,6 +227,22 @@ def test_a_monday_holiday_session_is_covered_by_friday_post_close():
     plan = pr.plan_refresh("2026-09-08", events=_events([("AAA", "2026-09-04")]),
                            price_universe=[], fetch_times=times)
     assert plan["daily"] == ["AAA"]
+
+
+@pytest.mark.parametrize("saturday_utc", ["00:15", "08:00", "13:00", "23:45"])
+def test_any_saturday_hour_covers_a_friday_session(saturday_utc):
+    """Session Fri 2026-09-11: cutoff 20:30Z. Every instant of Saturday
+    2026-09-12 — any hour, weekend day or not — is strictly after it, so a
+    Saturday fetch excuses the Friday session, and the Saturday arrival
+    date in fetch_history plays no part on the daily path."""
+    stamp = pd.Timestamp(f"2026-09-12T{saturday_utc}:00+00:00")
+    plan = pr.plan_refresh("2026-09-11", events=_events([("AAA", "2026-09-11")]),
+                           price_universe=[],
+                           fetch_history={"AAA": [date(2026, 9, 12)]},
+                           fetch_times={"AAA": [stamp]})
+    assert plan["skipped_already_fetched"] == ["AAA"]
+    assert plan["daily"] == []
+    assert plan["monthly"] == []
 
 
 def test_coverage_is_daily_only_monthly_keeps_the_month_key():
@@ -341,10 +376,12 @@ def test_invoke_price_refresh_planned_path_plans_daily_on_a_nat_or_empty_stamp(
 
 
 def test_run_refresh_refetches_past_a_cached_premarket_body(fetch_root, monkeypatch):
-    """A pre-market fetch stamps today but predates today's close, so the
-    plan keeps the ticker daily; ``run_refresh``'s token turns that plan into
-    a SECOND real adapter call (the stale body must not be served out of the
-    same-day cache), and the post-close stamp then excuses the next run."""
+    """A pre-market fetch stamps today and lands today's date in
+    ``fetch_history`` — what production passes alongside the times — but it
+    predates today's close, so the plan keeps the ticker daily;
+    ``run_refresh``'s token turns that plan into a SECOND real adapter call
+    (the stale body must not be served out of the same-day cache), and the
+    post-close stamp then excuses the next run."""
     adapter = _QueueAdapter({"AAA": [b"Date,Close\n2026-09-11,100\n",
                                      b"Date,Close\n2026-09-11,100\n2026-09-14,101\n"]})
     fetcher = _fetcher(fetch_root, adapter)
@@ -352,8 +389,10 @@ def test_run_refresh_refetches_past_a_cached_premarket_body(fetch_root, monkeypa
     _freeze(monkeypatch, datetime(2026, 9, 14, 13, 30, tzinfo=timezone.utc))
     assert pr.fetch_one(fetcher, "AAA")["ok"]
     first_times = pr.load_fetch_times(fetch_root=fetch_root)
-    plan = _plan(first_times)
-    assert plan["daily"] == ["AAA"], "the pre-market stamp is not coverage"
+    first_history = pr.load_fetch_history(fetch_root=fetch_root)
+    assert first_history == {"AAA": [date(2026, 9, 14)]}, "the pre-market fetch's own day"
+    plan = _plan(first_times, history=first_history)
+    assert plan["daily"] == ["AAA"], "neither the pre-market stamp nor its same-day date is coverage"
 
     _freeze(monkeypatch, datetime(2026, 9, 14, 20, 45, tzinfo=timezone.utc))
     report = pr.run_refresh(plan, fetcher)
@@ -362,7 +401,8 @@ def test_run_refresh_refetches_past_a_cached_premarket_body(fetch_root, monkeypa
 
     times = pr.load_fetch_times(fetch_root=fetch_root)
     assert len(times["AAA"]) == 2, "append-only: the stale entry is kept beside the fresh"
-    assert _plan(times)["skipped_already_fetched"] == ["AAA"]
+    assert _plan(times, pr.load_fetch_history(fetch_root=fetch_root))[
+        "skipped_already_fetched"] == ["AAA"]
 
 
 def test_two_runs_at_one_frozen_instant_each_spend_their_own_network_call(

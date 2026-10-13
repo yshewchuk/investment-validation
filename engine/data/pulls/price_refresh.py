@@ -273,11 +273,14 @@ def plan_refresh(
         :func:`_regular_market_close` of :func:`_required_daily_bar_date` (the
         latest trading day on or before ``session``; the regular 16:00
         America/New_York close every trading day) plus
-        :data:`COVERAGE_CLOSE_BUFFER`. On a half-day a fetch made before
-        16:30 ET may be refetched (accepted). Anything
-        else — a pre-market or
-        at-the-close fetch, a fetch on the wrong day, no fetch at all — goes
-        on today's daily list. A stamp that is not a tz-aware
+        :data:`COVERAGE_CLOSE_BUFFER` — that one comparison is the whole
+        rule, so a next-morning or weekend fetch, sitting later than the
+        previous session's close plus buffer, covers the session just as a
+        same-evening one does. On a half-day a fetch made before 16:30 ET
+        may be refetched (accepted). Anything stamped at or before the
+        cutoff — a same-day pre-market or at-the-close fetch, an earlier
+        day's fetch, no fetch at all — goes on today's daily list.
+        A stamp that is not a tz-aware
         ``pd.Timestamp``/``datetime`` (a garbage string, ``None``, NaT, a
         naive timestamp) is ignored by the test via :func:`_coverage_stamp`
         and never excuses the session. The body is never read: A bad post-close
