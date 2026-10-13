@@ -792,6 +792,17 @@ second inventory of the same kind.
   `concurrency` group (keyed on the ref/PR) and `cancel-in-progress: true`,
   older runs queue up behind newer ones instead of being cancelled, burning
   CI minutes on a result a newer push already superseded.
+- **Hand-rolling a standard format or tool.** Principle: wrap standard
+  tools; do not hand-roll standard formats. Code here must not parse,
+  validate or lint standard formats (Markdown, YAML, TOML, JSON Schema, CSV
+  dialects, dates and times, URLs, CLI arguments, semver), nor re-implement
+  linters, formatters, retries and backoff, caching, diffing or templating,
+  when a maintained tool or library does it. Use the tool and keep the
+  wrapper thin: configuration plus invocation. Custom code needs a reason
+  stated in the PR Spec: a needed rule no tool has, a private format, or a
+  dependency the repo cannot take. Example: a hand-written Markdown parser
+  took about 30 review rounds on CommonMark edge cases where wrapping
+  markdownlint would not have.
 
 ## 7. Writing an architecture-doc update
 
