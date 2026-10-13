@@ -211,6 +211,8 @@ def test_source_or_output_reference_drift_refuses_before_feature_payload(source,
     _, output = _build(source)
     monkeypatch.setattr(stored, "_scan", _forbid)
     with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
+        entry.build(source.repository, replace(source.snapshot, calendar_version="changed"), **REQUEST)
+    with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
         entry.read(source.repository, replace(source.snapshot, calendar_version="changed"), output, **REQUEST)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         _read(source, replace(output, manifest_hash="sha256:" + "a" * 64))
@@ -420,6 +422,23 @@ def test_replay_after_head_moves_returns_original_artifact_without_head_effect(s
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
+def test_replay_reverifies_tampered_stored_artifact_without_rebuild_or_publication(source, monkeypatch):
+    _, output = _build(source)
+    record = source.repository.fragment_records(output, TABLE)[0]
+    path = objects.verify_object_path(source.store, record.object_ref)
+    path.chmod(0o644)
+    with path.open("ab") as handle:
+        handle.write(b"x")  # Changed size invalidates the native checksum cache.
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    monkeypatch.setattr(stored, "_prepare_history", _forbid)
+    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
+    monkeypatch.setattr(catalog, "commit_snapshot", _forbid)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(DataError, match="OBJECT_CORRUPT"):
+        _build(source)
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
 def _cli_args(source):
     return ["--catalog", str(source.root / "catalog.sqlite"), "--store-root", str(source.store.root),
         "--source-snapshot-id", source.snapshot.snapshot_id, "--as-of-month", REQUEST["as_of_month"],
@@ -524,23 +543,52 @@ def test_cli_event_subset_build_and_read_keep_full_eligible_history(source, monk
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
-def test_cli_missing_store_refuses_source_admission_without_initializing_it(source, capsys, action):
-    _, output = _build(source)
-    missing = source.root / "missing-store"
+@pytest.mark.parametrize("kind", ["missing", "nested_missing", "file"])
+def test_cli_invalid_store_root_refuses_before_bootstrap_or_store_construction(
+        source, monkeypatch, capsys, action, kind):
+    root = source.root / "invalid-store-root"
+    if kind == "nested_missing":
+        root = root / "objects"
+    if kind == "file":
+        root.write_text("synthetic non-directory store path")
     args = _cli_args(source)
-    args[3] = str(missing)
+    args[3] = str(root)
     if action == "read":
-        args += ["--feature-snapshot-id", output.snapshot_id]
+        args += ["--feature-snapshot-id", "unused"]
+    monkeypatch.setattr(entry, "_execute", _forbid)
+    monkeypatch.setattr(entry, "open_catalog", _forbid)
+    monkeypatch.setattr(entry, "ArtifactStore", _forbid)
     before = _catalog(source.conn), _objects(source.store)
     assert entry.main([action, *args]) == 2
-    refusal = json.loads(capsys.readouterr().out)
-    assert refusal["refused"] == "OBJECT_CORRUPT" and set(refusal) == {"refused", "message"}
-    assert not missing.exists()
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"refused": "UNSAFE_PATH"} and captured.err == ""
+    assert root.exists() == (kind == "file")
+    if kind == "nested_missing":
+        assert not root.parent.exists()
+    if kind == "file":
+        assert root.read_text() == "synthetic non-directory store path"
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
-@pytest.mark.parametrize("fault", ["stat_os", "open_os", "open_sqlite", "store_os", "store_artifact"])
+def test_cli_existing_empty_store_reaches_native_object_admission(source, capsys, action):
+    _, output = _build(source)
+    root = source.root / "empty-store"
+    root.mkdir()
+    args = _cli_args(source)
+    args[3] = str(root)
+    if action == "read":
+        args += ["--feature-snapshot-id", output.snapshot_id]
+    before = _catalog(source.conn), _objects(source.store)
+    assert entry.main([action, *args]) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["refused"] == "OBJECT_CORRUPT" and captured.err == ""
+    assert list(root.iterdir()) == []
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+@pytest.mark.parametrize("action", ["build", "read"])
+@pytest.mark.parametrize("fault", ["stat_os", "store_stat_os", "open_os", "open_sqlite", "store_os", "store_artifact"])
 def test_cli_raw_local_failures_are_redacted_and_close_open_catalogs(source, monkeypatch, capsys, action, fault):
     args = _cli_args(source)
     if action == "read":
@@ -561,6 +609,10 @@ def test_cli_raw_local_failures_are_redacted_and_close_open_catalogs(source, mon
     if fault == "stat_os":
         monkeypatch.setattr(entry, "Path", lambda path: SimpleNamespace(is_file=fail))
         monkeypatch.setattr(entry, "open_catalog", _forbid)
+    elif fault == "store_stat_os":
+        monkeypatch.setattr(entry, "Path", lambda path: SimpleNamespace(is_file=lambda: True, is_dir=fail))
+        monkeypatch.setattr(entry, "open_catalog", _forbid)
+        monkeypatch.setattr(entry, "ArtifactStore", _forbid)
     elif fault == "open_os":
         monkeypatch.setattr(entry, "open_catalog", fail)
         monkeypatch.setattr(entry, "ArtifactStore", _forbid)
@@ -578,7 +630,7 @@ def test_cli_raw_local_failures_are_redacted_and_close_open_catalogs(source, mon
     expected = "UNSAFE_PATH" if fault == "store_artifact" else "INPUT_CHANGED"
     assert json.loads(captured.out) == {"refused": expected} and captured.err == ""
     assert (_catalog(source.conn), _objects(source.store)) == before
-    assert len(opened) == (1 if fault.startswith("store_") else 0)
+    assert len(opened) == (1 if fault in ("store_os", "store_artifact") else 0)
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             conn.execute("SELECT 1")

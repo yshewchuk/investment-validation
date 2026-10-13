@@ -109,8 +109,9 @@ Existing publication/transaction/retry semantics above apply unchanged.
 ## Stored research-history entrypoint
 
 `python -m experiments.magnitude_history_store build|read` requires an existing catalog file.
-Other inputs are the artifact-store path, exact source snapshot, holdout month, evaluation years, training
-start and history start (on/before every forecast ceiling). `read` also requires the exact feature snapshot.
+Other inputs are an existing artifact-store directory, exact source snapshot, holdout month, evaluation years,
+training start, history start (on/before every forecast ceiling) and optional repeatable `--event-id`.
+`read` also requires the exact feature snapshot.
 The entrypoint fingerprints its installed source closure and numerical environment;
 callers cannot submit features, a context document or an alternative producer.
 Research owns the native contract, protected build and stored-only reader; ops
@@ -118,7 +119,8 @@ supplies existing bootstrap/fingerprinting, with no peer-layer import added.
 The CLI uses `engine.v2.data` Repository/errors and foundation ArtifactStore/errors/clock.
 Build returns the source/context/output identities; read returns stored rows.
 Both actions run shared catalog bootstrap/migrations; stored-only describes feature consumption.
-The artifact-store constructor does not require an existing root; native object admission checks source contents.
+Before bootstrap or ArtifactStore construction, a missing/non-directory store root refuses `UNSAFE_PATH`.
+Native object admission then checks source contents; the CLI never initializes a missing root.
 Both are explicit local operations, never implicit provider downloads or model
 runs. Data/ops failures retain code/message; artifact failures retain only their
 code. Raw local OS/SQLite failures produce `INPUT_CHANGED` without exception text.

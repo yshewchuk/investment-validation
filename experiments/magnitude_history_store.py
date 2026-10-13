@@ -64,6 +64,8 @@ def main(argv=None):
     try:
         if not Path(args.catalog).is_file():
             parser.error("--catalog must name an existing native catalog file")
+        if not Path(args.store_root).is_dir():
+            raise ArtifactError("UNSAFE_PATH", "store root must be an existing directory")
         result = _execute(args)
     except (DataError, OpsError) as exc:
         print(json.dumps({"refused": exc.code, "message": str(exc)}, sort_keys=True))
