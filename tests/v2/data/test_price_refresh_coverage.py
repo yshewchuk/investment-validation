@@ -9,9 +9,9 @@ fetch made before 16:30 ET may be refetched (accepted
 harmless extra refetch). A pre-market fetch lands on the session's date but
 predates its close (the 2026-10-12 defect), so it never excuses the session.
 Bodies are never parsed on this path: capture is responsible for failing
-loudly, and a bad post-close response is not retried by further runs
-targeting the same session; the first run targeting a later session refetches
-it (accepted trade-off, 2026-10-13 simplification decision). Store-level fixtures write
+loudly. A bad post-close response is not retried until a run targets a session
+whose close (plus the buffer) is later than that fetch; that run refetches it.
+Store-level fixtures write
 into a real ``Fetcher`` over a throwaway root through a fake yfinance adapter,
 stamping arrival by freezing the clock or writing the sidecar meta directly.
 """
@@ -229,9 +229,9 @@ def test_a_ticker_whose_only_stamps_are_unreadable_is_daily(fetch_root):
 def test_a_post_close_stamp_covers_even_when_the_body_is_garbage(fetch_root):
     """The accepted trade-off, pinned: coverage never opens the body, so a
     truncated response stamped after the close counts as covered — capture
-    is responsible for failing loudly, and this response is not retried by
-    further runs targeting the same session; the first run targeting a later
-    session refetches it."""
+    is responsible for failing loudly. A bad post-close response is not
+    retried until a run targets a session whose close (plus the buffer) is
+    later than that fetch; that run refetches it."""
     directory = Path(fetch_root) / "yfinance" / "gb"
     directory.mkdir(parents=True)
     (directory / "gb.body.gz").write_bytes(b"this is not even gzip")

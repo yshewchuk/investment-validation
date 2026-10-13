@@ -318,9 +318,9 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     # cached fetch's own ``fetched_at`` post-dates the required trading day's
     # regular 16:00 ET close plus the coverage buffer (a half-day fetch made
     # before 16:30 ET may be refetched, accepted). A bad post-close
-    # response is not retried by further runs targeting the same session;
-    # the first run targeting a later session refetches it -- capture is
-    # responsible for failing loudly (accepted trade-off). The
+    # response is not retried until a run targets a session whose close
+    # (plus the buffer) is later than that fetch; that run refetches it.
+    # Capture is responsible for failing loudly. The
     # loader reads fetch metadata only -- no body parsing anywhere on this
     # path.
     fetch_root = None
