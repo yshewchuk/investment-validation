@@ -52,9 +52,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 _FENCE = re.compile(r"^( *(?:(?:[-*+]|\d+[.)]) +)?)(`{3,}|~{3,})(.*)$")  # optional list-marker prefix
-# A closer has no list-marker prefix and nothing after the fence run; its indent
-# is checked against the opener's in lint_text (CommonMark: 0-3 spaces relative
-# to the container the fence opened in).
+# A closer has no list-marker prefix and nothing after the fence run. Its indent
+# is checked against the opener's in lint_text: at most 3 more than the opener's
+# (CommonMark: 0-3 spaces relative to the container), and, for a fence inside a
+# list item, not less than the opener's own indent -- a less-indented line leaves
+# the list item, so it does not close the fence and the fence is reported unclosed.
 _CLOSER = re.compile(r"^( *)(`{3,}|~{3,})[ \t]*$")
 _HEADING = re.compile(r"^#{1,6}(\s|$)")
 _LIST_ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
@@ -103,7 +105,8 @@ def lint_text(text: str) -> list[Violation]:
     def blank(i: int) -> bool:
         return i < 0 or i >= n or not lines[i].strip()
 
-    fence = None  # (char, length, indent, opening 1-based line)
+    fence = None  # (char, length, indent, opening 1-based line, min closer indent)
+    in_list = False  # last column-0 line seen outside fences was a list item
     i = 0
     while i < n:
         s = lines[i]
@@ -113,18 +116,30 @@ def lint_text(text: str) -> list[Violation]:
         if fence:
             c = _CLOSER.match(s)
             if (c and c.group(2)[0] == fence[0] and len(c.group(2)) >= fence[1]
-                    and len(c.group(1)) <= fence[2] + 3):
+                    and fence[4] <= len(c.group(1)) <= fence[2] + 3):
                 if fence[2] == 0 and not blank(i + 1):
                     found.append(Violation(i + 1, i + 2, "fence-after"))
                 fence = None
             i += 1
             continue
-        if m:
-            fence = (m.group(2)[0], len(m.group(2)), len(m.group(1)), i + 1)
+        if m and (m.group(1).strip() or len(m.group(1)) < 4 or in_list):
+            # (else: 4+ spaces outside a list is an indented code block, not a fence)
+            # Inside a list item (marker on this line, or an earlier list item with
+            # no column-0 text since) the closer may not be less indented than the
+            # opener; at top level any indent from 0 is fine.
+            in_item = bool(m.group(1).strip()) or in_list
+            if m.group(1).strip():
+                in_list = True
+            fence = (m.group(2)[0], len(m.group(2)), len(m.group(1)), i + 1,
+                     len(m.group(1)) if in_item else 0)
             if not m.group(1) and not blank(i - 1):
                 found.append(Violation(i + 1, i, "fence-before"))
             i += 1
             continue
+        if _LIST_ITEM.match(s):
+            in_list = True
+        elif s.strip() and not s[:1].isspace():
+            in_list = False
         if _HEADING.match(s):
             if not blank(i - 1):
                 found.append(Violation(i + 1, i, "heading-before"))

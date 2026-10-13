@@ -262,6 +262,36 @@ def test_known_limit_cell_count_paragraph_under_pipeless_header_is_a_row():
     assert rules("a | b\n--|--\n1 | 2\nuse a | b here\n") == []
 
 
+def test_closer_less_indented_than_a_list_item_opener_does_not_close():
+    found = ms.lint_text("- item\n  ```\n  code\n```\nafter\n")
+    assert [(v.line, v.rule) for v in found] == [(2, "fence-unclosed")]
+    # Same indent as the opener closes it.
+    assert rules("- item\n  ```\n  code\n  ```\n\nafter\n") == []
+    # A marker-line opener (content column 2) behaves the same.
+    found = ms.lint_text("- ```\n  code\n```\nafter\n")
+    assert [v.rule for v in found] == ["fence-unclosed"]
+
+
+def test_gfm_fence_rules_matrix():
+    # Opener indent 1-3 spaces at top level: a column-0 closer is valid.
+    assert rules("a\n\n   ```\ncode\n```\n\nb\n") == []
+    assert rules("- item\n\ntext\n\n   ```\ncode\n```\n\nb\n") == []
+    # 4+ spaces outside a list is an indented code block, not a fence.
+    assert rules("a\n\n    ```\n    x\n\nb\n") == []
+    # Closer needs at least the opener's length and the same character.
+    assert [v.rule for v in ms.lint_text("a\n\n````\ncode\n```\n")] == ["fence-unclosed"]
+    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n~~~\n")] == ["fence-unclosed"]
+    assert rules("a\n\n```\ncode\n`````\n\nb\n") == []
+    # An info string is allowed on the opener only.
+    assert rules("a\n\n```python\ncode\n```\n\nb\n") == []
+    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n```python\n")] == ["fence-unclosed"]
+    # A tilde opener's info string may contain backticks.
+    assert rules("a\n\n~~~ a`b\ncode\n~~~\n\nb\n") == []
+    # Closer indent is at most 3 beyond the opener's.
+    assert rules("a\n\n```\ncode\n   ```\n\nb\n") == []
+    assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n    ```\n")] == ["fence-unclosed"]
+
+
 def test_blockquoted_fence_is_not_checked():
     assert rules("> ```\n> # x\n") == []
 

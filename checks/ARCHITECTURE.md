@@ -37,8 +37,10 @@ rendering defect; the other blank-line rules are house style that keeps diffs
 and other renderers safe. An ATX heading needs a blank line before (unless on line 1) and after (unless last);
 a table needs one before (unless at file start) and after (unless it ends the
 file); an unindented fenced block needs one before and after. Indented
-and list-marker fences are tracked too, and every fence must be closed; only
-unindented fences get the blank-line rule. Blockquoted fences (`> ```)
+and list-marker fences are tracked too, and every fence must be closed (a
+closer needs the opener's character, at least its length, no info string, an
+indent within 3 of the opener's and, inside a list item, not less than it);
+only unindented fences get the blank-line rule. Blockquoted fences (`> ```)
 are not checked. Fenced content is never
 scanned as headings or tables. There is no list rule, and list content is
 skipped for the heading and table rules: only column-0 headings and tables are
