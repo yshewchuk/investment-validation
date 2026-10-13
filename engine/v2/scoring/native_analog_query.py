@@ -23,7 +23,7 @@ BOOTSTRAP_DRAWS = 2000
 CI_QUANTILES = (0.05, 0.95)
 
 
-def _number(value: Any) -> float | None:
+def _finite_or_none(value: Any) -> float | None:
     """``value`` as a finite float, or ``None`` (bool and non-numbers are None)."""
     if isinstance(value, bool):
         return None
@@ -48,15 +48,15 @@ def analog_query_base(panel_row: Mapping[str, Any]) -> dict[str, Any]:
     ``im / mean_prior_or_implied`` when both are finite and the divisor is
     non-zero, else ``None``.
     """
-    log = _number(panel_row.get("mcap_log"))
+    log = _finite_or_none(panel_row.get("mcap_log"))
     mcap = None
     if log is not None:
         try:
             mcap = exp(log)
         except OverflowError:
             mcap = None
-    implied = _number(panel_row.get("im"))
-    prior = _number(panel_row.get("mean_prior_or_implied"))
+    implied = _finite_or_none(panel_row.get("im"))
+    prior = _finite_or_none(panel_row.get("mean_prior_or_implied"))
     ratio = implied / prior if implied is not None and prior else None
     return {"mcap_bucket": _label(mcap, MCAP_EDGES, MCAP_LABELS),
             "implied_ratio": ratio if ratio is not None and isfinite(ratio) else None}
@@ -74,13 +74,13 @@ def complete_analog_query(query: Any, values: Mapping[str, Any]) -> Any:
         return query
     out = dict(query)
     if "dte_band" not in out:
-        dte = _number(values.get("dte_entry"))
+        dte = _finite_or_none(values.get("dte_entry"))
         out["dte_band"] = next(
             (label for (low, high), label in zip(DTE_BANDS, DTE_LABELS)
              if dte is not None and low <= dte <= high), None)
     if "moneyness_band" not in out:
-        strike = _number(values.get("strike"))
-        spot = _number(values.get("spot"))
+        strike = _finite_or_none(values.get("strike"))
+        spot = _finite_or_none(values.get("spot"))
         usable = strike is not None and spot is not None and strike > 0 and spot > 0
         pct = abs(strike / spot - 1.0) * 100.0 if usable else None
         out["moneyness_band"] = _label(pct, MONEYNESS_EDGES, MONEYNESS_LABELS)
