@@ -103,6 +103,36 @@ def test_complete_query_moneyness_band(strike, band):
     assert out["moneyness_band"] == band
 
 
+@pytest.mark.parametrize(
+    ("im", "prior", "ratio"),
+    [(0.09, 0.06, 1.5), (0.04, 0.08, 0.5), (0.12, 0.03, 4.0)],
+)
+def test_query_base_implied_ratio_is_im_over_prior(im, prior, ratio):
+    # Distinct ratios, none equal to 1.2 or its inverse: im/prior, not prior/im.
+    got = analog_query_base({"im": im, "mean_prior_or_implied": prior})
+    assert got["implied_ratio"] == pytest.approx(ratio)
+
+
+@pytest.mark.parametrize(
+    ("spot", "strike", "band"),
+    [
+        (250.0, 254.9, "ATM"),
+        (250.0, 255.0, "2-5%"),
+        (250.0, 245.0, "2-5%"),
+        (250.0, 262.4, "2-5%"),
+        (250.0, 262.5, ">5%"),
+        (250.0, 237.0, ">5%"),
+        (50.0, 100.0, ">5%"),
+        (50.0, 50.5, "ATM"),
+    ],
+)
+def test_complete_query_moneyness_is_relative_to_spot(spot, strike, band):
+    # Spots other than 100: a distance-from-100 or absolute-dollar rule fails.
+    out = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None},
+                                {"spot": spot, "strike": strike})
+    assert out["moneyness_band"] == band
+
+
 def test_complete_query_zero_spot_is_none():
     out = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None},
                                 {"spot": 0.0, "strike": 100.0})
