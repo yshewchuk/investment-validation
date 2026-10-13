@@ -594,9 +594,9 @@ Root doc §5 invariants this package is responsible for:
   `ops price-refresh` schedules it daily (a daily ticker is skipped only if a
   cached fetch was stamped after the required trading day's regular 16:00 ET
   close — every trading day uses it; on half-days a fetch made before 16:30
-  ET may be refetched (accepted) — plus a 30-minute buffer; a bad or
-  truncated post-close response is NOT retried until the next session's
-  close (same-session and weekend reruns treat it as covered; accepted
+  ET may be refetched (accepted) — plus a 30-minute buffer; a bad
+  post-close response is not retried by further runs targeting the same
+  session; the first run targeting a later session refetches it (accepted
   trade-off — capture is responsible for failing loudly)), and
   `ops price-history capture` refuses `SOURCE_NOT_FOUND`
   (details name the ticker) before writing any fragment unless it has a live

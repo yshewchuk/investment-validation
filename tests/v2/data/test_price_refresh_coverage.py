@@ -9,9 +9,9 @@ fetch made before 16:30 ET may be refetched (accepted
 harmless extra refetch). A pre-market fetch lands on the session's date but
 predates its close (the 2026-10-12 defect), so it never excuses the session.
 Bodies are never parsed on this path: capture is responsible for failing
-loudly, and a bad or truncated post-close response is NOT retried until the
-next session's close — same-session and weekend reruns treat it as covered
-(accepted trade-off, 2026-10-13 simplification decision). Store-level fixtures write
+loudly, and a bad post-close response is not retried by further runs
+targeting the same session; the first run targeting a later session refetches
+it (accepted trade-off, 2026-10-13 simplification decision). Store-level fixtures write
 into a real ``Fetcher`` over a throwaway root through a fake yfinance adapter,
 stamping arrival by freezing the clock or writing the sidecar meta directly.
 """
@@ -229,8 +229,9 @@ def test_a_ticker_whose_only_stamps_are_unreadable_is_daily(fetch_root):
 def test_a_post_close_stamp_covers_even_when_the_body_is_garbage(fetch_root):
     """The accepted trade-off, pinned: coverage never opens the body, so a
     truncated response stamped after the close counts as covered — capture
-    is responsible for failing loudly, and this response is NOT retried
-    until the next session's close."""
+    is responsible for failing loudly, and this response is not retried by
+    further runs targeting the same session; the first run targeting a later
+    session refetches it."""
     directory = Path(fetch_root) / "yfinance" / "gb"
     directory.mkdir(parents=True)
     (directory / "gb.body.gz").write_bytes(b"this is not even gzip")
@@ -245,6 +246,15 @@ def test_a_post_close_stamp_covers_even_when_the_body_is_garbage(fetch_root):
 # --------------------------------------------------------------------------
 # production entry point: one unreadable stamp never aborts the plan
 # --------------------------------------------------------------------------
+
+
+def test_load_fetch_history_returns_the_good_date_and_skips_the_bad_stamp(fetch_root):
+    """One garbage ``fetched_at`` for a ticker must not abort monthly
+    planning: ``load_fetch_history`` keeps the ticker's valid date and does
+    not raise."""
+    _write_raw_fetch(fetch_root, "AAA", key="k-good", fetched_at=POST_CLOSE_STAMP)
+    _write_raw_fetch(fetch_root, "AAA", key="k-garbage", fetched_at="garbage")
+    assert pr.load_fetch_history(fetch_root=fetch_root) == {"AAA": [date(2026, 9, 14)]}
 
 
 def test_invoke_price_refresh_planned_path_survives_an_unparseable_stamp(tmp_path):

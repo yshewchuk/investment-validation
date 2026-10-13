@@ -35,9 +35,9 @@ A pre-market fetch lands on the session's date but its last bar is yesterday's
 close, so stamping alone was never coverage until the close-time test was
 added (the 2026-10-12 defect); reading bodies to re-derive bar coverage was
 dropped as over-engineering (the 2026-10-13 simplification decision) — a bad
-or truncated post-close response is NOT retried until the next session's
-close (same-session and weekend reruns treat it as covered); this is the
-accepted trade-off, and capture is responsible for failing loudly. And when
+post-close response is not retried by further runs targeting the same session;
+the first run targeting a later session refetches it; this is the accepted
+trade-off, and capture is responsible for failing loudly. And when
 the plan *does* ask
 for the session, :func:`run_refresh` gives each daily call a fresh
 ``refetch_token`` — today's cached body is a known-stale answer, so the token
@@ -255,10 +255,10 @@ def plan_refresh(
         16:30 ET may be refetched (accepted). Anything
         else — a pre-market or
         at-the-close fetch, a fetch on the wrong day, no fetch at all — goes
-        on today's daily list. The body is never read: a bad or truncated
-        post-close response is NOT retried until the next session's close
-        (same-session and weekend reruns treat it as covered — the accepted
-        trade-off; capture is responsible for failing loudly), and unknown
+        on today's daily list. The body is never read: a bad post-close
+        response is not retried by further runs targeting the same session;
+        the first run targeting a later session refetches it (the accepted
+        trade-off; capture is responsible for failing loudly). Unknown
         is never coverage, which can only lengthen the daily list, never
         shorten it.
     always_daily:
@@ -506,9 +506,9 @@ def load_fetch_times(*, fetch_root=None) -> dict[str, list[pd.Timestamp]]:
     raising, and a NaT stamp has no side of any cutoff, so it is skipped
     exactly like a garbage one.
     The body is never opened — bar validity is capture's job, which fails
-    loudly there; a bad or truncated post-close response is NOT retried
-    until the next session's close (same-session and weekend reruns treat
-    it as covered — the accepted trade-off).
+    loudly there; a bad post-close response is not retried by further runs
+    targeting the same session; the first run targeting a later session
+    refetches it (the accepted trade-off).
 
     ``fetch_root`` defaults to ``engine.paths.RAW_FETCH`` and exists only so
     tests can point this at a throwaway tree.
