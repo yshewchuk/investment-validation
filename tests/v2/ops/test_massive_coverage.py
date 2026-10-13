@@ -702,6 +702,27 @@ def test_interval_planning_cli_is_readonly_clipped_gap_aware_and_legacy_compatib
     assert "MASSIVE_API_KEY" not in captured.out + legacy.out
 
 
+@pytest.mark.parametrize("cap", [1, 7, 100])
+def test_planner_http_cap_counts_only_units_with_gaps(harness, capsys, cap):
+    h = harness
+    acquire(h, "covered-daily", fetch=fetching([]))
+    before = tuple(h.conn.iterdump())
+    args = ["--catalog", str(h.root / "ops.sqlite"), "--store-root", str(h.store.root),
+            "--ticker", "SYNTH", "--start", "2026-08-01", "--end", "2026-08-31",
+            "--as-of", "2026-09-12", "--adjustment", "raw", "--max-calls-per-request", str(cap),
+            "--generation", "initial"]
+    assert plan_cli._main(args) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    result = json.loads(captured.out)
+    scoped = {p["request"]["dataset"]: p for p in result["plans"]}
+    assert scoped["daily"]["gaps"] == []
+    assert scoped["splits"]["gaps"] == [request(dataset="splits")]
+    assert scoped["dividends"]["gaps"] == [request(dataset="dividends")]
+    assert result["maximum_http_attempts"] == 2 * cap
+    assert tuple(h.conn.iterdump()) == before
+
+
 @pytest.mark.parametrize("generation", ["initial", "refresh"])
 @pytest.mark.parametrize("observed,end", [
     ("2026-09-12T02:00:00+00:00", "2026-09-11"),

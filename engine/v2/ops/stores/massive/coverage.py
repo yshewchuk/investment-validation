@@ -48,13 +48,20 @@ def record(conn, document):
     conn.execute("INSERT INTO ops_massive_occurrences VALUES (?,?,?,?,?,?,?,?,?)", values)
 
 
+def _observation(document):
+    observed = parse_timestamp(document["observed_at"])
+    if (format_timestamp(observed) != document["observed_at"]
+            or document["origin"] not in ("raw_reuse", "http_response")
+            or (document["origin"] == "raw_reuse"
+                and document["observed_at"] != document["first_received_at"])):
+        raise ValueError
+    return observed
+
+
 def _raw(conn, store, document, original, remaining):
     try:
         request = document["request"]
-        observed = parse_timestamp(document["observed_at"])
-        if (format_timestamp(observed) != document["observed_at"]
-                or document["origin"] not in ("raw_reuse", "http_response")):
-            raise ValueError
+        observed = _observation(document)
         attempt = conn.execute("SELECT job_id,fence FROM attempts WHERE attempt_id=?",
                                (document["attempt_id"],)).fetchone()
         if attempt is None or tuple(attempt) != (document["job_id"], document["fence"]):
