@@ -71,18 +71,26 @@ def _run_hook(hook, cwd, env=None):
 
 
 @needs_node
-@pytest.mark.parametrize("rule, text, line, marker", CASES)
-def test_config_reports_each_side_of_each_rule(tmp_path, rule, text, line, marker):
-    (tmp_path / "bad.md").write_text(text, encoding="utf-8")
+def test_config_reports_each_side_of_each_rule(tmp_path):
+    expected = []
+    names = []
+    for i, (rule, text, line, marker) in enumerate(CASES):
+        name = f"case{i}_{rule}.md"
+        names.append(name)
+        (tmp_path / name).write_text(text, encoding="utf-8")
+        expected.append((name, line, rule, marker))
     proc = subprocess.run(
-        ["npx", "--yes", _pin(), "--config", str(CONFIG), "bad.md"],
+        ["npx", "--yes", _pin(), "--config", str(CONFIG), *names],
         cwd=tmp_path, capture_output=True, text=True, timeout=300,
     )
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, out
-    rows = [r for r in out.splitlines() if re.match(rf"bad\.md:{line}(:\d+)? {rule}", r)]
-    assert rows, f"{rule} not reported on line {line}:\n{out}"
-    assert any(marker in r for r in rows), f"{rule} {marker} not reported:\n{out}"
+    for name, line, rule, marker in expected:
+        case = f"{name}:{line} {rule}"
+        rows = [r for r in out.splitlines() if re.match(rf"{re.escape(name)}:{line}(:\d+)? {rule}", r)]
+        assert rows, f"{case} not reported in file {name}:\n{out}"
+        if marker:
+            assert any(marker in r for r in rows), f"{case} {marker} not reported:\n{out}"
 
 
 @needs_node
