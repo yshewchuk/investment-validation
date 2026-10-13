@@ -52,7 +52,11 @@ No refusal emits a success artifact or invents whole-scope coverage. Completed g
 | HTTP 429 or unelapsed account eligibility | `RATE_LIMITED`; observed 429 persists source backoff. |
 | Transport error, deadline or server error | `TRANSIENT_SOURCE`; charged attempts remain spent. |
 | Raw size, interval candidate/verification-byte bound, 100-page chain bound or cumulative HTTP cap exceeded | `RESOURCE_LIMIT_EXCEEDED`; no whole-scope result or additional charge. |
-| Corrupt/missing occurrence/page evidence, stored scope validation failure, pre-close cached observation, conflicting occurrence, or omitted accounting | `INTEGRITY_FAILED`; terminal, no HTTP fallback over unusable evidence. |
+| Corrupt/missing occurrence/page metadata, stored scope validation failure, pre-close cached observation, conflicting occurrence, wrong raw-object bytes/type/size, or omitted accounting | `INTEGRITY_FAILED`; terminal, no HTTP fallback over unusable evidence. |
+| Generation-planning CLI: selected raw object or its parent is absent beneath an existing store root | `MISSING`; exit 2 with no plan or catalog mutation. Cache misses do not require a store root. |
+| Generation-planning CLI: selected raw evidence needs an absent/non-directory root or unsafe/unopenable object path | `UNSAFE_PATH`; exit 2 with no plan or catalog mutation. Unlike exact planning, an absent root is not remapped to `MISSING`. |
+| Generation-planning CLI: cached object reference fails the shared manifest decoder after receipt identity checks | `MANIFEST_CORRUPT`; exit 2 with no plan or catalog mutation. |
+| Acquisition worker encounters any raw-store artifact/manifest refusal above | `INTEGRITY_FAILED`; terminal, no HTTP fallback. |
 | Acquired receipt disappears | `INPUT_CHANGED`. |
 | Cancellation / stale or expired attempt | `CANCELLED` / `LEASE_LOST`; no fenced publication. |
 | Catalog/filesystem unavailable, exhausted reservation or conflicting worker timer | `RESOURCE_UNAVAILABLE`. |

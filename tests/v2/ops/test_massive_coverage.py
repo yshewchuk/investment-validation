@@ -575,6 +575,79 @@ def test_invalid_generation_or_call_cap_is_refused_before_submission(harness, ch
     assert harness.conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("mode,code", [("missing_object", "MISSING"),
+    ("absent_root", "UNSAFE_PATH"), ("file_root", "UNSAFE_PATH"), ("symlink_object_parent", "UNSAFE_PATH"),
+    ("corrupt_object", "INTEGRITY_FAILED"), ("manifest", "MANIFEST_CORRUPT")])
+@pytest.mark.parametrize("entrypoint", ["_main", "main"])
+def test_generation_planner_cli_preserves_raw_store_refusals(harness, monkeypatch, capsys, mode, code, entrypoint):
+    h = harness
+    acquire(h, "original")
+    root = h.root / "synthetic-private-store"
+    catalog_path = h.root / "ops.sqlite"
+    if mode in {"missing_object", "corrupt_object"}:
+        digest = json.loads(occurrences(h)[0]["document_json"])["raw_hash"].removeprefix("sha256:")
+        (root / "objects" / digest[:2]).mkdir(parents=True)
+        if mode == "corrupt_object":
+            (root / "objects" / digest[:2] / digest).write_bytes(b"synthetic corruption")
+    elif mode == "file_root":
+        root.write_text("synthetic non-directory")
+    elif mode == "symlink_object_parent":
+        root.mkdir()
+        (root / "objects").symlink_to(h.store.root / "objects", target_is_directory=True)
+    elif mode == "manifest":
+        root = h.store.root
+        catalog_path = h.root / "synthetic-malformed-copy.sqlite"
+        copy = sqlite3.connect(catalog_path)
+        try:
+            h.conn.backup(copy)
+            ref = json.loads(copy.execute("SELECT artifact_ref_json FROM data_raw_receipts").fetchone()[0])
+            ref.pop("object_id")  # Preserve preliminary identity fields; reach the shared decoder.
+            copy.execute("DROP TRIGGER data_raw_receipts_no_update")
+            copy.execute("UPDATE data_raw_receipts SET artifact_ref_json=?", (canonical_json(ref),))
+            copy.commit()
+            malformed_before = tuple(copy.iterdump())
+        finally:
+            copy.close()
+    monkeypatch.setattr(plan_cli, "SystemClock", FakeClock)
+    original = plan_cli.subprocess.run
+    def frozen_worker(command, **kwargs):
+        command = list(command)
+        marker = "from tools.v2_massive_plan import _main; "
+        assert marker in command[-1]
+        command[-1] = command[-1].replace(marker,
+            "import socket; from tests.ops_support import FakeClock; "
+            "from tools import v2_massive_plan as cli; cli.SystemClock = FakeClock; "
+            "socket.socket.connect = lambda *a: (_ for _ in ()).throw(AssertionError('network')); "
+            + marker)
+        return original(command, **kwargs)
+    monkeypatch.setattr(plan_cli.subprocess, "run", frozen_worker)
+    before = tuple(h.conn.iterdump())
+    objects = {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()}
+    args = ["--catalog", str(catalog_path), "--store-root", str(root),
+            "--ticker", "SYNTH", "--start", "2026-08-01", "--end", "2026-08-31",
+            "--as-of", "2026-09-12", "--adjustment", "raw", "--max-calls-per-request", "1",
+            "--generation", "initial"]
+    invoke = getattr(plan_cli, entrypoint)
+    assert invoke(args) == 2
+    captured = capsys.readouterr()
+    assert captured.err == "" and json.loads(captured.out) == {"refused": code, "reason": None}
+    assert str(root) not in captured.out
+    if mode == "manifest":
+        copy = sqlite3.connect(catalog_path)
+        try:
+            assert tuple(copy.iterdump()) == malformed_before
+        finally:
+            copy.close()
+    args[args.index("--catalog") + 1] = str(h.root / "ops.sqlite")
+    args[args.index("--store-root") + 1] = str(h.store.root)
+    assert invoke(args) == 0
+    daily = next(p for p in json.loads(capsys.readouterr().out)["plans"] if p["request"]["dataset"] == "daily")
+    assert len(daily["bindings"]) == 1 and daily["gaps"] == []
+    assert tuple(h.conn.iterdump()) == before
+    assert {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()} == objects
+    assert root.exists() is (mode != "absent_root")
+
+
 @pytest.mark.parametrize("cap", [1, 7, 100])
 def test_history_cli_submits_registered_kind_and_preserves_idempotency(tmp_path, isolated, capsys, cap):
     conn = open_catalog(tmp_path / "catalog.sqlite", clock=FakeClock())
