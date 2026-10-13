@@ -398,11 +398,13 @@ rerun. A run in which no module was measured is GREY (`neutral`); the descriptio
 PR changed, or a module run that failed with a test-failure exit code main does
 not also show. Infra (a `::warning::`, never red): no report, skipped, timeout or
 cancel, signal kill, gremlin ERROR results, an invalid raw report, a failure main
-shows too. Unreadable inputs degrade to warnings; none can produce `success`:
+shows too. Unreadable inputs degrade to warnings; none can produce `success`, and a
+PR-owned failure that is still evidenced (a retained changed-line survivor, or an independent
+test failure) still wins as `failure`:
 an unreadable merged summary, a merge tool error or incomplete run, a missing or
 unreadable PR diff, and unreadable or partly malformed result rows (a missing, null or
 unknown `status`, a non-positive or non-integer `line`, a non-string `module` or `file`)
-all give `neutral`; so does a merged summary that is not a mapping with a mapping `modules`,
+give `neutral` (never `success`) unless a PR-owned failure is evidenced; so does a merged summary that is not a mapping with a mapping `modules`,
 boolean `complete` and `tool_error`, and a list `failure_reasons` (a module entry with a
 missing or mistyped `run_exit_code`, `counts_backend` or `failure_reasons` is infra)
 (survivors cannot be attributed; listed as `attribution_problems`, merge-level reasons as

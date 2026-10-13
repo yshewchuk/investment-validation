@@ -769,7 +769,9 @@ jobs:
           rc=$(cat "$RUNNER_TEMP/gremlin-merge-rc" 2>/dev/null || echo -1)
           if [ "$rc" != 0 ]; then echo "::error::report merge exited $rc"; exit 1; fi
       # PR-owned (red) versus infra (warning) classification of the merged report.
-      # Never fails the step: unreadable inputs degrade to warnings.
+      # Unreadable inputs degrade to warnings and a classified or degraded result never fails
+      # the step; the one exception is an unwritable $GITHUB_OUTPUT file (nonzero after
+      # classification, deliberately loud).
       - name: Classify PR-owned and infra results
         id: classify
         if: always() && needs.plan.outputs.pr_number != ''

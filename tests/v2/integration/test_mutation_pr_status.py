@@ -141,6 +141,23 @@ def test_main_writes_state_and_annotations(tmp_path, capsys):
     assert "::error::a:" in stdout and "::warning::b: timeout or cancelled" in stdout
 
 
+def test_main_defaults_github_output_to_the_env_variable(tmp_path, monkeypatch):
+    d, diff = _write_report(tmp_path, merged(a=mod(), b=mod(run_exit_code=-1)),
+                            [row("a", "engine/v2/a.py", 12)])
+    out = tmp_path / "gh_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    rc = ps.main(["--merged-dir", str(d), "--diff-file", str(diff)])
+    assert rc == 0 and "state=failure\n" in out.read_text()
+
+
+def test_main_without_any_github_output_still_prints_the_verdict(tmp_path, monkeypatch, capsys):
+    d, diff = _write_report(tmp_path, merged(a=mod(), b=mod(run_exit_code=-1)),
+                            [row("a", "engine/v2/a.py", 12)])
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    rc = ps.main(["--merged-dir", str(d), "--diff-file", str(diff)])
+    assert rc == 0 and '"state": "failure"' in capsys.readouterr().out
+
+
 def test_main_reads_baseline_file(tmp_path):
     d, diff = _write_report(tmp_path, merged(a=mod(run_exit_code=1)), [])
     base = tmp_path / "base.json"

@@ -5,9 +5,11 @@ Inputs: the merged ``summary.json`` (+ ``results.jsonl``) written by
 main's last merged ``summary.json``. Output: a JSON verdict on stdout and
 ``state`` / ``description`` lines in ``$GITHUB_OUTPUT``. Only PR-owned problems
 make ``state`` ``failure``; infra problems are ``::warning::`` lines. When no
-module was measured at all, ``state`` is ``neutral`` (the workflow posts it as a
-grey check run, never a pass). This tool
-never exits nonzero for a classified result.
+module was measured at all, ``state`` is ``neutral`` (the workflow posts every
+state, neutral included, as the mutation/pr check run). The exit code is 0 for
+every classified or degraded input; it is nonzero only for argument errors, or
+when the ``--github-output`` file cannot be written (raised after
+classification, so the CI step fails loudly).
 """
 from __future__ import annotations
 
@@ -235,7 +237,8 @@ def _valid_summary(s) -> bool:
     """A merged/baseline summary: a mapping whose ``modules`` is a non-empty mapping
     or whose ``expected_modules`` is a non-empty list -- it measured or planned
     something. ``modules`` must be a mapping (absent, null, a list, ... are invalid)
-    and ``expected_modules``, when present, must be a list; ``complete`` and
+    and ``expected_modules``, when present, must be a list or null (a local merge
+    without a plan writes null); ``complete`` and
     ``tool_error`` must be bools and ``failure_reasons`` a list. An invalid summary is
     never success: ``main`` treats an invalid merged summary as an unavailable
     report (neutral) and drops an invalid baseline."""

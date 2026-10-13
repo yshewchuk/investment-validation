@@ -275,6 +275,20 @@ def test_report_status_script_posts_exactly_the_table_state(tmp_path):
             assert summary == want_summary, (key, summary)
 
 
+def test_classify_step_identity_comes_from_the_triggering_workflow_run():
+    classify = next(s for s in JOBS["report"]["steps"] if s.get("id") == "classify")
+    assert classify["env"]["HEAD_SHA"] == "${{ github.event.workflow_run.head_sha }}"
+    assert classify["env"]["BASE_SHA"] == "${{ needs.plan.outputs.base_sha }}"
+    assert classify["env"]["PR"] == "${{ needs.plan.outputs.pr_number }}"
+    for value in classify["env"].values():
+        assert "github.sha" not in value
+    assert "github.sha" not in classify["run"]
+    report_step = next(s for s in JOBS["report_status"]["steps"]
+                       if str(s.get("name", "")).startswith("Post mutation"))
+    assert report_step["env"]["SHA"] == "${{ github.event.workflow_run.head_sha }}"
+    assert "github.sha" not in report_step["env"]["SHA"]
+
+
 def test_report_status_never_posts_a_commit_status(tmp_path):
     run = _step("report_status", lambda s: str(s.get("name", "")).startswith("Post mutation"))["run"]
     for modules, skipped, classified, report in _report_status_combos():
