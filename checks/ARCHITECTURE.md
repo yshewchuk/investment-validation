@@ -50,7 +50,9 @@ read, so indented lines and list-marker lines are never headings or table
 headers. Known limit: under a pipeless-edge table header, a line with the
 header's cell count is a row by GFM rules and is not flagged. A line that
 starts another block (heading, fence, list item, blockquote, thematic break,
-HTML block) ends a table and is never a row or a header. A table needs
+HTML block) ends a table and is never a row or a header. HTML blocks follow
+CommonMark 4.6 (start conditions 1-7, type 7 not interrupting a paragraph); their
+lines are not scanned as Markdown until the block ends. A table needs
 equal header and delimiter cell counts; unescaped pipes separate cells. Table
 violations are scoped by the whole block (header, delimiter, rows, absorbing
 line), so editing only a delimiter row is caught. Default mode reads

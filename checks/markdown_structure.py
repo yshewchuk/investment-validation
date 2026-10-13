@@ -62,19 +62,58 @@ _HEADING = re.compile(r"^#{1,6}(\s|$)")
 _LIST_ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
 _ITEM = re.compile(r"^( *)([-*+]|\d+[.)])( +|$)")  # any-indent list item line
 _LEAD = re.compile(r"^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?")  # indent + optional list marker
-# A line that starts another block at the top level (indent 0-3): ATX heading,
-# fence, list item, blockquote, thematic break, or a common HTML block opener.
+# A line that starts a non-HTML block at the top level (indent 0-3): ATX heading,
+# fence, list item, blockquote or thematic break.
 _BLOCK_START = re.compile(
     r"^ {0,3}(?:#{1,6}(?:\s|$)|`{3,}|~{3,}|(?:[-*+]|\d{1,9}[.)])(?:\s|$)|>"
-    r"|([-*_])(?:[ \t]*\1){2,}[ \t]*$"
-    r"|<(?:/?(?:div|p|table|ul|ol|li|h[1-6]|details|summary|section|pre|script|style"
-    r"|blockquote|hr)\b|!--|\?|![A-Za-z]|!\[CDATA\[))")
+    r"|([-*_])(?:[ \t]*\1){2,}[ \t]*$)")
+
+# HTML blocks, CommonMark spec 0.31.2 section 4.6. Start conditions 1-7 and the
+# matching end conditions: types 1-5 end at the start-tag/close-tag line itself,
+# types 6 and 7 end at a blank line. Type 7 cannot interrupt a paragraph.
+_HTML_BLOCK_TAGS = (  # start condition 6, copied from the spec
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup"
+    "|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame"
+    "|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu"
+    "|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table"
+    "|tbody|td|tfoot|th|thead|title|tr|track|ul")
+_OPEN_TAG = (r"""<[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*"""
+             r"""(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t]*/?>""")
+_CLOSE_TAG = r"</[A-Za-z][A-Za-z0-9-]*[ \t]*>"
+_HTML_START = (
+    (1, re.compile(r"^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)", re.I)),
+    (2, re.compile(r"^ {0,3}<!--")),
+    (3, re.compile(r"^ {0,3}<\?")),
+    (4, re.compile(r"^ {0,3}<![A-Za-z]")),
+    (5, re.compile(r"^ {0,3}<!\[CDATA\[")),
+    (6, re.compile(r"^ {0,3}</?(?:" + _HTML_BLOCK_TAGS + r")(?:[ \t]|/?>|$)", re.I)),
+    (7, re.compile(r"^ {0,3}(?:" + _OPEN_TAG + "|" + _CLOSE_TAG + r")[ \t]*$")),
+)
+_HTML_END = {
+    1: re.compile(r"</(?:script|pre|style|textarea)>", re.I),
+    2: re.compile(r"-->"),
+    3: re.compile(r"\?>"),
+    4: re.compile(r">"),
+    5: re.compile(r"\]\]>"),
+}
+
+
+def _html_start(line: str, in_paragraph: bool) -> int:
+    """The HTML block start condition (1-7) ``line`` matches, else 0. Type 7
+    cannot interrupt a paragraph, so it is skipped when ``in_paragraph``."""
+    for kind, rx in _HTML_START:
+        if kind == 7 and in_paragraph:
+            continue
+        if rx.match(line):
+            return kind
+    return 0
 
 
 def _starts_block(line: str) -> bool:
-    """Whether ``line`` starts a block other than a paragraph or table row. Used
-    for both the table end and the table-header check, so they cannot disagree."""
-    return bool(_BLOCK_START.match(line))
+    """Whether ``line`` starts a block other than a paragraph or table row (it can
+    interrupt a paragraph). Used for both the table end and the table-header
+    check, so they cannot disagree."""
+    return bool(_BLOCK_START.match(line)) or _html_start(line, in_paragraph=True) > 0
 _DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -157,6 +196,7 @@ def lint_text(text: str) -> list[Violation]:
 
     fence = None  # (char, length, indent, opening 1-based line, container indent)
     items: list[int] = []  # content columns of the open list items, outermost first
+    html = 0  # start condition (1-7) of the HTML block being skipped, else 0
     i = 0
     while i < n:
         s = lines[i]
@@ -174,6 +214,23 @@ def lint_text(text: str) -> list[Violation]:
                 fence = None
             i += 1
             continue
+        if html:
+            if html >= 6 and not s.strip():
+                html = 0  # a blank line ends HTML blocks of type 6 and 7
+            else:
+                # Inside an HTML block nothing is Markdown: no fence, heading or table.
+                if html < 6 and _HTML_END[html].search(s):
+                    html = 0
+                i += 1
+                continue
+        else:
+            kind = _html_start(s, in_paragraph=i > 0 and not blank(i - 1))
+            if kind:
+                if not s[:1].isspace():
+                    items.clear()
+                html = 0 if kind < 6 and _HTML_END[kind].search(s) else kind
+                i += 1
+                continue
         indent = len(m.group(1)) if m else 0
         lead = indent - len(m.group(1).lstrip(" ")) if m else 0
         base = max((x for x in items if x <= lead), default=0)

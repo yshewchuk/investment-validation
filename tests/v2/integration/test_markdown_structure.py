@@ -474,6 +474,82 @@ def test_marker_followed_by_five_or_more_spaces_is_code_not_a_fence():
     assert [v.rule for v in ms.lint_text("-     x\n\n     ```\n     y\n")] == ["fence-unclosed"]
 
 
+def located(text):
+    return sorted((v.rule, v.line) for v in ms.lint_text(text))
+
+
+def test_html_block_type_1_script_pre_style_textarea():
+    # Inside: nothing is Markdown (heading, table, fence). Case-insensitive.
+    assert rules("<pre>\n# h\na | b\n--|--\n```\n</pre>\n") == []
+    assert rules("<PRE>\n```\n</PRE>\n") == []
+    assert rules("<textarea>\n# h\n</textarea>\n") == []
+    assert rules("<script>\n# h\n</script>\n") == []
+    assert rules("<style>\n# h\n</style>\n") == []
+    # Ends at the line containing the closing tag (not at a blank line): the
+    # heading right after is scanned again.
+    assert located("<pre>\n\n# h\n</pre>\n# H\n\nx\n") == [("heading-before", 5)]
+    assert located("<style>x</style>\n# H\n\nx\n") == [("heading-before", 2)]
+
+
+def test_html_block_type_2_comment():
+    assert rules("<!--\n```\n# x\n| a | b |\n|---|---|\n-->\n") == []
+    assert rules("<!--\n```\n-->\n\ntext\n") == []  # no fence-unclosed
+    assert located("<!-- a -->\n# H\n\nx\n") == [("heading-before", 2)]  # same-line end
+    assert located("<!--\n\n# still comment\n-->\n# H\n\nx\n") == [("heading-before", 5)]
+
+
+def test_html_block_type_3_processing_instruction():
+    assert rules("<?php\n# x\n```\n?>\n") == []
+    assert located("<?php ?>\n# H\n\nx\n") == [("heading-before", 2)]
+
+
+def test_html_block_type_4_declaration():
+    assert rules("<!DOCTYPE html\n# x\n```\n>\n") == []
+    assert located("<!DOCTYPE html>\n# H\n\nx\n") == [("heading-before", 2)]
+
+
+def test_html_block_type_5_cdata():
+    assert rules("<![CDATA[\n# x\n```\n]]>\n") == []
+    assert located("<![CDATA[ x ]]>\n# H\n\nx\n") == [("heading-before", 2)]
+
+
+def test_html_block_type_6_block_tags_end_at_a_blank_line():
+    assert rules("<div>\n# x\n```\n| a | b |\n|---|---|\n\n# Real\n\nz\n") == []
+    assert rules("<DIV>\n# x\n\n") == []  # case-insensitive
+    assert rules("</div>\n```\n\nz\n") == []  # a closing tag starts it too
+    assert rules("<search>\n```\n\nz\n") == []  # tag list is the spec's (0.31.2)
+    assert located("<div>\n\n# H\n\nz\n") == []  # the heading after the blank line is fine
+    # It can interrupt a paragraph.
+    assert rules("para\n<div>\n```\n\nz\n") == []
+    # Not in the list: not a block, so the content IS scanned.
+    assert located("<span>x\n# H\n\nz\n") == [("heading-before", 2)]
+
+
+def test_html_block_type_7_lone_tag_cannot_interrupt_a_paragraph():
+    assert rules('a\n\n<custom-tag attr="v">\n# x\n```\n\nz\n') == []
+    assert rules("a\n\n</custom-tag>\n```\n\nz\n") == []
+    # Interrupting a paragraph is not allowed: the heading is scanned.
+    assert located("a\n<span>\n# H\n\nx\n") == [("heading-before", 3)]
+    # Text after the tag: not type 7.
+    assert located("a\n\n<span>text\n# H\n\nx\n") == [("heading-before", 4)]
+
+
+def test_every_html_start_ends_a_table_case_insensitively():
+    head = "a | b\n--|--\n1 | 2\n"
+    for starter in ("<div>x | y", "<DIV>x | y", "<!-- x | y", "<?x | y", "<!DOCTYPE x | y",
+                    "<![CDATA[x | y", "<pre>x | y", "<TABLE>x | y"):
+        assert [(v.rule, v.line) for v in ms.lint_text(head + starter + "\n")] == [("table-after", 4)], starter
+    # Type 7 cannot interrupt a paragraph (a table row), so a lone tag is not a starter.
+    assert ms._starts_block("<custom-tag>") is False
+    assert ms._starts_block("<div>") is True
+
+
+def test_nested_list_closer_uses_the_innermost_container():
+    # Innermost content column 4: a closer at 7 closes, one at 2 does not.
+    assert rules("- a\n  - b\n\n    ```\n    x\n       ```\n") == []
+    assert [v.rule for v in ms.lint_text("- a\n  - b\n\n    ```\n    x\n  ```\n")] == ["fence-unclosed"]
+
+
 def test_blockquoted_fence_is_not_checked():
     assert rules("> ```\n> # x\n") == []
 
