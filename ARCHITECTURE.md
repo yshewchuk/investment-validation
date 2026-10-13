@@ -267,7 +267,7 @@ evidence. See the models and data component contracts.
     `_has_unresolved_import_attempt`'s docstrings, not here.
   - **Mutation PR status** (`tools/mutation_pr_status.py`): the gremlins `report` job
     classifies the merged mutation report by FILE (inputs: the merged `summary.json` and
-    `results.jsonl`, and the PR's changed-file list from `git diff --name-only`). `state` is
+    `results.jsonl`, and the PR's changed-file list from `git diff -z --name-only`, NUL-separated). `state` is
     `failure` for a surviving mutant in a file the PR changed (in a complete, clean report),
     `success` only for a clean measured run of every planned module, and `neutral` for
     everything else, including any malformed or partial report (integrity is checked before

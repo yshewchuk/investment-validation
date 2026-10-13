@@ -382,11 +382,15 @@ The two names, `mutation-mutmut/pr` (commit status) and `mutation/pr` (check run
 are distinct from each other and from the `Tests` check.
 
 **`mutation/pr` (gremlins workflow) has three outcomes**, posted by `report_status`
-as ONE check run (`checks: write`, never a commit status, so a rerun on the same SHA
-supersedes the earlier result; mutmut's status is unchanged). The `report` job's
+as ONE check run (`checks: write`, never a commit status; a rerun on the same SHA adds a
+newer check run of the same name, but an old commit status named `mutation/pr` from the
+earlier workflow is not superseded by a check run and may linger on old heads; mutmut's
+status is unchanged). The `report` job's
 `classify` step runs `tools/mutation_pr_status.py` over the merged report
-(`summary.json`, `results.jsonl`) and the files the PR changed (plain
-`git diff --name-only --no-renames base...head`; attribution is by FILE, no diff parsing):
+(`summary.json`, `results.jsonl`) and the files the PR changed (NUL-separated, from
+`git diff -z --name-only --no-renames base...head`, so tab or quote paths stay literal;
+attribution is by FILE, no diff parsing). A neutral description truncates only its
+reason, so "; not a pass" always survives the 140-character limit:
 
 - **failure (red)**: a surviving mutant in a file the PR changed, in a complete, clean report
   (valid `expected_modules`; every planned module complete, no tool error, no failure reasons,

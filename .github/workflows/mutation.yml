@@ -780,7 +780,7 @@ jobs:
           set -uo pipefail
           args=(--merged-dir merged)
           if git fetch -q --no-tags origin "+refs/pull/$PR/head:refs/remotes/pr/head" \
-              && git -c core.quotepath=off diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > changed_files.txt; then
+              && git diff -z --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > changed_files.txt; then
             args+=(--changed-files changed_files.txt)
           else
             echo "::warning::could not compute the PR's changed files"
@@ -789,8 +789,10 @@ jobs:
 
   report_status:
     # Posts the run's outcome onto the PR's own head commit as ONE check run
-    # named mutation/pr (success, failure or neutral; never a commit status, so
-    # a rerun on the same SHA supersedes the earlier result). This run's own event is `workflow_run`, so `plan`/
+    # named mutation/pr (success, failure or neutral; never a commit status; a rerun on the
+    # same SHA adds a newer check run of the same name, but an OLD commit status named
+    # mutation/pr from the pre-#708 workflow is NOT superseded by a check run and may linger
+    # on old heads). This run's own event is `workflow_run`, so `plan`/
     # `mutate`/`report` only ever show up under the DEFAULT branch's own
     # Actions history -- never on the PR's Checks tab -- and without this
     # job a fully successful (or a failed) run is invisible from the PR
@@ -848,7 +850,8 @@ jobs:
           fi
           # The decision is made above; the check run itself is posted with gh api below.
           # Every state (a grey `neutral` too) is a check run of the same name, so the
-          # latest run of mutation/pr on this SHA is the only one that counts.
+          # latest check run of mutation/pr on this SHA is the one that counts (an old
+          # commit status of that name is a separate result).
           gh api "repos/$REPO/check-runs" \
             -f name="mutation/pr" -f head_sha="$SHA" \
             -f status=completed -f conclusion="$state" \

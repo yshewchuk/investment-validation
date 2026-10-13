@@ -68,7 +68,7 @@ def test_classify_step_wiring():
 
 def test_classify_step_fails_loudly_when_the_classifier_fails(tmp_path):
     script = _classify_step()["run"]
-    funcs = "git() { printf 'a/x.py\\n'; return 0; }\npython() { return 3; }\n"
+    funcs = "git() { printf 'a/x.py\\0'; return 0; }\npython() { return 3; }\n"
     proc = _run_bash(script, {"LOG": str(tmp_path / "log"), "PR": "7",
                               "BASE_SHA": "base1", "HEAD_SHA": "head1"}, funcs, tmp_path)
     assert proc.returncode == 3
@@ -81,7 +81,7 @@ def _run_bash(script: str, env_over: dict, functions: str, cwd: Path) -> subproc
 
 
 GIT_PY_FUNCS = """
-git() { echo "git $*" >> "$LOG"; [ -n "${GIT_FAIL:-}" ] && return 1; if [ -n "${GIT_FAIL_DIFF:-}" ] && [ "$1" = "-c" ]; then echo partial.py; return 1; fi; return 0; }
+git() { echo "git $*" >> "$LOG"; [ -n "${GIT_FAIL:-}" ] && return 1; if [ -n "${GIT_FAIL_DIFF:-}" ] && [ "$1" = "diff" ]; then printf 'partial.py\\0'; return 1; fi; return 0; }
 python() { echo "python" >> "$LOG"; printf 'ARG %s\\n' "$@" >> "$LOG"; return 0; }
 """
 
@@ -93,7 +93,7 @@ def test_classify_script_runs_git_and_the_tool(tmp_path):
     assert proc.returncode == 0
     assert log.read_text().splitlines() == [
         "git fetch -q --no-tags origin +refs/pull/7/head:refs/remotes/pr/head",
-        "git -c core.quotepath=off diff --name-only --no-renames base1...head1",
+        "git diff -z --name-only --no-renames base1...head1",
         "python",
         "ARG tools/mutation_pr_status.py",
         "ARG --merged-dir",
@@ -148,11 +148,11 @@ def test_classify_script_does_not_forward_partial_diff_output(tmp_path):
 
 def test_changed_files_holds_the_two_diff_paths(tmp_path):
     script = _classify_step()["run"]
-    funcs = "git() { if [ \"$1\" = \"-c\" ]; then printf 'a/x.py\\nb/y.py\\n'; fi; return 0; }\npython() { return 0; }\n"
+    funcs = 'git() { if [ "$1" = "diff" ]; then printf \'a/x.py\\0b/y.py\\0\'; fi; return 0; }\npython() { return 0; }\n'
     proc = _run_bash(script, {"LOG": str(tmp_path / "log"), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1"}, funcs, tmp_path)
     assert proc.returncode == 0, proc.stderr
-    content = (tmp_path / "changed_files.txt").read_text().splitlines()
-    assert content == ["a/x.py", "b/y.py"]
+    content = (tmp_path / "changed_files.txt").read_bytes().split(b"\0")
+    assert [c for c in content if c] == [b"a/x.py", b"b/y.py"]
 
 
 def _decision_script() -> str:

@@ -1,7 +1,7 @@
 """Classify a PR's merged gremlins mutation report: failure, success or neutral.
 
 Inputs: ``DIR/summary.json`` + ``DIR/results.jsonl`` and ``--changed-files FILE``
-(one changed repo path per line). Output: JSON ``{"state", "description",
+(NUL-separated changed repo paths, as from ``git diff -z --name-only``). Output: JSON ``{"state", "description",
 "reasons"}``, ``::error::``/``::warning::`` annotations, and ``state=``/
 ``description=`` appended to ``--github-output`` (default env ``$GITHUB_OUTPUT``).
 ``failure`` only for a PR-owned problem (a surviving mutant in a file the PR
@@ -39,6 +39,20 @@ def _list(label: str, items) -> str:
     return f"{label} {', '.join(items[:3])}{', ...' if len(items) > 3 else ''}"
 
 
+_NEUTRAL_PREFIX = "gremlins: not a clean measured run ("
+_NEUTRAL_SUFFIX = "); not a pass"
+
+
+def _neutral_desc(reason: str) -> str:
+    full = f"{_NEUTRAL_PREFIX}{reason}{_NEUTRAL_SUFFIX}"
+    if len(full) <= DESC_MAX:
+        return full
+    room = DESC_MAX - len(_NEUTRAL_PREFIX) - len(_NEUTRAL_SUFFIX) - 3
+    if room < 1:
+        return full[:DESC_MAX - 3] + "..."
+    return f"{_NEUTRAL_PREFIX}{reason[:room]}...{_NEUTRAL_SUFFIX}"
+
+
 def classify(summary, rows, changed) -> dict:
     """Pure verdict ``neutral`` (integrity) first, then ``failure``, then
     ``success``; ``reasons[0]`` sets the neutral description."""
@@ -67,8 +81,8 @@ def classify(summary, rows, changed) -> dict:
     if not changed:
         reasons.append("changed files unavailable")
     if reasons:
-        desc = f"gremlins: not a clean measured run ({reasons[0]}); not a pass"
-        return {"state": "neutral", "description": _cut(desc), "reasons": reasons}
+        return {"state": "neutral", "description": _neutral_desc(reasons[0]),
+                "reasons": reasons}
     hits = [r["file"] for r in rows
             if r["status"] == "survived" and r["file"] in changed]
     # Survivor-red below needs a complete, clean report: complete=True, no tool error, every planned module clean.
@@ -98,8 +112,8 @@ def classify(summary, rows, changed) -> dict:
             else:
                 reasons.append(f"module {name} not clean")
     if reasons:
-        desc = f"gremlins: not a clean measured run ({reasons[0]}); not a pass"
-        return {"state": "neutral", "description": _cut(desc), "reasons": reasons}
+        return {"state": "neutral", "description": _neutral_desc(reasons[0]),
+                "reasons": reasons}
     if hits:
         parts = [f"{len(hits)} " + _list("surviving mutant(s) in", set(hits))]
         desc = "gremlins: PR-owned problem: " + "; ".join(parts)
@@ -137,9 +151,10 @@ def main(argv: list[str] | None = None) -> int:
     changed = None
     if args.changed_files:
         try:
-            changed = ({ln.strip() for ln in
-                        Path(args.changed_files).read_text().splitlines() if ln.strip()} or None)
-        except (OSError, ValueError):
+            parts = Path(args.changed_files).read_bytes().split(b"\0")
+            names = {p.decode("utf-8") for p in parts if p}
+            changed = names or None
+        except (OSError, UnicodeDecodeError):
             changed = None
     verdict = classify(summary, rows, changed)
     for reason in verdict["reasons"]:

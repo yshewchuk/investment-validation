@@ -395,7 +395,7 @@ def _report(tmp_path, summary, rows_lines, changed_lines, subdir="report"):
     if rows_lines is not None:
         (root / "results.jsonl").write_text("".join(x + "\n" for x in rows_lines))
     changed = root / "changed.txt"
-    changed.write_text("".join(x + "\n" for x in changed_lines))
+    changed.write_bytes(b"".join(x.encode() + b"\0" for x in changed_lines))
     out = root / "gh_output"
     return ["--merged-dir", str(root), "--changed-files", str(changed),
             "--github-output", str(out)], out
@@ -455,7 +455,7 @@ def test_cli_invalid_summary_is_neutral(tmp_path, capsys):
     (merged / "summary.json").write_text("{not json")
     (merged / "results.jsonl").write_text("")
     changed = tmp_path / "changed.txt"
-    changed.write_text("engine/v2/a.py\n")
+    changed.write_bytes(b"engine/v2/a.py\0")
     out = tmp_path / "gh_output"
     assert ps.main(["--merged-dir", str(merged), "--changed-files", str(changed),
                     "--github-output", str(out)]) == 0
@@ -476,7 +476,7 @@ def test_cli_missing_summary_is_neutral(tmp_path, capsys):
     merged.mkdir()
     (merged / "results.jsonl").write_text("")
     changed = tmp_path / "changed.txt"
-    changed.write_text("engine/v2/a.py\n")
+    changed.write_bytes(b"engine/v2/a.py\0")
     out = tmp_path / "gh_output"
     assert ps.main(["--merged-dir", str(merged), "--changed-files", str(changed),
                     "--github-output", str(out)]) == 0
@@ -544,7 +544,7 @@ def test_output_defaults_to_the_env_variable(tmp_path, monkeypatch):
     (merged / "summary.json").write_text(json.dumps(clean("a")))
     (merged / "results.jsonl").write_text("")
     changed = tmp_path / "changed.txt"
-    changed.write_text("engine/v2/a.py\n")
+    changed.write_bytes(b"engine/v2/a.py\0")
     out = tmp_path / "gh_output"
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
     assert ps.main(["--merged-dir", str(merged), "--changed-files", str(changed)]) == 0
@@ -563,3 +563,28 @@ def test_unwritable_output_fails_loudly_after_classification(tmp_path, capsys):
     res = subprocess.run([sys.executable, str(ROOT / "tools" / "mutation_pr_status.py")],
                          capture_output=True, text=True)
     assert res.returncode == 2
+
+
+def test_cli_special_characters_in_changed_files(tmp_path, capsys):
+    files = ['engine/v2/we"ird.py', "engine/v2/ta\tb.py"]
+    rows = [json.dumps(row("a", f)) for f in files]
+    argv, out = _report(tmp_path, clean("a"), rows, files)
+    assert ps.main(argv) == 0
+    assert "state=failure\n" in out.read_text()
+    v = _printed_verdict(capsys.readouterr().out)
+    assert v["reasons"][0] == '2 surviving mutant(s) in engine/v2/ta\tb.py, engine/v2/we"ird.py'
+
+
+def test_over_long_module_name_keeps_the_suffix(tmp_path, capsys):
+    name = "m" * 200
+    summary = {"modules": {"b": mod()}, "expected_modules": [name], "complete": True,
+               "tool_error": False, "failure_reasons": []}
+    verdict = ps.classify(summary, [], {"engine/v2/z.py"})
+    assert verdict["state"] == "neutral"
+    assert len(verdict["description"]) <= 140
+    assert verdict["description"].endswith("...); not a pass")
+    argv, out = _report(tmp_path, summary, [], ["engine/v2/z.py"])
+    assert ps.main(argv) == 0
+    v = _printed_verdict(capsys.readouterr().out)
+    assert len(v["description"]) <= 140
+    assert v["description"].endswith("...); not a pass")
