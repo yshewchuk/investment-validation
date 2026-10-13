@@ -73,6 +73,9 @@ leaked outcome/driver/Tier-4-stamp feature name, a panel row naming a
 different event, a caller-declared `panel_anchor` (issue #53: the as-of the
 panel row's market-state values were computed against) that postdates
 `as_of`, or a used feature whose own fold_start postdates `as_of`.
+RUNUP's required `days_before_print` instead comes from its calendar row:
+validated nonnegative session count, retained in context and requested features,
+with no fallback to panel or Tier-4 values. Other strategies are unchanged.
 `quote_domain_map` (extracted from `tools/capture_tier0_corpus.py`'s
 `_quote_map`), `validated_as_of`, and `NightlySourceBundleRefusal` are its
 other real `__all__` exports, all four now declared below even though

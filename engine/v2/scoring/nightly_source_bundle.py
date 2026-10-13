@@ -423,10 +423,11 @@ def _project_features(
     panel_row: Mapping[str, Any],
     feature_names: Sequence[str],
     as_of_ts: pd.Timestamp,
+    calendar_features: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, bool]]:
-    """Project ``feature_names`` from the Tier-4 row, falling back to the panel.
+    """Project calendar-owned features first, then Tier-4 with panel fallback.
 
-    Every resolved value is passed through EXACTLY as staged -- ``None``,
+    Every resolved Tier-4/panel value passes through EXACTLY as staged -- ``None``,
     NaN (Python/NumPy/pandas, any flavor), +/-inf, or a non-numeric string
     included, unmodified and unconverted. Classifying a value as missing vs.
     invalid is the real consumer's job (``FrozenStageExecutor._row``,
@@ -456,10 +457,14 @@ def _project_features(
     """
     feature_vector: dict[str, Any] = {}
     feature_missing_mask: dict[str, bool] = {}
+    calendar_features = calendar_features or {}
     for name in sorted(feature_names):
         if name in _SCORER_COMPUTED_FEATURES:
             continue
-        if name in tier4_row:
+        if name in calendar_features:
+            feature_vector[name] = calendar_features[name]
+            feature_missing_mask[name] = False
+        elif name in tier4_row:
             value = tier4_row[name]
             if not _is_null_forecast_value(value):
                 fold_key = _tier4_fold_start_key(name)
@@ -483,6 +488,25 @@ def _project_features(
         else:
             feature_missing_mask[name] = True
     return feature_vector, feature_missing_mask
+
+
+def _runup_calendar_features(strategy: str, calendar_row: Mapping[str, Any]) -> dict[str, int]:
+    """RUNUP timing is calendar-owned, never a panel/Tier-4 fallback."""
+    if strategy != "STR-RUNUP":
+        return {}
+    value = calendar_row.get("days_before_print", _MISSING)
+    if value is _MISSING:
+        raise NightlySourceBundleRefusal(
+            "MISSING_STAGED_INPUT", "calendar_row is missing days_before_print")
+    try:
+        valid = (not isinstance(value, bool) and isinstance(value, numbers.Real)
+                 and math.isfinite(value) and value >= 0 and value == int(value))
+    except (ValueError, OverflowError):
+        valid = False
+    if not valid:
+        raise NightlySourceBundleRefusal(
+            "INVALID_RUNUP_HORIZON", "days_before_print must be a nonnegative session count")
+    return {"days_before_print": int(value)}
 
 
 def assemble_nightly_source_bundle(
@@ -529,7 +553,9 @@ def assemble_nightly_source_bundle(
     as_of_ts = validated_as_of(as_of, label="as_of")
     _checked_against_as_of(calendar_row, observed, panel_anchor, as_of_ts)
     raw_quotes = quote_domain_map(list(quote_rows), quote_status)
+    calendar_features = _runup_calendar_features(strategy, calendar_row)
     context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
+    context.update(calendar_features)
     if quote_max_age_sessions is not None:
         context["quote_max_age_sessions"] = quote_max_age_sessions
     if observed:
@@ -544,7 +570,7 @@ def assemble_nightly_source_bundle(
         context["quote_date"] = str(min(quote_days).date())
         context["quote_latest_date"] = str(max(quote_days).date())
     feature_vector, feature_missing_mask = _project_features(
-        tier4_row, panel_row, feature_names, as_of_ts)
+        tier4_row, panel_row, feature_names, as_of_ts, calendar_features)
     _reject_answers("context", context)
     _reject_answers("feature_vector", feature_vector)
     return SourceBundle(

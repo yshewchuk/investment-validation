@@ -63,6 +63,8 @@ _ROW_REFUSAL_DETAILS = {
     "EVENT_NOT_FOUND": "no exact calendar event for the board request in the snapshot",
     "IDENTITY_CONFLICT": "multiple exact calendar events for the board request",
     "PRICE_HISTORY_NOT_AVAILABLE": _SPOT_HISTORY_DETAIL,
+    "RUNUP_HORIZON_NOT_AVAILABLE": "the pinned calendar does not cover the RUNUP horizon",
+    "INVALID_RUNUP_HORIZON": "RUNUP entry is after the pre-print close",
 }
 #: The only event refusals the calendar helper may expose as a typed error.
 _EVENT_ERROR_CODES = ("EVENT_NOT_FOUND", "IDENTITY_CONFLICT")
