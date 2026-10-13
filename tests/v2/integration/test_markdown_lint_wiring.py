@@ -217,6 +217,30 @@ def test_hook_with_only_non_markdown_staged_does_not_run_the_linter(tmp_path, mo
     assert "NPX-WAS-RUN" not in proc.stdout + proc.stderr
 
 
+@needs_node
+def test_cli_with_repo_config_reports_a_file_a_deny_all_gitignore_excludes(tmp_path):
+    # The repo's .gitignore is default-deny; config "gitignore": true would skip every doc.
+    (tmp_path / ".gitignore").write_text("*\n", encoding="utf-8")
+    (tmp_path / "bad.md").write_text("intro\n# Heading\ntext\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["npx", "--yes", _pin(), "--config", str(CONFIG), "bad.md"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "MD022" in proc.stdout + proc.stderr
+
+
+@needs_node
+def test_hook_reports_a_tracked_file_that_a_deny_all_gitignore_matches(tmp_path, monkeypatch):
+    hook = _hook_repo(tmp_path, monkeypatch)
+    (tmp_path / ".gitignore").write_text("*\n", encoding="utf-8")
+    (tmp_path / "bad.md").write_text("intro\n# Heading\ntext\n", encoding="utf-8")
+    _git(tmp_path, "add", "-f", "bad.md")
+    proc = _run_hook(hook, tmp_path)
+    assert proc.returncode != 0
+    assert "MD022" in proc.stdout + proc.stderr
+
+
 def test_hook_fails_closed_without_npx(tmp_path, monkeypatch):
     hook = _hook_repo(tmp_path, monkeypatch)
     (tmp_path / "ok.md").write_text("# Heading\n\ntext\n", encoding="utf-8")
