@@ -202,7 +202,22 @@ def lint_text(text: str) -> list[Violation]:
     fence = None  # (char, length, indent, opening 1-based line, container indent)
     items: list[int] = []  # content columns of the open list items, outermost first
     html = 0  # start condition (1-7) of the HTML block being skipped, else 0
+    html_col = 0  # content column of the list item that HTML block opened in, else 0
     para = False  # the last line processed is paragraph text (what type 7 cannot interrupt)
+
+    def item_col(line: str) -> int:
+        """Content column of the list item ``line`` starts, else 0. A marker indented
+        4+ columns beyond its container is indented code or a paragraph continuation,
+        not an item; with no text or 5+ spaces after the marker the column is marker + 1."""
+        it = _ITEM.match(line)
+        if not it:
+            return 0
+        lead = len(it.group(1))
+        if lead - max((x for x in items if x <= lead), default=0) >= 4:
+            return 0
+        width, gap = lead + len(it.group(2)), len(it.group(3))
+        return width + gap if 1 <= gap <= 4 else width + 1
+
     i = 0
     while i < n:
         s = lines[i]
@@ -222,6 +237,9 @@ def lint_text(text: str) -> list[Violation]:
                 para = False  # a closed fence is not paragraph text
             i += 1
             continue
+        ws = len(s) - len(s.lstrip(" "))
+        if html and html_col and s.strip() and ws < html_col:
+            html = 0  # the list item ended, taking its HTML block with it
         if html:
             if html >= 6 and not s.strip():
                 html = 0  # a blank line ends HTML blocks of type 6 and 7
@@ -232,17 +250,30 @@ def lint_text(text: str) -> list[Violation]:
                     para = False  # an ended HTML block is not paragraph text
                 i += 1
                 continue
+        # Container first: a list marker and its gap are replaced by spaces, so HTML,
+        # fence, heading and table detection below read the remainder in its columns.
+        col = item_col(s)
+        if col:
+            while items and items[-1] > ws:
+                items.pop()
+            items.append(col)
+            probe = " " * col + s[col:]
         else:
-            ws = len(s) - len(s.lstrip(" "))
-            kind = _html_start(s, prev_para, max((x for x in items if x <= ws), default=0))
-            if kind:
-                if not s[:1].isspace():
-                    items.clear()
-                html = 0 if kind < 6 and _HTML_END[kind].search(s) else kind
-                if not html:
-                    para = False
-                i += 1
-                continue
+            if s.strip() and not s[:1].isspace():
+                items.clear()
+            probe = s
+        pws = len(probe) - len(probe.lstrip(" "))
+        cont = max((x for x in items if x <= pws), default=0)
+        if not col and pws - cont >= 4 and not prev_para:
+            para = False  # indented code is not paragraph text
+        kind = _html_start(probe, prev_para, cont)
+        if kind:
+            html_col = cont
+            html = 0 if kind < 6 and _HTML_END[kind].search(probe) else kind
+            if not html:
+                para = False
+            i += 1
+            continue
         indent = len(m.group(1)) if m else 0
         lead = indent - len(m.group(1).lstrip(" ")) if m else 0
         base = max((x for x in items if x <= lead), default=0)
@@ -264,20 +295,6 @@ def lint_text(text: str) -> list[Violation]:
                 found.append(Violation(i + 1, i, "fence-before"))
             i += 1
             continue
-        item = _ITEM.match(s)
-        # A marker indented 4+ columns beyond its container is indented code or a
-        # paragraph continuation, not a list item.
-        if item and len(item.group(1)) - max(
-                (x for x in items if x <= len(item.group(1))), default=0) < 4:
-            while items and items[-1] > len(item.group(1)):
-                items.pop()
-            # Content column: after the marker and its 1-4 spaces; with no text or
-            # 5+ spaces after the marker the rest is code, so the column is marker + 1.
-            width = len(item.group(1)) + len(item.group(2))
-            gap = len(item.group(3))
-            items.append(width + gap if 1 <= gap <= 4 else width + 1)
-        elif s.strip() and not s[:1].isspace():
-            items.clear()
         if _HEADING.match(s):
             if not blank(i - 1):
                 found.append(Violation(i + 1, i, "heading-before"))

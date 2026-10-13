@@ -566,6 +566,33 @@ def test_html_blocks_inside_list_items_use_the_container_indent():
     assert [v.rule for v in ms.lint_text("- item\n\n      <div>\n  ```\n  y\n")] == ["fence-unclosed"]
 
 
+def test_html_after_a_list_marker_is_detected_on_the_remainder():
+    # The comment starts after the marker; its content (incl. a fence line) is HTML.
+    assert rules("- <!--\n  ```\n  -->\n") == []
+    assert rules("- <!-- ``` -->\n") == []
+    assert rules("- <div>\n  ```\n\nz\n") == []
+    # Type 7 after a marker, with the item's content column as the container.
+    assert rules("- <custom-tag>\n  ```\n\nz\n") == []
+
+
+def test_unindented_line_ends_a_list_contained_html_block():
+    # The item ended at "# H" (column 0), so its HTML block ended too: the heading
+    # is scanned again.
+    assert located("- <div>\n  x\n# H\n\nz\n") == [("heading-before", 3)]
+    assert located("- <!--\n  x\n# H\n\nz\n") == [("heading-before", 3)]
+    # An indented continuation stays inside the block.
+    assert located("- <div>\n  x\n  # not scanned\n\nz\n") == []
+    # A top-level block is not ended by an unindented line (only blank / its end marker).
+    assert located("<div>\nx\n# H\n\nz\n") == []
+
+
+def test_indented_code_is_not_paragraph_text_for_type_7():
+    # Indented code, then a lone tag: the tag may start an HTML block.
+    assert located("    code\n<custom-tag>\n# h\n\nz\n") == []
+    # A 4-space line right after a paragraph is a continuation: the tag cannot start.
+    assert located("para\n    cont\n<custom-tag>\n# H\n\nz\n") == [("heading-before", 4)]
+
+
 def test_nested_list_closer_uses_the_innermost_container():
     # Innermost content column 4: a closer at 7 closes, one at 2 does not.
     assert rules("- a\n  - b\n\n    ```\n    x\n       ```\n") == []

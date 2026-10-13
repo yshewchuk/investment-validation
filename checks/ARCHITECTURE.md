@@ -53,7 +53,9 @@ starts another block (heading, fence, list item, blockquote, thematic break,
 HTML block) ends a table and is never a row or a header. HTML blocks follow
 CommonMark 4.6 (start conditions 1-7, type 7 not interrupting a paragraph line
 but allowed after a heading, closed fence, thematic break or ended HTML block;
-indent measured from the enclosing list item's content column); their
+indent measured from the enclosing list item's content column, a block may start
+right after a list marker, and a line less indented than the item's content ends
+a list-contained block); their
 lines are not scanned as Markdown until the block ends. A table needs
 equal header and delimiter cell counts; unescaped pipes separate cells. Table
 violations are scoped by the whole block (header, delimiter, rows, absorbing
