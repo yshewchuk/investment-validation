@@ -303,6 +303,7 @@ def test_mismatch_table_shows_only_differing_fields(browser, server):
     try:
         page.goto(base + "/#/native-parity")
         expect(page.get_by_test_id("parity-mismatch-table")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
         expect(page.get_by_test_id("parity-mismatch-row")).to_have_count(2)
         aapl = page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")
         expect(aapl).to_contain_text("gate_score")
@@ -380,6 +381,7 @@ def test_mismatch_table_pages_past_first_page(browser, server):
         page.goto(base + "/#/native-parity")
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
         page.get_by_test_id("parity-mismatch-next").click()
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_have_count(0)
@@ -390,6 +392,7 @@ def test_mismatch_table_pages_past_first_page(browser, server):
         page.get_by_test_id("parity-mismatch-prev").click()
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
     finally:
         context.close()
 
@@ -437,16 +440,19 @@ def test_mismatch_table_walks_three_pages_with_re_read(browser, server):
         expect(rows).to_have_count(1)
         expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
         page.get_by_test_id("parity-mismatch-next").click()
         expect(rows).to_have_count(1)
         expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
         page.get_by_test_id("parity-mismatch-next").click()
         expect(rows).to_have_count(1)
         expect(rows.filter(has_text="TSLA|2026-09-29|STR-THRU")).to_be_visible()
         expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_have_count(0)
         expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_have_count(0)
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 3")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
         expect(page.get_by_test_id("parity-mismatch-next")).to_be_disabled()
         page.get_by_test_id("parity-mismatch-prev").click()
         expect(rows).to_have_count(1)
@@ -457,9 +463,11 @@ def test_mismatch_table_walks_three_pages_with_re_read(browser, server):
         page.get_by_test_id("parity-mismatch-prev").click()
         expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
         page.get_by_test_id("parity-mismatch-next").click()
         expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
         cursors = [u.split("cursor=")[1].split("&")[0] if "cursor=" in u else None
             for u in page.mismatch_calls]
         assert cursors == [None, "c2", "c3", "c2", None, "c2"]
@@ -519,6 +527,7 @@ def test_mismatch_error_recovery_restarts(browser, server):
     try:
         page.goto(base + "/#/native-parity")
         expect(page.get_by_test_id("parity-mismatch-unavailable")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
         failing["on"] = False
         page.get_by_test_id("parity-mismatch-restart").click()
         expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
@@ -545,6 +554,7 @@ def test_mismatch_later_page_error_recovers_via_previous_and_restart(browser, se
         page.goto(base + "/#/native-parity")
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
         page.get_by_test_id("parity-mismatch-next").click()
         expect(page.get_by_test_id("parity-mismatch-unavailable")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
@@ -553,6 +563,7 @@ def test_mismatch_later_page_error_recovers_via_previous_and_restart(browser, se
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
         expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
         page.get_by_test_id("parity-mismatch-next").click()
         expect(page.get_by_test_id("parity-mismatch-unavailable")).to_be_visible()
         fail["on"] = False
@@ -561,6 +572,7 @@ def test_mismatch_later_page_error_recovers_via_previous_and_restart(browser, se
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_have_count(0)
         expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
         assert len(parity) == 2
         assert "cursor=" not in page.mismatch_calls[-1]
         page.get_by_test_id("parity-mismatch-next").click()
