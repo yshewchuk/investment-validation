@@ -1,17 +1,21 @@
 # Massive supervised raw acquisition
 
 ## Purpose
+
 Store-tier owner of explicit US-stock daily OHLCV, split or dividend acquisition under the versioned Basic policy. Exact mode preserves the one-request contract; generation mode adds refresh, interval reuse and bounded continuation recovery. No research read, normalization, snapshot publication or fallback provider.
 
 ## Interfaces and dependencies
+
 `acquisition` owns parameters, validation, both job kinds and `run`; `coverage` owns occurrence identity and bounded interval planning; `journal` owns immutable page progress; `pages` validates row scope, credential-free continuations and closed-local-day eligibility. `ops.massive_acquire` submits; `stages` registers; `worker.dispatch` invokes `run`. `massive_plan` owns canonical requests/policy/exact cache validation, `provider_budget` admission/accounting, `lifecycle` fences, and `data.incremental.cache_raw_receipt` raw persistence. `providers.massive` owns the fixed HTTPS edge; `providers.massive_policy` owns the shared 16 MiB response limit imported directly by `pages` and the edge.
 
 ## Inputs and outputs
+
 One strict ticker/dataset/date/adjustment scope, policy version and expected request hash; a fixed source account and one reserved call. CLI and worker refuse `as_of` after the current UTC date before storage, preventing future-dated scopes from caching bars-so-far as complete. Valid symbols are uppercased before deduplication and request identity; daily response symbols compare case-insensitively. Existing uppercase request identities are unchanged; old lowercase raw keys are not migrated or silently aliased. Trusted executor context supplies the catalog, object store and attempt/fence, never submission paths. The standalone submitter requires an initialized catalog and creates only a shadow job; `ops serve` executes it later.
 Success writes `massive_acquisition.v1`: request hash, raw receipt/hash, first receipt time, this job's observation time, attempt/fence, cache-hit flag, HTTP-attempt count and policy identity. Every success produces this job output, including cache hits, so `no_work` is false. Supervisor completion publishes this output under its ordinary fence. A raw hit proves verified response bytes, not normalized coverage, entitlement, EOD finality or historical knowledge.
 Explicit `generation` selects `massive_history_acquisition`: a plain namespace, plus `max_http_calls` (1–100). Its result is `massive_history_acquisition.v1`, pinning the interval plan hash, clipped bindings and original occurrence/request/receipt evidence. `initial` may adopt an exact raw hit after stronger validation, using its original receipt time. Other generations bypass raw-only hits and fetch fresh responses; completed same-generation intervals remain reusable.
 
 ## Interval evidence and refresh
+
 - Ops migration 12 adds append-only `ops_massive_occurrences`, indexed by semantic family/generation/date bounds and unique by job/request, plus `ops_massive_pages` keyed by job/original-gap/page-index. Content identity includes original request, receipt/hash, first receipt time, observed time, HTTP-versus-raw-reuse origin and producer job/attempt/fence. An identical HTTP refresh preserves raw identity/time and appends a distinct occurrence.
 - Family identity includes the canonical non-date request, adjustment, policy and validator version. No ticker aliasing, cross-provider fallback or adjustment substitution. SQL selects at most 100 intersecting occurrences; a 101st refuses. Successful plans expose `candidate_count` and `candidate_limit`, included in the plan hash: all intersecting family/generation occurrences count, including unselected overlaps, not raw pages or final bindings. Verification reads at most 64 MiB of declared raw bytes, rechecking original request/object identity and row scope before reuse.
 - Plans return deterministic clipped bindings to original evidence and maximal uncovered intervals. Overlapping evidence prefers the latest observation, with occurrence identity breaking ties. Original superset bytes are never rewritten into synthetic smaller responses; inverted caller ranges refuse before catalog access.
@@ -22,6 +26,7 @@ Explicit `generation` selects `massive_history_acquisition`: a plain namespace, 
 - All three generation-mode datasets require `end` before the observation's `America/New_York` date. Read-only planning, submission and worker check live eligibility; reused evidence checks its original observation. Initial raw adoption uses first receipt time, so aging cannot rehabilitate early-observed bars or actions. Ineligible cached observations and stored page validation failures are terminal `INTEGRITY_FAILED`, without HTTP fallback; an explicit new generation can acquire fresh evidence. This closed-window rule does not prevent later announcements/corrections or prove source finality.
 
 ## Invariants
+
 - Account admission serializes this producer's jobs. The worker rechecks the exact cache after admission; verified hits consume zero HTTP attempts/charges but still require an available account reservation. Cross-job checkpoint reuse is disabled; raw receipts are the only fetch cache.
 - Exact mode has one attempt. Generation mode has at most 101 supervised attempts and acquires at most one page of one gap per attempt, without sleeping in the worker. Before each HTTP call, the fenced budget transaction sums this job/account's used calls across all reservations, including released attempts, and enforces its cumulative cap. No client retries/redirects; crashes do not refund uncertain calls. Versioned pacing/backoff remains account-wide; it does not police other clients or prove socket-send spacing after arbitrary stalls. Without quota observations, `remaining` is conservative local accounting and `uncertain=1` persists after success without itself refusing admission.
 - The edge requests identity encoding only, rejects other encodings, and bounds response bytes and whole-request duration. No token-bearing URL, provider error body, response headers or exception text is persisted. Credential echoes refuse before caching. Body-policy refusals preserve observed HTTP 200 accounting; only transport/deadline failures use transient accounting.
@@ -31,6 +36,7 @@ Explicit `generation` selects `massive_history_acquisition`: a plain namespace, 
 - Supervisor resource admission and attempt-staging cleanup remain authoritative. No cache eviction, retention policy or disk-capacity claim beyond existing admission is supplied.
 
 ## Failure semantics
+
 No refusal emits a success artifact or invents whole-scope coverage. Completed gaps survive a later failure. Generation mode retries retryable failures under the supervisor with a 13-second delay even when uncharged, plus account backoff; attempt exhaustion can stop before the HTTP cap. Invalid cached observations fail once. Same-key submission only reattaches; generic `resume` does not reset terminal jobs. A new key is separately authorized work with a new cap, never continuation of the old budget.
 
 | Condition | Outcome |
@@ -52,4 +58,5 @@ No refusal emits a success artifact or invents whole-scope coverage. Completed g
 | Catalog/filesystem unavailable, exhausted reservation or conflicting worker timer | `RESOURCE_UNAVAILABLE`. |
 
 ## Diagrams
+
 Operator submit → supervisor admission → verified exact/interval lookup → optional charged gap HTTPS → atomic raw/occurrence receipt → replan/retry or pinned result. Research does not enter this flow.
