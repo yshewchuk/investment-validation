@@ -36,11 +36,11 @@ close, so stamping alone was never coverage until the close-time test was
 added (the 2026-10-12 defect); reading bodies to re-derive bar coverage was
 dropped as over-engineering (the 2026-10-13 simplification decision). A bad
 post-close response is not retried until a run targets a session whose close
-(plus the buffer) is later than that fetch; that run refetches it. Capture
-rejects a retrieval that starts later than the stored history but does not
-check coverage of the requested session, so a valid response missing trailing
-bars can pass capture and then counts as covered (accepted trade-off). And when
-the plan *does* ask
+(plus the buffer) is at or after that fetch's stamp; that run refetches it.
+Capture rejects a retrieval that starts later than the stored history but
+does not check coverage of the requested session, so a valid response
+missing trailing bars can pass capture and then counts as covered (accepted
+trade-off). And when the plan *does* ask
 for the session, :func:`run_refresh` gives each daily call a fresh
 ``refetch_token`` — today's cached body is a known-stale answer, so the token
 guarantees a real network call rather than a same-day cache hit. Monthly
@@ -287,12 +287,12 @@ def plan_refresh(
         naive timestamp) is ignored by the test via :func:`_coverage_stamp`
         and never excuses the session. The body is never read: A bad post-close
         response is not retried until a run targets a session whose close
-        (plus the buffer) is later than that fetch; that run refetches it.
-        Capture rejects a retrieval that starts later than the stored history
-        but does not check coverage of the requested session, so a valid
-        response missing trailing bars can pass capture and then counts as
-        covered (accepted trade-off). Unknown is never coverage, which can
-        only lengthen the daily list, never shorten it.
+        (plus the buffer) is at or after that fetch's stamp; that run
+        refetches it. Capture rejects a retrieval that starts later than the
+        stored history but does not check coverage of the requested session,
+        so a valid response missing trailing bars can pass capture and then
+        counts as covered (accepted trade-off). Unknown is never coverage,
+        which can only lengthen the daily list, never shorten it.
     always_daily:
         Tickers that are always on the daily schedule regardless of events,
         e.g. the native calendar series. A forced ticker with a post-close
@@ -407,11 +407,11 @@ def run_refresh(plan: Mapping, fetcher: Fetcher) -> dict:
     class — never a payload; a failure never carries fetched bytes).
 
     The daily group gets a fresh ``refetch_token`` per ticker call: a daily
-    ticker is on the list precisely because no cached fetch was stamped after
-    the required trading day's close plus the coverage buffer, so a same-day
-    cached (typically pre-market) entry must not satisfy the request out of
-    cache — the token forces a real network call and a second, append-only
-    Tier-1 entry. The token is unique per call — a wall-clock timestamp plus
+    ticker is on the list precisely because no cached fetch was stamped
+    strictly after the required trading day's close plus the coverage buffer,
+    so a same-day cached (typically pre-market) entry must not satisfy the
+    request out of cache — the token forces a real network call and a second,
+    append-only Tier-1 entry. The token is unique per call — a wall-clock timestamp plus
     a ``uuid4`` suffix, so two calls at the same instant (a frozen or coarse
     clock) can never collide into one key and turn the second into a cache
     hit. The monthly group keeps the plain cache-first call: its resumability
@@ -534,10 +534,10 @@ def load_fetch_times(*, fetch_root=None) -> dict[str, list[pd.Timestamp]]:
     Same iteration and filters as :func:`load_fetch_history` (``period=max``,
     a ticker, a present ``fetched_at``), but keeping the full timestamp
     rather than its date: the daily skip asks whether a fetch was stamped
-    AFTER the required trading day's close plus :data:`COVERAGE_CLOSE_BUFFER`
-    (the regular 16:00 ET close every trading day — a fetch made on a
-    half-day before 16:30 ET may be refetched, accepted), which
-    a date alone cannot answer.
+    STRICTLY AFTER the required trading day's close plus
+    :data:`COVERAGE_CLOSE_BUFFER` (the regular 16:00 ET close every trading
+    day — a fetch made on a half-day before 16:30 ET may be refetched,
+    accepted), which a date alone cannot answer.
     A missing or unparseable ``fetched_at`` contributes nothing: unknown is
     never coverage, which can only lengthen the daily list, never shorten it.
     Unparseable includes NaT — ``pd.Timestamp("NaT")`` parses to NaT without
@@ -545,8 +545,8 @@ def load_fetch_times(*, fetch_root=None) -> dict[str, list[pd.Timestamp]]:
     exactly like a garbage one.
     The body is never opened — bar validity is capture's job, which fails
     loudly there. A bad post-close response is not retried until a run targets
-    a session whose close (plus the buffer) is later than that fetch; that run
-    refetches it.
+    a session whose close (plus the buffer) is at or after that fetch's stamp;
+    that run refetches it.
 
     ``fetch_root`` defaults to ``engine.paths.RAW_FETCH`` and exists only so
     tests can point this at a throwaway tree.

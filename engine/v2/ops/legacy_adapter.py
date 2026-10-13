@@ -319,7 +319,8 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     # regular 16:00 ET close plus the coverage buffer (a half-day fetch made
     # before 16:30 ET may be refetched, accepted). A bad post-close
     # response is not retried until a run targets a session whose close
-    # (plus the buffer) is later than that fetch; that run refetches it.
+    # (plus the buffer) is at or after that fetch's stamp; that run refetches
+    # it.
     # Capture rejects a retrieval that starts later than the stored history
     # but does not check coverage of the requested session, so a valid
     # response missing trailing bars can pass capture and then counts as

@@ -1,17 +1,18 @@
 """Close-buffered daily coverage: ``load_fetch_times`` and the stamp-keyed skip.
 
 A daily ticker's cached fetch covers the session only if its ``fetched_at``
-(UTC-aware) is AFTER the close of the required trading day — the latest
-trading day on or before the session, the regular 16:00 America/New_York
-close for every trading day (``price_refresh._regular_market_close``) — plus
+(UTC-aware) is STRICTLY AFTER the close of the required trading day — the
+latest trading day on or before the session, the regular 16:00
+America/New_York close for every trading day
+(``price_refresh._regular_market_close``) — plus
 ``COVERAGE_CLOSE_BUFFER`` (30 minutes). On the ~3 NYSE half-days a year a
 fetch made before 16:30 ET may be refetched (accepted
 harmless extra refetch). A pre-market fetch lands on the session's date but
 predates its close (the 2026-10-12 defect), so it never excuses the session.
 Bodies are never parsed on this path: capture is responsible for failing
 loudly. A bad post-close response is not retried until a run targets a session
-whose close (plus the buffer) is later than that fetch; that run refetches it.
-Store-level fixtures write
+whose close (plus the buffer) is at or after that fetch's stamp; that run
+refetches it. Store-level fixtures write
 into a real ``Fetcher`` over a throwaway root through a fake yfinance adapter,
 stamping arrival by freezing the clock or writing the sidecar meta directly.
 """
@@ -300,13 +301,13 @@ def test_a_ticker_whose_only_stamps_are_unreadable_is_daily(fetch_root):
 
 def test_a_post_close_stamp_covers_even_when_the_body_is_garbage(fetch_root):
     """The accepted trade-off, pinned: coverage never opens the body, so a
-    truncated response stamped after the close counts as covered. Capture
-    rejects a retrieval that starts later than the stored history but does
-    not check coverage of the requested session, so a valid response missing
-    trailing bars can pass capture and then counts as covered (accepted
-    trade-off). A bad post-close response is not retried until a run targets
-    a session whose close (plus the buffer) is later than that fetch; that
-    run refetches it."""
+    truncated response stamped strictly after the close counts as covered.
+    Capture rejects a retrieval that starts later than the stored history but
+    does not check coverage of the requested session, so a valid response
+    missing trailing bars can pass capture and then counts as covered
+    (accepted trade-off). A bad post-close response is not retried until a
+    run targets a session whose close (plus the buffer) is at or after that
+    fetch's stamp; that run refetches it."""
     directory = Path(fetch_root) / "yfinance" / "gb"
     directory.mkdir(parents=True)
     (directory / "gb.body.gz").write_bytes(b"this is not even gzip")
