@@ -298,8 +298,11 @@ evidence. See the models and data component contracts.
     and an unwritable `--github-output` file exit nonzero, the latter deliberately
     so a CI step fails loudly). A missing or unparsable merged summary yields `neutral`, an
     "unavailable" description and a warning. An omitted, missing or undecodable
-    diff, or an unreadable `results.jsonl` (malformed rows are dropped with a warning), warns and attributes no survivor to
-    the PR; an unreadable baseline warns and excuses nothing. Survivors on lines
+    diff (including one with hunks but no recognizable file header), or an unreadable
+    or partly malformed `results.jsonl`, warns and makes survivors unattributable:
+    the result is `neutral` ("... survivors not attributed; not a pass", listed in
+    `attribution_problems`), never `success`, unless a module is PR-owned anyway. An
+    unreadable baseline warns and excuses nothing (it can add red, never green). Survivors on lines
     the PR did not touch never fail a PR. `classify` is a pure function: no
     network or git.
 

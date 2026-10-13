@@ -172,7 +172,9 @@ def test_missing_or_undecodable_diff_attributes_no_survivor(tmp_path, capsys):
                                    ["--diff-file", str(bad)]]):
         out = tmp_path / f"gh_{i}"
         assert ps.main(["--merged-dir", str(d), "--github-output", str(out), *diff_args]) == 0
-        assert "state=success\n" in out.read_text()
+        text = out.read_text()
+        assert "state=neutral\n" in text  # a survivor may sit on a changed line: never a pass
+        assert "description=gremlins: PR diff unavailable -- survivors not attributed; not a pass\n" in text
         assert "PR diff unavailable" in capsys.readouterr().out
 
 
@@ -273,7 +275,10 @@ def test_malformed_result_rows_are_ignored_with_a_warning(tmp_path, capsys):
     out = tmp_path / "gh_output"
     assert ps.main(["--merged-dir", str(d), "--diff-file", str(diff),
                     "--github-output", str(out)]) == 0
-    assert "state=success\n" in out.read_text()
+    text = out.read_text()
+    assert "state=neutral\n" in text  # dropped rows may have hidden a survivor
+    assert ("description=gremlins: result rows unreadable or malformed -- survivors not "
+            "attributed; not a pass\n") in text
     assert "6 malformed results.jsonl row(s) ignored" in capsys.readouterr().out
 
 
@@ -449,7 +454,7 @@ def test_published_descriptions_and_degradation_messages_are_exact(tmp_path, cap
     assert notes == ["::warning::merged mutation report unavailable; "
                      "not reporting red for infra"]
     assert verdict == {"state": "neutral", "pr_owned": [], "infra": ["report"], "modules": {},
-                       "merge_issues": [],
+                       "merge_issues": [], "attribution_problems": [],
                        "description": "gremlins: merged report unavailable (infra); "
                                       "no PR-owned result"}
 
@@ -465,7 +470,7 @@ def test_exact_degradation_warnings(tmp_path, capsys):
         "::warning::PR diff unavailable; survivors cannot be attributed to the PR",
         "::warning::main baseline summary unreadable; no failure is excused as pre-existing"]
     assert set(verdict) == {"state", "description", "pr_owned", "infra", "modules",
-                            "merge_issues"}
+                            "merge_issues", "attribution_problems"}
     (d / "results.jsonl").write_text("{bad\n")
     ps.main(["--merged-dir", str(d), "--diff-file", str(diff), "--github-output", str(out)])
     notes, _ = _split(capsys.readouterr().out)
@@ -562,3 +567,79 @@ def test_merge_issues_are_warned_by_main(tmp_path, capsys):
     assert "state=neutral\n" in out.read_text()
     notes, _ = _split(capsys.readouterr().out)
     assert notes == ["::warning::merge: RUN_PROVENANCE_MISMATCH: x"]
+
+
+def _case(tmp_path, name, survivor, diff_mode, rows_mode):
+    root = tmp_path / name
+    root.mkdir()
+    d = root / "m"
+    d.mkdir()
+    (d / "summary.json").write_text(json.dumps(merged(a=mod())))
+    good = json.dumps(row("a", "engine/v2/a.py", 5 if survivor else 99)) + "\n"
+    if rows_mode == "ok":
+        (d / "results.jsonl").write_text(good)
+    elif rows_mode == "malformed":
+        (d / "results.jsonl").write_text(good + "{bad\n")
+    elif rows_mode == "undecodable":
+        (d / "results.jsonl").write_bytes(b"\xff\xfe\n")
+    # rows_mode == "missing": no file
+    args = ["--merged-dir", str(d), "--github-output", str(root / "out")]
+    if diff_mode == "ok":
+        (root / "pr.diff").write_text(DIFF)
+        args += ["--diff-file", str(root / "pr.diff")]
+    elif diff_mode == "undecodable":
+        (root / "pr.diff").write_bytes(b"+++ b/engine/v2/a.py\n@@ -1 +5 @@\n\xff\n")
+        args += ["--diff-file", str(root / "pr.diff")]
+    elif diff_mode == "hunks_without_header":
+        (root / "pr.diff").write_text("@@ -1 +5 @@\n+x\n")
+        args += ["--diff-file", str(root / "pr.diff")]
+    elif diff_mode == "missing_file":
+        args += ["--diff-file", str(root / "absent.diff")]
+    # diff_mode == "no_flag": no --diff-file
+    assert ps.main(args) == 0
+    return (root / "out").read_text()
+
+
+def test_unattributable_survivors_are_never_success(tmp_path):
+    """Audit: every combination of diff/result-row degradation vs the oracle."""
+    n = 0
+    for survivor in (True, False):
+        for diff_mode in ("ok", "no_flag", "missing_file", "undecodable", "hunks_without_header"):
+            for rows_mode in ("ok", "malformed", "undecodable", "missing"):
+                n += 1
+                text = _case(tmp_path, f"c{n}", survivor, diff_mode, rows_mode)
+                attributable = diff_mode == "ok" and rows_mode == "ok"
+                rows_have_survivor = survivor and rows_mode in ("ok", "malformed")
+                if rows_have_survivor and diff_mode == "ok":
+                    want = "failure"  # the good row is a survivor on a changed line
+                elif attributable:
+                    want = "success"
+                else:
+                    want = "neutral"
+                assert f"state={want}\n" in text, (survivor, diff_mode, rows_mode, text)
+
+
+def test_degraded_inputs_other_than_attribution_never_produce_success(tmp_path):
+    # unreadable summary, malformed summary, merge tool error, incomplete run: neutral
+    d = tmp_path / "s1"
+    d.mkdir()
+    (d / "summary.json").write_text("{not json")
+    for name, summary in (("s2", {"modules": []}), ("s3", _merged_with(tool_error=True)),
+                          ("s4", _merged_with(complete=False))):
+        dd = tmp_path / name
+        dd.mkdir()
+        (dd / "summary.json").write_text(json.dumps(summary))
+        (dd / "results.jsonl").write_text("")
+        (dd / "pr.diff").write_text(DIFF)
+    for name in ("s1", "s2", "s3", "s4"):
+        out = tmp_path / f"{name}.out"
+        assert ps.main(["--merged-dir", str(tmp_path / name), "--diff-file",
+                        str(tmp_path / name / "pr.diff"), "--github-output", str(out)]) == 0
+        assert "state=neutral\n" in out.read_text(), name
+    # A missing/unreadable baseline only stops excusing failures: it can add red, never green.
+    (tmp_path / "b").mkdir()
+    d5, diff5 = _write_report(tmp_path / "b", merged(a=mod(run_exit_code=1)), [])
+    out = tmp_path / "b.out"
+    ps.main(["--merged-dir", str(d5), "--diff-file", str(diff5), "--baseline-summary",
+             str(tmp_path / "nope.json"), "--github-output", str(out)])
+    assert "state=failure\n" in out.read_text()

@@ -396,7 +396,10 @@ says "no module measured ... not a pass". `mutation/pr` is not a required check.
 PR changed, or a module run that failed with a test-failure exit code main does
 not also show. Infra (a `::warning::`, never red): no report, skipped, timeout or
 cancel, signal kill, gremlin ERROR results, an invalid raw report, a failure main
-shows too. Unreadable inputs degrade to warnings.
+shows too. Unreadable inputs degrade to warnings; none can produce `success`:
+an unreadable merged summary, a merge tool error or incomplete run, a missing or
+unreadable PR diff, and unreadable or partly malformed result rows all give `neutral`
+(survivors cannot be attributed), while a missing baseline only stops excusing failures.
 
 Gremlins `report_status` decision table, first match wins (`report` = the report job
 result, `classified` = the classifier's `state`, empty if its step did not run):

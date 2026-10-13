@@ -143,10 +143,12 @@ def _truncate(text: str, keep_tail: str = "") -> str:
     return text[:DESC_MAX - 3 - len(keep_tail)] + "..." + keep_tail
 
 
-def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=None) -> dict:
+def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=None,
+             attribution_problems=()) -> dict:
     """Pure verdict: ``failure`` only when a module is PR-owned; ``neutral`` when no
-    module was measured (all infra) or the merge reported a tool error / incomplete
-    run; else ``success``."""
+    module was measured (all infra), the merge reported a tool error / incomplete run,
+    or survivors could not be attributed to the PR (``attribution_problems``); else
+    ``success``."""
     rows = [r for r in rows if _valid_row(r)]
     modules = merged.get("modules") if isinstance(merged, dict) else None
     modules = modules if isinstance(modules, dict) else {}
@@ -168,6 +170,8 @@ def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=No
     reasons = merged.get("failure_reasons") if isinstance(merged, dict) else None
     merge_issues = [r for r in reasons if isinstance(r, str) and r.startswith(_MERGE_CODES)] \
         if isinstance(reasons, list) else []
+    problems = [p for p in attribution_problems if isinstance(p, str)]
+    unattributed = bool(problems) and bool(names)
     tail = ""
     if owned:
         desc = f"gremlins: PR-owned problem in {', '.join(owned)}"
@@ -176,6 +180,8 @@ def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=No
     elif infra and len(infra) == len(names):
         # Nothing was measured: still not red (infra), but never worded as a pass.
         desc = f"gremlins: no module measured ({len(infra)} infra warning(s)); not a pass"
+    elif unattributed:
+        desc = f"gremlins: {problems[0]}"
     elif unsafe:
         desc = f"gremlins: report incomplete or tool error ({len(infra)} infra warning(s)); not a pass"
     elif infra:
@@ -183,9 +189,11 @@ def classify(merged, rows: list[dict], changed: dict[str, set[int]], baseline=No
     else:
         desc = f"gremlins: no PR-owned problems in {len(names)} module(s)"
     nothing_measured = bool(names) and len(infra) == len(names)
-    state = "failure" if owned else "neutral" if (nothing_measured or unsafe) else "success"
+    state = ("failure" if owned
+             else "neutral" if (nothing_measured or unsafe or unattributed) else "success")
     return {"state": state, "description": _truncate(desc, tail),
-            "pr_owned": owned, "infra": infra, "modules": result, "merge_issues": merge_issues}
+            "pr_owned": owned, "infra": infra, "modules": result, "merge_issues": merge_issues,
+            "attribution_problems": problems}
 
 
 def _load_json(path: str | None):
@@ -208,12 +216,13 @@ def _valid_row(r) -> bool:
             and not isinstance(r.get("line"), bool))
 
 
-def _load_rows(path: Path) -> list[dict]:
+def _load_rows(path: Path) -> tuple[list[dict], bool]:
+    """Return (rows, complete); complete is False if the file or any row was unusable."""
     try:
         lines = [x for x in path.read_text().splitlines() if x.strip()]
     except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
         print("::warning::results.jsonl unreadable; survivors cannot be attributed to the PR")
-        return []
+        return [], False
     rows = []
     for x in lines:
         try:
@@ -224,7 +233,7 @@ def _load_rows(path: Path) -> list[dict]:
             rows.append(r)
     if len(rows) != len(lines):
         print(f"::warning::{len(lines) - len(rows)} malformed results.jsonl row(s) ignored")
-    return rows
+    return rows, len(rows) == len(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -239,25 +248,34 @@ def main(argv: list[str] | None = None) -> int:
     merged = _load_json(str(merged_dir / "summary.json"))
     if not _valid_summary(merged):
         verdict = {"state": "neutral", "pr_owned": [], "infra": ["report"], "modules": {},
-                   "merge_issues": [],
+                   "merge_issues": [], "attribution_problems": [],
                    "description": _truncate("gremlins: merged report unavailable (infra); "
                                             "no PR-owned result")}
         print("::warning::merged mutation report unavailable; not reporting red for infra")
     else:
         changed: dict[str, set[int]] = {}
+        problems: list[str] = []
         try:
             if not args.diff_file:
                 raise OSError("no --diff-file given")
-            changed = parse_changed_lines(Path(args.diff_file).read_text())
+            diff_text = Path(args.diff_file).read_text()
+            changed = parse_changed_lines(diff_text)
+            if not changed and any(x.startswith("@@") for x in diff_text.splitlines()):
+                raise ValueError("diff has hunks but no recognizable file header")
         except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
             changed = {}
+            problems.append("PR diff unavailable -- survivors not attributed; not a pass")
             print("::warning::PR diff unavailable; survivors cannot be attributed to the PR")
         baseline = _load_json(args.baseline_summary)
         if not _valid_summary(baseline):
             baseline = None
         if args.baseline_summary and baseline is None:
             print("::warning::main baseline summary unreadable; no failure is excused as pre-existing")
-        verdict = classify(merged, _load_rows(merged_dir / "results.jsonl"), changed, baseline)
+        rows, rows_complete = _load_rows(merged_dir / "results.jsonl")
+        if not rows_complete:
+            problems.append("result rows unreadable or malformed -- survivors not attributed; "
+                            "not a pass")
+        verdict = classify(merged, rows, changed, baseline, problems)
     for issue in verdict["merge_issues"]:
         print(f"::warning::merge: {issue}")
     for name, v in verdict["modules"].items():
