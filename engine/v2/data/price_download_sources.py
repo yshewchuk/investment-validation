@@ -63,10 +63,7 @@ here.
 """
 from __future__ import annotations
 
-import hashlib
 import io
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -77,10 +74,8 @@ __all__ = [
     "NORMALIZED_COLUMNS",
     "normalize_px_csv",
     "normalize_tier1_body",
-    "parse_tier1_retrieval",
     "read_legacy_px_csv",
     "read_tier1_body",
-    "tier1_retrieval_entry",
     "write_legacy_px_csv",
 ]
 
@@ -125,44 +120,6 @@ def write_legacy_px_csv(path: Path, rows) -> pd.DataFrame:
 
 
 _TIER1_REQUIRED_COLUMNS = ("Close", "Adj Close", "High")
-
-
-def tier1_retrieval_entry(cached_entry) -> dict:
-    """The ONE builder for the entry dict :func:`parse_tier1_retrieval`
-    consumes -- the ``{"ticker", "entry", "fetched_at"}`` shape the capture
-    scans Tier-1 store entries into (``engine.v2.ops.price_history_store.
-    _tier1_retrievals``), ``fetched_at`` falling back to the body file's own
-    mtime exactly as the capture's scan does. The price-refresh coverage hook
-    (``engine.v2.ops.legacy_adapter.read_tier1_retrieval``) builds through
-    this SAME function, so a second reader of the store parses exactly the
-    entry the capture would parse with exactly the ``retrieved_at`` the
-    capture would order it by -- one rule, never a copied shape that could
-    drift."""
-    fetched_at = cached_entry.meta.get("fetched_at") or datetime.fromtimestamp(
-        cached_entry.path.stat().st_mtime, tz=timezone.utc).isoformat()
-    return {"ticker": cached_entry.params.get("ticker"), "entry": cached_entry,
-            "fetched_at": fetched_at}
-
-
-def parse_tier1_retrieval(entry: dict) -> tuple[pd.DataFrame, bytes, str, str]:
-    """One ``tier1_retrieval_entry``-shaped retrieval read through the
-    capture's own rule: ``(frame, raw, retrieved_at, source_hash)`` -- the
-    valid-bar frame from :func:`read_tier1_body`, the raw payload whose
-    sha256 IS the retrieval's ``source_hash`` (body + NUL + the sorted-meta
-    JSON, the exact pair ``price_history_store._parse_and_order_entries``
-    sorts a ticker's retrievals by), that ordering stamp, and the hash.
-    Shared by the capture (via ``_parse_tier1``, which adds only its
-    ``_stringify_dates`` frame shape) and the price-refresh coverage hook
-    (``engine.v2.ops.legacy_adapter.read_tier1_retrieval``), so parse,
-    payload and identity are ONE rule rather than a copy that could drift
-    from the capture's. Raises whatever :func:`read_tier1_body` raises for a
-    body the capture will not accept -- a typed refusal the caller treats as
-    "this retrieval does not exist".
-    """
-    body = entry["entry"].body()
-    meta_bytes = json.dumps(entry["entry"].meta, sort_keys=True).encode("utf-8")
-    combined = body + b"\x00" + meta_bytes
-    return read_tier1_body(body), combined, entry["fetched_at"], hashlib.sha256(combined).hexdigest()
 
 
 def read_tier1_body(body_bytes: bytes) -> pd.DataFrame:

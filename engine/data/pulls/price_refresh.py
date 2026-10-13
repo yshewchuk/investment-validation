@@ -24,20 +24,18 @@ refresh cadences, per the 2026-09-14 decision:
   exists for it in the current calendar month, which is what makes a run
   resumable without a separate state file.
 
-Daily resumability is keyed on **coverage**, not on fetch arrival: a daily
-ticker is skipped only when its NEWEST successfully-parsed cached retrieval's
-valid bars reach the session's (or, for a weekend/holiday session, the last
-trading day's) date — see :func:`load_fetch_coverage`, which replays the
-``price_history`` capture's own rule instead of running a second one that
-could drift from it: retrievals ordered by ``(retrieved_at, source_hash)``
-exactly as capture processes them, a date a later valid retrieval omits
-tombstoned (``engine/v2/data/price_history.py``'s ``diff_retrieval``), and
-only the newest parseable retrieval's newest valid bar counted — an older
-retrieval's bar never excuses a session a newer valid retrieval dropped. The
-``fetched_at`` date alone is not coverage: a pre-market fetch lands today but
-its last bar is yesterday's close, and counting it as covering today would
-skip the very session this pull exists to capture (the 2026-10-12 defect).
-And when the plan *does* ask
+Daily resumability is keyed on the fetch's STAMP against the session's close:
+a cached dated fetch covers the session only if its ``fetched_at`` (UTC-aware)
+is later than the close of the required trading day — the latest trading day
+on or before the session, per :func:`_required_daily_bar_date`, closing at
+16:00 America/New_York (13:00 on NYSE early-close days;
+:func:`engine.calendar.market_close`) — plus :data:`COVERAGE_CLOSE_BUFFER`.
+A pre-market fetch lands on the session's date but its last bar is yesterday's
+close, so stamping alone was never coverage until the close-time test was
+added (the 2026-10-12 defect); reading bodies to re-derive bar coverage was
+dropped as over-engineering (the 2026-10-13 simplification decision) — a bad
+or truncated response is capture's job: it fails there and the next refresh
+retries (accepted trade-off). And when the plan *does* ask
 for the session, :func:`run_refresh` gives each daily call a fresh
 ``refetch_token`` — today's cached body is a known-stale answer, so the token
 guarantees a real network call rather than a same-day cache hit. Monthly
@@ -62,7 +60,7 @@ touched — this module only ever writes dated keys.
 
 :func:`plan_refresh` is pure — no I/O, no network, no clock reads beyond the
 ``session`` argument — and takes already-loaded ``events``/``price_universe``/
-``fetch_history``/``fetch_coverage`` so it can be tested without a filesystem.
+``fetch_history``/``fetch_times`` so it can be tested without a filesystem.
 The CLI (``ops price-refresh``) is what actually reads those from disk, via
 the ``load_*`` helpers below, and calls :func:`run_refresh` against a real
 :class:`~engine.data.fetch.Fetcher`.
@@ -70,8 +68,8 @@ the ``load_*`` helpers below, and calls :func:`run_refresh` against a real
 from __future__ import annotations
 
 from datetime import date as date_cls
-from datetime import datetime, timezone
-from typing import Callable, Iterable, Mapping
+from datetime import datetime, timedelta, timezone
+from typing import Iterable, Mapping
 
 import pandas as pd
 
@@ -82,13 +80,14 @@ from engine.data.fetch import Fetcher, iter_cached
 __all__ = [
     "HORIZON_DAYS",
     "POST_EVENT_TRADING_SESSIONS",
+    "COVERAGE_CLOSE_BUFFER",
     "plan_refresh",
     "run_refresh",
     "fetch_one",
     "load_events",
     "load_price_universe",
     "load_fetch_history",
-    "load_fetch_coverage",
+    "load_fetch_times",
 ]
 
 #: Calendar days from the board's session forward that still count as "about
@@ -101,6 +100,12 @@ HORIZON_DAYS = 35
 #: newly-realized close and the first couple of post-earnings sessions are
 #: captured before falling back to monthly cadence.
 POST_EVENT_TRADING_SESSIONS = 5
+
+#: Grace after the required trading day's close before a cached fetch's
+#: ``fetched_at`` counts as covering that day. A body fetched at, or seconds
+#: after, the closing bell can lag the real close print, so only a clearly
+#: post-close stamp excuses the session.
+COVERAGE_CLOSE_BUFFER = timedelta(minutes=30)
 
 
 # --------------------------------------------------------------------------
@@ -161,7 +166,8 @@ _DAILY_REQUIRED_LOOKBACK_DAYS = 10
 
 
 def _required_daily_bar_date(session) -> pd.Timestamp:
-    """The DATA date a daily fetch must already contain to skip this session.
+    """The trading day whose CLOSE a cached fetch's stamp must post-date to
+    skip this session.
 
     The latest trading day on or before ``session``: itself when it is a
     trading day, the Friday before a Monday holiday, the Friday before a
@@ -186,7 +192,7 @@ def plan_refresh(
     events: pd.DataFrame,
     price_universe: Iterable[str],
     fetch_history: Mapping[str, Iterable] | None = None,
-    fetch_coverage: Mapping[str, Iterable] | None = None,
+    fetch_times: Mapping[str, Iterable] | None = None,
     horizon_days: int = HORIZON_DAYS,
     post_event_sessions: int = POST_EVENT_TRADING_SESSIONS,
     always_daily: Iterable[str] = (),
@@ -215,27 +221,26 @@ def plan_refresh(
         landed for that ticker, keyed on the fetch's own ``fetched_at`` (see
         :func:`load_fetch_history`). Governs MONTHLY resumability only: a
         monthly ticker already fetched somewhere in ``session``'s calendar
-        month is skipped. The daily group reads :func:`load_fetch_coverage`
-        instead, because ``fetched_at`` says when bytes arrived, not which
-        bars they contain. Omit (or ``{}``) for a from-scratch plan.
-    fetch_coverage:
-        ``{ticker: [date]}`` — at most ONE date per ticker: the newest VALID
-        BAR date of that ticker's NEWEST successfully-parsed dated Tier-1
-        fetch (see :func:`load_fetch_coverage`; the retrieval ordering, the
-        fallback past an unparseable newest fetch and the bar validity all
-        replay capture's own rule, and these are DATA dates, never
-        ``fetched_at``). Governs DAILY resumability: a ticker on the board is
-        skipped only if that one date reaches ``_required_daily_bar_date``
-        (the latest trading day on or before ``session``); anything else — a
-        newer valid fetch that omits the required date, an old body, a
-        corrupt newest with nothing parseable behind it, or no fetch at all —
-        goes on today's daily list. A pre-market fetch whose last bar is the
-        prior session does NOT excuse the session.
+        month is skipped. The daily group reads :func:`load_fetch_times`
+        instead, which keeps the full timestamp the monthly date cannot
+        answer with. Omit (or ``{}``) for a from-scratch plan.
+    fetch_times:
+        ``{ticker: [timestamp, ...]}`` — every dated Tier-1 fetch's own
+        ``fetched_at`` for that ticker, UTC-aware (see
+        :func:`load_fetch_times`). Governs DAILY resumability: a ticker on the
+        board is skipped only if one of those stamps is LATER than
+        :func:`engine.calendar.market_close` of
+        :func:`_required_daily_bar_date` (the latest trading day on or before
+        ``session``; 16:00 America/New_York, 13:00 on NYSE early-close days)
+        plus :data:`COVERAGE_CLOSE_BUFFER`. Anything else — a pre-market or
+        at-the-close fetch, a fetch on the wrong day, no fetch at all — goes
+        on today's daily list. The body is never read: a bad or truncated
+        response is capture's job (accepted trade-off), and unknown is never
+        coverage, which can only lengthen the daily list, never shorten it.
     always_daily:
         Tickers that are always on the daily schedule regardless of events,
-        e.g. the native calendar series. A forced ticker whose cached bars
-        already reach ``_required_daily_bar_date`` is skipped like any other
-        daily fetch.
+        e.g. the native calendar series. A forced ticker with a post-close
+        stamped fetch is skipped like any other daily fetch.
 
     Returns
     -------
@@ -245,8 +250,11 @@ def plan_refresh(
     """
     session_ts = pd.Timestamp(session).normalize()
     history = fetch_history or {}
-    coverage = fetch_coverage or {}
-    required = _required_daily_bar_date(session_ts)
+    times = fetch_times or {}
+    coverage_cutoff = (
+        engine_calendar.market_close(_required_daily_bar_date(session_ts))
+        + COVERAGE_CLOSE_BUFFER
+    )
 
     events = events.copy()
     if len(events):
@@ -272,7 +280,8 @@ def plan_refresh(
         )
         if on_board:
             covered = any(
-                pd.Timestamp(d).normalize() >= required for d in coverage.get(ticker, ())
+                pd.Timestamp(t).tz_convert("UTC") > coverage_cutoff
+                for t in times.get(ticker, ())
             )
             if covered:
                 skipped.append(ticker)
@@ -340,13 +349,13 @@ def run_refresh(plan: Mapping, fetcher: Fetcher) -> dict:
     class — never a payload; a failure never carries fetched bytes).
 
     The daily group gets a fresh ``refetch_token`` per ticker call: a daily
-    ticker is on the list precisely because its newest parseable cached
-    retrieval lacks the required bar, so a same-day cached (typically
-    pre-market) entry must not satisfy the request out of cache — the token
-    forces a real network call and a second, append-only Tier-1 entry. The
-    monthly group keeps the plain cache-first call: its resumability is
-    arrival-based, so an already-answered same-day request should be a cache
-    hit, not a re-fetch.
+    ticker is on the list precisely because no cached fetch was stamped after
+    the required trading day's close plus the coverage buffer, so a same-day
+    cached (typically pre-market) entry must not satisfy the request out of
+    cache — the token forces a real network call and a second, append-only
+    Tier-1 entry. The monthly group keeps the plain cache-first call: its
+    resumability is arrival-based, so an already-answered same-day request
+    should be a cache hit, not a re-fetch.
     """
     fetched: dict[str, list[str]] = {"daily": [], "monthly": []}
     failed: list[dict] = []
@@ -442,112 +451,40 @@ def load_fetch_history(*, fetch_root=None) -> dict[str, list[date_cls]]:
     return out
 
 
-def load_fetch_coverage(session, *, read_retrieval: Callable[..., tuple],
-                        fetch_root=None) -> dict[str, list[date_cls]]:
-    """``{ticker: [newest_valid_bar_date]}`` — one element per ticker: the
-    newest valid bar date of the NEWEST successfully-parsed dated Tier-1
-    ``period=max`` yfinance ``history`` fetch on disk.
+def load_fetch_times(*, fetch_root=None) -> dict[str, list[pd.Timestamp]]:
+    """``{ticker: [fetched_at, ...]}`` — every dated ``period=max`` Tier-1
+    yfinance ``history`` fetch's own ``fetched_at`` on disk, as UTC-aware
+    timestamps, for the close-buffer daily coverage rule in
+    :func:`plan_refresh`.
 
-    This mirrors what the ``price_history`` capture actually replays:
-    ``engine/v2/ops/price_history_store.py``'s ``_parse_and_order_entries``/
-    ``_capture_ticker`` order every retrieval ascending by ``(retrieved_at =
-    the fetch's own fetched_at, source_hash = sha256(body + b"\\x00" +
-    meta_bytes))``, skip the ones that fail to parse, and feed them through
-    ``price_history.diff_retrieval``, which TOMBSTONES any date a later valid
-    retrieval omits. So the ticker's state is the newest valid retrieval's
-    bars, and coverage asks the same question: only the NEWEST parseable
-    retrieval counts, and an older retrieval's bar is never coverage once a
-    newer valid retrieval has arrived without it. A newest retrieval that
-    fails to parse is skipped exactly as capture skips it, falling back to
-    the next-newest parseable one; a retrieval that parses but holds no valid
-    bar shadows the older ones exactly as capture would tombstone them.
-
-    WHICH retrieval a fetch is (its ``retrieved_at``/``source_hash`` identity)
-    and WHICH rows of its body count as valid bars is not decided here: it is
-    capture's rule, injected as ``read_retrieval`` — a callable handed the
-    cached ``entry`` and returning ``(retrieved_at, source_hash, dates)``, or
-    raising for a fetch capture could not parse. The real caller passes
-    ``engine/v2/ops/legacy_adapter.py``'s ``read_tier1_retrieval``, which
-    builds and parses the entry through ``price_history_store``'s own shared
-    ``tier1_retrieval_entry``/``parse_tier1_retrieval`` — the same builder,
-    parser and hash the capture uses. Legacy cannot import ``engine.v2``
-    (``checks/import_layers.py``), so the rule arrives as a parameter instead
-    of being reimplemented here as a second rule that could drift from
-    capture's: a row the capture would not store is a bar this loader never
-    counts, and the ordering is the capture's own.
-
-    ``fetched_at`` is read for one purpose only, a cheap prefilter: a fetch
-    with a parseable stamp provably before :func:`_required_daily_bar_date`
-    (the latest trading day on or before ``session``) cannot possibly hold
-    that required bar — the market had not opened yet on that day when the
-    bytes arrived — and it is older than every fetch that could, so its body
-    is never opened and it never enters the ordering. A missing or
-    unparseable stamp is NOT a skip: capture's own scan fills a missing
-    ``fetched_at`` from the body file's mtime and sorts an unparseable one
-    verbatim, so the fetch goes to the hook, whose returned ``retrieved_at``
-    IS capture's identity, and the ordering decides there exactly as the
-    capture's would. The floor is the required BAR date, not ``session``
-    minus one day: a fetch stamped the Friday before a Saturday, Sunday or
-    Monday-holiday session IS read, because Friday's close is exactly the bar
-    those sessions require.
-
-    The dates ``read_retrieval`` returns are normalized the way
-    ``computed_moves.fetch_history`` normalizes them — ``pd.to_datetime(...,
-    utc=True)`` through the per-row UTC offsets yfinance writes (they flip at
-    DST), then ``tz_localize(None)`` and ``normalize()`` to midnight, so the
-    trade date is what survives. No ``newest_bar`` meta key is read or written
-    here: a shortcut stamped by the writer would be exactly the arrival-time
-    assumption this loader exists to stop trusting.
-
-    Any failure to read one fetch — an unreadable or corrupt body, ANY
-    exception raised while reading or parsing it (a broken gzip stream, a
-    ``ValueError`` from the CSV parse, capture's own typed refusal, whatever
-    ``read_retrieval`` raises for it) — skips that fetch and contributes
-    nothing, exactly as capture's parse loop skips its ``error`` outcomes and
-    keeps the ticker's state at the newest retrieval that did parse. Unknown
-    is treated as not covered, which can only ever lengthen today's daily
-    list, never shorten it: a fetch nobody can read is never evidence that a
-    session's close is already on disk.
+    Same iteration and filters as :func:`load_fetch_history` (``period=max``,
+    a ticker, a present ``fetched_at``), but keeping the full timestamp
+    rather than its date: the daily skip asks whether a fetch was stamped
+    AFTER the required trading day's close plus :data:`COVERAGE_CLOSE_BUFFER`
+    (16:00 America/New_York, 13:00 on NYSE early-close days —
+    :func:`engine.calendar.market_close`), which a date alone cannot answer.
+    A missing or unparseable ``fetched_at`` contributes nothing: unknown is
+    never coverage, which can only lengthen the daily list, never shorten it.
+    The body is never opened — bar validity is capture's job, and a bad or
+    truncated response fails there for the next refresh to retry against
+    (accepted trade-off).
 
     ``fetch_root`` defaults to ``engine.paths.RAW_FETCH`` and exists only so
     tests can point this at a throwaway tree.
     """
-    session_ts = pd.Timestamp(session).normalize()
-    required = _required_daily_bar_date(session_ts)
-    parsed: dict[str, list[tuple[str, str, date_cls | None]]] = {}
+    out: dict[str, list[pd.Timestamp]] = {}
     for entry in iter_cached("yfinance", "history", root=fetch_root):
         if entry.params.get("period") != "max":
             continue
         ticker = entry.params.get("ticker")
-        if not ticker:
-            continue
         fetched_at = entry.meta.get("fetched_at")
-        if fetched_at:
-            try:
-                when = pd.Timestamp(fetched_at)
-                if when.tzinfo is not None:
-                    when = when.tz_convert("UTC").tz_localize(None)
-                if when.normalize() < required:
-                    continue
-            except (TypeError, ValueError):
-                pass
-        # Broad on purpose: a broken stream, a CSV that will not parse or
-        # capture's own typed refusal all mean the same thing here — capture
-        # skips a retrieval whose parse failed, so this fetch is evidence of
-        # nothing and the next-newest parseable one decides, exactly as here.
-        try:
-            retrieved_at, source_hash, dates = read_retrieval(entry)
-            bars = pd.to_datetime(list(dates), errors="coerce", utc=True)
-            bars = bars.tz_localize(None).normalize().dropna()
-            newest = bars.max().date() if len(bars) else None
-        except Exception:
+        if not ticker or not fetched_at:
             continue
-        parsed.setdefault(str(ticker), []).append(
-            (str(retrieved_at), str(source_hash), newest))
-    out: dict[str, list[date_cls]] = {}
-    for ticker, items in parsed.items():
-        items.sort(key=lambda item: (item[0], item[1]))
-        newest = items[-1][2]
-        if newest is not None:
-            out[ticker] = [newest]
+        try:
+            when = pd.Timestamp(fetched_at)
+        except (TypeError, ValueError):
+            continue
+        if when.tzinfo is None:
+            when = when.tz_localize("UTC")
+        out.setdefault(str(ticker), []).append(when.tz_convert("UTC"))
     return out

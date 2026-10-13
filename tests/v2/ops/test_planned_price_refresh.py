@@ -18,7 +18,6 @@ from engine.data import fetch
 from engine.data.pulls import price_refresh
 from engine.v2.contracts import PriceQuery
 from engine.v2.data import reference_catalog
-from engine.v2.data.errors import DataError
 from engine.v2.data.reference_catalog import ReferenceInput
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
@@ -38,7 +37,7 @@ from tests.v2.ops.test_v2_ops_price_history import (
 )
 
 SESSION = "2026-09-11"
-FETCHED_AT = SESSION + "T20:00:00+00:00"
+FETCHED_AT = SESSION + "T21:00:00+00:00"  # after Friday's close + buffer
 PRICES = {"2026-09-10": 100.0, SESSION: 101.0}
 
 
@@ -190,8 +189,9 @@ def test_selected_root_controls_daily_cache_and_fetch_writes(
         tmp_path, isolated_legacy_sources, install_fetcher):
     """Daily cache reads and fetch writes stay within the selected root.
 
-    ``OLD`` is the pre-market case the coverage read exists for: its body's
-    last bar is the prior session, so a same-day fetch of it is still needed.
+    ``OLD``'s Thursday-evening stamp predates Friday's close plus the
+    coverage buffer, so it stays on the daily list even though it landed a
+    day ago and its body already holds Thursday's bar.
     """
     root = tmp_path / "selected-source"
     global_root = isolated_legacy_sources
@@ -244,7 +244,7 @@ def test_planned_dry_run_never_constructs_fetcher_or_writes(tmp_path, monkeypatc
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
         isolated_legacy_sources, monkeypatch, dry_run):
-    """Standalone calls retain event, inventory, cache, coverage and calendar inputs."""
+    """Standalone calls retain event, inventory, cache, stamp and calendar inputs."""
     loaders, fetcher_roots, requests, refetch_tokens = [], [], [], []
 
     def load_events():
@@ -268,46 +268,17 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
                 "INVENTORY_CACHED": ["2026-09-01"], "INVENTORY_OLD": ["2026-08-31"],
                 "SPY": ["2026-09-10"]}
 
-    class _StubTier1Entry:
-        """A stand-in for the ``CachedEntry`` the coverage hook receives: the
-        read surface the production hook touches (meta, params, body), with no
-        filesystem behind it."""
+    def load_fetch_times():
+        """Only the cached event ticker carries a post-close stamp.
 
-        def __init__(self, body: bytes):
-            self._body = body
-            self.meta = {"source": "yfinance", "endpoint": "history", "key": "stub",
-                         "params": {"ticker": "AAA", "period": "max"},
-                         "fetched_at": "2026-09-11T20:00:00+00:00", "status": 200}
-
-        @property
-        def params(self):
-            return dict(self.meta["params"])
-
-        def body(self):
-            return self._body
-
-    def load_fetch_coverage(session, *, read_retrieval):
-        """Only the cached event ticker's newest retrieval reaches today's
-        required bar.
-
-        The retrieval reader the adapter injects is proven here to be capture's
-        own rule: it returns the capture's ordering identity
-        ``(retrieved_at, source_hash)`` plus the valid bar dates, a row with an
-        empty ``Adj Close`` is not a valid bar, and a body with no ``Adj Close``
-        column at all is capture's typed refusal, not a date."""
-        loaders.append("coverage")
-        assert session == SESSION
-        retrieved_at, source_hash, dates = read_retrieval(
-            _StubTier1Entry(b"Date,Open,High,Low,Close,Adj Close,Volume\n"
-                            b"2026-09-10,1,1,1,1,1,1\n2026-09-11,2,2,2,2,,1\n"))
-        assert retrieved_at == "2026-09-11T20:00:00+00:00"
-        assert len(source_hash) == 64
-        assert [str(pd.Timestamp(d).date()) for d in dates] == ["2026-09-10"]
-        with pytest.raises(DataError):
-            read_retrieval(_StubTier1Entry(
-                b"Date,Open,High,Low,Close,Volume\n2026-09-11,1,1,1,1,1\n"))
-        return {"EVENT_CACHED": [SESSION], "EVENT_DAILY": ["2026-09-10"],
-                "SPY": ["2026-09-10"]}
+        The stamp against the required day's close plus the buffer is the
+        whole daily coverage question: EVENT_DAILY's and SPY's 13:30Z
+        arrivals predate Friday's 20:00Z close, so they stay on the daily
+        list, while EVENT_CACHED's 21:00Z stamp excuses the session."""
+        loaders.append("times")
+        return {"EVENT_DAILY": [pd.Timestamp("2026-09-11T13:30:00+00:00")],
+                "EVENT_CACHED": [pd.Timestamp("2026-09-11T21:00:00+00:00")],
+                "SPY": [pd.Timestamp("2026-09-11T13:30:00+00:00")]}
 
     class SyntheticFetcher:
         """Record requests without contacting providers or writing any cache."""
@@ -325,7 +296,7 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
     monkeypatch.setattr(price_refresh, "load_events", load_events)
     monkeypatch.setattr(price_refresh, "load_price_universe", load_price_universe)
     monkeypatch.setattr(price_refresh, "load_fetch_history", load_fetch_history)
-    monkeypatch.setattr(price_refresh, "load_fetch_coverage", load_fetch_coverage)
+    monkeypatch.setattr(price_refresh, "load_fetch_times", load_fetch_times)
     monkeypatch.setattr(fetch, "Fetcher", SyntheticFetcher)
 
     result = invoke_price_refresh(SESSION, dry_run=dry_run)
@@ -344,7 +315,7 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
         "failed": [],
     }
     assert result == {"plan": expected_plan, "report": None if dry_run else expected_report}
-    assert loaders == ["events", "inventory", "history", "coverage"]
+    assert loaders == ["events", "inventory", "history", "times"]
     assert fetcher_roots == ([] if dry_run else [None])
     expected_requests = [
         ("yfinance", "history", {"ticker": ticker, "period": "max"}, True, "price-refresh")
@@ -373,7 +344,7 @@ def test_planned_refresh_without_source_root_refuses_before_discovery_or_fetch(
         pytest.fail("missing source root reached discovery or fetch")
 
     monkeypatch.setattr(price_refresh, "load_fetch_history", unexpected_io)
-    monkeypatch.setattr(price_refresh, "load_fetch_coverage", unexpected_io)
+    monkeypatch.setattr(price_refresh, "load_fetch_times", unexpected_io)
     monkeypatch.setattr(fetch, "Fetcher", unexpected_io)
 
     with pytest.raises(OpsError) as error:
