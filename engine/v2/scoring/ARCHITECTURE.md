@@ -545,6 +545,16 @@ must be recorded in lineage.
 `class NightlySourceBundleRefusal(ValueError)` — `__init__(code, detail)`,
 message `f"{code}: {detail}"`.
 
+For STR-RUNUP, `calendar_row.days_before_print` is required: a nonnegative
+integral real number (zero allowed, booleans excluded), normalized to an integer.
+The calendar-owned value enters context and, when requested, the feature vector
+with a present mask; it wins over panel/Tier-4 namesakes without reading their
+forecast stamps. Missing value refuses `MISSING_STAGED_INPUT`; malformed,
+fractional, negative or nonfinite value refuses `INVALID_RUNUP_HORIZON`.
+This is staged session arithmetic, not `days_to_print` or `dte_entry`.
+No input mappings are mutated, no I/O/cache/retry/write occurs, and refusal
+returns no partial bundle. Other strategies retain their existing projection.
+
 | Condition | Code |
 |---|---|
 | a supplied `calendar_row`/`panel_row`/`tier4_row` is not a mapping; `quote_rows` is a string/bytes value, not a sequence, or an empty sequence without an allowed empty `quote_status`; `calendar_row` missing a required key; `panel_row` missing its own `date` column (the real panel key — never `observed_at`, which neither real table has ever carried); a `quote_rows[i]` is not a mapping or is missing `observed_at` (every one of these arguments is required with no default, so omitting one outright raises `TypeError` before any of this validation runs) | `MISSING_STAGED_INPUT` |
@@ -557,7 +567,7 @@ message `f"{code}: {detail}"`.
 | `feature_names` a bare `str`/`bytes`, not a `Sequence`, or containing a non-`str`, empty, or duplicate entry | `INVALID_FEATURE_NAMES` |
 | a quote row missing `right`/`strike`/`expiry`/`bid`/`ask`, an unrecognized `right`, non-finite/negative `bid`, a crossed `ask`, two rows disagreeing on the same contract key, or `quote_rows`/`quote_status` disagreeing on whether the domain is empty (`quote_domain_map`, the quote-map builder `tools/capture_tier0_corpus.py` shares; each quote also carries its row's `observed_date`) | `NightlySourceBundleRefusal` (that module's own call site wraps it back into its own exception type) |
 
-- **Values pass through unclassified.** A resolved feature value is
+- **Panel/Tier-4 values pass through unclassified.** A resolved feature value is
   projected into `feature_vector` exactly as staged (`None`, any NaN
   flavor, `+/-inf`, a non-numeric string — unconverted, unfiltered):
   classifying missing vs. invalid is `FrozenStageExecutor._row`'s job, not

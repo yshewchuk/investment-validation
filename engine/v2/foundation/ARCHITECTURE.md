@@ -8,6 +8,12 @@ Layer 0.5 in the root `/ARCHITECTURE.md`; owns pure session arithmetic ported fr
 
 `market_calendar.build_calendar_sessions` projects sessions from observed source dates; `planned_exit_date` applies native strategy anchors. `CalendarEventKey` is structural so ops requests satisfy it without a foundation dependency on ops.
 
+`market_horizon.trading_days_before_print(calendar, *, entry_date, event_date,
+session)` returns the signed session-index distance from entry (previous listed
+session for an unlisted day) to the last pre-print close: AMC includes the
+event close; BMO excludes it. Zero is valid. Both dates require calendar
+coverage; the helper counts supplied sessions, preserving historical gaps.
+
 `experiment_holdouts.ExperimentHoldouts` owns the shared, versioned membership
 definitions from [#373](https://github.com/yshewchuk/investment-validation/pull/373).
 Random membership hashes immutable canonical event identity, independently of
@@ -33,7 +39,7 @@ The factory accepts observed ISO session days and an event-through day. Exit pla
 
 ## Dependencies
 
-Pure standard-library arithmetic with no upward-layer imports. `ops.nightly_calendar_inputs` composes its calendar and exit helpers for pinned raw-row inputs; the later `nightly_raw_row_producer` remains a planned caller.
+Pure standard-library arithmetic with no upward-layer imports. `ops.nightly_calendar_inputs` composes its calendar, exit and horizon helpers for pinned raw-row inputs, reached by the native worker through `nightly_raw_row_producer`.
 
 ## External systems and libraries
 
@@ -42,6 +48,11 @@ None. This module does not access repositories, providers, loaders, models, legs
 ## Failure semantics
 
 Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strategy/session, or insufficient pre-print or post-print anchor coverage raise `CalendarInputError(code="INVALID_REQUEST")`. The bounded search for the first future session stops at Python's maximum representable date: if a session remains in range it is returned, and if none remains the function raises the same typed refusal rather than leaking date-arithmetic overflow. R1–R6: source failures propagate at the adapter; no cache or retries; deterministic for the same inputs; read-only; no partial result or writes; stable output for the same request.
+
+For `trading_days_before_print` only, missing date/anchor coverage raises the
+`CalendarCoverageError` subclass (same code), distinguishable from malformed
+calendar/date/session input. Negative distances are returned for caller policy;
+no calendar days, missing sessions or horizon defaults are invented.
 
 The shared typed-document decoder reports `UNSUPPORTED_VERSION` before `UNKNOWN_FIELD` when a document has both an unsupported schema version and undeclared fields. Supported versions still report `UNKNOWN_FIELD` for undeclared fields.
 
