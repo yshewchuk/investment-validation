@@ -191,7 +191,7 @@ def test_report_status_decision_table():
         if cstate and not (cstate == "success" and report != "success") and skipped in ("", "0"):
             assert desc == cdesc
         elif expected == "neutral" and report != "success":
-            assert "before classification" in desc
+            assert desc == f"gremlins: report job {report} before classification -- infra; not a pass"
 
 
 GH_FUNCS = """

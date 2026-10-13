@@ -358,7 +358,7 @@ same reason -- `plan`'s own steps can fail *after* `select_pr` already set
 `pr_number` (e.g. its checkout or pip install step), and a
 `result == 'success'` guard would then skip `report_status` too, silently
 recreating the exact invisible-PR problem this job exists to fix; posting
-a `failure` status attributed to a "report" that never ran is still
+a status posted for a "report" that never ran (mutmut: `failure`; gremlins: `neutral`, "not a pass") is still
 strictly more informative than nothing). A fork PR, or a Tests run that
 failed, was cancelled, or was not itself a `pull_request` run, never
 reaches this far (`plan` is skipped, or leaves `pr_number` empty), so
@@ -368,15 +368,16 @@ workflow. When
 checkout, or a docs-only PR the `[pr_selection] inert` allowlist ruled out)
 the status is `success` with a "skipped by design" description rather
 than silence; a `report` job that itself failed or was skipped maps to
-`failure` (mutmut; gremlins: `neutral`, see below). In between those two, `report` can also exit 0 having merged
+`failure` for mutmut and to `neutral` for gremlins (see below). Both backends share the
+PR-closed guard: `report` can exit 0 having merged
 one or more PR-closed placeholder modules (issue #64, above: `merge_dirs`'s
 `skipped_modules`) -- not a tool error, but not a real measurement either,
 so `report_status` reads `report`'s own `skipped_count` output (a `jq`
 count of `merged/summary.json`'s `skipped_modules`, computed by `report`'s
 own `skip` step) and posts `failure` with a "skipped (PR closed)"
-description instead: this must never read as `success`, which would claim
-every module was measured when some were only a stub. Only when none of
-that applies does the status mirror `report`'s own result as `success`.
+description: this must never read as `success`. Otherwise mutmut mirrors
+`report`'s own result as `success`, while gremlins posts the classified
+`state` (failure, success or neutral; see below).
 The two names, `mutation-mutmut/pr` (commit status) and `mutation/pr` (check run),
 are distinct from each other and from the `Tests` check.
 
@@ -402,7 +403,10 @@ supersedes the earlier result; mutmut's status is unchanged). The `report` job's
 
 User decision 2026-10-13: any malformed or partial report is neutral, even if some result
 rows are readable; partial evidence is not salvaged for this advisory check. A test failure
-that main also shows is still red (no baseline; the `Tests` job is the gate). The tool exits 0
+that main also shows is still red (no baseline; the `Tests` job is the gate). Stated exceptions:
+a failing PR test run (module exit code 1..127) is red even if the summary is incomplete, and
+row-count reconciliation is out of scope (a truncated-but-valid row file can at worst miss a
+survivor: grey or green instead of red). The tool exits 0
 for every classified or degraded input; only argument errors and an unwritable
 `--github-output` file exit nonzero (after classification, so the step fails loudly).
 `mutation/pr` is not a required check. The PR-closed placeholder guard and the empty-plan

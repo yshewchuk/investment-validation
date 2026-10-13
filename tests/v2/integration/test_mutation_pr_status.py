@@ -203,6 +203,8 @@ def test_cut_truncates_at_exactly_the_limit():
     assert verdict["state"] == "failure"
     assert len(verdict["description"]) == 140
     assert verdict["description"].endswith("...")
+    full = "gremlins: PR-owned problem: 3 surviving mutant(s) in " + ", ".join(sorted(files))
+    assert verdict["description"] == full[:137] + "..."
 
 
 def _report(tmp_path, summary, rows_lines, changed_lines, subdir="report"):
@@ -248,10 +250,29 @@ def test_cli_invalid_summary_is_neutral(tmp_path, capsys):
     merged.mkdir()
     (merged / "summary.json").write_text("{not json")
     (merged / "results.jsonl").write_text("")
+    changed = tmp_path / "changed.txt"
+    changed.write_text("engine/v2/a.py\n")
     out = tmp_path / "gh_output"
-    assert ps.main(["--merged-dir", str(merged), "--github-output", str(out)]) == 0
+    assert ps.main(["--merged-dir", str(merged), "--changed-files", str(changed),
+                    "--github-output", str(out)]) == 0
     assert "state=neutral\n" in out.read_text()
-    assert "::warning::" in capsys.readouterr().out
+    out_text = out.read_text()
+    cap_text = capsys.readouterr().out
+    assert "merged report unavailable" in out_text or "merged report unavailable" in cap_text
+    assert "::warning::" in cap_text
+
+
+def test_cli_missing_summary_is_neutral(tmp_path, capsys):
+    merged = tmp_path / "merged"
+    merged.mkdir()
+    (merged / "results.jsonl").write_text("")
+    changed = tmp_path / "changed.txt"
+    changed.write_text("engine/v2/a.py\n")
+    out = tmp_path / "gh_output"
+    assert ps.main(["--merged-dir", str(merged), "--changed-files", str(changed),
+                    "--github-output", str(out)]) == 0
+    assert "state=neutral\n" in out.read_text()
+    assert "merged report unavailable" in capsys.readouterr().out
 
 
 def test_cli_malformed_rows_are_neutral(tmp_path):
