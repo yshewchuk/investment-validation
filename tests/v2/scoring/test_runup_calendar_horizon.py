@@ -89,7 +89,7 @@ def test_real_native_builder_receives_horizon():
     assert inputs.features["missing_mask"]["days_before_print"] is False
 
 
-def test_through_ignores_calendar_namesake_and_keeps_prior_projection():
+def test_through_omits_calendar_horizon_and_projects_panel_horizon():
     kwargs = _valid_kwargs(feature_names=("days_before_print",))
     kwargs["calendar_row"]["days_before_print"] = "not-a-horizon"
     kwargs["panel_row"]["days_before_print"] = 7.5

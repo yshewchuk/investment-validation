@@ -202,9 +202,11 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
     repository failure still fails the whole call. The key's strategy and
     session domains are checked first, so an unsupported value is
     ``INVALID_REQUEST`` rather than a masked expiry refusal; an empty eligible
-    expiry domain, or the native no-expiry geometry refusals, are the one
-    per-key ``NO_RESOLVABLE_EXPIRY`` refusal -- every other geometry/input
-    error propagates."""
+    expiry domain or native no-expiry geometry refusal becomes per-key
+    ``NO_RESOLVABLE_EXPIRY``. Missing RUNUP pre-print coverage becomes per-key
+    ``RUNUP_HORIZON_NOT_AVAILABLE``; a negative distance becomes per-key
+    ``INVALID_RUNUP_HORIZON``. Malformed calendar input and other unhandled
+    geometry/input errors propagate."""
     from engine.v2.domain.generation import GeometryRefusal, resolve_expiry
 
     _require_key(key)

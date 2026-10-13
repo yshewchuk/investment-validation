@@ -78,6 +78,7 @@ def test_producer_horizon_reaches_both_real_frozen_consumers(tmp_path, monkeypat
         bundle, model_release=binding.model_release, frozen_inference=binding.frozen_inference))
     assert inputs.context["days_before_print"] == expected
     assert inputs.features["missing_mask"] == {"days_before_print": False}
+    assert set(inputs.forecast["executors"]) == {"driver_prediction", "runup_move_prediction"}
     for output, executor in inputs.forecast["executors"].items():
         assert executor.predict(inputs.features["model_inputs"]) == {output: expected + 1.0}
     # This prerequisite does not activate RUNUP batch dispatch.
