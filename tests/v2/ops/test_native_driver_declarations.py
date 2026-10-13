@@ -1,6 +1,6 @@
 """Ordered driver declarations over real synthetic releases; RUNUP stays gated."""
 import json
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 
 import pytest
 
@@ -90,7 +90,10 @@ def test_every_recipe_identity_reference_and_frozen_consumer_survives(
     assert inputs.context["strategy"] == "STR-RUNUP"
     assert inputs.forecast["driver_name"] == "im_t1"
     assert set(inputs.forecast["executors"]) == {"driver_prediction", "runup_move_prediction"}
-    assert set(inputs.features["model_identity"]) == {driver_key, "runup_move:*", "gate:STR-RUNUP"}
+    # Independent dataclass/JSON projection, not the production document serializer.
+    assert inputs.features["model_identity"] == {
+        key: json.loads(json.dumps(asdict(binding.model_identity[key])))
+        for key in (driver_key, "runup_move:*", "gate:STR-RUNUP")}
     selected = [binding.model_identity[key] for key in (driver_key, "runup_move:*", "gate:STR-RUNUP")]
     assert request.model_artifact_refs == tuple(identity.artifact_hash for identity in selected)
     assert inputs.forecast["model_artifact_refs"] == {
@@ -324,4 +327,5 @@ def test_worker_executes_both_forecasts_without_claiming_runup_readiness(tmp_pat
     assert record["forecasts"]["runup_move_prediction"] == pytest.approx(51.0 / 14.0)
     roles = ("implied_t1:*", "runup_move:*", "gate:STR-RUNUP")
     assert record["model_artifact_ids"] == [binding.model_identity[role].artifact_hash for role in roles]
-    assert set(record["resolved_request"]["model_identity"]) == set(roles)
+    assert record["resolved_request"]["model_identity"] == {
+        role: json.loads(json.dumps(asdict(binding.model_identity[role]))) for role in roles}
