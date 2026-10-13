@@ -362,6 +362,15 @@ def test_cache_key_refetch_token_is_distinct_and_optional():
             cache_key("yfinance", "history", params, live=True, refetch_token="t2")}
     assert len(keys) == 3
 
+    tokened = cache_key("yfinance", "history", params, live=True, refetch_token="t1")
+    assert cache_key("yfinance", "history", params,
+                     live=True, refetch_token="t1") == tokened, \
+        "same source/endpoint/params/token must give the identical key"
+    other_params = {"ticker": "BBB", "period": "max"}
+    assert cache_key("yfinance", "history", other_params,
+                     live=True, refetch_token="t1") != tokened, \
+        "a different request with the same token is a different key"
+
 
 def test_a_tokenless_repeat_is_a_cache_hit_while_a_token_misses(fetch_root, monkeypatch):
     _freeze(monkeypatch, datetime(2026, 9, 14, 13, 30, tzinfo=timezone.utc))
