@@ -145,6 +145,18 @@ def test_coverage_is_strictly_after_close_plus_buffer():
     assert one_microsecond_later["skipped_already_fetched"] == ["AAA"]
 
 
+@pytest.mark.parametrize("value", ["garbage", None, pd.Timestamp("2026-09-14 21:00")])
+def test_a_stamp_that_is_not_a_tz_aware_instant_is_ignored_never_raises(value):
+    """Only a tz-aware ``pd.Timestamp``/``datetime`` has a side of the
+    cutoff: a garbage string, ``None``, or a naive timestamp is no time at
+    all, so it is ignored rather than raising, and a ticker whose only
+    stamp is such a value stays on the daily list — unknown is never
+    coverage."""
+    plan = _plan({"AAA": [value]})
+    assert plan["daily"] == ["AAA"]
+    assert plan["skipped_already_fetched"] == []
+
+
 def test_a_half_day_fetch_before_the_1630_et_cutoff_is_refetched():
     """2026-11-27 is Black Friday: a 13:45 ET fetch predates the plain 16:30 ET
     cutoff, so it is refetched — the accepted harmless extra refetch."""

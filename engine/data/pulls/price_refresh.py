@@ -127,6 +127,25 @@ def _regular_market_close(day) -> pd.Timestamp:
     return (ts + timedelta(hours=16)).tz_convert("UTC")
 
 
+def _coverage_stamp(stamp) -> pd.Timestamp | None:
+    """One fetch's ``fetched_at`` normalized for the daily coverage test.
+
+    Only a tz-aware ``pd.Timestamp``/``datetime`` has a side of the cutoff.
+    Anything else — a garbage string, ``None``, NaT, a naive timestamp — is
+    no time at all, so it returns ``None`` and contributes nothing: unknown
+    is never coverage, which can only lengthen the daily list, never
+    shorten it (the same rule :func:`load_fetch_times` applies on the
+    loader side, re-checked here because callers can inject the mapping
+    directly).
+    """
+    if not isinstance(stamp, (pd.Timestamp, datetime)):
+        return None
+    ts = pd.Timestamp(stamp)
+    if pd.isna(ts) or ts.tzinfo is None:
+        return None
+    return ts.tz_convert("UTC")
+
+
 # --------------------------------------------------------------------------
 # window arithmetic
 # --------------------------------------------------------------------------
@@ -255,7 +274,10 @@ def plan_refresh(
         16:30 ET may be refetched (accepted). Anything
         else — a pre-market or
         at-the-close fetch, a fetch on the wrong day, no fetch at all — goes
-        on today's daily list. The body is never read: A bad post-close
+        on today's daily list. A stamp that is not a tz-aware
+        ``pd.Timestamp``/``datetime`` (a garbage string, ``None``, NaT, a
+        naive timestamp) is ignored by the test via :func:`_coverage_stamp`
+        and never excuses the session. The body is never read: A bad post-close
         response is not retried until a run targets a session whose close
         (plus the buffer) is later than that fetch; that run refetches it.
         Capture is responsible for failing loudly. Unknown
@@ -304,8 +326,9 @@ def plan_refresh(
         )
         if on_board:
             covered = any(
-                pd.Timestamp(t).tz_convert("UTC") > coverage_cutoff
-                for t in times.get(ticker, ())
+                stamp > coverage_cutoff
+                for stamp in map(_coverage_stamp, times.get(ticker, ()))
+                if stamp is not None
             )
             if covered:
                 skipped.append(ticker)
