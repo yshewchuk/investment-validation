@@ -1,6 +1,8 @@
 """Synthetic native publication/read oracles, including physical poison guards."""
 import hashlib
+import importlib.metadata
 import json
+import platform
 import sqlite3
 from collections import Counter
 from dataclasses import replace
@@ -101,6 +103,15 @@ def test_native_roundtrip_math_lineage_units_identity_and_replay(source, monkeyp
     assert {"experiments/magnitude_history_store.py", "engine/v2/research/magnitude_history_store.py",
             "engine/v2/research/event_history.py"} <= closure.keys()
     assert closure == {name: "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest() for name in closure}
+    libraries = {}
+    for name in ("numpy", "pandas", "scipy", "scikit-learn", "pyarrow"):
+        try:
+            libraries[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            libraries[name] = None
+    assert context["producer"]["environment"] == {
+        "python": platform.python_version(), "machine": platform.machine(),
+        "libraries": libraries, "numerical_threads": 1}
     assert context["feature_recipe"]["features"] == [
         {"name": name, "on_missing": "zero_count" if name == "n_prior" else "null"} for name in FEATURES]
     before = _catalog(source.conn), _objects(source.store)
@@ -168,6 +179,63 @@ def test_empty_and_zero_history_keep_distinct_missingness(source):
     assert json.loads(empty["history_json"])["history"] == []
     zero = next(r for r in rows if r["event_date"] == "2024-06-12")
     assert zero["n_prior"] == 2 and zero["mean_prior_move"] == 1 and zero["mean_prior_abs_move"] == 5
+
+
+def test_two_issuers_with_overlapping_dates_keep_exact_stored_features_and_lineage(tmp_path, monkeypatch):
+    dates = ("2022-06-02", "2023-01-03", "2023-06-02", "2024-06-12", "2024-06-17")
+    events = {ticker: [_event(day, ticker=ticker) for day in dates] for ticker in ("SYNTH", "SYNTH_B")}
+    values = {"SYNTH": [-2., -4., 6., 10., None], "SYNTH_B": [2., 8., -12., 20., None]}
+    moves = {ticker: [_move(event, value) for event, value in zip(group, values[ticker])]
+             for ticker, group in events.items()}
+    conn, repository, snapshot = _commit(tmp_path,
+        [event for pair in zip(*events.values()) for event in reversed(pair)],
+        [move for pair in zip(*moves.values()) for move in pair],
+        days=_calendar("2022-05-25", "2024-06-18").days)
+    source = SimpleNamespace(conn=conn, repository=repository, snapshot=snapshot, store=repository._store)
+    selected = [events[ticker][i]["event_id"] for i in (2, 4) for ticker in ("SYNTH_B", "SYNTH")]
+    by_id = {event["event_id"]: (ticker, i) for ticker, group in events.items() for i, event in enumerate(group)}
+    # Independent tuples: signed/absolute means, EMA2 pair, optional EMA4 pair.
+    expected = {"SYNTH": {2: (-3., 3., -10 / 3, 10 / 3, None, None),
+        3: (0., 4., 26 / 9, 46 / 9, None, None),
+        4: (2.5, 5.5, 206 / 27, 226 / 27, 554 / 125, 806 / 125)},
+        "SYNTH_B": {2: (5., 5., 6., 6., None, None),
+        3: (-2 / 3, 22 / 3, -6., 10., None, None),
+        4: (4.5, 10.5, 34 / 3, 50 / 3, 838 / 125, 1558 / 125)}}
+    try:
+        records = {(r.partition_key, r.time_min): r for r in repository.fragment_records(snapshot, "computed_moves")}
+        _poison(monkeypatch, repository, snapshot, [dates[-1]])
+        _, output = _build(source, event_ids=selected)
+        _poison(monkeypatch, repository, snapshot, [], all_outcomes=True)
+        monkeypatch.setattr(stored, "_prepare_history", _forbid)
+        before = _catalog(conn), _objects(source.store)
+        rows = _read(source, output, event_ids=selected)["rows"]
+        assert {(row["event_id"], row["horizon_sessions"]) for row in rows} == {
+            (event_id, horizon) for event_id in selected for horizon in (1, 3, 5)}
+        assert len(rows) == 12
+        for row in rows:
+            ticker, index = by_id[row["event_id"]]
+            count = 2 if index == 2 else 4 if row["horizon_sessions"] == 1 else 3
+            mean, absolute, ema2, abs2, ema4, abs4 = expected[ticker][count]
+            wanted = dict(n_prior=count, mean_prior_move=mean, mean_prior_abs_move=absolute,
+                ema2_prior_move=ema2, ema2_prior_abs_move=abs2, ema4_prior_move=ema4,
+                ema4_prior_abs_move=abs4, ema8_prior_move=None, ema8_prior_abs_move=None,
+                ema12_prior_move=None, ema12_prior_abs_move=None)
+            assert {name: row[name] for name in wanted} == pytest.approx(wanted)
+            lineage = json.loads(row["history_json"])
+            assert lineage["ticker"] == ticker and lineage["event_id"] == row["event_id"]
+            assert lineage["omitted_history"] == []
+            history, inputs = [], []
+            for event, move in zip(events[ticker][:count], moves[ticker][:count]):
+                record = records[ticker, move["event_date"]]
+                identity = dict(event_id=event["event_id"], fragment_id=record.fragment_id,
+                    object_id=record.object_ref.object_id, content_hash=record.object_ref.content_hash)
+                inputs.append(identity)
+                history.append({**identity, "event_date": move["event_date"],
+                                "target_available_on": move["available_as_of_date"]})
+            assert lineage["history"] == history and lineage["read_inputs"] == inputs
+        assert (_catalog(conn), _objects(source.store)) == before
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("count,expected", [
@@ -251,6 +319,35 @@ def test_changed_context_cannot_reuse_feature_snapshot(source, monkeypatch, chan
     monkeypatch.setattr(stored, "_scan", _forbid)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         _read(source, output, **change)
+
+
+@pytest.mark.parametrize("field", ["python", "machine", "libraries", "numerical_threads"])
+def test_environment_only_drift_changes_context_and_refuses_old_feature_snapshot(source, monkeypatch, field):
+    built, output = _build(source)
+    original = built["context"]
+    environment = json.loads(json.dumps(original["producer"]["environment"]))
+    environment[field] = ({**environment[field], "numpy": "synthetic-drift"} if field == "libraries"
+        else 2 if field == "numerical_threads" else environment[field] + "-synthetic-drift")
+    calls = []
+
+    def changed_environment(threads):
+        calls.append(threads)
+        return environment
+
+    monkeypatch.setattr(entry, "environment_identity", changed_environment)
+    changed = entry.context(source.repository, source.snapshot, **REQUEST)
+    identity = {**{k: v for k, v in original.items() if k != "context_id"},
+                "producer": {**original["producer"], "environment": environment}}
+    assert changed == {**identity, "context_id": content_hash(identity)}
+    assert changed["context_id"] != original["context_id"]
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    monkeypatch.setattr(stored, "_scan", _forbid)
+    monkeypatch.setattr(stored, "_prepare_history", _forbid)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        _read(source, output)
+    assert calls == [1, 1]
+    assert (_catalog(source.conn), _objects(source.store)) == before
 
 
 @pytest.mark.parametrize("changes,code", [
@@ -520,8 +617,10 @@ def test_global_fragment_preflight_precedes_all_feature_object_opens(source, mon
 def test_commit_failure_rolls_back_and_retry_uses_unpoisoned_success_identity(source, monkeypatch):
     commit = catalog.commit_snapshot
     before = _catalog(source.conn)
+    attempts = []
 
     def interrupted(*args, **kwargs):
+        attempts.append(1)
         def fault(point):
             if point == "before_commit":
                 raise RuntimeError("synthetic interruption")
@@ -530,6 +629,7 @@ def test_commit_failure_rolls_back_and_retry_uses_unpoisoned_success_identity(so
     monkeypatch.setattr(catalog, "commit_snapshot", interrupted)
     with pytest.raises(RuntimeError, match="synthetic interruption"):
         _build(source)
+    assert attempts == [1]
     assert _catalog(source.conn) == before
     monkeypatch.setattr(catalog, "commit_snapshot", commit)
     _, output = _build(source)
@@ -773,11 +873,23 @@ def test_cli_raw_local_failures_are_redacted_and_close_open_catalogs(source, mon
 
 
 def test_recipe_and_physical_contract_are_closed():
+    names = ("n_prior", "mean_prior_move", "mean_prior_abs_move", "ema2_prior_move", "ema2_prior_abs_move",
+        "ema4_prior_move", "ema4_prior_abs_move", "ema8_prior_move", "ema8_prior_abs_move",
+        "ema12_prior_move", "ema12_prior_abs_move")
+    assert FEATURES == names
+    assert stored.feature_recipe() == {"schema_version": "stored_magnitude_history.v1",
+        "arithmetic": "panel_math.history_features", "units": "percentage_points", "imputation": "none",
+        "features": [{"name": name, "on_missing": "zero_count" if name == "n_prior" else "null"}
+                     for name in names]}
     assert CONTRACT.primary_key == ("event_id", "context_id", "horizon_sessions")
     assert CONTRACT.partition_columns == ("context_id",)
     assert [c.name for c in CONTRACT.columns] == [*stored.METADATA, *FEATURES]
     assert all(c.nullable == (c.name in FEATURES[1:]) for c in CONTRACT.columns)
     assert len(FEATURES) == 11
+    assert {c.name: c.unit for c in CONTRACT.columns if c.name in names} == {
+        name: "count" if name == "n_prior" else "percent" for name in names}
+    assert {c.name: c.null_policy for c in CONTRACT.columns if c.name in names} == {
+        name: "zero count" if name == "n_prior" else "null when history is insufficient" for name in names}
 
 
 def test_context_or_source_mismatch_refuses_before_any_source_or_feature_payload(source, monkeypatch):

@@ -5,10 +5,12 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from engine.v2.contracts.data import DataQuery, KeyPredicate, TimeInterval
 from engine.v2.data import query as query_planner
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.research import event_history
+from engine.v2.research.experiment_population import load_population
 from engine.v2.research.prediction_inputs import _target_filters
 from tests.v2.research.test_event_history import _commit, _event, _poison, _read
 from tests.v2.research.test_prediction_inputs import _move
@@ -56,6 +58,81 @@ def _equivalent(records, *, day=DAY, ticker=TICKER):
 
 def _ids(population):
     return [record.fragment_id for record in population.records]
+
+
+def test_native_two_issuer_index_preserves_exact_admitted_membership_without_outcome_reads(
+        tmp_path, monkeypatch):
+    first, second = "2023-01-02", DAY
+    events = [_event(day, ticker=ticker) for ticker in (TICKER, "SYNTH_B")
+              for day in (first, second)]
+    conn, repository, snapshot = _commit(tmp_path, events[::-1], [_move(e) for e in events])
+    try:
+        records = tuple(repository.fragment_records(snapshot, "computed_moves"))
+        by_key = {record.primary_key_min: record for record in records}
+        assert set(by_key) == {(e["ticker"], e["event_date"].date().isoformat()) for e in events}
+        assert len(records) == len(by_key) == 4
+        assert len({record.object_ref.object_id for record in records}) == 4
+        opened = _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        before = conn.total_changes
+        admitted = load_population(repository, snapshot, as_of_month="2025-01")
+        assert set(admitted.event_id) == {e["event_id"] for e in events}
+        assert admitted.attrs["holdout_exclusions"] == []
+        # Overlapping dates cannot substitute for issuer membership. Candidate order
+        # interleaves issuers and differs from both native manifest and date order.
+        expected_events = [events[i] for i in (3, 0, 2, 1)]
+        candidates = admitted.set_index("event_id").loc[
+            [e["event_id"] for e in expected_events]].reset_index()
+        expected_records = [by_key[(e["ticker"], e["event_date"].date().isoformat())]
+                            for e in expected_events]
+        assert expected_records != list(records)
+        enumerations, planner_records = [], []
+        original_records = repository.fragment_records
+        original_plan = query_planner.plan_scan_population
+
+        def metadata(received_snapshot, table_name):
+            assert received_snapshot is snapshot and table_name == "computed_moves"
+            enumerations.append(table_name)
+            assert len(enumerations) == 1
+            return original_records(received_snapshot, table_name)
+
+        def plan(contract, selected, **kwargs):
+            selected = tuple(selected)
+            planner_records.append(selected)
+            return original_plan(contract, selected, **kwargs)
+
+        def no_second_lookup(*args, **kwargs):
+            pytest.fail("a supplied population bound must not enumerate metadata again")
+
+        monkeypatch.setattr(repository, "fragment_records", metadata)
+        monkeypatch.setattr(repository, "scan_population_bound", no_second_lookup)
+        monkeypatch.setattr(query_planner, "plan_scan_population", plan)
+        scans_before = list(repository.scans)
+        plans = event_history._plans(repository, snapshot, candidates, COMPUTED_MOVES_CONTRACT)
+        assert enumerations == ["computed_moves"]
+        assert planner_records == [(record,) for record in expected_records]
+        assert [(e.event_id, e.ticker, e.event_date, r.fragment_id, r.object_ref.object_id)
+                for e, _, r in plans] == [
+            (e["event_id"], e["ticker"], e["event_date"], r.fragment_id, r.object_ref.object_id)
+            for e, r in zip(expected_events, expected_records)]
+        for (_, request, record), event, expected in zip(plans, expected_events, expected_records):
+            day = event["event_date"].date().isoformat()
+            assert record == expected
+            assert record.primary_key_min == record.primary_key_max == (event["ticker"], day)
+            assert record.partition_key == event["ticker"]
+            assert record.time_min == record.time_max == day and record.row_count == 1
+            assert request == DataQuery(snapshot_id=snapshot.snapshot_id,
+                table_contract_ref=snapshot.table_versions["computed_moves"].table_contract_ref,
+                columns=("event_date", "realized_move_pct", "available_as_of_date", "skipped"),
+                key_filter=(KeyPredicate(column="ticker", operator="eq", values=(event["ticker"],)),),
+                time_interval=TimeInterval(column="event_date", start_inclusive=day,
+                    end_exclusive=(event["event_date"] + pd.Timedelta(days=1)).date().isoformat()),
+                order_by=("ticker", "event_date"), max_batch_rows=1, max_result_rows=1)
+        assert repository.scans == scans_before
+        assert scans_before and all(name == "earnings_events" for name, _ in scans_before)
+        assert not ({record.object_ref.object_id for record in records} & set(opened))
+        assert conn.total_changes == before
+    finally:
+        conn.close()
 
 
 def test_large_point_corpus_is_enumerated_once_and_planner_sees_one_record_per_target(
