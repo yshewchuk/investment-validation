@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import numbers
+from datetime import date, datetime
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -35,7 +36,7 @@ _PANEL_DATE_COLUMN = "date"
 # answer." An independent copy, not an import -- this package never imports
 # legacy `engine.*` outside compatibility.py's one lazy call (see
 # ARCHITECTURE.md, Native vs. legacy independence). Kept in sync by
-# tests/test_v2_scoring_nightly_source_bundle.py::
+# tests/v2/scoring/test_nightly_source_bundle.py::
 # test_panel_outcome_columns_matches_legacy, which imports the live legacy
 # constant and asserts equality, so the two cannot silently drift apart.
 _PANEL_OUTCOME_COLUMNS = frozenset({"move", "abs_move"})
@@ -106,14 +107,20 @@ def validated_as_of(value: Any, *, label: str = "as_of") -> pd.Timestamp:
     return ts
 
 
-def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str, float]]:
+def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str, Any]]:
     """The native quote map for one event's Tier-1 quote domain.
 
     An empty domain is accepted only when the caller names WHY it is empty
     (no chain found, or pricing never reached, i.e. quote_status in
     _EMPTY_QUOTE_STATUSES); an empty domain with no recorded status is a
-    refusal, not a silent gap. Extracted, behavior-identical (messages and
-    checks unchanged), from tools/capture_tier0_corpus.py's _quote_map.
+    refusal, not a silent gap. Shared with tools/capture_tier0_corpus.py,
+    which imports it (it was extracted from that tool's former _quote_map and
+    has since gained observed_date). Returns {"right:strike:expiry": {"bid":
+    float, "ask": float, "observed_date": "YYYY-MM-DD"}}; observed_date is the
+    quote row's observed_at calendar date and is omitted when the row has none
+    or it is unparseable. A repeated contract must repeat bid/ask exactly (else
+    INVALID_QUOTE_DOMAIN) and keeps the earliest observed_date. Pricing reads
+    the first leg's observed_date to measure dte_entry.
     """
     if quote_status in _EMPTY_QUOTE_STATUSES:
         if rows != []:
@@ -128,19 +135,60 @@ def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str,
     if not isinstance(rows, list) or not rows:
         raise NightlySourceBundleRefusal(
             "MISSING_STAGED_INPUT", "source_inputs.quote_domain is empty")
-    quotes: dict[str, dict[str, float]] = {}
+    quotes: dict[str, dict[str, Any]] = {}
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             raise NightlySourceBundleRefusal(
                 "INVALID_QUOTE_DOMAIN", f"quote_domain[{index}] is not an object")
         right, strike, expiry, bid, ask = _contract_quote(row, index)
         key = f"{right}:{strike}:{expiry}"
-        quote = {"bid": bid, "ask": ask}
-        if key in quotes and quotes[key] != quote:
-            raise NightlySourceBundleRefusal(
-                "INVALID_QUOTE_DOMAIN", f"conflicting source quote: {key}")
+        observed_date = _observed_date(row.get("observed_at"))
+        quote: dict[str, Any] = {"bid": bid, "ask": ask}
+        if observed_date is not None:
+            quote["observed_date"] = observed_date
+        if key in quotes:
+            _merge_duplicate_quote(quotes[key], quote, key)
+            continue
         quotes[key] = quote
     return quotes
+
+
+def _observed_date(value: Any) -> str | None:
+    """One quote row's observation date as an ISO string, or None when absent,
+    NaT/NaN, empty, unparseable or not a date/ISO string."""
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date)):
+        if value != value:  # NaT
+            return None
+        return (value.date() if isinstance(value, datetime) else value).isoformat()
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            ts = pd.Timestamp(stripped)
+        except (ValueError, TypeError):
+            return None
+        if ts != ts:  # NaT
+            return None
+        return ts.date().isoformat()
+    return None
+
+
+def _merge_duplicate_quote(existing: dict[str, Any], quote: dict[str, Any],
+                           key: str) -> None:
+    """Merge a duplicate key's quote into ``existing``: bid/ask must match,
+    and the earlier observed_date wins so pricing can measure dte_entry."""
+    if (existing["bid"], existing["ask"]) != (quote["bid"], quote["ask"]):
+        raise NightlySourceBundleRefusal(
+            "INVALID_QUOTE_DOMAIN", f"conflicting source quote: {key}")
+    existing_date = existing.get("observed_date")
+    new_date = quote.get("observed_date")
+    if existing_date is None and new_date is not None:
+        existing["observed_date"] = new_date
+    elif existing_date is not None and new_date is not None:
+        existing["observed_date"] = min(existing_date, new_date)
 
 
 def _contract_quote(
@@ -412,10 +460,18 @@ def _is_null_forecast_value(value: Any) -> bool:
 
 
 #: Names a frozen model may list in its feature_order that the scorer itself
-#: computes from staged quotes (engine/v2/scoring/stages.py
-#: _check_pricing_boundary). They are answer fields, so source_inputs forbids
-#: them in source inputs; projecting them would make every row refuse.
-_SCORER_COMPUTED_FEATURES = frozenset({"entry_cost_pct"})
+#: computes: days_to_print by engine/v2/scoring/stages.py
+#: _stage_days_to_print (before the forecast); dte_entry, measured from the
+#: first priced leg's own quote date, and entry_cost_pct by
+#: engine/v2/scoring/stages.py _check_pricing_boundary (after pricing). They
+#: are not projected from tier4/panel rows. Only entry_cost_pct is also an
+#: answer field that source_inputs forbids (projecting it would make every row
+#: refuse); days_to_print/dte_entry are not in that denylist, but the scorer
+#: computes them (dte_entry from the first priced leg's quote date) and they are
+#: never projected from source inputs.
+_SCORER_COMPUTED_FEATURES = frozenset({
+    "entry_cost_pct", "days_to_print", "dte_entry",
+})
 
 
 def _project_features(
@@ -509,6 +565,16 @@ def _runup_calendar_features(strategy: str, calendar_row: Mapping[str, Any]) -> 
     return {"days_before_print": int(value)}
 
 
+def _calendar_context(calendar_row: Mapping[str, Any], calendar_features: Mapping[str, int],
+                      as_of_ts: pd.Timestamp) -> dict[str, Any]:
+    """Stage calendar-owned context together with the validated decision date."""
+    context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
+    context.update(calendar_features)
+    # The decision date: stages._stage_days_to_print measures days_to_print from it.
+    context["as_of"] = str(as_of_ts.date())
+    return context
+
+
 def assemble_nightly_source_bundle(
     *,
     source_ref: str,
@@ -554,8 +620,7 @@ def assemble_nightly_source_bundle(
     _checked_against_as_of(calendar_row, observed, panel_anchor, as_of_ts)
     raw_quotes = quote_domain_map(list(quote_rows), quote_status)
     calendar_features = _runup_calendar_features(strategy, calendar_row)
-    context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
-    context.update(calendar_features)
+    context = _calendar_context(calendar_row, calendar_features, as_of_ts)
     if quote_max_age_sessions is not None:
         context["quote_max_age_sessions"] = quote_max_age_sessions
     if observed:

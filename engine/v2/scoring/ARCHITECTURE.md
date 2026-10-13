@@ -320,7 +320,9 @@ The nightly source bundle preserves a supplied bound in its context and omits
 that optional key when unset. When quote rows exist, `quote_date` is their
 earliest validated `observed_at` date and `quote_latest_date` is their latest;
 both dates have passed the assembler's `as_of` upper-bound check. An allowed
-empty quote domain carries neither date. `native_score_batch` carries the
+empty quote domain carries neither date. The bundle context always carries the
+validated `as_of` calendar date as `as_of` (the decision date `days_to_print`
+is measured from). `native_score_batch` carries the
 caller policy into scoring; `None` continues to mean no policy and no numeric
 age default is invented. This policy is independent of the assembler's
 `as_of` upper-bound check, which only prevents future observations.
@@ -557,13 +559,13 @@ returns no partial bundle. Other strategies retain their existing projection.
 |---|---|
 | a supplied `calendar_row`/`panel_row`/`tier4_row` is not a mapping; `quote_rows` is a string/bytes value, not a sequence, or an empty sequence without an allowed empty `quote_status`; `calendar_row` missing a required key; `panel_row` missing its own `date` column (the real panel key — never `observed_at`, which neither real table has ever carried); a `quote_rows[i]` is not a mapping or is missing `observed_at` (every one of these arguments is required with no default, so omitting one outright raises `TypeError` before any of this validation runs) | `MISSING_STAGED_INPUT` |
 | a name in the feature-name leakage denylist — a realized panel outcome column, `driver_name` itself, a Tier-4 producer-stamp column (`*_fold_start`/`*_model_id`/`"tier3_snapshot"`), or any `pred_iv_crush_30*` column (that one family's bands included) — checked on `feature_names` alone, before any row is read; another metric's own band column (e.g. `pred_abs_move_p10`) is NOT denylisted | `LEAKED_FEATURE_NAME` |
-| a calculated scoring answer surfaces in the assembled `context`/`feature_vector` (`source_inputs._reject_answers`, the denylist `build_native_score_inputs` enforces; a second layer over raw columns). The `feature_names` entry `entry_cost_pct` (the only scorer-computed one) is not projected into `feature_vector` or `feature_missing_mask`: the scorer computes it from staged quotes | `AnswerFieldsInSource` (a plain `ValueError`, not this refusal type; `.fields` lists the matched answer-field names, never staged keys or values) |
+| a calculated scoring answer surfaces in `context`/`feature_vector` (`source_inputs._reject_answers`, the denylist `build_native_score_inputs` enforces). The scorer-computed `feature_names` entries `entry_cost_pct`, `days_to_print` and `dte_entry` are never projected from source rows (the scorer computes them), and a missing or invalid input date leaves the computed value absent rather than refusing | `AnswerFieldsInSource` (a plain `ValueError`, not this refusal type; `.fields` lists the matched answer-field names, never staged keys or values) |
 | `panel_row["date"]` (normalized) != `calendar_row["event_date"]` (normalized) — `panel_row["date"]` is the EVENT date, not an observation date, so this is the only check that catches a row staged for the wrong event; it never compares against `as_of` | `PANEL_ROW_WRONG_EVENT` |
 | `as_of`, `calendar_row["calendar_observed_through"]`, `panel_anchor`, or a `quote_rows` entry's `observed_at` fails `validated_as_of` (rejects `None`/`NaT`/a bare number or bool/unparseable/timezone-aware), or any of them lands strictly after `as_of` | `POST_AS_OF_ROW` (or `NightlySourceBundleRefusal`: `MISSING_STAGED_INPUT` for `None`, `INVALID_DATE` otherwise) |
 | a feature resolved from `tier4_row`, non-null, whose own base metric's `fold_start` is missing, or missing-and-present-but-dated-after `as_of` (a null resolved value — legacy's own "no forecast" — skips this check entirely, whatever its `fold_start` holds) | `MISSING_STAGED_INPUT` / `POST_AS_OF_ROW` |
 | `calendar_row["spot"]` not coercible to `float`, non-finite, or `<= 0.0` | `INVALID_SPOT` |
 | `feature_names` a bare `str`/`bytes`, not a `Sequence`, or containing a non-`str`, empty, or duplicate entry | `INVALID_FEATURE_NAMES` |
-| a quote row missing `right`/`strike`/`expiry`/`bid`/`ask`, an unrecognized `right`, non-finite/negative `bid`, a crossed `ask`, two rows disagreeing on the same contract key, or `quote_rows`/`quote_status` disagreeing on whether the domain is empty (`quote_domain_map`, an extracted, behavior-identical copy of `tools/capture_tier0_corpus.py`'s `_quote_map`) | `NightlySourceBundleRefusal` (that module's own call site wraps it back into its own exception type) |
+| a quote row missing `right`/`strike`/`expiry`/`bid`/`ask`, an unrecognized `right`, non-finite/negative `bid`, a crossed `ask`, two rows disagreeing on the same contract key, or `quote_rows`/`quote_status` disagreeing on whether the domain is empty (`quote_domain_map`, the quote-map builder `tools/capture_tier0_corpus.py` shares; each quote also carries its row's `observed_date`) | `NightlySourceBundleRefusal` (that module's own call site wraps it back into its own exception type) |
 
 - **Panel/Tier-4 values pass through unclassified.** A resolved feature value is
   projected into `feature_vector` exactly as staged (`None`, any NaN
@@ -642,8 +644,9 @@ unlike `compatibility.py`.
   `release_bindings.py` without either reaching into the other's inputs.
 - **Native vs. legacy independence.** `nightly_source_bundle.py` imports no
   legacy `engine.*` module and is never imported by one. `quote_domain_map`
-  is a byte-identical port of `tools/capture_tier0_corpus.py`'s
-  `_quote_map`, moved (not copied) so the two never drift.
+  is the quote-map builder `tools/capture_tier0_corpus.py` imports (one
+  implementation, so the two never drift); it adds `observed_date` to each
+  quote.
 - **Layering.** Scoring (5.0) never imports ops (7.0) or serving (7.0);
   `nightly_source_bundle.py` follows that rule even where it costs a small
   duplicated validator (`validated_as_of`) rather than an upward import.

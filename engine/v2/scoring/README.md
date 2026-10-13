@@ -76,9 +76,10 @@ panel row's market-state values were computed against) that postdates
 RUNUP's required `days_before_print` instead comes from its calendar row:
 validated nonnegative session count, retained in context and requested features,
 with no fallback to panel or Tier-4 values. Other strategies are unchanged.
-`quote_domain_map` (extracted from `tools/capture_tier0_corpus.py`'s
-`_quote_map`), `validated_as_of`, and `NightlySourceBundleRefusal` are its
-other real `__all__` exports, all four now declared below even though
+`quote_domain_map` (shared with `tools/capture_tier0_corpus.py`, which
+imports it; it was extracted from that tool's former `_quote_map`),
+`validated_as_of`, and `NightlySourceBundleRefusal` are its other real
+`__all__` exports, all four now declared below even though
 `checks/package_readmes.py` only strictly requires an entry for a name
 reached via an unqualified `from engine.v2.scoring import <name>` — every
 real caller of these four (`tools/capture_tier0_corpus.py`,
@@ -134,9 +135,10 @@ builds the block, `native_chooser.py` assembles it, `native_chooser_features.py`
 holds the ported `Scorer._chooser_frame` arithmetic): `chooser_recipe` names the
 champion binding, its `producers` (the implied_t1/runup_move Tier-4 folds) and
 the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`;
-`chooser_fold_pools` carries the served folds' pools. Only the 17 primitive
-features (event history, market/regime block, `dte_entry`) come from
-`feature_vector`, which still wins for any derived column it declares.
+`chooser_fold_pools` carries the served folds' pools. Only the primitive
+features (event history, market/regime block) come from `feature_vector`, which
+still wins for any derived column it declares; `dte_entry` is scorer-computed
+(from the priced legs and quote date) and no longer projected.
 
 The current builder is deliberately bounded to STR-THRU and its declared
 recipes. To add another strategy or recipe, extend `source_inputs.py` and add

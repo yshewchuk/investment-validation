@@ -327,7 +327,8 @@ def test_calendar_row_meets_source_bundle_contract_and_causal_checks(calendar_so
                   panel_row={"date": "2026-10-13", "signal": 1.5}, panel_anchor=_AS_OF,
                   tier4_row={}, quote_rows=[], quote_status="empty", feature_names=("signal",))
     bundle = assemble_nightly_source_bundle(as_of=_AS_OF, **kwargs)
-    assert bundle.context == {"ticker": "ACI", "event_date": "2026-10-13", **_CONTEXT}
+    assert bundle.context == {"ticker": "ACI", "event_date": "2026-10-13",
+                              "as_of": "2026-09-29", **_CONTEXT}
     assert bundle.feature_vector == {"signal": 1.5}
     with pytest.raises(NightlySourceBundleRefusal) as exc:
         assemble_nightly_source_bundle(as_of="2026-09-28", **kwargs)

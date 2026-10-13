@@ -9,7 +9,7 @@ from engine.v2.scoring.nightly_source_bundle import (
     assemble_nightly_source_bundle,
 )
 from engine.v2.scoring.source_inputs import build_native_score_inputs
-from tests.test_v2_scoring_nightly_source_bundle import _valid_kwargs
+from tests.v2.scoring.test_nightly_source_bundle import _valid_kwargs
 
 
 def _kwargs(**changes):

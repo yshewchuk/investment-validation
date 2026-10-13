@@ -583,7 +583,7 @@ tests = [
     "tests/test_v2_scoring_frozen_recipes.py",
     "tests/test_v2_scoring_frozen_residuals.py",
     "tests/test_v2_scoring_native_payoff.py",
-    "tests/test_v2_scoring_nightly_source_bundle.py",
+    "tests/v2/scoring/test_nightly_source_bundle.py",
     "tests/test_v2_scoring_no_score_status.py",
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",

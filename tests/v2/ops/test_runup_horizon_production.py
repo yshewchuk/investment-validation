@@ -67,16 +67,20 @@ def test_producer_horizon_reaches_both_real_frozen_consumers(tmp_path, monkeypat
                "runup_move_prediction": {"binding_id": "b-runup_move-*"}}
     bundle = assemble_nightly_source_bundle(
         source_ref="synthetic:runup-horizon", strategy="STR-RUNUP", as_of=decision,
-        calendar_row=event.calendar_row, panel_row=event.panel_row,
+        calendar_row=event.calendar_row,
+        panel_row={**event.panel_row, "days_to_print": 99, "dte_entry": 99},
         panel_anchor=event.panel_anchor, tier4_row=event.tier4_row,
         quote_rows=event.quote_rows, quote_status=event.quote_status,
-        feature_names=("days_before_print",), driver_name="im_t1",
+        feature_names=("days_before_print", "days_to_print", "dte_entry"), driver_name="im_t1",
         forecast_recipes=recipes,
         model_artifact_refs={output: "synthetic-ref" for output in recipes},
         gate_recipe={"binding_id": "b-gate-STR-RUNUP", "threshold": 0.0})
+    assert bundle.feature_vector == {"days_before_print": expected}
+    assert {quote["observed_date"] for quote in bundle.raw_quotes.values()} == {decision}
     inputs = build_native_score_inputs(replace(
         bundle, model_release=binding.model_release, frozen_inference=binding.frozen_inference))
     assert inputs.context["days_before_print"] == expected
+    assert inputs.context["as_of"] == decision
     assert inputs.features["missing_mask"] == {"days_before_print": False}
     assert set(inputs.forecast["executors"]) == {"driver_prediction", "runup_move_prediction"}
     for output, executor in inputs.forecast["executors"].items():
