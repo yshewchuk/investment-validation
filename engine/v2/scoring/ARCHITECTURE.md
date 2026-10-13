@@ -145,7 +145,10 @@ load-bearing entrypoints:
   legacy does with no chain). A query that already carries a band key keeps
   it. A non-mapping query is returned unchanged so the evaluator's
   `INVALID_ANALOG_INPUT` still fires. The analogs stage receipt records this
-  completed query, the one the matcher and its bootstrap seed used. While `implied_ratio` is `None` (no
+  completed query, the one the matcher and its bootstrap seed used. The
+  bootstrap seed uses native's own snapshot id and native request key, not
+  legacy's identity (user decision 2026-10-13, as for the MC seed), so
+  interval drift against legacy is expected parity drift. While `implied_ratio` is `None` (no
   `mean_prior_or_implied`, #651) the implied-tercile dimension is dropped
   from matching, so `n_analogs` and the interval can differ from legacy.
 - `compatibility.py` — `score_legacy_request`, the one legacy adapter this
