@@ -210,9 +210,11 @@ reviews:
     - path: "**/*.py"
       instructions: |
         Wrap standard tools; do not hand-roll standard formats
-        (/ARCHITECTURE.md §6). Flag Python code that parses, validates or
-        lints a standard format (Markdown, YAML, TOML, JSON Schema, CSV
-        dialects, dates and times, URLs, CLI arguments, semver), or
+        (/ARCHITECTURE.md §6). Flag Python code that hand-rolls parsing,
+        validation or linting of a standard format (Markdown, YAML, TOML,
+        JSON Schema, CSV dialects, dates and times, URLs, CLI arguments,
+        semver); a thin wrapper that configures and invokes a maintained
+        tool is fine. Also flag code that
         re-implements a linter, formatter, retry/backoff, cache, diff or
         templating engine that a maintained tool or library already
         provides. The wrapper should be thin: configuration plus
