@@ -130,7 +130,8 @@ load-bearing entrypoints:
   `board_analog_pool_key(strategy, alpha, cutoff)` equals the row's key and
   returns `analog_artifact`, `analog_artifact_recipe` (cutoff, pinned
   `content_hash`, `min_analogs=30`, `bootstrap_draws=2000`, `ci_quantiles=
-  (0.05, 0.95)`, `seed_snapshot`, `request_key`: legacy `match` defaults) and
+  (0.05, 0.95)` as legacy `match`'s defaults, and native's own
+  `seed_snapshot` and `request_key`) and
   the bundle-time part of `analog_query` (`mcap_bucket` from
   `exp(panel_row["mcap_log"])`, `implied_ratio = im / mean_prior_or_implied`,
   `None` unless both are finite and the divisor non-zero). No matching pool

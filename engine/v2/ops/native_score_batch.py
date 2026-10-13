@@ -332,8 +332,9 @@ def _with_release_artifacts(
     The cutoff's own date refusal (:func:`_row_cutoff`) is a source-bundle
     refusal like any other and is re-wrapped with the row's key. The frozen
     board analog pool, when the release carries one for this row's
-    ``(strategy, fill alpha, cutoff)``, is declared with the row's legacy
-    request key (#681); otherwise the analog block stays undeclared.
+    ``(strategy, fill alpha, cutoff)``, is declared with the NATIVE snapshot id
+    and the row's native request key as its bootstrap-seed identity (#681);
+    otherwise the analog block stays undeclared.
     """
     context = {**bundle.context,
                **_identity_context(as_of, snapshot_id, calendar_row,
