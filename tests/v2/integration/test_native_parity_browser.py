@@ -1,4 +1,4 @@
-"""Native-parity summary browser checks (#327); mismatch/unpaired rendering and pagination are an owner follow-up. Synthetic page.route mocks ONLY /api/v1/native_parity** and /api/v1/releases/current, which always answers a valid 503 Problem, plus a /__data_client__/ harness serving ui/src/api/client.ts transpiled to ESM by the esbuild already installed in ui/node_modules, so the real DataClient parity detail reads run their own fetches through the mocked detail routes."""
+"""Native-parity summary browser checks (#327); mismatch rendering is covered and unpaired rendering/pagination are an owner follow-up. Synthetic page.route mocks ONLY /api/v1/native_parity** and /api/v1/releases/current, which always answers a valid 503 Problem, plus a /__data_client__/ harness serving ui/src/api/client.ts transpiled to ESM by the esbuild already installed in ui/node_modules, so the real DataClient parity detail reads run their own fetches through the mocked detail routes."""
 from __future__ import annotations
 
 import json
@@ -36,17 +36,29 @@ def _close_new_contexts(browser):
         if context not in existing:
             context.close()
 
-def _open_parity(browser, server, *, code=200, body=SUMMARY, hold=False):
+EMPTY_MISMATCH_PAGE = (200, {"status": "available", "as_of": None, "generated_at": None,
+    "tolerance_policy_id": None, "items": [], "next_cursor": None})
+
+def _open_parity(browser, server, *, code=200, body=SUMMARY, hold=False, mismatches=None):
     base = f"http://127.0.0.1:{server.server_port}"
     context = browser.new_context()
     context.add_cookies([{"name": "operations_token", "value": TOKEN, "url": base}])
     page = context.new_page()
     parity, pending = [], []
+    page.mismatch_calls = []
+    if mismatches is None:
+        mismatches = lambda cursor: EMPTY_MISMATCH_PAGE
 
     def handle(route):
         url = route.request.url
+        path = url.split("?")[0]
+        if path.endswith("/native_parity/mismatches"):
+            page.mismatch_calls.append(url)
+            status, response = mismatches(route.request.url.split("cursor=")[1].split("&")[0] if "cursor=" in route.request.url else None)
+            route.fulfill(status=status, content_type="application/json", body=json.dumps(response))
+            return
         parity.append(url)
-        if not url.split("?")[0].endswith("/api/v1/native_parity"):
+        if not path.endswith("/api/v1/native_parity"):
             route.fulfill(status=500, content_type="application/json", body=json.dumps(PROBLEM))
         elif hold:
             pending.append(route)
@@ -278,5 +290,112 @@ def test_unpaired_available_page_round_trips_exactly(browser, server, tmp_path):
         result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityUnpaired", ["legacy", 3, "uc-1"]])
         assert result == UNPAIRED_PAGE
         assert calls == [base + "/api/v1/native_parity/unpaired?side=legacy&limit=3&cursor=uc-1"]
+    finally:
+        context.close()
+
+def test_mismatch_table_shows_only_differing_fields(browser, server):
+    first = dict(MISMATCH_PAGE, next_cursor=None)
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, first))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-table")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row")).to_have_count(2)
+        aapl = page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")
+        expect(aapl).to_contain_text("gate_score")
+        expect(aapl.get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(aapl.get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        msft = page.get_by_test_id("parity-mismatch-row").filter(has_text="MSFT|2026-09-18|STR-THRU")
+        expect(msft).to_contain_text("model_vs_market")
+        expect(msft.get_by_test_id("parity-mismatch-legacy")).to_have_text("-0.015")
+        expect(msft.get_by_test_id("parity-mismatch-native")).to_have_text("0.02")
+        page_text = page.get_by_test_id("parity-mismatch-table").inner_text()
+        assert "gate_threshold" not in page_text
+        assert "entry_cost_pct" not in page_text
+        expect(page.get_by_test_id("parity-mismatch-next")).to_be_disabled()
+    finally:
+        context.close()
+
+def test_mismatch_table_pages_past_first_page(browser, server):
+    page1 = {"status": "available", "as_of": None, "generated_at": None, "tolerance_policy_id": None,
+        "items": [{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+            "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}],
+        "next_cursor": "c2"}
+    page2 = {"status": "available", "as_of": None, "generated_at": None, "tolerance_policy_id": None,
+        "items": [{"row_key": "NVDA|2026-09-22|STR-THRU", "dimension": "verdicts",
+            "fields": {"gate_score": {"status": "differ", "legacy": 1.0, "native": 2.0}}}],
+        "next_cursor": None}
+
+    def mismatches(cursor):
+        return (200, page1 if cursor is None else page2)
+
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=mismatches)
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        expect(page.get_by_test_id("parity-mismatch-next")).to_be_disabled()
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
+        assert any("cursor=c2" in u for u in page.mismatch_calls)
+        page.get_by_test_id("parity-mismatch-prev").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+    finally:
+        context.close()
+
+def test_mismatch_empty_and_no_report(browser, server):
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: EMPTY_MISMATCH_PAGE)
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+    finally:
+        context.close()
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, {"status": "no_report"}))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-no-report")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+    finally:
+        context.close()
+
+def test_mismatch_loading_state(browser, server):
+    mismatch_pending = []
+    base, context, page, _, _ = _open_parity(browser, server, hold=True)
+    page.unroute("**/api/v1/native_parity**")
+    parity = []
+
+    def handle(route):
+        url = route.request.url
+        path = url.split("?")[0]
+        if path.endswith("/native_parity/mismatches"):
+            page.mismatch_calls.append(url)
+            mismatch_pending.append(route)
+        elif path.endswith("/api/v1/native_parity"):
+            parity.append(url)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(SUMMARY))
+        else:
+            route.fulfill(status=500, content_type="application/json", body=json.dumps(PROBLEM))
+
+    page.route("**/api/v1/native_parity**", handle)
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-summary")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_be_visible()
+        mismatch_pending[0].fulfill(status=200, content_type="application/json",
+            body=json.dumps(EMPTY_MISMATCH_PAGE[1]))
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_be_visible()
+    finally:
+        context.close()
+
+def test_mismatch_error_state(browser, server):
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (503, PROBLEM))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_contain_text("NO_CURRENT_RELEASE")
     finally:
         context.close()

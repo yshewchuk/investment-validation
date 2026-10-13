@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { ApiError, clientProblem, type DataClient } from "../api/client";
-import type { NativeParitySummary } from "../api/types";
+import type { NativeParityMismatchItem, NativeParitySummary } from "../api/types";
 import { fmtNumber, fmtText } from "../format";
 
 type Loaded<T> =
@@ -71,6 +71,75 @@ function ReadError({ error, prefix, name, label }: {
   );
 }
 
+function fmtMismatchValue(value: unknown): string {
+  if (value === undefined || value === null) return "—";
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return String(value);
+  return JSON.stringify(value);
+}
+
+function MismatchTable({ client }: { client: DataClient }) {
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const index = cursors.length - 1;
+  const cursor = cursors[index] ?? null;
+  const page = useRead(`mismatch:${cursors.length}:${cursor}`, (signal) =>
+    client.getNativeParityMismatches(50, cursor, signal),
+  );
+  const data = page.status === "ready" && page.data.status !== "no_report" ? page.data : null;
+  const rows: { item: NativeParityMismatchItem; field: string; legacy: unknown; native: unknown }[] = [];
+  if (data !== null) {
+    for (const item of data.items) {
+      for (const [field, cell] of Object.entries(item.fields)) {
+        if (cell.status === "differ") rows.push({ item, field, legacy: cell.legacy, native: cell.native });
+      }
+    }
+  }
+  const showPager = data !== null && (data.items.length > 0 || index > 0);
+  const nextCursor = data?.next_cursor ?? null;
+  return (
+    <>
+      <h2>Mismatched fields</h2>
+      {page.status === "loading" && <p data-testid="parity-mismatch-loading">Loading mismatches…</p>}
+      {page.status === "error" && (
+        <ReadError error={page.error} prefix="parity-mismatch-" name="unavailable" label="mismatches" />
+      )}
+      {page.status === "ready" && page.data.status === "no_report" && (
+        <p data-testid="parity-mismatch-no-report">No native parity report is published yet.</p>
+      )}
+      {data !== null && data.items.length === 0 && (
+        <p data-testid="parity-mismatch-empty">No mismatched rows.</p>
+      )}
+      {data !== null && data.items.length > 0 && (
+        <table data-testid="parity-mismatch-table">
+          <thead>
+            <tr><th>Row</th><th>Dimension</th><th>Field</th><th>Legacy</th><th>Native</th></tr>
+          </thead>
+          <tbody>
+            {rows.map(({ item, field, legacy, native }) => (
+              <tr key={`${item.row_key}|${item.dimension}|${field}`} data-testid="parity-mismatch-row">
+                <td>{item.row_key}</td>
+                <td>{item.dimension}</td>
+                <td>{field}</td>
+                <td data-testid="parity-mismatch-legacy">{fmtMismatchValue(legacy)}</td>
+                <td data-testid="parity-mismatch-native">{fmtMismatchValue(native)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {showPager && (
+        <div data-testid="parity-mismatch-pager">
+          <button type="button" data-testid="parity-mismatch-prev" disabled={index === 0}
+            onClick={() => setCursors((stack) => stack.slice(0, -1))}>Previous</button>
+          <button type="button" data-testid="parity-mismatch-next" disabled={nextCursor === null}
+            onClick={() => setCursors((stack) => [...stack, nextCursor])}>Next</button>
+          <span data-testid="parity-mismatch-page">Page {index + 1}</span>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function NativeParity({ client }: { client: DataClient }) {
   const summary = useRead("summary", (signal) => client.getNativeParity(signal));
   const refusalReasons: [string, number][] = summary.status === "ready" && summary.data.status !== "no_report" ? Object.entries(summary.data.native_refused_reasons) : [];
@@ -101,6 +170,7 @@ export function NativeParity({ client }: { client: DataClient }) {
           )}
         </>
       )}
+      {summary.status === "ready" && summary.data.status !== "no_report" && <MismatchTable client={client} />}
     </main>
   );
 }
