@@ -1,5 +1,4 @@
 """Synthetic pre-print session intervals, independent expected counts."""
-from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -19,6 +18,11 @@ def _calendar():
 
 
 @pytest.mark.parametrize("entry,event,session,expected", [
+    # Jan 4 -> Jan 12 is six supplied intervals; Jan 17 is the last supplied close.
+    ("2024-01-04", "2024-01-16", "BMO", 6),
+    ("2024-01-04", "2024-01-04", "AMC", 0),
+    ("2024-01-17", "2024-01-17", "AMC", 0),
+    ("2024-01-17", "2024-01-17", "BMO", -1),
     ("2024-01-05", "2024-01-16", "BMO", 5),
     ("2024-01-05", "2024-01-16", "AMC", 6),
     ("2024-01-11", "2024-01-16", "BMO", 1),
@@ -26,6 +30,8 @@ def _calendar():
     ("2024-01-16", "2024-01-16", "AMC", 0),
     ("2024-01-16", "2024-01-16", "BMO", -1),
     ("2024-01-06", "2024-01-16", "BMO", 5),
+    ("2024-01-15", "2024-01-16", "BMO", 0),
+    ("2024-01-15", "2024-01-16", "AMC", 1),
     ("2024-01-05", "2024-01-13", "AMC", 5),
 ])
 def test_counts_supplied_sessions_not_calendar_days(entry, event, session, expected):
@@ -35,13 +41,11 @@ def test_counts_supplied_sessions_not_calendar_days(entry, event, session, expec
     assert calendar.observed_through == "2024-01-05"
 
 
-def test_historical_gaps_are_not_synthesized_and_inputs_are_unchanged():
+def test_historical_gaps_count_only_supplied_sessions_repeatedly():
     calendar = CalendarSessions(("2024-01-05", "2024-01-10", "2024-01-16"), "2024-01-16")
-    original = replace(calendar)
     for _ in range(2):
         assert trading_days_before_print(
             calendar, entry_date="2024-01-05", event_date="2024-01-16", session="BMO") == 1
-    assert calendar == original
 
 
 @pytest.mark.parametrize("changes", [

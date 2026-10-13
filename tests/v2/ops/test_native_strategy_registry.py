@@ -82,6 +82,7 @@ def test_registered_keys_reach_real_bundle_and_preserve_downstream_refusal(
 
     monkeypatch.setattr(batch, "build_native_score_inputs", inspect_then_build)
     event = _event_inputs(strategy="BFLY-P")
+    # The test-only RUNUP bundle route requires its calendar-owned horizon.
     event = replace(event, calendar_row={**event.calendar_row, "days_before_print": 5})
     assembled, refusals = _assemble(
         binding, [event], gate_policy={"test-policy": {"threshold": 0.0}})
