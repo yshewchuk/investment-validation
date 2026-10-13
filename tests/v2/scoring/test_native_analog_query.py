@@ -205,6 +205,29 @@ def test_complete_query_zero_spot_is_none():
     assert out["moneyness_band"] is None
 
 
+@pytest.mark.parametrize(("dte_band", "moneyness_band"), [
+    ("1-3", "ATM"), ("11-25", ">5%"), ("26-45", "2-5%")])
+def test_complete_query_keeps_each_distinct_existing_band(dte_band, moneyness_band):
+    # values would compute "26-45"/"ATM"; every given label survives unchanged.
+    out = complete_analog_query(
+        {"mcap_bucket": "1-10B", "implied_ratio": None,
+         "dte_band": dte_band, "moneyness_band": moneyness_band},
+        {"dte_entry": 30, "spot": 100.0, "strike": 100.0})
+    assert out["dte_band"] == dte_band
+    assert out["moneyness_band"] == moneyness_band
+
+
+def test_complete_query_does_not_mutate_the_callers_query():
+    query = {"mcap_bucket": "1-10B", "implied_ratio": 1.5}
+    out = complete_analog_query(query, {"dte_entry": 5, "spot": 100.0, "strike": 101.0})
+    assert out is not query
+    assert query == {"mcap_bucket": "1-10B", "implied_ratio": 1.5}
+    assert out["dte_band"] == "4-10" and out["moneyness_band"] == "ATM"
+    # A second call with other values on the SAME query is not polluted by the first.
+    again = complete_analog_query(query, {"dte_entry": 30, "spot": 100.0, "strike": 110.0})
+    assert again["dte_band"] == "26-45" and again["moneyness_band"] == ">5%"
+
+
 def test_complete_query_keeps_existing_and_passes_non_mapping():
     kept = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None,
                                   "dte_band": "1-3"},

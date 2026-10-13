@@ -11,7 +11,7 @@ from engine.v2.parity.tolerance import SCORE_RECORD_V1
 
 
 @pytest.mark.parametrize(("cost", "spot", "pct"), [
-    (3.0, 250.0, 1.2), (5.0, 80.0, 6.25), (-2.0, 40.0, -5.0)])
+    (3.0, 250.0, 1.2), (5.0, 80.0, 6.25), (-2.0, 40.0, -5.0), (0.0, 100.0, 0.0)])
 def test_legacy_row_derives_entry_cost_pct(cost, spot, pct):
     # Different spots and results: a constant, un-normalised or cost*100 value fails.
     row = {"entry_cost": cost, "spot": spot}

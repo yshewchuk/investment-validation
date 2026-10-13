@@ -3,7 +3,7 @@
 Pure arithmetic, no I/O. The bucket edges and the implied-ratio rule are the
 legacy ``engine.analogs`` ones (``MCAP_EDGES``, ``DTE_BANDS``,
 ``MONEYNESS_BANDS``; ``engine.score.Scorer._score_analogs``), restated here
-because ``engine.v2`` never imports legacy code.
+because this module imports no legacy code.
 """
 from __future__ import annotations
 
