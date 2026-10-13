@@ -13,7 +13,12 @@ from engine.v2.foundation import from_document, to_document, untag_nonfinite
 from engine.v2.registry import DYNAMIC_MENU, default_registry
 
 from .financial import financial_diagnostics
-from .frozen_executor import FrozenStageExecutor, FrozenStageRefusal
+from .frozen_executor import (
+    _RUNUP_FINAL_NAMES,
+    _RUNUP_RAW_NAMES,
+    FrozenStageExecutor,
+    FrozenStageRefusal,
+)
 from .identity import dependency_hash, request_hash, with_score_id
 from .stages import NativeScoreInputs, StageObserver, assemble_native_values, flags_refuse
 
@@ -34,14 +39,6 @@ _FROZEN_OUTPUTS = frozenset(
     for output in outputs
 )
 _RUNUP_BASE_DAYS = 14.0
-_RUNUP_RAW_NAMES = (
-    "prediction", "pred_runup_abs_move_d14", "runup_move_d14",
-    "runup_move_raw_d14",
-)
-_RUNUP_FINAL_NAMES = frozenset({
-    "runup_move_prediction", "runup_move_p10", "runup_move_p90",
-    "runup_move_sd",
-})
 _RUNUP_DERIVED_FIELDS = frozenset({
     "runup_move_raw_d14", "runup_move_raw_d14_p10",
     "runup_move_raw_d14_p90", "runup_move_raw_d14_sd",

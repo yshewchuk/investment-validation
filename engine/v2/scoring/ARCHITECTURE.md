@@ -378,6 +378,17 @@ when no raw value was produced (reachable only via an invalid/missing
 `MISSING_MODEL_INPUT:days_before_print`); it refuses
 `MISSING_MODEL_INPUT:runup_move_prediction` when neither value is finite.
 
+Source-bound frozen recipes for the `runup_move` role select a raw D14 point
+output: `prediction`, `pred_runup_abs_move_d14`, `runup_move_d14`, or
+`runup_move_raw_d14`. A binding containing a final move/band/SD name, or a
+recipe selecting another output such as a quantile, raises `ValueError`
+before execution (batch: sanitized `NATIVE_INPUT_BUILD_FAILED`). Multi-output
+selection retains the existing explicit-output/target rules. This also covers
+chooser producer recipes; historical `score_frozen` singleton compatibility
+is unchanged. Both paths share the raw/final name vocabulary, never scaling
+inside the executor; forecast and model stages retain their separate raw and
+scaled values.
+
 **`score_frozen`'s release-binding scope (issue #93).** A `ModelRelease`
 binds every strategy's models together (e.g. STR-THRU's and STR-RUNUP's own
 bindings side by side, plus any binding a release shares across every
@@ -516,9 +527,10 @@ from the resolved binding when assembling release-backed bundles.
 | no release is staged | existing `NoCurrentRelease` behavior remains; no partial binding is returned |
 
 The loader is read-only: a failure returns no partial binding and writes no
-state. Native batch binds a present verified pool to the scorer's `driver`
-slot and model-residual artifact recipe, and attaches a selected verified
-payoff artifact with its causal recipe. Release-backed STR-THRU keeps the
+state. Native batch binds verified pools and a selected payoff artifact with
+their causal recipes. RUNUP requires both champion residual slots and a unique
+exact-key, numerically usable surface; missing/mismatched state refuses its
+row with `MODEL_NOT_READY` (ops contract). Release-backed STR-THRU keeps the
 simulation `residual_recipe` empty: this release binding supplies no paired
 residual inputs for planned-exit simulation, so the batch does not invent a
 recipe or source rows. A missing driver-pool member is never filled from
