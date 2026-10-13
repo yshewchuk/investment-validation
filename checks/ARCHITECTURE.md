@@ -40,7 +40,7 @@ file); an unindented fenced block needs one before and after. Indented
 and list-marker fences are tracked too, and every fence must be closed (a
 closer needs the opener's character, at least its length, no info string, an
 indent within 3 of the opener's and, inside a list item, not less than it);
-only unindented fences get the blank-line rule. Blockquoted fences (`> ```)
+only unindented fences get the blank-line rule. Fences inside a blockquote (after a `>` marker)
 are not checked. Fenced content is never
 scanned as headings or tables. There is no list rule, and list content is
 skipped for the heading and table rules: only column-0 headings and tables are
