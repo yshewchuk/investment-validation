@@ -112,10 +112,13 @@ def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str,
     An empty domain is accepted only when the caller names WHY it is empty
     (no chain found, or pricing never reached, i.e. quote_status in
     _EMPTY_QUOTE_STATUSES); an empty domain with no recorded status is a
-    refusal, not a silent gap. Extracted, behavior-identical (messages and
-    checks unchanged), from tools/capture_tier0_corpus.py's _quote_map.
-    Each quote carries its row's observation date as ``observed_date`` (ISO)
-    so pricing can measure dte_entry per leg.
+    refusal, not a silent gap. Derived from tools/capture_tier0_corpus.py's
+    _quote_map, with one addition. Returns {"right:strike:expiry": {"bid":
+    float, "ask": float, "observed_date": "YYYY-MM-DD"}}; observed_date is the
+    quote row's observed_at calendar date and is omitted when the row has none
+    or it is unparseable. A repeated contract must repeat bid/ask exactly (else
+    INVALID_QUOTE_DOMAIN) and keeps the earliest observed_date. Pricing reads
+    the first leg's observed_date to measure dte_entry.
     """
     if quote_status in _EMPTY_QUOTE_STATUSES:
         if rows != []:
@@ -444,12 +447,12 @@ def _is_null_forecast_value(value: Any) -> bool:
 #: Names a frozen model may list in its feature_order that the scorer itself
 #: computes: days_to_print by engine/v2/scoring/stages.py
 #: _stage_days_to_print (before the forecast); dte_entry, measured from the
-#: priced legs' own quote date, and entry_cost_pct by
+#: first priced leg's own quote date, and entry_cost_pct by
 #: engine/v2/scoring/stages.py _check_pricing_boundary (after pricing). They
 #: are not projected from tier4/panel rows. Only entry_cost_pct is also an
 #: answer field that source_inputs forbids (projecting it would make every row
 #: refuse); days_to_print/dte_entry are not in that denylist, but the scorer
-#: computes them (dte_entry from the priced legs and quote date) and they are
+#: computes them (dte_entry from the first priced leg's quote date) and they are
 #: never projected from source inputs.
 _SCORER_COMPUTED_FEATURES = frozenset({
     "entry_cost_pct", "days_to_print", "dte_entry",
