@@ -29,6 +29,7 @@ cached forever.
 ``refetch_token``: caller-supplied nonce for a request whose cached answer is
 known stale; distinct token => distinct entry => real network call. The stale
 body is kept beside the fresh one — the store stays append-only.
+``refetch_token`` changes the key whether or not ``live`` is set.
 """
 from __future__ import annotations
 

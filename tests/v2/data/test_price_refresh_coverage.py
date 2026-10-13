@@ -277,6 +277,19 @@ def test_load_fetch_times_keeps_utc_aware_stamps_and_filters_like_history(fetch_
         "a missing or unparseable stamp contributes nothing"
 
 
+def test_load_fetch_times_converts_an_aware_non_utc_stamp_to_utc(fetch_root):
+    """A stamp stored at any offset comes back as the same instant in UTC —
+    17:30 EDT is 21:30Z — so the close-buffer comparison happens in one zone."""
+    _write_raw_fetch(fetch_root, "AAA", key="k-edt",
+                     fetched_at="2026-10-12T17:30:00-04:00")
+
+    times = pr.load_fetch_times(fetch_root=fetch_root)
+
+    expected = pd.Timestamp("2026-10-12T21:30:00Z")
+    assert times == {"AAA": [expected]}
+    assert times["AAA"][0].tz == expected.tz
+
+
 def test_a_ticker_whose_only_stamps_are_unreadable_is_daily(fetch_root):
     """Unknown is never coverage: it can only lengthen the daily list."""
     _write_raw_fetch(fetch_root, "AAA", key="k-missing", fetched_at=None)
@@ -461,6 +474,21 @@ def test_cache_key_refetch_token_is_distinct_and_optional():
     assert cache_key("yfinance", "history", other_params,
                      live=True, refetch_token="t1") != tokened, \
         "a different request with the same token is a different key"
+
+
+def test_cache_key_refetch_token_changes_the_key_even_when_live_is_false():
+    """Documented behaviour: ``refetch_token`` changes the key whether or not
+    ``live`` is set — the tokenless historical key is not stable against a
+    token, and a given token reproduces its own key across calls."""
+    params = {"ticker": "AAA", "period": "max"}
+    plain = cache_key("yfinance", "history", params)
+    tokened = cache_key("yfinance", "history", params, refetch_token="t1")
+    assert tokened != plain, \
+        "live defaults to False and the token must still change the key"
+    assert cache_key("yfinance", "history", params, refetch_token="t1") == tokened, \
+        "the same params and token must give the identical key across calls"
+    assert cache_key("yfinance", "history", params, refetch_token="t2") != tokened, \
+        "a distinct token is a distinct key even with live unset"
 
 
 def test_a_tokenless_repeat_is_a_cache_hit_while_a_token_misses(fetch_root, monkeypatch):

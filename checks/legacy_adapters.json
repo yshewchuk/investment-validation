@@ -849,7 +849,7 @@
       "package": "engine.v2.ops",
       "module": "engine.v2.ops.legacy_adapter",
       "legacy_symbol": "engine.data.pulls.price_refresh.load_fetch_history",
-      "reason": "ops price-refresh's read-only Tier-1 dated-fetch history loader, for daily/monthly resumability.",
+      "reason": "ops price-refresh's read-only Tier-1 dated-fetch history loader, for monthly resumability only (daily planning uses load_fetch_times).",
       "declared_on": "2026-09-14",
       "runtime": "invoke_price_refresh",
       "read_set": "Tier-1 fetch store (yfinance history metadata)",
