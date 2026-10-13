@@ -80,7 +80,7 @@ Primary RMSE pools equally weighted events, never fold RMSEs; MAE and per-horizo
 metrics are also reported. Numerically scaled errors avoid square overflow.
 The report binds every opened object, training omission, cutoff and sealed plan.
 Schedule/source availability stays unverified reconstruction; quantile calibration,
-market/history features, search and final evaluation are not implemented.
+market/history-feature model fitting, search and final evaluation are not implemented.
 The existing native report/outcome/completion, ledger and replay lifecycle applies;
 no-ledger runs still persist smoke evidence. Replay admits metadata but does not refit.
 
@@ -105,6 +105,27 @@ Existing publication/transaction/retry semantics above apply unchanged.
 | Admission has no native registration | `INVALID_EXPERIMENT_SPEC`; no implicit registration. |
 | Existing key has changed code, environment, plan, snapshot, population or context, or corrupt stored evidence | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; existing catalog and artifact bytes stay unchanged. |
 | Publication or catalog commit fails | No partial registration is admitted; a complete unreferenced artifact may remain. No automatic retry. |
+
+## Stored research-history entrypoint
+
+`python -m experiments.magnitude_history_store build|read` requires an existing catalog file.
+Other inputs are an existing artifact-store directory, exact source snapshot, holdout month, evaluation years,
+training start, history start (on/before every forecast ceiling) and optional repeatable `--event-id`.
+`read` also requires the exact feature snapshot.
+The entrypoint fingerprints its installed source closure and numerical environment;
+callers cannot submit features, a context document or an alternative producer.
+Research owns the native contract, protected build and stored-only reader; ops
+supplies existing bootstrap/fingerprinting, with no peer-layer import added.
+The CLI uses `engine.v2.data` Repository/errors and foundation ArtifactStore/errors/clock.
+Build returns the source/context/output identities; read returns stored rows.
+Both actions run shared catalog bootstrap/migrations; stored-only describes feature consumption.
+Before bootstrap or ArtifactStore construction, a missing/non-directory store root refuses `UNSAFE_PATH`.
+Native object admission then checks source contents; the CLI never initializes a missing root.
+Both are explicit local operations, never implicit provider downloads or model
+runs. Data/ops failures retain code/message; artifact failures retain only their
+code. Raw local OS/SQLite failures produce `INPUT_CHANGED` without exception text.
+Handled runtime failures are stdout JSON and exit 2; argument refusals use argparse stderr.
+No partial successful output or ledger entry is returned.
 
 ## Native outcome publication
 
