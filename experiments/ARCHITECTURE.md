@@ -110,7 +110,7 @@ Existing publication/transaction/retry semantics above apply unchanged.
 
 `python -m experiments.magnitude_history_store build|read` requires an existing catalog file.
 Other inputs are the artifact-store path, exact source snapshot, holdout month, evaluation years, training
-start and earlier history start. `read` also requires the exact feature snapshot.
+start and history start (on/before every forecast ceiling). `read` also requires the exact feature snapshot.
 The entrypoint fingerprints its installed source closure and numerical environment;
 callers cannot submit features, a context document or an alternative producer.
 Research owns the native contract, protected build and stored-only reader; ops

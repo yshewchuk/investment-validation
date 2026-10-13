@@ -137,7 +137,7 @@ def _event_rows(repository, snapshot, context, event, prepared):
         history = event_history._assemble_history(snapshot, target, population, plans,
             start=start, decision=decision, purpose="selection", read_rows=read_rows)
         _feature_recipe(history["features"])  # Validate names/numbers; the stored recipe is already pinned.
-        lineage = {k: v for k, v in history.items() if k != "features"}
+        lineage = {k: v for k, v in history.items() if k not in ("features", "holdout_exclusions")}
         rows.append({"event_id": event["event_id"], "context_id": context["context_id"],
             "horizon_sessions": cutoff["horizon_sessions"], "event_date": event["event_date"],
             "cutoff_id": cutoff["cutoff_id"], "source_session_ceiling": cutoff["source_session_ceiling"],
@@ -206,12 +206,12 @@ def _lineage(history, context, event, cutoff):
         decision_session=cutoff["source_session_ceiling"], computed_moves_version=
         context["source_snapshot"]["table_versions"]["computed_moves"]["dataset_version_id"])
     lists = ("history", "omitted_history", "read_inputs")
-    keys = set(pins) | {*lists, "history_id", "history_status", "holdout_exclusions"}
+    keys = set(pins) | {*lists, "history_id", "history_status"}
     if (set(history) != keys or any(history[name] != value for name, value in pins.items())
             or any(type(history[name]) is not list for name in lists)):
         raise ValueError
     identity = {k: v for k, v in history.items()
-                if k not in ("history_id", "history_status", "holdout_exclusions")}
+                if k not in ("history_id", "history_status")}
     if content_hash(identity) != history["history_id"]:
         raise ValueError
 

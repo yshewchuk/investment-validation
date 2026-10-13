@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pyarrow.parquet as pq
 import pytest
 
 from engine.v2.data import catalog, objects
@@ -87,7 +88,7 @@ def test_native_roundtrip_math_lineage_units_identity_and_replay(source, monkeyp
     monkeypatch.setattr(event_history, "load_event_history", _forbid)
     monkeypatch.setattr(stored, "_preflight_source", _forbid)
     first = _read(source, output)
-    assert first == _read(source, output)
+    assert first == _read(source, output)  # Two separate calls pin stored-read determinism.
     assert _build(source) == (build, output)  # Metadata admission, then artifact-only replay.
     assert (_catalog(source.conn), _objects(source.store)) == before
     assert first["inputs_id"] == content_hash({k: v for k, v in first.items() if k != "inputs_id"})
@@ -111,6 +112,31 @@ def test_native_roundtrip_math_lineage_units_identity_and_replay(source, monkeyp
     records = source.repository.fragment_records(output, TABLE)
     assert len(records) == 4 and all(r.row_count == 3 for r in records)
     assert all(r.primary_key_min[-1] == 1 and r.primary_key_max[-1] == 5 for r in records)
+
+
+def test_native_persisted_rows_omit_exclusion_roster_but_keep_transient_history(source, monkeypatch):
+    _poison(monkeypatch, source.repository, source.snapshot,
+            [e["event_date"].date().isoformat() for e in [*source.forbidden, source.events[-1]]])
+    transient = event_history.load_event_history(source.repository, source.snapshot,
+        event_id=source.events[-1]["event_id"], as_of_month=REQUEST["as_of_month"],
+        history_start=REQUEST["history_start"], decision_session="2024-06-14")
+    exclusions = {r["event_id"]: r["memberships"] for r in transient["holdout_exclusions"]}
+    assert exclusions and source.forbidden[0]["event_id"] in exclusions
+    built, output = _build(source)
+    persisted = []
+    for record in source.repository.fragment_records(output, TABLE):
+        path = objects.verify_object_path(source.store, record.object_ref)
+        persisted.extend(pq.read_table(path).to_pylist())
+    assert len(persisted) == 12
+    for row in persisted:
+        lineage = json.loads(row["history_json"])
+        assert "holdout_exclusions" not in lineage
+        assert lineage["history_id"] == content_hash({k: v for k, v in lineage.items()
+            if k not in ("history_id", "history_status")})
+    serialized = canonical_json({"build": built, "rows": persisted})
+    assert all(event_id not in serialized for event_id in exclusions)
+    latest = next(r for r in persisted if r["event_date"] == "2024-06-17" and r["horizon_sessions"] == 1)
+    assert json.loads(latest["history_json"])["history_id"] == transient["history_id"]
 
 
 def test_empty_and_zero_history_keep_distinct_missingness(source):
@@ -359,6 +385,42 @@ def test_cli_build_read_and_typed_refusal(source, capsys):
     with pytest.raises(SystemExit) as error:
         entry.main(["build", *args, "--feature-snapshot-id", source.snapshot.snapshot_id])
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize("action", ["build", "read"])
+def test_cli_bootstrap_migrates_each_owner_before_source_resolution(source, capsys, action):
+    path = source.root / "empty.sqlite"
+    sqlite3.connect(path).close()
+    args = _cli_args(source)
+    args[1] = str(path)
+    if action == "read":
+        args += ["--feature-snapshot-id", "unused"]
+    assert entry.main([action, *args]) == 2
+    assert json.loads(capsys.readouterr().out)["refused"] == "SNAPSHOT_NOT_FOUND"
+    with sqlite3.connect(path) as conn:
+        versions = conn.execute("SELECT * FROM schema_versions ORDER BY owner, version").fetchall()
+        assert {row[0] for row in versions} == {"ops", "ledger", "data"}
+        assert conn.execute("SELECT COUNT(*) FROM data_snapshots").fetchone()[0] == 0
+    assert entry.main([action, *args]) == 2
+    assert json.loads(capsys.readouterr().out)["refused"] == "SNAPSHOT_NOT_FOUND"
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT * FROM schema_versions ORDER BY owner, version").fetchall() == versions
+
+
+@pytest.mark.parametrize("action", ["build", "read"])
+def test_cli_unknown_option_refuses_before_execution_and_bootstrap(source, monkeypatch, capsys, action):
+    args = _cli_args(source)
+    if action == "read":
+        args += ["--feature-snapshot-id", "unused"]
+    before = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(entry, "open_catalog", _forbid)
+    monkeypatch.setattr(entry, "_execute", _forbid)
+    with pytest.raises(SystemExit) as error:
+        entry.main([action, *args, "--caller-features", "unused"])
+    assert error.value.code == 2
+    captured = capsys.readouterr()
+    assert "--caller-features" in captured.err and captured.out == ""
+    assert (_catalog(source.conn), _objects(source.store)) == before
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
@@ -673,15 +735,26 @@ def test_candidate_on_latest_ceiling_is_never_opened(tmp_path, monkeypatch):
         source.conn.close()
 
 
-def test_lazy_cache_preserves_first_invalid_label_refusal_before_later_objects(tmp_path, monkeypatch):
-    source = _source(tmp_path, overrides={0: {"realized_move_pct": None}})
+@pytest.mark.parametrize("invalid_index", [0, 2])
+def test_lazy_cache_preserves_invalid_label_order_without_catalog_or_receipt_effect(tmp_path, monkeypatch, invalid_index):
+    source = _source(tmp_path, overrides={invalid_index: {"realized_move_pct": None}})
     try:
         _poison(monkeypatch, source.repository, source.snapshot,
-                [e["event_date"].date().isoformat() for e in source.events[1:] + source.forbidden])
-        before = _catalog(source.conn), _objects(source.store)
+                [e["event_date"].date().isoformat() for e in source.events[invalid_index + 1:] + source.forbidden])
+        context = entry.context(source.repository, source.snapshot, **REQUEST)
+        scope, receipt = stored._names(context)
+        before, existing_objects = _catalog(source.conn), _objects(source.store)
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             _build(source)
-        assert (_catalog(source.conn), _objects(source.store)) == before
+        assert _catalog(source.conn) == before
+        assert source.conn.execute("SELECT 1 FROM data_import_receipts WHERE receipt_id=?", (receipt,)).fetchone() is None
+        assert source.conn.execute("SELECT 1 FROM data_snapshot_heads WHERE scope=?", (scope,)).fetchone() is None
+        after = _objects(source.store)
+        assert {key: after[key] for key in existing_objects} == existing_objects
+        if invalid_index == 2:
+            assert len(after) == len(existing_objects) + 2  # Earlier complete objects are unreferenced.
+        else:
+            assert after == existing_objects  # The first target failed before any feature publication.
     finally:
         source.conn.close()
 
@@ -696,7 +769,8 @@ def test_prepared_histories_preserve_existing_per_forecast_features_and_full_lin
         assert {key: row[key] for key in FEATURES} == expected["features"]
         assert row["cutoff_id"] == expected["forecast_cutoff"]["cutoff_id"]
         assert json.loads(row["history_json"]) == {
-            key: value for key, value in expected["history_input"].items() if key != "features"}
+            key: value for key, value in expected["history_input"].items()
+            if key not in ("features", "holdout_exclusions")}
 
 
 @pytest.mark.parametrize("change", ["both_statuses", "lineage_status"])
@@ -760,7 +834,8 @@ def test_fragment_coverage_and_bounds_refuse_before_any_feature_object(source, m
 
 
 @pytest.mark.parametrize("change", ["history_content", "read_inputs_content", "history_id", "noncanonical",
-                                    "history_type", "omitted_history_type", "read_inputs_type", "extra_key"])
+                                    "history_type", "omitted_history_type", "read_inputs_type", "extra_key",
+                                    "holdout_exclusions", "rehashed_roster"])
 def test_lineage_digest_encoding_and_closed_types_refuse_before_features(source, monkeypatch, change):
     original = stored._event_rows
 
@@ -777,6 +852,11 @@ def test_lineage_digest_encoding_and_closed_types_refuse_before_features(source,
                 history[name] = {"one": 1, "two": 2, "three": 3} if name == "history" else {}
             elif change == "extra_key":
                 history["extra"] = "unused"
+            elif change in ("holdout_exclusions", "rehashed_roster"):
+                history["holdout_exclusions"] = [{"event_id": source.forbidden[0]["event_id"], "memberships": ["random"]}]
+                if change == "rehashed_roster":
+                    history["history_id"] = content_hash({k: v for k, v in history.items()
+                        if k not in ("history_id", "history_status")})
             if change.endswith("_type") or change == "extra_key":
                 history["history_id"] = content_hash({k: v for k, v in history.items()
                     if k not in ("history_id", "history_status", "holdout_exclusions")})

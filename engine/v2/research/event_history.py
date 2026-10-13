@@ -86,6 +86,7 @@ def load_event_history(repository, snapshot, *, event_id, as_of_month,
     if contract != COMPUTED_MOVES_CONTRACT:
         raise errors.fail("CONTRACT_MISMATCH", "history requires the native computed-moves contract")
     plans = _plans(repository, snapshot, candidates, contract)
+
     def read_rows(event, request):
         """Scan one outcome; the caller validates it before requesting the next."""
         return [row for batch in repository.scan(request, table_name="computed_moves")
