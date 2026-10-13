@@ -15,7 +15,14 @@ import pytest
 from engine.v2.data import catalog, objects
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactError, SystemClock, canonical_json, content_hash
+from engine.v2.foundation import (
+    ArtifactError,
+    SystemClock,
+    canonical_json,
+    content_hash,
+    to_document,
+)
+from engine.v2.ops import bootstrap
 from engine.v2.research import event_history, magnitude_features
 from engine.v2.research import magnitude_history_store as stored
 from engine.v2.research.magnitude_history_table import CONTRACT, FEATURES, TABLE
@@ -93,15 +100,29 @@ def test_native_roundtrip_math_lineage_units_identity_and_replay(source, monkeyp
     before_source = Repository.resolve_pinned(source.repository, "shadow")
     build, output = _build(source)
     context = build["context"]
+    committed = Repository.resolve_pinned(source.repository,
+        "magnitude-history-" + context["context_id"].removeprefix("sha256:"))
+    assert output == committed
+    assert build == {"context": context, "feature_snapshot": to_document(committed)}
+    assert set(context) == {"schema_version", "context_id", "source_snapshot", "temporal_plan",
+                            "history_start", "feature_recipe", "producer"}
+    assert context["schema_version"] == "magnitude_materialization.v1"
+    assert context["temporal_plan"]["schema_version"] == "magnitude_temporal_plan.v1"
+    assert context["history_start"] == "2022-01-01"
+    assert set(context["producer"]) == {"source_closure", "environment"}
     assert output != source.snapshot and set(output.table_versions) == {TABLE}
     assert Repository.resolve_pinned(source.repository, "shadow") == before_source
     assert output.knowledge_mode_by_table == {TABLE: "reconstructed"}
     assert context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
-    assert context["source_snapshot"]["snapshot_id"] == source.snapshot.snapshot_id
+    assert context["source_snapshot"] == to_document(source.snapshot)
     closure = context["producer"]["source_closure"]
     root = Path(entry.__file__).resolve().parents[1]
     assert {"experiments/magnitude_history_store.py", "engine/v2/research/magnitude_history_store.py",
-            "engine/v2/research/event_history.py"} <= closure.keys()
+            "engine/v2/research/event_history.py", "engine/v2/features/panel_math.py",
+            "engine/v2/research/magnitude_history_table.py", "engine/v2/research/magnitude_features.py",
+            "engine/v2/research/magnitude_inputs.py", "engine/v2/research/magnitude_folds.py",
+            "engine/v2/research/experiment_population.py", "engine/v2/foundation/experiment_holdouts.py",
+            "engine/v2/foundation/market_calendar.py"} <= closure.keys()
     assert closure == {name: "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest() for name in closure}
     libraries = {}
     for name in ("numpy", "pandas", "scipy", "scikit-learn", "pyarrow"):
@@ -119,10 +140,13 @@ def test_native_roundtrip_math_lineage_units_identity_and_replay(source, monkeyp
     monkeypatch.setattr(event_history, "load_event_history", _forbid)
     monkeypatch.setattr(stored, "_preflight_source", _forbid)
     first = _read(source, output)
+    assert set(first) == {"context", "feature_snapshot", "rows", "inputs_id"}
+    assert first["context"] == context and first["feature_snapshot"] == to_document(committed)
     assert first == _read(source, output)  # Two separate calls pin stored-read determinism.
     assert _build(source) == (build, output)  # Metadata admission, then artifact-only replay.
     assert (_catalog(source.conn), _objects(source.store)) == before
-    assert first["inputs_id"] == content_hash({k: v for k, v in first.items() if k != "inputs_id"})
+    assert first["inputs_id"] == content_hash({"context": context,
+        "feature_snapshot": to_document(committed), "rows": first["rows"]})
     assert len(first["rows"]) == 12
     rows = {(r["event_date"], r["horizon_sessions"]): r for r in first["rows"]}
     for horizon in (1, 3, 5):
@@ -338,6 +362,38 @@ def test_environment_only_drift_changes_context_and_refuses_old_feature_snapshot
     changed = entry.context(source.repository, source.snapshot, **REQUEST)
     identity = {**{k: v for k, v in original.items() if k != "context_id"},
                 "producer": {**original["producer"], "environment": environment}}
+    assert changed == {**identity, "context_id": content_hash(identity)}
+    assert changed["context_id"] != original["context_id"]
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    monkeypatch.setattr(stored, "_scan", _forbid)
+    monkeypatch.setattr(stored, "_prepare_history", _forbid)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        _read(source, output)
+    assert calls == [1, 1]
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+@pytest.mark.parametrize("path", ["engine/v2/features/panel_math.py",
+    "engine/v2/research/magnitude_history_table.py", "engine/v2/foundation/experiment_holdouts.py"])
+def test_source_only_drift_changes_context_and_refuses_old_feature_snapshot(source, monkeypatch, path):
+    built, output = _build(source)
+    original = built["context"]
+    closure = original["producer"]["source_closure"]
+    assert path in closure and closure[path] != "sha256:" + "0" * 64
+    changed_sources = {**closure, path: "sha256:" + "0" * 64}
+    calls = []
+
+    def changed_closure(root, entries):
+        assert root == Path(entry.__file__).resolve().parents[1]
+        assert entries == ["experiments/magnitude_history_store.py"]
+        calls.append(1)
+        return changed_sources
+
+    monkeypatch.setattr(entry, "source_closure", changed_closure)
+    changed = entry.context(source.repository, source.snapshot, **REQUEST)
+    identity = {**{k: v for k, v in original.items() if k != "context_id"},
+                "producer": {**original["producer"], "source_closure": changed_sources}}
     assert changed == {**identity, "context_id": content_hash(identity)}
     assert changed["context_id"] != original["context_id"]
     _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
@@ -693,7 +749,10 @@ def test_cli_build_read_and_typed_refusal(source, capsys):
     assert row["n_prior"] == 3 and row["mean_prior_abs_move"] == 4
     assert row["ema2_prior_abs_move"] == pytest.approx(46 / 9)
     assert entry.main(["read", *args, "--feature-snapshot-id", source.snapshot.snapshot_id]) == 2
-    assert json.loads(capsys.readouterr().out)["refused"] == "IDENTITY_CONFLICT"
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"refused": "IDENTITY_CONFLICT",
+        "message": "IDENTITY_CONFLICT: feature snapshot is not the committed context output"}
+    assert captured.err == ""
     with pytest.raises(SystemExit) as error:
         entry.main(["read", *args])
     assert error.value.code == 2
@@ -707,6 +766,43 @@ def test_cli_build_read_and_typed_refusal(source, capsys):
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
+@pytest.mark.parametrize("kind,expected", [
+    ("data", {"refused": "SNAPSHOT_NOT_FOUND", "message": "SNAPSHOT_NOT_FOUND: unknown snapshot id"}),
+    ("ops", {"refused": "INTEGRITY_FAILED",
+             "message": "INTEGRITY_FAILED: ops migration differs from the one applied"}),
+])
+def test_cli_native_typed_errors_preserve_complete_envelope_and_close_catalog(
+        source, monkeypatch, capsys, action, kind, expected):
+    args = _cli_args(source)
+    if kind == "ops":
+        changed = source.conn.execute("UPDATE schema_versions SET checksum='synthetic-changed' "
+                                      "WHERE owner='ops' AND version=1")
+        assert changed.rowcount == 1
+    else:
+        args[5] = "unknown-synthetic-source"
+    if action == "read":
+        args += ["--feature-snapshot-id", "unused"]
+    opened = []
+    connect = bootstrap.connect
+
+    def track(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(bootstrap, "connect", track)
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    before = _catalog(source.conn), _objects(source.store)
+    assert entry.main([action, *args]) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == expected and captured.err == ""
+    assert (_catalog(source.conn), _objects(source.store)) == before
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")
+
+
+@pytest.mark.parametrize("action", ["build", "read"])
 def test_cli_bootstrap_migrates_each_owner_before_source_resolution(source, capsys, action):
     path = source.root / "empty.sqlite"
     sqlite3.connect(path).close()
@@ -715,13 +811,19 @@ def test_cli_bootstrap_migrates_each_owner_before_source_resolution(source, caps
     if action == "read":
         args += ["--feature-snapshot-id", "unused"]
     assert entry.main([action, *args]) == 2
-    assert json.loads(capsys.readouterr().out)["refused"] == "SNAPSHOT_NOT_FOUND"
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"refused": "SNAPSHOT_NOT_FOUND",
+                                       "message": "SNAPSHOT_NOT_FOUND: unknown snapshot id"}
+    assert captured.err == ""
     with sqlite3.connect(path) as conn:
         versions = conn.execute("SELECT * FROM schema_versions ORDER BY owner, version").fetchall()
         assert {row[0] for row in versions} == {"ops", "ledger", "data"}
         assert conn.execute("SELECT COUNT(*) FROM data_snapshots").fetchone()[0] == 0
     assert entry.main([action, *args]) == 2
-    assert json.loads(capsys.readouterr().out)["refused"] == "SNAPSHOT_NOT_FOUND"
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"refused": "SNAPSHOT_NOT_FOUND",
+                                       "message": "SNAPSHOT_NOT_FOUND: unknown snapshot id"}
+    assert captured.err == ""
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT * FROM schema_versions ORDER BY owner, version").fetchall() == versions
 
@@ -818,7 +920,9 @@ def test_cli_existing_empty_store_reaches_native_object_admission(source, capsys
     before = _catalog(source.conn), _objects(source.store)
     assert entry.main([action, *args]) == 2
     captured = capsys.readouterr()
-    assert json.loads(captured.out)["refused"] == "OBJECT_CORRUPT" and captured.err == ""
+    assert json.loads(captured.out) == {"refused": "OBJECT_CORRUPT",
+        "message": "OBJECT_CORRUPT: published object bytes do not match its recorded hash"}
+    assert captured.err == ""
     assert list(root.iterdir()) == []
     assert (_catalog(source.conn), _objects(source.store)) == before
 
@@ -953,6 +1057,36 @@ def test_rehashed_direct_context_guards_all_targets_before_outcomes(source, monk
     code = "HOLDOUT_ACCESS_DENIED" if name == "event_id" else "CONTRACT_MISMATCH"
     with pytest.raises(DataError, match=code):
         stored.materialize(source.repository, source.snapshot, binding)
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+def test_direct_engine_accepts_rehashed_calendar_metadata_but_public_read_rederives_context(source, monkeypatch):
+    authentic = entry.context(source.repository, source.snapshot, **REQUEST)
+    binding = json.loads(json.dumps(authentic))
+    plan = binding["temporal_plan"]
+    plan["calendar_input"]["calendar_version"] = "synthetic-rehashed-calendar"
+    for event in plan["events"]:
+        for forecast in event["forecasts"]:
+            forecast["calendar_id"] = "sha256:" + "0" * 64
+            forecast["cutoff_id"] = content_hash({k: v for k, v in forecast.items() if k != "cutoff_id"})
+    plan["plan_id"] = content_hash({k: v for k, v in plan.items() if k != "plan_id"})
+    binding["context_id"] = content_hash({k: v for k, v in binding.items() if k != "context_id"})
+    assert binding["context_id"] != authentic["context_id"]
+    _poison(monkeypatch, source.repository, source.snapshot,
+            [e["event_date"].date().isoformat() for e in [*source.forbidden, source.events[-1]]])
+    output = stored.materialize(source.repository, source.snapshot, binding)
+    _poison(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
+    monkeypatch.setattr(stored, "_prepare_history", _forbid)
+    before = _catalog(source.conn), _objects(source.store)
+    result = stored.read_stored(source.repository, output, binding)
+    assert result["context"] == binding and result["feature_snapshot"] == to_document(output)
+    assert len(result["rows"]) == 12
+    latest = next(row for row in result["rows"]
+                  if row["event_date"] == "2024-06-17" and row["horizon_sessions"] == 1)
+    assert latest["n_prior"] == 4 and latest["mean_prior_abs_move"] == 5.5
+    monkeypatch.setattr(stored, "_scan", _forbid)
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT: feature snapshot is not the committed context output"):
+        _read(source, output)
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
