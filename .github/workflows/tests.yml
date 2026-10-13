@@ -55,19 +55,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 checks/test_layout_budget.py --base-ref "$BASE_SHA"
 
-      - name: Set up Node
+      - name: Lint Markdown
         if: github.event_name == 'pull_request'
-        uses: actions/setup-node@v4
+        # v20 bundles markdownlint-cli2 0.18.1 (same pin as the pre-commit hook);
+        # rules come from .markdownlint-cli2.jsonc.
+        uses: DavidAnson/markdownlint-cli2-action@992badcdf24e3b8eb7e87ff9287fe931bcb00c6e
         with:
-          node-version: "22"
-
-      - name: Check Markdown structure
-        if: github.event_name == 'pull_request'
-        env:
-          # The CURRENT base tip, not pull_request.base.sha: once the base branch
-          # moves, the merge commit contains files the stale sha lacks.
-          BASE_REF: origin/${{ github.base_ref }}
-        run: python3 checks/markdown_structure.py --base-ref "$BASE_REF"
+          globs: "**/*.md"
 
       - name: Upload PR test selection
         if: github.event_name == 'pull_request'
