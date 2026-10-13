@@ -11,8 +11,8 @@ from engine.v2.research.event_history import load_event_history
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_inputs import forecast_cutoff, magnitude_recipe
 
-_FEATURES = ("n_prior", "mean_prior_move", "mean_prior_abs_move",
-             *(f"ema{span}_prior_{kind}" for span in (2, 4, 8, 12) for kind in ("move", "abs_move")))
+HISTORY_FEATURE_COLUMNS = ("n_prior", "mean_prior_move", "mean_prior_abs_move",
+                           *(f"ema{span}_prior_{kind}" for span in (2, 4, 8, 12) for kind in ("move", "abs_move")))
 
 
 def _calendar_input(repository, snapshot):
@@ -36,11 +36,11 @@ def _calendar_input(repository, snapshot):
 
 def _feature_recipe(features):
     """Keep exact native history names and explicit nulls; never infer aliases."""
-    if (tuple(features) != _FEATURES or any(value is not None and
+    if (tuple(features) != HISTORY_FEATURE_COLUMNS or any(value is not None and
             (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value))
             for value in features.values())):
         raise errors.fail("EXPERIMENT_VARIANT_FAILED", "magnitude history features are invalid")
-    return {"schema_version": "magnitude_history_features.v1", "columns": list(_FEATURES),
+    return {"schema_version": "magnitude_history_features.v1", "columns": list(HISTORY_FEATURE_COLUMNS),
             "arithmetic": "panel_math.history_features", "missing_values": "null", "imputation": "none"}
 
 
