@@ -265,46 +265,18 @@ evidence. See the models and data component contracts.
     taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
-  - **Mutation PR status** (`tools/mutation_pr_status.py`; the gremlins
-    `report` job runs it on a PR, and `report_status` posts its verdict unless
-    the plan was empty or a PR-closed placeholder module was merged, which keep
-    their earlier mapping). Inputs
-    (`--merged-dir`, `--diff-file`, `--baseline-summary`, `--github-output`): the
-    merged `summary.json` and `results.jsonl` in the merged directory, the PR's
-    `git diff -U0`, and optionally main's last merged `summary.json`. Outputs: a
-    JSON verdict on stdout, `::error::` (PR-owned) and `::warning::` (infra)
-    annotations, and `state` (`success`|`failure`|`neutral`) and `description` (within the
-    commit-status length limit, the infra count never cut) appended to `--github-output`, which
-    `report_status` posts as the `mutation/pr` commit status when it is `success` or
-    `failure`. `neutral` means no module
-    was measured (every module infra, or the merged report unavailable) or the merge
-    itself reported a tool error or an incomplete run (merge-level reasons such as a
-    provenance mismatch are listed as `merge_issues` and warned), never `success`; a
-    classified `success` never overrides a `report` job that did not succeed, and a
-    `report` job that fails before classification is infra: `neutral`. Commit statuses
-    have no grey state, so a `neutral` verdict goes only to the `report_neutral` job's
-    `neutral` check run, and `report_status` posts no commit status for it. `mutation/pr` is not a required check. The module set is the summary's
-    `expected_modules` and `modules` plus every module named in a result row.
-    A module is `pr_owned` when a `survived` row sits on a line the PR added or
-    changed (checked first, from the rows alone, so it wins over every infra
-    class and over a missing summary entry), or when its run ended
-    in a test failure that main's summary does not show for the same module
-    (a skipped module in main's summary excuses nothing). Otherwise it is `infra`
-    (no summary entry, `skipped_reason`, timeout/cancel `-1`, killed by a
-    signal, gremlin `ERROR` results, an invalid raw report, a module that
-    reports `tool_error`, or a failure main shows too) or `ok`. Only `pr_owned` modules make the state `failure`;
-    infra modules are counted in the description, never red. Failure semantics:
-    the tool exits 0 for every classified or degraded input (only argument errors
-    and an unwritable `--github-output` file exit nonzero, the latter deliberately
-    so a CI step fails loudly). A missing or unparsable merged summary yields `neutral`, an
-    "unavailable" description and a warning. An omitted, missing or undecodable
-    diff (including one with hunks but no recognizable file header), or an unreadable
-    or partly malformed `results.jsonl`, warns and makes survivors unattributable:
-    the result is `neutral` ("... survivors not attributed; not a pass", listed in
-    `attribution_problems`), never `success`, unless a module is PR-owned anyway. An
-    unreadable baseline warns and excuses nothing (it can add red, never green). Survivors on lines
-    the PR did not touch never fail a PR. `classify` is a pure function: no
-    network or git.
+  - **Mutation PR status** (`tools/mutation_pr_status.py`): the gremlins
+    `report` job classifies the merged mutation report against the PR diff (inputs:
+    the merged `summary.json` and `results.jsonl`, the PR's `git diff -U0`, optionally
+    main's last merged summary). `state` is `failure` only for PR-owned results
+    (survivors on lines the PR changed, or a test failure main does not show);
+    `neutral` when nothing was measured, the merge reported a tool error, or survivors
+    cannot be attributed to the PR; otherwise `success`. Infra problems are warnings,
+    never red. `report_status` posts `success`/`failure` as the `mutation/pr` commit
+    status; a `neutral` verdict is posted only as a `neutral` check run by
+    `report_neutral`, because commit statuses have no grey state. `mutation/pr` is not
+    a required check. The per-case rules and the `report_status` decision table are in
+    `tests/README.md` ("Mutation CI").
 
 The active PR workflow uses `tools/mutation_pilot.py select-tests` and the
 import-graph policy described above. For each non-empty diff that yields a

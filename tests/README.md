@@ -399,7 +399,10 @@ cancel, signal kill, gremlin ERROR results, an invalid raw report, a failure mai
 shows too. Unreadable inputs degrade to warnings; none can produce `success`:
 an unreadable merged summary, a merge tool error or incomplete run, a missing or
 unreadable PR diff, and unreadable or partly malformed result rows all give `neutral`
-(survivors cannot be attributed), while a missing baseline only stops excusing failures.
+(survivors cannot be attributed; listed as `attribution_problems`, merge-level reasons as
+`merge_issues`), while a missing baseline only stops excusing failures. The tool exits 0
+for every classified or degraded input; only argument errors and an unwritable
+`--github-output` file exit nonzero (deliberately, so the CI step fails loudly).
 
 Gremlins `report_status` decision table, first match wins (`report` = the report job
 result, `classified` = the classifier's `state`, empty if its step did not run):
