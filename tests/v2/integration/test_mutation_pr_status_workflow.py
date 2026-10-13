@@ -65,7 +65,7 @@ def _run_bash(script: str, env_over: dict, functions: str) -> subprocess.Complet
 
 
 GIT_PY_FUNCS = """
-git() { echo "git $*" >> "$LOG"; [ -n "${GIT_FAIL:-}" ] && return 1; return 0; }
+git() { echo "git $*" >> "$LOG"; [ -n "${GIT_FAIL:-}" ] && return 1; if [ -n "${GIT_FAIL_DIFF:-}" ] && [ "$1" = "-c" ]; then echo partial.py; return 1; fi; return 0; }
 python() { echo "python" >> "$LOG"; printf 'ARG %s\\n' "$@" >> "$LOG"; return 0; }
 """
 
@@ -104,6 +104,31 @@ def test_classify_script_degrades_when_git_fails(tmp_path):
         "ARG --merged-dir",
         "ARG merged",
     ]
+
+
+def test_classify_script_does_not_forward_partial_diff_output(tmp_path):
+    log = tmp_path / "log"
+    script = _classify_step()["run"]
+    try:
+        proc = _run_bash(
+            script,
+            {"LOG": str(log), "PR": "7", "BASE_SHA": "base1", "HEAD_SHA": "head1",
+             "GIT_FAIL_DIFF": "1"},
+            GIT_PY_FUNCS,
+        )
+        assert proc.returncode == 0
+        assert "::warning::" in proc.stdout
+        lines = log.read_text().splitlines()
+        py_lines = [ln for ln in lines if ln == "python" or ln.startswith("ARG ")]
+        assert py_lines == [
+            "python",
+            "ARG tools/mutation_pr_status.py",
+            "ARG --merged-dir",
+            "ARG merged",
+        ]
+        assert "ARG --changed-files" not in lines
+    finally:
+        (ROOT / "changed_files.txt").unlink(missing_ok=True)
 
 
 def _decision_script() -> str:

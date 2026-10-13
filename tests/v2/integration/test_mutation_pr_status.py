@@ -63,6 +63,22 @@ def test_failure_cases():
                               "tests fail in b"]
 
 
+def test_two_survivors_in_one_file_are_counted(tmp_path):
+    verdict = ps.classify(clean("a"), [row("a", "engine/v2/a.py"),
+                                       row("a", "engine/v2/a.py")],
+                          {"engine/v2/a.py"})
+    assert verdict["state"] == "failure"
+    assert verdict["description"] == (
+        "gremlins: PR-owned problem: 2 surviving mutant(s) in engine/v2/a.py")
+    assert verdict["reasons"] == ["2 surviving mutant(s) in engine/v2/a.py"]
+    argv, out = _report(tmp_path, clean("a"),
+                        [json.dumps(row("a", "engine/v2/a.py"))] * 2,
+                        ["engine/v2/a.py"])
+    assert ps.main(argv) == 0
+    assert ("description=gremlins: PR-owned problem: 2 surviving mutant(s) in "
+            "engine/v2/a.py\n") in out.read_text()
+
+
 def test_integrity_comes_before_attribution():
     for summary in (None, {"modules": None},
                     {"modules": {"a": mod()}, "expected_modules": ["a", "b"],
@@ -92,6 +108,8 @@ def test_success_cases():
     assert verdict["state"] == "success" and verdict["description"].endswith("1 module(s)")
     verdict = ps.classify(clean("a", "b", "c"), [], {"engine/v2/z.py"})
     assert verdict["state"] == "success" and verdict["description"].endswith("3 module(s)")
+    assert (ps.classify(clean("a", "b", "c"), [], {"engine/v2/z.py"})["description"]
+            == "gremlins: no PR-owned problems in 3 module(s)")
     verdict = ps.classify(clean("a"), [row("a", "engine/v2/other.py")], {"engine/v2/a.py"})
     assert verdict["state"] == "success"
     for status in ("killed", "timeout", "suspicious", "excluded"):
@@ -160,6 +178,10 @@ def test_description_fits_the_limit():
                            "failure_reasons": ["x"]}, [], {"engine/v2/z.py"})
     assert verdict["state"] == "failure" and len(verdict["description"]) <= 140
     assert verdict["description"] and verdict["description"].endswith("...")
+    assert verdict["description"] == (
+        "gremlins: PR-owned problem: tests fail in "
+        "module_0_with_a_long_name, module_10_with_a_long_name, "
+        "module_11_with_a_long_name, ...")
     bad = {f"module_{i}_with_a_long_name": mod(skipped_reason="x") for i in range(30)}
     verdict = ps.classify({"modules": bad, "expected_modules": sorted(bad), "complete": True,
                            "tool_error": False, "failure_reasons": []}, [], {"engine/v2/z.py"})
@@ -219,7 +241,9 @@ def test_cli_invalid_summary_is_neutral(tmp_path, capsys):
 def test_cli_malformed_rows_are_neutral(tmp_path):
     bad_rows = ("{not json",
                 json.dumps({"module": "a", "file": "f", "status": "zapped"}),
-                json.dumps({"module": "a", "status": "survived"}))
+                json.dumps({"module": "a", "status": "survived"}),
+                json.dumps({"file": "f", "status": "survived"}),
+                json.dumps({"module": "a", "file": 7, "status": "survived"}))
     for i, bad in enumerate(bad_rows):
         argv, out = _report(tmp_path, clean("a"), [bad], ["engine/v2/a.py"],
                             subdir=f"bad{i}")
