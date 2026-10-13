@@ -176,6 +176,17 @@ def _post_anchor(day: date, session: str, days: list[date]) -> date:
     return later[0]
 
 
+def _calendar_days(raw_days: Any) -> list[date]:
+    if not isinstance(raw_days, tuple) or not raw_days:
+        raise CalendarInputError("calendar days must be a non-empty tuple of YYYY-MM-DD strings")
+    days = [_as_day(text, "calendar day") for text in raw_days]
+    if days != sorted(set(days)):
+        raise CalendarInputError("calendar days must be sorted and duplicate-free")
+    if any(d.weekday() > 4 or d in _holidays(d.year) for d in days):
+        raise CalendarInputError("calendar days must be weekday non-holiday sessions")
+    return days
+
+
 def planned_exit_date(key: CalendarEventKey, calendar: CalendarSessions) -> str:
     """Fixed foundation exit policy: STR-RUNUP the last pre-print, else first post."""
     strategy = _field(key, "strategy")
@@ -186,13 +197,7 @@ def planned_exit_date(key: CalendarEventKey, calendar: CalendarSessions) -> str:
         raise CalendarInputError(f"unknown session {session!r}")
     if not isinstance(strategy, str) or (strategy not in _EXIT_PRE and strategy not in _EXIT_POST):
         raise CalendarInputError(f"unknown strategy {strategy!r}")
-    if not isinstance(raw_days, tuple) or not raw_days:
-        raise CalendarInputError("calendar days must be a non-empty tuple of YYYY-MM-DD strings")
-    days = [_as_day(text, "calendar day") for text in raw_days]
-    if days != sorted(set(days)):
-        raise CalendarInputError("calendar days must be sorted and duplicate-free")
-    if any(d.weekday() > 4 or d in _holidays(d.year) for d in days):
-        raise CalendarInputError("calendar days must be weekday non-holiday sessions")
+    days = _calendar_days(raw_days)
     day = _as_day(event_date, "event_date")
     if day < days[0]:
         raise CalendarInputError(f"no calendar coverage before {day} ({days[0]} is first session)")

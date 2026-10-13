@@ -63,6 +63,8 @@ _ROW_REFUSAL_DETAILS = {
     "EVENT_NOT_FOUND": "no exact calendar event for the board request in the snapshot",
     "IDENTITY_CONFLICT": "multiple exact calendar events for the board request",
     "PRICE_HISTORY_NOT_AVAILABLE": _SPOT_HISTORY_DETAIL,
+    "RUNUP_HORIZON_NOT_AVAILABLE": "the pinned calendar does not cover the RUNUP horizon",
+    "INVALID_RUNUP_HORIZON": "RUNUP entry is after the pre-print close",
 }
 #: The only event refusals the calendar helper may expose as a typed error.
 _EVENT_ERROR_CODES = ("EVENT_NOT_FOUND", "IDENTITY_CONFLICT")
@@ -238,8 +240,9 @@ def build_native_score_batch_events(
     quote read, and an all-intraday one returns only its refusals. A missing
     ticker history or missing/unusable exact-session spot becomes a
     per-key ``PRICE_HISTORY_NOT_AVAILABLE`` refusal at its original position.
-    ``NO_RESOLVABLE_EXPIRY``, ``EVENT_NOT_FOUND`` and ``IDENTITY_CONFLICT``
-    are likewise per-key refusals; other keys proceed. Malformed series data,
+    ``NO_RESOLVABLE_EXPIRY``, ``EVENT_NOT_FOUND``, ``IDENTITY_CONFLICT``,
+    ``RUNUP_HORIZON_NOT_AVAILABLE`` and ``INVALID_RUNUP_HORIZON`` are likewise
+    per-key refusals; other keys proceed. Malformed calendar/series data,
     missing source tables, repository failures, caller-input failures and other
     errors still fail the whole build. An absent ``option_chains`` table fails
     before any non-intraday key is processed.
