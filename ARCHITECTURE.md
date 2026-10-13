@@ -430,6 +430,7 @@ Only a tracked path absent from the worktree reads as empty.
 
 - **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
 - **Massive acquisition — `python -m engine.v2.ops.massive_acquire`.** Explicit shadow-job submission; `ops serve` performs bounded, cache-first REST acquisition. See the [acquisition contract](engine/v2/ops/stores/massive/ARCHITECTURE.md).
+- **Massive daily snapshot — `python -m engine.v2.ops.massive_snapshot`.** A separate supervised offline job normalizes saved acquisition pins into a dedicated reconstructed native snapshot; research uses the data layer's existing bounded pinned reader. [Contract](engine/v2/ops/stores/massive/ARCHITECTURE.md#invariants).
 - **Shadow nightly coordination.** The operations trigger coordinates snapshot
   import, pinned planning, submission and bounded serving; preparation commands
   remain separate interfaces. It does not start the production legacy nightly.
