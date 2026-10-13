@@ -92,6 +92,18 @@ through the loader for its family (`FrozenInference` for models,
 non-model state) — never by opening a staged object file directly outside
 `deployment.py`'s own hash verification.
 
+`FrozenStateLoader(root, max_bytes=None)` accepts an optional positive integer
+byte ceiling below `sys.maxsize`, fixed for that loader. A bounded load admits
+only a regular file, checks its opened size before reading, and reads at most the ceiling plus one
+byte before hash or JSON decoding. The extra byte detects growth after the
+size check. Existing callers omitting the ceiling retain their read contract.
+
+| Bounded frozen-state condition | Outcome |
+|---|---|
+| Invalid limit, nonregular object, or object exceeds the ceiling | `FrozenStateError`; no decoded state or new cache entry |
+| Object at/below the ceiling | Existing byte-hash, canonical-hash and typed validation apply |
+| Cache, retry, transaction, partial write | Existing per-loader content-hash cache; no retries or writes; failure returns no partial state |
+
 `carry_forward_release`, `derive_catalog`: design only, not yet
 implemented — see #192.
 
