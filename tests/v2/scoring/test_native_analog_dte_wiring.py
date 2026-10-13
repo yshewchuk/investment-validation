@@ -49,3 +49,24 @@ def test_unpriced_row_has_no_dte_band_and_keeps_the_whole_pool():
     assert "dte_entry" not in values
     assert "MISSING_PRICING_INPUT" in values["flags"]
     assert values["n_analogs"] == 60
+
+
+def _analogs_observation(spot):
+    seen = []
+    assemble_native_values(
+        _analog_inputs(context_overrides={"spot": spot}), observer=seen.append)
+    return next(o for o in seen if o.receipt.stage == "analogs")
+
+
+def test_receipt_records_the_completed_query_actually_used():
+    # Same declared (original) query; only the spot differs, so the completed
+    # moneyness band differs ("ATM" vs ">5%") and so must the recorded query
+    # and the stage input hash.
+    near = _analogs_observation(100.0)
+    far = _analogs_observation(106.0)
+    near_query = near.input_document["inputs"]["query_features"]
+    far_query = far.input_document["inputs"]["query_features"]
+    assert near_query["moneyness_band"] == "ATM"
+    assert far_query["moneyness_band"] == ">5%"
+    assert near_query["dte_band"] == far_query["dte_band"] == "26-45"
+    assert near.receipt.input_hash != far.receipt.input_hash

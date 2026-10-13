@@ -216,6 +216,13 @@ def test_complete_query_keeps_existing_and_passes_non_mapping():
                                  {"dte_entry": 30, "spot": 100.0, "strike": 120.0})
     assert kept["moneyness_band"] == "ATM"
     assert kept["dte_band"] == "26-45"
+    # A key that is present with value None is an explicit "unavailable": it
+    # stays None and is never filled from the priced values.
+    kept = complete_analog_query({"mcap_bucket": "1-10B", "implied_ratio": None,
+                                  "dte_band": None, "moneyness_band": None},
+                                 {"dte_entry": 30, "spot": 100.0, "strike": 101.0})
+    assert kept["dte_band"] is None
+    assert kept["moneyness_band"] is None
     assert complete_analog_query(None, {}) is None
 
 

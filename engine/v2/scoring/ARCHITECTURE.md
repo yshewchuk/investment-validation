@@ -144,7 +144,8 @@ load-bearing entrypoints:
   gives a `None` moneyness band (the matcher drops that dimension, as
   legacy does with no chain). A query that already carries a band key keeps
   it. A non-mapping query is returned unchanged so the evaluator's
-  `INVALID_ANALOG_INPUT` still fires. While `implied_ratio` is `None` (no
+  `INVALID_ANALOG_INPUT` still fires. The analogs stage receipt records this
+  completed query, the one the matcher and its bootstrap seed used. While `implied_ratio` is `None` (no
   `mean_prior_or_implied`, #651) the implied-tercile dimension is dropped
   from matching, so `n_analogs` and the interval can differ from legacy.
 - `compatibility.py` — `score_legacy_request`, the one legacy adapter this

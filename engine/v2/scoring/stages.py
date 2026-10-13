@@ -2551,15 +2551,24 @@ def _execute_frozen_analogs(
     return output
 
 
-def _analog_identity(block: Mapping[str, Any]) -> dict[str, Any] | None:
+def _analog_identity(block: Mapping[str, Any],
+                     values: Mapping[str, Any]) -> dict[str, Any] | None:
     """The frozen analog artifact's identity for the stage receipt, or
-    ``None`` on the undeclared/declared-rows paths (receipts unchanged)."""
+    ``None`` on the undeclared/declared-rows paths (receipts unchanged).
+
+    ``query_features`` is the COMPLETED query the matcher actually used
+    (``complete_analog_query``: dte/moneyness bands from the priced values), so
+    two rows that select different populations never share an input hash.
+    """
+    from engine.v2.scoring.native_analog_query import complete_analog_query
+
     if ANALOG_ARTIFACT_FIELD not in block:
         return None
     artifact = block.get(ANALOG_ARTIFACT_FIELD)
+    query = complete_analog_query(block.get("query_features"), values)
     return {"artifact": None if artifact is None else str(artifact),
             "recipe": dict(block.get(ANALOG_ARTIFACT_RECIPE_FIELD) or {}),
-            "query_features": dict(block.get("query_features") or {})}
+            "query_features": dict(query) if isinstance(query, Mapping) else {}}
 
 
 def _execute_analogs(
@@ -2969,7 +2978,7 @@ def _append_normal_late_stages(
     analog_output = _execute_analogs(
         inputs, values, flags, geometry.strategy, analog_display)
     analog_inputs: dict[str, Any] = {"prior": executed[-1].output_hash}
-    analog_identity = _analog_identity(inputs.analogs)
+    analog_identity = _analog_identity(inputs.analogs, values)
     if analog_identity is not None:
         analog_inputs["inputs"] = analog_identity
     _emit_stage(executed, "analogs", analog_inputs, analog_output, observer,
