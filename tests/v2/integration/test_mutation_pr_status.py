@@ -40,9 +40,25 @@ diff --git a/engine/v2/dead.py b/engine/v2/dead.py
 
 
 def mod(**kw):
+    """A module summary whose complete/tool_error/failure_reasons follow gremlin_results rules."""
     base = {"run_exit_code": 0, "skipped_reason": None, "counts_backend": {"error": 0},
             "failure_reasons": [], "complete": True, "tool_error": False}
     base.update(kw)
+    rc = base["run_exit_code"]
+    skipped = base["skipped_reason"] is not None
+    counts = base["counts_backend"]
+    errored = bool(counts.get("error")) if isinstance(counts, dict) else False
+    if "complete" not in kw:
+        base["complete"] = rc in (None, 0) and not skipped
+    if "tool_error" not in kw:
+        base["tool_error"] = (rc not in (None, 0) and not skipped) or errored
+    if "failure_reasons" not in kw:
+        reasons = []
+        if rc not in (None, 0):
+            reasons.append("TIMEOUT_KILL" if rc == -1 else "RUN_INCOMPLETE")
+        if errored:
+            reasons.append("ERROR_RESULTS")
+        base["failure_reasons"] = reasons
     return base
 
 
@@ -51,8 +67,12 @@ def row(module, file, line, status="survived"):
 
 
 def merged(**modules):
-    return {"modules": modules, "expected_modules": sorted(modules), "complete": True,
-            "tool_error": False, "failure_reasons": []}
+    """The merged summary gremlin_results.merge writes for these modules (no merge codes)."""
+    return {"modules": modules, "expected_modules": sorted(modules),
+            "complete": all(m["complete"] for m in modules.values()),
+            "tool_error": any(m["tool_error"] for m in modules.values()),
+            "failure_reasons": [f"{n}: {r}" for n, m in modules.items()
+                                for r in m["failure_reasons"]]}
 
 
 CHANGED = ps.parse_changed_lines(DIFF)
@@ -86,6 +106,19 @@ def test_module_test_failure_is_pr_owned_unless_main_fails_too():
     v = verdict(m, baseline=base)
     assert v["state"] == "neutral" and v["modules"]["a"]["class"] == "infra"
     assert "main" in v["modules"]["a"]["reason"]
+
+
+def test_pr_owned_failure_wins_over_merge_level_tool_error():
+    m = merged(a=mod(run_exit_code=1), b=mod())
+    assert m["tool_error"] is True and m["complete"] is False
+    v = verdict(m)
+    assert v["state"] == "failure"
+    assert v["modules"]["a"]["class"] == "pr_owned"
+    m = merged(a=mod(run_exit_code=-1), b=mod())
+    assert m["tool_error"] is True and m["complete"] is False
+    v = verdict(m, [row("a", "engine/v2/a.py", 5)])
+    assert v["state"] == "failure"
+    assert v["modules"]["a"]["class"] == "pr_owned"
 
 
 def test_each_infra_class_is_a_warning_never_red():
@@ -462,7 +495,8 @@ def test_published_descriptions_and_degradation_messages_are_exact(tmp_path, cap
     _, out = _run_main(tmp_path, "clean", merged(a=mod(), b=mod()))
     assert "description=gremlins: no PR-owned problems in 2 module(s)\n" in out.read_text()
     _, out = _run_main(tmp_path, "infra", merged(a=mod(run_exit_code=-1), b=mod()))
-    assert "description=gremlins: no PR-owned problems; 1 infra warning(s)\n" in out.read_text()
+    assert ("description=gremlins: report incomplete or tool error (1 infra warning(s)); "
+            "not a pass\n") in out.read_text()
     _, out = _run_main(tmp_path, "owned", merged(a=mod(run_exit_code=1), b=mod(run_exit_code=-1)))
     assert ("description=gremlins: PR-owned problem in a; 1 infra warning(s)\n"
             in out.read_text())
@@ -528,7 +562,7 @@ def test_all_infra_run_is_not_red_but_never_worded_as_a_pass(tmp_path):
 
 def test_neutral_state_only_when_nothing_was_measured():
     assert verdict(merged(a=mod(run_exit_code=-1)))["state"] == "neutral"
-    assert verdict(merged(a=mod(run_exit_code=-1), b=mod()))["state"] == "success"
+    assert verdict(merged(a=mod(run_exit_code=-1), b=mod()))["state"] == "neutral"
     assert verdict(merged(a=mod(run_exit_code=-1), b=mod(run_exit_code=1)))["state"] == "failure"
     assert verdict({"modules": {}, "expected_modules": []})["state"] == "success"
 
@@ -572,7 +606,7 @@ def test_every_merged_report_shape_maps_to_a_state(capsys):
     # a module that reports tool_error is infra even with no other reason
     v = ps.classify(merged(a=mod(tool_error=True), b=mod()), [], {})
     assert v["modules"]["a"] == {"class": "infra", "reason": "module reported a tool error"}
-    assert v["state"] == "success"  # b was measured and nothing at the merge level failed
+    assert v["state"] == "neutral"  # a's tool error is also the merged summary's tool error
     # skipped placeholder: merge reports complete=False -> never success from the tool
     v = ps.classify(_merged_with(complete=False, skipped_modules={"a": "pr_closed_mid_run"}),
                     [], {})
@@ -789,6 +823,39 @@ def test_every_degraded_shape_is_never_success(tmp_path):
     # Control: one valid extra row on an untouched line is still a success.
     run("control: valid extra row", "success", copy.deepcopy(base), rows=[extra])
     assert failures == []
+
+
+def test_valid_shapes_are_accepted(tmp_path):
+    """Positive control: every shape the validators accept classifies without degradation."""
+    for status in ("killed", "survived", "timeout", "suspicious", "excluded"):
+        assert ps._valid_row(row("a", "engine/v2/a.py", 99, status))
+    assert ps._valid_summary(merged(a=mod(run_exit_code=None)))
+    assert ps.classify_module("a", mod(run_exit_code=None), [], {}, set()) == ("ok", "")
+    expected_none = merged(a=mod())
+    expected_none["expected_modules"] = None
+    assert ps._valid_summary(expected_none)
+    expected_omitted = merged(a=mod())
+    del expected_omitted["expected_modules"]
+    assert ps._valid_summary(expected_omitted)
+    planned = {"modules": {}, "expected_modules": ["a"], "complete": True,
+               "tool_error": False, "failure_reasons": []}
+    assert ps._valid_summary(planned)
+
+    def state_of(name, summary, rows=()):
+        _, out = _run_main(tmp_path, name, summary, rows)
+        return next(line.split("=", 1)[1] for line in out.read_text().splitlines()
+                    if line.startswith("state="))
+
+    for status in ("killed", "survived", "timeout", "suspicious", "excluded"):
+        assert state_of(f"row_{status}", merged(a=mod()),
+                        [row("a", "engine/v2/a.py", 99, status)]) == "success"
+    assert state_of("expected_none", expected_none,
+                    [row("a", "engine/v2/a.py", 99)]) == "success"
+    assert state_of("expected_omitted", expected_omitted,
+                    [row("a", "engine/v2/a.py", 99)]) == "success"
+    assert state_of("null_run_exit_code", merged(a=mod(run_exit_code=None)),
+                    [row("a", "engine/v2/a.py", 99)]) == "success"
+    assert state_of("planned_but_nothing_measured", planned) == "neutral"
 
 
 def test_row_statuses_match_gremlin_results():

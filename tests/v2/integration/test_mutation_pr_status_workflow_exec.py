@@ -170,6 +170,7 @@ def test_classify_step_and_status_jobs_run_only_for_a_resolved_pr():
 GH_STUB = r'''
 gh() {
   echo "gh $*" >> "$LOG"
+  { printf 'ARG:%s\n' "$@"; echo '--'; } >> "$LOG.args"
   if [ "$1 $2" = "run list" ]; then
     case "$*" in
       *"--branch main"*"--event push"*) printf '%s\n' $FAKE_RUNS ;;
@@ -197,11 +198,29 @@ python() { echo "python $*" >> "$LOG"; }
 def _run(run, tmp_path, **env):
     log = tmp_path / "calls.log"
     log.write_text("")
+    (tmp_path / "calls.log.args").write_text("")
     full = dict(os.environ, LOG=str(log), REPO="o/r", FAKE_RUNS="", ARTIFACT_IDS="")
     full.update(env)
     res = subprocess.run(["bash", "-c", GH_STUB + "\n" + run], capture_output=True, text=True,
                          env=full, cwd=tmp_path)
     return res, log.read_text().splitlines()
+
+
+def _arg_calls(tmp_path) -> list[list[str]]:
+    """Each gh call's argv: one ARG: line per argument, calls split on '--' separator lines."""
+    path = tmp_path / "calls.log.args"
+    if not path.exists():
+        return []
+    calls, current = [], []
+    for line in path.read_text().splitlines():
+        if line == "--":
+            calls.append(current)
+            current = []
+        elif line.startswith("ARG:"):
+            current.append(line[4:])
+    if current:
+        calls.append(current)
+    return calls
 
 
 def _step(job, predicate):
@@ -298,3 +317,27 @@ def test_report_status_never_posts_a_commit_status(tmp_path):
         assert res.returncode == 0, (modules, skipped, classified, report, res.stderr)
         key = (modules, skipped, classified, report)
         assert not any("/statuses/" in c for c in calls), key
+
+
+def test_report_status_check_run_arguments_keep_their_boundaries(tmp_path):
+    run = _step("report_status", lambda s: str(s.get("name", "")).startswith("Post mutation"))["run"]
+    res, _ = _run(run, tmp_path, SHA="sha1", RUN_URL="https://x/run/5", MODULES='["a"]',
+                  SKIPPED_COUNT="0", CLASSIFIED_STATE="failure",
+                  CLASSIFIED_DESC="classified text with spaces", REPORT_RESULT="success")
+    assert res.returncode == 0, res.stderr
+    assert _arg_calls(tmp_path) == [[
+        "api", "repos/o/r/check-runs", "-f", "name=mutation/pr", "-f", "head_sha=sha1",
+        "-f", "status=completed", "-f", "conclusion=failure",
+        "-f", "details_url=https://x/run/5",
+        "-f", "output[title]=Mutation testing: failure",
+        "-f", "output[summary]=classified text with spaces"]]
+    res, _ = _run(run, tmp_path, SHA="sha1", RUN_URL="https://x/run/5", MODULES='["a"]',
+                  SKIPPED_COUNT="0", CLASSIFIED_STATE="neutral",
+                  CLASSIFIED_DESC="classified text with spaces", REPORT_RESULT="success")
+    assert res.returncode == 0, res.stderr
+    assert _arg_calls(tmp_path) == [[
+        "api", "repos/o/r/check-runs", "-f", "name=mutation/pr", "-f", "head_sha=sha1",
+        "-f", "status=completed", "-f", "conclusion=neutral",
+        "-f", "details_url=https://x/run/5",
+        "-f", "output[title]=Mutation testing: neutral",
+        "-f", "output[summary]=classified text with spaces"]]
