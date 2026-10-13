@@ -528,14 +528,71 @@ def test_mismatch_error_recovery_restarts(browser, server):
     finally:
         context.close()
 
-def test_mismatch_identity_changing_detail_banner(browser, server):
-    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, _page(
-        [{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
-            "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}],
-        as_of="2026-10-01", generated_at="2026-10-02T02:00:00Z")))
+def test_mismatch_later_page_error_recovers_via_previous_and_restart(browser, server):
+    fail = {"on": True}
+    page_a = _page([{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}], next_cursor="c2")
+    page_b = _page([{"row_key": "NVDA|2026-09-22|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 1.0, "native": 2.0}}}])
+
+    def mismatches(cursor):
+        if cursor == "c2" and fail["on"]:
+            return (503, PROBLEM)
+        return (200, page_a if cursor is None else page_b)
+
+    base, context, page, parity, _ = _open_parity(browser, server, mismatches=mismatches)
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
+        expect(page.get_by_test_id("parity-mismatch-restart")).to_be_visible()
+        page.get_by_test_id("parity-mismatch-prev").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_be_visible()
+        fail["on"] = False
+        page.get_by_test_id("parity-mismatch-restart").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        assert len(parity) == 2
+        assert "cursor=" not in page.mismatch_calls[-1]
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+    finally:
+        context.close()
+
+@pytest.mark.parametrize("as_of,generated_at", [
+    ("2026-10-01", SUMMARY["generated_at"]),
+    (SUMMARY["as_of"], "2026-10-02T02:00:00Z"),
+    ("2026-10-01", "2026-10-02T02:00:00Z"),
+])
+def test_mismatch_identity_changing_detail_banner(browser, server, as_of, generated_at):
+    identity = {"as_of": as_of, "generated_at": generated_at}
+    items = [{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}]
+
+    def mismatches(cursor):
+        return (200, _page(items, as_of=identity["as_of"], generated_at=identity["generated_at"]))
+
+    base, context, page, parity, _ = _open_parity(browser, server, mismatches=mismatches)
     try:
         page.goto(base + "/#/native-parity")
         expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_be_visible()
-        expect(page.get_by_test_id("parity-mismatch-identity")).to_contain_text("2026-10-02T02:00:00Z")
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_have_text(
+            f"Rows from report generated {generated_at} (as of {as_of})")
+        identity["as_of"] = SUMMARY["as_of"]
+        identity["generated_at"] = SUMMARY["generated_at"]
+        page.get_by_test_id("parity-mismatch-restart").click()
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_have_text(
+            f"Rows from report generated {SUMMARY['generated_at']} (as of {SUMMARY['as_of']})")
+        assert len(parity) == 2
     finally:
         context.close()
