@@ -24,6 +24,16 @@ refresh cadences, per the 2026-09-14 decision:
   exists for it in the current calendar month, which is what makes a run
   resumable without a separate state file.
 
+Daily resumability is keyed on **coverage**, not on fetch arrival: a daily
+ticker is skipped only when some cached fetch's BODY already contains the
+session's (or, for a weekend/holiday session, the last trading day's) bar —
+see :func:`load_fetch_coverage`. The ``fetched_at`` date alone is not
+coverage: a pre-market fetch lands today but its last bar is yesterday's
+close, and counting it as covering today would skip the very session this
+pull exists to capture (the 2026-10-12 defect). Monthly resumability keeps
+using ``fetched_at`` dates, which is the right key for "did we refresh this
+month at all".
+
 Delisted or otherwise failing tickers are **never pruned** from either group
 — they stay in the universe and every run's report lists them, so a human
 decides, not this pull.
@@ -42,13 +52,15 @@ touched — this module only ever writes dated keys.
 
 :func:`plan_refresh` is pure — no I/O, no network, no clock reads beyond the
 ``session`` argument — and takes already-loaded ``events``/``price_universe``/
-``fetch_history`` so it can be tested without a filesystem. The CLI (``ops
-price-refresh``) is what actually reads those from disk, via the ``load_*``
-helpers below, and calls :func:`run_refresh` against a real
+``fetch_history``/``fetch_coverage`` so it can be tested without a filesystem.
+The CLI (``ops price-refresh``) is what actually reads those from disk, via
+the ``load_*`` helpers below, and calls :func:`run_refresh` against a real
 :class:`~engine.data.fetch.Fetcher`.
 """
 from __future__ import annotations
 
+import gzip
+import io
 from datetime import date as date_cls
 from typing import Iterable, Mapping
 
@@ -67,6 +79,7 @@ __all__ = [
     "load_events",
     "load_price_universe",
     "load_fetch_history",
+    "load_fetch_coverage",
 ]
 
 #: Calendar days from the board's session forward that still count as "about
@@ -130,12 +143,41 @@ def in_daily_window(
 # --------------------------------------------------------------------------
 
 
+#: Calendar days scanned back for "the latest trading day on or before the
+#: session". The longest realistic market closure is a three-day weekend, so
+#: ten days always contains at least one candidate unless the calendar itself
+#: is broken — and then the session is the requirement rather than every
+#: on-board ticker silently skipping.
+_DAILY_REQUIRED_LOOKBACK_DAYS = 10
+
+
+def _required_daily_bar_date(session) -> pd.Timestamp:
+    """The DATA date a daily fetch must already contain to skip this session.
+
+    The latest trading day on or before ``session``: itself when it is a
+    trading day, the Friday before a Monday holiday, the Friday before a
+    weekend. Discovered with ``engine_calendar.projected_trading_days`` over a
+    short window ending at ``session`` (which returns weekdays in
+    ``(start, end]``, so the session itself is included and every candidate is
+    ``<= session``); with no trading day in that window — which cannot happen
+    for a real market calendar — the session is the requirement rather than
+    silently skipping everything.
+    """
+    session_ts = pd.Timestamp(session).normalize()
+    days = engine_calendar.projected_trading_days(
+        session_ts - pd.Timedelta(days=_DAILY_REQUIRED_LOOKBACK_DAYS), session_ts)
+    if len(days) == 0:
+        return session_ts
+    return days[-1]
+
+
 def plan_refresh(
     session,
     *,
     events: pd.DataFrame,
     price_universe: Iterable[str],
     fetch_history: Mapping[str, Iterable] | None = None,
+    fetch_coverage: Mapping[str, Iterable] | None = None,
     horizon_days: int = HORIZON_DAYS,
     post_event_sessions: int = POST_EVENT_TRADING_SESSIONS,
     always_daily: Iterable[str] = (),
@@ -161,14 +203,26 @@ def plan_refresh(
         ``set(price_universe) | set(events["ticker"])``.
     fetch_history:
         ``{ticker: [date, ...]}`` — every date a dated Tier-1 fetch already
-        landed for that ticker (see :func:`load_fetch_history`). Governs
-        resumability: a daily ticker already fetched on ``session`` is
-        skipped; a monthly ticker already fetched somewhere in ``session``'s
-        calendar month is skipped. Omit (or ``{}``) for a from-scratch plan.
+        landed for that ticker, keyed on the fetch's own ``fetched_at`` (see
+        :func:`load_fetch_history`). Governs MONTHLY resumability only: a
+        monthly ticker already fetched somewhere in ``session``'s calendar
+        month is skipped. The daily group reads :func:`load_fetch_coverage`
+        instead, because ``fetched_at`` says when bytes arrived, not which
+        bars they contain. Omit (or ``{}``) for a from-scratch plan.
+    fetch_coverage:
+        ``{ticker: [date, ...]}`` — per dated Tier-1 fetch, the newest BAR
+        date its body actually holds (see :func:`load_fetch_coverage`; these
+        are DATA dates, never ``fetched_at``). Governs DAILY resumability: a
+        ticker on the board is skipped only if some fetch covers
+        ``_required_daily_bar_date`` (the latest trading day on or before
+        ``session``) or is newer; anything else — an old body, a corrupt one,
+        or no fetch at all — goes on today's daily list. A pre-market fetch
+        whose last bar is the prior session does NOT excuse the session.
     always_daily:
         Tickers that are always on the daily schedule regardless of events,
-        e.g. the native calendar series. A forced ticker already fetched on
-        ``session`` is skipped like any other daily fetch.
+        e.g. the native calendar series. A forced ticker whose cached bars
+        already reach ``_required_daily_bar_date`` is skipped like any other
+        daily fetch.
 
     Returns
     -------
@@ -178,6 +232,8 @@ def plan_refresh(
     """
     session_ts = pd.Timestamp(session).normalize()
     history = fetch_history or {}
+    coverage = fetch_coverage or {}
+    required = _required_daily_bar_date(session_ts)
 
     events = events.copy()
     if len(events):
@@ -201,13 +257,16 @@ def plan_refresh(
                             post_event_sessions=post_event_sessions)
             for event_date in events_by_ticker.get(ticker, ())
         )
-        already = {pd.Timestamp(d).normalize() for d in history.get(ticker, ())}
         if on_board:
-            if session_ts in already:
+            covered = any(
+                pd.Timestamp(d).normalize() >= required for d in coverage.get(ticker, ())
+            )
+            if covered:
                 skipped.append(ticker)
             else:
                 daily.append(ticker)
         else:
+            already = {pd.Timestamp(d).normalize() for d in history.get(ticker, ())}
             fetched_this_month = any(
                 d.year == session_ts.year and d.month == session_ts.month for d in already
             )
@@ -350,4 +409,75 @@ def load_fetch_history(*, fetch_root=None) -> dict[str, list[date_cls]]:
             continue
         when = pd.Timestamp(fetched_at).normalize().date()
         out.setdefault(str(ticker), []).append(when)
+    return out
+
+
+def load_fetch_coverage(session, *, fetch_root=None) -> dict[str, list[date_cls]]:
+    """``{ticker: [newest_bar_date, ...]}`` — the newest bar date each dated
+    Tier-1 ``period=max`` yfinance ``history`` fetch on disk actually holds.
+
+    The dates returned are DATA dates taken from the body's first column,
+    never the fetch's ``fetched_at``: what a fetch *covers* is the bars it
+    carries. A fetch stamped today but ending at yesterday's close — the
+    pre-market fetch that caused the 2026-10-12 skip defect — contributes
+    yesterday, which :func:`plan_refresh` refuses to accept for today's
+    session. The one entry-per-fetch shape mirrors
+    :func:`load_fetch_history`, so a ticker with several fetches gets several
+    candidate dates and the plan asks only "does any of them reach far enough".
+
+    ``fetched_at`` is read for one purpose only, a cheap prefilter: a fetch
+    stamped earlier than ``session`` minus one calendar day cannot possibly
+    hold that session's bar — the market had not opened yet when the bytes
+    arrived — so its body is never opened. A fetch stamped the day before
+    ``session`` does get read, because the session can be a weekend or a
+    holiday and that fetch is the one holding the required bar.
+
+    Body dates parse the way ``computed_moves.fetch_history`` parses them —
+    ``pd.to_datetime(..., utc=True)`` through the per-row UTC offsets yfinance
+    writes (they flip at DST), then ``tz_localize(None)`` and ``normalize()``
+    to midnight, so the trade date is what survives. No ``newest_bar`` meta key
+    is read or written here: a shortcut stamped by the writer would be exactly
+    the arrival-time assumption this loader exists to stop trusting.
+
+    Any failure to read one fetch — unreadable or corrupt body, no parseable
+    dates, an unusable ``fetched_at`` — makes that fetch contribute NOTHING.
+    Unknown is treated as not covered, which can only ever lengthen today's
+    daily list, never shorten it: a fetch nobody can read is never evidence
+    that a session's close is already on disk.
+
+    ``fetch_root`` defaults to ``engine.paths.RAW_FETCH`` and exists only so
+    tests can point this at a throwaway tree.
+    """
+    session_ts = pd.Timestamp(session).normalize()
+    floor = session_ts - pd.Timedelta(days=1)
+    out: dict[str, list[date_cls]] = {}
+    for entry in iter_cached("yfinance", "history", root=fetch_root):
+        if entry.params.get("period") != "max":
+            continue
+        ticker = entry.params.get("ticker")
+        fetched_at = entry.meta.get("fetched_at")
+        if not ticker or not fetched_at:
+            continue
+        try:
+            when = pd.Timestamp(fetched_at)
+            if when.tzinfo is not None:
+                when = when.tz_convert("UTC").tz_localize(None)
+            if when.normalize() < floor:
+                continue
+        except (TypeError, ValueError):
+            continue
+        try:
+            frame = pd.read_csv(io.BytesIO(entry.body()))
+        except (OSError, EOFError, ValueError, gzip.BadGzipFile):
+            continue
+        if frame.empty:
+            continue
+        try:
+            dates = pd.to_datetime(frame[frame.columns[0]], errors="coerce", utc=True)
+            dates = dates.dt.tz_localize(None).dt.normalize().dropna()
+        except (ValueError, TypeError):
+            continue
+        if dates.empty:
+            continue
+        out.setdefault(str(ticker), []).append(dates.max().date())
     return out

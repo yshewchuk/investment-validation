@@ -306,6 +306,7 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     """
     from engine.data.pulls.price_refresh import (
         load_events,
+        load_fetch_coverage,
         load_fetch_history,
         load_price_universe,
         plan_refresh,
@@ -316,7 +317,9 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     fetch_root = None
     if planned_tickers is None:
         plan = plan_refresh(session, events=load_events(), price_universe=load_price_universe(),
-                            fetch_history=load_fetch_history(), always_daily=(CALENDAR_TICKER,))
+                            fetch_history=load_fetch_history(),
+                            fetch_coverage=load_fetch_coverage(session),
+                            always_daily=(CALENDAR_TICKER,))
     else:
         import pandas as pd
 
@@ -325,6 +328,7 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
         fetch_root = Path(source_root) / "data" / "raw" / "fetch"
         plan = plan_refresh(session, events=pd.DataFrame(columns=["ticker", "event_date"]),
                             price_universe=(), fetch_history=load_fetch_history(fetch_root=fetch_root),
+                            fetch_coverage=load_fetch_coverage(session, fetch_root=fetch_root),
                             always_daily=(*planned_tickers, CALENDAR_TICKER))
     if dry_run:
         return {"plan": plan, "report": None}

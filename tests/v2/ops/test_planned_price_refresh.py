@@ -187,14 +187,19 @@ def test_ordinary_fetch_failure_is_nonfatal_and_reported(
 
 def test_selected_root_controls_daily_cache_and_fetch_writes(
         tmp_path, isolated_legacy_sources, install_fetcher):
-    """Daily cache reads and fetch writes stay within the selected root."""
+    """Daily cache reads and fetch writes stay within the selected root.
+
+    ``OLD`` is the pre-market case the coverage read exists for: its body's
+    last bar is the prior session, so a same-day fetch of it is still needed.
+    """
     root = tmp_path / "selected-source"
     global_root = isolated_legacy_sources
     for ticker in ("NEW", "SPY"):
         _write_tier1(global_root, ticker, PRICES, key="global-" + ticker,
                      fetched_at=FETCHED_AT)
     _write_tier1(root, "CACHED", PRICES, key="cached", fetched_at=FETCHED_AT)
-    _write_tier1(root, "OLD", PRICES, key="old", fetched_at="2026-09-10T20:00:00+00:00")
+    _write_tier1(root, "OLD", {"2026-09-09": 100.0, "2026-09-10": 101.0}, key="old",
+                 fetched_at="2026-09-10T20:00:00+00:00")
     _write_tier1(root, "UNRELATED", PRICES, key="unrelated",
                  fetched_at="2026-09-10T20:00:00+00:00")
     global_before = {p: p.read_bytes() for p in global_root.rglob("*") if p.is_file()}
@@ -238,7 +243,7 @@ def test_planned_dry_run_never_constructs_fetcher_or_writes(tmp_path, monkeypatc
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
         isolated_legacy_sources, monkeypatch, dry_run):
-    """Standalone calls retain event, inventory, cache and calendar planning inputs."""
+    """Standalone calls retain event, inventory, cache, coverage and calendar inputs."""
     loaders, fetcher_roots, requests = [], [], []
 
     def load_events():
@@ -262,6 +267,13 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
                 "INVENTORY_CACHED": ["2026-09-01"], "INVENTORY_OLD": ["2026-08-31"],
                 "SPY": ["2026-09-10"]}
 
+    def load_fetch_coverage(session):
+        """Only the cached event ticker's body reaches today's required bar."""
+        loaders.append("coverage")
+        assert session == SESSION
+        return {"EVENT_CACHED": [SESSION], "EVENT_DAILY": ["2026-09-10"],
+                "SPY": ["2026-09-10"]}
+
     class SyntheticFetcher:
         """Record requests without contacting providers or writing any cache."""
 
@@ -277,6 +289,7 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
     monkeypatch.setattr(price_refresh, "load_events", load_events)
     monkeypatch.setattr(price_refresh, "load_price_universe", load_price_universe)
     monkeypatch.setattr(price_refresh, "load_fetch_history", load_fetch_history)
+    monkeypatch.setattr(price_refresh, "load_fetch_coverage", load_fetch_coverage)
     monkeypatch.setattr(fetch, "Fetcher", SyntheticFetcher)
 
     result = invoke_price_refresh(SESSION, dry_run=dry_run)
@@ -295,7 +308,7 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
         "failed": [],
     }
     assert result == {"plan": expected_plan, "report": None if dry_run else expected_report}
-    assert loaders == ["events", "inventory", "history"]
+    assert loaders == ["events", "inventory", "history", "coverage"]
     assert fetcher_roots == ([] if dry_run else [None])
     expected_requests = [
         ("yfinance", "history", {"ticker": ticker, "period": "max"}, True, "price-refresh")
@@ -316,6 +329,7 @@ def test_planned_refresh_without_source_root_refuses_before_discovery_or_fetch(
         pytest.fail("missing source root reached discovery or fetch")
 
     monkeypatch.setattr(price_refresh, "load_fetch_history", unexpected_io)
+    monkeypatch.setattr(price_refresh, "load_fetch_coverage", unexpected_io)
     monkeypatch.setattr(fetch, "Fetcher", unexpected_io)
 
     with pytest.raises(OpsError) as error:

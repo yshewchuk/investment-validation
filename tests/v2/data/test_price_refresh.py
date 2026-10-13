@@ -149,21 +149,33 @@ class TestSelectionRules:
         assert plan["skipped_already_fetched"] == ["ZZZ"]
         assert plan["monthly"] == []
 
-    def test_a_daily_ticker_already_fetched_today_is_skipped(self):
+    def test_a_daily_ticker_already_covered_today_is_skipped(self):
         session = "2026-09-14"
         events = _events([("AAA", "2026-09-14")])
-        history = {"AAA": [date(2026, 9, 14)]}
-        plan = pr.plan_refresh(session, events=events, price_universe=[], fetch_history=history)
+        coverage = {"AAA": [date(2026, 9, 14)]}
+        plan = pr.plan_refresh(session, events=events, price_universe=[], fetch_coverage=coverage)
         assert plan["skipped_already_fetched"] == ["AAA"]
         assert plan["daily"] == []
 
     def test_a_daily_ticker_fetched_a_different_day_this_month_is_not_skipped(self):
-        """Daily resumability is keyed on the exact session, not the month --
-        a fetch from three days ago does not excuse today's print-window pull."""
+        """Daily resumability is keyed on the bar the fetch holds, not the
+        month it landed in — a fetch whose last bar is Friday does not excuse
+        Monday's print-window pull."""
         session = "2026-09-14"
         events = _events([("AAA", "2026-09-14")])
-        history = {"AAA": [date(2026, 9, 11)]}
-        plan = pr.plan_refresh(session, events=events, price_universe=[], fetch_history=history)
+        coverage = {"AAA": [date(2026, 9, 11)]}
+        plan = pr.plan_refresh(session, events=events, price_universe=[], fetch_coverage=coverage)
+        assert plan["daily"] == ["AAA"]
+        assert plan["skipped_already_fetched"] == []
+
+    def test_a_daily_ticker_covered_only_by_fetched_at_is_not_skipped(self):
+        """The 2026-09-16 defect: a fetch stamped today whose body's last bar
+        is Friday must NOT count as covering Monday's session."""
+        session = "2026-09-14"
+        events = _events([("AAA", "2026-09-14")])
+        history = {"AAA": [date(2026, 9, 14)]}  # fetched_at dates only
+        plan = pr.plan_refresh(session, events=events, price_universe=[],
+                               fetch_history=history)
         assert plan["daily"] == ["AAA"]
         assert plan["skipped_already_fetched"] == []
 
@@ -293,6 +305,7 @@ class TestDryRun:
         monkeypatch.setattr(pr, "load_events", lambda: _events([("AAA", "2026-09-14")]))
         monkeypatch.setattr(pr, "load_price_universe", lambda: {"ZZZ"})
         monkeypatch.setattr(pr, "load_fetch_history", lambda: {})
+        monkeypatch.setattr(pr, "load_fetch_coverage", lambda session: {})
 
         def _boom(*a, **k):
             raise AssertionError("Fetcher must not be constructed on --dry-run")
@@ -314,6 +327,7 @@ class TestDryRun:
         monkeypatch.setattr(pr, "load_events", lambda: _events([("AAA", "2026-09-14")]))
         monkeypatch.setattr(pr, "load_price_universe", lambda: {"ZZZ"})
         monkeypatch.setattr(pr, "load_fetch_history", lambda: {})
+        monkeypatch.setattr(pr, "load_fetch_coverage", lambda session: {})
 
         result = invoke_price_refresh("2026-09-14", dry_run=True)
         assert result["plan"]["daily"] == sorted(["AAA", CALENDAR_TICKER])
