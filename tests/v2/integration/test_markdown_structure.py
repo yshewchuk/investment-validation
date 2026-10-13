@@ -292,6 +292,39 @@ def test_gfm_fence_rules_matrix():
     assert [v.rule for v in ms.lint_text("a\n\n```\ncode\n    ```\n")] == ["fence-unclosed"]
 
 
+def test_staged_mode_reads_the_index_not_the_worktree(repo, capsys):
+    bad, fine = "intro\n# Bad\n\nbody\n", "# Fine\n\nbody\n"
+    f = repo / "w.md"
+    # Staged version is bad, the worktree was then fixed but not staged: still flagged.
+    f.write_text(bad, encoding="utf-8")
+    _git(repo, "add", "w.md")
+    f.write_text(fine, encoding="utf-8")
+    assert ms.main(["--quiet"]) == 1
+    assert "w.md:2: heading-before" in capsys.readouterr().out
+    # Staged version is fine, the worktree was then broken but not staged: clean.
+    f.write_text(fine, encoding="utf-8")
+    _git(repo, "add", "w.md")
+    f.write_text(bad, encoding="utf-8")
+    assert ms.main(["--quiet"]) == 0
+
+
+def test_base_ref_mode_reads_committed_content_not_the_worktree(repo, capsys):
+    bad, fine = "intro\n# Bad\n\nbody\n", "# Fine\n\nbody\n"
+    f = repo / "w.md"
+    _git(repo, "branch", "base")
+    # Committed version is bad, the worktree was then fixed (uncommitted): still flagged.
+    f.write_text(bad, encoding="utf-8")
+    _git(repo, "add", "w.md")
+    _git(repo, "commit", "-qm", "bad")
+    f.write_text(fine, encoding="utf-8")
+    assert ms.main(["--base-ref", "base", "--quiet"]) == 1
+    assert "w.md:2: heading-before" in capsys.readouterr().out
+    # Committed version is fine, the worktree was then broken (uncommitted): clean.
+    _git(repo, "commit", "-qam", "fix")
+    f.write_text(bad, encoding="utf-8")
+    assert ms.main(["--base-ref", "base", "--quiet"]) == 0
+
+
 def test_blockquoted_fence_is_not_checked():
     assert rules("> ```\n> # x\n") == []
 
