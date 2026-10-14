@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import subprocess
 import sys
 from dataclasses import replace
@@ -972,7 +973,7 @@ def test_main_exits_one_for_missed_then_zero_for_idle(tmp_path, monkeypatch, cap
     assert idle["status"] == "idle"
 
 
-def test_main_records_the_submit_refusal_when_qualification_inputs_are_absent(
+def test_main_records_the_snapshot_refusal_when_the_override_is_absent(
         tmp_path, monkeypatch, capsys):
     """Wiring with the snapshot-universe helper stubbed to the empty-window
     refusal: an unconfigured scheduled run (no ``expected_population.json``
@@ -988,10 +989,7 @@ def test_main_records_the_submit_refusal_when_qualification_inputs_are_absent(
     monkeypatch.setattr(nightly_trigger, "_ensure_shadow_snapshot",
                         lambda root, as_of, clock, attempt: ("ready", "snap_stub"))
     # The absent override means _prepare_default_plan reads the snapshot's own
-    # events; stand in for that read with the empty-window refusal it raises. The
-    # ticker-level finality probe is irrelevant to this wiring case: stub it final.
-    monkeypatch.setattr(nightly_trigger, "_orats_probe",
-                        lambda as_of, tickers: (True, "final"))
+    # events; stand in for that read with the empty-window refusal it raises.
     def no_events(root, as_of, clock, expected_shadow_snapshot_id):
         raise fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's planning window")
 
@@ -1084,7 +1082,6 @@ def test_snapshot_event_universe_is_the_real_wrapper_closing_its_catalog_connect
     # The real wrapper (not a stub): the ops catalog is opened with this call's clock, the
     # helper gets the pinned head / scope / horizon inputs, its tuple comes back unchanged,
     # and the connection closes in finally -- the seam _prepare_default_plan itself calls.
-    from engine.v2.data.errors import fail as data_fail
     from engine.v2.foundation import ArtifactStore
     from engine.v2.ops import bootstrap, snapshot_planning
     from engine.v2.ops.errors import fail as ops_fail
@@ -1146,7 +1143,7 @@ def test_snapshot_event_universe_is_the_real_wrapper_closing_its_catalog_connect
 
     # A typed OpsError the helper itself raises (the empty-window INVALID_REQUEST) passes
     # through UNCHANGED -- same code, same details -- and the same finally still closes
-    # the connection. Only DataError is remapped (next case).
+    # the connection.
     del closed[:]
     del calls[:]
 
@@ -1159,21 +1156,6 @@ def test_snapshot_event_universe_is_the_real_wrapper_closing_its_catalog_connect
         nightly_trigger._snapshot_event_universe(tmp_path, AS_OF, _CLOCK, "snap_pinned")
     assert raised.value.code == "INVALID_REQUEST"
     assert raised.value.problem.details["as_of"] == AS_OF
-    assert closed == [True]
-
-    # A DataError raised by the helper surfaces as INPUT_CHANGED with its data_code, and
-    # the same finally still closes the connection.
-    del closed[:]
-    del calls[:]
-
-    def _raise(*a, **k):
-        raise data_fail("CONTRACT_MISMATCH", "synthetic refusal")
-
-    monkeypatch.setattr(snapshot_planning, "snapshot_event_tickers", _raise)
-    with pytest.raises(OpsError) as raised:
-        nightly_trigger._snapshot_event_universe(tmp_path, AS_OF, _CLOCK, "snap_pinned")
-    assert raised.value.code == "INPUT_CHANGED"
-    assert raised.value.problem.details["data_code"] == "CONTRACT_MISMATCH"
     assert closed == [True]
 
 
@@ -1873,18 +1855,22 @@ def test_prepare_default_plan_refuses_an_override_that_yields_no_tickers(
     assert "yields no tickers" in raised.value.problem.message
 
 
-@pytest.mark.parametrize("kind", ["dangling_symlink", "directory"])
+@pytest.mark.parametrize("kind", ["dangling_symlink", "directory", "fifo"])
 def test_prepare_default_plan_refuses_an_override_that_is_not_a_usable_file(
         tmp_path, monkeypatch, kind):
-    # A dangling symlink or a directory at the override path is PRESENT (exists or is a
-    # symlink) and must be refused INVALID_REQUEST, never silently treated as absent.
-    # The snapshot universe stub explodes, proving the fallback is never consulted.
+    # A dangling symlink, a directory or a FIFO at the override path is PRESENT (exists or is
+    # a symlink) and must be refused INVALID_REQUEST before being read, never silently treated
+    # as absent. The snapshot universe stub explodes, proving the fallback is never consulted.
     path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     if kind == "dangling_symlink":
         path.symlink_to(tmp_path / "does_not_exist")
-    else:
+    elif kind == "directory":
         path.mkdir()
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("os.mkfifo unavailable")
+        os.mkfifo(path)
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
     monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
     monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
@@ -1894,7 +1880,7 @@ def test_prepare_default_plan_refuses_an_override_that_is_not_a_usable_file(
             tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
             expected_shadow_snapshot_id="snap_before")
     assert raised.value.code == "INVALID_REQUEST"
-    assert "yields no tickers" in raised.value.problem.message
+    assert "is not a regular file" in raised.value.problem.message
 
 
 def test_prepare_default_plan_propagates_the_absent_override_snapshot_refusal(

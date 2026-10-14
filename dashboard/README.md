@@ -447,10 +447,11 @@ intended. The legacy cron time (21:30 weekdays) is unaffected: it ends well
 before 00:00 ET.
 
 The plan is the native nightly plan's full-population option (`--full-run`):
-the scheduled universe is the full default population — the tickers of
+the scheduled universe is the full default population — the shadow
+snapshot's events by default, or, as an explicit override when present, the tickers of
 `reports/phase6/nightly_trigger/expected_population.json` (a JSON list of
 `ticker|strategy|event_date` keys, passed to the plan unchanged as
-`--expected-population`) when the operator has captured it — never a
+`--expected-population`) — never a
 ticker-list argument and never a slice of the context. A crash between submit
 and the state write cannot double-submit: the trigger writes `submitting` with
 the plan_ref before calling submit, resubmits that SAME plan_ref on the next

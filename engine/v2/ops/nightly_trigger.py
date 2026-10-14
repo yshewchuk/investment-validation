@@ -767,11 +767,10 @@ def _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id):
 
     Opens the ops catalog, calls ``snapshot_event_tickers`` on the ``shadow`` scope's pinned
     head (refusing ``INPUT_CHANGED`` if it moved vs ``expected_shadow_snapshot_id``), and
-    closes the connection in ``finally``. ``DataError``/empty-window refusals surface as the
+    closes the connection in ``finally``. Empty-window refusals surface as the
     helper's typed ``OpsError`` unchanged. Issue #471: the scheduled run's universe comes from
     the snapshot, not from an operator file that may be absent.
     """
-    from engine.v2.data.errors import DataError
     from engine.v2.foundation import ArtifactStore
     from engine.v2.ops.bootstrap import open_catalog
     from engine.v2.ops.snapshot_planning import snapshot_event_tickers
@@ -782,9 +781,6 @@ def _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id):
         return snapshot_event_tickers(
             conn, ArtifactStore(ops_root), "shadow", as_of=as_of, clock=clock,
             expected_snapshot_id=expected_shadow_snapshot_id)
-    except DataError as exc:
-        raise fail("INPUT_CHANGED", "shadow snapshot events cannot be read for the universe",
-                   details={"data_code": exc.code}) from None
     finally:
         conn.close()
 
@@ -795,9 +791,9 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
 
     Universe derivation (issue #471), when no explicit ``tickers`` were supplied: an
     ``expected_population.json`` override that exists or is a symlink is PRESENT and wins;
-    one that yields no tickers (unreadable, non-list, empty, a dangling symlink or a
-    directory) is refused ``INVALID_REQUEST``, never replaced by generation. (A FIFO or
-    other special file is not handled and is out of scope.) An ABSENT override means the
+    one that yields no tickers (unreadable, non-list, empty) is refused ``INVALID_REQUEST``,
+    never replaced by generation; a non-regular override (FIFO, directory, dangling symlink)
+    is refused ``INVALID_REQUEST`` without being read. An ABSENT override means the
     universe is ``snapshot_event_tickers`` on the pinned head ``expected_shadow_snapshot_id``
     names, also used as the context unless ``context_tickers`` were supplied. The override is
     NOT cross-checked against the snapshot; a planned key with no observed row is only
@@ -812,6 +808,8 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
     universe = tuple(tickers)
     if not universe:
         if override_present:
+            if not override.is_file():
+                raise fail("INVALID_REQUEST", "expected_population.json is present but is not a regular file; fix or remove it")
             universe = _population_tickers(override)
             if not universe:
                 raise fail("INVALID_REQUEST",
