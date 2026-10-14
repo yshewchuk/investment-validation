@@ -1230,6 +1230,12 @@ def test_40_row_missing_an_implied_key_refuses():
     ({"implied_move_pct": float("inf")}, "implied_move_pct"),
     ({"mean_prior_or_implied": None, "n_prior_implied": 2}, "mean_prior_or_implied"),
     ({"mean_prior_or_implied": 3.0, "n_prior_implied": 0}, "mean_prior_or_implied"),
+    ({"mean_prior_or_implied": True, "n_prior_implied": 1}, "mean_prior_or_implied"),
+    ({"mean_prior_or_implied": "2.0", "n_prior_implied": 1}, "mean_prior_or_implied"),
+    ({"implied_move_pct": True, "mean_prior_or_implied": 2.0, "n_prior_implied": 1},
+     "implied_move_pct"),
+    ({"implied_move_pct": "4.0", "mean_prior_or_implied": 2.0, "n_prior_implied": 1},
+     "implied_move_pct"),
 ])
 def test_41_bad_implied_values_refuse(overrides, field):
     batches = _default_batches()
