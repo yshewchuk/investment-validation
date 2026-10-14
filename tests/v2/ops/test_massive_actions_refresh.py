@@ -198,37 +198,85 @@ def test_parent_action_addition_and_interval_correction_preserve_native_membersh
     original_daily = read(h, parent, massive_daily.CONTRACT)
     contract = massive_actions.CONTRACTS["dividends"]
     initial = [action("dividends", "left", "2026-08-03"), action("dividends", "inside"),
+               action("dividends", "old-start", "2026-08-09"), action("dividends", "old-end", "2026-08-12"),
                action("dividends", "right", "2026-08-25")]
     source, first_ref, first_doc = acquired(h, "dividends", key="actions", rows=initial)
     attempt, params = prepare(h, source, key="add", parent=parent, scope=scope, generation=1)
     added = finish_snapshot(h, attempt, params)
     assert added.table_versions["massive_daily"] == parent.table_versions["massive_daily"]
     assert added.parent_snapshot_id == parent.snapshot_id
-    correction = action("dividends", "replacement") | {"cash_amount": 9.5}
+    corrections = [action("dividends", identity, day) | {"cash_amount": amount} for identity, day, amount in
+                   [("new-start", "2026-08-09", 8.5), ("replacement", "2026-08-10", 9.5),
+                    ("new-end", "2026-08-12", 10.5)]]
     # New generation ensures a real independent provider observation, not older exact reuse.
     request = support.request("2026-08-09", "2026-08-12", "dividends")
     p = support.parameters(request, generation="correction")
     support.enqueue(h, "correction-source", p)
     source_attempt = support.claim(h)
     _, doc = support.run(h, source_attempt, support.fetching([], canonical_json(
-        {"status": "OK", "results": [correction]}).encode()), p)
+        {"status": "OK", "results": corrections}).encode()), p)
     second_ref = daily.committed_output(h, source_attempt, doc)
     attempt, params = prepare(h, source_attempt.job_id, key="replace", parent=added, scope=scope, generation=2)
     monkeypatch.setattr(support.coverage, "plan", lambda *_: pytest.fail("snapshot replanned"))
     updated = finish_snapshot(h, attempt, params)
     rows = read(h, updated, contract)
     assert [(r["id"], r["date"], r["cash_amount"]) for r in rows] == [
-        ("left", "2026-08-03", 1.25), ("replacement", "2026-08-10", 9.5), ("right", "2026-08-25", 1.25)]
+        ("left", "2026-08-03", 1.25), ("new-end", "2026-08-12", 10.5),
+        ("new-start", "2026-08-09", 8.5), ("replacement", "2026-08-10", 9.5), ("right", "2026-08-25", 1.25)]
     assert rows[0]["raw_receipt_id"] == first_doc["coverage"]["bindings"][0]["evidence"]["raw_receipt_id"]
-    assert rows[1]["raw_receipt_id"] == doc["coverage"]["bindings"][0]["evidence"]["raw_receipt_id"]
+    assert all(r["raw_receipt_id"] == doc["coverage"]["bindings"][0]["evidence"]["raw_receipt_id"]
+               for r in rows[1:4])
     assert read(h, parent, massive_daily.CONTRACT) == original_daily == read(h, updated, massive_daily.CONTRACT)
-    assert [r["id"] for r in read(h, added, contract)] == ["inside", "left", "right"]
+    assert [(r["id"], r["date"], r["cash_amount"]) for r in read(h, added, contract)] == [
+        ("inside", "2026-08-10", 1.25), ("left", "2026-08-03", 1.25),
+        ("old-end", "2026-08-12", 1.25), ("old-start", "2026-08-09", 1.25), ("right", "2026-08-25", 1.25)]
     resolved = Repository(h.conn, h.store).resolve_full(updated.snapshot_id)
     manifest = resolved.table_manifests[contract.table_name]
     assert manifest.coverage_receipt_refs == tuple(sorted([first_ref.artifact_id, second_ref.artifact_id]))
     assert manifest.parent_dataset_version_id == added.table_versions[contract.table_name].dataset_version_id
     assert resolved.table_manifests["massive_daily"].coverage_receipt_refs == (daily_ref.artifact_id,)
     assert h.conn.execute("SELECT generation FROM data_snapshot_heads WHERE scope=?", (scope,)).fetchone()[0] == 3
+
+
+def test_refresh_preserves_distinct_parent_policies_and_finality_on_replay(harness, monkeypatch):
+    from engine.v2.data import manifests
+    from engine.v2.ops import snapshots
+    h = harness
+    source, _, _ = daily.acquired(h)
+    attempt, params = prepare(h, source, key="bootstrap")
+    original = daily.execute(h, attempt, params)[1]
+    repo = Repository(h.conn, h.store)
+    resolved = repo.resolve_full(original.snapshot_id)
+    # Commit an independent valid parent; do not construct it with the refresh composer.
+    candidate = manifests.snapshot_ref(resolved.table_manifests, calendar_version="synthetic_calendar.v7",
+        source_priority_version="synthetic_priority.v9",
+        finality_receipt_refs=("synthetic-finality-z", "synthetic-finality-a"),
+        parent_snapshot_id=original.snapshot_id)
+    receipt = snapshots.commit_snapshot_for_attempt(h.conn, h.store, scope="policy-parent",
+        request_hash=content_hash(["policy-parent"]), contracts=resolved.contracts, objects=resolved.objects,
+        records=resolved.records, manifests=tuple(resolved.table_manifests.values()), snapshot=candidate,
+        expected_head_snapshot_id=None, expected_head_generation=0, receipt_id="policy-parent",
+        attempt_id=attempt.attempt_id, fence=attempt.fence, clock=h.clock)
+    parent = repo.resolve(receipt.snapshot_ref.snapshot_id)
+    expected = ("synthetic_calendar.v7", "synthetic_priority.v9",
+                ("synthetic-finality-z", "synthetic-finality-a"))
+    assert (parent.calendar_version, parent.source_priority_version, parent.finality_receipt_refs) == expected
+    assert parent.table_versions == original.table_versions
+    support.finish(h, attempt)
+    h.clock.advance(13)
+    source, _, _ = acquired(h, "splits", key="actions")
+    attempt, params = prepare(h, source, key="refresh", parent=parent, scope="policy-parent", generation=1)
+    fresh = daily.execute(h, attempt, params)[1]
+    assert (fresh.calendar_version, fresh.source_priority_version, fresh.finality_receipt_refs) == expected
+    assert fresh.parent_snapshot_id == parent.snapshot_id
+    assert fresh.table_versions["massive_daily"] == parent.table_versions["massive_daily"]
+    assert set(fresh.table_versions) == {"massive_daily", "massive_splits"}
+    before = tuple(h.conn.iterdump())
+    monkeypatch.setattr(pinned, "normalized_rows", lambda *_: pytest.fail("replay normalized again"))
+    replay = daily.execute(h, attempt, params)[1]
+    assert (replay.calendar_version, replay.source_priority_version, replay.finality_receipt_refs) == expected
+    assert replay == fresh and tuple(h.conn.iterdump()) == before
+    assert repo.resolve(parent.snapshot_id) == parent
 
 
 @pytest.mark.parametrize("wrong_generation", [1, 3])
