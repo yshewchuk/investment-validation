@@ -1263,12 +1263,12 @@ job.
 
 | Condition | Outcome |
 |---|---|
-| `serve` runs past its bounded same-day deadline (ahead of the legacy cron's own start) | stops, returns `"timed_out"`; in-flight jobs are left for the standing recovery pass, not cancelled |
-| `"timed_out"` recurs for the same `as_of` | counted separately from an `"error"` streak; past a fixed bound, the receipt becomes terminal `"failed"` |
+| `serve` runs past its bounded same-day deadline (ahead of the legacy cron's own start) | stops, returns `"timed_out"`; in-flight jobs are left for the standing recovery pass, not cancelled; a recurrence for the same `as_of` is counted apart from an `"error"` streak and, past a fixed bound, the receipt becomes terminal `"failed"` |
 | a resource profile could never fit this host | refused at submit time, before `serve` ever waits on it |
 | legacy's nightly lock is held | on a tick resuming prior state, an ephemeral `busy_legacy` is returned for this tick only (durable prior state, with its plan, untouched); on a non-resuming tick `busy_legacy` is persisted, since there is no prior plan to protect |
-| the per-`as_of` input manifest is captured | written fresh to a per-`as_of` path on every plan build, never a shared static file; a session mismatch is `INPUT_CHANGED` |
-| the scoring context years | derived from `as_of` on every call, mirroring legacy's own formula — never a fixed window that ages past its end |
+| the per-`as_of` input manifest is captured, and the scoring context years | manifest written fresh to a per-`as_of` path on every plan build, never a shared static file (a session mismatch is `INPUT_CHANGED`); years derived from `as_of` on every call, mirroring legacy's own formula |
+| no explicit tickers and `expected_population.json` absent | universe and context are the event tickers of the pinned shadow snapshot (`expected_shadow_snapshot_id`, same 35-day scan as `ops plan`); the plan then generates the population. A present file is the override and is not cross-checked against the snapshot |
+| the file is present but unreadable or yields no tickers; the snapshot cannot be read or its head moved; the snapshot window has no events | `INVALID_REQUEST` (file, no events) or `INPUT_CHANGED` (snapshot, moved head); no plan is saved and nothing falls back to snapshot input |
 | crash after `plan_fn` returns but before the `"submitting"` receipt is durable (issue #186) | accepted risk: a retry may produce the same or a different plan; only the plan named by the durable receipt is submitted or scored. If the rebuilt plan differs, the first artifact is orphaned. Fresh retries recheck the window and probe; resume retries skip the window check and may submit after it closes. |
 
 ### `capture_inputs.py`: `legacy_features` read set
