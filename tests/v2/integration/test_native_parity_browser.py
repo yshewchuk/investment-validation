@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import expect
@@ -56,7 +57,7 @@ def _open_parity(browser, server, *, code=200, body=SUMMARY, hold=False, mismatc
         path = url.split("?")[0]
         if path.endswith("/native_parity/mismatches"):
             page.mismatch_calls.append(url)
-            status, response = mismatches(route.request.url.split("cursor=")[1].split("&")[0] if "cursor=" in route.request.url else None)
+            status, response = mismatches(parse_qs(urlsplit(url).query).get("cursor", [None])[0])
             route.fulfill(status=status, content_type="application/json", body=json.dumps(response))
             return
         parity.append(url)

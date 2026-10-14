@@ -31,7 +31,10 @@ Explicit `generation` selects `massive_history_acquisition`: a plain namespace, 
 
 `snapshot` owns the separately submitted `massive_daily_snapshot` job. Its sole
 declared dependency is a successful history-acquisition job; the supervisor binds
-that job's committed output once. The worker verifies the original artifact,
+that job's committed output once. `stores.massive.pinned` is that worker's
+recheck module: it verifies the saved acquisition artifact (producer identity,
+complete mosaic, original occurrence/page/raw evidence) and normalizes the rows.
+The worker verifies the original artifact,
 producer identity and saved complete mosaic, then rechecks only its original
 occurrence/page/raw evidence. It never replans against newer catalog coverage.
 Normalization uses `data.massive_daily`; page-specific clocks/receipts survive

@@ -161,8 +161,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::{'error' if verdict['state'] == 'failure' else 'warning'}::{reason}")
     print(json.dumps(verdict, indent=2, sort_keys=True))
     if args.github_output:
+        description = verdict['description'].replace("\r", " ").replace("\n", " ")
         with open(args.github_output, "a") as fh:
-            fh.write(f"state={verdict['state']}\ndescription={verdict['description']}\n")
+            fh.write(f"state={verdict['state']}\ndescription={description}\n")
     return 0
 
 
