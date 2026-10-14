@@ -48,19 +48,24 @@ def _pin_head(monkeypatch, resolve=None):
     monkeypatch.setattr(snapshot_planning, "Repository", lambda *args: object())
 
 
-def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_tickers(monkeypatch):
-    # One head resolve (clock + expected id), one scan with tickers=None (never a restricted
-    # watchlist), the fixed 35-day horizon, and the result de-duplicated and sorted.
+@pytest.mark.parametrize("request_tickers, expected", [
+    (["BBB", "AAA", "BBB"], ("AAA", "BBB")),  # sorted, de-duplicated
+    (["ZZZ", "CCC"], ("CCC", "ZZZ")),
+])
+def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_tickers(
+        monkeypatch, request_tickers, expected):
+    # One head resolve (clock + expected id), EXACTLY one scan with tickers=None (never a
+    # restricted watchlist), the fixed 35-day horizon, and the result de-duplicated and sorted.
     resolved = []
     monkeypatch.setattr(snapshot_planning, "_resolve_scope_snapshot",
                         lambda *args, **kwargs: resolved.append(kwargs) or _SNAPSHOT)
     monkeypatch.setattr(snapshot_planning, "Repository", lambda *args: object())
-    scanned = {}
+    scan_calls = []
 
     def fake_scan(repository, snapshot, *, as_of, horizon_days, tickers):
-        scanned.update(snapshot=snapshot.snapshot_id, as_of=as_of,
-                       horizon_days=horizon_days, tickers=tickers)
-        return [_request("BBB"), _request("AAA"), _request("BBB")]
+        scan_calls.append({"snapshot": snapshot.snapshot_id, "as_of": as_of,
+                           "horizon_days": horizon_days, "tickers": tickers})
+        return [_request(ticker) for ticker in request_tickers]
 
     monkeypatch.setattr(snapshot_planning, "scan_forward_board_requests", fake_scan)
 
@@ -68,9 +73,9 @@ def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_ticke
         _DummyConn(), object(), "shadow", as_of=_AS_OF, clock=_CLOCK,
         expected_snapshot_id="snap_pinned")
 
-    assert result == ("AAA", "BBB")  # sorted, de-duplicated
-    assert scanned == {"snapshot": "snap_pinned", "as_of": _AS_OF,
-                       "horizon_days": _HORIZON, "tickers": None}
+    assert result == expected
+    assert scan_calls == [{"snapshot": "snap_pinned", "as_of": _AS_OF,
+                           "horizon_days": _HORIZON, "tickers": None}]  # exactly one scan
     assert resolved == [{"clock": _CLOCK, "expected_snapshot_id": "snap_pinned"}]
 
 

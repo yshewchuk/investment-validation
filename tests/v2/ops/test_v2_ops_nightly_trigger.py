@@ -902,6 +902,9 @@ def test_full_population_is_the_operator_document(tmp_path):
     assert full_population(tmp_path / "absent") == ((), ())
 
 
+_CLOCK = object()
+
+
 class _DummyConn:
     def close(self):
         return None
@@ -1070,6 +1073,57 @@ def test_capture_input_manifest_refuses_a_selected_session_mismatch(tmp_path, mo
     assert raised.value.code == "INPUT_CHANGED"
     assert not (tmp_path / "reports" / "phase6" / "nightly_trigger"
                 / "2026-01-15.input_manifest.json").exists()
+
+
+def test_snapshot_event_universe_is_the_real_wrapper_closing_its_catalog_connection(
+        tmp_path, monkeypatch):
+    # The real wrapper (not a stub): the ops catalog is opened with this call's clock, the
+    # helper gets the pinned head / scope / horizon inputs, its tuple comes back unchanged,
+    # and the connection closes in finally -- the seam _prepare_default_plan itself calls.
+    from engine.v2.data.errors import fail as data_fail
+    from engine.v2.ops import bootstrap, snapshot_planning
+
+    closed, calls = [], []
+
+    class _TrackingConn(_DummyConn):
+        def close(self):
+            closed.append(True)
+            return super().close()
+
+    monkeypatch.setattr(bootstrap, "open_catalog",
+                        lambda *a, **k: calls.append(("open", a, k)) or _TrackingConn())
+    # _snapshot_event_universe imports the helper at call time, so patch it where the
+    # local ``from ... import snapshot_event_tickers`` resolves it -- on the helper's module.
+    monkeypatch.setattr(snapshot_planning, "snapshot_event_tickers",
+                        lambda conn, store, scope, *, as_of, clock, expected_snapshot_id:
+                        calls.append(("helper", scope, as_of, clock, expected_snapshot_id))
+                        or ("AAA", "BBB"))
+
+    result = nightly_trigger._snapshot_event_universe(
+        tmp_path, AS_OF, _CLOCK, "snap_pinned")
+
+    assert result == ("AAA", "BBB")
+    assert closed == [True]
+    open_call = [c for c in calls if c[0] == "open"]
+    assert len(open_call) == 1
+    assert open_call[0][2]["clock"] is _CLOCK
+    helper_call = [c for c in calls if c[0] == "helper"]
+    assert helper_call == [("helper", "shadow", AS_OF, _CLOCK, "snap_pinned")]
+
+    # A DataError raised by the helper surfaces as INPUT_CHANGED with its data_code, and
+    # the same finally still closes the connection.
+    del closed[:]
+    del calls[:]
+
+    def _raise(*a, **k):
+        raise data_fail("CONTRACT_MISMATCH", "synthetic refusal")
+
+    monkeypatch.setattr(snapshot_planning, "snapshot_event_tickers", _raise)
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._snapshot_event_universe(tmp_path, AS_OF, _CLOCK, "snap_pinned")
+    assert raised.value.code == "INPUT_CHANGED"
+    assert raised.value.problem.details["data_code"] == "CONTRACT_MISMATCH"
+    assert closed == [True]
 
 
 def test_default_plan_has_no_input_manifest_when_there_is_no_population(tmp_path, monkeypatch):
@@ -1628,13 +1682,21 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
     # The override file is absent, so the universe (and, with no explicit
     # context, the context too) is exactly what snapshot_event_tickers returns
     # off the same pinned head, then handed unchanged to _refresh_plan_prices
-    # and _default_plan.
+    # and _default_plan. Both stubs assert the incoming pin ("snap_before").
     events, refreshed = ("AAA", "BBB"), "snap_after_refresh"
+
+    def fake_snapshot_event_universe(root, as_of, clock, expected):
+        assert expected == "snap_before"  # the incoming pin, unchanged
+        return events
+
+    def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert expected == "snap_before"  # the incoming pin, unchanged
+        return refreshed if tickers == events else _explode("wrong universe")
+
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe",
-                        lambda root, as_of, clock, expected: events)
+                        fake_snapshot_event_universe)
     monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices",
-                        lambda root, as_of, tickers, clock, expected:
-                        refreshed if tickers == events else _explode("wrong universe"))
+                        fake_refresh_plan_prices)
     monkeypatch.setattr(nightly_trigger, "_default_plan",
                         lambda root, as_of, tickers, context, clock, *, full_run,
                         expected_shadow_snapshot_id:

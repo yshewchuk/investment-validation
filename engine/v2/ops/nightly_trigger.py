@@ -785,19 +785,20 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
                           full_run=True, expected_shadow_snapshot_id=None):
     """The scheduled preparation uses the exact watchlist passed to planning.
 
-    Universe derivation (issue #471): if the operator's ``expected_population.json`` override
+    Universe derivation (issue #471): when no explicit ``tickers`` were supplied (explicit
+    tickers bypass both), if the operator's ``expected_population.json`` override
     file is PRESENT (``_qualification_path`` not ``None``), it wins unchanged and
     ``snapshot_event_tickers`` is never consulted; if present but yielding no tickers
     (unreadable, non-list, or empty), refuse ``INVALID_REQUEST`` rather than silently falling
-    through to generation. If ABSENT and no ``tickers`` were passed, the universe is the
+    through to generation. If ABSENT (still with no explicit ``tickers``), the universe is the
     shadow snapshot's own event tickers (``snapshot_event_tickers`` on the same pinned head
     ``expected_shadow_snapshot_id`` names; the catalog connection closes in ``finally``), and
     that result is both ``universe`` and ``context``. The override file is NOT cross-checked
-    against the snapshot — the file wins, and the later score stage already refuses planned
-    keys with no observed row. The existing refresh + ``_default_plan`` path continues
-    unchanged (``_default_plan`` still passes ``expected_population=None`` when the file is
-    absent, so ``commands._planned_population`` generates the population from the same
-    snapshot's events).
+    against the snapshot — when no explicit ``tickers`` were supplied the file wins, and the
+    later score stage already refuses planned keys with no observed row. The existing refresh +
+    ``_default_plan`` path continues unchanged (``_default_plan`` still passes
+    ``expected_population=None`` when the file is absent, so ``commands._planned_population``
+    generates the population from the same snapshot's events).
     """
     clock = clock or SystemClock()
     population_path = _qualification_path(root, QUALIFICATION_POPULATION)
