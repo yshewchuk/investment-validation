@@ -159,6 +159,34 @@ def test_diff_retrieval_omitting_more_than_20_dates_reports_count_first_and_last
                                          "last_missing_date": "2024-01-25"}
 
 
+def test_diff_retrieval_exactly_20_missing_dates_still_reports_the_full_list():
+    """Boundary of the compact-details rule: 20 missing dates is still the
+    ``missing_dates`` list, not the first/last pair."""
+    dates = [f"2024-01-{day:02d}" for day in range(1, 22)]  # 21 live dates
+    stored, _ = _apply(_empty_stored(), {d: (float(i), float(i), float(i))
+                                         for i, d in enumerate(dates, start=1)},
+                       retrieved_at="2024-02-01T00:00:00Z")
+    with pytest.raises(DataError) as exc:
+        _apply(stored, {dates[0]: (1.0, 1.0, 1.0)}, retrieved_at="2024-02-02T00:00:00Z")
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"missing_count": 20, "missing_dates": dates[1:]}
+
+
+def test_diff_retrieval_21_missing_dates_reports_first_and_last_only():
+    """One past the boundary: 21 missing dates compact to
+    ``first_missing_date``/``last_missing_date``."""
+    dates = [f"2024-01-{day:02d}" for day in range(1, 23)]  # 22 live dates
+    stored, _ = _apply(_empty_stored(), {d: (float(i), float(i), float(i))
+                                         for i, d in enumerate(dates, start=1)},
+                       retrieved_at="2024-02-01T00:00:00Z")
+    with pytest.raises(DataError) as exc:
+        _apply(stored, {dates[0]: (1.0, 1.0, 1.0)}, retrieved_at="2024-02-02T00:00:00Z")
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"missing_count": 21,
+                                         "first_missing_date": "2024-01-02",
+                                         "last_missing_date": "2024-01-22"}
+
+
 def test_diff_retrieval_full_history_with_a_new_later_date_appends_the_new_bar():
     stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1)},
                        retrieved_at="2024-01-05T00:00:00Z")
@@ -176,10 +204,56 @@ def test_diff_retrieval_revives_a_previously_deleted_row():
     stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1)},
                        retrieved_at="2024-01-05T00:00:00Z")
     stored = _tombstone(stored, "2024-01-02", retrieved_at="2024-01-06T00:00:00Z")
-    _, new_rows = _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1)},
+    _, new_rows = _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.5, 2.4, 2.6)},
                          retrieved_at="2024-01-07T00:00:00Z")
     assert list(new_rows["date"]) == ["2024-01-02"]
     assert not new_rows["deleted"].any()
+    revived = new_rows.iloc[0]
+    assert (revived["close_adj"], revived["close_raw"], revived["high_raw"]) == (2.5, 2.4, 2.6)
+
+
+def test_diff_retrieval_omitting_a_tombstoned_date_is_not_an_omission_refusal():
+    """A tombstoned date is not live, so a retrieval that simply stops before
+    it diffs cleanly: unchanged live rows give an empty delta, and a changed
+    live row still gives exactly the one new row -- no CONTRACT_MISMATCH."""
+    stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1),
+                                         "2024-01-02": (2.0, 2.0, 2.1),
+                                         "2024-01-03": (3.0, 3.0, 3.1)},
+                       retrieved_at="2024-01-05T00:00:00Z")
+    stored = _tombstone(stored, "2024-01-03", retrieved_at="2024-01-06T00:00:00Z")
+
+    unchanged, new_rows = _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1),
+                                          "2024-01-02": (2.0, 2.0, 2.1)},
+                                 retrieved_at="2024-01-07T00:00:00Z")
+    assert unchanged.equals(stored)
+    assert new_rows.empty
+
+    _, new_rows = _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1),
+                                  "2024-01-02": (9.0, 2.0, 2.1)},
+                         retrieved_at="2024-01-08T00:00:00Z")
+    assert list(new_rows["date"]) == ["2024-01-02"]
+    assert len(new_rows) == 1
+    assert new_rows.iloc[0]["close_adj"] == 9.0
+
+
+def test_diff_retrieval_wholly_deleted_history_takes_a_fresh_retrieval_without_refusing():
+    """Every stored date is tombstoned, so there is no live history left to
+    omit: a fresh retrieval of never-seen dates is added exactly, with no
+    refusal and no tombstone rows."""
+    stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1),
+                                         "2024-01-02": (2.0, 2.0, 2.1)},
+                       retrieved_at="2024-01-05T00:00:00Z")
+    stored = _tombstone(stored, "2024-01-01", retrieved_at="2024-01-06T00:00:00Z")
+    stored = _tombstone(stored, "2024-01-02", retrieved_at="2024-01-06T00:00:01Z")
+
+    before = len(stored)
+    after, new_rows = _apply(stored, {"2024-01-03": (7.0, 7.0, 7.1), "2024-01-04": (8.0, 8.0, 8.1)},
+                             retrieved_at="2024-01-07T00:00:00Z")
+    assert list(new_rows["date"]) == ["2024-01-03", "2024-01-04"]
+    assert len(new_rows) == 2
+    assert list(new_rows["close_adj"]) == [7.0, 8.0]
+    assert not new_rows["deleted"].any()
+    assert len(after) == before + 2
 
 
 def test_diff_retrieval_reversion_to_earlier_value_diffs_against_latest_state():

@@ -506,6 +506,48 @@ def test_capture_refuses_a_ticker_whose_retrieval_omits_stored_dates_and_keeps_c
     assert retried["failed_tickers"] == 1
 
 
+def test_capture_counts_one_failed_ticker_even_when_two_of_its_retrievals_refuse(tmp_path):
+    """One ticker's TWO refusing retrievals in a single capture (its px file
+    and its Tier-1 entry, both truncated below the stored history) stay two
+    ``failures`` entries -- one per refused retrieval -- but count as ONE
+    distinct failed ticker, never more than the tickers the run actually saw.
+    """
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 101.0})
+    os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    px_path = _write_px(source_root, "MSFT", {"2024-01-01": 200.0})
+    os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["by_outcome"] == {"added": 2}
+    assert first["failures"] == []
+
+    # AAPL now exists TWICE as a truncated retrieval: its px file (mtime later)
+    # and an independent Tier-1 entry (fetched_at later still), each dropping
+    # 2024-01-02. MSFT grows one genuinely new bar.
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})
+    os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 100.0}, key="k1",
+                 fetched_at="2024-09-12T00:00:00+00:00")
+    px_path = _write_px(source_root, "MSFT", {"2024-01-01": 200.0, "2024-01-02": 201.0})
+    os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+
+    assert second["by_outcome"] == {"added": 1, "error": 2}
+    assert second["failed_tickers"] == 1
+    assert second["failed_tickers"] <= second["tickers_seen"] == 2
+    assert [(f["ticker"], f["error"], f["details"]) for f in second["failures"]] == \
+        [("AAPL", "CONTRACT_MISMATCH", {"missing_count": 1, "missing_dates": ["2024-01-02"]}),
+         ("AAPL", "CONTRACT_MISMATCH", {"missing_count": 1, "missing_dates": ["2024-01-02"]})]
+
+    # Neither AAPL refusal wrote anything; MSFT's new bar landed.
+    stored_aapl = _scan_price_history(conn, store, second["result_snapshot_id"])
+    assert sorted(stored_aapl["date"]) == ["2024-01-01", "2024-01-02"]
+    stored_msft = _scan_price_history(conn, store, second["result_snapshot_id"], ticker="MSFT")
+    assert sorted(stored_msft["date"]) == ["2024-01-01", "2024-01-02"]
+
+
 # --------------------------------------------------------------------------
 # Tier-1 parsing fix (2026-09-15): close_raw/high_raw are real values now,
 # not forced NaN, and diff_retrieval only stores what actually changed.

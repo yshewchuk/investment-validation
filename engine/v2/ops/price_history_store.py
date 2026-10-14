@@ -800,6 +800,7 @@ def _aggregate_overlap(disagreements: dict) -> dict:
 def _summarize(results: list[dict], disagreements: dict, *, dry_run: bool) -> dict:
     by_outcome: dict[str, int] = {}
     tickers_seen = set()
+    failed_tickers = set()
     rows_added = rows_tombstoned = estimated_bytes = 0
     failures: list[dict] = []
     for r in results:
@@ -809,6 +810,7 @@ def _summarize(results: list[dict], disagreements: dict, *, dry_run: bool) -> di
         rows_tombstoned += r.get("rows_tombstoned", 0)
         estimated_bytes += r.get("estimated_compressed_bytes", 0)
         if r["outcome"] == "error":
+            failed_tickers.add(r["ticker"])
             failure = {"ticker": r["ticker"], "error": r.get("error")}
             if r.get("details"):
                 failure["details"] = r["details"]
@@ -817,6 +819,6 @@ def _summarize(results: list[dict], disagreements: dict, *, dry_run: bool) -> di
     return {"schema_version": "price_history_capture_report.v1.0", "dry_run": dry_run,
            "tickers_seen": len(tickers_seen), "by_outcome": by_outcome, "rows_added": rows_added,
            "rows_tombstoned": rows_tombstoned, "estimated_compressed_bytes": estimated_bytes,
-           "failed_tickers": len(failures), "failures": failures,
+           "failed_tickers": len(failed_tickers), "failures": failures,
            "overlapping_tickers": len(disagreements),
            "overlap_by_column": _aggregate_overlap(disagreements)}
