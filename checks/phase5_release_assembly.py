@@ -293,6 +293,9 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
         prior = deployment.resolve_release(store, prior_release_id)
     except (deployment.DeploymentError, OSError, ValueError) as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release could not be resolved") from exc
+    if prior_catalog.get("deployment_id") != prior.deployment_id:
+        raise ReleaseAssemblyRefusal(
+            "PRIOR_MISMATCH", "prior catalog deployment id disagrees with its staged release")
     if getattr(inventory, "deployment_id", None) != prior.deployment_id:
         raise ReleaseAssemblyRefusal(
             "INVENTORY_MISMATCH", "inventory deployment id does not match the prior release")

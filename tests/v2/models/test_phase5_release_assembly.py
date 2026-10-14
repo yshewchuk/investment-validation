@@ -26,13 +26,13 @@ from engine.v2.models import (
 UNRELATED_MEMBER_ID = "payoff_line:STR-THRU"
 
 
-def _fixture(release_id, deployment_id="d1"):
+def _fixture(release_id, deployment_id="d1", binding_id="b1"):
     payload = json.dumps({"schema_version": "linear_estimator.v1.0", "feature_order": ["x"],
                           "outputs": [{"name": "prediction", "intercept": 1.0, "coefficients": [2.0]}]},
                          sort_keys=True).encode()
     member_hash = phase5_release.sha256_bytes(payload)
     member = ArtifactMember(name="estimator", path="unused.json", content_hash=member_hash)
-    binding = ModelBinding(binding_id="b1", model_id="m1", role="size", strategy_id="*",
+    binding = ModelBinding(binding_id=binding_id, model_id="m1", role="size", strategy_id="*",
                            decision_clock_id="entry-close", adapter="json-linear.v1",
                            feature_order=("x",), output_names=("prediction",), members=(member,))
     release = ModelRelease(release_id=release_id, deployment_id=deployment_id, bindings=(binding,))
@@ -57,9 +57,10 @@ def _spec(member_id):
     return next(spec for spec in phase5_release.STATE_SPECS if spec.member_id == member_id)
 
 
-def _stage_prior(root, release_id="prior1", deployment_id="d1", prior_names=None,
-                 prior_sources=None):
-    release, inventory, payloads = _fixture(release_id, deployment_id=deployment_id)
+def _stage_prior(root, release_id="prior1", deployment_id="d1", binding_id="b1",
+                 prior_names=None, prior_sources=None):
+    release, inventory, payloads = _fixture(release_id, deployment_id=deployment_id,
+                                            binding_id=binding_id)
     deployment.stage_release(phase5_release.deployment_root(root), release, inventory, payloads)
     rows = []
     for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID, UNRELATED_MEMBER_ID):
@@ -158,8 +159,9 @@ def test_derive_catalog_matches_independent_oracle(tmp_path, release_id):
     assert prior_body == snapshot
 
 
-def test_happy_path_carries_the_pools_forward(tmp_path):
-    inventory, prior_body = _stage_prior(tmp_path)
+@pytest.mark.parametrize("deployment_id, binding_id", [("d1", "b1"), ("deployZ", "bindZ")])
+def test_happy_path_carries_the_pools_forward(tmp_path, deployment_id, binding_id):
+    inventory, prior_body = _stage_prior(tmp_path, deployment_id=deployment_id, binding_id=binding_id)
     args = _valid_derive_args(tmp_path)
     inventory = dataclasses.replace(inventory, release_id="cand1")
     prior_path = phase5_release._catalog_path(tmp_path, "prior1")
@@ -169,11 +171,15 @@ def test_happy_path_carries_the_pools_forward(tmp_path):
     path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                           inventory=inventory, **_carry_kwargs(args))
     assert path == phase5_release._catalog_path(tmp_path, "cand1")
-    assert phase5_release._read_catalog(path, "cand1") == _expected_catalog(prior_body, args, "cand1")
+    catalog = phase5_release._read_catalog(path, "cand1")
+    assert catalog == _expected_catalog(prior_body, args, "cand1")
+    assert catalog["deployment_id"] == deployment_id
     store = phase5_release.deployment_root(tmp_path)
     prior_model = deployment.resolve_release(store, "prior1")
     candidate_model = deployment.resolve_release(store, "cand1")
     assert dataclasses.replace(candidate_model, release_id="prior1") == prior_model
+    assert candidate_model.deployment_id == catalog["deployment_id"]
+    assert prior_model.deployment_id == deployment_id
     assert not (store / "DEPLOYED").exists()
     assert prior_path.read_bytes() == prior_bytes
     assert (tmp_path / "phase5_release.json").read_bytes() == root_manifest
@@ -597,4 +603,32 @@ def test_prior_mismatch_when_prior_staged_manifest_is_deleted(tmp_path):
         assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                        inventory=inventory, **_carry_kwargs(args))
     assert error.value.code == "PRIOR_MISMATCH"
+
+
+def test_prior_mismatch_when_prior_catalog_deployment_id_differs(tmp_path):
+    inventory, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    body = phase5_release.manifest_body(prior_body["release_id"], "dX",
+                                        prior_body["members"], prior_body["sources"])
+    phase5_release._write_catalog(phase5_release._catalog_path(tmp_path, "prior1"), body)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "PRIOR_MISMATCH"
     assert not _candidate_path(tmp_path).exists()
+    assert not deployment._manifest_path(phase5_release.deployment_root(tmp_path),
+                                         "cand1").exists()
+
+
+def test_carry_forward_leaves_existing_deployed_pointer_untouched(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    pointer = phase5_release.deployment_root(tmp_path) / "DEPLOYED"
+    pointer.write_bytes(b'{"x":1}')
+
+    path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                          inventory=inventory, **_carry_kwargs(args))
+    assert path == phase5_release._catalog_path(tmp_path, "cand1")
+    assert pointer.read_bytes() == b'{"x":1}'
