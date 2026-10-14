@@ -217,6 +217,51 @@ from verified bytes; malformed metadata refuses before ledger or catalog effects
 
 Pre-admission receipts cannot invent admission; rejected-request ledger identities belong to the runner.
 
+## Reconstructed gate evaluation
+
+`python -m experiments.v2_gate register|run` evaluates one preregistered arm.
+It composes native registration, `gate_report` and native outcome/replay/export;
+the supervisor's smoke-only pricing kind remains a separate entrypoint.
+The fixed recipe requires this runner, seed zero, ordered unique year folds,
+option-chain prices, and exactly `strategy` and finite `fill` economics.
+Other declarations refuse before repository access. Each arm independently
+resolves its immutable plan and reprices its own training and evaluation rows.
+The registration binds recipe source, environment, snapshot, population and
+holdouts; the report also binds actual history, cutoffs and replay inputs.
+
+This is exploratory reconstructed-history research.
+Calendar sessions come from the exact snapshot without projected extensions.
+The feature ceiling is the completed session strictly before the earlier of
+the strategy's decision and entry. Protected `load_event_history` supplies
+`n_prior` and `mean_prior_abs_move` from the calendar's first session onward.
+Empty history alone maps the missing mean to zero, retaining its zero count.
+History/source dates are never converted into claimed observation timestamps;
+schedule-as-known and source publication remain unverified.
+
+Folds partition by gate-decision year. Training uses earlier decision years
+whose exits precede both the year start and earliest evaluation feature ceiling.
+Each fold fits a fresh depth-one sklearn DecisionTreeClassifier on profitable
+training trades, requiring both classes. The shared training-score median
+rule freezes its threshold before evaluation quotes/outcomes are read.
+Per-event test histories may incorporate earlier completed events, but test
+labels never fit the model or threshold. Selection uses score >= threshold.
+Every requested event must have a complete native calendar plan; each consumed
+pricing set must be complete and finite, otherwise the whole arm refuses.
+
+Reports contain selected and all-candidate mark-based mean P&L (no commissions), row counts,
+fold memberships, scores, cash flows, feature ceilings and complete provenance.
+They make no observed-PIT, fill-validation, holdout, promotion or winner claim.
+One arm counts as one attempt only when evaluation starts. Recorded success
+uses its own report and ledger identity; smoke never accesses a ledger path.
+Replay re-admits current inputs then reconciles existing evidence without fitting.
+Changed inputs under the same arm identity refuse R6, preserving prior evidence.
+
+| Condition | Outcome |
+| --- | --- |
+| Explicit excluded/unknown event or final-read registration | `HOLDOUT_ACCESS_DENIED` before features, pricing or metrics; no partial report. |
+| Missing prior session, empty fold, incomplete/nonfinite inputs or fitting failure | `EXPERIMENT_VARIANT_FAILED`; existing native failure publication applies. |
+| Admission, publication or replay failure | Existing native lifecycle's typed refusal and interruption semantics apply. |
+
 ## Native gate-variant pricing
 
 The `native_gate_pricing` supervisor kind launches only the fixed unlayered
@@ -260,7 +305,7 @@ as_of_month, event_ids=None)` resolves one immutable single-arm plan and
 freshly prices its eligible canonical events from that snapshot's option
 chains and calendar. It accepts a finite `fill` and optional `strategy`
 economics declaration, which must match the explicit strategy argument.
-The resolver permits that key only for `native-gate-replay` and the fixed native worker.
+The resolver permits that key only for `native-gate-replay`, the fixed native worker and `v2_gate.py`.
 The admitted worker requires that declaration; manual fill-only calls retain
 their explicit strategy input. Replay consumes the resolved fill. Returned
 stage inputs bind the strategy, alpha, snapshot, event population and holdout

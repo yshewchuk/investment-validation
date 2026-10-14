@@ -112,6 +112,9 @@ the prediction outcome table cannot distinguish those event identities.
 `experiments.v2_gate_variant` consumes this population in sweep mode before
 fresh native replay, directly or through the smoke-only `native_gate_pricing`
 worker. Its no-report/no-ledger contract lives in `experiments/ARCHITECTURE.md`.
+`experiments.gate_report` separately composes population, observed calendar sessions,
+protected `event_history` and fresh replay for each fold's training/evaluation rows;
+its reconstructed date-ceiling and native publication contracts live in that same doc.
 `prediction_inputs.load_prediction_targets` consumes this population first,
 then scans each eligible ticker/event-date pair in pinned `computed_moves`.
 It returns the signed move, binary `positive_move` target, and
@@ -168,9 +171,10 @@ identities and availability, omitted-history reasons, snapshot/dataset/month/
 membership-version/cutoff pins and their deterministic history digest.
 The `research_event_history.v2` identity also binds `read_inputs`: every decoded
 candidate object, including skipped/unavailable labels omitted from arithmetic.
-No cache, automatic retry, transaction, write or partial return occurs. This
-library seam has no supervisor, provider, market-price, report or ledger caller;
-production panel reads and final-read authority remain unchanged.
+No cache, automatic retry, transaction, write or partial return occurs.
+The reader performs no supervisor dispatch, provider/market-price access or
+publication; `experiments.gate_report` consumes it for fold-local exploratory
+reporting. Production panel reads and final-read authority remain unchanged.
 
 `magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
 pure contract over native `CalendarSessions`: horizons are five, three or one

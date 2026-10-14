@@ -51,9 +51,9 @@ from that module for closed v1.4 construction/validation without read authority.
 They compose one resolved plan, source/environment binding and primary catalog
 reservation; the caller owns the transaction around the reservation helper.
 The registration verifier reads only catalog-owned binding evidence and grants no final-read authority; internal `final_holdout.authorize_final_holdout` has only synthetic tests as consumers and no production entrypoint or read capability.
-Native prediction reporting also consumes the public fold-local
+Native prediction and reconstructed gate reporting consume the public fold-local
 `experiment_folds.TrainFoldRule` and `experiment_folds.fit_walk_forward_fold`.
-The fixed native gate child consumes `worker.main(dispatcher=...)` for the unchanged launch/result protocol; ops never imports its pricing adapter. The prediction CLI consumes `catalog.connect` and `experiments.experiment_spec_from_document`
+The fixed native gate child consumes `worker.main(dispatcher=...)` for the unchanged launch/result protocol; ops never imports its pricing adapter. Prediction and gate CLIs consume `catalog.connect` and `experiments.experiment_spec_from_document`
 to open an existing catalog and decode the same strict experiment specification.
 
 `native.input_decoding._load_native_score_inputs` is an internal decoder shared
