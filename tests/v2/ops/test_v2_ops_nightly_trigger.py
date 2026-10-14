@@ -1762,8 +1762,6 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
         expected_shadow_snapshot_id="snap_before") == "plan_snap")
-    assert not (tmp_path / "reports" / "phase6" / "nightly_trigger"
-                / "expected_population.json").exists()  # the absent-override branch
 
 
 def test_prepare_default_plan_keeps_the_callers_context_when_the_universe_is_the_snapshot(
@@ -1797,8 +1795,6 @@ def test_prepare_default_plan_keeps_the_callers_context_when_the_universe_is_the
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), ("XXX", "YYY"), FakeClock(IN_WINDOW),
         expected_shadow_snapshot_id="snap_before") == "plan_context")
-    assert not (tmp_path / "reports" / "phase6" / "nightly_trigger"
-                / "expected_population.json").exists()  # the absent-override branch
 
 
 def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_snapshot(

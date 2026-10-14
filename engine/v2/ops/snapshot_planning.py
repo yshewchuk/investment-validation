@@ -104,7 +104,8 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     ``INVALID_REQUEST``; a mismatch with ``expected_snapshot_id`` is ``INPUT_CHANGED``; a
     missing head, a missing/malformed events table, or an unreadable carried-set table is the
     reader's ``DataError`` as ``INPUT_CHANGED`` (``details.data_code``), as
-    ``pin_snapshot_inputs`` reports it."""
+    ``pin_snapshot_inputs`` reports it; an unreadable head artifact (missing, integrity-failed,
+    undecodable) is also ``INPUT_CHANGED`` (``details.artifact_error``)."""
     if not tickers:
         # The score stage scores the watchlist only: a population over any wider scope (the
         # context universe) could only fail at execution, so refuse at plan time instead.
