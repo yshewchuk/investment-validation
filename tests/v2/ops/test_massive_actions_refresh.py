@@ -111,11 +111,13 @@ def test_action_values_ids_clocks_pins_and_same_day_events(harness, dataset):
     assert tuple(h.conn.iterdump()) == before
 
 
-@pytest.mark.parametrize("dataset", ["splits", "dividends"])
+@pytest.mark.parametrize("dataset,required", [
+    ("splits", {"id", "ticker", "execution_date", "split_from", "split_to"}),
+    ("dividends", {"id", "ticker", "ex_dividend_date", "cash_amount", "currency"}),
+])
 @pytest.mark.parametrize("explicit_null", [False, True])
-def test_optional_action_metadata_remains_unknown(harness, dataset, explicit_null):
+def test_optional_action_metadata_remains_unknown(harness, dataset, required, explicit_null):
     h = harness
-    required = {"id", "ticker", *massive_actions._REQUIRED[dataset]}
     row = {k: v if k in required else None for k, v in action(dataset).items()}
     if not explicit_null:
         row = {k: v for k, v in row.items() if k in required}
@@ -126,6 +128,31 @@ def test_optional_action_metadata_remains_unknown(harness, dataset, explicit_nul
     optional = set(action(dataset)) - required
     assert all(actual[k] is None for k in optional)
     assert {k: actual[k] for k in required} == {k: action(dataset)[k] for k in required}
+
+
+@pytest.mark.parametrize("field", ["split_from", "split_to"])
+@pytest.mark.parametrize("explicit_null", [False, True], ids=["absent", "null"])
+def test_missing_split_economics_preserves_native_visibility(harness, monkeypatch, field, explicit_null):
+    h = harness
+    parent, scope, _ = bootstrap(h)
+    parent_rows = read(h, parent, massive_daily.CONTRACT)
+    row = action("splits")
+    if explicit_null:
+        row[field] = None
+    else:
+        del row[field]
+    source, _, _ = acquired(h, "splits", key="invalid-split-source", rows=[row])
+    attempt, params = prepare(h, source, key="publish", parent=parent, scope=scope, generation=1)
+    # Admission must refuse before a nullable schema or Parquet validation can mask it.
+    monkeypatch.setattr(massive_daily, "build_candidate",
+                        lambda *_a, **_k: pytest.fail("missing split economics reached publication"))
+    before = tuple(h.conn.iterdump())
+    with pytest.raises(OpsError) as error:
+        daily.execute(h, attempt, params)
+    assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
+    assert tuple(h.conn.iterdump()) == before
+    assert read(h, parent, massive_daily.CONTRACT) == parent_rows
+    assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
 
 
 @pytest.mark.parametrize("dataset,field,value", [
