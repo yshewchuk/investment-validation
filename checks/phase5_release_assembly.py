@@ -45,6 +45,7 @@ CHOOSER_MEMBER_ID = "chooser_analog_pool"
 _REFUSAL_CODES = (
     "PRIOR_MISMATCH", "POOL_SET_MISMATCH", "CUTOFF_MISMATCH", "CHOOSER_MISMATCH",
     "CUTOFF_NOT_ADVANCED", "OBJECT_UNVERIFIED", "ID_CONFLICT", "INVENTORY_MISMATCH",
+    "PUBLICATION_FAILED",
 )
 _REQUIRED_MEMBER_IDS = (*POOL_MEMBER_IDS, CHOOSER_MEMBER_ID)
 _SPEC_BY_ID = {spec.member_id: spec for spec in STATE_SPECS}
@@ -138,6 +139,19 @@ def derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_rel
                    outputs: object, chooser: PoolOutput, cutoff: str) -> dict:
     """Return the pure candidate catalog body for carrying ``prior_catalog`` forward."""
     try:
+        return _derive_catalog(prior_catalog, release_id=release_id,
+                               expected_prior_release_id=expected_prior_release_id,
+                               outputs=outputs, chooser=chooser, cutoff=cutoff)
+    except ReleaseAssemblyRefusal:
+        raise
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise ReleaseAssemblyRefusal(
+            "PRIOR_MISMATCH", "prior catalog rows or identity are malformed") from exc
+
+
+def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_release_id: str,
+                    outputs: object, chooser: PoolOutput, cutoff: str) -> dict:
+    try:
         prior = _validate_catalog(prior_catalog, expected_prior_release_id)
     except ReleaseLayoutError as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior catalog is malformed or names another release") from exc
@@ -208,10 +222,13 @@ def _read_prior_payloads(store: Path, prior) -> dict[str, bytes]:
                 if path.is_symlink() or not path.is_file():
                     raise ReleaseAssemblyRefusal(
                         "PRIOR_MISMATCH", "a prior model object is missing or unreadable")
-                payloads[member.content_hash] = path.read_bytes()
+                data = path.read_bytes()
             except OSError as exc:
                 raise ReleaseAssemblyRefusal(
                     "PRIOR_MISMATCH", "a prior model object is missing or unreadable") from exc
+            if sha256_bytes(data) != member.content_hash:
+                raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a prior model object is corrupt")
+            payloads[member.content_hash] = data
     return payloads
 
 
@@ -233,6 +250,24 @@ def _publication_lock(store: Path):
 def carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
                           inventory, outputs, chooser: PoolOutput, cutoff: str) -> Path:
     """Verify, re-stage the prior model bindings and write the candidate catalog."""
+    if not isinstance(getattr(inventory, "release_id", None), str):
+        raise ReleaseAssemblyRefusal("INVENTORY_MISMATCH", "inventory is missing or has no release id")
+    try:
+        return _carry_forward_release(release_root, prior_release_id=prior_release_id,
+                                      release_id=release_id, inventory=inventory, outputs=outputs,
+                                      chooser=chooser, cutoff=cutoff)
+    except ReleaseAssemblyRefusal:
+        raise
+    except OSError as exc:
+        raise ReleaseAssemblyRefusal(
+            "PUBLICATION_FAILED", "a filesystem error occurred while assembling the release") from exc
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise ReleaseAssemblyRefusal(
+            "PRIOR_MISMATCH", "prior catalog rows or identity are malformed") from exc
+
+
+def _carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
+                           inventory, outputs, chooser: PoolOutput, cutoff: str) -> Path:
     root = Path(release_root)
     store = deployment_root(root)
     try:
@@ -246,9 +281,9 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
     except ReleaseLayoutError as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release is not a verified staged release") from exc
 
-    body = derive_catalog(prior_catalog, release_id=release_id,
-                          expected_prior_release_id=prior_release_id,
-                          outputs=outputs, chooser=chooser, cutoff=cutoff)
+    body = _derive_catalog(prior_catalog, release_id=release_id,
+                           expected_prior_release_id=prior_release_id,
+                           outputs=outputs, chooser=chooser, cutoff=cutoff)
     if inventory.release_id != release_id:
         raise ReleaseAssemblyRefusal("ID_CONFLICT", "inventory release id does not match the candidate")
 
@@ -266,9 +301,13 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
         try:
             deployment.stage_release(store, candidate, inventory, payloads)
         except deployment.StagingRefused as exc:
-            if any(issue.code == "RELEASE_ID_REUSED" for issue in exc.issues):
+            codes = {issue.code for issue in exc.issues}
+            if codes & {"RELEASE_ID_REUSED", "MANIFEST_UNREADABLE"}:
                 raise ReleaseAssemblyRefusal(
                     "ID_CONFLICT", "candidate release id is already staged with different content") from exc
+            if codes & {"MISSING_MEMBER_PAYLOAD", "PAYLOAD_HASH_MISMATCH"}:
+                raise ReleaseAssemblyRefusal(
+                    "PRIOR_MISMATCH", "a prior model payload is missing or corrupt") from exc
             raise ReleaseAssemblyRefusal(
                 "INVENTORY_MISMATCH",
                 "inventory is incomplete or incompatible with the prior release") from exc
@@ -276,10 +315,9 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
             raise ReleaseAssemblyRefusal(
                 "INVENTORY_MISMATCH",
                 "inventory is incomplete or incompatible with the prior release") from exc
-        except (deployment.DeploymentError, OSError, ValueError) as exc:
+        except deployment.DeploymentError as exc:
             raise ReleaseAssemblyRefusal(
-                "INVENTORY_MISMATCH",
-                "inventory is incomplete or incompatible with the prior release") from exc
+                "ID_CONFLICT", "candidate staged manifest is corrupt or conflicting") from exc
 
         try:
             _verify_staged(store, release_id)

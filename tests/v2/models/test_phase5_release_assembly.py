@@ -4,6 +4,8 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import threading
+import time
 
 import pytest
 
@@ -203,32 +205,47 @@ def test_prior_mismatch_on_edited_prior_catalog(tmp_path, mode):
     assert not _candidate_path(tmp_path).exists()
 
 
-@pytest.mark.parametrize("mutate", [
-    lambda outputs: outputs[:5],
-    lambda outputs: [*outputs, outputs[0]],
-    lambda outputs: [dataclasses.replace(outputs[0], content_hash="sha256:nothex"), *outputs[1:]],
-], ids=["five-outputs", "duplicate", "malformed-hash"])
-def test_pool_set_mismatch(tmp_path, mutate):
-    _, prior_body = _stage_prior(tmp_path)
-    args = _valid_derive_args(tmp_path)
-    args["outputs"] = mutate(args["outputs"])
-    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
-        assembly.derive_catalog(prior_body, **args)
-    assert error.value.code == "POOL_SET_MISMATCH"
-    assert not _candidate_path(tmp_path).exists()
+def _replace_output(args, **changes):
+    outputs = list(args["outputs"])
+    outputs[0] = dataclasses.replace(outputs[0], **changes)
+    return {**args, "outputs": outputs}
 
 
-@pytest.mark.parametrize("mutate", [
-    lambda chooser: dataclasses.replace(chooser, member_id="admissible_table:dyn_sv"),
-    lambda chooser: "not-a-pool-output",
-], ids=["wrong-member", "not-a-pool-output"])
-def test_chooser_mismatch(tmp_path, mutate):
+def _replace_chooser(args, **changes):
+    return {**args, "chooser": dataclasses.replace(args["chooser"], **changes)}
+
+
+_POOL_REFUSALS = [
+    (lambda a: {**a, "outputs": "not-a-sequence"}, "POOL_SET_MISMATCH"),
+    (lambda a: {**a, "outputs": a["outputs"][:5]}, "POOL_SET_MISMATCH"),
+    (lambda a: {**a, "outputs": [*a["outputs"], a["outputs"][0]]}, "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, content_hash="sha256:nothex"), "POOL_SET_MISMATCH"),
+    (lambda a: {**a, "outputs": [*a["outputs"][:5], "not-an-output"]}, "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, member_id=5), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, member_id=["x"]), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, name=""), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, payload_bytes=-1), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, payload_bytes=True), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, payload_bytes="12"), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_chooser(a, member_id="admissible_table:dyn_sv"), "CHOOSER_MISMATCH"),
+    (lambda a: {**a, "chooser": "not-a-pool-output"}, "CHOOSER_MISMATCH"),
+    (lambda a: _replace_chooser(a, content_hash="sha256:nothex"), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_chooser(a, name=""), "CHOOSER_MISMATCH"),
+    (lambda a: _replace_chooser(a, payload_bytes=-1), "CHOOSER_MISMATCH"),
+]
+
+
+@pytest.mark.parametrize("mutate, code", _POOL_REFUSALS, ids=[
+    "outputs-not-a-sequence", "five-outputs", "duplicate", "malformed-hash", "element-not-a-pool-output",
+    "member-id-int", "member-id-list", "empty-name", "negative-bytes", "bool-bytes", "str-bytes",
+    "chooser-wrong-member", "chooser-not-a-pool-output", "chooser-bad-hash", "chooser-empty-name",
+    "chooser-bad-bytes"])
+def test_derive_catalog_rejects_malformed_outputs(tmp_path, mutate, code):
     _, prior_body = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
-    args["chooser"] = mutate(args["chooser"])
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
-        assembly.derive_catalog(prior_body, **args)
-    assert error.value.code == "CHOOSER_MISMATCH"
+        assembly.derive_catalog(prior_body, **mutate(args))
+    assert error.value.code == code
     assert not _candidate_path(tmp_path).exists()
 
 
@@ -360,11 +377,14 @@ def test_retry_restages_a_deleted_candidate_manifest(tmp_path):
     path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                           inventory=inventory, **_carry_kwargs(args))
     published = path.read_bytes()
-    deployment._manifest_path(phase5_release.deployment_root(tmp_path), "cand1").unlink()
+    store = phase5_release.deployment_root(tmp_path)
+    deployment._manifest_path(store, "cand1").unlink()
     again = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                            inventory=inventory, **_carry_kwargs(args))
     assert again == path
     assert again.read_bytes() == published
+    resolved = deployment.resolve_release(store, "cand1")
+    assert dataclasses.replace(resolved, release_id="prior1") == deployment.resolve_release(store, "prior1")
 
 
 def test_prior_mismatch_when_prior_model_object_is_deleted(tmp_path):
@@ -394,3 +414,120 @@ def test_id_conflict_when_candidate_content_changes_on_retry(tmp_path):
                                        inventory=inventory, **_carry_kwargs(other))
     assert error.value.code == "ID_CONFLICT"
     assert path.read_bytes() == published
+
+
+def _gate(real_stage, entered, proceed, first):
+    def wrapper(*args, **kwargs):
+        if not first["done"]:
+            first["done"] = True
+            entered.set()
+            assert proceed.wait(10)
+        return real_stage(*args, **kwargs)
+    return wrapper
+
+
+def test_publication_lock_serialises_concurrent_same_candidate(tmp_path, monkeypatch):
+    inventory, prior_body = _stage_prior(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    args_x = _valid_derive_args(tmp_path, prefix="x")
+    args_y = _valid_derive_args(tmp_path, prefix="y", cutoff="2026-10-02")
+    entered, proceed, first = threading.Event(), threading.Event(), {"done": False}
+    real_stage = assembly.deployment.stage_release
+    monkeypatch.setattr(assembly.deployment, "stage_release", _gate(real_stage, entered, proceed, first))
+    results = {}
+
+    def run(tag, kwargs):
+        try:
+            results[tag] = assembly.carry_forward_release(
+                tmp_path, prior_release_id="prior1", release_id="cand1",
+                inventory=inventory, **_carry_kwargs(kwargs))
+        except BaseException as exc:
+            results[tag] = exc
+
+    a = threading.Thread(target=run, args=("a", args_x))
+    a.start()
+    assert entered.wait(10)
+    b = threading.Thread(target=run, args=("b", args_y))
+    b.start()
+    time.sleep(0.5)
+    assert b.is_alive()
+    proceed.set()
+    a.join(20)
+    b.join(20)
+    assert not a.is_alive() and not b.is_alive()
+    assert results["a"] == _candidate_path(tmp_path)
+    assert isinstance(results["b"], assembly.ReleaseAssemblyRefusal)
+    assert results["b"].code == "ID_CONFLICT"
+    assert phase5_release._read_catalog(_candidate_path(tmp_path), "cand1") == _expected_catalog(
+        prior_body, args_x, "cand1")
+
+
+def _corrupt_candidate_manifest(root, args, monkeypatch):
+    _stage_other_candidate_release(root)
+    store = phase5_release.deployment_root(root)
+    deployment._manifest_path(store, "cand1").write_bytes(b"garbage manifest")
+
+
+def _corrupt_prior_payload(root, args, monkeypatch):
+    store = phase5_release.deployment_root(root)
+    prior = deployment.resolve_release(store, "prior1")
+    (store / prior.bindings[0].members[0].path).write_bytes(b"tampered bytes")
+
+
+def _lock_is_directory(root, args, monkeypatch):
+    (phase5_release.deployment_root(root) / ".carry_forward.lock").mkdir()
+
+
+def _staging_oserror(root, args, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(assembly.deployment, "stage_release", boom)
+
+
+def _symlink_supplied_object(root, args, monkeypatch):
+    store = phase5_release.deployment_root(root)
+    path = store / phase5_release.object_relpath(args["outputs"][0].content_hash)
+    target = root / "valid-object.bin"
+    target.write_bytes(b"valid payload")
+    path.unlink()
+    path.symlink_to(target)
+
+
+def _symlink_prior_payload(root, args, monkeypatch):
+    store = phase5_release.deployment_root(root)
+    member_path = store / deployment.resolve_release(store, "prior1").bindings[0].members[0].path
+    target = root / "prior-copy.bin"
+    target.write_bytes(member_path.read_bytes())
+    member_path.unlink()
+    member_path.symlink_to(target)
+
+
+@pytest.mark.parametrize("setup, code", [
+    (_corrupt_candidate_manifest, "ID_CONFLICT"),
+    (_corrupt_prior_payload, "PRIOR_MISMATCH"),
+    (_lock_is_directory, "PUBLICATION_FAILED"),
+    (_staging_oserror, "PUBLICATION_FAILED"),
+    (_symlink_supplied_object, "OBJECT_UNVERIFIED"),
+    (_symlink_prior_payload, "PRIOR_MISMATCH"),
+], ids=["corrupt-manifest", "corrupt-prior-payload", "lock-is-directory", "staging-oserror",
+        "supplied-object-symlink", "prior-payload-symlink"])
+def test_refusal_classification(tmp_path, setup, code, monkeypatch):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    setup(tmp_path, args, monkeypatch)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == code
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_inventory_none_is_inventory_mismatch(tmp_path):
+    _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=None, **_carry_kwargs(args))
+    assert error.value.code == "INVENTORY_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()

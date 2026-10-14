@@ -130,9 +130,13 @@ chooser disagrees with `cutoff`), `CHOOSER_MISMATCH` (wrong member id),
 `OBJECT_UNVERIFIED` (object missing or its bytes do not hash to the claim),
 `ID_CONFLICT` (candidate id empty, unsafe, equal to the prior's, or already
 exists with different content), `INVENTORY_MISMATCH` (inventory incomplete or
-incompatible with the prior bindings). Missing prior model objects refuse
-`PRIOR_MISMATCH`; no upstream exception escapes raw. The helpers have no
-production caller yet.
+incompatible with the prior bindings), `PUBLICATION_FAILED` (a filesystem or
+lock failure while publishing; the inputs are not at fault). A missing or
+corrupt prior model object, or malformed prior catalog rows, refuse
+`PRIOR_MISMATCH`; a corrupt or different existing candidate manifest refuses
+`ID_CONFLICT`. No upstream exception escapes raw: the public functions
+translate any stray `OSError`/`KeyError`/`TypeError`/`AttributeError` at the
+boundary. The helpers have no production caller yet.
 
 Every call re-runs all validation, including when an identical candidate
 catalog already exists; the staging and catalog write run under one exclusive
@@ -141,10 +145,10 @@ calls the loser refuses `ID_CONFLICT`.
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | Prior release, each output, chooser row, identities, hashes and cutoff validated before any write |
+| R1 verified input | Prior release, each output, chooser row, identities, hashes, cutoff, inventory identity and prior model payload hashes validated before any candidate artifact is written |
 | R2 cache | None; the prior catalog, staged manifest and objects are re-read each call |
 | R3 retry | Repeatable only with the same validated inputs; no fallback to old pools or live registries |
-| R4 transaction | Writes only under the new candidate id; objects are content-addressed |
+| R4 transaction | Candidate artifacts are written only under the new candidate id (objects are content-addressed); the only other write is the `deployment/.carry_forward.lock` coordination file |
 | R5 partial failure | Orphaned objects or a staged manifest without a catalog may remain; no catalog, no candidate, nothing promoted |
 | R6 idempotency | Identical inputs give identical catalog bytes (no clock in the catalog); same id with different content refuses `ID_CONFLICT` |
 
