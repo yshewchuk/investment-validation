@@ -69,6 +69,7 @@ class _FakeRepository:
         self._snapshot = snapshot
         self._contracts = contracts
         self._batches = batches_by_key
+        self.queries: list = []
 
     def resolve(self, snapshot_id: str) -> SnapshotRef:
         assert snapshot_id == self._snapshot.snapshot_id
@@ -103,6 +104,7 @@ class _FakeRepository:
                    for row in rows if _bound_row_selected(row, key_filter, time_interval))
 
     def scan(self, query, *, table_name):
+        self.queries.append(query)
         ticker = query.key_filter[0].values[0]
         rows = self._batches.get((table_name, ticker), [])
         selected = [row for row in rows if _bound_row_selected(
@@ -632,6 +634,26 @@ def test_22_computed_projection_names_available_as_of_date_and_only_real_columns
     assert set(panel_row_inputs._COMPUTED_COLUMNS) <= real_columns
 
 
+def test_22b_computed_moves_emitted_projection_is_the_pinned_literal_tuple():
+    """The DataQuery the scan actually emits for ``computed_moves`` projects
+    exactly these columns, in this order -- the permissive ``_FakeRepository``
+    never validates column names against the contract, so a rename or reorder
+    would otherwise pass every other test in this file."""
+    snapshot = _snapshot()
+    repo = _FakeRepository(snapshot, _contracts(), _default_batches())
+    scan_panel_row(repo, snapshot, _key(), history_start=_HISTORY_START,
+                   decision_session=_DECISION)
+    computed = [query for query in repo.queries
+                if "realized_move_pct" in query.columns]
+    assert len(computed) == 1
+    query = computed[0]
+    assert query.key_filter[0].values == ("AAA",)
+    assert query.columns == (
+        "ticker", "event_date", "realized_move_pct", "skipped",
+        "available_as_of_date", "event_ordinal", "admitted", "implied_move_pct",
+        "mean_prior_or_implied", "n_prior_implied")
+
+
 # --------------------------------------------------------------------------
 # staged-input presence contract (nightly_source_bundle)
 # --------------------------------------------------------------------------
@@ -1137,6 +1159,12 @@ def _without_implied_columns():
     return dataclasses.replace(COMPUTED_MOVES_CONTRACT, columns=kept)
 
 
+def _without_implied_column(removed):
+    kept = tuple(column for column in COMPUTED_MOVES_CONTRACT.columns
+                 if column.name != removed)
+    return dataclasses.replace(COMPUTED_MOVES_CONTRACT, columns=kept)
+
+
 def test_39_v3_contract_missing_implied_columns_refuses_even_with_empty_window():
     contracts = {**_contracts(), COMPUTED_MOVES_TABLE_NAME: _without_implied_columns()}
     snapshot = _snapshot()
@@ -1146,7 +1174,9 @@ def test_39_v3_contract_missing_implied_columns_refuses_even_with_empty_window()
         scan_panel_row(repo, snapshot, _key(), history_start=_HISTORY_START,
                        decision_session=_DECISION)
     assert exc.value.code == "CONTRACT_MISMATCH"
-    assert "mean_prior_or_implied" in exc.value.problem.details["missing_columns"]
+    assert exc.value.problem.details == {
+        "table_name": COMPUTED_MOVES_TABLE_NAME,
+        "missing_columns": list(panel_row_inputs._IMPLIED_COLUMNS)}
 
     # The zero-day window short-circuits the query but never the validation.
     batches = _default_batches()
@@ -1157,7 +1187,23 @@ def test_39_v3_contract_missing_implied_columns_refuses_even_with_empty_window()
         scan_panel_row(repo, snapshot, _key(), history_start=_DECISION,
                        decision_session=_DECISION)
     assert exc.value.code == "CONTRACT_MISMATCH"
-    assert "mean_prior_or_implied" in exc.value.problem.details["missing_columns"]
+    assert exc.value.problem.details == {
+        "table_name": COMPUTED_MOVES_TABLE_NAME,
+        "missing_columns": list(panel_row_inputs._IMPLIED_COLUMNS)}
+
+
+@pytest.mark.parametrize("removed", panel_row_inputs._IMPLIED_COLUMNS)
+def test_39b_v3_contract_missing_each_implied_column_refuses(removed):
+    contracts = {**_contracts(),
+                 COMPUTED_MOVES_TABLE_NAME: _without_implied_column(removed)}
+    snapshot = _snapshot()
+    repo = _FakeRepository(snapshot, contracts, _default_batches())
+    with pytest.raises(DataError) as exc:
+        scan_panel_row(repo, snapshot, _key(), history_start=_HISTORY_START,
+                       decision_session=_DECISION)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {
+        "table_name": COMPUTED_MOVES_TABLE_NAME, "missing_columns": [removed]}
 
 
 def test_40_row_missing_an_implied_key_refuses():
@@ -1168,19 +1214,24 @@ def test_40_row_missing_an_implied_key_refuses():
     with pytest.raises(DataError) as exc:
         _scan(batches=batches)
     assert exc.value.code == "CONTRACT_MISMATCH"
-    assert "n_prior_implied" in exc.value.problem.details["missing_columns"]
+    assert exc.value.problem.details == {
+        "table_name": COMPUTED_MOVES_TABLE_NAME,
+        "missing_columns": ["n_prior_implied"]}
 
 
-@pytest.mark.parametrize("overrides", [
-    {"admitted": 1},
-    {"n_prior_implied": -1},
-    {"n_prior_implied": True},
-    {"mean_prior_or_implied": float("nan"), "n_prior_implied": 1},
-    {"implied_move_pct": float("inf")},
-    {"mean_prior_or_implied": None, "n_prior_implied": 2},
-    {"mean_prior_or_implied": 3.0, "n_prior_implied": 0},
+@pytest.mark.parametrize("overrides,field", [
+    ({"admitted": 1}, "admitted"),
+    ({"n_prior_implied": -1, "mean_prior_or_implied": 2.0}, "n_prior_implied"),
+    ({"n_prior_implied": True, "mean_prior_or_implied": 2.0}, "n_prior_implied"),
+    ({"n_prior_implied": 1.5, "mean_prior_or_implied": 2.0}, "n_prior_implied"),
+    ({"n_prior_implied": "2", "mean_prior_or_implied": 2.0}, "n_prior_implied"),
+    ({"mean_prior_or_implied": float("nan"), "n_prior_implied": 1},
+     "mean_prior_or_implied"),
+    ({"implied_move_pct": float("inf")}, "implied_move_pct"),
+    ({"mean_prior_or_implied": None, "n_prior_implied": 2}, "mean_prior_or_implied"),
+    ({"mean_prior_or_implied": 3.0, "n_prior_implied": 0}, "mean_prior_or_implied"),
 ])
-def test_41_bad_implied_values_refuse(overrides):
+def test_41_bad_implied_values_refuse(overrides, field):
     batches = _default_batches()
     kwargs = {"admitted": True, **overrides}
     row = _implied_row("2024-01-10", 1.0, False, **kwargs)
@@ -1188,6 +1239,7 @@ def test_41_bad_implied_values_refuse(overrides):
     with pytest.raises(DataError) as exc:
         _scan(batches=batches)
     assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details["field"] == field
 
 
 def test_42_bundle_presence_of_stored_implied_mean():
@@ -1222,3 +1274,18 @@ def test_43_implied_columns_are_in_the_projection_and_real_contract():
     for name in panel_row_inputs._IMPLIED_COLUMNS:
         assert name in panel_row_inputs._COMPUTED_COLUMNS
         assert name in real_columns
+
+
+def test_44_implied_carry_ignores_a_late_availability_that_history_respects():
+    batches = _default_batches()
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = [
+        _implied_row("2024-01-10", 1.0, False, admitted=True,
+                     available_as_of_date="2024-03-01",
+                     mean_prior_or_implied=2.0, n_prior_implied=1,
+                     implied_move_pct=4.0)]
+    panel = _scan(batches=batches).panel_row
+    # (m*n + i) / (n + 1) = (2.0*1 + 4.0) / (1 + 1) = 3.0, even though the
+    # row's availability is after the 2024-02-14 decision (so it never feeds
+    # the prior history).
+    assert panel["mean_prior_or_implied"] == pytest.approx(3.0)
+    assert panel["n_prior"] == 0

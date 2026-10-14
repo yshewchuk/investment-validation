@@ -558,7 +558,7 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
     changed_bytes = json.dumps(
         changed_events, sort_keys=True, separators=(",", ":")).encode("utf-8")
     assert hashlib.sha256(changed_bytes).hexdigest() != (
-        "e43a8af415afe25b5048fbadca2e314f0eceb131ebea32d74936f32dcb8ec705"), (
+        "4d5a12389ad105096b6a7cb3e0198b4f03003ba5490cfc7e3de4391a88762ccc"), (
         "changing a consumed SPY value must break the pinned event digest")
     assert changed_repository.spy_reads == 1
 

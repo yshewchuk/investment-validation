@@ -164,12 +164,10 @@ is 1.0 when `or_implied` is present and above 0, else 0.0
 `computed_moves.v4` columns (`event_ordinal`, `admitted`, `implied_move_pct`,
 `mean_prior_or_implied`, `n_prior_implied`), never computed from history per
 run (platform rule, #651). The scored event has no row of its own, so the
-value is one carry step from the latest row strictly before
-`min(event_day, decision_session)` (any `skipped`/availability state; implied
-quotes are anchored before their own event): a non-admitted row gives `None`;
-an admitted row with stored mean `m` over `n` values and its own implied `i`
-gives `i` when `n=0`, `m` when `i` is null, else `(m*n+i)/(n+1)`; no row gives
-`None`. A null value is the key present with `None`, so it is never reported
+value carries the latest row strictly before
+`min(event_day, decision_session)` forward by one event (any `skipped`/availability
+state; implied quotes are anchored before their own event). It is `None` when
+that row is not admitted or no row exists. A null value is the key present with `None`, so it is never reported
 as a missing feature.
 It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
