@@ -143,9 +143,12 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   gap stops the run with `NightlyStop` carrying a typed code
   (`TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET`, `TIER4_GAP_REMAINS`) as the
   start of its detail; exit 1, nothing scored or published, so no snapshot is
-  produced for that night. The native import then finds no snapshot session
-  for the night (`nightly_trigger` returns `not_yet` when the selected session
-  is not the night's `as_of`) and does not run on a gapped Tier-4. Idempotent: a rerun with no gap skips the repair. The budget is
+  produced for that night: the incremental rebuild runs with `finalize=False`
+  (`engine.data.rebuild`), and `finalize_rebuild` writes the manifest and
+  SNAPSHOT only once the gap check passes (the repair's own full rebuild
+  finalizes by default). The native import reads the SNAPSHOT date, finds no
+  session for the night (`nightly_trigger` returns `not_yet`) and does not run
+  on a gapped Tier-4. Idempotent: a rerun with no gap skips the repair. The budget is
   checked after the rebuild returns, not enforced mid-run.
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.

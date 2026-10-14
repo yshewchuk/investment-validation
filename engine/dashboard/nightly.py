@@ -815,10 +815,16 @@ def _repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time)
 
 
 def _repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
-                                rebuild_tables, *, clock=time.time) -> None:
+                                rebuild_tables, *, clock=time.time,
+                                finalize=None) -> None:
     gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
     if _tier4_gap_partial_flag(gap_fill) is not None:
         _repair_tier4_gap(report, rebuild_tables, clock=clock)
+    elif finalize is not None:
+        # No gap: the incremental result is sound, so write its snapshot now.
+        # The nightly passes finalize=False to the incremental rebuild for
+        # exactly this reason — a refused repair must leave no snapshot behind.
+        finalize(tier_result)
 
 
 def _panel_staleness_flags(as_of) -> list[dict]:
@@ -1382,7 +1388,7 @@ def run_nightly(
     # which is wrong but visible; a nightly that refuses to render leaves the
     # board dark, which is worse and less visible.
     if refresh and tiers:
-        from engine.data.rebuild import rebuild as rebuild_tables
+        from engine.data.rebuild import rebuild as rebuild_tables, finalize_rebuild
 
         # -- 2b(i). realized moves, the layer BOTH tiers are derived from ----
         # Rebuilding Tier 3/4 without this cannot advance coverage by a day:
@@ -1440,7 +1446,12 @@ def run_nightly(
             # onward stale ... so a partial Tier-3 rebuild must be followed by
             # --since D". The nightly passed nothing and rebuilt ~100 monthly
             # folds x 4 producers from 2018 every night to absorb one day.
-            tier_result = rebuild_tables(("panel", "tier4"), tier4_since=moves_since)
+            #
+            # finalize=False: the snapshot is written only after the Tier-4 gap
+            # check below passes (or the full repair finalizes it). That is what
+            # keeps a night whose repair is refused from leaving a snapshot for
+            # the native import to read.
+            tier_result = rebuild_tables(("panel", "tier4"), tier4_since=moves_since, finalize=False)
             report.steps["tiers"] = {
                 "rebuilt": ["panel", "tier4"],
                 "tier4_since": moves_since,
@@ -1463,7 +1474,8 @@ def run_nightly(
         # A typed TIER4_* stop from the repair propagates (it is not the
         # "degraded" path above), so the run fails before score or import.
         if tier_result is not None and "degraded" not in report.steps.get("tiers", {}):
-            _repair_tier4_gap_if_needed(report, tier_result, rebuild_tables)
+            _repair_tier4_gap_if_needed(report, tier_result, rebuild_tables,
+                                        finalize=finalize_rebuild)
 
         # -- 2b(ii). did any of that actually advance? ----------------------
         # The failure this exists for was silent: the pull wrote nothing, the

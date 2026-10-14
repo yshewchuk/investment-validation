@@ -34,7 +34,7 @@ from engine.data.features import tier4 as tier4_mod
 from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n_securities, n_trades
 from engine.data.rebuild_cache import InputCache
 
-__all__ = ["rebuild", "RebuildResult", "TABLE_ORDER"]
+__all__ = ["rebuild", "finalize_rebuild", "RebuildResult", "TABLE_ORDER"]
 
 #: ``daily_market`` before ``securities`` (which is derived from it) and before
 #: the panel (which joins it).
@@ -56,6 +56,10 @@ class RebuildResult:
     reports: dict = field(default_factory=dict)
     snapshot: str | None = None
     elapsed_s: float = 0.0
+    #: The wall-clock start of the build, stashed so a caller that rebuilds the
+    #: tables with ``finalize=False`` can finalize later (see
+    #: :func:`finalize_rebuild`). Not serialised: ``as_dict`` enumerates fields.
+    started: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -460,6 +464,7 @@ def rebuild(
     sample: int | None = None,
     tier4_since=None,
     incremental: bool = False,
+    finalize: bool = True,
 ) -> RebuildResult:
     """Rebuild the named tables.
 
@@ -471,6 +476,12 @@ def rebuild(
     ``sample`` cannot be combined with ``incremental``: a sampled run sees only
     part of the inputs, so committing its manifest would prune the cache of
     every input the sample skipped.
+
+    ``finalize=False`` returns after the builders, leaving the manifest and
+    snapshot unwritten and stashing ``started`` on the result for a later
+    :func:`finalize_rebuild`. A caller that must not publish a snapshot for a
+    bad build (the nightly, on a gapped Tier-4) uses this and only finalizes
+    once the result checks out; the default path is unchanged.
     """
     if incremental and sample:
         raise ValueError("--sample cannot be combined with --incremental")
@@ -495,6 +506,20 @@ def rebuild(
             continue
         result.reports[name] = builders[name]()
 
+    result.started = started
+    if not finalize:
+        return result
+    return finalize_rebuild(result)
+
+
+def finalize_rebuild(result: RebuildResult) -> RebuildResult:
+    """Write the manifest and snapshot for a built result and stamp elapsed.
+
+    Split from :func:`rebuild` so a caller can build the tables first and only
+    publish a snapshot after deciding the result is sound -- the nightly
+    defers finalizing the incremental Tier-3/4 build until the Tier-4 gap check
+    passes, so a night whose full repair is refused leaves no snapshot behind.
+    """
     _banner("manifest + snapshot")
     stats = manifest.collect_stats()
     result.tables = stats
@@ -503,7 +528,7 @@ def rebuild(
     print(f"  snapshot {result.snapshot}", flush=True)
     print(f"  manifest {manifest_path}", flush=True)
 
-    result.elapsed_s = time.time() - started
+    result.elapsed_s = time.time() - result.started
     print(f"\nrebuild complete in {result.elapsed_s:.0f}s", flush=True)
     return result
 

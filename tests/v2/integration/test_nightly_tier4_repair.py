@@ -8,9 +8,13 @@ and ``steps.tiers.tier4_repair`` records the repair. The repair raising,
 exceeding its wall-clock budget, or leaving the gap stops the run with a
 typed code; a night with no gap skips the repair entirely.
 
+The snapshot is deferred: the incremental rebuild runs with
+``finalize=False`` and the snapshot is written only once the gap check passes
+(or the full repair finalizes it). A night whose repair is refused therefore
+leaves no snapshot for the native import to read.
+
 Every rebuild here is a synthetic fake — no real Tier-3/Tier-4 rebuild runs.
-Driving ``run_nightly`` end-to-end needs a full store, ledger and scorer, so
-these unit-test ``_repair_tier4_gap`` (and the call-site guard) directly.
+The orchestration cases drive ``run_nightly`` with every heavy step patched.
 """
 # packages: engine.v2.dashboard
 
@@ -43,6 +47,11 @@ def _result(gap_fill: dict) -> SimpleNamespace:
 def _gapped() -> dict:
     return {"pred_abs_move": {"out_of_window_gap": [
         {"ticker": "AAPL", "event_date": "2026-10-01"}]}}
+
+
+# --------------------------------------------------------------------------
+# the repair helper, directly
+# --------------------------------------------------------------------------
 
 
 def test_planted_gap_runs_a_full_rebuild_and_records_the_repair():
@@ -89,8 +98,7 @@ def test_repair_that_still_leaves_the_gap_stops_the_run():
     assert "pred_abs_move" in caught.value.detail
 
 
-@pytest.mark.parametrize("elapsed", [99.0, 100.0, 101.0])
-def test_repair_budget_is_measured_on_the_injected_clock(monkeypatch, elapsed):
+def test_repair_budget_reports_the_complete_detail_string(monkeypatch):
     from engine.dashboard import nightly
 
     monkeypatch.setattr(nightly, "TIER4_REPAIR_BUDGET_S", 100)
@@ -98,79 +106,296 @@ def test_repair_budget_is_measured_on_the_injected_clock(monkeypatch, elapsed):
     def fake_rebuild_tables(tables, **kwargs):
         return _result({})
 
-    readings = iter([0, elapsed])
+    readings = iter([0, 101.0])
     report = _report()
 
-    if elapsed > 100:
-        with pytest.raises(NightlyStop) as caught:
-            _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings))
-        assert caught.value.step == "tier4_repair"
-        assert caught.value.detail.startswith("TIER4_REPAIR_BUDGET: ")
-    else:
+    with pytest.raises(NightlyStop) as caught:
         _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings))
-        assert report.steps["tiers"]["tier4_repair"]["elapsed_s"] == elapsed
+
+    assert caught.value.step == "tier4_repair"
+    assert caught.value.detail == (
+        "TIER4_REPAIR_BUDGET: full Tier-4 rebuild took 101.0s, over the 100s budget"
+    )
 
 
-def test_a_night_with_no_gap_never_calls_rebuild_a_second_time():
+def test_a_night_with_no_gap_finalizes_the_incremental_result_once():
     report = _report()
     calls = []
+    finalized = []
 
     def fake_rebuild_tables(tables, **kwargs):
         calls.append((tables, kwargs))
         return _result({})
 
-    # The call-site guard from run_nightly's tiers block: the repair runs
-    # only when the incremental build actually left an out-of-window gap.
-    tier_result = fake_rebuild_tables(("panel", "tier4"), tier4_since="2026-10-10")
-    _repair_tier4_gap_if_needed(report, tier_result, fake_rebuild_tables)
+    # The call-site guard from run_nightly's tiers block: the repair runs only
+    # when the incremental build actually left an out-of-window gap.
+    tier_result = fake_rebuild_tables(("panel", "tier4"), tier4_since="2026-10-10",
+                                      finalize=False)
+    _repair_tier4_gap_if_needed(report, tier_result, fake_rebuild_tables,
+                                finalize=finalized.append)
 
     assert len(calls) == 1, "no gap means no second (full) rebuild"
+    assert finalized == [tier_result], "the incremental result is finalized exactly once"
     assert "tier4_repair" not in report.steps["tiers"]
 
 
-def test_an_incremental_result_with_a_gap_runs_the_repair():
+def test_an_incremental_result_with_a_gap_runs_the_repair_without_finalizing():
     report = _report()
     calls = []
+    finalized = []
 
     def fake_rebuild_tables(tables, **kwargs):
         calls.append((tables, kwargs))
         return _result({})  # the repair closed the gap
 
-    _repair_tier4_gap_if_needed(report, _result(_gapped()), fake_rebuild_tables)
+    _repair_tier4_gap_if_needed(report, _result(_gapped()), fake_rebuild_tables,
+                                finalize=finalized.append)
 
     assert calls == [(("tier4",), {"tier4_since": None})], \
         "the repair is Tier-4 only, with no --since"
+    assert finalized == [], \
+        "a repaired gap must not finalize the gapped incremental result"
     assert report.steps["tiers"]["tier4_repair"]["ran"] is True
     assert report.flags == []
+
+
+def test_a_refused_repair_never_finalizes_the_incremental_result():
+    report = _report()
+    finalized = []
+
+    def boom(tables, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    with pytest.raises(NightlyStop) as caught:
+        _repair_tier4_gap_if_needed(report, _result(_gapped()), boom,
+                                    finalize=finalized.append)
+
+    assert caught.value.detail.startswith("TIER4_REPAIR_FAILED: ")
+    assert finalized == [], "a refused repair must leave no snapshot to finalize"
 
 
 def test_rerunning_the_guard_after_a_repair_does_nothing():
     report = _report()
     calls = []
+    finalized = []
 
     def fake_rebuild_tables(tables, **kwargs):
         calls.append((tables, kwargs))
         return _result({})
 
-    _repair_tier4_gap_if_needed(report, _result(_gapped()), fake_rebuild_tables)
-    _repair_tier4_gap_if_needed(report, _result({}), fake_rebuild_tables)
+    _repair_tier4_gap_if_needed(report, _result(_gapped()), fake_rebuild_tables,
+                                finalize=finalized.append)
+    gap_free = _result({})
+    _repair_tier4_gap_if_needed(report, gap_free, fake_rebuild_tables,
+                                finalize=finalized.append)
 
     assert len(calls) == 1, "the rerun's gap-free result must not repair again"
+    assert finalized == [gap_free], "only the gap-free rerun is finalized"
     assert report.steps["tiers"]["tier4_repair"]["ran"] is True
 
 
-def test_repair_call_site_sits_after_the_rebuild_and_outside_its_degraded_handler():
-    from pathlib import Path
+# --------------------------------------------------------------------------
+# rebuild()/finalize_rebuild(): the snapshot is deferred, not written early
+# --------------------------------------------------------------------------
+
+
+def test_rebuild_defers_the_snapshot_until_finalize(monkeypatch):
+    from engine.data import rebuild as rebuild_mod
+
+    writes = []
+    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(rebuild_mod, "build_panel_table", lambda: {"rows": 3})
+    monkeypatch.setattr(rebuild_mod, "build_tier4_table",
+                        lambda since=None: {"rows": 3, "producers": {}})
+    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats",
+                        lambda: {"panel": "hash"})
+    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot",
+                        lambda stats: writes.append(("snapshot", stats)) or "snap-1")
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest",
+                        lambda stats: writes.append(("manifest", stats)) or "manifest-1")
+
+    result = rebuild_mod.rebuild(("panel", "tier4"), finalize=False)
+
+    assert writes == [], "finalize=False must not write the snapshot or manifest"
+    assert result.snapshot is None
+
+    finalize_rebuild = rebuild_mod.finalize_rebuild
+    rebuilt = finalize_rebuild(result)
+
+    assert rebuilt is result
+    assert result.snapshot == "snap-1"
+    assert writes == [("snapshot", {"panel": "hash"}), ("manifest", {"panel": "hash"})]
+
+    writes.clear()
+    default = rebuild_mod.rebuild(("panel", "tier4"))
+
+    assert default.snapshot == "snap-1"
+    assert writes == [("snapshot", {"panel": "hash"}), ("manifest", {"panel": "hash"})], \
+        "the default rebuild path still finalizes exactly once"
+
+
+# --------------------------------------------------------------------------
+# orchestration through run_nightly
+# --------------------------------------------------------------------------
+
+
+class _Scored(Exception):
+    """A private sentinel: raised the moment the scorer is actually consulted."""
+
+
+class _ScorerSentinel:
+    """A scorer stand-in whose every attribute use raises :class:`_Scored`.
+
+    It records that it was touched, so a stopped run can prove the scorer was
+    never reached.
+    """
+
+    def __init__(self):
+        object.__setattr__(self, "touched", False)
+
+    def __getattr__(self, name):
+        object.__setattr__(self, "touched", True)
+        raise _Scored(name)
+
+
+def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls):
+    """Patch everything run_nightly touches up to the scorer.
+
+    Returns ``(nightly, sentinel, calls, captured)`` where ``calls`` records
+    every fake rebuild invocation and ``captured["report"]`` is the
+    ``NightlyReport`` the run built.
+    """
+    import pandas as pd
 
     from engine.dashboard import nightly
+    from engine.data import store
+    from engine.data.pulls import computed_moves
 
-    source = Path(nightly.__file__).read_text()
-    block = source.split("# -- 2b. Tier 3 and Tier 4", 1)[1]
-    block = block.split("# -- earnings-date changes", 1)[0]
+    events = pd.DataFrame({
+        "event_id": pd.Series(dtype="object"),
+        "ticker": pd.Series(dtype="object"),
+        "event_date": pd.Series(dtype="datetime64[ns]"),
+        "session": pd.Series(dtype="object"),
+        "date_conflict": pd.Series(dtype="bool"),
+    })
+    monkeypatch.setattr(store, "read_table", lambda *a, **k: events.copy())
+    monkeypatch.setattr(nightly, "validate_refresh",
+                        lambda *a, **k: [{"name": "no_calendar", "passed": True,
+                                          "detail": "no tickers to validate"}])
+    monkeypatch.setattr(nightly, "_panel_staleness_flags", lambda as_of: [])
+    monkeypatch.setattr(computed_moves, "read_state", lambda: {})
+    monkeypatch.setattr(computed_moves, "target_tickers", lambda **kwargs: ([], {}))
 
-    call = "_repair_tier4_gap_if_needed(report, tier_result, rebuild_tables)"
-    assert call in block
-    call_at = block.index(call)
-    assert call_at > block.index('rebuild_tables(("panel", "tier4")')
-    assert call_at < block.index("_panel_staleness_flags(as_of)")
-    assert call_at > block.index('"kind": "tiers_degraded"')
+    calls = []
+
+    def fake_rebuild(tables, **kwargs):
+        calls.append((tables, kwargs))
+        outcome = rebuild_results.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("engine.data.rebuild.rebuild", fake_rebuild)
+    monkeypatch.setattr("engine.data.rebuild.finalize_rebuild",
+                        lambda result: finalize_calls.append(result))
+
+    captured = {}
+
+    class _RecordingReport(nightly.NightlyReport):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            captured["report"] = self
+
+    monkeypatch.setattr(nightly, "NightlyReport", _RecordingReport)
+
+    return nightly, calls, captured
+
+
+def _run(monkeypatch, tmp_path, *, rebuild_results, finalize_calls):
+    nightly, calls, captured = _patch_run_nightly(
+        monkeypatch, rebuild_results=rebuild_results, finalize_calls=finalize_calls)
+    sentinel = _ScorerSentinel()
+    with pytest.raises(_Scored):
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=[], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+    return calls, sentinel, captured
+
+
+def test_run_nightly_repairs_a_gap_then_scores(monkeypatch, tmp_path):
+    finalize_calls = []
+    calls, sentinel, captured = _run(
+        monkeypatch, tmp_path,
+        rebuild_results=[_result(_gapped()), _result({})],
+        finalize_calls=finalize_calls,
+    )
+
+    assert calls == [
+        (("panel", "tier4"), {"tier4_since": None, "finalize": False}),
+        (("tier4",), {"tier4_since": None}),
+    ], "the incremental build is not finalized; the full repair is"
+    assert finalize_calls == [], "a repaired gap leaves the snapshot to the repair"
+    report = captured.get("report")
+    assert report is not None, "run_nightly never constructed a report"
+    assert report.steps["tiers"]["tier4_repair"]["ran"] is True
+    assert not any(f.get("kind") == "tier4_gap_partial" for f in report.flags)
+    assert sentinel.touched, "the run proceeded to the scorer"
+
+
+def test_run_nightly_stops_when_the_repair_raises(monkeypatch, tmp_path):
+    finalize_calls = []
+    nightly, _calls, _captured = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[_result(_gapped()), RuntimeError("disk on fire")],
+        finalize_calls=finalize_calls,
+    )
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(NightlyStop) as caught:
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=[], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert caught.value.step == "tier4_repair"
+    assert caught.value.detail.startswith("TIER4_REPAIR_FAILED: ")
+    assert not sentinel.touched, "a refused repair must never reach the scorer"
+    assert finalize_calls == [], "a refused repair must leave no snapshot"
+
+
+def test_run_nightly_stops_when_the_repair_leaves_the_gap(monkeypatch, tmp_path):
+    finalize_calls = []
+    nightly, _calls, _captured = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[_result(_gapped()), _result(_gapped())],
+        finalize_calls=finalize_calls,
+    )
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(NightlyStop) as caught:
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=[], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert caught.value.detail.startswith("TIER4_GAP_REMAINS: ")
+    assert not sentinel.touched, "a remaining gap must never reach the scorer"
+    assert finalize_calls == []
+
+
+def test_run_nightly_finalizes_a_gap_free_incremental_result(monkeypatch, tmp_path):
+    finalize_calls = []
+    calls, sentinel, _captured = _run(
+        monkeypatch, tmp_path,
+        rebuild_results=[_result({})],
+        finalize_calls=finalize_calls,
+    )
+
+    assert calls == [(("panel", "tier4"), {"tier4_since": None, "finalize": False})], \
+        "a gap-free night rebuilds once"
+    assert len(finalize_calls) == 1, "the incremental result is finalized once"
+    assert sentinel.touched, "the run proceeded to the scorer"
