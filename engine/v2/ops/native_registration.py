@@ -12,7 +12,8 @@ from engine.v2.foundation import (
     from_document,
     to_document,
 )
-from engine.v2.ops.errors import fail
+from engine.v2.models.training.magnitude import fitted_magnitude_recipe
+from engine.v2.ops.errors import OpsError, fail
 
 
 def verified_registration_bytes(conn, store, run_id, *, expected_ref=None):
@@ -29,7 +30,7 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None):
         ref = from_document(ArtifactRef, evidence["native_registration"])
         if (ref.schema_ref not in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
                                   "native_experiment_registration.v1.2", "native_experiment_registration.v1.3",
-                                  "native_experiment_registration.v1.4")
+                                  "native_experiment_registration.v1.4", "native_experiment_registration.v1.5")
                 or (expected_ref is not None and ref != expected_ref)):
             raise ValueError
         binding = store.read_verified(ref)
@@ -66,6 +67,8 @@ def validate_magnitude_execution(document):
 
 def _magnitude_binding(document):
     """Check stored plan integrity and cross-links, never reconstruct or authorize."""
+    if document["schema_version"] == "native_experiment_registration.v1.5":
+        return _fitted_binding(document)
     if document["schema_version"] == "native_experiment_registration.v1.4":
         return _history_binding(document)
     executable = document["schema_version"] == "native_experiment_registration.v1.3"
@@ -144,6 +147,42 @@ def validate_magnitude_history_execution(document):
     except (KeyError, TypeError, ValueError, OverflowError, ArtifactError):
         pass
     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "history execution requires a sealed v1.4 plan")
+
+
+def magnitude_fitted_execution_document(labels_before, model):
+    """Seal one fixed fitted recipe; arbitrary estimator overrides are unsupported."""
+    try:
+        recipe = fitted_magnitude_recipe(model)
+    except (ValueError, TypeError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "unsupported fitted magnitude model") from None
+    execution = magnitude_history_execution_document(labels_before)
+    execution.pop("empty_history")
+    return {**execution, "schema_version": "magnitude_fitted_execution.v1", "model": model,
+            "features": recipe["features"], "fit_recipe": recipe}
+
+
+def _fitted_binding(document):
+    """Require the literal recipe, then apply the unchanged stored-history proof."""
+    execution = document["magnitude_execution"]
+    try:
+        expected = magnitude_fitted_execution_document(execution["evaluation_labels_before"], execution["model"])
+        if canonical_json(execution) != canonical_json(expected):
+            return False
+    except (KeyError, TypeError, ValueError, OpsError):
+        return False
+    baseline = {**document, "schema_version": "native_experiment_registration.v1.4",
+                "magnitude_execution": magnitude_history_execution_document(execution["evaluation_labels_before"])}
+    return _history_binding(baseline)
+
+
+def validate_magnitude_fitted_execution(document):
+    """Validate closed v1.5 without granting payload access or fitting."""
+    try:
+        if document["schema_version"] == "native_experiment_registration.v1.5" and _fitted_binding(document):
+            return
+    except (KeyError, TypeError, ValueError, OverflowError, ArtifactError):
+        pass
+    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "fitted magnitude execution requires a sealed v1.5 plan")
 
 
 def _history_binding(document):

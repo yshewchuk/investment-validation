@@ -46,7 +46,8 @@ gets fit — see its own package doc reference in the root index. Nothing in
 The research-only `training.magnitude` boundary adds two fixed original-unit
 magnitude recipes and guarded fitting for the native experiment CLI. Ridge's
 median imputation, full missing indicators and scaling learn from training rows
-only; HGB handles nulls natively without a random early-stopping split. Both use
+only; HGB freezes training-all-null columns to zero and routes other nulls natively,
+without a random early-stopping split. Both use
 fresh per-fold/horizon estimators, one numerical thread and finite nonnegative
 predictions. The caller owns protected admission, label qualification and evidence;
 this module receives numeric matrices only and performs no I/O or model release.

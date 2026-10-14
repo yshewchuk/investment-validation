@@ -434,6 +434,8 @@ skip = [
     "*/training/trailing_cutoff.py",
 ]
 tests = [
+    "tests/v2/models/training/test_magnitude_estimators.py",
+    "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_phase5_datasets.py",
     "tests/test_v2_models_recalibration_artifact.py",
@@ -643,6 +645,7 @@ mutate = [
     "engine/v2/ops/experiments.py",
 ]
 tests = [
+    "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
@@ -816,6 +819,7 @@ tests = [
 why = "Catalog-bound native registration verification and immutable user-only final-read spend: forged metadata or a duplicate act must never create authority."
 mutate = ["engine/v2/ops/native_registration.py", "engine/v2/ops/final_holdout.py"]
 tests = [
+    "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
@@ -1089,6 +1093,7 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/research/test_gate_variant.py",
     "tests/v2/research/test_prediction_inputs.py",
     "tests/v2/research/test_event_history.py",

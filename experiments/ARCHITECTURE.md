@@ -155,8 +155,10 @@ There are no caller-supplied hyperparameters, target transforms or search.
 `models.training.magnitude` owns guarded fitting using maintained sklearn APIs.
 Ridge uses training-only median imputation (all-empty columns retain zero),
 all-column missing indicators and StandardScaler before fixed alpha-one Ridge.
-HGB uses squared-error loss, native missingness, fixed seed/iterations and no
-automatic validation split or warm start. Missing features never drop events.
+HGB uses squared-error loss, fixed seed/iterations and no automatic validation
+split or warm start. Training-all-null columns are frozen to zero in train/predict
+matrices; other nulls remain native. This avoids sklearn 1.9.0's empty-bin failure
+without dropping columns or events and without learning from evaluation values.
 Every fold/horizon uses a fresh estimator and only strictly qualified training
 events. Empty history is handled by the declared preprocessing, not mean fallback.
 
@@ -241,7 +243,7 @@ from verified bytes; malformed metadata refuses before ledger or catalog effects
 | R1 invalid specification, R2 unresolved snapshot, or R6 identity conflict | `publish_native_refusal` publishes private evidence only; no result or ledger row. |
 | Empty, directory or symlinked recorded ledger destination | R1 before outcome reservation or ledger access; no default-ledger fallback or conflict evidence. |
 | Publish, replay or export called within an active caller transaction | R1 before path access or artifact/CSV effects; leave the caller transaction unchanged. |
-| Publish, replay or export with metadata-only magnitude v1.2 | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private refusal evidence only, before outcome/report reads or catalog/ledger/export effects. Validated v1.0/v1.1/v1.3/v1.4 are accepted; v1.2 remains registration-only. |
+| Publish, replay or export with metadata-only magnitude v1.2 | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private refusal evidence only, before outcome/report reads or catalog/ledger/export effects. Validated v1.0/v1.1/v1.3/v1.4/v1.5 are accepted; v1.2 remains registration-only. |
 | Admitted R3 look-ahead or R5 holdout denial | Immutable refusal and `refused` row, unless smoke; no current-attempt report. |
 | Admitted R4 variant failure | Immutable refusal and `failed` row, unless smoke; no current-attempt report. |
 | Same canonical registration/result/destination repeated, including tuple/list-equivalent refusal details | Reuse the first outcome and date; reconcile one terminal CSV row per experiment/variant identity without refitting. |

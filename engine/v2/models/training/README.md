@@ -77,7 +77,7 @@ are not saved, so they cannot be re-bucketed). The real-data dataset
 builders for these and for the calibration recipes live in
 `tools/phase5_datasets.py` (legacy readers stay outside `engine/v2`).
 
-<!-- public-interface: build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool -->
+<!-- public-interface: fitted_magnitude_recipe, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool -->
 
 ## Consumers
 
@@ -85,10 +85,12 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-`engine.v2.ops` imports `TrainingRefused` from this package (to map a
-refused training receipt to a typed `OpsError`); no other v2 package
+`engine.v2.ops` imports `TrainingRefused` (to map a refused training receipt to a
+typed `OpsError`) and `fitted_magnitude_recipe` for registration; no other v2 package
 imports this one, and none below layer 6 may. The real-data entry point is
 `tools/phase5_training_job.py`, which is not a v2 package.
+
+`experiments/magnitude_fitted.py` consumes `fit_magnitude_predictions` after native admission.
 
 <!-- consumers: engine.v2.ops -->
 
