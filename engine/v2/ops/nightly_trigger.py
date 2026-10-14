@@ -793,7 +793,8 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
     through to generation. If ABSENT (still with no explicit ``tickers``), the universe is the
     shadow snapshot's own event tickers (``snapshot_event_tickers`` on the same pinned head
     ``expected_shadow_snapshot_id`` names; the catalog connection closes in ``finally``), and
-    that result is both ``universe`` and ``context``. The override file is NOT cross-checked
+    that result is ``universe`` and, when no explicit ``context_tickers`` were supplied, also
+    ``context`` (a caller-supplied context is preserved). The override file is NOT cross-checked
     against the snapshot — when no explicit ``tickers`` were supplied the file wins, and the
     later score stage already refuses planned keys with no observed row. The existing refresh +
     ``_default_plan`` path continues unchanged (``_default_plan`` still passes
