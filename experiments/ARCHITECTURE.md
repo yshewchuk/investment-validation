@@ -176,6 +176,7 @@ Registration/replay never fit. Native smoke/recorded publication remains unchang
 | Unknown recipe or missing magnitude/history inputs | `INVALID_EXPERIMENT_SPEC` before repository admission; CLI parser errors exit 2 before store access. |
 | Changed recipe, parameter, feature order, preprocessing, source or pin | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; no implicit registration or fit. |
 | Invalid fit arrays, estimator failure, wrong-shaped/nonfinite predictions | `EXPERIMENT_VARIANT_FAILED`; no partial successful report or baseline fallback. |
+| A no-fit guard raises `RuntimeFitForbidden` (v2 or legacy type) during a fit | Propagates unchanged; it is never converted to `EXPERIMENT_VARIANT_FAILED`. |
 | Missing/late evaluation labels or empty qualified training | Existing whole-assessment refusal; no row dropping or horizon omission. |
 | v1.5 final-request preparation | `INVALID_EXPERIMENT_SPEC`; no final-read authority. |
 
