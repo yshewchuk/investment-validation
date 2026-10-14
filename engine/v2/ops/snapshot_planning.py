@@ -159,7 +159,7 @@ def snapshot_event_tickers(conn, store, scope, *, as_of, clock,
     head exactly once (same head resolution and ``SnapshotRef`` load as
     :func:`generated_population`) and calls
     ``scan_forward_board_requests(..., tickers=None)`` — the same single scan and the same
-    35-day window, never a second enumeration. Pure snapshot read: no provider or network call.
+    35-day window, one scan within this call. Pure snapshot read: no provider or network call.
 
     Failure semantics: a missing/unreadable snapshot head or events table is
     ``INPUT_CHANGED`` with ``details.data_code`` (the reader's ``DataError`` mapped like

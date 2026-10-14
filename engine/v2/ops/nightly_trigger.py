@@ -785,22 +785,17 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
                           full_run=True, expected_shadow_snapshot_id=None):
     """The scheduled preparation uses the exact watchlist passed to planning.
 
-    Universe derivation (issue #471): when no explicit ``tickers`` were supplied (explicit
-    tickers bypass both), if the operator's ``expected_population.json`` override
-    is PRESENT (present = exists or is a symlink; a dangling symlink or non-regular path is
-    refused INVALID_REQUEST), it wins unchanged and ``snapshot_event_tickers`` is never
-    consulted; if present but yielding no tickers (unreadable, non-list, or empty), refuse
-    ``INVALID_REQUEST`` rather than silently falling through to generation. If ABSENT (still
-    with no explicit ``tickers``), the universe is the
-    shadow snapshot's own event tickers (``snapshot_event_tickers`` on the same pinned head
-    ``expected_shadow_snapshot_id`` names; the catalog connection closes in ``finally``), and
-    that result is ``universe`` and, when no explicit ``context_tickers`` were supplied, also
-    ``context`` (a caller-supplied context is preserved). The override file is NOT cross-checked
-    against the snapshot — when no explicit ``tickers`` were supplied the file wins, and the
-    later score stage already refuses planned keys with no observed row. The existing refresh +
-    ``_default_plan`` path continues unchanged (``_default_plan`` still passes
-    ``expected_population=None`` when the file is absent, so ``commands._planned_population``
-    generates the population from the same snapshot's events).
+    Universe derivation (issue #471), when no explicit ``tickers`` were supplied: an
+    ``expected_population.json`` override that exists or is a symlink is PRESENT and wins;
+    one that yields no tickers (unreadable, non-list, empty, a dangling symlink or a
+    directory) is refused ``INVALID_REQUEST``, never replaced by generation. (A FIFO or
+    other special file is not handled and is out of scope.) An ABSENT override means the
+    universe is ``snapshot_event_tickers`` on the pinned head ``expected_shadow_snapshot_id``
+    names, also used as the context unless ``context_tickers`` were supplied. The override is
+    NOT cross-checked against the snapshot; a planned key with no observed row is only
+    recorded as a ``PLANNED_ROW_MISSING`` finding by the serving bridge. The refresh and
+    ``_default_plan`` path is unchanged: with the file absent ``commands._planned_population``
+    generates the population from the same snapshot's events.
     """
     clock = clock or SystemClock()
     override = Path(root).joinpath(*STATE_DIR, QUALIFICATION_POPULATION)
