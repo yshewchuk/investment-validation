@@ -740,7 +740,9 @@ change their arithmetic or imply that source receipt production is available.
   moves only fence-first: the current writer is fenced and verified, then
   the other is granted; a crash between the two leaves no writer, never
   two. Rollback reconciles committed v2 facts into legacy rather than
-  deleting them. Design: `guides/authority_fence_switch_rollback.md`.
+  deleting them. The legacy-side fence and backfill suppression are
+  legacy changes and wait for a recorded sign-off, per the bullet above.
+  Design: `guides/authority_fence_switch_rollback.md`.
 - **Every `ARCHITECTURE.md` stays under a growth ceiling.**
   `checks/architecture_doc_budgets.py` enforces a growth ceiling, not an
   absolute cap: below 1000 lines, one PR may add at most 50 net lines to
