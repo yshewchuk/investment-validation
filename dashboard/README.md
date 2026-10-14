@@ -447,9 +447,9 @@ intended. The legacy cron time (21:30 weekdays) is unaffected: it ends well
 before 00:00 ET.
 
 The plan is the native nightly plan's full-population option (`--full-run`):
-the scheduled universe is the full default population — the shadow
-snapshot's events by default, or, as an explicit override when present, the tickers of
-`reports/phase6/nightly_trigger/expected_population.json` (a JSON list of
+the scheduled universe is the full default population: the shadow
+snapshot's events by default, or, as an explicit override when present, the
+tickers of `reports/phase6/nightly_trigger/expected_population.json` (a JSON list of
 `ticker|strategy|event_date` keys, passed to the plan unchanged as
 `--expected-population`) — never a
 ticker-list argument and never a slice of the context. A crash between submit

@@ -41,6 +41,7 @@ import argparse
 import fcntl
 import json
 import os
+import stat
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from datetime import time as clock_time
@@ -82,6 +83,8 @@ STATE_DIR = ("reports", "phase6", "nightly_trigger")
 #: Where the operator drops the native nightly's own qualification documents.
 QUALIFICATION_INPUT_MANIFEST = "input_manifest.json"
 QUALIFICATION_POPULATION = "expected_population.json"
+#: A qualification document is never read past this cap.
+_MAX_POPULATION_BYTES = 16 * 1024 * 1024
 
 STATUSES = ("submitted", "not_yet", "snapshot_not_yet", "missed", "already_submitted",
             "busy_legacy", "error", "submitting", "completed", "failed", "failed_setup", "idle",
@@ -647,14 +650,37 @@ def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, pla
 def _read_document(path: Path | None):
     if path is None:
         return None
+    fd = None
     try:
-        return json.loads(path.read_text())
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_POPULATION_BYTES:
+            return None
+        chunks = []
+        remaining = _MAX_POPULATION_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > _MAX_POPULATION_BYTES:
+            return None
+        return json.loads(data)
     except (OSError, ValueError):
         return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _qualification_location(root: Path, name: str) -> Path:
+    return Path(root).joinpath(*STATE_DIR, name)
 
 
 def _qualification_path(root: Path, name: str) -> Path | None:
-    path = Path(root).joinpath(*STATE_DIR, name)
+    path = _qualification_location(root, name)
     return path if path.is_file() else None
 
 
@@ -790,24 +816,28 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
     """The scheduled preparation uses the exact watchlist passed to planning.
 
     Universe derivation (issue #471), when no explicit ``tickers`` were supplied: an
-    ``expected_population.json`` override that exists or is a symlink is PRESENT and wins;
-    one that yields no tickers (unreadable, non-list, empty) is refused ``INVALID_REQUEST``,
-    never replaced by generation; a non-regular override (FIFO, directory, dangling symlink)
-    is refused ``INVALID_REQUEST`` without being read. An ABSENT override means the
+    ``expected_population.json`` override that exists is PRESENT and wins; one that yields no
+    tickers (unreadable, too large, non-list, empty) is refused ``INVALID_REQUEST``, never
+    replaced by generation; a symlink or non-regular override (FIFO, directory, dangling
+    symlink) is refused ``INVALID_REQUEST`` without being read. An ABSENT override means the
     universe is ``snapshot_event_tickers`` on the pinned head ``expected_shadow_snapshot_id``
     names, also used as the context unless ``context_tickers`` were supplied. The override is
     NOT cross-checked against the snapshot; a planned key with no observed row is only
     recorded as a ``PLANNED_ROW_MISSING`` finding by the serving bridge. The refresh and
     ``_default_plan`` path is unchanged: with the file absent ``commands._planned_population``
     generates the population from the same snapshot's events, then the snapshot-derived
-    universe gets a ticker-level ``_orats_probe`` finality check before refresh or plan build.
+    universe gets a day-level finality probe over the universe (partial ticker coverage is
+    not refused) before refresh or plan build.
     """
     clock = clock or SystemClock()
-    override = Path(root).joinpath(*STATE_DIR, QUALIFICATION_POPULATION)
+    override = _qualification_location(root, QUALIFICATION_POPULATION)
     override_present = override.exists() or override.is_symlink()
     universe = tuple(tickers)
     if not universe:
         if override_present:
+            if override.is_symlink():
+                raise fail("INVALID_REQUEST",
+                           "expected_population.json is a symlink; fix or remove it")
             if not override.is_file():
                 raise fail("INVALID_REQUEST", "expected_population.json is present but is not a regular file; fix or remove it")
             universe = _population_tickers(override)
@@ -817,7 +847,7 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
                            "fix or remove it")
         else:
             universe = _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id)
-            # A ticker-level finality check over the snapshot-derived universe, before any
+            # A day-level finality probe over the snapshot-derived universe, before any
             # price refresh or plan build; never probed on the override or explicit-tickers
             # branches above.
             final, detail = _orats_probe(as_of, universe)
@@ -839,7 +869,7 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     ``full_run=True`` is the native nightly plan's full-population option and
     is always declared for a scheduled run, so the plan's effect scope is the
     global ``shadow`` scope, never a slice (a generated population with
-    carried-set exclusions gets subset effects instead, see nightly.py).
+    carried-set exclusions gets subset effects instead, see engine/v2/ops/nightly.py).
     ``input_mode`` is always
     ``"snapshot"`` and ``snapshot_scope`` is always ``"shadow"`` (Cutover
     PR-7b): the shadow nightly's plan always reads a pinned snapshot of the
@@ -874,7 +904,7 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     clock = clock or SystemClock()
     ops_root = _ops_root(root)
     ensure_directory(ops_root)
-    population = _qualification_path(root, QUALIFICATION_POPULATION)
+    population = _qualification_location(root, QUALIFICATION_POPULATION)
     universe = tuple(tickers) or _population_tickers(population)
     context = tuple(context_tickers) or universe
     year_start, year_end = _derive_years(as_of)

@@ -1855,16 +1855,22 @@ def test_prepare_default_plan_refuses_an_override_that_yields_no_tickers(
     assert "yields no tickers" in raised.value.problem.message
 
 
-@pytest.mark.parametrize("kind", ["dangling_symlink", "directory", "fifo"])
+@pytest.mark.parametrize("kind", ["dangling_symlink", "symlink_to_regular_file",
+                                  "directory", "fifo"])
 def test_prepare_default_plan_refuses_an_override_that_is_not_a_usable_file(
         tmp_path, monkeypatch, kind):
-    # A dangling symlink, a directory or a FIFO at the override path is PRESENT (exists or is
+    # A dangling symlink, a symlink to a REAL regular file (even one holding a valid
+    # population list), a directory or a FIFO at the override path is PRESENT (exists or is
     # a symlink) and must be refused INVALID_REQUEST before being read, never silently treated
     # as absent. The snapshot universe stub explodes, proving the fallback is never consulted.
     path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     if kind == "dangling_symlink":
         path.symlink_to(tmp_path / "does_not_exist")
+    elif kind == "symlink_to_regular_file":
+        target = tmp_path / "real_population.json"
+        target.write_text(json.dumps(["AAA|STR-THRU|2026-09-25"]))
+        path.symlink_to(target)
     elif kind == "directory":
         path.mkdir()
     else:
@@ -1880,7 +1886,33 @@ def test_prepare_default_plan_refuses_an_override_that_is_not_a_usable_file(
             tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
             expected_shadow_snapshot_id="snap_before")
     assert raised.value.code == "INVALID_REQUEST"
-    assert "is not a regular file" in raised.value.problem.message
+    if kind in ("symlink_to_regular_file", "dangling_symlink"):
+        assert "is a symlink" in raised.value.problem.message
+    else:
+        assert "is not a regular file" in raised.value.problem.message
+
+
+def test_prepare_default_plan_refuses_an_oversized_population_document(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_trigger, "_MAX_POPULATION_BYTES", 8)
+    _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._prepare_default_plan(
+            tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+            expected_shadow_snapshot_id="snap_before")
+    assert raised.value.code == "INVALID_REQUEST"
+    assert "yields no tickers" in raised.value.problem.message
+
+
+def test_read_document_returns_none_immediately_for_a_fifo(tmp_path):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo unavailable")
+    fifo = tmp_path / "population.fifo"
+    os.mkfifo(fifo)
+    assert nightly_trigger._read_document(fifo) is None
 
 
 def test_prepare_default_plan_propagates_the_absent_override_snapshot_refusal(
