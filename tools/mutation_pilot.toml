@@ -199,9 +199,10 @@ tests = [
 
 [modules.native_analog]
 why = "Native analog selection: bucket widening order, population hashing and bootstrap seeding decide which history a row is compared against; an off-by-one silently changes n_analogs and the interval."
-mutate = ["engine/v2/scoring/native_analog.py"]
+mutate = ["engine/v2/scoring/native_analog.py", "engine/v2/scoring/native_analog_query.py"]
 tests = [
     "tests/test_v2_scoring_native_analog.py",
+    "tests/v2/scoring/test_native_analog_query.py",
     "tests/test_phase4_acceptance_independence.py",
     "tests/test_v2_scoring_runup_frozen.py",
     "tests/test_v2_scoring_actionable_flags.py",
