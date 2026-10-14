@@ -290,6 +290,25 @@ def test_actual_negative_ridge_extrapolation_is_projected_to_zero():
     assert result == pytest.approx([0, 2])
 
 
+def test_hgb_mixed_sign_inference_is_projected_to_zero(monkeypatch):
+    raw_predictions = np.array([-3.5, 0.0, 2.25, -0.125])
+    calls = []
+
+    def predict(self, matrix):
+        # Only replace inference output; the genuine HGB fit must complete first.
+        assert self.n_iter_ == 100 and self.n_features_in_ == 11
+        assert matrix.shape == (4, 11)
+        calls.append(self)
+        return raw_predictions
+
+    monkeypatch.setattr(HistGradientBoostingRegressor, "predict", predict)
+    result = fit_magnitude_predictions(fitted_magnitude_recipe("history_hgb"), _matrix([0, 2, 4]),
+                                       [1, 5, 9], _matrix([0, 1, 2, 4]))
+    assert len(calls) == 1
+    assert result == [0.0, 0.0, 2.25, 0.0]
+    np.testing.assert_array_equal(raw_predictions, [-3.5, 0.0, 2.25, -0.125])
+
+
 @pytest.mark.parametrize("kind,cls", [("history_ridge", Ridge),
                                      ("history_hgb", HistGradientBoostingRegressor)])
 @pytest.mark.parametrize("bad", [[np.nan], [np.inf], [-np.inf], [[1]], [1, 2], 1.0])
