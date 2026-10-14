@@ -305,7 +305,7 @@ EXPECTED_WORKFLOW = {
             "name": "tests (${{ matrix.shard }})",
             "needs": "plan",
             "runs-on": "ubuntu-latest",
-            "timeout-minutes": 25,
+            "timeout-minutes": 45,
             "strategy": {"fail-fast": False,
                          "matrix": "${{ fromJSON(needs.plan.outputs.matrix) }}"},
             "steps": [
