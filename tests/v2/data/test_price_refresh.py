@@ -149,21 +149,31 @@ class TestSelectionRules:
         assert plan["skipped_already_fetched"] == ["ZZZ"]
         assert plan["monthly"] == []
 
-    def test_a_daily_ticker_already_fetched_today_is_skipped(self):
+    def test_a_daily_ticker_already_covered_today_is_skipped(self):
         session = "2026-09-14"
         events = _events([("AAA", "2026-09-14")])
-        history = {"AAA": [date(2026, 9, 14)]}
-        plan = pr.plan_refresh(session, events=events, price_universe=[], fetch_history=history)
+        times = {"AAA": [pd.Timestamp("2026-09-14T20:31:00+00:00")]}  # after close+buffer
+        plan = pr.plan_refresh(session, events=events, price_universe=[], fetch_times=times)
         assert plan["skipped_already_fetched"] == ["AAA"]
         assert plan["daily"] == []
 
-    def test_a_daily_ticker_fetched_a_different_day_this_month_is_not_skipped(self):
-        """Daily resumability is keyed on the exact session, not the month --
-        a fetch from three days ago does not excuse today's print-window pull."""
+    def test_a_daily_ticker_covered_only_the_day_before_is_not_skipped(self):
+        """Daily resumability is keyed on the required day's CLOSE, not on a
+        fetch landing in the same month or on the prior trading day."""
         session = "2026-09-14"
         events = _events([("AAA", "2026-09-14")])
-        history = {"AAA": [date(2026, 9, 11)]}
-        plan = pr.plan_refresh(session, events=events, price_universe=[], fetch_history=history)
+        times = {"AAA": [pd.Timestamp("2026-09-11T20:31:00+00:00")]}  # Friday post-close
+        plan = pr.plan_refresh(session, events=events, price_universe=[], fetch_times=times)
+        assert plan["daily"] == ["AAA"]
+        assert plan["skipped_already_fetched"] == []
+
+    def test_a_pre_market_fetch_stamp_is_not_coverage(self):
+        """The 2026-10-12 defect: a fetch stamped Monday 13:30Z is before
+        Monday's 20:00Z close, so it must not excuse Monday's session."""
+        session = "2026-09-14"
+        events = _events([("AAA", "2026-09-14")])
+        times = {"AAA": [pd.Timestamp("2026-09-14T13:30:00+00:00")]}
+        plan = pr.plan_refresh(session, events=events, price_universe=[], fetch_times=times)
         assert plan["daily"] == ["AAA"]
         assert plan["skipped_already_fetched"] == []
 
@@ -293,6 +303,7 @@ class TestDryRun:
         monkeypatch.setattr(pr, "load_events", lambda: _events([("AAA", "2026-09-14")]))
         monkeypatch.setattr(pr, "load_price_universe", lambda: {"ZZZ"})
         monkeypatch.setattr(pr, "load_fetch_history", lambda: {})
+        monkeypatch.setattr(pr, "load_fetch_times", lambda **kw: {})
 
         def _boom(*a, **k):
             raise AssertionError("Fetcher must not be constructed on --dry-run")
@@ -314,6 +325,7 @@ class TestDryRun:
         monkeypatch.setattr(pr, "load_events", lambda: _events([("AAA", "2026-09-14")]))
         monkeypatch.setattr(pr, "load_price_universe", lambda: {"ZZZ"})
         monkeypatch.setattr(pr, "load_fetch_history", lambda: {})
+        monkeypatch.setattr(pr, "load_fetch_times", lambda **kw: {})
 
         result = invoke_price_refresh("2026-09-14", dry_run=True)
         assert result["plan"]["daily"] == sorted(["AAA", CALENDAR_TICKER])
