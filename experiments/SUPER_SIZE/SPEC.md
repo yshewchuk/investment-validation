@@ -59,7 +59,7 @@ features. These candidates are local development benchmarks, not a selected winn
 After preregistering a fitted candidate, use `python -m experiments.v2_magnitude_search
 prepare --spec <anchor-spec> --catalog <existing-catalog> --store-root <existing-store>
 --request <request-json>`. The command returns an immutable plan reference, not a run.
-Use `verify` with `--plan-ref <reference-json>` instead of `--request` to check it again.
+Use `verify` with the same request plus `--plan-ref <reference-json>` to check it again.
 
 The request has schema `magnitude_search_request.v1`, `inner_years` mapping every
 outer year to explicit increasing earlier years, `space`, `max_candidates` and
