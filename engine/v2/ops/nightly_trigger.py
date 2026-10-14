@@ -840,10 +840,13 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     ``_prepare_default_plan`` already derived ``universe``/``context`` (when
     no explicit caller tickers/context_tickers were supplied) from the shadow
     snapshot's own events via
-    ``snapshot_event_tickers`` (issue #471) before this call, so this path no longer sees an
-    empty universe just because the file is absent (the file itself stays absent, so
-    ``expected_population`` remains ``None`` and ``commands._planned_population`` generates
-    the population from the same snapshot's events). ``input_manifest`` and
+    ``snapshot_event_tickers`` (issue #471) before this call, so when called
+    through ``_prepare_default_plan`` (the only scheduled caller) this path no
+    longer sees an empty universe just because the file is absent; a direct
+    call with no tickers still builds an empty universe (the file itself stays
+    absent, so ``expected_population`` remains ``None`` and
+    ``commands._planned_population`` generates the population from the same
+    snapshot's events). ``input_manifest`` and
     ``year_start``/``year_end`` are derived fresh from
     ``as_of`` on every call (the manifest is captured and written per-``as_of``
     rather than read from one fixed filename, and the year span mirrors

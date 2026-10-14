@@ -997,6 +997,7 @@ def test_main_records_the_submit_refusal_when_qualification_inputs_are_absent(
     document = json.loads(capsys.readouterr().out.strip())
     assert code == 1 and document["status"] == "error"
     assert "INVALID_REQUEST" in document["detail"]
+    assert "no earnings events in the pinned snapshot's planning window" in document["detail"]
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.status == "error"
 
@@ -1874,6 +1875,27 @@ def test_prepare_default_plan_refuses_an_override_that_is_not_a_usable_file(
             expected_shadow_snapshot_id="snap_before")
     assert raised.value.code == "INVALID_REQUEST"
     assert "yields no tickers" in raised.value.problem.message
+
+
+def test_prepare_default_plan_propagates_the_absent_override_snapshot_refusal(
+        tmp_path, monkeypatch):
+    # No population file at all: the snapshot event universe is the only
+    # remaining source, and its empty-window INVALID_REQUEST refusal propagates
+    # unchanged -- neither the price-refresh seam nor the plan seam runs.
+    def no_events(root, as_of, clock, expected_shadow_snapshot_id):
+        raise fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's planning window")
+
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", no_events)
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._prepare_default_plan(
+            tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+            expected_shadow_snapshot_id="snap_before")
+    assert raised.value.code == "INVALID_REQUEST"
+    assert raised.value.problem.message == (
+        "no earnings events in the pinned snapshot's planning window")
 
 
 def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(tmp_path,
