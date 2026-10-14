@@ -123,7 +123,7 @@ produce only the eight legacy tables, and price-history capture is the existing 
 - [ ] Catalog `decisions` holds the imported prediction/outcome history the rebuilt tree needs.
 - [ ] Legacy selected session is exactly `AS_OF` — wait for currency, never import later/partial.
 - [ ] A staged model release exists under `MODEL_RELEASE_ROOT` and passed Phase 5 acceptance.
-- [ ] The expected population document exists and matches the intended nightly population (the trigger still needs the file; a qualification run needs an independent one, see step 6).
+- [ ] The expected population document is optional for scheduled runs (absent, the trigger derives the universe from the shadow snapshot; present, it is an override and must match the intended nightly population); a qualification run still needs an independent file, see step 6.
 - [ ] Operations root, legacy store root, and timer target the same intended catalogs/tree.
 
 ## Retained derived inputs (supervisor recommendation; report step 5 / gap 2)
