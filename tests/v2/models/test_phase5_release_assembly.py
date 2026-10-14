@@ -226,6 +226,12 @@ def _replace_chooser(args, **changes):
     return {**args, "chooser": dataclasses.replace(args["chooser"], **changes)}
 
 
+def _output_with(args, target_member, **changes):
+    return {**args, "outputs": [dataclasses.replace(output, **changes)
+                                if output.member_id == target_member else output
+                                for output in args["outputs"]]}
+
+
 _POOL_REFUSALS = [
     (lambda a: {**a, "outputs": "not-a-sequence"}, "POOL_SET_MISMATCH"),
     (lambda a: {**a, "outputs": a["outputs"][:5]}, "POOL_SET_MISMATCH"),
@@ -243,6 +249,10 @@ _POOL_REFUSALS = [
     (lambda a: _replace_chooser(a, content_hash="sha256:nothex"), "POOL_SET_MISMATCH"),
     (lambda a: _replace_chooser(a, name=""), "CHOOSER_MISMATCH"),
     (lambda a: _replace_chooser(a, payload_bytes=-1), "CHOOSER_MISMATCH"),
+    (lambda a: _output_with(a, "trailing_pnl_cutoff", member_id="bogus"), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, content_hash="sha256:" + "g" * 64), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, content_hash="sha256:" + "A" * 64), "POOL_SET_MISMATCH"),
+    (lambda a: _replace_output(a, name=5), "POOL_SET_MISMATCH"),
 ]
 
 
@@ -250,7 +260,7 @@ _POOL_REFUSALS = [
     "outputs-not-a-sequence", "five-outputs", "duplicate", "malformed-hash", "element-not-a-pool-output",
     "member-id-int", "member-id-list", "empty-name", "negative-bytes", "bool-bytes", "str-bytes",
     "chooser-wrong-member", "chooser-not-a-pool-output", "chooser-bad-hash", "chooser-empty-name",
-    "chooser-bad-bytes"])
+    "chooser-bad-bytes", "wrong-member-id", "nonhex-hash-g", "uppercase-hash", "non-string-name"])
 def test_derive_catalog_rejects_malformed_outputs(tmp_path, mutate, code):
     _, prior_body = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
@@ -305,7 +315,7 @@ def test_object_unverified_leaves_no_candidate_catalog(tmp_path, mode):
     assert not _candidate_path(tmp_path).exists()
 
 
-@pytest.mark.parametrize("release_id", ["prior1", "", "a/b"])
+@pytest.mark.parametrize("release_id", ["prior1", "", "a/b", ".hidden", "a\\b"])
 def test_id_conflict_on_bad_candidate_id(tmp_path, release_id):
     _, prior_body = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
@@ -632,3 +642,241 @@ def test_carry_forward_leaves_existing_deployed_pointer_untouched(tmp_path):
                                           inventory=inventory, **_carry_kwargs(args))
     assert path == phase5_release._catalog_path(tmp_path, "cand1")
     assert pointer.read_bytes() == b'{"x":1}'
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_derive_catalog_requires_non_empty_expected_prior_id(tmp_path, value):
+    _, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    args["expected_prior_release_id"] = value
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "PRIOR_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_carry_forward_requires_non_empty_prior_release_id(tmp_path, value):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id=value, release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "PRIOR_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+_REQUIRED_MEMBER_IDS = (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID)
+
+
+def _prior_row(prior_body, member_id):
+    return next(row for row in prior_body["members"] if row["member_id"] == member_id)
+
+
+def _rebuilt_prior(prior_body, members):
+    return phase5_release.manifest_body(prior_body["release_id"], prior_body["deployment_id"],
+                                        members, prior_body["sources"])
+
+
+@pytest.mark.parametrize("mode", ["missing", "duplicate", "missing-status"])
+@pytest.mark.parametrize("member_id", _REQUIRED_MEMBER_IDS)
+def test_prior_mismatch_for_each_required_member(tmp_path, member_id, mode):
+    _, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    members = [dict(row) for row in prior_body["members"]]
+    if mode == "missing":
+        members = [row for row in members if row["member_id"] != member_id]
+    elif mode == "duplicate":
+        members.append(dict(_prior_row(prior_body, member_id)))
+    else:
+        next(row for row in members if row["member_id"] == member_id)["status"] = phase5_release.MISSING
+    body = _rebuilt_prior(prior_body, members)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(body, **args)
+    assert error.value.code == "PRIOR_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("member_id", _REQUIRED_MEMBER_IDS)
+def test_cutoff_mismatch_for_each_required_member(tmp_path, member_id):
+    _, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    if member_id == assembly.CHOOSER_MEMBER_ID:
+        args["chooser"] = dataclasses.replace(args["chooser"], cutoff="2026-09-15")
+    else:
+        args["outputs"] = [dataclasses.replace(output, cutoff="2026-09-15")
+                           if output.member_id == member_id else output
+                           for output in args["outputs"]]
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "CUTOFF_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+_RICH_BINDINGS = (("b1", "m1", "size"), ("b2", "m2", "implied_t1"))
+_RICH_MEMBER_KINDS = ("estimator", "calibration")
+
+
+def _rich_fixture(release_id, deployment_id="d1"):
+    payloads, bindings, artifacts, inv_bindings, requirements = {}, [], [], [], []
+    for binding_id, model_id, role in _RICH_BINDINGS:
+        members, inv_members = [], []
+        for name in _RICH_MEMBER_KINDS:
+            payload = json.dumps({"schema_version": "linear_estimator.v1.0", "feature_order": ["x"],
+                                  "model": model_id, "member": name}, sort_keys=True).encode()
+            content_hash = phase5_release.sha256_bytes(payload)
+            payloads[content_hash] = payload
+            members.append(ArtifactMember(name=name, path="unused.json", content_hash=content_hash))
+            inv_members.append(ArtifactInventoryMember(member_id=f"{model_id}:{name}", kind=name,
+                                                       artifact_ref=f"artifact://{model_id}",
+                                                       content_hash=content_hash))
+        bindings.append(ModelBinding(binding_id=binding_id, model_id=model_id, role=role,
+                                     strategy_id="*", decision_clock_id="entry-close",
+                                     adapter="json-linear.v1", feature_order=("x",),
+                                     output_names=("prediction",), members=tuple(members)))
+        artifacts.append(ModelArtifactInventory(artifact_id=model_id, role=role, strategy_ids=("*",),
+                                                compatible_clock_ids=("entry-close",),
+                                                target_contract_ref="return.v1",
+                                                ordered_features=("x",), members=tuple(inv_members)))
+        inv_bindings.append(ReleaseBinding(role=role, strategy_id="*", clock_id="entry-close",
+                                           artifact_id=model_id, ordered_features=("x",),
+                                           required_member_kinds=_RICH_MEMBER_KINDS))
+        requirements.append(ReleaseRequirement(role=role, strategy_id="*", clock_id="entry-close"))
+    release = ModelRelease(release_id=release_id, deployment_id=deployment_id,
+                           bindings=tuple(bindings))
+    inventory = ModelReleaseInventory(release_id=release_id, deployment_id=deployment_id,
+                                      known_clock_ids=("entry-close",), artifacts=tuple(artifacts),
+                                      bindings=tuple(inv_bindings), requirements=tuple(requirements),
+                                      artifact_manifest_ref="manifest://r",
+                                      evidence_refs=("evidence://r",))
+    return release, inventory, payloads
+
+
+def _unrelated_ids(count=3):
+    return tuple(spec.member_id for spec in phase5_release.STATE_SPECS
+                 if spec.member_id not in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID,
+                                           UNRELATED_MEMBER_ID))[:count]
+
+
+def _stage_rich_prior(root, *, release_id="prior1", deployment_id="d1",
+                      prior_cutoff="2026-09-01", extra_ids=()):
+    release, inventory, payloads = _rich_fixture(release_id, deployment_id=deployment_id)
+    deployment.stage_release(phase5_release.deployment_root(root), release, inventory, payloads)
+    rows = []
+    for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID, *extra_ids):
+        payload = f"prior-{member_id}".encode()
+        content_hash, rel = phase5_release.write_object(root, payload)
+        obj = {"name": "prior.bin", "path": rel, "content_hash": content_hash, "bytes": len(payload)}
+        rows.append(phase5_release.member_row(_spec(member_id), phase5_release.STAGED, [obj], "prior"))
+    body = phase5_release.manifest_body(release_id, deployment_id, rows, {"pool_cutoff": prior_cutoff})
+    phase5_release.write_manifest(root, body)
+    return inventory, body
+
+
+@pytest.mark.parametrize("release_id", ["candA", "candB"])
+@pytest.mark.parametrize("prior_cutoff, cutoff", [("2026-09-01", "2026-10-01"),
+                                                  ("2026-08-20", "2026-12-31")])
+def test_rich_carry_forward_preserves_untouched_rows_and_release(tmp_path, release_id, prior_cutoff,
+                                                                 cutoff):
+    inventory, prior_body = _stage_rich_prior(tmp_path, prior_cutoff=prior_cutoff,
+                                              extra_ids=_unrelated_ids())
+    args = _valid_derive_args(tmp_path, cutoff=cutoff, prefix="rich")
+    args["release_id"] = release_id
+    inventory = dataclasses.replace(inventory, release_id=release_id)
+    path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id=release_id,
+                                          inventory=inventory, **_carry_kwargs(args))
+    catalog = phase5_release._read_catalog(path, release_id)
+    carrier = (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID)
+    for row in prior_body["members"]:
+        if row["member_id"] not in carrier:
+            assert next(r for r in catalog["members"]
+                        if r["member_id"] == row["member_id"]) == row
+    store = phase5_release.deployment_root(tmp_path)
+    prior_model = deployment.resolve_release(store, "prior1")
+    candidate_model = deployment.resolve_release(store, release_id)
+    assert dataclasses.replace(candidate_model, release_id="prior1") == prior_model
+
+
+def _object_path(root, target):
+    return phase5_release.deployment_root(root) / phase5_release.object_relpath(target.content_hash)
+
+
+def _supplied_by_member(args):
+    return {obj.member_id: obj for obj in (*args["outputs"], args["chooser"])}
+
+
+@pytest.mark.parametrize("member_id", (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID))
+def test_object_preflight_rejects_each_supplied_object(tmp_path, member_id):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    target = _supplied_by_member(args)[member_id]
+    _object_path(tmp_path, target).write_bytes(b"x" * max(target.payload_bytes, 1))
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "OBJECT_UNVERIFIED"
+    assert not _candidate_path(tmp_path).exists()
+    assert not deployment._manifest_path(phase5_release.deployment_root(tmp_path),
+                                         "cand1").exists()
+
+
+@pytest.mark.parametrize("member_id", [assembly.POOL_MEMBER_IDS[0], assembly.CHOOSER_MEMBER_ID])
+def test_object_preflight_after_publication_preserves_catalog(tmp_path, member_id):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                          inventory=inventory, **_carry_kwargs(args))
+    published = path.read_bytes()
+    obj_path = _object_path(tmp_path, _supplied_by_member(args)[member_id])
+    original = obj_path.read_bytes()
+    obj_path.write_bytes(b"damaged:" + original)
+    try:
+        with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+            assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                           inventory=inventory, **_carry_kwargs(args))
+        assert error.value.code == "OBJECT_UNVERIFIED"
+        assert path.read_bytes() == published
+    finally:
+        obj_path.write_bytes(original)
+
+
+def test_inventory_mismatch_on_feature_order_disagreement(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    artifact = dataclasses.replace(inventory.artifacts[0], ordered_features=("x", "y"))
+    binding = dataclasses.replace(inventory.bindings[0], ordered_features=("x", "y"))
+    inventory = dataclasses.replace(inventory, release_id="cand1", artifacts=(artifact,),
+                                    bindings=(binding,))
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "INVENTORY_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_republish_after_write_catalog_oserror(tmp_path, monkeypatch):
+    inventory, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(assembly, "_write_catalog", boom)
+        with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+            assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                           inventory=inventory, **_carry_kwargs(args))
+        assert error.value.code == "PUBLICATION_FAILED"
+
+    path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                          inventory=inventory, **_carry_kwargs(args))
+    assert path == _candidate_path(tmp_path)
+    assert phase5_release._read_catalog(path, "cand1") == _expected_catalog(prior_body, args, "cand1")
+    store = phase5_release.deployment_root(tmp_path)
+    resolved = deployment.resolve_release(store, "cand1")
+    assert dataclasses.replace(resolved, release_id="prior1") == deployment.resolve_release(store,
+                                                                                            "prior1")

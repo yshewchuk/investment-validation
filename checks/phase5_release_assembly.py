@@ -151,6 +151,9 @@ def derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_rel
 
 def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_release_id: str,
                     outputs: object, chooser: PoolOutput, cutoff: str) -> dict:
+    if not isinstance(expected_prior_release_id, str) or not expected_prior_release_id:
+        raise ReleaseAssemblyRefusal(
+            "PRIOR_MISMATCH", "expected prior release id must be a non-empty string")
     try:
         prior = _validate_catalog(prior_catalog, expected_prior_release_id)
     except ReleaseLayoutError as exc:
@@ -268,6 +271,9 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
 
 def _carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
                            inventory, outputs, chooser: PoolOutput, cutoff: str) -> Path:
+    if not isinstance(prior_release_id, str) or not prior_release_id:
+        raise ReleaseAssemblyRefusal(
+            "PRIOR_MISMATCH", "expected prior release id must be a non-empty string")
     root = Path(release_root)
     store = deployment_root(root)
     try:
