@@ -202,6 +202,49 @@ def test_capture_anti_backdating_refuses_when_source_timestamp_is_not_later(tmp_
     assert report["by_outcome"] == {"error": 1, "duplicate_source_hash": 1}
 
 
+def test_capture_reports_the_backdate_refusal_with_no_details(tmp_path):
+    """The anti-backdating refusal carries the summary ``INPUT_CHANGED`` and NO
+    ``details`` key at all -- unlike the partial-omission refusal, whose
+    ``details`` names the missing dates. One distinct failed ticker.
+    """
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 100.0}, key="k1",
+                fetched_at="2024-06-05T00:00:00+00:00")
+    capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    # A second, DIFFERENT retrieval whose fetched_at is EARLIER than what was
+    # already captured -> refused_backdate.
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 999.0}, key="k2",
+                fetched_at="2024-01-01T00:00:00+00:00")
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert report["by_outcome"] == {"error": 1, "duplicate_source_hash": 1}
+    assert report["failed_tickers"] == 1
+    assert report["failures"] == [{"ticker": "AAPL", "error": "INPUT_CHANGED"}]
+    assert "details" not in report["failures"][0]
+
+
+def test_capture_reports_a_px_parse_error_and_still_captures_other_tickers(tmp_path):
+    """A malformed px csv (header missing the required ``date`` column) raises
+    inside ``_parse_and_order_entries`` and is reported as that retrieval's own
+    ``error`` result -- the raw parser exception's type name, since
+    ``read_legacy_px_csv`` raises a bare ``ValueError`` with no ``code`` -- while
+    a second, well-formed ticker in the same run still captures.
+    """
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _px_dir(source_root).joinpath("px_AAPL.csv").write_text(
+        "close_adj,close_raw,high_raw\n100.0,100.0,100.0\n")
+    _write_px(source_root, "MSFT", {"2024-01-01": 200.0})
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert report["by_outcome"] == {"added": 1, "error": 1}
+    assert report["failed_tickers"] == 1
+    assert report["failures"] == [{"ticker": "AAPL", "error": "ValueError"}]
+    assert "details" not in report["failures"][0]
+    stored_msft = _scan_price_history(conn, store, report["result_snapshot_id"], ticker="MSFT")
+    assert sorted(stored_msft["date"]) == ["2024-01-01"]
+    assert sorted(stored_msft["close_adj"]) == [200.0]
+
+
 def test_capture_merges_px_and_every_tier1_retrieval_for_the_same_ticker(tmp_path):
     """SEND-BACK 2026-09-14 item 1: a ticker with a px file plus the undated
     Tier-1 entry plus two dated re-downloads captures FOUR retrievals, in
@@ -533,8 +576,9 @@ def test_capture_two_distinct_failing_tickers_are_both_named(tmp_path):
     assert first["failed_tickers"] == 0
     assert first["failures"] == []
 
-    # Both tickers come back omitting 2024-01-02 (same row count, so the
-    # refusal is by DATE), each at a later mtime -> later retrieved_at.
+    # Both tickers come back omitting 2024-01-02: each retrieval shrinks from
+    # two rows to one, so the refusal is by DATE, not by row count. Each is at
+    # a later mtime -> later retrieved_at.
     for ticker, close in (("AAPL", 100.0), ("MSFT", 200.0)):
         px_path = _write_px(source_root, ticker, {"2024-01-01": close})
         os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
@@ -589,6 +633,42 @@ def test_capture_counts_one_failed_ticker_even_when_two_of_its_retrievals_refuse
     assert sorted(stored_aapl["date"]) == ["2024-01-01", "2024-01-02"]
     stored_msft = _scan_price_history(conn, store, second["result_snapshot_id"], ticker="MSFT")
     assert sorted(stored_msft["date"]) == ["2024-01-01", "2024-01-02"]
+
+
+def test_capture_one_ticker_two_retrievals_add_then_refuse_keeps_the_added_bar(tmp_path):
+    """One AAPL capture walks TWO retrievals in ascending retrieved_at order: a
+    clean px retrieval first (later mtime) that keeps every stored date and
+    appends 2024-01-03, then a Tier-1 entry (later fetched_at) that omits a live
+    date and is refused. The added bar stays; the refused retrieval writes
+    nothing and leaves no tombstone.
+    """
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 101.0})
+    os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["by_outcome"] == {"added": 1}
+
+    # px: later mtime, keeps 01-01 and 01-02 and appends 01-03 -> clean add.
+    px_path = _write_px(source_root, "AAPL",
+                        {"2024-01-01": 100.0, "2024-01-02": 101.0, "2024-01-03": 102.0})
+    os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
+    # Tier-1: later fetched_at still, omits the live 01-02 -> refused by date.
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-03": 102.0}, key="k1",
+                fetched_at="2024-09-12T00:00:00+00:00")
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+
+    assert second["by_outcome"] == {"added": 1, "error": 1}
+    assert second["failed_tickers"] == 1
+    assert second["failures"] == [{"ticker": "AAPL", "error": "CONTRACT_MISMATCH",
+                                   "details": {"missing_count": 1, "missing_dates": ["2024-01-02"]}}]
+
+    stored = _scan_price_history(conn, store, second["result_snapshot_id"])
+    assert sorted(stored["date"]) == ["2024-01-01", "2024-01-02", "2024-01-03"]
+    new_bar = stored[stored["date"] == "2024-01-03"]
+    assert list(new_bar["close_adj"]) == [102.0]
+    assert not stored["deleted"].astype(bool).any()
 
 
 # --------------------------------------------------------------------------
