@@ -137,11 +137,21 @@ def _dm_rows(ticker, days, *, src_iv="orats", implied_move=None, rvol30=None):
 
 
 def _computed_rows(rows_spec):
-    return [{"ticker": "AAA", "event_date": day, "realized_move_pct": move,
-             "skipped": skipped, "implied_move_pct": implied,
-             "available_as_of_date": None if skipped else
-             (pd.Timestamp(day) + pd.Timedelta(days=1)).date().isoformat()}
-            for day, move, skipped, implied in rows_spec]
+    rows = []
+    for index, (day, move, skipped, implied) in enumerate(rows_spec):
+        prior_implied = [row["implied_move_pct"] for row in rows
+                         if row["implied_move_pct"] is not None]
+        rows.append({
+            "ticker": "AAA", "event_date": day, "realized_move_pct": move,
+            "skipped": skipped, "implied_move_pct": implied,
+            "available_as_of_date": None if skipped else
+            (pd.Timestamp(day) + pd.Timedelta(days=1)).date().isoformat(),
+            "event_ordinal": index, "admitted": True,
+            "mean_prior_or_implied": (sum(prior_implied) / len(prior_implied)
+                                      if prior_implied else None),
+            "n_prior_implied": len(prior_implied),
+        })
+    return rows
 
 
 def _price_rows(n=320, *, end="2024-01-20"):
@@ -189,7 +199,7 @@ def test_scan_panel_row_emits_legacy_named_inputs():
     assert panel["abs_dist_high"] == abs(panel["dist_high"])
     assert panel["abs_dist_ema"] == abs(panel["dist_ema"])
     assert panel["has_implied_quote"] == 1.0
-    assert "mean_prior_or_implied" not in panel  # needs legacy admission + src_iv rows; see issue
+    assert panel["mean_prior_or_implied"] == pytest.approx(5.0)
 
 
 def test_derivations_match_legacy():
@@ -217,7 +227,8 @@ def test_derivations_match_legacy():
 
 
 def test_size_driver_names_not_missing_after_projection():
-    feature_names = ("has_implied_quote", "abs_dist_ema", "or_implied", "or_rvol30")
+    feature_names = ("has_implied_quote", "abs_dist_ema", "or_implied", "or_rvol30",
+                     "mean_prior_or_implied")
     _, mask = _project_features(
         tier4_row={}, panel_row=_scan().panel_row, feature_names=feature_names,
         as_of_ts=pd.Timestamp("2026-01-15"))
