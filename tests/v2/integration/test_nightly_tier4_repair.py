@@ -39,9 +39,9 @@ def _report() -> NightlyReport:
     return report
 
 
-def _result(gap_fill: dict) -> SimpleNamespace:
+def _result(gap_fill: dict, elapsed_s: float = 12.0) -> SimpleNamespace:
     return SimpleNamespace(reports={"tier4": {"gap_fill": gap_fill}},
-                           elapsed_s=12.0)
+                           elapsed_s=elapsed_s)
 
 
 def _gapped() -> dict:
@@ -285,6 +285,26 @@ def test_rebuild_defers_the_snapshot_until_finalize(monkeypatch):
     assert default.snapshot == "snap-1"
     assert writes == [("manifest", {"panel": "hash"}), ("snapshot", {"panel": "hash"})], \
         "the default rebuild path still finalizes exactly once"
+
+
+def test_rebuild_stamps_elapsed_when_it_defers_finalize(monkeypatch):
+    """finalize=False still stamps elapsed_s from the build's start clock."""
+    from engine.data import rebuild as rebuild_mod
+
+    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(rebuild_mod, "build_panel_table", lambda: {"rows": 3})
+    monkeypatch.setattr(rebuild_mod, "build_tier4_table",
+                        lambda since=None: {"rows": 3, "producers": {}})
+
+    readings = iter([100.0, 107.5])
+    monkeypatch.setattr(rebuild_mod, "time",
+                        SimpleNamespace(time=lambda: next(readings)))
+
+    result = rebuild_mod.rebuild(("panel", "tier4"), finalize=False)
+
+    assert result.snapshot is None, "finalize=False writes no snapshot"
+    assert result.elapsed_s > 0, "elapsed_s is stamped before the deferred finalize"
+    assert result.elapsed_s == pytest.approx(7.5)
 
 
 def test_finalize_writes_manifest_before_snapshot(monkeypatch):
@@ -533,8 +553,8 @@ def test_run_nightly_leaves_no_snapshot_when_the_repair_exceeds_the_budget(
 
 def test_run_nightly_finalizes_a_gap_free_incremental_result(monkeypatch, tmp_path):
     finalize_calls = []
-    incremental = _result({})
-    calls, sentinel, _captured, marker_writes = _run(
+    incremental = _result({}, elapsed_s=12.5)
+    calls, sentinel, captured, marker_writes = _run(
         monkeypatch, tmp_path,
         rebuild_results=[incremental],
         finalize_calls=finalize_calls,
@@ -545,6 +565,8 @@ def test_run_nightly_finalizes_a_gap_free_incremental_result(monkeypatch, tmp_pa
     assert finalize_calls == [incremental], "the incremental result is finalized once"
     assert _marker(tmp_path).exists(), "the no-gap path writes the snapshot marker"
     assert len(marker_writes) == 1, "the snapshot marker is written exactly once"
+    assert captured["report"].steps["tiers"]["elapsed_s"] == 12.5, \
+        "the tiers step records the incremental build's stamped elapsed_s"
     assert sentinel.touched, "the run proceeded to the scorer"
 
 

@@ -774,7 +774,7 @@ def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
     }
 
 
-#: Wall-clock ceiling for the full Tier-4 repair rebuild (~17-24 min healthy,
+#: Wall-clock budget for the full Tier-4 repair rebuild (~17-24 min healthy,
 #: gap nights only). Checked after the rebuild returns, not enforced mid-run.
 TIER4_REPAIR_BUDGET_S = 3600
 

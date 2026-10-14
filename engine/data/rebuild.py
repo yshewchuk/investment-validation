@@ -508,6 +508,7 @@ def rebuild(
 
     result.started = started
     if not finalize:
+        result.elapsed_s = time.time() - started
         return result
     return finalize_rebuild(result)
 

@@ -144,7 +144,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   | Condition | Outcome |
   | --- | --- |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`, ~17-24 min); `steps.tiers.tier4_repair` records it, no gap flag |
-  | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no SNAPSHOT, so the native import sees no session for the night (`not_yet`) |
+  | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no session for the night (`not_yet`) |
   | No gap, finalize fails | `tiers_degraded` (as any rebuild failure) |
   | Repaired, or no gap | SNAPSHOT written once |
 
