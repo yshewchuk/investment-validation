@@ -195,24 +195,32 @@ def test_duplicate_event_id_refuses_even_with_different_dates(harness, dataset):
     assert h.conn.execute("SELECT count(*) FROM data_snapshots").fetchone()[0] == 0
 
 
-def test_parent_action_addition_and_interval_correction_preserve_native_membership(harness, monkeypatch):
+@pytest.mark.parametrize("dataset,economic_field,initial_amount", [
+    ("splits", "split_to", 7.), ("dividends", "cash_amount", 1.25)])
+def test_parent_action_addition_and_interval_correction_preserve_native_membership(
+        harness, monkeypatch, dataset, economic_field, initial_amount):
     h = harness
     parent, scope, daily_ref = bootstrap(h)
     original_daily = read(h, parent, massive_daily.CONTRACT)
-    contract = massive_actions.CONTRACTS["dividends"]
-    initial = [action("dividends", "left", "2026-08-03"), action("dividends", "inside"),
-               action("dividends", "old-start", "2026-08-09"), action("dividends", "old-end", "2026-08-12"),
-               action("dividends", "right", "2026-08-25")]
-    source, first_ref, first_doc = acquired(h, "dividends", key="actions", rows=initial)
+    contract = massive_actions.CONTRACTS[dataset]
+    initial = [action(dataset, "left", "2026-08-03"), action(dataset, "inside"),
+               action(dataset, "old-start", "2026-08-09"), action(dataset, "old-end", "2026-08-12"),
+               action(dataset, "right", "2026-08-25")]
+    source, first_ref, first_doc = acquired(h, dataset, key="actions", rows=initial)
     attempt, params = prepare(h, source, key="add", parent=parent, scope=scope, generation=1)
     added = finish_snapshot(h, attempt, params)
+    original_actions = read(h, added, contract)
+    for row in original_actions:
+        expected = next(value for value in initial if value["id"] == row["id"])
+        assert all(value is not None for value in expected.values())
+        assert {k: row[k] for k in expected} == expected
     assert added.table_versions["massive_daily"] == parent.table_versions["massive_daily"]
     assert added.parent_snapshot_id == parent.snapshot_id
-    corrections = [action("dividends", identity, day) | {"cash_amount": amount} for identity, day, amount in
+    corrections = [action(dataset, identity, day) | {economic_field: amount} for identity, day, amount in
                    [("new-start", "2026-08-09", 8.5), ("replacement", "2026-08-10", 9.5),
                     ("new-end", "2026-08-12", 10.5)]]
     # New generation ensures a real independent provider observation, not older exact reuse.
-    request = support.request("2026-08-09", "2026-08-12", "dividends")
+    request = support.request("2026-08-09", "2026-08-12", dataset)
     p = support.parameters(request, generation="correction")
     support.enqueue(h, "correction-source", p)
     source_attempt = support.claim(h)
@@ -223,16 +231,21 @@ def test_parent_action_addition_and_interval_correction_preserve_native_membersh
     monkeypatch.setattr(support.coverage, "plan", lambda *_: pytest.fail("snapshot replanned"))
     updated = finish_snapshot(h, attempt, params)
     rows = read(h, updated, contract)
-    assert [(r["id"], r["date"], r["cash_amount"]) for r in rows] == [
-        ("left", "2026-08-03", 1.25), ("new-end", "2026-08-12", 10.5),
-        ("new-start", "2026-08-09", 8.5), ("replacement", "2026-08-10", 9.5), ("right", "2026-08-25", 1.25)]
+    assert [(r["id"], r["date"], r[economic_field]) for r in rows] == [
+        ("left", "2026-08-03", initial_amount), ("new-end", "2026-08-12", 10.5),
+        ("new-start", "2026-08-09", 8.5), ("replacement", "2026-08-10", 9.5),
+        ("right", "2026-08-25", initial_amount)]
+    assert [r for r in rows if r["id"] in ("left", "right")] == [
+        r for r in original_actions if r["id"] in ("left", "right")]
     assert rows[0]["raw_receipt_id"] == first_doc["coverage"]["bindings"][0]["evidence"]["raw_receipt_id"]
     assert all(r["raw_receipt_id"] == doc["coverage"]["bindings"][0]["evidence"]["raw_receipt_id"]
                for r in rows[1:4])
     assert read(h, parent, massive_daily.CONTRACT) == original_daily == read(h, updated, massive_daily.CONTRACT)
-    assert [(r["id"], r["date"], r["cash_amount"]) for r in read(h, added, contract)] == [
-        ("inside", "2026-08-10", 1.25), ("left", "2026-08-03", 1.25),
-        ("old-end", "2026-08-12", 1.25), ("old-start", "2026-08-09", 1.25), ("right", "2026-08-25", 1.25)]
+    assert [(r["id"], r["date"], r[economic_field]) for r in read(h, added, contract)] == [
+        ("inside", "2026-08-10", initial_amount), ("left", "2026-08-03", initial_amount),
+        ("old-end", "2026-08-12", initial_amount), ("old-start", "2026-08-09", initial_amount),
+        ("right", "2026-08-25", initial_amount)]
+    assert read(h, added, contract) == original_actions
     resolved = Repository(h.conn, h.store).resolve_full(updated.snapshot_id)
     manifest = resolved.table_manifests[contract.table_name]
     assert manifest.coverage_receipt_refs == tuple(sorted([first_ref.artifact_id, second_ref.artifact_id]))
@@ -592,6 +605,39 @@ def test_paginated_action_pins_clip_without_replacing_original_page_receipts(har
     assert resolved.records[0].input_receipt_refs == tuple(sorted(p["raw_receipt_id"] for p in original_pages))
     assert resolved.table_manifests[contract.table_name].coverage_receipt_refs == (ref.artifact_id,)
     assert calls == [scope, continuation]
+
+
+@pytest.mark.parametrize("dataset,field,value", [
+    ("splits", "id", None), ("splits", "split_from", None), ("splits", "split_to", None),
+    ("splits", "historical_adjustment_factor", 0), ("dividends", "id", None),
+    ("dividends", "cash_amount", None), ("dividends", "currency", None), ("dividends", "pay_date", "invalid")])
+def test_narrow_action_pin_clips_unusable_outside_rows_before_validation(harness, dataset, field, value):
+    h = harness
+    outside = [action(dataset, "outside-left", "2026-08-02"), action(dataset, "outside-right", "2026-08-29")]
+    for row in outside:
+        if value is None:
+            del row[field]
+        else:
+            row[field] = value
+    selected = action(dataset, "selected")
+    _, _, broad = acquired(h, dataset, key="broad", rows=[outside[0], selected, outside[1]])
+    before_calls = h.conn.execute("SELECT SUM(used_calls) FROM provider_reservations").fetchone()[0]
+    source, ref, saved = daily.acquired(h, key="clipped", scope=support.request("2026-08-09", "2026-08-12", dataset))
+    original = broad["coverage"]["bindings"][0]
+    assert saved["coverage"]["bindings"] == [original | {"start": "2026-08-09", "end": "2026-08-12"}]
+    attempt, params = prepare(h, source, key="publish")
+    result = daily.execute(h, attempt, params)[1]
+    contract = massive_actions.CONTRACTS[dataset]
+    assert read(h, result, contract) == [{**selected, "date": "2026-08-10", "adjustment_basis": "corporate_action",
+        "occurrence_id": original["occurrence_id"], **{k: original["evidence"][k] for k in
+        ("raw_receipt_id", "raw_hash", "first_received_at", "observed_at")}}]
+    resolved = Repository(h.conn, h.store).resolve_full(result.snapshot_id)
+    assert resolved.table_manifests[contract.table_name].coverage_receipt_refs == (ref.artifact_id,)
+    assert len(resolved.records) == 1
+    assert resolved.records[0].input_receipt_refs == (original["evidence"]["raw_receipt_id"],)
+    assert resolved.records[0].import_request_hash == content_hash([
+        ref.artifact_id, "massive_actions_normalizer.v1", contract.definition_hash])
+    assert h.conn.execute("SELECT SUM(used_calls) FROM provider_reservations").fetchone()[0] == before_calls
 
 
 @pytest.mark.parametrize("dataset", ["splits", "dividends"])
