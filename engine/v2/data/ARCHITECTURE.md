@@ -615,6 +615,16 @@ Root doc §5 invariants this package is responsible for:
   but fully tombstoned ticker refuses); for a ticker the source does not list,
   in the prior dataset version. The gap surfaces at capture rather than as a failed native calendar scan
   (`CONTRACT_MISMATCH`, no `price_history` for the ticker) in the nightly.
+- **A `price_history` retrieval never drops stored history.** A full-history
+  retrieval that omits any currently live stored date (truncated end,
+  mid-history gap, or empty), or starts later than the live history, is refused
+  whole by `diff_retrieval` with `CONTRACT_MISMATCH`. A later start reports
+  `stored_min_date` and `retrieval_min_date`; an omission reports
+  `missing_count` plus the missing dates (or `first_missing_date`,
+  `last_missing_date` past 20). Nothing from the refused response is written,
+  the stored rows stay live, and the next refresh retries. Only live dates
+  count: omitting a tombstoned date is not a refusal. `diff_retrieval` never
+  emits a tombstone.
 - **Registered contract definitions are immutable.** `catalog.commit_snapshot`
   refuses (`IDENTITY_CONFLICT`) a changed definition under an existing
   `contract_id`; a table picks its next `contract_id`/`semantic_version` per
