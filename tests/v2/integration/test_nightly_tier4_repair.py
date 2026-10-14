@@ -27,8 +27,8 @@ import pytest
 from engine.dashboard.nightly import (
     NightlyReport,
     NightlyStop,
-    _repair_tier4_gap,
-    _repair_tier4_gap_if_needed,
+    repair_tier4_gap,
+    repair_tier4_gap_if_needed,
 )
 
 
@@ -66,7 +66,7 @@ def test_planted_gap_runs_a_full_rebuild_and_records_the_repair():
         return repaired
 
     readings = iter([0, 7.5])
-    _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings),
+    repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings),
                       finalize=finalized.append)
 
     assert calls == [(("tier4",), {"tier4_since": None, "finalize": False})], \
@@ -86,7 +86,7 @@ def test_repair_raising_stops_the_run_with_a_typed_code():
         raise RuntimeError("disk on fire")
 
     with pytest.raises(NightlyStop) as caught:
-        _repair_tier4_gap(_report(), boom, finalize=finalized.append)
+        repair_tier4_gap(_report(), boom, finalize=finalized.append)
 
     assert caught.value.step == "tier4_repair"
     assert caught.value.detail.startswith(
@@ -101,7 +101,7 @@ def test_repair_that_still_leaves_the_gap_stops_the_run():
         return _result(_gapped())
 
     with pytest.raises(NightlyStop) as caught:
-        _repair_tier4_gap(_report(), fake_rebuild_tables, finalize=finalized.append)
+        repair_tier4_gap(_report(), fake_rebuild_tables, finalize=finalized.append)
 
     assert caught.value.step == "tier4_repair"
     assert caught.value.detail.startswith("TIER4_GAP_REMAINS: ")
@@ -122,7 +122,7 @@ def test_repair_budget_reports_the_complete_detail_string(monkeypatch):
     report = _report()
 
     with pytest.raises(NightlyStop) as caught:
-        _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings),
+        repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings),
                           finalize=finalized.append)
 
     assert caught.value.step == "tier4_repair"
@@ -146,7 +146,7 @@ def test_the_helper_finalizes_a_gap_free_incremental_result_once():
     # not run the repair.
     tier_result = fake_rebuild_tables(("panel", "tier4"), tier4_since="2026-10-10",
                                       finalize=False)
-    _repair_tier4_gap_if_needed(report, tier_result, fake_rebuild_tables,
+    repair_tier4_gap_if_needed(report, tier_result, fake_rebuild_tables,
                                 finalize=finalized.append)
 
     assert len(calls) == 1, "no gap means no second (full) rebuild"
@@ -165,7 +165,7 @@ def test_an_incremental_result_with_a_gap_runs_the_repair_and_finalizes_it():
         calls.append((tables, kwargs))
         return repaired
 
-    _repair_tier4_gap_if_needed(report, _result(_gapped()), fake_rebuild_tables,
+    repair_tier4_gap_if_needed(report, _result(_gapped()), fake_rebuild_tables,
                                 finalize=finalized.append)
 
     assert calls == [(("tier4",), {"tier4_since": None, "finalize": False})], \
@@ -184,7 +184,7 @@ def test_a_refused_repair_never_finalizes_the_incremental_result():
         raise RuntimeError("disk on fire")
 
     with pytest.raises(NightlyStop) as caught:
-        _repair_tier4_gap_if_needed(report, _result(_gapped()), boom,
+        repair_tier4_gap_if_needed(report, _result(_gapped()), boom,
                                     finalize=finalized.append)
 
     assert caught.value.detail.startswith("TIER4_REPAIR_FAILED: ")
@@ -200,10 +200,10 @@ def test_rerunning_the_guard_after_a_repair_does_nothing():
         calls.append((tables, kwargs))
         return _result({})
 
-    _repair_tier4_gap_if_needed(report, _result(_gapped()), fake_rebuild_tables,
+    repair_tier4_gap_if_needed(report, _result(_gapped()), fake_rebuild_tables,
                                 finalize=finalized.append)
     gap_free = _result({})
-    _repair_tier4_gap_if_needed(report, gap_free, fake_rebuild_tables,
+    repair_tier4_gap_if_needed(report, gap_free, fake_rebuild_tables,
                                 finalize=finalized.append)
 
     assert len(calls) == 1, "the rerun's gap-free result must not repair again"
@@ -223,7 +223,7 @@ def test_repair_finalize_failure_stops_the_run_with_a_typed_code():
     report = _report()
 
     with pytest.raises(NightlyStop) as caught:
-        _repair_tier4_gap(report, fake_rebuild_tables, finalize=boom)
+        repair_tier4_gap(report, fake_rebuild_tables, finalize=boom)
 
     assert caught.value.step == "tier4_repair"
     assert caught.value.detail.startswith(
@@ -238,7 +238,7 @@ def test_gap_free_finalize_failure_degrades_the_tiers_step():
     def boom(result):
         raise RuntimeError("disk full")
 
-    _repair_tier4_gap_if_needed(report, _result({}), lambda *a, **k: _result({}),
+    repair_tier4_gap_if_needed(report, _result({}), lambda *a, **k: _result({}),
                                 finalize=boom)
 
     assert report.steps["tiers"]["degraded"] is True
@@ -374,7 +374,42 @@ def _marker(tmp_path):
     return tmp_path / "snapshot.marker"
 
 
-def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_path):
+def _events_stub(tickers, *, as_of="2026-10-13", ahead_days=2):
+    """One upcoming, session-stamped event per ticker for the store stub.
+
+    A non-empty calendar is what makes ``run_nightly`` run its refresh step
+    (``if refresh and calendar_tickers``); the empty stub the older cases use
+    skips refresh and finality entirely. The date lands inside the horizon and
+    carries a ``session``, so the event counts as upcoming and scoreable.
+    """
+    import pandas as pd
+
+    stamp = pd.Timestamp(as_of) + pd.Timedelta(days=ahead_days)
+    return pd.DataFrame({
+        "event_id": [f"evt-{t}" for t in tickers],
+        "ticker": list(tickers),
+        "event_date": [stamp] * len(tickers),
+        "session": ["bmo"] * len(tickers),
+        "date_conflict": [False] * len(tickers),
+    })
+
+
+def _refresh_recorder(record):
+    """A stand-in ``refresh_calendar_data`` that records its ``finalize`` kwarg.
+
+    Returns the deferred-snapshot shape the refresh rebuild now reports when it
+    is told not to finalize (``rebuild.snapshot`` is ``None``).
+    """
+
+    def recorder(tickers, as_of, **kwargs):
+        record.append({"tickers": list(tickers), "finalize": kwargs.get("finalize")})
+        return {"calls": 0, "rebuild": {"snapshot": None, "elapsed_s": 0}}
+
+    return recorder
+
+
+def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_path,
+                       events=None):
     """Patch everything run_nightly touches up to the scorer.
 
     Returns ``(nightly, calls, captured, marker_writes)`` where ``calls``
@@ -382,6 +417,13 @@ def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_p
     ``NightlyReport`` the run built. ``marker_writes`` counts snapshot writes:
     the fake ``rebuild`` writes ``marker_path`` when it finalizes (the
     default), and the fake ``finalize_rebuild`` writes the same file.
+
+    ``events`` is the earnings-events table the store stub returns. It defaults
+    to empty (no calendar, so refresh and finality are skipped); pass
+    :func:`_events_stub` to drive a non-empty calendar through refresh, finality
+    and the tiers step. ``resolve_final_session`` and ``trading_calendar`` are
+    stubbed too, so a non-empty calendar proceeds without touching the network
+    or the calendar cache.
     """
     import pandas as pd
 
@@ -389,14 +431,27 @@ def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_p
     from engine.data import store
     from engine.data.pulls import computed_moves
 
-    events = pd.DataFrame({
-        "event_id": pd.Series(dtype="object"),
-        "ticker": pd.Series(dtype="object"),
-        "event_date": pd.Series(dtype="datetime64[ns]"),
-        "session": pd.Series(dtype="object"),
-        "date_conflict": pd.Series(dtype="bool"),
-    })
+    if events is None:
+        events = pd.DataFrame({
+            "event_id": pd.Series(dtype="object"),
+            "ticker": pd.Series(dtype="object"),
+            "event_date": pd.Series(dtype="datetime64[ns]"),
+            "session": pd.Series(dtype="object"),
+            "date_conflict": pd.Series(dtype="bool"),
+        })
     monkeypatch.setattr(store, "read_table", lambda *a, **k: events.copy())
+    monkeypatch.setattr(
+        "engine.data.finality.resolve_final_session",
+        lambda requested, tickers, *, calendar: SimpleNamespace(
+            date=str(pd.Timestamp(requested).normalize().date()),
+            as_dict=lambda: {"is_final": True, "detail": "stub"},
+        ),
+    )
+    monkeypatch.setattr(
+        "engine.calendar.trading_calendar",
+        lambda: SimpleNamespace(is_trading_day=lambda stamp: True,
+                                shift=lambda stamp, n: stamp),
+    )
     monkeypatch.setattr(nightly, "validate_refresh",
                         lambda *a, **k: [{"name": "no_calendar", "passed": True,
                                           "detail": "no tickers to validate"}])
@@ -622,3 +677,101 @@ def test_run_nightly_degrades_when_the_incremental_rebuild_raises(monkeypatch, t
     assert sentinel.touched, "the run proceeded to the scorer"
     assert marker_writes == []
     assert not _marker(tmp_path).exists(), "a failed rebuild writes no snapshot"
+
+
+# --------------------------------------------------------------------------
+# the refresh rebuild's snapshot is deferred exactly when tiers will finalize
+# --------------------------------------------------------------------------
+
+
+def test_run_nightly_defers_the_refresh_snapshot_when_tiers_will_finalize(
+        monkeypatch, tmp_path):
+    """With a real calendar and tiers on, refresh must NOT finalize.
+
+    The refresh rebuild is told ``finalize=False``; the tiers step's own
+    ``finalize_rebuild`` writes the one snapshot after the Tier-4 gap check.
+    """
+    refresh_calls = []
+    nightly, calls, _captured, _marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[_result({})],
+        finalize_calls=[],
+        marker_path=_marker(tmp_path),
+        events=_events_stub(["AAA"]),
+    )
+    monkeypatch.setattr(nightly, "refresh_calendar_data", _refresh_recorder(refresh_calls))
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(_Scored):
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=["AAA"], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert refresh_calls == [{"tickers": ["AAA"], "finalize": False}], \
+        "with tiers on, the refresh rebuild defers; the tiers step finalizes"
+    assert calls == [(("panel", "tier4"), {"tier4_since": None, "finalize": False})], \
+        "the refresh deferral leaves the one finalize to the tiers step"
+    assert sentinel.touched, "the run proceeded to the scorer"
+
+
+def test_run_nightly_finalizes_the_refresh_snapshot_when_tiers_is_off(
+        monkeypatch, tmp_path):
+    """With tiers off there is no later finalize, so refresh finalizes as before."""
+    refresh_calls = []
+    nightly, calls, _captured, _marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[],
+        finalize_calls=[],
+        marker_path=_marker(tmp_path),
+        events=_events_stub(["AAA"]),
+    )
+    monkeypatch.setattr(nightly, "refresh_calendar_data", _refresh_recorder(refresh_calls))
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(_Scored):
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=["AAA"], refresh=True, tiers=False,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert refresh_calls == [{"tickers": ["AAA"], "finalize": True}], \
+        "with tiers off, the refresh rebuild finalizes as before"
+    assert calls == [], "no tiers rebuild runs when tiers is off"
+    assert sentinel.touched, "the run proceeded to the scorer"
+
+
+def test_run_nightly_refused_repair_writes_no_snapshot_with_calendar_names(
+        monkeypatch, tmp_path):
+    """A refused repair leaves no SNAPSHOT even when refresh ran first.
+
+    The refresh rebuild deferred its snapshot (``finalize=False``); when the
+    repair is refused neither the refresh nor the incremental result is
+    finalized, so nothing writes the marker.
+    """
+    finalize_calls = []
+    nightly, _calls, _captured, marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[_result(_gapped()), RuntimeError("disk on fire")],
+        finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
+        events=_events_stub(["AAA"]),
+    )
+    monkeypatch.setattr(nightly, "refresh_calendar_data", _refresh_recorder([]))
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(NightlyStop) as caught:
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=["AAA"], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert caught.value.step == "tier4_repair"
+    assert caught.value.detail.startswith("TIER4_REPAIR_FAILED: ")
+    assert not sentinel.touched, "a refused repair must never reach the scorer"
+    assert finalize_calls == [], "neither the refresh nor the tiers result finalizes"
+    assert marker_writes == []
+    assert not _marker(tmp_path).exists(), "a refused repair leaves no SNAPSHOT"

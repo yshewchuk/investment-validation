@@ -51,6 +51,7 @@ from engine.score import LADDER_STEP
 
 __all__ = [
     "NightlyStop", "NightlyReport", "run_nightly", "refresh_calendar_data",
+    "repair_tier4_gap", "repair_tier4_gap_if_needed",
     "single_run_lock",
     "strike_ladder", "validate_refresh",
 ]
@@ -568,6 +569,7 @@ def refresh_calendar_data(
     sessions: int = CHAIN_SESSIONS,
     forward: bool = True,
     max_confirmations: int = 400,
+    finalize: bool = True,
 ) -> dict:
     """Refresh what the board scores from, cheapest and most load-bearing first.
 
@@ -703,7 +705,8 @@ def refresh_calendar_data(
     # Incremental: unchanged raw inputs reuse their cached parse (byte-identical
     # outputs; see engine/data/rebuild_cache.py). INVESTING_PLAN_REBUILD_FULL=1
     # forces a full parse.
-    rebuild_result = rebuild(tables=("events", "daily", "chains"), incremental=True)
+    rebuild_result = rebuild(tables=("events", "daily", "chains"), incremental=True,
+                             finalize=finalize)
     out["rebuild"] = {"snapshot": rebuild_result.snapshot, "elapsed_s": round(rebuild_result.elapsed_s, 1)}
     return out
 
@@ -787,7 +790,7 @@ def _repair_failed(exc: Exception) -> NightlyStop:
     )
 
 
-def _repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
+def repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
                       finalize) -> None:
     """Full Tier-4 rebuild (no ``--since``) to close an out-of-window gap.
 
@@ -836,7 +839,7 @@ def _tiers_degraded(report: NightlyReport, exc: Exception) -> None:
     or a finalize failure records the error on ``steps["tiers"]`` and appends
     the flag, and the run continues to score rather than leaving the board
     dark. Called from run_nightly's rebuild handler and from the gap-free
-    finalize path of :func:`_repair_tier4_gap_if_needed`.
+    finalize path of :func:`repair_tier4_gap_if_needed`.
     """
     report.steps["tiers"] = {"degraded": True,
                              "error": f"{type(exc).__name__}: {exc}"[:300]}
@@ -847,7 +850,7 @@ def _tiers_degraded(report: NightlyReport, exc: Exception) -> None:
     })
 
 
-def _repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
+def repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
                                 rebuild_tables, *, clock=time.time,
                                 finalize) -> None:
     """Close an out-of-window Tier-4 gap, else finalize the incremental result.
@@ -861,7 +864,7 @@ def _repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
     """
     gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
     if _tier4_gap_partial_flag(gap_fill) is not None:
-        _repair_tier4_gap(report, rebuild_tables, clock=clock, finalize=finalize)
+        repair_tier4_gap(report, rebuild_tables, clock=clock, finalize=finalize)
     else:
         # No gap: the incremental result is sound, so write its snapshot now.
         # The nightly passes finalize=False to the incremental rebuild for
@@ -1341,9 +1344,13 @@ def run_nightly(
         from engine.data.throttle import QuotaExhausted
 
         try:
+            # When the tiers step will run, its own finalize_rebuild writes the
+            # one snapshot after the Tier-4 gap check; when tiers is off, the
+            # refresh rebuild finalizes as before. So defer here exactly when a
+            # later step will finalize.
             report.steps["refresh"] = refresh_calendar_data(
                 calendar_tickers, as_of, fetcher=fetcher, horizon_days=horizon_days,
-                sessions=chain_sessions,
+                sessions=chain_sessions, finalize=not tiers,
             )
             # The calendar may have moved under the refresh — re-read it.
             events = store.read_table(
@@ -1520,7 +1527,7 @@ def run_nightly(
         # initialised to None before the try), so the None check alone already
         # excludes the degraded path.
         if tier_result is not None:
-            _repair_tier4_gap_if_needed(report, tier_result, rebuild_tables,
+            repair_tier4_gap_if_needed(report, tier_result, rebuild_tables,
                                         finalize=finalize_rebuild)
 
         # -- 2b(ii). did any of that actually advance? ----------------------

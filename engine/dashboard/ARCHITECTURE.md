@@ -139,7 +139,13 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   Tier-4 gap check passes. The budget (`TIER4_REPAIR_BUDGET_S`) is checked
   after the repair returns, not enforced mid-run. A rerun with no gap skips
   the repair. Store side effect: a refused night leaves the panel and Tier-4
-  tables rebuilt while SNAPSHOT keeps the previous digests.
+  tables rebuilt while SNAPSHOT keeps the previous digests. When the tiers
+  step runs, the refresh step's own rebuild is also deferred
+  (`refresh_calendar_data(finalize=False)`) so the tiers step writes the one
+  snapshot per night; with `--no-tiers` the refresh rebuild finalizes as
+  before. A night whose tiers step degrades (rebuild raised) therefore
+  writes no snapshot. `repair_tier4_gap` and `repair_tier4_gap_if_needed`
+  are public (in `__all__`) so tests drive them without private imports.
 
   | Condition | Outcome |
   | --- | --- |
