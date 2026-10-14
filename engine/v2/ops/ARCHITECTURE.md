@@ -252,9 +252,8 @@ submission path reads either edge (the rule Part 4 established for
   `native_rows` share any key (below, `_empty_native_report`) before
   calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
-  This is the only production producer of `native_parity_report.json`;
-  `tools/native_parity_run.py` and `row_explanations` never existed and no
-  parallel manual path is built.
+  This is the only production producer of `native_parity_report.json`; the one other producer of this format is the operator exporter `tools/captured_native_comparison.py`.
+- **`financial_diagnostics` view of a legacy row (#681).** Legacy score rows never carry `entry_cost_pct`; `_dimension_view` derives it as `entry_cost / spot * 100` (`None`, never an exception, when either is absent, non-numeric or non-finite, or `spot` is 0; the comparator reports `None` as a mismatch only when the other side has a value, and `None` against `None` agrees; `checks/phase4_real._expected_financial_diagnostics` arithmetic). A row that already carries the key keeps its value.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
   dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
   gap in `compare_native_vs_legacy`: its unchanged guards reject an empty
@@ -1028,7 +1027,7 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `DYNAMIC_MENU`), `engine.v2.scoring` (5.0 — `native_board_universe.py`'s
 `SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
-`identity`/`application`), `engine.v2.ledger` (6.0), `engine.v2.parity`
+`identity`/`application`, and since #681 `native_analog_query.analog_declarations` plus `identity.score_request_key`, declaring the frozen board analog pool on each row whose release carries a matching one), `engine.v2.ledger` (6.0), `engine.v2.parity`
 (6.5). `engine.v2.models` (3.5) permits top-level `payoff_artifact_key` in `native_score_batch` and `PayoffSurfaceArtifact`/`payoff_artifact_key`/`DriverResidualPoolArtifact` in `native_runup_inputs`; all other direct model imports are lazy.
 `engine.v2.domain.generation` (2.0, `Geometry`/`Pricing`) remains lazy-only. Ops does not import the native experiment adapter; the executor selects a fixed child module.
 `engine.v2.domain.generation` supplies geometry to the rescore decoder

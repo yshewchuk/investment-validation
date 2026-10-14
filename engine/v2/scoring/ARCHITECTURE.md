@@ -127,6 +127,23 @@ load-bearing entrypoints:
   native arithmetic for the analog stage, the DYN-SV chooser, the entry-rule
   gates, payoff-calibration/model layer and frozen residual-state reading.
   Each is pure arithmetic over declared inputs; none performs I/O.
+  **Nightly frozen analog declaration** (`native_analog_query.py`, pure).
+  - *Selection:* the release's board analog pool whose
+    `(strategy, fill alpha, cutoff)` key matches the row, pinned by its
+    `content_hash`; no match leaves the analog block undeclared, and more than
+    one match refuses the row (`MODEL_NOT_READY`), never a first-wins pick.
+  - *Query:* `mcap_bucket` and `implied_ratio` come from the panel row at
+    bundle time; `dte_band` and `moneyness_band` are completed in the analog
+    stage from the scorer-computed `dte_entry`, `strike` and `spot` with
+    legacy's band edges. An absent, non-finite or (for strike and spot)
+    non-positive input gives a `None` band, so the matcher drops that
+    dimension. A band key already present is kept; a non-mapping query is
+    returned unchanged and refused by the evaluator.
+  - *Receipt:* the analogs stage records the completed query the matcher used.
+  - *Seed:* native's own snapshot id and native request key, not legacy's
+    identity (user decision 2026-10-13), so interval drift against legacy is
+    expected parity drift. While `implied_ratio` is `None` (#651) the
+    implied-tercile dimension is dropped, so `n_analogs` can also differ.
 - `compatibility.py` — `score_legacy_request`, the one legacy adapter this
   package owns (see Dependencies).
 
