@@ -580,6 +580,47 @@ def test_mismatch_later_page_error_recovers_via_previous_and_restart(browser, se
     finally:
         context.close()
 
+def test_mismatch_restart_from_successful_later_page(browser, server):
+    page_a = _page([{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}], next_cursor="c2")
+    page_b = _page([{"row_key": "NVDA|2026-09-22|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 1.0, "native": 2.0}}}])
+
+    def mismatches(cursor):
+        return (200, page_a if cursor is None else page_b)
+
+    base, context, page, parity, _ = _open_parity(browser, server, mismatches=mismatches)
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        expect(page.get_by_test_id("parity-mismatch-restart")).to_be_visible()
+        page.get_by_test_id("parity-mismatch-restart").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        assert "cursor=" not in page.mismatch_calls[-1]
+        assert len(parity) == 2
+    finally:
+        context.close()
+
+def test_mismatch_401_shows_unauthenticated(browser, server):
+    base, context, page, _, _ = _open_parity(browser, server,
+        mismatches=lambda c: (401, {"code": "UNAUTHENTICATED", "category": "auth", "retryable": False, "message": "sign in"}))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-unauthenticated")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-summary")).to_be_visible()
+    finally:
+        context.close()
+
 @pytest.mark.parametrize("as_of,generated_at", [
     ("2026-10-01", SUMMARY["generated_at"]),
     (SUMMARY["as_of"], "2026-10-02T02:00:00Z"),
