@@ -11,6 +11,8 @@ from __future__ import annotations
 import copy
 import dataclasses
 import fcntl
+import os
+import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -20,16 +22,16 @@ from checks.phase5_release import (
     STAGED,
     STATE_SPECS,
     ReleaseLayoutError,
-    _catalog_path,
-    _read_catalog,
-    _validate_catalog,
-    _verify_staged,
-    _write_catalog,
+    catalog_path,
     deployment_root,
     manifest_body,
     member_row,
     object_relpath,
+    read_catalog,
     sha256_bytes,
+    validate_catalog,
+    verify_staged,
+    write_catalog,
 )
 from engine.v2.models import deployment, releases
 
@@ -51,6 +53,7 @@ _REQUIRED_MEMBER_IDS = (*POOL_MEMBER_IDS, CHOOSER_MEMBER_ID)
 _SPEC_BY_ID = {spec.member_id: spec for spec in STATE_SPECS}
 _HEX = frozenset("0123456789abcdef")
 _UNSAFE_ID_CHARS = ("/", "\\", "\0")
+MAX_OBJECT_BYTES = 512 * 1024 * 1024
 
 
 class ReleaseAssemblyRefusal(ValueError):
@@ -81,6 +84,8 @@ def _content_hash_valid(value: object) -> bool:
 
 def _parse_day(value: object, code: str, detail: str) -> date:
     try:
+        if not isinstance(value, str) or len(value) != 10:
+            raise ValueError("not an extended ISO date")
         return date.fromisoformat(value)
     except (TypeError, ValueError) as exc:
         raise ReleaseAssemblyRefusal(code, detail) from exc
@@ -173,7 +178,7 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
         raise ReleaseAssemblyRefusal(
             "PRIOR_MISMATCH", "expected prior release id must be a non-empty string")
     try:
-        prior = _validate_catalog(prior_catalog, expected_prior_release_id)
+        prior = validate_catalog(prior_catalog, expected_prior_release_id)
     except ReleaseLayoutError as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior catalog is malformed or names another release") from exc
     sources = prior.get("sources")
@@ -228,15 +233,32 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
     return manifest_body(release_id, prior["deployment_id"], rows, carried)
 
 
+def _read_regular(path: Path, limit: int, code: str, detail: str) -> bytes:
+    """Read a bounded regular file, refusing symlinks, non-regular files and oversize input."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise ReleaseAssemblyRefusal(code, detail) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ReleaseAssemblyRefusal(code, detail)
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            data = handle.read(limit + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(data) > limit:
+        raise ReleaseAssemblyRefusal(code, detail)
+    return data
+
+
 def _verify_objects(store: Path, supplied: tuple[PoolOutput, ...]) -> None:
     for output in supplied:
         path = store / object_relpath(output.content_hash)
-        try:
-            if path.is_symlink() or not path.is_file():
-                raise ReleaseAssemblyRefusal("OBJECT_UNVERIFIED", "a supplied object is missing")
-            payload = path.read_bytes()
-        except OSError as exc:
-            raise ReleaseAssemblyRefusal("OBJECT_UNVERIFIED", "a supplied object is unreadable") from exc
+        payload = _read_regular(
+            path, output.payload_bytes, "OBJECT_UNVERIFIED",
+            "a supplied object is missing or unreadable")
         if sha256_bytes(payload) != output.content_hash or len(payload) != output.payload_bytes:
             raise ReleaseAssemblyRefusal("OBJECT_UNVERIFIED", "an object disagrees with its claim")
 
@@ -246,15 +268,9 @@ def _read_prior_payloads(store: Path, prior) -> dict[str, bytes]:
     payloads: dict[str, bytes] = {}
     for binding in prior.bindings:
         for member in binding.members:
-            path = store / member.path
-            try:
-                if path.is_symlink() or not path.is_file():
-                    raise ReleaseAssemblyRefusal(
-                        "PRIOR_MISMATCH", "a prior model object is missing or unreadable")
-                data = path.read_bytes()
-            except OSError as exc:
-                raise ReleaseAssemblyRefusal(
-                    "PRIOR_MISMATCH", "a prior model object is missing or unreadable") from exc
+            data = _read_regular(
+                store / member.path, MAX_OBJECT_BYTES, "PRIOR_MISMATCH",
+                "a prior model object is missing or unreadable")
             if sha256_bytes(data) != member.content_hash:
                 raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a prior model object is corrupt")
             payloads[member.content_hash] = data
@@ -279,8 +295,6 @@ def _publication_lock(store: Path):
 def carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
                           inventory, outputs, chooser: object, cutoff: str) -> Path:
     """Verify, re-stage the prior model bindings and write the candidate catalog."""
-    if not isinstance(getattr(inventory, "release_id", None), str):
-        raise ReleaseAssemblyRefusal("INVENTORY_MISMATCH", "inventory is missing or has no release id")
     try:
         return _carry_forward_release(release_root, prior_release_id=prior_release_id,
                                       release_id=release_id, inventory=inventory, outputs=outputs,
@@ -303,15 +317,20 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
     root = Path(release_root)
     store = deployment_root(root)
     try:
-        prior_catalog = _read_catalog(_catalog_path(root, prior_release_id), prior_release_id)
+        prior_catalog = read_catalog(catalog_path(root, prior_release_id), prior_release_id)
     except ReleaseLayoutError as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior catalog could not be read or validated") from exc
     if prior_catalog is None:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "no prior catalog exists for that release id")
     try:
-        _verify_staged(store, prior_release_id)
+        verify_staged(store, prior_release_id)
     except ReleaseLayoutError as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release is not a verified staged release") from exc
+
+    if not (isinstance(getattr(inventory, "release_id", None), str)
+            and isinstance(getattr(inventory, "artifacts", None), tuple)
+            and isinstance(getattr(inventory, "bindings", None), tuple)):
+        raise ReleaseAssemblyRefusal("INVENTORY_MISMATCH", "inventory is missing or malformed")
 
     body = _derive_catalog(prior_catalog, release_id=release_id,
                            expected_prior_release_id=prior_release_id,
@@ -335,7 +354,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
             "INVENTORY_MISMATCH", "inventory deployment id does not match the prior release")
     payloads = _read_prior_payloads(store, prior)
 
-    candidate_path = _catalog_path(root, release_id)
+    candidate_path = catalog_path(root, release_id)
     candidate = dataclasses.replace(prior, release_id=release_id)
     with _publication_lock(store):
         try:
@@ -345,9 +364,6 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
             if codes & {"RELEASE_ID_REUSED", "MANIFEST_UNREADABLE"}:
                 raise ReleaseAssemblyRefusal(
                     "ID_CONFLICT", "candidate release id is already staged with different content") from exc
-            if codes & {"MISSING_MEMBER_PAYLOAD", "PAYLOAD_HASH_MISMATCH"}:
-                raise ReleaseAssemblyRefusal(
-                    "PRIOR_MISMATCH", "a prior model payload is missing or corrupt") from exc
             raise ReleaseAssemblyRefusal(
                 "INVENTORY_MISMATCH",
                 "inventory is incomplete or incompatible with the prior release") from exc
@@ -358,15 +374,19 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
         except deployment.DeploymentError as exc:
             raise ReleaseAssemblyRefusal(
                 "ID_CONFLICT", "candidate staged manifest is corrupt or conflicting") from exc
+        except (TypeError, AttributeError, KeyError) as exc:
+            raise ReleaseAssemblyRefusal(
+                "INVENTORY_MISMATCH",
+                "inventory is incomplete or incompatible with the prior release") from exc
 
         try:
-            _verify_staged(store, release_id)
+            verify_staged(store, release_id)
         except ReleaseLayoutError as exc:
             raise ReleaseAssemblyRefusal(
                 "ID_CONFLICT", "candidate staged release could not be verified") from exc
 
         try:
-            existing = _read_catalog(candidate_path, release_id)
+            existing = read_catalog(candidate_path, release_id)
         except ReleaseLayoutError as exc:
             raise ReleaseAssemblyRefusal(
                 "ID_CONFLICT", "candidate catalog exists but cannot be read or validated") from exc
@@ -377,7 +397,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
                 "ID_CONFLICT", "candidate catalog already exists with different content")
 
         try:
-            _write_catalog(candidate_path, body)
+            write_catalog(candidate_path, body)
         except OSError as exc:
             raise ReleaseAssemblyRefusal(
                 "PUBLICATION_FAILED", "candidate catalog could not be written") from exc
@@ -385,6 +405,6 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
 
 
 __all__ = [
-    "CHOOSER_MEMBER_ID", "POOL_MEMBER_IDS", "PoolOutput", "ReleaseAssemblyRefusal",
-    "carry_forward_release", "derive_catalog",
+    "CHOOSER_MEMBER_ID", "MAX_OBJECT_BYTES", "POOL_MEMBER_IDS", "PoolOutput",
+    "ReleaseAssemblyRefusal", "carry_forward_release", "derive_catalog",
 ]

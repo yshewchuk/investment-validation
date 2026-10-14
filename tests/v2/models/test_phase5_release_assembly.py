@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
-import pathlib
+import os
 import threading
 import time
 
@@ -101,7 +101,7 @@ def _valid_derive_args(root, *, cutoff="2026-10-01", prefix="new",
 
 
 def _candidate_path(root, release_id="cand1"):
-    return phase5_release._catalog_path(root, release_id)
+    return phase5_release.catalog_path(root, release_id)
 
 
 def _expected_row(spec, output, detail):
@@ -165,14 +165,14 @@ def test_happy_path_carries_the_pools_forward(tmp_path, deployment_id, binding_i
     inventory, prior_body = _stage_prior(tmp_path, deployment_id=deployment_id, binding_id=binding_id)
     args = _valid_derive_args(tmp_path)
     inventory = dataclasses.replace(inventory, release_id="cand1")
-    prior_path = phase5_release._catalog_path(tmp_path, "prior1")
+    prior_path = phase5_release.catalog_path(tmp_path, "prior1")
     prior_bytes = prior_path.read_bytes()
     root_manifest = (tmp_path / "phase5_release.json").read_bytes()
 
     path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                           inventory=inventory, **_carry_kwargs(args))
-    assert path == phase5_release._catalog_path(tmp_path, "cand1")
-    catalog = phase5_release._read_catalog(path, "cand1")
+    assert path == phase5_release.catalog_path(tmp_path, "cand1")
+    catalog = phase5_release.read_catalog(path, "cand1")
     assert catalog == _expected_catalog(prior_body, args, "cand1")
     assert catalog["deployment_id"] == deployment_id
     store = phase5_release.deployment_root(tmp_path)
@@ -285,6 +285,24 @@ def test_cutoff_mismatch(tmp_path, kind):
     assert not _candidate_path(tmp_path).exists()
 
 
+def test_cutoff_not_extended_iso_date_is_cutoff_mismatch(tmp_path):
+    _, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path, cutoff="20261001")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "CUTOFF_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_prior_pool_cutoff_not_extended_iso_date_is_prior_mismatch(tmp_path):
+    _, prior_body = _stage_prior(tmp_path, prior_sources={"pool_cutoff": "20260101"})
+    args = _valid_derive_args(tmp_path)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "PRIOR_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
 @pytest.mark.parametrize("cutoff", ["2026-09-01", "2026-08-15"])
 def test_cutoff_not_advanced(tmp_path, cutoff):
     _, prior_body = _stage_prior(tmp_path)
@@ -294,7 +312,7 @@ def test_cutoff_not_advanced(tmp_path, cutoff):
     assert error.value.code == "CUTOFF_NOT_ADVANCED"
     store = phase5_release.deployment_root(tmp_path)
     assert not _candidate_path(tmp_path).exists()
-    assert not deployment._manifest_path(store, "cand1").exists()
+    assert not phase5_release.staged_manifest_path(store, "cand1").exists()
 
 
 @pytest.mark.parametrize("mode", ["missing", "hash", "length"])
@@ -349,7 +367,7 @@ def _corrupt_candidate_catalog(root):
 def _different_candidate_catalog(root):
     rows = [phase5_release.member_row(_spec(member_id), phase5_release.STAGED, [], "old")
             for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID)]
-    phase5_release._write_catalog(_candidate_path(root),
+    phase5_release.write_catalog(_candidate_path(root),
                                   phase5_release.manifest_body("cand1", "d1", rows,
                                                                {"pool_cutoff": "2026-09-01"}))
 
@@ -406,7 +424,7 @@ def test_retry_restages_a_deleted_candidate_manifest(tmp_path):
                                           inventory=inventory, **_carry_kwargs(args))
     published = path.read_bytes()
     store = phase5_release.deployment_root(tmp_path)
-    deployment._manifest_path(store, "cand1").unlink()
+    phase5_release.staged_manifest_path(store, "cand1").unlink()
     again = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                            inventory=inventory, **_carry_kwargs(args))
     assert again == path
@@ -459,12 +477,16 @@ def test_publication_lock_serialises_concurrent_same_candidate(tmp_path, monkeyp
     inventory = dataclasses.replace(inventory, release_id="cand1")
     args_x = _valid_derive_args(tmp_path, prefix="x")
     args_y = _valid_derive_args(tmp_path, prefix="y", cutoff="2026-10-02")
-    entered, proceed, first = threading.Event(), threading.Event(), {"done": False}
+    entered = threading.Event()
+    b_started = threading.Event()
+    proceed, first = threading.Event(), {"done": False}
     real_stage = assembly.deployment.stage_release
     monkeypatch.setattr(assembly.deployment, "stage_release", _gate(real_stage, entered, proceed, first))
     results = {}
 
     def run(tag, kwargs):
+        if tag == "b":
+            b_started.set()
         try:
             results[tag] = assembly.carry_forward_release(
                 tmp_path, prior_release_id="prior1", release_id="cand1",
@@ -477,8 +499,14 @@ def test_publication_lock_serialises_concurrent_same_candidate(tmp_path, monkeyp
     assert entered.wait(10)
     b = threading.Thread(target=run, args=("b", args_y))
     b.start()
-    time.sleep(0.5)
-    assert b.is_alive()
+    deadline = time.monotonic() + 5
+    while not b_started.is_set() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert b_started.is_set()
+    hold_until = time.monotonic() + 0.2
+    while time.monotonic() < hold_until:
+        assert b.is_alive()
+        time.sleep(0.01)
     proceed.set()
     a.join(20)
     b.join(20)
@@ -486,14 +514,14 @@ def test_publication_lock_serialises_concurrent_same_candidate(tmp_path, monkeyp
     assert results["a"] == _candidate_path(tmp_path)
     assert isinstance(results["b"], assembly.ReleaseAssemblyRefusal)
     assert results["b"].code == "ID_CONFLICT"
-    assert phase5_release._read_catalog(_candidate_path(tmp_path), "cand1") == _expected_catalog(
+    assert phase5_release.read_catalog(_candidate_path(tmp_path), "cand1") == _expected_catalog(
         prior_body, args_x, "cand1")
 
 
 def _corrupt_candidate_manifest(root, args, monkeypatch):
     _stage_other_candidate_release(root)
     store = phase5_release.deployment_root(root)
-    deployment._manifest_path(store, "cand1").write_bytes(b"garbage manifest")
+    phase5_release.staged_manifest_path(store, "cand1").write_bytes(b"garbage manifest")
 
 
 def _corrupt_prior_payload(root, args, monkeypatch):
@@ -515,7 +543,7 @@ def _staging_oserror(root, args, monkeypatch):
 def _write_catalog_oserror(root, args, monkeypatch):
     def boom(*a, **k):
         raise OSError("disk full")
-    monkeypatch.setattr(assembly, "_write_catalog", boom)
+    monkeypatch.setattr(assembly, "write_catalog", boom)
 
 
 def _symlink_supplied_object(root, args, monkeypatch):
@@ -581,6 +609,27 @@ def test_inventory_mismatch_on_different_deployment_id(tmp_path):
     assert not _candidate_path(tmp_path).exists()
 
 
+def test_inventory_with_none_artifacts_is_inventory_mismatch(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1", artifacts=None)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "INVENTORY_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_inventory_without_release_id_is_inventory_mismatch(tmp_path):
+    _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=object(), **_carry_kwargs(args))
+    assert error.value.code == "INVENTORY_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
 def test_derive_catalog_carries_distinct_identities_and_names(tmp_path):
     prior_names = {member_id: f"prior-{member_id}.bin"
                    for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID,
@@ -601,7 +650,7 @@ def test_derive_catalog_carries_distinct_identities_and_names(tmp_path):
 def test_prior_mismatch_when_prior_catalog_file_is_missing(tmp_path):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
-    phase5_release._catalog_path(tmp_path, "prior1").unlink()
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
     inventory = dataclasses.replace(inventory, release_id="cand1")
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
@@ -614,7 +663,7 @@ def test_prior_mismatch_when_prior_staged_manifest_is_deleted(tmp_path):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
     store = phase5_release.deployment_root(tmp_path)
-    deployment._manifest_path(store, "prior1").unlink()
+    phase5_release.staged_manifest_path(store, "prior1").unlink()
     inventory = dataclasses.replace(inventory, release_id="cand1")
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
@@ -629,14 +678,14 @@ def _assert_prior_mismatch_on_retry(tmp_path, inventory, args, store):
                                            inventory=inventory, **_carry_kwargs(args))
         assert error.value.code == "PRIOR_MISMATCH"
         assert not _candidate_path(tmp_path).exists()
-        assert not deployment._manifest_path(store, "cand1").exists()
+        assert not phase5_release.staged_manifest_path(store, "cand1").exists()
 
 
 def test_prior_mismatch_when_prior_manifest_hash_is_invalid(tmp_path):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
     store = phase5_release.deployment_root(tmp_path)
-    path = deployment._manifest_path(store, "prior1")
+    path = phase5_release.staged_manifest_path(store, "prior1")
     manifest = json.loads(path.read_bytes())
     manifest["release_hash"] = "sha256:" + "0" * 64
     path.write_bytes(json.dumps(manifest).encode())
@@ -650,8 +699,8 @@ def test_prior_mismatch_when_prior_manifest_declares_different_release(tmp_path)
     store = phase5_release.deployment_root(tmp_path)
     other_release, other_inventory, other_payloads = _fixture("other1")
     deployment.stage_release(store, other_release, other_inventory, other_payloads)
-    deployment._manifest_path(store, "prior1").write_bytes(
-        deployment._manifest_path(store, "other1").read_bytes())
+    phase5_release.staged_manifest_path(store, "prior1").write_bytes(
+        phase5_release.staged_manifest_path(store, "other1").read_bytes())
     inventory = dataclasses.replace(inventory, release_id="cand1")
     _assert_prior_mismatch_on_retry(tmp_path, inventory, args, store)
 
@@ -661,14 +710,14 @@ def test_prior_mismatch_when_prior_catalog_deployment_id_differs(tmp_path):
     args = _valid_derive_args(tmp_path)
     body = phase5_release.manifest_body(prior_body["release_id"], "dX",
                                         prior_body["members"], prior_body["sources"])
-    phase5_release._write_catalog(phase5_release._catalog_path(tmp_path, "prior1"), body)
+    phase5_release.write_catalog(phase5_release.catalog_path(tmp_path, "prior1"), body)
     inventory = dataclasses.replace(inventory, release_id="cand1")
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                        inventory=inventory, **_carry_kwargs(args))
     assert error.value.code == "PRIOR_MISMATCH"
     assert not _candidate_path(tmp_path).exists()
-    assert not deployment._manifest_path(phase5_release.deployment_root(tmp_path),
+    assert not phase5_release.staged_manifest_path(phase5_release.deployment_root(tmp_path),
                                          "cand1").exists()
 
 
@@ -681,7 +730,7 @@ def test_carry_forward_leaves_existing_deployed_pointer_untouched(tmp_path):
 
     path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                           inventory=inventory, **_carry_kwargs(args))
-    assert path == phase5_release._catalog_path(tmp_path, "cand1")
+    assert path == phase5_release.catalog_path(tmp_path, "cand1")
     assert pointer.read_bytes() == b'{"x":1}'
 
 
@@ -827,7 +876,7 @@ def test_rich_carry_forward_preserves_untouched_rows_and_release(tmp_path, relea
     inventory = dataclasses.replace(inventory, release_id=release_id)
     path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id=release_id,
                                           inventory=inventory, **_carry_kwargs(args))
-    catalog = phase5_release._read_catalog(path, release_id)
+    catalog = phase5_release.read_catalog(path, release_id)
     carrier = (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID)
     assert catalog["sources"]["pool_cutoff"] == cutoff
     assert catalog["sources"]["carried_from"] == "prior1"
@@ -855,7 +904,7 @@ def test_cutoff_not_advanced_refusal(tmp_path, cutoff):
     assert error.value.code == "CUTOFF_NOT_ADVANCED"
     store = phase5_release.deployment_root(tmp_path)
     assert not _candidate_path(tmp_path).exists()
-    assert not deployment._manifest_path(store, "cand1").exists()
+    assert not phase5_release.staged_manifest_path(store, "cand1").exists()
 
 
 def _object_path(root, target):
@@ -878,7 +927,7 @@ def test_object_preflight_rejects_each_supplied_object(tmp_path, member_id):
                                        inventory=inventory, **_carry_kwargs(args))
     assert error.value.code == "OBJECT_UNVERIFIED"
     assert not _candidate_path(tmp_path).exists()
-    assert not deployment._manifest_path(phase5_release.deployment_root(tmp_path),
+    assert not phase5_release.staged_manifest_path(phase5_release.deployment_root(tmp_path),
                                          "cand1").exists()
 
 
@@ -926,7 +975,7 @@ def test_republish_after_write_catalog_oserror(tmp_path, monkeypatch):
         raise OSError("disk full")
 
     with monkeypatch.context() as patch:
-        patch.setattr(assembly, "_write_catalog", boom)
+        patch.setattr(assembly, "write_catalog", boom)
         with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
             assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                            inventory=inventory, **_carry_kwargs(args))
@@ -935,7 +984,7 @@ def test_republish_after_write_catalog_oserror(tmp_path, monkeypatch):
     path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                           inventory=inventory, **_carry_kwargs(args))
     assert path == _candidate_path(tmp_path)
-    assert phase5_release._read_catalog(path, "cand1") == _expected_catalog(prior_body, args, "cand1")
+    assert phase5_release.read_catalog(path, "cand1") == _expected_catalog(prior_body, args, "cand1")
     store = phase5_release.deployment_root(tmp_path)
     resolved = deployment.resolve_release(store, "cand1")
     assert dataclasses.replace(resolved, release_id="prior1") == deployment.resolve_release(store,
@@ -958,7 +1007,7 @@ def test_carry_forward_prefers_named_prior_over_staged_decoy(tmp_path):
     path = assembly.carry_forward_release(tmp_path, prior_release_id=chosen_id, release_id="cand1",
                                           inventory=inventory, **_carry_kwargs(args))
     first_bytes = path.read_bytes()
-    catalog = phase5_release._read_catalog(path, "cand1")
+    catalog = phase5_release.read_catalog(path, "cand1")
     assert catalog["sources"]["carried_from"] == chosen_id
     assert catalog["deployment_id"] == "d1"
     assert _prior_row(catalog, UNRELATED_MEMBER_ID) == _prior_row(chosen_body, UNRELATED_MEMBER_ID)
@@ -978,14 +1027,14 @@ def test_carry_forward_prefers_named_prior_over_staged_decoy(tmp_path):
 
 
 def _deny_reads_of(monkeypatch, target):
-    real = pathlib.Path.read_bytes
+    real = os.open
 
-    def guarded(self):
-        if str(self) == str(target):
+    def guarded(path, flags, *args, **kwargs):
+        if str(path) == str(target):
             raise PermissionError("denied")
-        return real(self)
+        return real(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(pathlib.Path, "read_bytes", guarded)
+    monkeypatch.setattr(assembly.os, "open", guarded)
 
 
 _READ_FAILURE_CASES = (
@@ -1012,8 +1061,12 @@ def test_read_failure_classification(tmp_path, monkeypatch, label, member_id, co
         assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                        inventory=inventory, **_carry_kwargs(args))
     assert error.value.code == code
+    if label == "prior-model":
+        assert "a prior model object is missing or unreadable" in str(error.value)
+    else:
+        assert "unreadable" in str(error.value)
     assert not _candidate_path(tmp_path).exists()
-    assert not deployment._manifest_path(store, "cand1").exists()
+    assert not phase5_release.staged_manifest_path(store, "cand1").exists()
 
 
 _POOL_OBJECT_ORDER = (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID)
@@ -1024,7 +1077,7 @@ _SUPPLIED_MULTI_COUNTS = dict(zip(_POOL_OBJECT_ORDER, (3, 3, 3, 2, 2, 4, 2)))
 def _stage_prior_with_multi_objects(root, *, release_id="prior1", deployment_id="d1",
                                     prior_cutoff="2026-09-01"):
     inventory, _ = _stage_prior(root, release_id=release_id, deployment_id=deployment_id)
-    catalog = phase5_release._read_catalog(phase5_release._catalog_path(root, release_id), release_id)
+    catalog = phase5_release.read_catalog(phase5_release.catalog_path(root, release_id), release_id)
     members = []
     for row in catalog["members"]:
         member_id = row["member_id"]
@@ -1094,7 +1147,7 @@ def test_multiple_objects_per_pool_row_carried_forward(tmp_path, derive):
         path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1",
                                               release_id="cand1", inventory=inventory,
                                               **_carry_kwargs(args))
-        catalog = phase5_release._read_catalog(path, "cand1")
+        catalog = phase5_release.read_catalog(path, "cand1")
     supplied = _supplied_by_member_multi(args)
     for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID):
         row = _prior_row(catalog, member_id)
@@ -1174,7 +1227,7 @@ def test_chooser_sequence_damaged_second_object_is_unverified(tmp_path):
     assert error.value.code == "OBJECT_UNVERIFIED"
     store = phase5_release.deployment_root(tmp_path)
     assert not _candidate_path(tmp_path).exists()
-    assert not deployment._manifest_path(store, "cand1").exists()
+    assert not phase5_release.staged_manifest_path(store, "cand1").exists()
 
 
 @pytest.mark.parametrize("cutoff", ["2026-03-15", "2026-03-14"])
@@ -1188,4 +1241,93 @@ def test_carry_forward_cutoff_not_advanced_leaves_no_candidate(tmp_path, cutoff)
     assert error.value.code == "CUTOFF_NOT_ADVANCED"
     store = phase5_release.deployment_root(tmp_path)
     assert not _candidate_path(tmp_path).exists()
-    assert not deployment._manifest_path(store, "cand1").exists()
+    assert not phase5_release.staged_manifest_path(store, "cand1").exists()
+
+
+def _assert_no_candidate(tmp_path):
+    store = phase5_release.deployment_root(tmp_path)
+    assert not _candidate_path(tmp_path).exists()
+    assert not phase5_release.staged_manifest_path(store, "cand1").exists()
+
+
+def _run_carry(tmp_path, inventory, args):
+    return assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                          inventory=inventory, **_carry_kwargs(args))
+
+
+def test_supplied_object_longer_than_its_claim_is_refused(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    output = args["outputs"][0]
+    payload = b"z" * (output.payload_bytes + 16)
+    content_hash = phase5_release.sha256_bytes(payload)
+    (phase5_release.deployment_root(tmp_path)
+     / phase5_release.object_relpath(content_hash)).write_bytes(payload)
+    args["outputs"][0] = dataclasses.replace(output, content_hash=content_hash,
+                                             payload_bytes=len(payload) - 1)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "OBJECT_UNVERIFIED"
+    _assert_no_candidate(tmp_path)
+
+
+def test_supplied_object_path_replaced_by_directory_is_refused(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    path = _object_path(tmp_path, args["outputs"][0])
+    path.unlink()
+    path.mkdir()
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "OBJECT_UNVERIFIED"
+    _assert_no_candidate(tmp_path)
+
+
+def test_supplied_object_path_fifo_is_refused_without_hanging(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    path = _object_path(tmp_path, args["outputs"][0])
+    path.unlink()
+    try:
+        os.mkfifo(path)
+    except (AttributeError, OSError):
+        pytest.skip("os.mkfifo is not supported on this platform")
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    outcome = {}
+
+    def worker():
+        try:
+            _run_carry(tmp_path, inventory, args)
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive(), "carry_forward hung reading a FIFO"
+    assert isinstance(outcome.get("error"), assembly.ReleaseAssemblyRefusal)
+    assert outcome["error"].code == "OBJECT_UNVERIFIED"
+    _assert_no_candidate(tmp_path)
+
+
+def test_prior_payload_larger_than_max_object_bytes_is_prior_mismatch(tmp_path, monkeypatch):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    monkeypatch.setattr(assembly, "MAX_OBJECT_BYTES", 10)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "PRIOR_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+def test_inventory_with_none_bindings_is_inventory_mismatch(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1", bindings=None)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "INVENTORY_MISMATCH"
+    _assert_no_candidate(tmp_path)

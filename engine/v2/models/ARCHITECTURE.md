@@ -141,6 +141,18 @@ corrupt prior model object, or malformed prior catalog rows, refuse
 translate any stray `OSError`/`KeyError`/`TypeError`/`AttributeError` at the
 boundary. The helpers have no production caller yet.
 
+| Condition | Code |
+|---|---|
+| Prior catalog `deployment_id` differs from its staged release's | `PRIOR_MISMATCH` |
+| Inventory `deployment_id` differs from the prior release's | `INVENTORY_MISMATCH` |
+| Inventory missing, no string `release_id`, or non-tuple `artifacts`/`bindings` | `INVENTORY_MISMATCH` |
+| `cutoff` (or the prior's `pool_cutoff`) is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` / `PRIOR_MISMATCH` |
+
+Supplied objects and prior model payloads are opened once without following
+links, must be regular files, and are read under a byte cap (the claimed
+`payload_bytes` for supplied objects, `MAX_OBJECT_BYTES` for prior payloads).
+The existing catalog and manifest readers keep their own read behaviour.
+
 Every call re-runs all validation, including when an identical candidate
 catalog already exists; the staging and catalog write run under one exclusive
 `flock` on `deployment/.carry_forward.lock`, so of two conflicting concurrent

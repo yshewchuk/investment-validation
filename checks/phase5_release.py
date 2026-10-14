@@ -291,12 +291,24 @@ def member_row(spec: StateSpec, status: str, objects: list[dict], detail: str) -
     }
 
 
+catalog_path = _catalog_path
+validate_catalog = _validate_catalog
+read_catalog = _read_catalog
+verify_staged = _verify_staged
+write_catalog = _write_catalog
+
+
+def staged_manifest_path(store, release_id):
+    return deployment._manifest_path(store, release_id)
+
+
 __all__ = [
     "ANALOG_MODULES", "DEPLOYMENT_DIR", "EXPECTED_MODEL_BINDINGS", "MANIFEST_NAME",
     "MEMBER_STATUSES", "MISSING", "OBJECTS_DIR", "PENDING", "PHASE5_RELEASE_SCHEMA",
     "RECALIBRATION_MODULES", "STAGED", "STATE_SPECS", "TIER4_ROLES",
-    "TRAILING_CUTOFF_MODULES", "ReleaseLayoutError", "StateSpec", "deployment_root",
-    "manifest_body", "member_row", "modules_available", "object_relpath",
-    "preserve_legacy_manifest", "read_manifest", "sha256_bytes", "write_manifest", "write_object",
-    "validate_legacy_manifest",
+    "TRAILING_CUTOFF_MODULES", "ReleaseLayoutError", "StateSpec", "catalog_path",
+    "deployment_root", "manifest_body", "member_row", "modules_available", "object_relpath",
+    "preserve_legacy_manifest", "read_catalog", "read_manifest", "sha256_bytes",
+    "staged_manifest_path", "validate_catalog", "validate_legacy_manifest", "verify_staged",
+    "write_catalog", "write_manifest", "write_object",
 ]
