@@ -125,7 +125,7 @@ function MismatchTable({ client, summary, onRestart }: {
       {page.status === "error" && (
         <ReadError error={page.error} prefix="parity-mismatch-" name="unavailable" label="mismatches" />
       )}
-      {page.status === "error" && (
+      {page.status === "error" && page.error.status !== 401 && (
         <div data-testid="parity-mismatch-pager">
           <button type="button" data-testid="parity-mismatch-prev" disabled={index === 0}
             onClick={() => setCursors((stack) => stack.slice(0, -1))}>Previous</button>
