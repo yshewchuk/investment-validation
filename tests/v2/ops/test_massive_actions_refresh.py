@@ -211,6 +211,43 @@ def test_invalid_selected_action_fails_without_native_visibility(harness, monkey
 
 
 @pytest.mark.parametrize("dataset", ["splits", "dividends"])
+@pytest.mark.parametrize("stamp", ["malformed-synthetic-clock", "2026-09-12T00:00:00.0Z"])
+def test_action_bad_retained_first_receipt_clock_refuses_before_publication(harness, monkeypatch, dataset, stamp):
+    from engine.v2.data.incremental import RawPayload, cache_raw_receipt
+    from engine.v2.foundation import format_timestamp
+
+    h = harness
+    parent, parent_scope, _ = bootstrap(h)
+    parent_rows = read(h, parent, massive_daily.CONTRACT)
+    scope = support.request(dataset=dataset)
+    payload = canonical_json({"status": "OK", "results": [action(dataset)]}).encode()
+    raw = cache_raw_receipt(h.conn, h.store,
+        RawPayload(payload=payload, response_kind="complete", response_meta={}),
+        source=support.SOURCE, endpoint=scope["endpoint"], request=scope, received_at=stamp)
+    source_params = support.parameters(scope, generation="clock-refresh")
+    support.enqueue(h, "clock-refresh", source_params)
+    producer = support.claim(h)
+    observed, calls = format_timestamp(h.clock.now()), []
+    _, document = support.run(h, producer, support.fetching(calls, payload), source_params)
+    evidence = document["coverage"]["bindings"][0]["evidence"]
+    assert calls == [scope] and evidence["origin"] == "http_response"
+    assert (evidence["raw_receipt_id"], evidence["raw_hash"], evidence["first_received_at"]) == (
+        raw.raw_receipt_id, raw.raw_hash, stamp)
+    assert evidence["observed_at"] == observed and observed != stamp
+    daily.committed_output(h, producer, document)
+    attempt, params = prepare(h, producer.job_id, key="publish", parent=parent, scope=parent_scope, generation=1)
+    monkeypatch.setattr(massive_daily, "build_candidate",
+                        lambda *_a, **_k: pytest.fail("invalid action clock reached publication"))
+    before = tuple(h.conn.iterdump())
+    with pytest.raises(OpsError) as error:
+        daily.execute(h, attempt, params)
+    assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
+    assert tuple(h.conn.iterdump()) == before
+    assert read(h, parent, massive_daily.CONTRACT) == parent_rows
+    assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
+
+
+@pytest.mark.parametrize("dataset", ["splits", "dividends"])
 def test_duplicate_event_id_refuses_even_with_different_dates(harness, dataset):
     h = harness
     source, _, _ = acquired(h, dataset, key="source", rows=[action(dataset), action(dataset, day="2026-08-11")])
