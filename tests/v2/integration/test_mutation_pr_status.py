@@ -80,6 +80,17 @@ def test_cli_attribution_is_by_changed_file(tmp_path):
     assert "state=failure\n" in out.read_text()
 
 
+def test_cli_description_newline_cannot_inject_output(tmp_path):
+    argv, out = _report(tmp_path, clean("a"),
+                        [json.dumps(row("a", "engine/v2/a.py")),
+                         json.dumps(row("a", "x\nstate=success.py"))],
+                        ["engine/v2/a.py", "x\nstate=success.py"])
+    assert ps.main(argv) == 0
+    lines = out.read_text().splitlines()
+    assert [l for l in lines if l.startswith("state=")] == ["state=failure"]
+    assert all(l.startswith(("state=", "description=")) for l in lines)
+
+
 def test_integrity_comes_before_attribution():
     for summary in (None, {"modules": None},
                     {"modules": {"a": mod()}, "expected_modules": ["a", "b"],
