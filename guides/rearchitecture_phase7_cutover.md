@@ -101,8 +101,8 @@ Cutover is complete after the controlled activation and a verified official
 completed-session run, with rollback still available. Record exact activation
 time, authority generation, released snapshot/deployment, ledger high-water
 marks, run results and rollback retention owner. Retain the old deployment
-for an explicit rollback window; its duration is set in the concrete release
-runbook before switching.
+for an explicit rollback window: 10 completed sessions after the switch
+(owner decision, #739; see `guides/authority_fence_switch_rollback.md`).
 
 Do not delete/rename code in the cutover change. Phase 8A handles it after the
 rollback window. No intraday entitlement purchase, live model qualification
