@@ -48,7 +48,7 @@ from engine.v2.data.reference_catalog import (
     reference_inputs_for_snapshot,
 )
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import from_document, to_document
+from engine.v2.foundation import ArtifactError, DocumentError, from_document, to_document
 from engine.v2.ops.carried_set import build_uncarried_exclusions, resolve_carried_set
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import register_artifact
@@ -144,7 +144,12 @@ def _resolve_scope_snapshot(conn, store, scope, *, clock, expected_snapshot_id=N
     ``expected_snapshot_id`` is given and differs, so both callers pin the plan to one snapshot.
     """
     head = resolve_snapshot_head(conn, store, scope, clock=clock)
-    snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
+    try:
+        document = json.loads(store.read_verified(head))
+        snapshot = from_document(SnapshotRef, document)
+    except (ArtifactError, DocumentError, ValueError) as exc:
+        raise fail("INPUT_CHANGED", "the shadow snapshot head artifact cannot be read",
+                   details={"artifact_error": type(exc).__name__}) from None
     if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
         raise fail("INPUT_CHANGED",
                    "the shadow snapshot head moved since it was verified for this session")
@@ -161,9 +166,10 @@ def snapshot_event_tickers(conn, store, scope, *, as_of, clock,
     ``scan_forward_board_requests(..., tickers=None)`` — the same single scan and the same
     35-day window, one scan within this call. Pure snapshot read: no provider or network call.
 
-    Failure semantics: a missing/unreadable snapshot head or events table is
-    ``INPUT_CHANGED`` with ``details.data_code`` (the reader's ``DataError`` mapped like
-    :func:`generated_population`'s), whereas a head that moved vs ``expected_snapshot_id``
+    Failure semantics: an unreadable head ARTIFACT (missing, integrity-failed,
+    undecodable) and the reader's ``DataError`` are both ``INPUT_CHANGED``, differing only
+    in details — ``artifact_error`` (the exception type name) vs ``data_code`` — whereas a
+    head that moved vs ``expected_snapshot_id``
     is ``INPUT_CHANGED`` with no ``details``; zero events in the
     window is ``INVALID_REQUEST`` with ``details`` ``as_of`` and ``horizon_days``. Does not
     filter by the carried set: the later ``generated_population`` call already filters

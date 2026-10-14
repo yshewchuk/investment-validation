@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.data.errors import fail as data_fail  # noqa: E402
+from engine.v2.foundation import ArtifactError  # noqa: E402
 from engine.v2.ops import snapshot_planning  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 
@@ -171,6 +172,35 @@ def test_a_head_that_moves_vs_the_expected_snapshot_id_is_refused_before_the_sca
     assert raised.value.code == "INPUT_CHANGED"
     assert "moved" in raised.value.problem.message
     assert not raised.value.problem.details
+
+
+@pytest.mark.parametrize("payload, artifact_error", [
+    (ArtifactError("ARTIFACT_MISSING", "gone"), "ArtifactError"),
+    (b"not json", "JSONDecodeError"),
+    (b"{}", "DocumentError"),
+])
+def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(
+        monkeypatch, payload, artifact_error):
+    # The REAL _resolve_scope_snapshot path through snapshot_event_tickers: only the head
+    # resolve is patched, the store's own read/decode refuses, and the scan never runs.
+    monkeypatch.setattr(snapshot_planning, "resolve_snapshot_head",
+                        lambda *args, **kwargs: "head")
+    monkeypatch.setattr(snapshot_planning, "scan_forward_board_requests", _explode)
+
+    def read_verified(head):
+        assert head == "head"
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
+
+    store = SimpleNamespace(read_verified=read_verified)
+
+    with pytest.raises(OpsError) as raised:
+        snapshot_planning.snapshot_event_tickers(
+            _DummyConn(), store, "shadow", as_of=_AS_OF, clock=_CLOCK)
+
+    assert raised.value.code == "INPUT_CHANGED"
+    assert raised.value.problem.details["artifact_error"] == artifact_error
 
 
 def test_success_path_does_not_consult_the_carried_set(monkeypatch):
