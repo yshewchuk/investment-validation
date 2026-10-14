@@ -21,7 +21,7 @@ from engine.v2.research._final_evaluator import (
     SetMetrics,
     evaluate_final_holdout,
 )
-from engine.v2.research._final_population import load_final_population
+from engine.v2.research._final_population import FinalPopulation, load_final_population
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.experiment_trades import PROVENANCE
 from tests.data_scan_support import (
@@ -161,11 +161,9 @@ def test_unscored_event_counts_without_trade(tmp_path):
         assert result.random.n_events == 2
         assert result.random.n_trades == 1
         assert result.random.n_without_trade == 1
-        assert result.rolling.n_events == 2
-        assert result.rolling.n_trades == 0
-        assert result.rolling.n_without_trade == 2
-        assert result.rolling.mean_ret is None
-        assert result.rolling.win_rate is None
+        assert result.rolling == SetMetrics(
+            n_events=2, n_trades=0, n_without_trade=2, total_ret=0.0,
+            mean_ret=None, win_rate=None)
     finally:
         conn.close()
 
@@ -203,6 +201,11 @@ def test_no_winner_trade_in_either_set_collapses(tmp_path):
 
 
 def test_non_finite_ret_is_a_contract_mismatch(tmp_path):
+    """NaN is the only non-finite ret that can reach the evaluator.
+
+    Infinities are rejected earlier, at publication: the trades table cannot
+    hold them, so only NaN survives to this finite check.
+    """
     extra = [_winner_trade("EVENT-5", "2024-01-16", float("nan"))]
     conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM], extra_trades=extra)
     try:
@@ -211,6 +214,31 @@ def test_non_finite_ret_is_a_contract_mismatch(tmp_path):
         with pytest.raises(DataError) as refusal:
             evaluate_final_holdout(repository, request, population)
         assert refusal.value.problem.code == "CONTRACT_MISMATCH"
+    finally:
+        conn.close()
+
+
+def test_infinite_ret_cannot_enter_a_snapshot(tmp_path):
+    with pytest.raises(DataError) as refusal:
+        _holdout_snapshot(
+            tmp_path, [_RANDOM],
+            extra_trades=[_winner_trade("EVENT-5", "2024-01-16", float("inf"))])
+    assert refusal.value.problem.code == "CONTRACT_MISMATCH"
+
+
+def test_hand_reconstructed_equal_population_is_accepted(tmp_path):
+    extra = [_winner_trade("EVENT-5", "2024-01-16", 0.5)]
+    conn, repository, snapshot = _holdout_snapshot(
+        tmp_path, [_RANDOM, _ROLLING, _OVERLAP], extra_trades=extra)
+    try:
+        request = _request(snapshot)
+        derived = load_final_population(repository, request)
+        reconstructed = FinalPopulation(
+            **{field.name: getattr(derived, field.name) for field in fields(derived)})
+        assert reconstructed == derived
+        assert reconstructed is not derived
+        assert (evaluate_final_holdout(repository, request, reconstructed)
+                == evaluate_final_holdout(repository, request, derived))
     finally:
         conn.close()
 
