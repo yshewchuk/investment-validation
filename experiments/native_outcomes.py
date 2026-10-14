@@ -186,7 +186,7 @@ def _verify_outcome_registration(conn, store, registration):
     verify_native_registration(conn, store, registration)
     if registration.document["schema_version"] not in (
             "native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
-            "native_experiment_registration.v1.3"):
+            "native_experiment_registration.v1.3", "native_experiment_registration.v1.4"):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "registration schema has no native outcome contract")
 
 
