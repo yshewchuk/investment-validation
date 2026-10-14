@@ -45,7 +45,11 @@ def _explode(*args, **kwargs):
 def _pin_head(monkeypatch, resolve=None):
     monkeypatch.setattr(snapshot_planning, "_resolve_scope_snapshot",
                         resolve or (lambda *args, **kwargs: _SNAPSHOT))
-    monkeypatch.setattr(snapshot_planning, "Repository", lambda *args: object())
+    repo_calls = []
+    sentinel_repo = object()
+    monkeypatch.setattr(
+        snapshot_planning, "Repository",
+        lambda *a, **k: repo_calls.append((a, k)) or sentinel_repo)
 
 
 @pytest.mark.parametrize("request_tickers, expected", [
@@ -65,10 +69,15 @@ def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_ticke
         return _SNAPSHOT
 
     monkeypatch.setattr(snapshot_planning, "_resolve_scope_snapshot", fake_resolve)
-    monkeypatch.setattr(snapshot_planning, "Repository", lambda *args: object())
+    repo_calls, scan_repo = [], []
+    sentinel_repo = object()
+    monkeypatch.setattr(
+        snapshot_planning, "Repository",
+        lambda *a, **k: repo_calls.append((a, k)) or sentinel_repo)
     scan_calls = []
 
     def fake_scan(repository, snapshot, *, as_of, horizon_days, tickers):
+        scan_repo.append(repository)
         scan_calls.append({"snapshot": snapshot.snapshot_id, "as_of": as_of,
                            "horizon_days": horizon_days, "tickers": tickers})
         return [_request(ticker) for ticker in request_tickers]
@@ -87,6 +96,8 @@ def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_ticke
     assert resolve_args[0][0] is conn  # the caller's own connection, unchanged
     assert resolve_args[0][1] is store  # the caller's own store, unchanged
     assert resolve_args[0][2] == "shadow"  # the head was resolved for this scope
+    assert repo_calls == [((conn, store), {})]
+    assert scan_repo[0] is sentinel_repo
 
 
 def test_an_empty_window_is_a_typed_invalid_request_with_as_of_and_horizon(monkeypatch):
@@ -157,3 +168,21 @@ def test_a_head_that_moves_vs_the_expected_snapshot_id_is_refused_before_the_sca
 
     assert raised.value.code == "INPUT_CHANGED"
     assert "moved" in raised.value.problem.message
+    assert not raised.value.problem.details
+
+
+def test_success_path_does_not_consult_the_carried_set(monkeypatch):
+    # Tripwire: snapshot_event_tickers builds its universe from a single scan; if a
+    # change makes it fall back to resolve_carried_set, this fails loudly.
+    def consulted(*args, **kwargs):
+        raise AssertionError("carried set must not be consulted")
+
+    monkeypatch.setattr(snapshot_planning, "resolve_carried_set", consulted)
+    _pin_head(monkeypatch)
+    monkeypatch.setattr(snapshot_planning, "scan_forward_board_requests",
+                        lambda *args, **kwargs: [_request("AAA")])
+
+    result = snapshot_planning.snapshot_event_tickers(
+        _DummyConn(), object(), "shadow", as_of=_AS_OF, clock=_CLOCK)
+
+    assert result == ("AAA",)
