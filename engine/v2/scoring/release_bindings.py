@@ -1,11 +1,11 @@
 """Production reader of one live release's scoring catalog.
 
 Resolves model identity, model artifact refs, the verified ``ModelRelease``, a
-constructed ``FrozenInference``, and the analog/payoff/recalibration artifacts
+constructed ``FrozenInference``, and the frozen scoring state artifacts
 from a live ``deployment.current_pointer()`` -- the failure-semantics contract
 is ``engine/v2/scoring/ARCHITECTURE.md``'s ``release_bindings.py`` section (the
-"4c R1-R6 template"). Nothing calls this yet; a later PR wires it into the
-per-night ``SourceBundle`` assembler.
+"4c R1-R6 template"). Native batch and the supervisor's release-readiness
+check consume this reader; chooser state selection is not wired into nightly.
 
 Every refusal below is path-free by construction: a fixed message plus the
 exact ``member_id``/field name (and, where useful, a type name), never a raw
@@ -19,11 +19,13 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import Callable, Mapping, TypeVar
 
 from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
+from engine.v2.models.admissible_table import AdmissibleDepthTable
 from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
+from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
 from engine.v2.models.contracts import MODEL_NOT_READY, ModelRelease
 from engine.v2.models.frozen_state import FrozenStateError, FrozenStateLoader, FrozenStateRef
 from engine.v2.models.loader import FrozenInference
@@ -64,6 +66,10 @@ _PAYOFF_PREFIXES = ("payoff_line:", "payoff_surface:")
 _RECALIBRATION_PREFIX = "recalibration_map:"
 _ANALOG_MEMBER_ID = "board_analog_matcher"
 _DRIVER_RESIDUAL_PREFIX = "driver_residual_pool:"
+_CHOOSER_POOL_MEMBER_ID = "chooser_analog_pool"
+_CHOOSER_TABLE_MEMBER_ID = "admissible_table:dyn_sv"
+_CHOOSER_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+_ChooserState = TypeVar("_ChooserState", ChooserAnalogPoolArtifact, AdmissibleDepthTable)
 
 
 class ReleaseBindingError(ValueError):
@@ -76,7 +82,7 @@ class NoCurrentRelease(ReleaseBindingError):
 
 class ModelNotReady(ReleaseBindingError):
     """One named member -- the DEPLOYED pointer, the staged manifest, a model
-    binding member, or a payoff/recalibration/analog state object -- is
+    binding member, or a frozen scoring state object -- is
     missing, wrong status, hash-mismatched, or rejected by its own typed
     loader. Never a fallback: this is always the only outcome for a bad
     member (R1). ``detail`` is always a fixed, path-free message."""
@@ -143,6 +149,10 @@ class ScoringReleaseBinding:
     #: Driver residual pools, keyed by the loaded artifact's own ``.role``
     #: field. Empty for a release that stages none.
     driver_residual_artifacts: Mapping[str, DriverResidualPoolArtifact] = field(default_factory=dict)
+    #: All verified objects, preserving catalog order; request-specific
+    #: selection remains the assembler's responsibility. Absent -> empty.
+    chooser_analog_artifacts: tuple[ChooserAnalogPoolArtifact, ...] = ()
+    chooser_admissible_artifacts: tuple[AdmissibleDepthTable, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_identity", MappingProxyType(dict(self.model_identity)))
@@ -156,6 +166,9 @@ class ScoringReleaseBinding:
                            MappingProxyType({k: tuple(v) for k, v in self.analog_artifacts.items()}))
         object.__setattr__(self, "driver_residual_artifacts",
                            MappingProxyType(dict(self.driver_residual_artifacts)))
+        object.__setattr__(self, "chooser_analog_artifacts", tuple(self.chooser_analog_artifacts))
+        object.__setattr__(self, "chooser_admissible_artifacts",
+                           tuple(self.chooser_admissible_artifacts))
 
 
 def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
@@ -197,6 +210,10 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
     analog = _resolve_state_group(
         dep_root, catalog, lambda member_id: member_id == _ANALOG_MEMBER_ID, _load_analog)
     driver_residual = _resolve_driver_residual_pools(dep_root, catalog)
+    chooser_analog = _resolve_chooser_state_group(
+        dep_root, catalog, _CHOOSER_POOL_MEMBER_ID, ChooserAnalogPoolArtifact)
+    chooser_admissible = _resolve_chooser_state_group(
+        dep_root, catalog, _CHOOSER_TABLE_MEMBER_ID, AdmissibleDepthTable)
 
     return ScoringReleaseBinding(
         release_id=release.release_id, model_identity=model_identity,
@@ -204,6 +221,8 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
         frozen_inference=FrozenInference(dep_root),
         payoff_artifacts=payoff, recalibration_artifacts=recalibration, analog_artifacts=analog,
         driver_residual_artifacts=driver_residual,
+        chooser_analog_artifacts=chooser_analog,
+        chooser_admissible_artifacts=chooser_admissible,
     )
 
 
@@ -480,6 +499,38 @@ def _load_analog(dep_root: Path, member_id: str, obj: Mapping):
     if not isinstance(state, BoardAnalogPoolArtifact):
         raise ModelNotReady(member_id, f"expected a board analog pool, got {type(state).__name__}")
     return state
+
+
+def _resolve_chooser_state_group(
+    dep_root: Path, catalog: Mapping, member_id: str, kind: type[_ChooserState],
+) -> tuple[_ChooserState, ...]:
+    """Load a whole optional family without selecting a request's state.
+
+    Several distinct semantic keys are valid; duplicate keys are ambiguous
+    even if their bytes agree. The typed loader verifies both byte and
+    decoded hashes. A fresh loader per object prevents cache reuse from
+    concealing a corrupt second reference to the same content hash.
+    """
+    def load(root: Path, member: str, obj: Mapping) -> _ChooserState:
+        try:
+            state = FrozenStateLoader(root, max_bytes=_CHOOSER_MAX_ARTIFACT_BYTES).load(
+                FrozenStateRef(path=obj["path"], content_hash=obj["content_hash"]))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError,
+                OverflowError, RuntimeError) as exc:
+            # Decoder numeric/shape/depth errors and path resolution failures
+            # must not leak raw parser or filesystem details.
+            raise ModelNotReady(member, "chooser state could not be verified or loaded") from exc
+        if not isinstance(state, kind):
+            raise ModelNotReady(member, "chooser state has the wrong artifact type")
+        return state
+
+    grouped = _resolve_state_group(
+        dep_root, catalog, lambda candidate: candidate == member_id, load,
+        key=lambda state: member_id)
+    artifacts = grouped.get(member_id, ())
+    if len({artifact.key for artifact in artifacts}) != len(artifacts):
+        raise ModelNotReady(member_id, "ambiguous chooser state key")
+    return artifacts
 
 
 def _resolve_driver_residual_pools(
