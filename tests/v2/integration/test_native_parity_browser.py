@@ -1,4 +1,4 @@
-"""Native-parity summary browser checks (#327); mismatch/unpaired rendering and pagination are an owner follow-up. Synthetic page.route mocks ONLY /api/v1/native_parity** and /api/v1/releases/current, which always answers a valid 503 Problem, plus a /__data_client__/ harness serving ui/src/api/client.ts transpiled to ESM by the esbuild already installed in ui/node_modules, so the real DataClient parity detail reads run their own fetches through the mocked detail routes."""
+"""Native-parity summary browser checks (#327); mismatch rendering is covered and unpaired rendering/pagination are an owner follow-up. Synthetic page.route mocks ONLY /api/v1/native_parity** and /api/v1/releases/current, which always answers a valid 503 Problem, plus a /__data_client__/ harness serving ui/src/api/client.ts transpiled to ESM by the esbuild already installed in ui/node_modules, so the real DataClient parity detail reads run their own fetches through the mocked detail routes."""
 from __future__ import annotations
 
 import json
@@ -36,22 +36,37 @@ def _close_new_contexts(browser):
         if context not in existing:
             context.close()
 
-def _open_parity(browser, server, *, code=200, body=SUMMARY, hold=False):
+EMPTY_MISMATCH_PAGE = (200, {"status": "available", "as_of": None, "generated_at": None,
+    "tolerance_policy_id": None, "items": [], "next_cursor": None})
+
+def _empty_mismatches(cursor): return EMPTY_MISMATCH_PAGE
+
+def _open_parity(browser, server, *, code=200, body=SUMMARY, hold=False, mismatches=None):
     base = f"http://127.0.0.1:{server.server_port}"
     context = browser.new_context()
     context.add_cookies([{"name": "operations_token", "value": TOKEN, "url": base}])
     page = context.new_page()
     parity, pending = [], []
+    page.mismatch_calls = []
+    if mismatches is None:
+        mismatches = _empty_mismatches
 
     def handle(route):
         url = route.request.url
+        path = url.split("?")[0]
+        if path.endswith("/native_parity/mismatches"):
+            page.mismatch_calls.append(url)
+            status, response = mismatches(route.request.url.split("cursor=")[1].split("&")[0] if "cursor=" in route.request.url else None)
+            route.fulfill(status=status, content_type="application/json", body=json.dumps(response))
+            return
         parity.append(url)
-        if not url.split("?")[0].endswith("/api/v1/native_parity"):
+        if not path.endswith("/api/v1/native_parity"):
             route.fulfill(status=500, content_type="application/json", body=json.dumps(PROBLEM))
         elif hold:
             pending.append(route)
         else:
-            route.fulfill(status=code, content_type="application/json", body=json.dumps(body))
+            payload = body() if callable(body) else body
+            route.fulfill(status=code, content_type="application/json", body=json.dumps(payload))
 
     page.route("**/api/v1/native_parity**", handle)
     page.route("**/api/v1/releases/current", lambda r: r.fulfill(status=503, content_type="application/json", body=json.dumps(PROBLEM)))
@@ -278,5 +293,424 @@ def test_unpaired_available_page_round_trips_exactly(browser, server, tmp_path):
         result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityUnpaired", ["legacy", 3, "uc-1"]])
         assert result == UNPAIRED_PAGE
         assert calls == [base + "/api/v1/native_parity/unpaired?side=legacy&limit=3&cursor=uc-1"]
+    finally:
+        context.close()
+
+def _page(items, next_cursor=None, as_of="2026-09-30", generated_at="2026-10-01T02:00:00Z"):
+    return {"status": "available", "as_of": as_of, "generated_at": generated_at,
+        "tolerance_policy_id": "tol-1", "items": items, "next_cursor": next_cursor}
+
+def test_mismatch_table_shows_only_differing_fields(browser, server):
+    first = _page(MISMATCH_PAGE["items"])
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, first))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-table")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        expect(page.get_by_test_id("parity-mismatch-row")).to_have_count(2)
+        aapl = page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")
+        expect(aapl).to_contain_text("gate_score")
+        expect(aapl.locator("td").nth(1)).to_have_text("verdicts")
+        expect(aapl.get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(aapl.get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        msft = page.get_by_test_id("parity-mismatch-row").filter(has_text="MSFT|2026-09-18|STR-THRU")
+        expect(msft).to_contain_text("model_vs_market")
+        expect(msft.locator("td").nth(1)).to_have_text("financial_diagnostics")
+        expect(msft.get_by_test_id("parity-mismatch-legacy")).to_have_text("-0.015")
+        expect(msft.get_by_test_id("parity-mismatch-native")).to_have_text("0.02")
+        page_text = page.get_by_test_id("parity-mismatch-table").inner_text()
+        assert "gate_threshold" not in page_text
+        assert "entry_cost_pct" not in page_text
+        expect(page.get_by_test_id("parity-mismatch-next")).to_be_disabled()
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_contain_text("2026-10-01T02:00:00Z")
+    finally:
+        context.close()
+
+def test_mismatch_item_with_multiple_differing_fields_and_value_kinds(browser, server):
+    page_body = _page([{"row_key": "KO|2026-09-10|STR-THRU", "dimension": "verdicts", "fields": {
+            "gate_pass": {"status": "differ", "legacy": True, "native": False},
+            "reason": {"status": "differ", "legacy": "ok", "native": "withheld"},
+            "gate_score": {"status": "differ", "legacy": None, "native": 0.5},
+            "gate_threshold": {"status": "differ", "native": 0.7},
+            "zero_flag": {"status": "differ", "legacy": 0, "native": 1},
+            "zero_count": {"status": "differ", "legacy": 2, "native": 0},
+            "n_analogs": {"status": "agree"}}}])
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, page_body))
+    try:
+        page.goto(base + "/#/native-parity")
+        rows = page.get_by_test_id("parity-mismatch-row")
+        expect(rows).to_have_count(6)
+        expect(rows.filter(has_text="KO|2026-09-10|STR-THRU")).to_have_count(6)
+        gate_pass = rows.filter(has_text="gate_pass")
+        expect(gate_pass.get_by_test_id("parity-mismatch-legacy")).to_have_text("true")
+        expect(gate_pass.get_by_test_id("parity-mismatch-native")).to_have_text("false")
+        reason = rows.filter(has_text="reason")
+        expect(reason.get_by_test_id("parity-mismatch-legacy")).to_have_text("ok")
+        expect(reason.get_by_test_id("parity-mismatch-native")).to_have_text("withheld")
+        gate_score = rows.filter(has_text="gate_score")
+        expect(gate_score.get_by_test_id("parity-mismatch-legacy")).to_have_text("—")
+        expect(gate_score.get_by_test_id("parity-mismatch-native")).to_have_text("0.5")
+        gate_threshold = rows.filter(has_text="gate_threshold")
+        expect(gate_threshold.get_by_test_id("parity-mismatch-legacy")).to_have_text("—")
+        expect(gate_threshold.get_by_test_id("parity-mismatch-native")).to_have_text("0.7")
+        zero_flag = rows.filter(has_text="zero_flag")
+        expect(zero_flag.get_by_test_id("parity-mismatch-legacy")).to_have_text("0")
+        expect(zero_flag.get_by_test_id("parity-mismatch-native")).to_have_text("1")
+        zero_count = rows.filter(has_text="zero_count")
+        expect(zero_count.get_by_test_id("parity-mismatch-legacy")).to_have_text("2")
+        expect(zero_count.get_by_test_id("parity-mismatch-native")).to_have_text("0")
+        table_text = page.get_by_test_id("parity-mismatch-table").inner_text()
+        assert "n_analogs" not in table_text
+        assert table_text.count("—") == 2
+    finally:
+        context.close()
+
+def test_mismatch_table_pages_past_first_page(browser, server):
+    page1 = {"status": "available", "as_of": None, "generated_at": None, "tolerance_policy_id": None,
+        "items": [{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+            "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}],
+        "next_cursor": "c2"}
+    page2 = {"status": "available", "as_of": None, "generated_at": None, "tolerance_policy_id": None,
+        "items": [{"row_key": "NVDA|2026-09-22|STR-THRU", "dimension": "verdicts",
+            "fields": {"gate_score": {"status": "differ", "legacy": 1.0, "native": 2.0}}}],
+        "next_cursor": None}
+
+    def mismatches(cursor):
+        return (200, page1 if cursor is None else page2)
+
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=mismatches)
+    try:
+        page.goto(base + "/#/native-parity")
+        aapl = page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")
+        expect(aapl).to_be_visible()
+        expect(aapl.get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(aapl.get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        page.get_by_test_id("parity-mismatch-next").click()
+        nvda = page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")
+        expect(nvda).to_be_visible()
+        expect(nvda.get_by_test_id("parity-mismatch-legacy")).to_have_text("1")
+        expect(nvda.get_by_test_id("parity-mismatch-native")).to_have_text("2")
+        expect(aapl).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        expect(page.get_by_test_id("parity-mismatch-next")).to_be_disabled()
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
+        assert any("cursor=c2" in u for u in page.mismatch_calls)
+        page.get_by_test_id("parity-mismatch-prev").click()
+        expect(aapl).to_be_visible()
+        expect(aapl.get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(aapl.get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+    finally:
+        context.close()
+
+def test_mismatch_empty_and_no_report(browser, server):
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: EMPTY_MISMATCH_PAGE)
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-no-report")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-summary")).to_be_visible()
+    finally:
+        context.close()
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (200, {"status": "no_report"}))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-no-report")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-pager")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_have_count(0)
+    finally:
+        context.close()
+
+def test_mismatch_table_walks_three_pages_with_re_read(browser, server):
+    page1 = _page([{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}], next_cursor="c2")
+    page2 = _page([{"row_key": "NVDA|2026-09-22|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 1.5, "native": 2.5}}}], next_cursor="c3")
+    page3 = _page([{"row_key": "TSLA|2026-09-29|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 7, "native": 8}}}])
+
+    def mismatches(cursor):
+        return (200, {None: page1, "c2": page2, "c3": page3}[cursor])
+
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=mismatches)
+    try:
+        page.goto(base + "/#/native-parity")
+        rows = page.get_by_test_id("parity-mismatch-row")
+        expect(rows).to_have_count(1)
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(rows).to_have_count(1)
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("1.5")
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("2.5")
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(rows).to_have_count(1)
+        expect(rows.filter(has_text="TSLA|2026-09-29|STR-THRU")).to_be_visible()
+        expect(rows.filter(has_text="TSLA|2026-09-29|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("7")
+        expect(rows.filter(has_text="TSLA|2026-09-29|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("8")
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_have_count(0)
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 3")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
+        expect(page.get_by_test_id("parity-mismatch-next")).to_be_disabled()
+        page.get_by_test_id("parity-mismatch-prev").click()
+        expect(rows).to_have_count(1)
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("1.5")
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("2.5")
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_have_count(0)
+        expect(rows.filter(has_text="TSLA|2026-09-29|STR-THRU")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        page.get_by_test_id("parity-mismatch-prev").click()
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(rows.filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("1.5")
+        expect(rows.filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("2.5")
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
+        cursors = [u.split("cursor=")[1].split("&")[0] if "cursor=" in u else None
+            for u in page.mismatch_calls]
+        assert cursors == [None, "c2", "c3", "c2", None, "c2"]
+    finally:
+        context.close()
+
+def test_mismatch_loading_state(browser, server):
+    mismatch_pending = []
+    base, context, page, _, _ = _open_parity(browser, server, hold=True)
+    page.unroute("**/api/v1/native_parity**")
+    parity = []
+
+    def handle(route):
+        url = route.request.url
+        path = url.split("?")[0]
+        if path.endswith("/native_parity/mismatches"):
+            page.mismatch_calls.append(url)
+            mismatch_pending.append(route)
+        elif path.endswith("/api/v1/native_parity"):
+            parity.append(url)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(SUMMARY))
+        else:
+            route.fulfill(status=500, content_type="application/json", body=json.dumps(PROBLEM))
+
+    page.route("**/api/v1/native_parity**", handle)
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-summary")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-no-report")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unauthenticated")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-pager")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_have_count(0)
+        mismatch_pending[0].fulfill(status=200, content_type="application/json",
+            body=json.dumps(EMPTY_MISMATCH_PAGE[1]))
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_be_visible()
+    finally:
+        context.close()
+
+def test_mismatch_error_state(browser, server):
+    base, context, page, _, _ = _open_parity(browser, server, mismatches=lambda c: (503, PROBLEM))
+    try:
+        page.goto(base + "/#/native-parity")
+        unavailable = page.get_by_test_id("parity-mismatch-unavailable")
+        expect(unavailable).to_contain_text("NO_CURRENT_RELEASE")
+        expect(unavailable).to_contain_text("no release")
+        expect(unavailable).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-no-report")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_have_count(0)
+        expect(page.get_by_test_id("parity-summary")).to_be_visible()
+    finally:
+        context.close()
+
+def test_mismatch_error_recovery_restarts(browser, server):
+    summary = {"d": SUMMARY}
+    failing = {"on": True}
+    base, context, page, parity, _ = _open_parity(browser, server, body=lambda: summary["d"],
+        mismatches=lambda c: (503, PROBLEM) if failing["on"] else (200, EMPTY_MISMATCH_PAGE[1]))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        failing["on"] = False
+        summary["d"] = dict(SUMMARY, as_of="2026-10-01", generated_at="2026-10-02T02:00:00Z", compared_count=99)
+        page.get_by_test_id("parity-mismatch-restart").click()
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-as-of")).to_have_text("2026-10-01")
+        expect(page.get_by_test_id("parity-generated-at")).to_have_text("2026-10-02T02:00:00Z")
+        expect(page.get_by_test_id("parity-compared")).to_have_text("99")
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_be_visible()
+        assert len(parity) == 2
+    finally:
+        context.close()
+
+def test_mismatch_later_page_error_recovers_via_previous_and_restart(browser, server):
+    fail = {"on": True}
+    page_a = _page([{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}], next_cursor="c2")
+    page_b = _page([{"row_key": "NVDA|2026-09-22|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 1.5, "native": 2.5}}}])
+
+    def mismatches(cursor):
+        if cursor == "c2" and fail["on"]:
+            return (503, PROBLEM)
+        return (200, page_a if cursor is None else page_b)
+
+    base, context, page, parity, _ = _open_parity(browser, server, mismatches=mismatches)
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_enabled()
+        expect(page.get_by_test_id("parity-mismatch-restart")).to_be_visible()
+        page.get_by_test_id("parity-mismatch-prev").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_be_visible()
+        fail["on"] = False
+        page.get_by_test_id("parity-mismatch-restart").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        assert len(parity) == 2
+        assert "cursor=" not in page.mismatch_calls[-1]
+        page.get_by_test_id("parity-mismatch-next").click()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("1.5")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("2.5")
+    finally:
+        context.close()
+
+def test_mismatch_restart_from_successful_later_page(browser, server):
+    summary = {"d": SUMMARY}
+    page_a = _page([{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}], next_cursor="c2")
+    page_b = _page([{"row_key": "NVDA|2026-09-22|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 1.0, "native": 2.0}}}])
+
+    def mismatches(cursor):
+        return (200, page_a if cursor is None else page_b)
+
+    base, context, page, parity, _ = _open_parity(browser, server, body=lambda: summary["d"], mismatches=mismatches)
+    try:
+        page.goto(base + "/#/native-parity")
+        aapl = page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")
+        expect(aapl).to_be_visible()
+        expect(aapl.get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(aapl.get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        page.get_by_test_id("parity-mismatch-next").click()
+        nvda = page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")
+        expect(nvda).to_be_visible()
+        expect(nvda.get_by_test_id("parity-mismatch-legacy")).to_have_text("1")
+        expect(nvda.get_by_test_id("parity-mismatch-native")).to_have_text("2")
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 2")
+        expect(page.get_by_test_id("parity-mismatch-restart")).to_be_visible()
+        summary["d"] = dict(SUMMARY, as_of="2026-10-01", generated_at="2026-10-02T02:00:00Z", compared_count=99)
+        page.get_by_test_id("parity-mismatch-restart").click()
+        expect(aapl).to_be_visible()
+        expect(aapl.get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(aapl.get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
+        expect(page.get_by_test_id("parity-mismatch-prev")).to_be_disabled()
+        expect(page.get_by_test_id("parity-as-of")).to_have_text("2026-10-01")
+        expect(page.get_by_test_id("parity-generated-at")).to_have_text("2026-10-02T02:00:00Z")
+        expect(page.get_by_test_id("parity-compared")).to_have_text("99")
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_have_text(
+            "Rows from report generated 2026-10-01T02:00:00Z (as of 2026-09-30)")
+        assert "cursor=" not in page.mismatch_calls[-1]
+        assert len(parity) == 2
+    finally:
+        context.close()
+
+def test_mismatch_401_shows_unauthenticated(browser, server):
+    base, context, page, _, _ = _open_parity(browser, server,
+        mismatches=lambda c: (401, {"code": "UNAUTHENTICATED", "category": "auth", "retryable": False, "message": "sign in"}))
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-unauthenticated")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-table")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-empty")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-no-report")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-loading")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-pager")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_have_count(0)
+        expect(page.get_by_test_id("parity-summary")).to_be_visible()
+    finally:
+        context.close()
+
+@pytest.mark.parametrize("as_of,generated_at", [
+    ("2026-10-01", SUMMARY["generated_at"]),
+    (SUMMARY["as_of"], "2026-10-02T02:00:00Z"),
+    ("2026-10-01", "2026-10-02T02:00:00Z"),
+])
+def test_mismatch_identity_changing_detail_banner(browser, server, as_of, generated_at):
+    identity = {"as_of": as_of, "generated_at": generated_at}
+    items = [{"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts",
+        "fields": {"gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63}}}]
+
+    def mismatches(cursor):
+        return (200, _page(items, as_of=identity["as_of"], generated_at=identity["generated_at"]))
+
+    base, context, page, parity, _ = _open_parity(browser, server, mismatches=mismatches)
+    try:
+        page.goto(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_have_text(
+            f"Rows from report generated {generated_at} (as of {as_of})")
+        identity["as_of"] = SUMMARY["as_of"]
+        identity["generated_at"] = SUMMARY["generated_at"]
+        page.get_by_test_id("parity-mismatch-restart").click()
+        expect(page.get_by_test_id("parity-mismatch-identity-changed")).to_have_count(0)
+        expect(page.get_by_test_id("parity-mismatch-identity")).to_have_text(
+            f"Rows from report generated {SUMMARY['generated_at']} (as of {SUMMARY['as_of']})")
+        assert len(parity) == 2
     finally:
         context.close()
