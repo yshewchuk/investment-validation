@@ -151,7 +151,9 @@ def test_other_variants_and_provenance_are_never_scored(tmp_path):
         assert result.random == SetMetrics(
             n_events=2, n_trades=1, n_without_trade=1, total_ret=0.5,
             mean_ret=0.5, win_rate=1.0)
-        assert result.rolling.n_trades == 0
+        assert result.rolling == SetMetrics(
+            n_events=2, n_trades=0, n_without_trade=2, total_ret=0.0,
+            mean_ret=None, win_rate=None)
     finally:
         conn.close()
 
@@ -177,16 +179,17 @@ def test_unscored_event_counts_without_trade(tmp_path):
 def test_multiple_winner_trades_on_one_event_count_once_as_event(tmp_path):
     extra = [
         _winner_trade("EVENT-5", "2024-01-16", 0.5, trade_id="W-5a"),
-        _winner_trade("EVENT-5", "2024-01-16", 0.25, trade_id="W-5b"),
+        _winner_trade("EVENT-5", "2024-01-16", -0.25, trade_id="W-5b"),
     ]
     conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM], extra_trades=extra)
     try:
         result = _evaluate(repository, _request(snapshot))
-        assert result.random.n_events == 1
-        assert result.random.n_trades == 2
-        assert result.random.n_without_trade == 0
-        assert result.random.total_ret == 0.75
-        assert result.random.mean_ret == 0.375
+        assert result.random == SetMetrics(
+            n_events=1, n_trades=2, n_without_trade=0, total_ret=0.25,
+            mean_ret=0.125, win_rate=0.5)
+        assert result.rolling == SetMetrics(
+            n_events=0, n_trades=0, n_without_trade=0, total_ret=0.0,
+            mean_ret=None, win_rate=None)
     finally:
         conn.close()
 
@@ -227,13 +230,15 @@ def test_non_finite_ret_is_a_contract_mismatch(tmp_path):
 def test_stale_trade_date_against_canonical_event_is_a_contract_mismatch(tmp_path):
     """Calendar corrections keep the event_id but change the canonical date.
 
-    The valid winner row is never listed; only the distinct, plural offending
-    ids appear, sorted.
+    The valid winner row is never listed; the offending EVENT-30 rows sort
+    before the offending EVENT-1 row and repeat its event, yet only the
+    distinct, plural offending ids appear, sorted.
     """
     extra = [
         _winner_trade("EVENT-5", "2024-01-16", 0.5),
-        _winner_trade("EVENT-1", "2024-02-20", 0.25),
-        _winner_trade("EVENT-30", "2024-02-21", 0.75),
+        _winner_trade("EVENT-30", "2024-02-21", 0.75, trade_id="W-A-EVENT-30"),
+        _winner_trade("EVENT-30", "2024-02-21", 0.75, trade_id="W-A2-EVENT-30"),
+        _winner_trade("EVENT-1", "2024-02-20", 0.25, trade_id="W-B-EVENT-1"),
     ]
     conn, repository, snapshot = _holdout_snapshot(
         tmp_path, [_RANDOM, _ROLLING, _OVERLAP], extra_trades=extra)
@@ -251,11 +256,18 @@ def test_stale_trade_date_against_canonical_event_is_a_contract_mismatch(tmp_pat
 
 
 def test_winner_ticker_mismatch_against_canonical_event_is_a_contract_mismatch(tmp_path):
-    """The valid winner row is never listed; only distinct wrong-ticker ids."""
+    """The valid winner row is never listed; the offending EVENT-30 rows sort
+    before the offending EVENT-1 row and repeat its event, yet only distinct
+    wrong-ticker ids appear, sorted.
+    """
     extra = [
         _winner_trade("EVENT-5", "2024-01-16", 0.5),
-        _winner_trade("EVENT-1", "2024-09-15", 0.25, ticker="ZZZZ"),
-        _winner_trade("EVENT-30", "2024-09-16", 0.75, ticker="YYYY"),
+        _winner_trade("EVENT-30", "2024-09-16", 0.75, ticker="YYYY",
+                      trade_id="W-A-EVENT-30"),
+        _winner_trade("EVENT-30", "2024-09-16", 0.75, ticker="YYYY",
+                      trade_id="W-A2-EVENT-30"),
+        _winner_trade("EVENT-1", "2024-09-15", 0.25, ticker="ZZZZ",
+                      trade_id="W-B-EVENT-1"),
     ]
     conn, repository, snapshot = _holdout_snapshot(
         tmp_path, [_RANDOM, _ROLLING, _OVERLAP], extra_trades=extra)
@@ -291,8 +303,11 @@ def test_hand_reconstructed_equal_population_is_accepted(tmp_path):
             **{field.name: getattr(derived, field.name) for field in fields(derived)})
         assert reconstructed == derived
         assert reconstructed is not derived
-        assert (evaluate_final_holdout(repository, request, reconstructed)
-                == evaluate_final_holdout(repository, request, derived))
+        result = evaluate_final_holdout(repository, request, reconstructed)
+        assert result == evaluate_final_holdout(repository, request, derived)
+        assert result.rolling == SetMetrics(
+            n_events=2, n_trades=0, n_without_trade=2, total_ret=0.0,
+            mean_ret=None, win_rate=None)
     finally:
         conn.close()
 
@@ -396,8 +411,14 @@ def test_fit_and_alternate_arm_attempts_refuse(tmp_path):
         assert alternate.random == SetMetrics(
             n_events=1, n_trades=1, n_without_trade=0, total_ret=0.9,
             mean_ret=0.9, win_rate=1.0)
+        assert alternate.rolling == SetMetrics(
+            n_events=0, n_trades=0, n_without_trade=0, total_ret=0.0,
+            mean_ret=None, win_rate=None)
         winner = evaluate_final_holdout(repository, request, population)
         assert winner.random.total_ret == 0.5
+        assert winner.rolling == SetMetrics(
+            n_events=0, n_trades=0, n_without_trade=0, total_ret=0.0,
+            mean_ret=None, win_rate=None)
     finally:
         conn.close()
 
@@ -442,6 +463,9 @@ def test_does_not_write(tmp_path):
         assert first.random == SetMetrics(
             n_events=1, n_trades=1, n_without_trade=0, total_ret=0.5,
             mean_ret=0.5, win_rate=1.0)
+        assert first.rolling == SetMetrics(
+            n_events=0, n_trades=0, n_without_trade=0, total_ret=0.0,
+            mean_ret=None, win_rate=None)
     finally:
         conn.close()
 
