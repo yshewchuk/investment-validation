@@ -79,7 +79,12 @@ def source(tmp_path_factory):
 
 
 def _metadata_only(monkeypatch, source):
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    from sklearn.linear_model import Ridge
+
     _no_rebuild(monkeypatch)
+    for estimator in (Ridge, HistGradientBoostingRegressor):
+        monkeypatch.setattr(estimator, "__init__", _forbid)
     for name in ("scan", "resolve", "resolve_pinned", "fragment_records", "table_contract"):
         monkeypatch.setattr(Repository, name, _forbid)
     from engine.v2.models.training import magnitude
@@ -410,6 +415,41 @@ def test_alternate_inner_map_has_exact_fits_and_adjacent_cap_refuses_before_publ
     monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
     with pytest.raises(OpsError) as caught:
         search.seal_search_plan(source.conn, source.store, source.registration, request)
+    assert to_document(caught.value.problem) == _problem(
+        "INVALID_EXPERIMENT_SPEC", "planned search fits exceed the explicit cap")
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+def test_single_outer_anchor_has_exact_refit_budget_and_adjacent_cap_refusal(source, monkeypatch):
+    _, feature_snapshot = _build(source, training_start="2022-01-01", evaluation_years=["2024"])
+    spec = replace(source.spec, experiment_id=source.spec.experiment_id + "-one-outer", folds=("2024",))
+    registration = native.register_native(source.conn, source.store, source.repository, spec,
+        code_root=ROOT, as_of_month=MONTH, magnitude_training_start="2022-01-01",
+        magnitude_labels_before=CUTOFF, magnitude_feature_snapshot_id=feature_snapshot.snapshot_id,
+        magnitude_history_start=HISTORY, magnitude_fit_model="history_ridge")
+    validate_magnitude_fitted_execution(registration.document)
+    assert native.read_native_registration(source.conn, source.store, spec).binding_json == registration.binding_json
+    assert registration.document["magnitude_plan"]["evaluation_years"] == ["2024"]
+    assert registration.document["magnitude_plan"]["folds"] == [_expected_folds(source)[0]["outer"]]
+    _metadata_only(monkeypatch, source)
+    request = _request()
+    request.update(inner_years={"2024": ["2023"]}, max_fits=21)
+    catalog = _catalog(source.conn)
+    sealed = search.seal_search_plan(source.conn, source.store, registration, request)
+    plan = sealed["plan"]
+    assert plan["folds"] == _expected_folds(source)[:1]
+    # Six candidates times three horizons, plus one three-horizon outer refit.
+    assert plan["candidate_count"] == 6 and plan["planned_fit_count"] == 21
+    assert plan["horizons"] == [5, 3, 1]
+    assert search.read_search_plan(source.conn, source.store, registration, request,
+        from_document(ArtifactRef, sealed["plan_ref"])) == plan
+    assert _catalog(source.conn) == catalog
+    before = _catalog(source.conn), _objects(source.store)
+    request["max_fits"] = 20
+    monkeypatch.setattr(search.itertools, "product", _forbid)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(source.conn, source.store, registration, request)
     assert to_document(caught.value.problem) == _problem(
         "INVALID_EXPERIMENT_SPEC", "planned search fits exceed the explicit cap")
     assert (_catalog(source.conn), _objects(source.store)) == before
