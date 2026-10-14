@@ -12,6 +12,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 HOOK = ROOT / "checks" / "hooks" / "pre-commit"
 CONFIG = ROOT / ".markdownlint-cli2.jsonc"
+
+# Every test here runs npx markdownlint-cli2; one worker avoids concurrent npx-cache writes (#710).
+pytestmark = pytest.mark.xdist_group("markdownlint_npx")
+
 needs_node = pytest.mark.skipif(
     shutil.which("npx") is None,
     reason="node/npx not installed; markdownlint-cli2 cannot run here (CI has Node)",

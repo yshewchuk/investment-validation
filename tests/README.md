@@ -87,7 +87,7 @@ python3 -m pytest -q -n 4 --dist loadgroup -rfEs --durations=15 tests/ 2>&1 | ta
 - **`-n 4 --dist loadgroup`**: 4 workers when you are the only test runner.
   Use `-n 2` while a heavy job (nightly, D14, real scoring) or another agent's
   tests are running. `loadgroup` keeps the `xdist_group("serial")` files on
-  one worker (see `conftest.py`).
+  one worker (see `conftest.py`). `tests/v2/integration/test_markdown_lint_wiring.py` has its own `xdist_group("markdownlint_npx")` so its npx calls share one worker.
 - **Don't narrow the CPU affinity below 4 CPUs.** Don't run it under
   `taskset`, or `bounded_run --cores`/`--cpu-set`, with fewer than 4 CPUs.
   Real-`Service` tests admit jobs against this process's own affinity minus 1
