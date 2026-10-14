@@ -645,6 +645,7 @@ mutate = [
     "engine/v2/ops/experiments.py",
 ]
 tests = [
+    "tests/v2/models/training/test_magnitude_estimators.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",

@@ -12,7 +12,6 @@ from engine.v2.foundation import (
     from_document,
     to_document,
 )
-from engine.v2.models.training.magnitude import fitted_magnitude_recipe
 from engine.v2.ops.errors import OpsError, fail
 
 
@@ -149,10 +148,43 @@ def validate_magnitude_history_execution(document):
     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "history execution requires a sealed v1.4 plan")
 
 
+def _fitted_magnitude_recipe(kind: str) -> dict:
+    """Return a detached JSON policy; accepting caller overrides is unsupported."""
+    if kind not in ("history_ridge", "history_hgb"):
+        raise ValueError("unknown fitted magnitude model")
+    ridge = kind == "history_ridge"
+    params = ({"alpha": 1.0, "fit_intercept": True, "copy_X": True,
+               "max_iter": None, "tol": 0.0001, "solver": "svd", "positive": False,
+               "random_state": 0} if ridge else {
+        "loss": "squared_error", "quantile": None, "learning_rate": 0.1,
+        "max_iter": 100, "max_leaf_nodes": 7, "max_depth": None,
+        "min_samples_leaf": 20, "l2_regularization": 0.0, "max_features": 1.0,
+        "max_bins": 255, "categorical_features": None, "monotonic_cst": None,
+        "interaction_cst": None, "warm_start": False, "early_stopping": False,
+        "scoring": "loss", "validation_fraction": 0.1, "n_iter_no_change": 10,
+        "tol": 1e-7, "verbose": 0, "random_state": 0})
+    preprocessing = ({
+        "imputer": {"strategy": "median", "keep_empty_features": True},
+        "missing_indicator": {"features": "all", "sparse": False},
+        "scaler": {"with_mean": True, "with_std": True}, "output_features": 22,
+    } if ridge else {"missing_values": "native", "scaling": "none",
+                    "all_empty_training_columns": "constant_zero_train_and_predict"})
+    return {"schema_version": "magnitude_fitted_recipe.v1", "model": kind,
+        "features": ["n_prior", "mean_prior_move", "mean_prior_abs_move",
+                     "ema2_prior_move", "ema2_prior_abs_move", "ema4_prior_move",
+                     "ema4_prior_abs_move", "ema8_prior_move", "ema8_prior_abs_move",
+                     "ema12_prior_move", "ema12_prior_abs_move"],
+        "estimator": {"class": "Ridge" if ridge else "HistGradientBoostingRegressor",
+                      "params": params}, "preprocessing": preprocessing,
+        "target_transform": "none", "prediction_projection": "clip_zero",
+        "fit_scope": "fold_and_horizon", "numerical_threads": 1}
+
+
+
 def magnitude_fitted_execution_document(labels_before, model):
     """Seal one fixed fitted recipe; arbitrary estimator overrides are unsupported."""
     try:
-        recipe = fitted_magnitude_recipe(model)
+        recipe = _fitted_magnitude_recipe(model)
     except (ValueError, TypeError):
         raise fail("INVALID_EXPERIMENT_SPEC", "unsupported fitted magnitude model") from None
     execution = magnitude_history_execution_document(labels_before)

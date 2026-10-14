@@ -122,10 +122,16 @@ def _ridge_oracle(train, labels, test):
 
 def _fit_spy(monkeypatch):
     calls, original = [], fitted.fit_magnitude_predictions
-    def fit(kind, train, labels, test):
-        calls.append((kind, np.array(train, dtype=float), np.array(labels, dtype=float),
+    def fit(recipe, train, labels, test):
+        assert recipe == source_recipe(recipe["model"])
+        calls.append((recipe["model"], np.array(train, dtype=float), np.array(labels, dtype=float),
                       np.array(test, dtype=float)))
-        return original(kind, train, labels, test)
+        before = canonical_json(recipe)
+        result = original(recipe, train, labels, test)
+        assert canonical_json(recipe) == before
+        return result
+    def source_recipe(kind):
+        return native.magnitude_fitted_execution_document(CUTOFF, kind)["fit_recipe"]
     monkeypatch.setattr(fitted, "fit_magnitude_predictions", fit)
     return calls
 
@@ -547,6 +553,27 @@ def test_renderer_rejects_boolean_recipe_even_with_valid_result_hash(source, fie
     assert canonical_json(result[unchanged]) == canonical_json(expected)
     with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.render_prediction_report(source.registration, result, spec=source.spec, no_ledger=True)
+
+
+@pytest.mark.parametrize("field,replacement", [
+    ("model", "history_hgb"), ("features", list(reversed(FEATURES))),
+    ("weighting", "equal_fold"), ("target", {"units": "decimal_return"}),
+], ids=["model", "features", "weighting", "target"])
+def test_renderer_rejects_each_rehashed_policy_field_without_provenance_drift(source, field, replacement):
+    result = model.prediction_result(source.repository, source.registration)
+    original = json.loads(json.dumps(result))
+    assert result[field] != replacement
+    result[field] = replacement
+    result["result_id"] = _sha({key: value for key, value in result.items() if key != "result_id"})
+    assert result["result_id"] != original["result_id"]
+    assert canonical_json(result["provenance"]) == canonical_json(source.registration.document)
+    assert {key: value for key, value in result.items() if key not in (field, "result_id")} == {
+        key: value for key, value in original.items() if key not in (field, "result_id")}
+    with pytest.raises(OpsError) as caught:
+        model.render_prediction_report(source.registration, result, spec=source.spec, no_ledger=True)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert caught.value.problem.message == "history report differs from its registered result"
 
 
 def test_catalog_backed_fitted_registration_has_no_final_holdout_authority(source, monkeypatch):

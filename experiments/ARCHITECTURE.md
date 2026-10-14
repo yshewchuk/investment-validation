@@ -152,7 +152,8 @@ the recipe, separate fold/horizon fits, original percentage-point targets,
 nonnegative prediction projection, one numerical thread and equal event/horizon loss.
 There are no caller-supplied hyperparameters, target transforms or search.
 
-`models.training.magnitude` owns guarded fitting using maintained sklearn APIs.
+`models.training.magnitude` owns guarded fitting using maintained sklearn APIs;
+the reporter passes recipe data only after ops validates the closed execution policy.
 Ridge uses training-only median imputation (all-empty columns retain zero),
 all-column missing indicators and StandardScaler before fixed alpha-one Ridge.
 HGB uses squared-error loss, fixed seed/iterations and no automatic validation

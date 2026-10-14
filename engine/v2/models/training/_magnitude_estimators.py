@@ -9,7 +9,9 @@ from sklearn.preprocessing import StandardScaler
 def build_estimator(recipe):
     """Construct only: fitting and both no-fit guards belong to magnitude.py."""
     if recipe["model"] == "history_hgb":
-        return HistGradientBoostingRegressor(**recipe["estimator"]["params"])
+        params = recipe["estimator"]["params"]
+        # Canonical JSON writes 1.0 as 1; sklearn requires this fraction as float.
+        return HistGradientBoostingRegressor(**{**params, "max_features": float(params["max_features"])})
     preprocessing = recipe["preprocessing"]
     return make_pipeline(FeatureUnion([
         ("imputer", SimpleImputer(**preprocessing["imputer"])),

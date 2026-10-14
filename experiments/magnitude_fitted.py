@@ -31,7 +31,7 @@ def fitted_forecasts(indexed, train, fold, plan, execution):
             "evaluation_event_ids": list(test_ids), "training_matrix_id": content_hash(training),
             "prediction_matrix_id": content_hash(prediction)}
         try:
-            values = fit_magnitude_predictions(execution["model"], matrix, labels.copy(), test_matrix)
+            values = fit_magnitude_predictions(execution["fit_recipe"], matrix, labels.copy(), test_matrix)
             if (len(values) != len(test_ids) or any(isinstance(value, bool)
                     or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in values)):
                 raise ValueError
