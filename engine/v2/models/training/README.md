@@ -20,6 +20,14 @@ Replaces (§4.4): `models/training/, rewritten above scoring rather than moved`.
 
 ## Public interface
 
+`magnitude.fitted_magnitude_recipe` returns a detached closed Ridge/HGB policy.
+`magnitude.fit_magnitude_predictions` accepts eleven-column numeric matrices
+(NaN features permitted), nonnegative finite labels and returns detached finite
+nonnegative predictions. It fits with the shared no-fit guard and one numerical
+thread; it never reads data, drops rows, writes models or publishes evidence.
+The native experiment reporter consumes this API; ops imports the pure recipe
+constructor for immutable registration validation. Old training recipes are unchanged.
+
 The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.

@@ -142,6 +142,40 @@ holdout evaluation or observed point-in-time claim is added.
 | Empty qualified training, incomplete evaluation or invalid stored numeric/missingness | Whole assessment refuses; no partial report. Native failure-stage rules apply after attempt. |
 | v1.4 final-request preparation | `INVALID_EXPERIMENT_SPEC`; final declarations remain exclusive to v1.1. |
 
+### Fixed fitted-history candidates (v1.5)
+
+`--magnitude-model history_ridge|history_hgb` uses the same two clocks and exact
+stored-history pair. Library callers additionally pass `magnitude_fit_model`.
+Each registration selects one closed recipe; absent fitting preserves v1.4.
+The v1.5 execution binds all eleven stored columns in their original order,
+the recipe, separate fold/horizon fits, original percentage-point targets,
+nonnegative prediction projection, one numerical thread and equal event/horizon loss.
+There are no caller-supplied hyperparameters, target transforms or search.
+
+`models.training.magnitude` owns guarded fitting using maintained sklearn APIs.
+Ridge uses training-only median imputation (all-empty columns retain zero),
+all-column missing indicators and StandardScaler before fixed alpha-one Ridge.
+HGB uses squared-error loss, native missingness, fixed seed/iterations and no
+automatic validation split or warm start. Missing features never drop events.
+Every fold/horizon uses a fresh estimator and only strictly qualified training
+events. Empty history is handled by the declared preprocessing, not mean fallback.
+
+The history reporter retains whole-run physical preflight and supported producer
+admission. `magnitude_fitted` assembles each horizon's training/prediction matrices
+from stored rows, binds their ordered keys/values and qualified labels by digest,
+and freezes detached forecasts before that fold's evaluation labels open.
+It never builds features. The result adds per-horizon fit evidence and a distinct
+schema; existing fixed-history result bytes/policy remain unchanged for identical inputs.
+Registration/replay never fit. Native smoke/recorded publication remains unchanged.
+
+| Fitted-history condition | Outcome |
+| --- | --- |
+| Unknown recipe or missing magnitude/history inputs | `INVALID_EXPERIMENT_SPEC` before repository admission; CLI parser errors exit 2 before store access. |
+| Changed recipe, parameter, feature order, preprocessing, source or pin | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; no implicit registration or fit. |
+| Invalid fit arrays, estimator failure, wrong-shaped/nonfinite predictions | `EXPERIMENT_VARIANT_FAILED`; no partial successful report or baseline fallback. |
+| Missing/late evaluation labels or empty qualified training | Existing whole-assessment refusal; no row dropping or horizon omission. |
+| v1.5 final-request preparation | `INVALID_EXPERIMENT_SPEC`; no final-read authority. |
+
 | Condition | Outcome |
 | --- | --- |
 | Invalid plan, external inputs, unsupported runner path, or missing/malformed/indirect source | `INVALID_EXPERIMENT_SPEC` before registration. |

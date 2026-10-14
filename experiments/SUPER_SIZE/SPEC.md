@@ -32,3 +32,23 @@ Random and rolling holdouts remain excluded. Native evidence binds consumed
 stored rows and original source identities; schedules/publication remain unverified
 reconstructions. Synthetic development tests do not establish real coverage,
 accuracy, resource requirements or a winning model. The user runs real development locally.
+
+## Fixed fitted candidates
+
+Use a separate unique experiment/arm for `--magnitude-model history_ridge` or
+`history_hgb`, retaining the same explicit clocks and stored-feature arguments.
+Each recipe consumes all eleven history columns and fits separately per year/horizon
+using only qualified earlier labels. Ridge uses train-only median imputation,
+all-column missing flags, scaling and alpha 1; HGB uses squared-error loss,
+native missingness, 100 iterations, learning rate 0.1, seven leaves, minimum
+20 samples per leaf, zero L2, seed zero and no early stopping or warm start.
+Both project finite predictions to zero or above without transforming the target.
+The preregistration binds complete fixed parameters and preprocessing; no runtime
+overrides, automatic selection, tuning or model release occur. Feature-row and
+training-label digests accompany complete forecasts and pooled RMSE/MAE.
+
+The implementation uses sklearn Pipeline, FeatureUnion, SimpleImputer,
+MissingIndicator, StandardScaler, Ridge and HistGradientBoostingRegressor.
+Stored research admission owns membership; generic training folds are not reused
+because their missing-row and fold-cutoff policies differ. Runtime never rebuilds
+features. These candidates are local development benchmarks, not a selected winner.
