@@ -41,5 +41,7 @@ A failure never fails `publication`, never marks `delivery` failed, and never po
 
 **Slices** (each at most about 400 code lines): (1) serving root configuration and API wiring; (2) `run_projection` extracted from the tool, CLI unchanged; (3) `serving_projection` job kind, DAG/plan/profile wiring and the child-process worker; (4) serving-pointer retained publication, read-back verification and the failure table above; (5) completion disposition and the `serving_status.json` sidecar plus API exposure; (6) a real-browser test of the board against a real nightly's release.
 
+Regression cases: slice 1 asserts `/releases/current` ETag changes when the response changes and stays constant when the same projection is republished.
+
 Estimates (code / test / doc lines): 1: 120 / 100 / 15; 2: 150 / 120 / 10; 3: 250 / 200 / 20; 4: 300 / 250 / 25; 5: 200 / 150 / 20; 6: 40 / 150 / 10. Slice 4 must first confirm `submit_retained_publication` can target the separate serving pointer root; if it needs a parameter, that goes in slice 4.
 

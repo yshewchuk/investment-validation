@@ -200,8 +200,9 @@ does not resolve "current" from it.
 
 `/releases/current` after a nightly resolves: serving `publisher/CURRENT` -> that release's
 `projection_binding.json` -> projection release id -> `verify_projection_binding` against the
-live index. Only the `serving_projection` job moves that pointer, and only after the
-projection is committed and its binding verified; the swap is one atomic file replace into a
+live index. Only the fenced ops publisher replaces that pointer, on request from the nightly
+`serving_projection` job (after the projection is committed and its binding verified) or an
+operator rollback retained publication; the swap is one atomic file replace into a
 complete release directory. A request resolves once, so it sees the previous release or the
 new one, never a mix. Index rows are append-only, so the old binding verifies during the swap.
 
