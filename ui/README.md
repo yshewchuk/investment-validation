@@ -128,16 +128,16 @@ index.html`) via `compatibilityLink()` (`src/format.ts`).
 **Native parity summary** (`#/native-parity`) reads `/api/v1/native_parity`
 through the same typed client and cookie. It shows saved status, as-of and
 generation identity, tolerance policy, counts and refusal reasons. This view
-works independently of board release discovery. The typed client exposes the
-documented detail endpoints for a follow-up view. Per-field legacy/native
-values, unpaired keys and their pagination are deferred to that slice
-(estimated 100–130 production lines plus browser tests). Preview retirement
-is owned by a separate PR.
+works independently of board release discovery. The screen now shows a
+cursor-paged table of differing fields with legacy and native values side by
+side (agreeing fields hidden); unpaired keys remain deferred to a follow-up
+slice. Preview retirement is owned by a separate PR.
 
 - **States covered**: loading, unauthenticated (401), `no_report`, `stale`
   banner with data retained, `unavailable` error without data, zero saved
-  counts and empty refusal reasons, and partial saved reports with incomplete
-  refusal data. Browser tests mock the
+  counts and empty refusal reasons, partial saved reports with incomplete
+  refusal data, and for the mismatch table: loading, empty, `no_report` and
+  error. Browser tests mock the
   documented API contract (`tests/v2/integration/test_native_parity_browser.py`).
 
 ### Routing (`src/routes.ts`, P3-3b)

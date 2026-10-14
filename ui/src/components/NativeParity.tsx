@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { ApiError, clientProblem, type DataClient } from "../api/client";
-import type { NativeParitySummary } from "../api/types";
-import { fmtNumber, fmtText } from "../format";
+import type { NativeParityMismatchItem, NativeParitySummary } from "../api/types";
+import { fmtNumber, fmtText, fmtUnknown } from "../format";
 
 type Loaded<T> =
   | { status: "loading" }
@@ -71,10 +71,111 @@ function ReadError({ error, prefix, name, label }: {
   );
 }
 
+function RestartButton({ onRestart }: { onRestart: () => void }) {
+  return (
+    <button type="button" data-testid="parity-mismatch-restart" onClick={onRestart}>
+      Restart
+    </button>
+  );
+}
+
+function MismatchTable({ client, summary, onRestart }: {
+  client: DataClient;
+  summary: { as_of: string | null; generated_at: string | null };
+  onRestart: () => void;
+}) {
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const index = cursors.length - 1;
+  const cursor = cursors[index] ?? null;
+  const page = useRead(`mismatch:${cursors.length}:${cursor}`, (signal) =>
+    client.getNativeParityMismatches(50, cursor, signal),
+  );
+  const data = page.status === "ready" && page.data.status !== "no_report" ? page.data : null;
+  const rows: { item: NativeParityMismatchItem; field: string; legacy: unknown; native: unknown }[] = [];
+  if (data !== null) {
+    for (const item of data.items) {
+      for (const [field, cell] of Object.entries(item.fields)) {
+        if (cell.status === "differ") rows.push({ item, field, legacy: cell.legacy, native: cell.native });
+      }
+    }
+  }
+  const showPager = data !== null && (data.items.length > 0 || index > 0);
+  const nextCursor = data?.next_cursor ?? null;
+  const identityChanged =
+    data !== null && (data.generated_at !== summary.generated_at || data.as_of !== summary.as_of);
+  const restart =
+    index > 0 && page.status !== "error" && !identityChanged ? <RestartButton onRestart={onRestart} /> : null;
+  return (
+    <>
+      <h2>Mismatched fields</h2>
+      {data !== null && (
+        <p data-testid="parity-mismatch-identity">
+          Rows from report generated {fmtText(data.generated_at)} (as of {fmtText(data.as_of)})
+        </p>
+      )}
+      {identityChanged && (
+        <>
+          <p className="error-banner" role="alert" data-testid="parity-mismatch-identity-changed">
+            These mismatch rows come from a different report than the summary above. Restart to refresh both.
+          </p>
+          <RestartButton onRestart={onRestart} />
+        </>
+      )}
+      {page.status === "loading" && <p data-testid="parity-mismatch-loading">Loading mismatches…</p>}
+      {page.status === "error" && (
+        <ReadError error={page.error} prefix="parity-mismatch-" name="unavailable" label="mismatches" />
+      )}
+      {page.status === "error" && page.error.status !== 401 && (
+        <div data-testid="parity-mismatch-pager">
+          <button type="button" data-testid="parity-mismatch-prev" disabled={index === 0}
+            onClick={() => setCursors((stack) => stack.slice(0, -1))}>Previous</button>
+          <RestartButton onRestart={onRestart} />
+        </div>
+      )}
+      {page.status === "ready" && page.data.status === "no_report" && (
+        <p data-testid="parity-mismatch-no-report">No native parity report is published yet.</p>
+      )}
+      {data !== null && data.items.length === 0 && (
+        <p data-testid="parity-mismatch-empty">No mismatched rows.</p>
+      )}
+      {data !== null && data.items.length > 0 && (
+        <table data-testid="parity-mismatch-table">
+          <thead>
+            <tr><th>Row</th><th>Dimension</th><th>Field</th><th>Legacy</th><th>Native</th></tr>
+          </thead>
+          <tbody>
+            {rows.map(({ item, field, legacy, native }) => (
+              <tr key={`${item.row_key}|${item.dimension}|${field}`} data-testid="parity-mismatch-row">
+                <td>{item.row_key}</td>
+                <td>{item.dimension}</td>
+                <td>{field}</td>
+                <td data-testid="parity-mismatch-legacy">{fmtUnknown(legacy)}</td>
+                <td data-testid="parity-mismatch-native">{fmtUnknown(native)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {showPager && (
+        <div data-testid="parity-mismatch-pager">
+          <button type="button" data-testid="parity-mismatch-prev" disabled={index === 0}
+            onClick={() => setCursors((stack) => stack.slice(0, -1))}>Previous</button>
+          <button type="button" data-testid="parity-mismatch-next" disabled={nextCursor === null}
+            onClick={() => setCursors((stack) => [...stack, nextCursor])}>Next</button>
+          <span data-testid="parity-mismatch-page">Page {index + 1}</span>
+          {restart}
+        </div>
+      )}
+    </>
+  );
+}
+
 export function NativeParity({ client }: { client: DataClient }) {
-  const summary = useRead("summary", (signal) => client.getNativeParity(signal));
-  const refusalReasons: [string, number][] = summary.status === "ready" && summary.data.status !== "no_report" ? Object.entries(summary.data.native_refused_reasons) : [];
-  const refusedTickers: { ticker: string; reason: string }[] = summary.status === "ready" && (summary.data.status === "available" || summary.data.status === "stale") ? summary.data.native_refused_tickers : [];
+  const [reload, setReload] = useState(0);
+  const summary = useRead(`summary:${reload}`, (signal) => client.getNativeParity(signal));
+  const report = summary.status === "ready" && summary.data.status !== "no_report" ? summary.data : null;
+  const refusalReasons: [string, number][] = report ? Object.entries(report.native_refused_reasons) : [];
+  const refusedTickers: { ticker: string; reason: string }[] = report && (report.status === "available" || report.status === "stale") ? report.native_refused_tickers : [];
   return (
     <main className="app">
       <h1>v2 native parity (shadow)</h1>
@@ -100,6 +201,9 @@ export function NativeParity({ client }: { client: DataClient }) {
             </>
           )}
         </>
+      )}
+      {report && (
+        <MismatchTable key={reload} client={client} summary={report} onRestart={() => setReload((n) => n + 1)} />
       )}
     </main>
   );

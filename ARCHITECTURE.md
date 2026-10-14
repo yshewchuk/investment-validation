@@ -610,7 +610,7 @@ Only a tracked path absent from the worktree reads as empty.
 
   The authenticated FastAPI API exposes `/api/v1/native_parity` and paginated
   `/api/v1/native_parity/mismatches` and `/api/v1/native_parity/unpaired` routes.
-  React currently presents the summary; row-level detail remains deferred. The
+  React presents the summary and a cursor-paged mismatch table (differing fields only); the unpaired view remains deferred. The
   operations listener has no native-parity HTML or JSON preview routes.
   The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
   records whole-package ownership, interfaces and its boundary with React;

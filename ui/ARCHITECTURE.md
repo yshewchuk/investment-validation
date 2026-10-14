@@ -19,9 +19,7 @@ from [serving](../engine/v2/serving/ARCHITECTURE.md), plus route/filter state.
 Native parity renders the summary from `/api/v1/native_parity`, including its
 saved refused-ticker list (`native_refused_tickers`: ticker and reason code)
 separately from field mismatches. A nonempty list has its own refused-ticker
-section and count; an empty list adds no refused-ticker section. The typed client also
-exposes `/mismatches` and `/unpaired` under that prefix; the summary component
-does not request those pages. The retired `/native_parity.json` HTML paths are
+section and count; an empty list adds no refused-ticker section. The screen also reads `/mismatches` through the typed client and renders a cursor-paged table of differing fields only (legacy and native side by side); `/unpaired` is exposed by the client but not yet presented. The retired `/native_parity.json` HTML paths are
 not part of this React screen.
 
 ## Outputs
@@ -76,8 +74,8 @@ Format saved financial values; do not fit, rescore, derive financial evidence or
 fetch vendors. Preserve saved replay clocks and provenance without relabelling.
 Existing operations HTML/legacy previews are compatibility exceptions with
 migration outstanding, not evidence that a React application view is shipped.
-Native parity summary presentation belongs here; mismatch/unpaired detail is
-outside this component. The operations parity HTML/JSON preview is retired.
+Native parity summary presentation belongs here; mismatch detail is
+presented by this component; unpaired detail is not yet. The operations parity HTML/JSON preview is retired.
 
 ## Diagrams
 
