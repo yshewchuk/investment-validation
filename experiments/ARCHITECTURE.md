@@ -142,6 +142,43 @@ holdout evaluation or observed point-in-time claim is added.
 | Empty qualified training, incomplete evaluation or invalid stored numeric/missingness | Whole assessment refuses; no partial report. Native failure-stage rules apply after attempt. |
 | v1.4 final-request preparation | `INVALID_EXPERIMENT_SPEC`; final declarations remain exclusive to v1.1. |
 
+### Fixed fitted-history candidates (v1.5)
+
+`--magnitude-model history_ridge|history_hgb` uses the same two clocks and exact
+stored-history pair. Library callers additionally pass `magnitude_fit_model`.
+Each registration selects one closed recipe; absent fitting preserves v1.4.
+The v1.5 execution binds all eleven stored columns in their original order,
+the recipe, separate fold/horizon fits, original percentage-point targets,
+nonnegative prediction projection, one numerical thread and equal event/horizon loss.
+There are no caller-supplied hyperparameters, target transforms or search.
+
+`models.training.magnitude` owns guarded fitting using maintained sklearn APIs;
+the reporter passes recipe data only after ops validates the closed execution policy.
+Ridge uses training-only median imputation (all-empty columns retain zero),
+all-column missing indicators and StandardScaler before fixed alpha-one Ridge.
+HGB uses squared-error loss, fixed seed/iterations and no automatic validation
+split or warm start. Training-all-null columns are frozen to zero in train/predict
+matrices; other nulls remain native. This avoids sklearn 1.9.0's empty-bin failure
+without dropping columns or events and without learning from evaluation values.
+Every fold/horizon uses a fresh estimator and only strictly qualified training
+events. Empty history is handled by the declared preprocessing, not mean fallback.
+
+The history reporter retains whole-run physical preflight and supported producer
+admission. `magnitude_fitted` assembles each horizon's training/prediction matrices
+from stored rows, binds their ordered keys/values and qualified labels by digest,
+and freezes detached forecasts before that fold's evaluation labels open.
+It never builds features. The result adds per-horizon fit evidence and a distinct
+schema; existing fixed-history result bytes/policy remain unchanged for identical inputs.
+Registration/replay never fit. Native smoke/recorded publication remains unchanged.
+
+| Fitted-history condition | Outcome |
+| --- | --- |
+| Unknown recipe or missing magnitude/history inputs | `INVALID_EXPERIMENT_SPEC` before repository admission; CLI parser errors exit 2 before store access. |
+| Changed recipe, parameter, feature order, preprocessing, source or pin | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; no implicit registration or fit. |
+| Invalid fit arrays, estimator failure, wrong-shaped/nonfinite predictions | `EXPERIMENT_VARIANT_FAILED`; no partial successful report or baseline fallback. |
+| Missing/late evaluation labels or empty qualified training | Existing whole-assessment refusal; no row dropping or horizon omission. |
+| v1.5 final-request preparation | `INVALID_EXPERIMENT_SPEC`; no final-read authority. |
+
 | Condition | Outcome |
 | --- | --- |
 | Invalid plan, external inputs, unsupported runner path, or missing/malformed/indirect source | `INVALID_EXPERIMENT_SPEC` before registration. |
@@ -207,7 +244,7 @@ from verified bytes; malformed metadata refuses before ledger or catalog effects
 | R1 invalid specification, R2 unresolved snapshot, or R6 identity conflict | `publish_native_refusal` publishes private evidence only; no result or ledger row. |
 | Empty, directory or symlinked recorded ledger destination | R1 before outcome reservation or ledger access; no default-ledger fallback or conflict evidence. |
 | Publish, replay or export called within an active caller transaction | R1 before path access or artifact/CSV effects; leave the caller transaction unchanged. |
-| Publish, replay or export with metadata-only magnitude v1.2 | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private refusal evidence only, before outcome/report reads or catalog/ledger/export effects. Validated v1.0/v1.1/v1.3/v1.4 are accepted; v1.2 remains registration-only. |
+| Publish, replay or export with metadata-only magnitude v1.2 | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private refusal evidence only, before outcome/report reads or catalog/ledger/export effects. Validated v1.0/v1.1/v1.3/v1.4/v1.5 are accepted; v1.2 remains registration-only. |
 | Admitted R3 look-ahead or R5 holdout denial | Immutable refusal and `refused` row, unless smoke; no current-attempt report. |
 | Admitted R4 variant failure | Immutable refusal and `failed` row, unless smoke; no current-attempt report. |
 | Same canonical registration/result/destination repeated, including tuple/list-equivalent refusal details | Reuse the first outcome and date; reconcile one terminal CSV row per experiment/variant identity without refitting. |
