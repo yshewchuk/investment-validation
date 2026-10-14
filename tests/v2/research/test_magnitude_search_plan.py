@@ -102,7 +102,7 @@ def _ids(source, dates):
         if event["event_date"].date().isoformat() in dates]
 
 
-def _assert_folds(source, plan):
+def _expected_folds(source):
     first_train = _ids(source, ("2022-06-02",))
     outer_2024 = _ids(source, ("2022-06-02", "2022-12-22", "2022-12-23", "2023-01-03", "2023-06-02"))
     inner_2023 = {"year": "2023", "training_labels_before": "2022-12-22",
@@ -110,7 +110,7 @@ def _assert_folds(source, plan):
         "evaluation_event_ids": _ids(source, ("2023-01-03", "2023-06-02"))}
     inner_2024 = _ids(source, ("2024-06-12", "2024-06-17"))
     eval_2024 = _ids(source, ("2024-06-12", "2024-06-17", "2024-12-27", "2024-12-30"))
-    assert plan["folds"] == [
+    return [
         {"outer": {"year": "2024", "training_labels_before": "2024-01-01",
             "training_candidate_event_ids": outer_2024, "evaluation_event_ids": eval_2024},
          "inner": [{**inner_2023, "evaluation_labels_before": "2024-01-01"}]},
@@ -121,6 +121,10 @@ def _assert_folds(source, plan):
             {"year": "2024", "training_labels_before": "2024-01-01",
              "training_candidate_event_ids": outer_2024, "evaluation_event_ids": inner_2024,
              "evaluation_labels_before": "2024-12-27"}]}]
+
+
+def _assert_folds(source, plan):
+    assert plan["folds"] == _expected_folds(source)
 
 
 def _recipe(kind, params):
@@ -357,6 +361,60 @@ def test_two_candidate_single_family_request_is_supported_with_exact_refit_budge
         from_document(ArtifactRef, sealed["plan_ref"])) == plan
 
 
+@pytest.mark.parametrize("kind", ["history_ridge", "history_hgb"])
+def test_changed_axes_produce_independent_complete_recipes_and_hashes(source, monkeypatch, kind):
+    _metadata_only(monkeypatch, source)
+    request = _request()
+    if kind == "history_ridge":
+        request.update(space={kind: {"alpha": [0.25, 4, 8]}}, max_candidates=3, max_fits=33)
+        recipes = [_recipe(kind, {**RIDGE_PARAMS, "alpha": value}) for value in (0.25, 4, 8)]
+        expected_count, expected_fits = 3, 33
+    else:
+        request.update(space={kind: {"learning_rate": [0.1], "max_iter": [7, 11],
+            "max_leaf_nodes": [5, 9], "min_samples_leaf": [1, 4], "l2_regularization": [0.25]}},
+            max_candidates=8, max_fits=78)
+        recipes = [_recipe(kind, {**HGB_PARAMS, "learning_rate": 0.1, "l2_regularization": 0.25,
+            "max_iter": iterations, "max_leaf_nodes": leaves, "min_samples_leaf": samples})
+            for iterations, leaves, samples in (
+                (7, 5, 1), (7, 5, 4), (7, 9, 1), (7, 9, 4),
+                (11, 5, 1), (11, 5, 4), (11, 9, 1), (11, 9, 4))]
+        expected_count, expected_fits = 8, 78
+    expected = sorted([{"candidate_id": _sha(recipe), "recipe": recipe} for recipe in recipes],
+                      key=lambda candidate: candidate["candidate_id"])
+    before = _catalog(source.conn)
+    sealed = search.seal_search_plan(source.conn, source.store, source.registration, request)
+    plan = sealed["plan"]
+    assert plan["candidates"] == expected
+    assert plan["candidate_count"] == expected_count and plan["planned_fit_count"] == expected_fits
+    assert plan["request"] == request
+    assert search.read_search_plan(source.conn, source.store, source.registration, request,
+        from_document(ArtifactRef, sealed["plan_ref"])) == plan
+    assert _catalog(source.conn) == before
+
+
+def test_alternate_inner_map_has_exact_fits_and_adjacent_cap_refuses_before_publication(source, monkeypatch):
+    _metadata_only(monkeypatch, source)
+    request = _request()
+    request.update(inner_years={"2024": ["2023"], "2025": ["2024"]}, max_fits=42)
+    expected = _expected_folds(source)
+    expected[1]["inner"].pop(0)
+    sealed = search.seal_search_plan(source.conn, source.store, source.registration, request)
+    plan = sealed["plan"]
+    assert plan["folds"] == expected
+    assert plan["candidate_count"] == 6 and plan["planned_fit_count"] == 42
+    assert search.read_search_plan(source.conn, source.store, source.registration, request,
+        from_document(ArtifactRef, sealed["plan_ref"])) == plan
+    before = _catalog(source.conn), _objects(source.store)
+    request["max_fits"] = 41
+    monkeypatch.setattr(search.itertools, "product", _forbid)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(source.conn, source.store, source.registration, request)
+    assert to_document(caught.value.problem) == _problem(
+        "INVALID_EXPERIMENT_SPEC", "planned search fits exceed the explicit cap")
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
 def test_declared_candidate_ceiling_is_admitted_without_expanding_or_executing(monkeypatch):
     request = _request()
     request.update(space={"history_ridge": {"alpha": list(range(1, 4097))}}, max_candidates=4096)
@@ -425,7 +483,31 @@ def test_installed_identity_drift_refuses_without_publication(source, monkeypatc
     with pytest.raises(OpsError) as caught:
         search.read_search_plan(source.conn, source.store, source.registration, _request(),
             from_document(ArtifactRef, sealed["plan_ref"]))
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
+    message = ("search plan reference differs from its complete binding" if drift == "planner_source"
+               else "search anchor sources or environment differ from this installation")
+    assert to_document(caught.value.problem) == _problem("EXPERIMENT_IDENTITY_CONFLICT", message)
+
+
+@pytest.mark.parametrize("drift", ["anchor_source", "environment"])
+def test_prepare_rejects_installed_anchor_drift_before_publication(source, monkeypatch, drift):
+    _metadata_only(monkeypatch, source)
+    before = _catalog(source.conn), _objects(source.store)
+    if drift == "environment":
+        monkeypatch.setattr(search, "environment_identity", lambda _: {"changed": True})
+    else:
+        path = "experiments/v2_prediction.py"
+        assert path in source.registration.document["source_closure"]
+        original = search.source_closure
+        def closure(*args):
+            return {**original(*args), path: "sha256:" + "0" * 64}
+        monkeypatch.setattr(search, "source_closure", closure)
+    monkeypatch.setattr(search, "_candidates", _forbid)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(source.conn, source.store, source.registration, _request())
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search anchor sources or environment differ from this installation")
+    assert (_catalog(source.conn), _objects(source.store)) == before
 
 
 def test_wrong_reference_schema_refuses_before_open(source, monkeypatch):
