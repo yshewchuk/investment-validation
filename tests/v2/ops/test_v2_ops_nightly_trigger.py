@@ -1700,7 +1700,8 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
     monkeypatch.setattr(nightly_trigger, "_default_plan",
                         lambda root, as_of, tickers, context, clock, *, full_run,
                         expected_shadow_snapshot_id:
-                        (_explode("wrong context") if context != events
+                        (_explode("wrong context") if tickers != events
+                         or context != events
                          or expected_shadow_snapshot_id != refreshed
                          or not full_run or as_of != AS_OF else "plan_snap"))
 
@@ -1726,7 +1727,8 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     monkeypatch.setattr(nightly_trigger, "_default_plan",
                         lambda root, as_of, tickers, context, clock, *, full_run,
                         expected_shadow_snapshot_id:
-                        (_explode("wrong context") if context != ("AAA", "BBB")
+                        (_explode("wrong context") if tickers != ("AAA", "BBB")
+                         or context != ("AAA", "BBB")
                          or expected_shadow_snapshot_id != refreshed else "plan_override"))
 
     assert (nightly_trigger._prepare_default_plan(

@@ -161,9 +161,10 @@ def snapshot_event_tickers(conn, store, scope, *, as_of, clock,
     ``scan_forward_board_requests(..., tickers=None)`` — the same single scan and the same
     35-day window, never a second enumeration. Pure snapshot read: no provider or network call.
 
-    Failure semantics: a missing/unreadable snapshot head or events table, or a head that
-    moved vs ``expected_snapshot_id``, is ``INPUT_CHANGED`` with ``details.data_code`` (the
-    reader's ``DataError`` mapped like :func:`generated_population`'s); zero events in the
+    Failure semantics: a missing/unreadable snapshot head or events table is
+    ``INPUT_CHANGED`` with ``details.data_code`` (the reader's ``DataError`` mapped like
+    :func:`generated_population`'s), whereas a head that moved vs ``expected_snapshot_id``
+    is ``INPUT_CHANGED`` with no ``details``; zero events in the
     window is ``INVALID_REQUEST`` with ``details`` ``as_of`` and ``horizon_days``. Does not
     filter by the carried set: the later ``generated_population`` call already filters
     uncarried tickers and records their exclusions. An unreadable override file is not this
