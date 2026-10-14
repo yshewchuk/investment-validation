@@ -534,7 +534,9 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
     failure, recorded by ``_failure``), and no plan is built. Otherwise
     ``plan_fn`` builds the plan and this function records the ``"submitting"``
     receipt naming the new ``plan_ref``, returning ``(plan_ref, None)`` so
-    ``_submit_plan`` can submit it.
+    ``_submit_plan`` can submit it. A ``SOURCE_NOT_FINAL`` refusal from
+    ``plan_fn`` is a ``not_yet``/``snapshot_not_yet`` receipt instead of a
+    setup failure, mirroring the readiness ``"not_yet"`` branch above.
 
     Accepted risk (issue #186): a crash landing between ``plan_fn`` returning
     and the ``_record(..., "submitting", ...)`` call a few lines below leaves
@@ -576,6 +578,12 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
         plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
                            full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
     except _HANDLED_FAILURES as exc:
+        if isinstance(exc, OpsError) and exc.code == "SOURCE_NOT_FINAL":
+            resuming = prior is not None and prior.status in RESUME_STATUSES
+            return None, _record(root, _receipt(
+                clock, as_of, "snapshot_not_yet" if resuming else "not_yet",
+                _problem_detail(exc),
+                snapshot_attempt=snapshot_attempt))
         if (isinstance(exc, OpsError) and exc.code == "RESOURCE_UNAVAILABLE"
                 and exc.problem.details.get("resource") == "supervisor.lock"):
             return None, _record(root, _receipt(
@@ -795,7 +803,8 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
     NOT cross-checked against the snapshot; a planned key with no observed row is only
     recorded as a ``PLANNED_ROW_MISSING`` finding by the serving bridge. The refresh and
     ``_default_plan`` path is unchanged: with the file absent ``commands._planned_population``
-    generates the population from the same snapshot's events.
+    generates the population from the same snapshot's events, then the snapshot-derived
+    universe gets a ticker-level ``_orats_probe`` finality check before refresh or plan build.
     """
     clock = clock or SystemClock()
     override = Path(root).joinpath(*STATE_DIR, QUALIFICATION_POPULATION)
@@ -810,6 +819,12 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
                            "fix or remove it")
         else:
             universe = _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id)
+            # A ticker-level finality check over the snapshot-derived universe, before any
+            # price refresh or plan build; never probed on the override or explicit-tickers
+            # branches above.
+            final, detail = _orats_probe(as_of, universe)
+            if not final:
+                raise fail("SOURCE_NOT_FINAL", detail)
     context = tuple(context_tickers) or universe
     if universe:
         expected_shadow_snapshot_id = _refresh_plan_prices(

@@ -988,7 +988,10 @@ def test_main_records_the_submit_refusal_when_qualification_inputs_are_absent(
     monkeypatch.setattr(nightly_trigger, "_ensure_shadow_snapshot",
                         lambda root, as_of, clock, attempt: ("ready", "snap_stub"))
     # The absent override means _prepare_default_plan reads the snapshot's own
-    # events; stand in for that read with the empty-window refusal it raises.
+    # events; stand in for that read with the empty-window refusal it raises. The
+    # ticker-level finality probe is irrelevant to this wiring case: stub it final.
+    monkeypatch.setattr(nightly_trigger, "_orats_probe",
+                        lambda as_of, tickers: (True, "final"))
     def no_events(root, as_of, clock, expected_shadow_snapshot_id):
         raise fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's planning window")
 
@@ -1733,7 +1736,15 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
     # and _default_plan. Both stubs assert the incoming pin ("snap_before") and the
     # plan's as_of. IN_WINDOW's calendar date (2026-09-26) differs from AS_OF
     # (2026-09-25), so a clock-derived date could never satisfy those asserts by luck.
+    # The ticker-level finality check runs once over that snapshot-derived universe.
     events, refreshed = ("AAA", "BBB"), "snap_after_refresh"
+    probe_calls = []
+
+    def fake_orats_probe(as_of, tickers):
+        probe_calls.append((as_of, tuple(tickers)))
+        return True, "final"
+
+    monkeypatch.setattr(nightly_trigger, "_orats_probe", fake_orats_probe)
 
     def fake_snapshot_event_universe(root, as_of, clock, expected):
         assert root == tmp_path  # the caller's own root, forwarded unchanged
@@ -1762,13 +1773,24 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
         expected_shadow_snapshot_id="snap_before") == "plan_snap")
+    assert probe_calls == [(AS_OF, events)]  # once, over the snapshot-derived universe
 
 
 def test_prepare_default_plan_keeps_the_callers_context_when_the_universe_is_the_snapshot(
         tmp_path, monkeypatch):
     # No population file and no explicit --tickers: the universe is the snapshot's own
     # event tickers, but a supplied context is PRESERVED -- the snapshot's tickers never
-    # overwrite it, and _default_plan gets the two distinct tuples unchanged.
+    # overwrite it, and _default_plan gets the two distinct tuples unchanged. The
+    # ticker-level finality check runs once over the snapshot-derived universe, never
+    # over the caller's context.
+    probe_calls = []
+
+    def fake_orats_probe(as_of, tickers):
+        probe_calls.append((as_of, tuple(tickers)))
+        return True, "final"
+
+    monkeypatch.setattr(nightly_trigger, "_orats_probe", fake_orats_probe)
+
     def fake_snapshot_event_universe(root, as_of, clock, expected):
         assert root == tmp_path  # the caller's own root, forwarded unchanged
         assert as_of == AS_OF
@@ -1795,16 +1817,19 @@ def test_prepare_default_plan_keeps_the_callers_context_when_the_universe_is_the
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), ("XXX", "YYY"), FakeClock(IN_WINDOW),
         expected_shadow_snapshot_id="snap_before") == "plan_context")
+    assert probe_calls == [(AS_OF, ("AAA", "BBB"))]  # the universe, not the context
 
 
 def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_snapshot(
         tmp_path, monkeypatch):
     # The override file is PRESENT, so it wins unchanged: snapshot_event_tickers
     # is never consulted (a hard _explode proves it), and the existing
-    # refresh + _default_plan path continues with the file's own tickers.
+    # refresh + _default_plan path continues with the file's own tickers. The
+    # ticker-level finality check is not run on this branch either.
     _write_population(
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe", _explode)
     refreshed = "snap_from_override"
 
     def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
@@ -1881,6 +1906,7 @@ def test_prepare_default_plan_propagates_the_absent_override_snapshot_refusal(
         raise fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's planning window")
 
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", no_events)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe", _explode)
     monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
     monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
 
@@ -1893,13 +1919,38 @@ def test_prepare_default_plan_propagates_the_absent_override_snapshot_refusal(
         "no earnings events in the pinned snapshot's planning window")
 
 
+def test_prepare_default_plan_raises_source_not_final_when_the_probe_refuses_the_universe(
+        tmp_path, monkeypatch):
+    # Absent override: the snapshot-derived universe gets the ticker-level finality
+    # check; a non-final probe verdict refuses SOURCE_NOT_FINAL before the price
+    # refresh or the plan build ever run.
+    def fake_snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id):
+        return ("AAA", "BBB")
+
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe",
+                        fake_snapshot_event_universe)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe",
+                        lambda as_of, tickers: (False, "partial"))
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._prepare_default_plan(
+            tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+            expected_shadow_snapshot_id="snap_before")
+    assert raised.value.code == "SOURCE_NOT_FINAL"
+    assert raised.value.problem.message == "partial"
+
+
 def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(tmp_path,
                                                                                 monkeypatch):
     # An explicit --tickers selection (and its own context) still wins over both
     # the override file and snapshot generation, and the snapshot universe
-    # helper is never consulted in that case either.
+    # helper is never consulted in that case either -- nor is the ticker-level
+    # finality probe.
     _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe", _explode)
     refreshed = "snap_explicit"
 
     def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
@@ -1918,3 +1969,54 @@ def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, ("CCC", "DDD"), ("CCC", "DDD", "EEE"), FakeClock(IN_WINDOW),
         expected_shadow_snapshot_id="snap_before") == "plan_explicit")
+
+
+# --------------------------------------------------------------------------
+# 20. SOURCE_NOT_FINAL: the ticker-level finality refusal recorded as
+# not_yet / snapshot_not_yet, never a setup error, never a submit
+# --------------------------------------------------------------------------
+
+
+def _plan_fn_raising_source_not_final(root, as_of, tickers, context_tickers, clock, *,
+                                      full_run=True, expected_shadow_snapshot_id=None):
+    raise fail("SOURCE_NOT_FINAL", "partial")
+
+
+def test_ensure_plan_ref_records_source_not_final_as_not_yet_never_a_setup_error(tmp_path):
+    # _ensure_plan_ref maps a SOURCE_NOT_FINAL refusal from plan_fn to a plain,
+    # non-resumable "not_yet" receipt (mirroring the readiness "not_yet" branch):
+    # no error_count increment, and submit/serve are never called.
+    submit, serve = FakeSubmit(), FakeServe()
+    ensure_snapshot = FakeEnsureSnapshot(readiness="ready", snapshot_id="snap_finality")
+    receipt = _call_submit_plan(tmp_path, FakeClock(IN_WINDOW),
+                                ensure_snapshot_fn=ensure_snapshot,
+                                plan=_plan_fn_raising_source_not_final,
+                                submit=submit, serve=serve)
+    assert receipt.status == "not_yet"
+    assert "partial" in receipt.detail
+    assert receipt.error_count == 0
+    assert receipt.plan_ref is None
+    assert submit.calls == [] and serve.calls == []
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "not_yet" and stored.error_count == 0
+
+
+def test_ensure_plan_ref_keeps_snapshot_not_yet_for_a_resuming_source_not_final(tmp_path):
+    # With a resumable prior status ("snapshot_not_yet"), the same SOURCE_NOT_FINAL
+    # refusal keeps that status so the next tick resumes instead of re-gating the
+    # window -- still with no error_count increment and no submit.
+    submit, serve = FakeSubmit(), FakeServe()
+    ensure_snapshot = FakeEnsureSnapshot(readiness="ready", snapshot_id="snap_resumed")
+    prior = TriggerReceipt(as_of=AS_OF, status="snapshot_not_yet", detail="wait",
+                           checked_at="2026-09-26T06:00:00Z", error_count=0,
+                           snapshot_attempt=1)
+    receipt = _call_submit_plan(tmp_path, FakeClock(AFTER_DEADLINE),
+                                ensure_snapshot_fn=ensure_snapshot,
+                                plan=_plan_fn_raising_source_not_final,
+                                submit=submit, serve=serve, prior=prior)
+    assert receipt.status == "snapshot_not_yet"
+    assert "partial" in receipt.detail
+    assert receipt.error_count == 0
+    assert submit.calls == []
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "snapshot_not_yet"
