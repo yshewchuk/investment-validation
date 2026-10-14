@@ -19,7 +19,7 @@ from [serving](../engine/v2/serving/ARCHITECTURE.md), plus route/filter state.
 Native parity renders the summary from `/api/v1/native_parity`, including its
 saved refused-ticker list (`native_refused_tickers`: ticker and reason code)
 separately from field mismatches. A nonempty list has its own refused-ticker
-section and count; an empty list adds no refused-ticker section. The screen also reads `/mismatches` through the typed client and renders a cursor-paged table of differing fields only (legacy and native side by side); `/unpaired` is exposed by the client but not yet presented. The retired `/native_parity.json` HTML paths are
+section and count; an empty list adds no refused-ticker section. The screen also reads `/mismatches` through the typed client and renders a cursor-paged table of differing fields only (legacy and native side by side); `/unpaired` is exposed by the client but not yet presented. When a mismatch page's `generated_at` or `as_of` differs from the summary's, the screen shows a "mismatch identity changed" alert with a single restart that reloads both, and hides the pager's own restart. The retired `/native_parity.json` HTML paths are
 not part of this React screen.
 
 ## Outputs

@@ -123,3 +123,10 @@ def test_unavailable_on_both_sides_agrees_but_one_sided_is_a_mismatch():
     legacy_row = {"entry_cost": "bad", "spot": 250.0}
     assert not _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": None})
     assert _entry_cost_pct_findings(legacy_row, {"entry_cost_pct": 1.2})
+
+
+@pytest.mark.parametrize(("cost", "spot"), [
+    (10**400, 10**400), (10**400, 250.0), (3.0, 10**400)])
+def test_huge_integer_operand_gives_none(cost, spot):
+    assert _dimension_view({"entry_cost": cost, "spot": spot},
+                           "financial_diagnostics", legacy=True)["entry_cost_pct"] is None

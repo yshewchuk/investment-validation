@@ -124,7 +124,7 @@ def _entry_cost_pct(row: Mapping[str, Any]) -> float | None:
     try:
         cost = float(row.get("entry_cost"))
         spot = float(row.get("spot"))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if spot == 0.0 or not math.isfinite(cost) or not math.isfinite(spot):
         return None

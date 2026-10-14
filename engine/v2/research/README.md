@@ -173,6 +173,12 @@ and `read_stored` from `magnitude_history_store` for explicit stored-feature bui
 `experiments/magnitude_history_report.py` consumes `magnitude_history_store.read_stored`
 and the same magnitude target APIs as the baseline.
 
+The reporter reads the stored table named by `magnitude_history_table.TABLE`
+(`research_magnitude_history`): the `METADATA` columns (`event_id`, `context_id`,
+`horizon_sessions`, `event_date`, `cutoff_id`, `source_session_ceiling`,
+`history_status`, `history_json`) plus the `FEATURES` columns
+(`magnitude_features.HISTORY_FEATURE_COLUMNS`), under `magnitude_history_table.CONTRACT`.
+
 <!-- consumers: none -->
 
 ## Usage
