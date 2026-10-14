@@ -90,7 +90,9 @@ def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_ticke
 
     assert result == expected
     assert scan_calls == [{"snapshot": "snap_pinned", "as_of": _AS_OF,
-                           "horizon_days": _HORIZON, "tickers": None}]  # exactly one scan
+                           "horizon_days": 35, "tickers": None}]  # exactly one scan
+    assert scan_calls[0]["horizon_days"] == 35  # the fixed 35-day horizon, literally
+    assert scan_calls[0]["horizon_days"] == _HORIZON
     assert scan_calls[0]["as_of"] == _AS_OF  # the scan's own window start
     assert resolved == [{"clock": _CLOCK, "expected_snapshot_id": "snap_pinned"}]
     assert resolve_args[0][0] is conn  # the caller's own connection, unchanged

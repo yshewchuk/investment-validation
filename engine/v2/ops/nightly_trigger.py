@@ -787,10 +787,11 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
 
     Universe derivation (issue #471): when no explicit ``tickers`` were supplied (explicit
     tickers bypass both), if the operator's ``expected_population.json`` override
-    file is PRESENT (``_qualification_path`` not ``None``), it wins unchanged and
-    ``snapshot_event_tickers`` is never consulted; if present but yielding no tickers
-    (unreadable, non-list, or empty), refuse ``INVALID_REQUEST`` rather than silently falling
-    through to generation. If ABSENT (still with no explicit ``tickers``), the universe is the
+    is PRESENT (present = exists or is a symlink; a dangling symlink or non-regular path is
+    refused INVALID_REQUEST), it wins unchanged and ``snapshot_event_tickers`` is never
+    consulted; if present but yielding no tickers (unreadable, non-list, or empty), refuse
+    ``INVALID_REQUEST`` rather than silently falling through to generation. If ABSENT (still
+    with no explicit ``tickers``), the universe is the
     shadow snapshot's own event tickers (``snapshot_event_tickers`` on the same pinned head
     ``expected_shadow_snapshot_id`` names; the catalog connection closes in ``finally``), and
     that result is ``universe`` and, when no explicit ``context_tickers`` were supplied, also
@@ -802,11 +803,12 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
     generates the population from the same snapshot's events).
     """
     clock = clock or SystemClock()
-    population_path = _qualification_path(root, QUALIFICATION_POPULATION)
+    override = Path(root).joinpath(*STATE_DIR, QUALIFICATION_POPULATION)
+    override_present = override.exists() or override.is_symlink()
     universe = tuple(tickers)
     if not universe:
-        if population_path is not None:
-            universe = _population_tickers(population_path)
+        if override_present:
+            universe = _population_tickers(override)
             if not universe:
                 raise fail("INVALID_REQUEST",
                            "expected_population.json is present but yields no tickers; "

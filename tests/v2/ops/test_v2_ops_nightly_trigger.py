@@ -1852,6 +1852,30 @@ def test_prepare_default_plan_refuses_an_override_that_yields_no_tickers(
     assert "yields no tickers" in raised.value.problem.message
 
 
+@pytest.mark.parametrize("kind", ["dangling_symlink", "directory"])
+def test_prepare_default_plan_refuses_an_override_that_is_not_a_usable_file(
+        tmp_path, monkeypatch, kind):
+    # A dangling symlink or a directory at the override path is PRESENT (exists or is a
+    # symlink) and must be refused INVALID_REQUEST, never silently treated as absent.
+    # The snapshot universe stub explodes, proving the fallback is never consulted.
+    path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "dangling_symlink":
+        path.symlink_to(tmp_path / "does_not_exist")
+    else:
+        path.mkdir()
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._prepare_default_plan(
+            tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+            expected_shadow_snapshot_id="snap_before")
+    assert raised.value.code == "INVALID_REQUEST"
+    assert "yields no tickers" in raised.value.problem.message
+
+
 def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(tmp_path,
                                                                                 monkeypatch):
     # An explicit --tickers selection (and its own context) still wins over both
