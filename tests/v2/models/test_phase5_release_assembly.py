@@ -615,6 +615,40 @@ def test_prior_mismatch_when_prior_staged_manifest_is_deleted(tmp_path):
     assert error.value.code == "PRIOR_MISMATCH"
 
 
+def _assert_prior_mismatch_on_retry(tmp_path, inventory, args, store):
+    for _ in range(2):
+        with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+            assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                           inventory=inventory, **_carry_kwargs(args))
+        assert error.value.code == "PRIOR_MISMATCH"
+        assert not _candidate_path(tmp_path).exists()
+        assert not deployment._manifest_path(store, "cand1").exists()
+
+
+def test_prior_mismatch_when_prior_manifest_hash_is_invalid(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    path = deployment._manifest_path(store, "prior1")
+    manifest = json.loads(path.read_bytes())
+    manifest["release_hash"] = "sha256:" + "0" * 64
+    path.write_bytes(json.dumps(manifest).encode())
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    _assert_prior_mismatch_on_retry(tmp_path, inventory, args, store)
+
+
+def test_prior_mismatch_when_prior_manifest_declares_different_release(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    other_release, other_inventory, other_payloads = _fixture("other1")
+    deployment.stage_release(store, other_release, other_inventory, other_payloads)
+    deployment._manifest_path(store, "prior1").write_bytes(
+        deployment._manifest_path(store, "other1").read_bytes())
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    _assert_prior_mismatch_on_retry(tmp_path, inventory, args, store)
+
+
 def test_prior_mismatch_when_prior_catalog_deployment_id_differs(tmp_path):
     inventory, prior_body = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
