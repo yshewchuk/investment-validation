@@ -779,7 +779,8 @@ def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
 TIER4_REPAIR_BUDGET_S = 3600
 
 
-def _repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time) -> None:
+def _repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
+                      finalize=None) -> None:
     """Full Tier-4 rebuild (no ``--since``) to close an out-of-window gap.
 
     The incremental build's backfill window skipped keys it can never reach;
@@ -788,15 +789,20 @@ def _repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time)
     with a typed code at the start of the detail — a gapped Tier-4 must not
     be scored, published, or imported over. Success records
     ``steps["tiers"]["tier4_repair"]`` and appends no flag.
+
+    The repair is itself built with ``finalize=False`` and only finalized once
+    BOTH the budget and gap checks pass: the snapshot must not be written for a
+    build that was refused, exactly as for the incremental result. A finalize
+    failure is a refused repair too, so it stops with the same typed code.
     """
     start = clock()
     try:
-        result = rebuild_tables(("tier4",), tier4_since=None)
+        result = rebuild_tables(("tier4",), tier4_since=None, finalize=False)
     except Exception as exc:
         raise NightlyStop(
             "tier4_repair",
             f"TIER4_REPAIR_FAILED: {type(exc).__name__}: {str(exc)[:300]}",
-        )
+        ) from exc
     elapsed = clock() - start
     if elapsed > TIER4_REPAIR_BUDGET_S:
         raise NightlyStop(
@@ -808,6 +814,14 @@ def _repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time)
     flag = _tier4_gap_partial_flag(gap_fill)
     if flag is not None:
         raise NightlyStop("tier4_repair", "TIER4_GAP_REMAINS: " + flag["detail"])
+    if finalize is not None:
+        try:
+            finalize(result)
+        except Exception as exc:
+            raise NightlyStop(
+                "tier4_repair",
+                f"TIER4_REPAIR_FAILED: {type(exc).__name__}: {str(exc)[:300]}",
+            ) from exc
     report.steps["tiers"]["tier4_repair"] = {
         "ran": True,
         "elapsed_s": round(elapsed, 1),
@@ -819,7 +833,7 @@ def _repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
                                 finalize=None) -> None:
     gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
     if _tier4_gap_partial_flag(gap_fill) is not None:
-        _repair_tier4_gap(report, rebuild_tables, clock=clock)
+        _repair_tier4_gap(report, rebuild_tables, clock=clock, finalize=finalize)
     elif finalize is not None:
         # No gap: the incremental result is sound, so write its snapshot now.
         # The nightly passes finalize=False to the incremental rebuild for

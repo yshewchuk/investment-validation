@@ -57,45 +57,56 @@ def _gapped() -> dict:
 def test_planted_gap_runs_a_full_rebuild_and_records_the_repair():
     report = _report()
     calls = []
+    finalized = []
+
+    repaired = _result({})  # the repair closed the gap
 
     def fake_rebuild_tables(tables, **kwargs):
         calls.append((tables, kwargs))
-        return _result({})  # the repair closed the gap
+        return repaired
 
     readings = iter([0, 7.5])
-    _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings))
+    _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings),
+                      finalize=finalized.append)
 
-    assert calls == [(("tier4",), {"tier4_since": None})], \
+    assert calls == [(("tier4",), {"tier4_since": None, "finalize": False})], \
         "panel was just rebuilt; the repair is Tier-4 only, with no --since"
     assert report.flags == [], "a repaired night carries no tier4_gap_partial"
     repair = report.steps["tiers"]["tier4_repair"]
     assert repair["ran"] is True
     assert repair["elapsed_s"] == 7.5
+    assert finalized == [repaired], "the repair result is finalized exactly once"
     assert "degraded" not in report.steps["tiers"]
 
 
 def test_repair_raising_stops_the_run_with_a_typed_code():
+    finalized = []
+
     def boom(tables, **kwargs):
         raise RuntimeError("disk on fire")
 
     with pytest.raises(NightlyStop) as caught:
-        _repair_tier4_gap(_report(), boom)
+        _repair_tier4_gap(_report(), boom, finalize=finalized.append)
 
     assert caught.value.step == "tier4_repair"
     assert caught.value.detail.startswith(
         "TIER4_REPAIR_FAILED: RuntimeError: disk on fire")
+    assert finalized == [], "a refused repair must not finalize anything"
 
 
 def test_repair_that_still_leaves_the_gap_stops_the_run():
+    finalized = []
+
     def fake_rebuild_tables(tables, **kwargs):
         return _result(_gapped())
 
     with pytest.raises(NightlyStop) as caught:
-        _repair_tier4_gap(_report(), fake_rebuild_tables)
+        _repair_tier4_gap(_report(), fake_rebuild_tables, finalize=finalized.append)
 
     assert caught.value.step == "tier4_repair"
     assert caught.value.detail.startswith("TIER4_GAP_REMAINS: ")
     assert "pred_abs_move" in caught.value.detail
+    assert finalized == [], "a repair that still leaves the gap is not finalized"
 
 
 def test_repair_budget_reports_the_complete_detail_string(monkeypatch):
@@ -106,16 +117,19 @@ def test_repair_budget_reports_the_complete_detail_string(monkeypatch):
     def fake_rebuild_tables(tables, **kwargs):
         return _result({})
 
+    finalized = []
     readings = iter([0, 101.0])
     report = _report()
 
     with pytest.raises(NightlyStop) as caught:
-        _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings))
+        _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings),
+                          finalize=finalized.append)
 
     assert caught.value.step == "tier4_repair"
     assert caught.value.detail == (
         "TIER4_REPAIR_BUDGET: full Tier-4 rebuild took 101.0s, over the 100s budget"
     )
+    assert finalized == [], "an over-budget repair is refused before finalizing"
 
 
 def test_a_night_with_no_gap_finalizes_the_incremental_result_once():
@@ -139,22 +153,24 @@ def test_a_night_with_no_gap_finalizes_the_incremental_result_once():
     assert "tier4_repair" not in report.steps["tiers"]
 
 
-def test_an_incremental_result_with_a_gap_runs_the_repair_without_finalizing():
+def test_an_incremental_result_with_a_gap_runs_the_repair_and_finalizes_it():
     report = _report()
     calls = []
     finalized = []
 
+    repaired = _result({})  # the repair closed the gap
+
     def fake_rebuild_tables(tables, **kwargs):
         calls.append((tables, kwargs))
-        return _result({})  # the repair closed the gap
+        return repaired
 
     _repair_tier4_gap_if_needed(report, _result(_gapped()), fake_rebuild_tables,
                                 finalize=finalized.append)
 
-    assert calls == [(("tier4",), {"tier4_since": None})], \
+    assert calls == [(("tier4",), {"tier4_since": None, "finalize": False})], \
         "the repair is Tier-4 only, with no --since"
-    assert finalized == [], \
-        "a repaired gap must not finalize the gapped incremental result"
+    assert finalized == [repaired], \
+        "only the repair result is finalized; the gapped incremental one is not"
     assert report.steps["tiers"]["tier4_repair"]["ran"] is True
     assert report.flags == []
 
@@ -190,7 +206,9 @@ def test_rerunning_the_guard_after_a_repair_does_nothing():
                                 finalize=finalized.append)
 
     assert len(calls) == 1, "the rerun's gap-free result must not repair again"
-    assert finalized == [gap_free], "only the gap-free rerun is finalized"
+    assert len(finalized) == 2, \
+        "the repair result and the gap-free rerun are each finalized once"
+    assert finalized[-1] is gap_free, "the gap-free rerun is finalized"
     assert report.steps["tiers"]["tier4_repair"]["ran"] is True
 
 
@@ -258,12 +276,19 @@ class _ScorerSentinel:
         raise _Scored(name)
 
 
-def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls):
+def _marker(tmp_path):
+    """The file standing in for SNAPSHOT in the orchestration fakes."""
+    return tmp_path / "snapshot.marker"
+
+
+def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_path):
     """Patch everything run_nightly touches up to the scorer.
 
-    Returns ``(nightly, sentinel, calls, captured)`` where ``calls`` records
-    every fake rebuild invocation and ``captured["report"]`` is the
-    ``NightlyReport`` the run built.
+    Returns ``(nightly, calls, captured, marker_writes)`` where ``calls``
+    records every fake rebuild invocation and ``captured["report"]`` is the
+    ``NightlyReport`` the run built. ``marker_writes`` counts snapshot writes:
+    the fake ``rebuild`` writes ``marker_path`` when it finalizes (the
+    default), and the fake ``finalize_rebuild`` writes the same file.
     """
     import pandas as pd
 
@@ -287,17 +312,25 @@ def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls):
     monkeypatch.setattr(computed_moves, "target_tickers", lambda **kwargs: ([], {}))
 
     calls = []
+    marker_writes = []
 
     def fake_rebuild(tables, **kwargs):
         calls.append((tables, kwargs))
         outcome = rebuild_results.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
+        if kwargs.get("finalize", True):
+            marker_writes.append(tables)
+            marker_path.write_text("snapshot")
         return outcome
 
+    def fake_finalize_rebuild(result):
+        finalize_calls.append(result)
+        marker_writes.append("finalize")
+        marker_path.write_text("snapshot")
+
     monkeypatch.setattr("engine.data.rebuild.rebuild", fake_rebuild)
-    monkeypatch.setattr("engine.data.rebuild.finalize_rebuild",
-                        lambda result: finalize_calls.append(result))
+    monkeypatch.setattr("engine.data.rebuild.finalize_rebuild", fake_finalize_rebuild)
 
     captured = {}
 
@@ -308,12 +341,13 @@ def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls):
 
     monkeypatch.setattr(nightly, "NightlyReport", _RecordingReport)
 
-    return nightly, calls, captured
+    return nightly, calls, captured, marker_writes
 
 
 def _run(monkeypatch, tmp_path, *, rebuild_results, finalize_calls):
-    nightly, calls, captured = _patch_run_nightly(
-        monkeypatch, rebuild_results=rebuild_results, finalize_calls=finalize_calls)
+    nightly, calls, captured, marker_writes = _patch_run_nightly(
+        monkeypatch, rebuild_results=rebuild_results, finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path))
     sentinel = _ScorerSentinel()
     with pytest.raises(_Scored):
         nightly.run_nightly(
@@ -321,22 +355,25 @@ def _run(monkeypatch, tmp_path, *, rebuild_results, finalize_calls):
             publish=False, scorer=sentinel,
             bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
         )
-    return calls, sentinel, captured
+    return calls, sentinel, captured, marker_writes
 
 
 def test_run_nightly_repairs_a_gap_then_scores(monkeypatch, tmp_path):
     finalize_calls = []
-    calls, sentinel, captured = _run(
+    repaired = _result({})
+    calls, sentinel, captured, marker_writes = _run(
         monkeypatch, tmp_path,
-        rebuild_results=[_result(_gapped()), _result({})],
+        rebuild_results=[_result(_gapped()), repaired],
         finalize_calls=finalize_calls,
     )
 
     assert calls == [
         (("panel", "tier4"), {"tier4_since": None, "finalize": False}),
-        (("tier4",), {"tier4_since": None}),
-    ], "the incremental build is not finalized; the full repair is"
-    assert finalize_calls == [], "a repaired gap leaves the snapshot to the repair"
+        (("tier4",), {"tier4_since": None, "finalize": False}),
+    ], "the incremental build is not finalized; the repair defers its snapshot too"
+    assert finalize_calls == [repaired], "only the repair result is finalized"
+    assert _marker(tmp_path).exists(), "the clean repair writes the snapshot marker"
+    assert len(marker_writes) == 1, "the snapshot marker is written exactly once"
     report = captured.get("report")
     assert report is not None, "run_nightly never constructed a report"
     assert report.steps["tiers"]["tier4_repair"]["ran"] is True
@@ -346,10 +383,11 @@ def test_run_nightly_repairs_a_gap_then_scores(monkeypatch, tmp_path):
 
 def test_run_nightly_stops_when_the_repair_raises(monkeypatch, tmp_path):
     finalize_calls = []
-    nightly, _calls, _captured = _patch_run_nightly(
+    nightly, _calls, _captured, marker_writes = _patch_run_nightly(
         monkeypatch,
         rebuild_results=[_result(_gapped()), RuntimeError("disk on fire")],
         finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
     )
     sentinel = _ScorerSentinel()
 
@@ -364,14 +402,17 @@ def test_run_nightly_stops_when_the_repair_raises(monkeypatch, tmp_path):
     assert caught.value.detail.startswith("TIER4_REPAIR_FAILED: ")
     assert not sentinel.touched, "a refused repair must never reach the scorer"
     assert finalize_calls == [], "a refused repair must leave no snapshot"
+    assert marker_writes == []
+    assert not _marker(tmp_path).exists(), "a refused repair writes no snapshot marker"
 
 
 def test_run_nightly_stops_when_the_repair_leaves_the_gap(monkeypatch, tmp_path):
     finalize_calls = []
-    nightly, _calls, _captured = _patch_run_nightly(
+    nightly, _calls, _captured, marker_writes = _patch_run_nightly(
         monkeypatch,
         rebuild_results=[_result(_gapped()), _result(_gapped())],
         finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
     )
     sentinel = _ScorerSentinel()
 
@@ -385,17 +426,50 @@ def test_run_nightly_stops_when_the_repair_leaves_the_gap(monkeypatch, tmp_path)
     assert caught.value.detail.startswith("TIER4_GAP_REMAINS: ")
     assert not sentinel.touched, "a remaining gap must never reach the scorer"
     assert finalize_calls == []
+    assert not _marker(tmp_path).exists(), "a remaining gap leaves no snapshot marker"
+
+
+def test_run_nightly_leaves_no_snapshot_when_the_repair_exceeds_the_budget(
+        monkeypatch, tmp_path):
+    from engine.dashboard import nightly as nightly_mod
+
+    monkeypatch.setattr(nightly_mod, "TIER4_REPAIR_BUDGET_S", -1)
+    finalize_calls = []
+    nightly, _calls, _captured, marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[_result(_gapped()), _result({})],
+        finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
+    )
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(NightlyStop) as caught:
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=[], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert caught.value.step == "tier4_repair"
+    assert caught.value.detail.startswith("TIER4_REPAIR_BUDGET: ")
+    assert not sentinel.touched, "an over-budget repair must never reach the scorer"
+    assert finalize_calls == []
+    assert marker_writes == []
+    assert not _marker(tmp_path).exists(), "an over-budget repair writes no snapshot"
 
 
 def test_run_nightly_finalizes_a_gap_free_incremental_result(monkeypatch, tmp_path):
     finalize_calls = []
-    calls, sentinel, _captured = _run(
+    incremental = _result({})
+    calls, sentinel, _captured, marker_writes = _run(
         monkeypatch, tmp_path,
-        rebuild_results=[_result({})],
+        rebuild_results=[incremental],
         finalize_calls=finalize_calls,
     )
 
     assert calls == [(("panel", "tier4"), {"tier4_since": None, "finalize": False})], \
         "a gap-free night rebuilds once"
-    assert len(finalize_calls) == 1, "the incremental result is finalized once"
+    assert finalize_calls == [incremental], "the incremental result is finalized once"
+    assert _marker(tmp_path).exists(), "the no-gap path writes the snapshot marker"
+    assert len(marker_writes) == 1, "the snapshot marker is written exactly once"
     assert sentinel.touched, "the run proceeded to the scorer"
