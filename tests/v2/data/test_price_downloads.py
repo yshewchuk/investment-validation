@@ -146,6 +146,41 @@ def test_diff_retrieval_empty_retrieval_against_live_history_refuses():
                                          "missing_dates": ["2024-01-01", "2024-01-02"]}
 
 
+def test_diff_retrieval_omission_is_refused_even_when_the_response_is_not_shorter():
+    """Omission is judged by DATE, never by row count: a retrieval that drops
+    live stored dates but adds enough new later bars to be at least as long
+    as the stored history is still refused whole, and nothing about the input
+    frame changes (the raise happens before any write)."""
+    live_dates = ["2024-01-01", "2024-01-02", "2024-01-03"]
+    stored, _ = _apply(_empty_stored(), {d: (float(i), float(i), float(i))
+                                         for i, d in enumerate(live_dates, start=1)},
+                       retrieved_at="2024-01-05T00:00:00Z")
+    before = stored.copy()
+    retrieval = {"2024-01-01": (1.0, 1.0, 1.0), "2024-01-04": (4.0, 4.0, 4.0),
+                 "2024-01-05": (5.0, 5.0, 5.0)}  # 3 rows >= 3 live, omits 01-02/01-03
+    with pytest.raises(DataError) as exc:
+        _apply(stored, retrieval, retrieved_at="2024-01-06T00:00:00Z")
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"missing_count": 2,
+                                         "missing_dates": ["2024-01-02", "2024-01-03"]}
+    assert stored.equals(before)
+
+
+def test_diff_retrieval_starting_later_than_stored_reports_both_min_dates():
+    """The other whole-response refusal (the "full history only" start rule):
+    a retrieval whose earliest date is strictly later than the live stored
+    history's earliest date names both minima in ``details``."""
+    stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1),
+                                         "2024-01-02": (2.0, 2.0, 2.1)},
+                       retrieved_at="2024-01-05T00:00:00Z")
+    with pytest.raises(DataError) as exc:
+        _apply(stored, {"2024-01-02": (2.0, 2.0, 2.1), "2024-01-03": (3.0, 3.0, 3.1)},
+               retrieved_at="2024-01-06T00:00:00Z")
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"stored_min_date": "2024-01-01",
+                                         "retrieval_min_date": "2024-01-02"}
+
+
 def test_diff_retrieval_omitting_more_than_20_dates_reports_count_first_and_last():
     dates = [f"2024-01-{day:02d}" for day in range(1, 26)]  # 25 live dates
     stored, _ = _apply(_empty_stored(), {d: (float(i), float(i), float(i))

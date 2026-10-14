@@ -139,6 +139,8 @@ def test_capture_first_run_adds_rows_and_commits_a_new_generation_reusing_other_
 
     report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
     assert report["by_outcome"] == {"added": 1}
+    assert report["failed_tickers"] == 0
+    assert report["failures"] == []
     assert report["rows_added"] == 2
     assert "receipt_id" in report and "result_snapshot_id" in report
 
@@ -472,9 +474,11 @@ def test_capture_refuses_a_ticker_whose_retrieval_omits_stored_dates_and_keeps_c
     assert first["by_outcome"] == {"added": 2}
     assert first["failures"] == []
 
-    # AAPL comes back TRUNCATED at the end (2024-01-02 dropped); MSFT grows a
-    # brand-new later bar. Both rewritten at a later mtime -> later retrieved_at.
-    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})
+    # AAPL's later retrieval OMITS the live stored 2024-01-02 but adds a new
+    # later 2024-01-03, so it is NOT shorter than the stored history -- the
+    # refusal is judged by DATE, never by row count. MSFT grows a brand-new
+    # later bar. Both rewritten at a later mtime -> later retrieved_at.
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-03": 102.0})
     os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
     px_path = _write_px(source_root, "MSFT", {"2024-01-01": 200.0, "2024-01-02": 201.0})
     os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
@@ -504,6 +508,45 @@ def test_capture_refuses_a_ticker_whose_retrieval_omits_stored_dates_and_keeps_c
     assert [(f["ticker"], f["error"]) for f in retried["failures"]] == \
         [("AAPL", "CONTRACT_MISMATCH")]
     assert retried["failed_tickers"] == 1
+    # The refused retrieval is logged as a partial refusal, so it is re-read
+    # (never silently swallowed as a duplicate) on every later run.
+    refused = conn.execute(
+        "SELECT COUNT(*) FROM data_price_captures "
+        "WHERE ticker = 'AAPL' AND outcome = 'refused_partial'").fetchone()[0]
+    assert refused >= 2  # the second capture's refusal and the retry's
+
+
+def test_capture_two_distinct_failing_tickers_are_both_named(tmp_path):
+    """Two DISTINCT tickers whose own later retrievals each omit a stored
+    live date are reported as two separate ``failures`` entries -- one per
+    ticker, sorted by ticker -- and ``failed_tickers`` counts both.
+    """
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+
+    for ticker, close in (("AAPL", 100.0), ("MSFT", 200.0)):
+        px_path = _write_px(source_root, ticker,
+                            {"2024-01-01": close, "2024-01-02": close + 1.0})
+        os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["by_outcome"] == {"added": 2}
+    assert first["failed_tickers"] == 0
+    assert first["failures"] == []
+
+    # Both tickers come back omitting 2024-01-02 (same row count, so the
+    # refusal is by DATE), each at a later mtime -> later retrieved_at.
+    for ticker, close in (("AAPL", 100.0), ("MSFT", 200.0)):
+        px_path = _write_px(source_root, ticker, {"2024-01-01": close})
+        os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+
+    assert second["by_outcome"] == {"error": 2}
+    assert second["failed_tickers"] == 2
+    assert second["failures"] == [
+        {"ticker": "AAPL", "error": "CONTRACT_MISMATCH",
+         "details": {"missing_count": 1, "missing_dates": ["2024-01-02"]}},
+        {"ticker": "MSFT", "error": "CONTRACT_MISMATCH",
+         "details": {"missing_count": 1, "missing_dates": ["2024-01-02"]}}]
 
 
 def test_capture_counts_one_failed_ticker_even_when_two_of_its_retrievals_refuse(tmp_path):

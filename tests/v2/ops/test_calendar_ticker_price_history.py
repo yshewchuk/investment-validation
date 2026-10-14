@@ -97,6 +97,8 @@ def test_capture_with_required_ticker_in_a_shadow_scope_without_spy_universe_sta
     _write_sources(source_root, with_spy=True)
     report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
                      required_tickers=("SPY",))
+    assert report["failed_tickers"] == 0
+    assert report["failures"] == []
     rows = _scan_price_history(conn, store, report["result_snapshot_id"], ticker="SPY")
     assert not rows.empty
     assert sorted(rows["date"]) == list(_SPY_DATES)
