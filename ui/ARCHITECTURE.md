@@ -19,7 +19,7 @@ from [serving](../engine/v2/serving/ARCHITECTURE.md), plus route/filter state.
 Native parity renders the summary from `/api/v1/native_parity`, including its
 saved refused-ticker list (`native_refused_tickers`: ticker and reason code)
 separately from field mismatches. A nonempty list has its own refused-ticker
-section and count; an empty list adds no refused-ticker section. The screen also reads `/mismatches` through the typed client and renders a cursor-paged table of differing fields only (legacy and native side by side); `/unpaired` is exposed by the client but not yet presented. When a mismatch page's `generated_at` or `as_of` differs from the summary's, the screen shows a "mismatch identity changed" alert with a single restart that reloads both, and hides the pager's own restart. The retired `/native_parity.json` HTML paths are
+section and count; an empty list adds no refused-ticker section. The screen also reads `/mismatches` through the typed client and renders a cursor-paged table of differing fields only (legacy and native side by side); `/unpaired` is exposed by the client but not yet presented. The retired `/native_parity.json` HTML paths are
 not part of this React screen.
 
 ## Outputs
@@ -55,6 +55,7 @@ cookie. Build output is static assets; serving those bytes is transport.
 | Condition | Outcome |
 |---|---|
 | Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
+| A mismatch page's `generated_at` or `as_of` differs from the summary's | The screen shows a "mismatch identity changed" alert with a single restart that reloads both, and hides the pager's own restart. |
 | Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
 | Release-current polling | Default 30 seconds (`?pollMs=` test override); hidden tabs make no calls; becoming visible runs one check; requests never overlap. Only the latest request may replace publication evidence; a failed latest read clears identity and drift to unknown, a successful rollback to the pin clears drift, and operations status uses only the latest successful identity. The pin never moves, and failures wait for the next unchanged interval without immediate retry. |
 | Operations status | Show its observation age, requested/resolved sessions, engineering history (including scheduled `unknown` occurrences), latest attempt outcome, its described release, the board pin, and the latest published release separately. More than 24 hours old is stale; a scheduled `unknown` or `fail` observation is never current. Requested/resolved session dates must use the producer's `YYYY-MM-DD` form or the UI's `eng-night-YYYY-MM-DD` form, be valid calendar dates, and resolved must not be later than requested. Never label the board current unless its pin equals the latest successful current-release discovery. |

@@ -446,8 +446,8 @@ def test_panel_reader_called_once_per_ticker(
     assert batches[("daily_market", "SPY")] == fixture._spy_rows(periods=300)
     event_bytes = json.dumps(
         events, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    # Captured by the first fixture run, before the implementation cache edit.
-    # Pin the pre-optimization event bytes so the shared read cannot change output.
+    # Pinned digest of the event bytes; recaptured after the panel-feature change.
+    # If it changes, review the output diff before recapturing.
     assert hashlib.sha256(event_bytes).hexdigest() == (
         "23f067a35ab389a3362f2d4f54ccc4c9b5a1b71b3097fd6d295a1fd1ba0725ea"), (
         "if fixture inputs change, deliberately recapture the baseline digest")
