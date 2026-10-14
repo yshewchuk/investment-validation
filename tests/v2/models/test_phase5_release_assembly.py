@@ -26,7 +26,7 @@ from engine.v2.models import (
 UNRELATED_MEMBER_ID = "payoff_line:STR-THRU"
 
 
-def _fixture(release_id):
+def _fixture(release_id, deployment_id="d1"):
     payload = json.dumps({"schema_version": "linear_estimator.v1.0", "feature_order": ["x"],
                           "outputs": [{"name": "prediction", "intercept": 1.0, "coefficients": [2.0]}]},
                          sort_keys=True).encode()
@@ -35,7 +35,7 @@ def _fixture(release_id):
     binding = ModelBinding(binding_id="b1", model_id="m1", role="size", strategy_id="*",
                            decision_clock_id="entry-close", adapter="json-linear.v1",
                            feature_order=("x",), output_names=("prediction",), members=(member,))
-    release = ModelRelease(release_id=release_id, deployment_id="d1", bindings=(binding,))
+    release = ModelRelease(release_id=release_id, deployment_id=deployment_id, bindings=(binding,))
     inv_member = ArtifactInventoryMember(member_id="m1:estimator", kind="estimator",
                                          artifact_ref="artifact://m1", content_hash=member_hash)
     artifact = ModelArtifactInventory(artifact_id="m1", role="size", strategy_ids=("*",),
@@ -46,7 +46,7 @@ def _fixture(release_id):
                                  artifact_id="m1", ordered_features=("x",),
                                  required_member_kinds=("estimator",))
     inventory = ModelReleaseInventory(
-        release_id=release_id, deployment_id="d1", known_clock_ids=("entry-close",),
+        release_id=release_id, deployment_id=deployment_id, known_clock_ids=("entry-close",),
         artifacts=(artifact,), bindings=(inv_binding,),
         requirements=(ReleaseRequirement(role="size", strategy_id="*", clock_id="entry-close"),),
         artifact_manifest_ref="manifest://r", evidence_refs=("evidence://r",))
@@ -57,16 +57,19 @@ def _spec(member_id):
     return next(spec for spec in phase5_release.STATE_SPECS if spec.member_id == member_id)
 
 
-def _stage_prior(root, release_id="prior1"):
-    release, inventory, payloads = _fixture(release_id)
+def _stage_prior(root, release_id="prior1", deployment_id="d1", prior_names=None,
+                 prior_sources=None):
+    release, inventory, payloads = _fixture(release_id, deployment_id=deployment_id)
     deployment.stage_release(phase5_release.deployment_root(root), release, inventory, payloads)
     rows = []
     for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID, UNRELATED_MEMBER_ID):
         payload = f"prior-{member_id}".encode()
         content_hash, rel = phase5_release.write_object(root, payload)
-        obj = {"name": "prior.bin", "path": rel, "content_hash": content_hash, "bytes": len(payload)}
+        name = "prior.bin" if prior_names is None else prior_names[member_id]
+        obj = {"name": name, "path": rel, "content_hash": content_hash, "bytes": len(payload)}
         rows.append(phase5_release.member_row(_spec(member_id), phase5_release.STAGED, [obj], "prior"))
-    body = phase5_release.manifest_body(release_id, "d1", rows, {"pool_cutoff": "2026-09-01"})
+    sources = {"pool_cutoff": "2026-09-01"} if prior_sources is None else prior_sources
+    body = phase5_release.manifest_body(release_id, deployment_id, rows, sources)
     phase5_release.write_manifest(root, body)
     return inventory, body
 
@@ -76,17 +79,19 @@ def _carry_kwargs(args):
 
 
 def _valid_derive_args(root, *, cutoff="2026-10-01", prefix="new",
-                       expected_prior_release_id="prior1"):
+                       expected_prior_release_id="prior1", output_names=None,
+                       chooser_name="chooser.bin"):
     outputs = []
     for member_id in assembly.POOL_MEMBER_IDS:
         payload = f"{prefix}-{member_id}".encode()
         content_hash, _ = phase5_release.write_object(root, payload)
-        outputs.append(assembly.PoolOutput(member_id=member_id, name="pool.bin",
+        name = "pool.bin" if output_names is None else output_names[member_id]
+        outputs.append(assembly.PoolOutput(member_id=member_id, name=name,
                                            content_hash=content_hash, cutoff=cutoff,
                                            payload_bytes=len(payload)))
     chooser_payload = f"{prefix}-chooser".encode()
     chooser_hash, _ = phase5_release.write_object(root, chooser_payload)
-    chooser = assembly.PoolOutput(member_id=assembly.CHOOSER_MEMBER_ID, name="chooser.bin",
+    chooser = assembly.PoolOutput(member_id=assembly.CHOOSER_MEMBER_ID, name=chooser_name,
                                   content_hash=chooser_hash, cutoff=cutoff,
                                   payload_bytes=len(chooser_payload))
     return dict(release_id="cand1", expected_prior_release_id=expected_prior_release_id,
@@ -484,11 +489,18 @@ def _staging_oserror(root, args, monkeypatch):
     monkeypatch.setattr(assembly.deployment, "stage_release", boom)
 
 
+def _write_catalog_oserror(root, args, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(assembly, "_write_catalog", boom)
+
+
 def _symlink_supplied_object(root, args, monkeypatch):
     store = phase5_release.deployment_root(root)
     path = store / phase5_release.object_relpath(args["outputs"][0].content_hash)
+    original = path.read_bytes()
     target = root / "valid-object.bin"
-    target.write_bytes(b"valid payload")
+    target.write_bytes(original)
     path.unlink()
     path.symlink_to(target)
 
@@ -496,8 +508,9 @@ def _symlink_supplied_object(root, args, monkeypatch):
 def _symlink_prior_payload(root, args, monkeypatch):
     store = phase5_release.deployment_root(root)
     member_path = store / deployment.resolve_release(store, "prior1").bindings[0].members[0].path
+    original = member_path.read_bytes()
     target = root / "prior-copy.bin"
-    target.write_bytes(member_path.read_bytes())
+    target.write_bytes(original)
     member_path.unlink()
     member_path.symlink_to(target)
 
@@ -507,10 +520,11 @@ def _symlink_prior_payload(root, args, monkeypatch):
     (_corrupt_prior_payload, "PRIOR_MISMATCH"),
     (_lock_is_directory, "PUBLICATION_FAILED"),
     (_staging_oserror, "PUBLICATION_FAILED"),
+    (_write_catalog_oserror, "PUBLICATION_FAILED"),
     (_symlink_supplied_object, "OBJECT_UNVERIFIED"),
     (_symlink_prior_payload, "PRIOR_MISMATCH"),
 ], ids=["corrupt-manifest", "corrupt-prior-payload", "lock-is-directory", "staging-oserror",
-        "supplied-object-symlink", "prior-payload-symlink"])
+        "write-catalog-oserror", "supplied-object-symlink", "prior-payload-symlink"])
 def test_refusal_classification(tmp_path, setup, code, monkeypatch):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
@@ -530,4 +544,57 @@ def test_inventory_none_is_inventory_mismatch(tmp_path):
         assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                        inventory=None, **_carry_kwargs(args))
     assert error.value.code == "INVENTORY_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_inventory_mismatch_on_different_deployment_id(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1", deployment_id="d2")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "INVENTORY_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_derive_catalog_carries_distinct_identities_and_names(tmp_path):
+    prior_names = {member_id: f"prior-{member_id}.bin"
+                   for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID,
+                                     UNRELATED_MEMBER_ID)}
+    prior_sources = {"pool_cutoff": "2026-09-01", "panel_sha": "x", "note": "y"}
+    _, prior_body = _stage_prior(tmp_path, release_id="priorX", deployment_id="dX",
+                                 prior_names=prior_names, prior_sources=prior_sources)
+    output_names = {member_id: f"pool-{member_id}.bin" for member_id in assembly.POOL_MEMBER_IDS}
+    args = _valid_derive_args(tmp_path, expected_prior_release_id="priorX",
+                              output_names=output_names, chooser_name="chooser-X.bin")
+    derived = assembly.derive_catalog(prior_body, **args)
+    assert derived["deployment_id"] == "dX"
+    assert derived["sources"] == {**prior_body["sources"], "pool_cutoff": args["cutoff"],
+                                  "carried_from": "priorX"}
+    assert derived == _expected_catalog(prior_body, args, "cand1")
+
+
+def test_prior_mismatch_when_prior_catalog_file_is_missing(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    phase5_release._catalog_path(tmp_path, "prior1").unlink()
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "PRIOR_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_prior_mismatch_when_prior_staged_manifest_is_deleted(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    deployment._manifest_path(store, "prior1").unlink()
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "PRIOR_MISMATCH"
     assert not _candidate_path(tmp_path).exists()

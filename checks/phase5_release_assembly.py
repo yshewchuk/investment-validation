@@ -293,6 +293,9 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
         prior = deployment.resolve_release(store, prior_release_id)
     except (deployment.DeploymentError, OSError, ValueError) as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release could not be resolved") from exc
+    if getattr(inventory, "deployment_id", None) != prior.deployment_id:
+        raise ReleaseAssemblyRefusal(
+            "INVENTORY_MISMATCH", "inventory deployment id does not match the prior release")
     payloads = _read_prior_payloads(store, prior)
 
     candidate_path = _catalog_path(root, release_id)
@@ -340,7 +343,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
             _write_catalog(candidate_path, body)
         except OSError as exc:
             raise ReleaseAssemblyRefusal(
-                "ID_CONFLICT", "candidate catalog could not be written") from exc
+                "PUBLICATION_FAILED", "candidate catalog could not be written") from exc
     return candidate_path
 
 
