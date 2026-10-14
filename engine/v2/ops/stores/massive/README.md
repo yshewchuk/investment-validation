@@ -18,7 +18,7 @@ Internal ops modules `acquisition`, `coverage`, `journal`, `pages` and `snapshot
 
 ## Consumers
 
-`engine.v2.ops.massive_acquire`, `engine.v2.ops.stages`, `engine.v2.ops.worker`, `tools.v2_massive_plan`.
+`engine.v2.ops.massive_acquire`, `engine.v2.ops.massive_snapshot`, `engine.v2.ops.stages`, `engine.v2.ops.worker`, `tools.v2_massive_plan`.
 
 ## Usage
 
@@ -28,6 +28,8 @@ After verifying account access and data-use terms, initialize an ops root with t
 python -m engine.v2.ops.massive_acquire --root ROOT --idempotency-key REQUEST_ID --ticker EXAMPLE --dataset daily --start 2026-08-01 --end 2026-08-31 --as-of 2026-10-12 --adjustment raw
 python -m engine.v2.ops --root ROOT serve
 ```
+
+Both submitters honor `INVESTING_PLAN_ROOT` for implementation fingerprinting; `--root` remains the ops store. If selecting a different source tree, launch `ops serve` from that tree too. The supervisor refuses different source bytes with `INPUT_CHANGED` before starting a worker.
 
 Use `splits` or `dividends` for corporate actions; adjustment remains explicit. One job reserves one call even if cached. A new idempotency key authorizes a distinct job; the same key and request returns the existing job. The Basic policy is versioned, not a live subscription probe. This implementation supports only one-day stock bars: second, minute, hour, week, month, quarter and year aggregate intervals are excluded, as are S3 flat files; this is implementation scope, not a claim about live entitlement. Storage/throughput sizing requires a bounded authorized pilot, not extrapolation here.
 

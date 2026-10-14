@@ -15,7 +15,7 @@ from engine.v2.foundation import (
     from_document,
 )
 from engine.v2.ops import catalog, lifecycle, snapshots, submission
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.stores.massive import pinned
 
 KIND = "massive_daily_snapshot"
@@ -71,7 +71,12 @@ def _publish(conn, store, params, envelope, clock, fault):
     if existing is not None:
         fence()
         return existing
-    rows = pinned.normalized_rows(conn, store, plan)
+    try:
+        rows = pinned.normalized_rows(conn, store, plan)
+    except OpsError as error:
+        if error.code == "INVALID_REQUEST":
+            raise fail("INTEGRITY_FAILED", "Massive saved evidence scope is invalid") from None
+        raise
     record, manifest, candidate = massive_daily.build_candidate(store, rows, artifact_id, identity)
     try:
         receipt = snapshots.commit_snapshot_for_attempt(conn, store, scope=identity, request_hash=identity,

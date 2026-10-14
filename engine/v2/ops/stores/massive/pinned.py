@@ -43,7 +43,8 @@ def _plan_identity(plan):
             or plan["plan_hash"] != content_hash({k: v for k, v in plan.items() if k != "plan_hash"})
             or plan["candidate_limit"] != coverage.MAX_OCCURRENCES
             or type(plan["candidate_count"]) is not int or not 1 <= plan["candidate_count"] <= 100
-            or not 1 <= len(plan["bindings"]) <= 2 * coverage.MAX_OCCURRENCES + 1):
+            or not 1 <= len(plan["bindings"]) <= 2 * coverage.MAX_OCCURRENCES + 1
+            or len({b["occurrence_id"] for b in plan["bindings"]}) > plan["candidate_count"]):
         raise ValueError
     return request
 

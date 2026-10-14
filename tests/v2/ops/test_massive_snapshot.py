@@ -20,6 +20,7 @@ from engine.v2.ops.submission import submit
 from tests.ops_support import POLICY
 from tests.v2.ops import test_massive_coverage as support
 from tests.v2.ops import test_massive_pagination as pagination
+from tests.v2.ops.test_massive_submission import alternate_source as alternate_source
 
 harness = support.harness
 forbid_network = support.forbid_network
@@ -375,6 +376,81 @@ def test_malformed_saved_artifact_cannot_publish_or_replan(harness, monkeypatch,
     assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
 
 
+@pytest.mark.parametrize("location", ["saved_binding", "catalog_occurrence"])
+def test_unsupported_saved_dataset_is_integrity_failure(harness, monkeypatch, location):
+    h = harness
+    def mutate(document):
+        if location == "saved_binding":
+            plan = document["coverage"]
+            plan["bindings"][0]["evidence"]["request"]["dataset"] = "unsupported-synthetic"
+            plan["plan_hash"] = content_hash({k: v for k, v in plan.items() if k != "plan_hash"})
+    source, _, saved = acquired(h, mutate=mutate)
+    if location == "catalog_occurrence":
+        binding = saved["coverage"]["bindings"][0]
+        binding["evidence"]["request"]["dataset"] = "unsupported-synthetic"
+        h.conn.execute("DROP TRIGGER massive_occurrences_no_update")
+        h.conn.execute("UPDATE ops_massive_occurrences SET document_json=? WHERE occurrence_id=?",
+                       (canonical_json(binding["evidence"]), binding["occurrence_id"]))
+    attempt, params = prepare(h, source)
+    before = tuple(h.conn.iterdump())
+    objects = sorted(p.relative_to(h.store.root) for p in h.store.root.rglob("*") if p.is_file())
+    monkeypatch.setattr(coverage, "plan", support.no_fetch)
+    with pytest.raises(OpsError) as error:
+        execute(h, attempt, params)
+    assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
+    assert error.value.problem.message == "Massive saved evidence scope is invalid"
+    assert tuple(h.conn.iterdump()) == before
+    assert sorted(p.relative_to(h.store.root) for p in h.store.root.rglob("*") if p.is_file()) == objects
+    assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
+
+
+def test_saved_selected_occurrences_cannot_exceed_declared_candidates(harness, monkeypatch):
+    h = harness
+    support.seed_overlap(h, "wide", support.request(), "2026-09-10T12:00:00.000000Z")
+    support.seed_overlap(h, "middle", support.request("2026-08-05", "2026-08-15"),
+                         "2026-09-11T12:00:00.000000Z")
+    def mutate(document):
+        plan = document["coverage"]
+        assert plan["candidate_count"] == 2 and len(plan["bindings"]) == 3
+        plan["candidate_count"] = 1
+        plan["plan_hash"] = content_hash({k: v for k, v in plan.items() if k != "plan_hash"})
+    source, _, _ = acquired(h, mutate=mutate)
+    attempt, params = prepare(h, source)
+    before = tuple(h.conn.iterdump())
+    def unexpected_verification(*_, **__):
+        pytest.fail("selected occurrence overflow reached raw verification")
+    monkeypatch.setattr(coverage, "_verified", unexpected_verification)
+    with pytest.raises(OpsError) as error:
+        execute(h, attempt, params)
+    assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
+    assert tuple(h.conn.iterdump()) == before
+    assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
+
+
+def test_distinct_acquisition_pins_share_original_fragment_provenance(harness):
+    h = harness
+    results, artifacts, records = [], [], []
+    for index in range(2):
+        source, artifact, saved = acquired(h, key=f"source-{index}")
+        attempt, params = prepare(h, source, key=f"snapshot-{index}")
+        _, result = execute(h, attempt, params)
+        resolved = Repository(h.conn, h.store).resolve_full(result.snapshot_id)
+        assert resolved.table_manifests[massive_daily.TABLE].coverage_receipt_refs == (artifact.artifact_id,)
+        records.append(Repository(h.conn, h.store).fragment_records(result, massive_daily.TABLE))
+        results.append(result)
+        artifacts.append(artifact.artifact_id)
+        support.finish(h, attempt)
+    assert artifacts[0] != artifacts[1] and results[0].snapshot_id != results[1].snapshot_id
+    assert h.conn.execute("SELECT count(*) FROM data_snapshot_heads").fetchone()[0] == 2
+    assert records[0] == records[1]
+    original = saved["coverage"]["bindings"][0]["evidence"]["raw_receipt_id"]
+    assert records[1][0].input_receipt_refs == (original,)
+    assert records[1][0].import_request_hash == content_hash([
+        artifacts[0], massive_daily.NORMALIZER, massive_daily.CONTRACT.definition_hash])
+    assert records[1][0].import_request_hash != content_hash([
+        artifacts[1], massive_daily.NORMALIZER, massive_daily.CONTRACT.definition_hash])
+
+
 @pytest.mark.parametrize("mode", ["hole", "overlap", "lower_containment", "upper_containment", "family", "generation"])
 def test_rehashed_binding_guards_refuse_independently_valid_evidence(harness, monkeypatch, mode):
     h = harness
@@ -462,9 +538,12 @@ def test_corrupt_evidence_or_replay_slot_refuses_without_repair(harness, kind):
     assert tuple(h.conn.iterdump()) == before
 
 
-def test_real_submission_service_worker_and_bounded_pinned_read(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("source_mode", ["default", "override", "mismatch"])
+def test_real_submission_service_worker_and_bounded_pinned_read(
+        tmp_path, monkeypatch, capsys, alternate_source, source_mode):
     from types import SimpleNamespace
 
+    from engine import paths
     from engine.v2.data.incremental import RawPayload, cache_raw_receipt
     from engine.v2.foundation import SystemClock
     from engine.v2.ops import executor, massive_acquire, massive_snapshot, providers
@@ -474,6 +553,9 @@ def test_real_submission_service_worker_and_bounded_pinned_read(tmp_path, monkey
     from tests.ops_support import TEST_POLICY, run_until
     from tests.v2.ops.test_massive_submission import arguments
 
+    checkout, selected, _, _ = alternate_source
+    monkeypatch.setattr(paths, "ROOT", checkout if source_mode == "default" else selected)
+    code_source = selected if source_mode == "override" else checkout
     clock, store = SystemClock(), ArtifactStore(tmp_path)
     conn = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
     configure_account(conn, support.SOURCE, "synthetic", 10, 0)
@@ -493,12 +575,21 @@ def test_real_submission_service_worker_and_bounded_pinned_read(tmp_path, monkey
         return original(guarded, **(kwargs | {"env": environment}))
     monkeypatch.setattr(executor.subprocess, "Popen", launch)
     service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
-                      code_source=Path(__file__).resolve().parents[3], store_root=tmp_path / "synthetic-legacy")
+                      code_source=code_source, store_root=tmp_path / "synthetic-legacy")
     service.start()
     try:
         assert massive_acquire.main(arguments(tmp_path) + ["--generation", "initial"], clock=clock) == 0
         source = json.loads(capsys.readouterr().out)["job_id"]
-        assert run_until(service, conn, source, timeout=30) == "succeeded"
+        state = run_until(service, conn, source, timeout=30)
+        if source_mode == "mismatch":
+            assert state == "failed"
+            failure = conn.execute("SELECT failure_json FROM jobs WHERE job_id=?", (source,)).fetchone()[0]
+            assert json.loads(failure)["code"] == "INPUT_CHANGED"
+            assert launched == []
+            assert conn.execute("SELECT SUM(used_calls) FROM provider_reservations").fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM data_snapshots").fetchone()[0] == 0
+            return
+        assert state == "succeeded"
         capsys.readouterr()  # Supervisor diagnostics are separate from the submit CLI's response.
         monkeypatch.setattr(providers, "provider_credentials", support.no_fetch)
         argv = ["--root", str(tmp_path), "--acquisition-job", source, "--idempotency-key", "daily-native"]

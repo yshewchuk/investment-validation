@@ -42,11 +42,17 @@ _LEGACY_FINALITY_ORIGINALS = {
     "_coverage_frame": _legacy_coverage_frame,
 }
 
-__all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
+__all__ = ["configured_root", "copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
            "invoke_price_refresh", "invoke_score_calendar", "iter_raw_fetch_cache",
            "manifest_files", "overlay_read_set", "projected_trading_sessions",
            "run_engineering_gate", "run_legacy_rebuild", "run_legacy_script",
            "run_security_scan", "verify_export_generation"]
+
+
+def configured_root() -> Path:
+    """Shared root selected at engine startup, including its environment override."""
+    from engine import paths
+    return paths.ROOT
 
 
 def projected_trading_sessions(start, end) -> tuple[str, ...]:

@@ -10,6 +10,7 @@ from engine.v2.contracts import JobSpec, SubmitRequest
 from engine.v2.foundation import SystemClock, content_hash, to_document
 from engine.v2.ops import catalog, fingerprints, stages, submission
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.legacy_adapter import configured_root
 from engine.v2.ops.stores.massive import snapshot
 
 
@@ -33,7 +34,7 @@ def main(argv=None, *, clock=None):
             dependency_job_ids=(args.acquisition_job,))
         if snapshot.parameter_problems(job, params):
             raise fail("INVALID_REQUEST", "invalid Massive acquisition dependency")
-        source = Path(__file__).resolve().parents[3]
+        source = configured_root()
         job = replace(job, implementation_ref=content_hash(fingerprints.worker_source_manifest(source)),
                                  environment_ref=content_hash(fingerprints.environment_identity(1)))
         with closing(catalog.connect(args.root / "catalog.sqlite", must_exist=True)) as conn:

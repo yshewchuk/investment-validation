@@ -1045,7 +1045,7 @@ self-derived fingerprinting roots.
 It does not import its layer-7.0 peers `engine.v2.serving`/
 `engine.v2.research`, or higher packages (`engine.v2.diagnosis`, `engine.v2.dashboard`), lazily or otherwise. The unlayered native child imports the ops protocol, then its own pricing adapter after the launch gate opens; ops never loads an experiment module from submitted parameters.
 The entrypoint and adapter are covered by worker snapshots and native registration source identity. Legacy reads go through the
-one declared adapter module, `engine/v2/ops/legacy_adapter.py`
+one declared adapter module, `engine/v2/ops/legacy_adapter.py` (its `configured_root` exposes `engine.paths.ROOT` to both Massive submitters)
 (`checks/legacy_adapters.json`); its own further legacy `engine.*` imports
 are the adapter's job and are not layer-checked v2 dependencies. `finality.py` never imports the adapter: it takes legacy reads and monkeypatch-seam lookups as explicit `FinalityReads` callbacks the adapter supplies, and `legacy_adapter.session_finality`/`resolve_final_session`/`covered_tickers` bind them.
 
