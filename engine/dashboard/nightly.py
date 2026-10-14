@@ -779,7 +779,7 @@ def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
 TIER4_REPAIR_BUDGET_S = 3600
 
 
-def _repair_tier4_gap(report: NightlyReport, rebuild_tables) -> None:
+def _repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time) -> None:
     """Full Tier-4 rebuild (no ``--since``) to close an out-of-window gap.
 
     The incremental build's backfill window skipped keys it can never reach;
@@ -789,7 +789,7 @@ def _repair_tier4_gap(report: NightlyReport, rebuild_tables) -> None:
     be scored, published, or imported over. Success records
     ``steps["tiers"]["tier4_repair"]`` and appends no flag.
     """
-    start = time.time()
+    start = clock()
     try:
         result = rebuild_tables(("tier4",), tier4_since=None)
     except Exception as exc:
@@ -797,7 +797,7 @@ def _repair_tier4_gap(report: NightlyReport, rebuild_tables) -> None:
             "tier4_repair",
             f"TIER4_REPAIR_FAILED: {type(exc).__name__}: {str(exc)[:300]}",
         )
-    elapsed = time.time() - start
+    elapsed = clock() - start
     if elapsed > TIER4_REPAIR_BUDGET_S:
         raise NightlyStop(
             "tier4_repair",
@@ -815,10 +815,10 @@ def _repair_tier4_gap(report: NightlyReport, rebuild_tables) -> None:
 
 
 def _repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
-                                rebuild_tables) -> None:
+                                rebuild_tables, *, clock=time.time) -> None:
     gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
     if _tier4_gap_partial_flag(gap_fill) is not None:
-        _repair_tier4_gap(report, rebuild_tables)
+        _repair_tier4_gap(report, rebuild_tables, clock=clock)
 
 
 def _panel_staleness_flags(as_of) -> list[dict]:

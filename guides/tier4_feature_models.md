@@ -338,18 +338,22 @@ anti-join that is supposed to find it, so every night after the first would
 see a present (if empty) row and stop trying — a silent, permanent hole,
 indistinguishable from a healthy build without reading values column by
 column. Leaving the key absent means the **next** run's anti-join re-detects
-it and repeats the same bounded widening, night after night, until a human
-runs a full rebuild (`tier4_full.sh`) with no `--since` — which closes any gap
+it and repeats the same bounded widening, night after night, until a full rebuild
+with no `--since` runs (the legacy nightly now triggers it automatically on
+a gap; `tier4_full.sh` is the manual route) — which closes any gap
 immediately, regardless of age, because a full rebuild has no prefix to carry
 and nothing to be missing from. The window is measured backward from `since`,
 so as the nightly cut keeps advancing an old gap only falls farther behind it
 — it never "ages into" the window on its own; a full rebuild (or deliberately
 choosing an earlier `--since`) is the only recovery.
 
-The run itself still proceeds on a nontrainable scored out-of-window gap
-and names the skipped keys in
-the build's report (`out_of_window_gap` per producer). The legacy nightly (`engine/dashboard/nightly.py`) turns a non-empty
-report into a `tier4_gap_partial` flag, counted by **distinct `(ticker,
+The incremental build itself still proceeds on a nontrainable scored
+out-of-window gap and names the skipped keys in its report
+(`out_of_window_gap` per producer). The legacy nightly
+(`engine/dashboard/nightly.py`) treats a non-empty report as the
+`tier4_gap_partial` condition and immediately runs the full rebuild
+(a repaired night raises no flag; a failed or ineffective repair stops the
+run with a typed `TIER4_*` code). The gap is counted by **distinct `(ticker,
 event_date)` key, not by summing each producer's list** — the same three
 events show up in every producer's list, and double-counting them would
 overstate the flag.

@@ -53,14 +53,15 @@ def test_planted_gap_runs_a_full_rebuild_and_records_the_repair():
         calls.append((tables, kwargs))
         return _result({})  # the repair closed the gap
 
-    _repair_tier4_gap(report, fake_rebuild_tables)
+    readings = iter([0, 7.5])
+    _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings))
 
     assert calls == [(("tier4",), {"tier4_since": None})], \
         "panel was just rebuilt; the repair is Tier-4 only, with no --since"
     assert report.flags == [], "a repaired night carries no tier4_gap_partial"
     repair = report.steps["tiers"]["tier4_repair"]
     assert repair["ran"] is True
-    assert repair["elapsed_s"] >= 0
+    assert repair["elapsed_s"] == 7.5
     assert "degraded" not in report.steps["tiers"]
 
 
@@ -88,19 +89,26 @@ def test_repair_that_still_leaves_the_gap_stops_the_run():
     assert "pred_abs_move" in caught.value.detail
 
 
-def test_exceeding_the_repair_budget_stops_the_run(monkeypatch):
+@pytest.mark.parametrize("elapsed", [99.0, 100.0, 101.0])
+def test_repair_budget_is_measured_on_the_injected_clock(monkeypatch, elapsed):
     from engine.dashboard import nightly
 
-    monkeypatch.setattr(nightly, "TIER4_REPAIR_BUDGET_S", -1)
+    monkeypatch.setattr(nightly, "TIER4_REPAIR_BUDGET_S", 100)
 
     def fake_rebuild_tables(tables, **kwargs):
         return _result({})
 
-    with pytest.raises(NightlyStop) as caught:
-        _repair_tier4_gap(_report(), fake_rebuild_tables)
+    readings = iter([0, elapsed])
+    report = _report()
 
-    assert caught.value.step == "tier4_repair"
-    assert caught.value.detail.startswith("TIER4_REPAIR_BUDGET: ")
+    if elapsed > 100:
+        with pytest.raises(NightlyStop) as caught:
+            _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings))
+        assert caught.value.step == "tier4_repair"
+        assert caught.value.detail.startswith("TIER4_REPAIR_BUDGET: ")
+    else:
+        _repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings))
+        assert report.steps["tiers"]["tier4_repair"]["elapsed_s"] == elapsed
 
 
 def test_a_night_with_no_gap_never_calls_rebuild_a_second_time():
@@ -149,3 +157,20 @@ def test_rerunning_the_guard_after_a_repair_does_nothing():
 
     assert len(calls) == 1, "the rerun's gap-free result must not repair again"
     assert report.steps["tiers"]["tier4_repair"]["ran"] is True
+
+
+def test_repair_call_site_sits_after_the_rebuild_and_outside_its_degraded_handler():
+    from pathlib import Path
+
+    from engine.dashboard import nightly
+
+    source = Path(nightly.__file__).read_text()
+    block = source.split("# -- 2b. Tier 3 and Tier 4", 1)[1]
+    block = block.split("# -- earnings-date changes", 1)[0]
+
+    call = "_repair_tier4_gap_if_needed(report, tier_result, rebuild_tables)"
+    assert call in block
+    call_at = block.index(call)
+    assert call_at > block.index('rebuild_tables(("panel", "tier4")')
+    assert call_at < block.index("_panel_staleness_flags(as_of)")
+    assert call_at > block.index('"kind": "tiers_degraded"')
