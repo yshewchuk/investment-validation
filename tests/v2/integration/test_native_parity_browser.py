@@ -609,6 +609,8 @@ def test_mismatch_later_page_error_recovers_via_previous_and_restart(browser, se
         fail["on"] = False
         page.get_by_test_id("parity-mismatch-restart").click()
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("0.61")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="AAPL|2026-09-15|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("0.63")
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_have_count(0)
         expect(page.get_by_test_id("parity-mismatch-unavailable")).to_have_count(0)
         expect(page.get_by_test_id("parity-mismatch-page")).to_have_text("Page 1")
@@ -617,6 +619,8 @@ def test_mismatch_later_page_error_recovers_via_previous_and_restart(browser, se
         assert "cursor=" not in page.mismatch_calls[-1]
         page.get_by_test_id("parity-mismatch-next").click()
         expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU")).to_be_visible()
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-legacy")).to_have_text("1.5")
+        expect(page.get_by_test_id("parity-mismatch-row").filter(has_text="NVDA|2026-09-22|STR-THRU").get_by_test_id("parity-mismatch-native")).to_have_text("2.5")
     finally:
         context.close()
 
