@@ -42,7 +42,7 @@ def main(argv=None):
     history_options = (args.magnitude_feature_snapshot_id, args.magnitude_history_start)
     if (not magnitude and args.magnitude_model is not None) or (
             history and not all(history_options)) or (not history and any(v is not None for v in history_options)):
-        parser.error("history_mean requires absolute_move and both history options; other models accept neither")
+        parser.error("history_mean/history_ridge/history_hgb require absolute_move and both history options; other models accept neither")
     reporter = magnitude_history_report if history else magnitude_report if magnitude else prediction
     store, conn, registration, attempted = None, None, None, False
     try:
