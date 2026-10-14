@@ -32,7 +32,10 @@ official decisions or mutate research multiple-testing ledgers.
 
 Phase 6 can perform P7-1/P7-2 preparation and start the qualification window
 before its report is finalized. Keep the ten-session requirement; avoid adding
-another ten-session wait after a successful switch. Cosmetic/docs changes
+another ten-session qualification wait after a successful switch. The
+separate 10-completed-session rollback retention window after the switch
+(owner decision, #739) is not a qualification wait; see
+`guides/authority_fence_switch_rollback.md`. Cosmetic/docs changes
 need not reset a proven path. Any material change to data, model, score,
 publication, authority or resource behavior requires a documented impact
 decision and fresh qualification unless equivalence proves the path unchanged.
