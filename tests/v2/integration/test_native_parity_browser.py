@@ -39,6 +39,8 @@ def _close_new_contexts(browser):
 EMPTY_MISMATCH_PAGE = (200, {"status": "available", "as_of": None, "generated_at": None,
     "tolerance_policy_id": None, "items": [], "next_cursor": None})
 
+def _empty_mismatches(cursor): return EMPTY_MISMATCH_PAGE
+
 def _open_parity(browser, server, *, code=200, body=SUMMARY, hold=False, mismatches=None):
     base = f"http://127.0.0.1:{server.server_port}"
     context = browser.new_context()
@@ -47,7 +49,7 @@ def _open_parity(browser, server, *, code=200, body=SUMMARY, hold=False, mismatc
     parity, pending = [], []
     page.mismatch_calls = []
     if mismatches is None:
-        mismatches = lambda cursor: EMPTY_MISMATCH_PAGE
+        mismatches = _empty_mismatches
 
     def handle(route):
         url = route.request.url
