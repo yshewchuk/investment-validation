@@ -334,7 +334,7 @@ def test_interleaved_identical_builds_reconcile_only_exact_committed_receipt(har
 
 
 @pytest.mark.parametrize("mode", ["schema", "attempt", "fence", "plan_hash", "gaps", "bound",
-    "candidate_bool", "truncated", "wrong_evidence", "missing_occurrence", "source_scope", "generation"])
+    "candidate_bool", "truncated", "wrong_evidence", "missing_occurrence"])
 def test_malformed_saved_artifact_cannot_publish_or_replan(harness, monkeypatch, mode):
     h = harness
     def mutate(document):
@@ -359,10 +359,6 @@ def test_malformed_saved_artifact_cannot_publish_or_replan(harness, monkeypatch,
             plan["bindings"][0]["evidence"]["observed_at"] = "2026-09-12T01:00:00.000000Z"
         elif mode == "missing_occurrence":
             plan["bindings"][0]["occurrence_id"] = "sha256:" + "0" * 64
-        elif mode == "source_scope":
-            plan["request"] = support.request(ticker="OTHER")
-        else:
-            plan["generation"] = "different"
         if mode != "plan_hash":
             plan["plan_hash"] = content_hash({k: v for k, v in plan.items() if k != "plan_hash"})
     source, _, _ = acquired(h, mutate=mutate)
@@ -373,6 +369,38 @@ def test_malformed_saved_artifact_cannot_publish_or_replan(harness, monkeypatch,
         execute(h, attempt, params)
     assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
     assert tuple(h.conn.iterdump()) == before
+    assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["scope", "generation"])
+def test_valid_saved_plan_must_match_producer_inputs_before_normalization(harness, monkeypatch, mode):
+    h = harness
+    alternate_scope = support.request("2026-08-02", "2026-08-31") if mode == "scope" else support.request()
+    generation = "refresh-guard" if mode == "generation" else "initial"
+    _, alternate = support.acquire(h, "alternate", alternate_scope, generation=generation)
+    source, _, saved = acquired(h, mutate=lambda doc: doc.update(coverage=alternate["coverage"]))
+    plan = saved["coverage"]
+    producer = json.loads(h.conn.execute("SELECT spec_json FROM jobs WHERE job_id=?", (source,)).fetchone()[0])
+    declared = producer["parameters"]
+    assert (declared["expected_ids"] != [content_hash(plan["request"])]) == (mode == "scope")
+    assert (declared["generation"] != plan["generation"]) == (mode == "generation")
+    # Prove all later binding/evidence/normalization guards accept this genuine plan.
+    rows = pinned.normalized_rows(h.conn, h.store, plan)
+    assert [(row["ticker"], row["date"], row["close"]) for row in rows] == [
+        ("SYNTH", alternate_scope["start"], 11.0)]
+    attempt, params = prepare(h, source)
+    before = tuple(h.conn.iterdump())
+    objects = {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()}
+    def unexpected_normalization(*_):
+        pytest.fail("producer mismatch reached normalization")
+    monkeypatch.setattr(pinned, "normalized_rows", unexpected_normalization)
+    monkeypatch.setattr(coverage, "plan", support.no_fetch)
+    with pytest.raises(OpsError) as error:
+        execute(h, attempt, params)
+    assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
+    assert error.value.problem.message == "Massive saved scope differs from its producer"
+    assert tuple(h.conn.iterdump()) == before
+    assert {p.relative_to(h.store.root): p.read_bytes() for p in h.store.root.rglob("*") if p.is_file()} == objects
     assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
 
 
