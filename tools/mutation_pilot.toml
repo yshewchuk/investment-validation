@@ -378,6 +378,8 @@ mutate = [
     "engine/v2/data/computed_moves_table.py",
     "engine/v2/data/event_history.py",
     "engine/v2/data/massive_daily.py",
+    "engine/v2/data/massive_actions.py",
+    "engine/v2/data/massive_refresh.py",
 ]
 tests = [
     "tests/v2/ops/test_massive_accounting_hooks.py",
@@ -386,6 +388,7 @@ tests = [
     "tests/v2/data/test_computed_moves_table.py",
     "tests/v2/data/test_data_event_history.py",
     "tests/v2/ops/test_massive_snapshot.py",
+    "tests/v2/ops/test_massive_actions_refresh.py",
     "tests/test_v2_data_generic_incremental.py",
     "tests/test_v2_data_incremental.py",
     "tests/test_v2_data_incremental_persistence.py",
@@ -1021,6 +1024,7 @@ tests = [
     "tests/v2/ops/test_carried_set.py",
     "tests/v2/ops/test_massive_plan.py",
     "tests/v2/ops/test_massive_snapshot.py",
+    "tests/v2/ops/test_massive_actions_refresh.py",
     "tests/v2/ops/test_massive_coverage.py",
     "tests/v2/ops/test_massive_journal.py",
     "tests/v2/ops/test_massive_occurrence_integrity.py",
