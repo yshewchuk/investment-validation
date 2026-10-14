@@ -77,7 +77,7 @@ Cross-cutting: no receipt, log or artifact carries a local path or raw exception
 
 ## Negative controls and expected outcomes
 
-Each is a scenario for `tools/v2_controlled_failure_drill.py` (existing scenarios `after-good-release`, `before-any-release`; slice 7 adds all six controls below) or the P7-3 checker, with a `fault=` hook at the named point. The drill target is a scratch copy; #740's separate scratch catalog for native shadow decisions is the rehearsal target where it fits (it already holds native decisions apart from the official ledger), so the controls need no private data.
+Each is a scenario for `tools/v2_controlled_failure_drill.py` (existing scenarios `after-good-release`, `before-any-release`; slice 7 adds all six controls below) or the P7-3 checker, with a `fault=` hook at the named point. The drill target is a scratch copy; #740's planned separate scratch catalog for native shadow decisions is a dependency, not an existing capability: it has no producer yet. Until it lands, slice 7 provisions the rehearsal target itself (a scratch catalog seeded with synthetic decisions, as the controlled-failure drill already does for its fixtures); once #740 lands, slice 7 switches to it where it fits. Either way the controls need no private data.
 
 | Control | Fault | Expected outcome |
 |---|---|---|
