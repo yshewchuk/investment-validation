@@ -142,7 +142,7 @@ the new panel hash — costing more to build and validate; listed for review, no
 Regenerate snapshot IDs and preregistration hashes in affected experiment `spec.yaml` files by
 hand; recapture the v17 corpus with `tools/capture_tier0_corpus.py` and rerun corpus parity; rerun
 the D14, D15, and D19 evidence with their standard checks; old catalog attempts and receipts are
-not current evidence. Follow-up issues: spec-hash rebinding, scheduled-trigger population generation ([#471](https://github.com/yshewchuk/investment-validation/issues/471)), the
+not current evidence. Follow-up issues: spec-hash rebinding, the
 retention-vs-producers decision, a measured rebuild duration.
 
 ## Proposed slices

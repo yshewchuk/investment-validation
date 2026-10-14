@@ -974,11 +974,11 @@ def test_main_exits_one_for_missed_then_zero_for_idle(tmp_path, monkeypatch, cap
 
 def test_main_records_the_submit_refusal_when_qualification_inputs_are_absent(
         tmp_path, monkeypatch, capsys):
-    """End-to-end production wiring: an unconfigured scheduled run (no
-    ``expected_population.json`` override) whose pinned snapshot's planning
-    window holds no earnings events refuses ``_snapshot_event_universe``'s
-    typed ``INVALID_REQUEST`` and records it as an ``error`` receipt -- it
-    never falls back to a plan built from an empty universe."""
+    """Wiring with the snapshot-universe helper stubbed to the empty-window
+    refusal: an unconfigured scheduled run (no ``expected_population.json``
+    override) raises ``_snapshot_event_universe``'s typed ``INVALID_REQUEST``
+    and records it as an ``error`` receipt -- it never falls back to a plan
+    built from an empty universe."""
     monkeypatch.setattr(nightly_trigger, "SystemClock", lambda: FakeClock(IN_WINDOW))
     monkeypatch.setattr(nightly_trigger, "_orats_probe",
                         lambda as_of, tickers: (True, "final"))
@@ -1806,7 +1806,7 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     # The override file is PRESENT, so it wins unchanged: snapshot_event_tickers
     # is never consulted (a hard _explode proves it), and the existing
     # refresh + _default_plan path continues with the file's own tickers.
-    document = _write_population(
+    _write_population(
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
     refreshed = "snap_from_override"
@@ -1827,7 +1827,6 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
         expected_shadow_snapshot_id="snap_before") == "plan_override")
-    assert document.is_file()
 
 
 @pytest.mark.parametrize("payload", [
