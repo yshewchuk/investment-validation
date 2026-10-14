@@ -56,7 +56,7 @@ are required; this baseline has no hyperparameter or feature search declaration.
 Omitting the new option preserves v1.0/v1.1/v1.2 bytes. Admission binds the original
 v1.3 reservation before metadata scans; changing or omitting its execution policy
 is an identity conflict. Registration reads metadata only. Only sealed v1.3
-opens magnitude outcomes; v1.2 remains metadata-only and neither permits final reads.
+opens the intercept baseline; v1.4 below adds stored history. v1.2 remains metadata-only; none permits final reads.
 
 `magnitude_inputs.admit_magnitude_inputs` requires this v1.3 registration with
 the explicit training/evaluation clocks, then derives the union of all sealed
@@ -96,6 +96,51 @@ no-ledger runs still persist smoke evidence. Replay admits metadata but does not
 | v1.2/v1.3 final-request preparation | `INVALID_EXPERIMENT_SPEC`; final declarations remain exclusive to v1.1. |
 
 Existing publication/transaction/retry semantics above apply unchanged.
+
+### Stored-history mean model (v1.4)
+
+`--target absolute_move --magnitude-model history_mean` additionally requires
+`--magnitude-feature-snapshot-id` and `--magnitude-history-start` on register and run.
+Both magnitude clocks remain mandatory. Omitted model or explicit `pooled_mean`
+uses v1.3; positive-move and pooled-mean modes reject history options before store access.
+The library selects v1.4 by the same two history keyword arguments; both are required,
+with seed zero, empty economics and runner `experiments/v2_prediction.py`.
+
+The closed registration adds `magnitude_history_request` (exact feature snapshot ID,
+canonical history start) and `magnitude_history` (binding version, full feature pin,
+supported producer context). `magnitude_history_execution.v1` seals two model columns,
+the empty-history fallback, evaluation cutoff and equal event/horizon RMSE policy.
+The supported context is freshly derived from the original source, calendar, population,
+holdout versions, forecast ceilings, history recipe and installed producer fingerprint;
+its plan/source must exactly match the outer registration. Caller-supplied contexts fail.
+Old wire policies remain unchanged for identical bound inputs; legitimate runner-source
+changes still require new preregistration. Consumer wiring does not change producer code.
+
+`magnitude_history_inputs` bridges research metadata admission into registration.
+Admission checks mode/request drift before population scans, then derived context,
+exact committed feature receipt/contract and complete object isolation before any
+feature or outcome payload. Missing/changed feature identity refuses
+`EXPERIMENT_IDENTITY_CONFLICT` before attempt/replay; protected isolation refusals retain
+`HOLDOUT_ACCESS_DENIED`. There is no implicit build, repair, alternative pin or retry.
+
+`magnitude_history_report` uses the original stored-only reader; it never recomputes history.
+Each fold qualifies training labels and freezes their arithmetic mean, then fixes every
+evaluation forecast before opening evaluation labels. Positive `n_prior` uses stored
+`mean_prior_abs_move`, including zero; only empty history uses the fold mean.
+All three forecasts per event are required. RMSE pools event/horizon squared errors,
+giving each complete event equal weight; MAE and genuine per-horizon metrics accompany it.
+The report distinguishes events from forecasts and binds both snapshots, stored input
+digest, every decoded column/object/row, fallback inputs and actual model columns.
+The native smoke/recorded/replay lifecycle applies; replay re-admits metadata without
+reading feature payloads, labels or computing predictions. No search, quantiles,
+holdout evaluation or observed point-in-time claim is added.
+
+| Stored-history execution condition | Outcome |
+|---|---|
+| Missing/malformed history pair, incompatible runner/mode, unconsumed CLI options | `INVALID_EXPERIMENT_SPEC` (CLI parser errors exit 2 before store access). |
+| Changed pin, context, receipt or registered source/environment | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; no attempt or ledger slot. |
+| Empty qualified training, incomplete evaluation or invalid stored numeric/missingness | Whole assessment refuses; no partial report. Native failure-stage rules apply after attempt. |
+| v1.4 final-request preparation | `INVALID_EXPERIMENT_SPEC`; final declarations remain exclusive to v1.1. |
 
 | Condition | Outcome |
 | --- | --- |
@@ -162,7 +207,7 @@ from verified bytes; malformed metadata refuses before ledger or catalog effects
 | R1 invalid specification, R2 unresolved snapshot, or R6 identity conflict | `publish_native_refusal` publishes private evidence only; no result or ledger row. |
 | Empty, directory or symlinked recorded ledger destination | R1 before outcome reservation or ledger access; no default-ledger fallback or conflict evidence. |
 | Publish, replay or export called within an active caller transaction | R1 before path access or artifact/CSV effects; leave the caller transaction unchanged. |
-| Publish, replay or export with metadata-only magnitude v1.2 | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private refusal evidence only, before outcome/report reads or catalog/ledger/export effects. Validated v1.0/v1.1/v1.3 are accepted; v1.2 remains registration-only. |
+| Publish, replay or export with metadata-only magnitude v1.2 | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` with private refusal evidence only, before outcome/report reads or catalog/ledger/export effects. Validated v1.0/v1.1/v1.3/v1.4 are accepted; v1.2 remains registration-only. |
 | Admitted R3 look-ahead or R5 holdout denial | Immutable refusal and `refused` row, unless smoke; no current-attempt report. |
 | Admitted R4 variant failure | Immutable refusal and `failed` row, unless smoke; no current-attempt report. |
 | Same canonical registration/result/destination repeated, including tuple/list-equivalent refusal details | Reuse the first outcome and date; reconcile one terminal CSV row per experiment/variant identity without refitting. |

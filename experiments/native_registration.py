@@ -30,11 +30,15 @@ from engine.v2.ops.experiments import (
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.ops.native_registration import (
     magnitude_execution_document,
+    magnitude_history_execution_document,
+    magnitude_history_request,
+    validate_magnitude_history_execution,
     verified_registration_bytes,
 )
 from engine.v2.research._pricing import STRUCTURES
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_folds import magnitude_window, plan_magnitude_folds
+from experiments.magnitude_history_inputs import history_binding
 
 
 @dataclass(frozen=True)
@@ -54,7 +58,7 @@ class NativeRegistration:
 
 def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
              final_read=None, expected=None, magnitude_training_start=None, magnitude_labels_before=None,
-             admission=None):
+             admission=None, magnitude_feature_snapshot_id=None, magnitude_history_start=None):
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
@@ -76,6 +80,12 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
         if magnitude is None or type(plan.seed) is not int or plan.seed != 0 or plan.economic_params:
             raise fail("INVALID_EXPERIMENT_SPEC", "magnitude baseline requires its window, seed zero and no economics")
         execution = magnitude_execution_document(magnitude_labels_before)
+    history_request = None
+    if magnitude_feature_snapshot_id is not None or magnitude_history_start is not None:
+        if execution is None or plan.runner != "experiments/v2_prediction.py":
+            raise fail("INVALID_EXPERIMENT_SPEC", "stored history requires magnitude execution and its native runner")
+        history_request = magnitude_history_request(magnitude_feature_snapshot_id, magnitude_history_start)
+        execution = magnitude_history_execution_document(magnitude_labels_before)
     try:
         declaration = None if final_read is None else declaration_from_document(to_document(final_read))
     except (ValueError, TypeError):
@@ -118,6 +128,9 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
         document.update(schema_version="native_experiment_registration.v1.2", magnitude_request=magnitude)
     if execution is not None:
         document.update(schema_version="native_experiment_registration.v1.3", magnitude_execution=execution)
+    if history_request is not None:
+        document.update(schema_version="native_experiment_registration.v1.4",
+                        magnitude_history_request=history_request)
     key = content_hash({"experiment_id": plan.experiment_id, "arm": plan.arms[0]})
     run_id = "native_" + key.removeprefix("sha256:")
     if admission is not None:
@@ -127,7 +140,8 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
         if original is not None:
             stored = NativeRegistration(run_id, original)
             if magnitude is not None or stored.document["schema_version"] in (
-                    "native_experiment_registration.v1.2", "native_experiment_registration.v1.3"):
+                    "native_experiment_registration.v1.2", "native_experiment_registration.v1.3",
+                    "native_experiment_registration.v1.4"):
                 if expected is not None and expected != stored:
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "expected registration differs from original")
                 expected = stored
@@ -143,6 +157,9 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
         if execution is not None and any(event["event_date"] >= execution["evaluation_labels_before"]
                 for event in temporal["events"] if event["event_id"] in evaluation):
             raise fail("INVALID_EXPERIMENT_SPEC", "magnitude evaluation events must precede the label cutoff")
+        if history_request is not None:
+            document["magnitude_history"] = history_binding(repository, snapshot, temporal, history_request,
+                as_of_month=as_of_month, event_ids=event_ids)
         document["magnitude_plan"] = temporal
         selected_ids, context = [event["event_id"] for event in temporal["events"]], temporal
     else:
@@ -154,6 +171,8 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
         "holdouts": {name: context[name] for name in (
             "holdout_as_of_month", "random_membership_version", "rolling_membership_version")},
     })
+    if history_request is not None:
+        validate_magnitude_history_execution(document)
     return NativeRegistration(run_id, canonical_json(document).encode("utf-8")), spec
 
 
@@ -168,7 +187,7 @@ def _existing(conn, store, registration):
 
 def register_native(conn, store, repository, spec, *, code_root, as_of_month,
                     scope="shadow", event_ids=None, final_read=None, magnitude_training_start=None,
-                    magnitude_labels_before=None):
+                    magnitude_labels_before=None, magnitude_feature_snapshot_id=None, magnitude_history_start=None):
     """Explicitly reserve an exact current binding before any outcome is read.
 
     Publication precedes the short catalog transaction. A failed commit can
@@ -177,7 +196,9 @@ def register_native(conn, store, repository, spec, *, code_root, as_of_month,
     registration, spec = _binding(repository, spec, code_root=code_root, as_of_month=as_of_month,
                                   scope=scope, event_ids=event_ids, final_read=final_read,
                                   magnitude_training_start=magnitude_training_start,
-                                  magnitude_labels_before=magnitude_labels_before)
+                                  magnitude_labels_before=magnitude_labels_before,
+                                  magnitude_feature_snapshot_id=magnitude_feature_snapshot_id,
+                                  magnitude_history_start=magnitude_history_start)
     if _existing(conn, store, registration):
         return registration
     ref = store.publish_bytes(registration.binding_json,
@@ -200,12 +221,15 @@ def register_native(conn, store, repository, spec, *, code_root, as_of_month,
 
 def require_native_registration(conn, store, repository, spec, *, code_root,
                                 as_of_month, scope="shadow", event_ids=None, final_read=None, expected=None,
-                                magnitude_training_start=None, magnitude_labels_before=None):
+                                magnitude_training_start=None, magnitude_labels_before=None,
+                                magnitude_feature_snapshot_id=None, magnitude_history_start=None):
     """Read-only admission; never create registration, ledger, or result rows."""
     registration, _ = _binding(repository, spec, code_root=code_root, as_of_month=as_of_month,
                                scope=scope, event_ids=event_ids, final_read=final_read, expected=expected,
                                magnitude_training_start=magnitude_training_start,
-                               magnitude_labels_before=magnitude_labels_before, admission=(conn, store))
+                               magnitude_labels_before=magnitude_labels_before, admission=(conn, store),
+                               magnitude_feature_snapshot_id=magnitude_feature_snapshot_id,
+                               magnitude_history_start=magnitude_history_start)
     if not _existing(conn, store, registration):
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     return registration

@@ -571,6 +571,17 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 | Refusals | Missing or changed context/receipt: `IDENTITY_CONFLICT`; unprovable isolation: `HOLDOUT_ACCESS_DENIED`; bad stored schema/metadata/missingness: `CONTRACT_MISMATCH`. |
 | Source/publication failures | Unknown source/feature snapshot ID: `SNAPSHOT_NOT_FOUND`; resolved source-pin mismatch during public build/read context derivation: `SNAPSHOT_UNRESOLVED`; direct `materialize` source/context mismatch: `IDENTITY_CONFLICT`. Non-native computed-moves contract: `CONTRACT_MISMATCH`; empty fold: `POPULATION_COLLAPSED`; invalid eligible label/features: `EXPERIMENT_VARIANT_FAILED`; competing head: `SNAPSHOT_CONFLICT`. Other native catalog/object/source-admission errors propagate. |
 
+`magnitude_history_inputs.admit_stored(repository, snapshot, context)` is the consumer-only
+metadata boundary used by `experiments/magnitude_history_inputs.py`: exact receipt/output,
+features-only contract and complete event isolation, without payload decoding or arithmetic.
+It reuses the stored reader's receipt/isolation rules and returns no feature values.
+Missing/changed receipt or pin refuses `IDENTITY_CONFLICT`; bad contract refuses
+`CONTRACT_MISMATCH`; unprovable isolation refuses `HOLDOUT_ACCESS_DENIED`.
+It does not derive or authenticate a context; the unlayered caller owns supported producer
+derivation and native registration. `experiments/magnitude_history_report.py` consumes
+the existing `read_stored` plus magnitude target preflight/load/qualification APIs.
+Neither consumer modifies the build closure, stored artifact identity or final-read authority.
+
 ## External systems and libraries
 
 Direct libraries include pandas/numpy for tabular/numerical work and pyarrow

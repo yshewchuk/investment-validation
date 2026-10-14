@@ -3,13 +3,14 @@ import json
 import re
 from datetime import date
 
-from engine.v2.contracts import ArtifactRef
+from engine.v2.contracts import ArtifactRef, SnapshotRef
 from engine.v2.foundation import (
     ArtifactError,
     artifact_reference,
     canonical_json,
     content_hash,
     from_document,
+    to_document,
 )
 from engine.v2.ops.errors import fail
 
@@ -27,7 +28,8 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None):
         evidence = json.loads(row["evidence_json"])
         ref = from_document(ArtifactRef, evidence["native_registration"])
         if (ref.schema_ref not in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
-                                  "native_experiment_registration.v1.2", "native_experiment_registration.v1.3")
+                                  "native_experiment_registration.v1.2", "native_experiment_registration.v1.3",
+                                  "native_experiment_registration.v1.4")
                 or (expected_ref is not None and ref != expected_ref)):
             raise ValueError
         binding = store.read_verified(ref)
@@ -64,10 +66,13 @@ def validate_magnitude_execution(document):
 
 def _magnitude_binding(document):
     """Check stored plan integrity and cross-links, never reconstruct or authorize."""
+    if document["schema_version"] == "native_experiment_registration.v1.4":
+        return _history_binding(document)
     executable = document["schema_version"] == "native_experiment_registration.v1.3"
     if document["schema_version"] not in ("native_experiment_registration.v1.2",
                                            "native_experiment_registration.v1.3"):
-        return not {"magnitude_request", "magnitude_plan", "magnitude_execution"}.intersection(document)
+        return not {"magnitude_request", "magnitude_plan", "magnitude_execution",
+                    "magnitude_history_request", "magnitude_history"}.intersection(document)
     if set(document) != {"schema_version", "spec_hash", "execution_plan", "snapshot", "scope",
                          "source_closure", "environment", "event_ids", "holdouts",
                          "magnitude_request", "magnitude_plan"} | ({"magnitude_execution"} if executable else set()):
@@ -111,6 +116,88 @@ def _magnitude_execution(document, plan):
             and document["execution_plan"]["economic_params"] == {}
             and all(event["event_date"] < execution["evaluation_labels_before"]
                     for event in plan["events"] if event["event_id"] in evaluation))
+
+
+def magnitude_history_request(feature_snapshot_id, history_start):
+    """Validate the literal stored-feature request before repository access."""
+    try:
+        if _text(feature_snapshot_id) and _day(history_start):
+            return {"feature_snapshot_id": feature_snapshot_id, "history_start": history_start}
+    except (ValueError, TypeError, OverflowError):
+        pass
+    raise fail("INVALID_EXPERIMENT_SPEC", "history requires an exact feature snapshot and canonical start")
+
+
+def magnitude_history_execution_document(labels_before):
+    """Fixed stored ticker mean with an explicitly sealed empty-history fallback."""
+    return {**magnitude_execution_document(labels_before), "schema_version": "magnitude_history_execution.v1",
+            "model": "stored_ticker_arithmetic_mean", "features": ["n_prior", "mean_prior_abs_move"],
+            "empty_history": "fold_local_arithmetic_mean", "primary_metric": "event_horizon_pooled_rmse",
+            "weighting": "equal_event_and_horizon"}
+
+
+def validate_magnitude_history_execution(document):
+    """Validate a closed v1.4 envelope without reconstructing or authorizing reads."""
+    try:
+        if document["schema_version"] == "native_experiment_registration.v1.4" and _history_binding(document):
+            return
+    except (KeyError, TypeError, ValueError, OverflowError, ArtifactError):
+        pass
+    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "history execution requires a sealed v1.4 plan")
+
+
+def _history_binding(document):
+    """Cross-link the closed history binding, then reuse the v1.3 plan proof."""
+    execution = document["magnitude_execution"]
+    cutoff = execution["evaluation_labels_before"]
+    if not _day(cutoff) or execution != magnitude_history_execution_document(cutoff):
+        return False
+    request, binding = document["magnitude_history_request"], document["magnitude_history"]
+    if (set(request) != {"feature_snapshot_id", "history_start"} or not _text(request["feature_snapshot_id"])
+            or not _day(request["history_start"]) or set(binding) != {"schema_version", "feature_snapshot", "context"}
+            or binding["schema_version"] != "magnitude_history_binding.v1"):
+        return False
+    if not _history_context(document, binding, request) or not _history_producer(document, binding["context"]):
+        return False
+    baseline = {k: v for k, v in document.items() if k not in {"magnitude_history_request", "magnitude_history"}}
+    baseline.update(schema_version="native_experiment_registration.v1.3",
+                    magnitude_execution=magnitude_execution_document(cutoff))
+    return (document["execution_plan"]["runner"] == "experiments/v2_prediction.py"
+            and all(request["history_start"] <= clock["source_session_ceiling"]
+                    for event in document["magnitude_plan"]["events"] for clock in event["forecasts"])
+            and _magnitude_binding(baseline))
+
+
+def _history_context(document, binding, request):
+    """Cross-link the exact producer context and typed features-only snapshot."""
+    context, feature = binding["context"], binding["feature_snapshot"]
+    return (set(context) == {"schema_version", "source_snapshot", "temporal_plan", "history_start",
+                            "feature_recipe", "producer", "context_id"}
+            and context["schema_version"] == "magnitude_materialization.v1"
+            and context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
+            and context["source_snapshot"] == document["snapshot"]
+            and context["temporal_plan"] == document["magnitude_plan"]
+            and context["history_start"] == request["history_start"]
+            and feature == to_document(from_document(SnapshotRef, feature))
+            and feature["snapshot_id"] == request["feature_snapshot_id"]
+            and set(feature["table_versions"]) == {"research_magnitude_history"})
+
+
+def _history_producer(document, context):
+    """Check the fixed recipe and producer subset of the sealed runner closure."""
+    names = ["n_prior", "mean_prior_move", "mean_prior_abs_move"] + [
+        f"ema{span}_prior_{kind}" for span in (2, 4, 8, 12) for kind in ("move", "abs_move")]
+    recipe = {"schema_version": "stored_magnitude_history.v1", "arithmetic": "panel_math.history_features",
+        "features": [{"name": name, "on_missing": "zero_count" if name == "n_prior" else "null"}
+                     for name in names], "units": "percentage_points", "imputation": "none"}
+    producer = context["producer"]
+    sources = producer["source_closure"]
+    return (context["feature_recipe"] == recipe and set(producer) == {"source_closure", "environment"}
+            and producer["environment"] == document["environment"] and isinstance(sources, dict)
+            and isinstance(document["source_closure"], dict)
+            and {"experiments/magnitude_history_store.py", "engine/v2/research/magnitude_history_store.py",
+                 "engine/v2/foundation/experiment_holdouts.py", "engine/v2/features/panel_math.py"} <= sources.keys()
+            and all(_digest(value) and document["source_closure"].get(key) == value for key, value in sources.items()))
 
 
 def _text(value):
