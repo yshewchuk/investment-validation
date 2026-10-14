@@ -1,6 +1,6 @@
 # Nightly serving projection job (#717)
 
-Design, not yet implemented. Decisions (owner, 2026-10-14): the projection is a new job after `publication`; its failure fails that job loudly, leaves CURRENT on the previous release, and never fails publication or points CURRENT at a partial projection. The read side is in [`engine/v2/serving/ARCHITECTURE.md`](../engine/v2/serving/ARCHITECTURE.md). `engine/v2/ops/ARCHITECTURE.md` is at its line ceiling, so the job contract lives here until that doc is compressed.
+Design, not yet implemented. Decisions (owner, 2026-10-14): the projection is a new job after `publication`; a failure before the pointer swap fails that job loudly, leaves CURRENT on the previous release, and never fails publication or points CURRENT at a partial projection. The one failure after the swap (step 4, below) is the stated exception: the pointer is already the new, pre-verified release. The read side is in [`engine/v2/serving/ARCHITECTURE.md`](../engine/v2/serving/ARCHITECTURE.md). `engine/v2/ops/ARCHITECTURE.md` is at its line ceiling, so the job contract lives here until that doc is compressed.
 
 ## Job contract
 
@@ -21,7 +21,7 @@ A **new job kind `serving_projection`** (not the existing render stage `projecti
 
 A reader sees the previous release or the new one, never a mix: the new release directory is complete before `CURRENT` moves, the pointer swap is atomic, and index rows are append-only (an old binding keeps verifying while the swap happens). Each API request resolves once, and `/releases/current` carries a new ETag after the swap.
 
-**Idempotency and retry.** `release_id` derives from content and index writes are `INSERT OR IGNORE`; the retained-publication `operation_id` is fixed per publication job, so a retry resubmits the identical job and `publish_local` accepts `observed == release_id`. A retry after a crash between steps 1 and 3 reuses the committed release; after step 3 it only re-verifies. Retryable causes (store/index busy, `LEASE_LOST`, `RESOURCE_UNAVAILABLE`) go through the supervisor's normal retry; typed refusals are terminal until an operator reruns the job.
+**Idempotency and retry.** `release_id` derives from content and index writes are `INSERT OR IGNORE`; the retained-publication `operation_id` is fixed per publication job, so a retry resubmits the identical job and `publish_local` accepts `observed == release_id`. A retry after a crash between steps 1 and 3 reuses the committed release; after step 3 it first completes or confirms the retained publication's durable acknowledgement (release row, outbox, watermarks; reading a valid pointer does not replace it) and only then runs the step-4 read-back. Retryable causes (store/index busy, `LEASE_LOST`, `RESOURCE_UNAVAILABLE`) go through the supervisor's normal retry; typed refusals are terminal until an operator reruns the job.
 
 | Failure | Job outcome | `CURRENT` and board |
 |---|---|---|
@@ -30,12 +30,16 @@ A reader sees the previous release or the new one, never a mix: the new release 
 | Crash or error after the index commit, before step 3 | Fails or is retried; an unreferenced release row is inert | Unchanged |
 | Retained publication refused (`STALE_EXPECTATION`, `PUBLICATION_REFUSED`, `IDEMPOTENCY_CONFLICT`) | Fails with the typed code | Unchanged |
 | Crash between pointer swap and acknowledgement | Retry re-acknowledges (the existing O24 window) | New release, already complete |
-| Step 4 re-verification fails | Fails loudly (`CURRENT_BINDING_INVALID`) | New pointer is already visible; the operator re-points it with a rollback retained publication |
+| Step 4 re-verification fails (needs index damage after step 2's pre-swap check passed) | Fails loudly (`CURRENT_BINDING_INVALID`) | Exception to "previous release": the new pointer is already visible and the board refuses with `CURRENT_BINDING_INVALID` until the operator re-points it with a rollback retained publication |
 | Serving root unconfigured or unwritable | Fails `RESOURCE_UNAVAILABLE`; nothing is created | Unchanged |
 
-A failure never fails `publication`, never marks `delivery` failed, and never points `CURRENT` at a partial projection: steps 1-2 are the only place a half-built projection can exist, and nothing reads it until step 3. The nightly completion report records `serving_projection` as a failed required-after-publication disposition (the session is `completed_degraded`), and `operations_status.json` already shows the published and attempted release ids, so the board's pinned release can be compared with the nightly's.
+A failure never fails `publication`, never marks `delivery` failed, and never points `CURRENT` at a partial projection: steps 1-2 are the only place a half-built projection can exist, and nothing reads it until step 3. The nightly completion report records `serving_projection` as a failed required-after-publication disposition (the session is `completed_degraded`).
+
+**Status.** The existing `operations_status.json` is written during publication and read from the ops scope root, so it cannot show a projection failure that happens before retained publication starts. Slice 5 adds a `serving_status.json` sidecar written by the `serving_projection` job on every attempt (success or typed failure) into the serving root (`<serving_root>/serving_status.json`, atomic replace): the session, the attempted ops release id, the served projection release id and the failure code. The API reads it from the configured serving root and exposes it with the current-release discovery, so clients show "tonight's projection failed, serving the previous release" instead of inferring it. A missing or malformed sidecar reads as unknown.
 
 **`/api/v1/releases/current` from a nightly.** The serving root's `CURRENT` -> that release's `projection_binding.json` -> projection release id, re-verified against the live index, exactly as the serving doc states; a night whose job failed still resolves to the previous night's release.
 
-**Slices** (each at most about 400 code lines): (1) serving root configuration and API wiring; (2) `run_projection` extracted from the tool, CLI unchanged; (3) `serving_projection` job kind, DAG/plan/profile wiring and the child-process worker; (4) serving-pointer retained publication, read-back verification and the failure table above; (5) completion and status integration; (6) a real-browser test of the board against a real nightly's release.
+**Slices** (each at most about 400 code lines): (1) serving root configuration and API wiring; (2) `run_projection` extracted from the tool, CLI unchanged; (3) `serving_projection` job kind, DAG/plan/profile wiring and the child-process worker; (4) serving-pointer retained publication, read-back verification and the failure table above; (5) completion disposition and the `serving_status.json` sidecar plus API exposure; (6) a real-browser test of the board against a real nightly's release.
+
+Estimates (code / test / doc lines): 1: 120 / 100 / 15; 2: 150 / 120 / 10; 3: 250 / 200 / 20; 4: 300 / 250 / 25; 5: 200 / 150 / 20; 6: 40 / 150 / 10. Slice 4 must first confirm `submit_retained_publication` can target the separate serving pointer root; if it needs a parameter, that goes in slice 4.
 

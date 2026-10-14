@@ -207,15 +207,16 @@ new one, never a mix. Index rows are append-only, so the old binding verifies du
 
 | Condition | Read outcome |
 |---|---|
-| Nightly's `serving_projection` failed or has not run | `CURRENT` unchanged: the previous night's release is served |
+| Nightly's `serving_projection` failed before the pointer swap, or has not run | `CURRENT` unchanged: the previous night's release is served |
 | Serving root has no `CURRENT` yet (first run, or no successful projection) | `NO_CURRENT_RELEASE` (503, retryable) |
 | Serving root missing or `serving.sqlite` unreadable | `SERVING_INDEX_UNREADABLE` (503, retryable) |
 | Pointer names a release whose binding fails verification | `CURRENT_BINDING_INVALID` (500); no fallback to an older release |
 
 Serving gains no write path, retry or job start: the swap is the ops job's fenced
 publisher, and the read contract above is otherwise unchanged. Clients compare the release
-they show with the operations status (published versus attempted release) to detect a
-night whose projection failed.
+they show with the job's `serving_status.json` sidecar in the serving root (attempted versus
+served release and failure code; unknown when unreadable) to detect a night whose projection
+failed. The full proposed contract stays in the guide until implemented.
 
 ## Invariants
 
