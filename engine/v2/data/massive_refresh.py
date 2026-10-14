@@ -10,16 +10,17 @@ MAX_PARENT_ROWS = 1000
 def _selection(parent, contract, ticker):
     table = contract.table_name
     prior = parent.table_manifests.get(table)
+    members = set()
     selected = ()
     if prior is not None:
         if prior.dataset_version_ref.table_contract_ref.definition_hash != contract.definition_hash:
             raise errors.fail("CONTRACT_MISMATCH", "Massive parent table contract differs")
-        selected = tuple(r for r in parent.records if r.fragment_id in
-                         {f.fragment_id for f in prior.fragment_refs} and r.partition_key == ticker)
+        members = {f.fragment_id for f in prior.fragment_refs}
+        selected = tuple(r for r in parent.records if r.fragment_id in members and r.partition_key == ticker)
         if (sum(r.object_ref.byte_size for r in selected) > MAX_PARENT_BYTES
                 or sum(r.row_count for r in selected) > MAX_PARENT_ROWS):
             raise errors.fail("RESULT_LIMIT_EXCEEDED", "Massive parent partition exceeds bound")
-    return prior, selected
+    return prior, selected, members
 
 
 def _retained(conn, store, parent, contract, request, prior, selected):
@@ -42,11 +43,11 @@ def _retained(conn, store, parent, contract, request, prior, selected):
                                   and request["start"] <= r["date"] <= request["end"])]
 
 
-def _compose(parent, contract, ticker, record, prior, selected, acquisition_id):
+def _compose(parent, contract, ticker, record, prior, selected, members, acquisition_id):
     table = contract.table_name
     removed = {r.fragment_id for r in selected}
     records = tuple(r for r in parent.records if r.fragment_id not in removed) + (record,)
-    members = {f.fragment_id for f in prior.fragment_refs} - removed if prior else set()
+    members = members - removed
     table_records = sorted((r for r in records if r.fragment_id in members or r == record),
                            key=lambda r: (r.partition_key, r.primary_key_min))
     coverage = tuple(sorted(set((*prior.coverage_receipt_refs, acquisition_id)))) if prior else (acquisition_id,)
@@ -67,9 +68,9 @@ def _compose(parent, contract, ticker, record, prior, selected, acquisition_id):
 
 
 def build_candidate(conn, store, parent, contract, request, rows, acquisition_id, identity):
-    prior, selected = _selection(parent, contract, request["ticker"])
+    prior, selected, members = _selection(parent, contract, request["ticker"])
     rows = rows + _retained(conn, store, parent, contract, request, prior, selected)
     if len(rows) > 1000:
         raise errors.fail("RESULT_LIMIT_EXCEEDED", "Massive rewritten partition exceeds row bound")
     record, _, _ = massive_daily.build_candidate(store, rows, acquisition_id, identity, contract=contract)
-    return _compose(parent, contract, request["ticker"], record, prior, selected, acquisition_id)
+    return _compose(parent, contract, request["ticker"], record, prior, selected, members, acquisition_id)

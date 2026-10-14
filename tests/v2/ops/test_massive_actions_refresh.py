@@ -22,6 +22,32 @@ harness = support.harness
 forbid_network = support.forbid_network
 
 
+@pytest.mark.parametrize("dataset,expected_hash,fields", [
+    ("splits", "sha256:214ca30d821c7106218fd42ea7ff568d897397ca8ebd3cef09ea0ce3718e5914", [
+        ("execution_date", "string", False), ("split_from", "float64", False), ("split_to", "float64", False),
+        ("adjustment_type", "string", True), ("historical_adjustment_factor", "float64", True)]),
+    ("dividends", "sha256:d23c0b25858fa1b69827353d4a8f9ed3095a00d953e2e19bee8602c1a6d6cadd", [
+        ("ex_dividend_date", "string", False), ("cash_amount", "float64", False), ("currency", "string", False),
+        ("declaration_date", "string", True), ("record_date", "string", True), ("pay_date", "string", True),
+        ("frequency", "int64", True), ("distribution_type", "string", True),
+        ("split_adjusted_cash_amount", "float64", True), ("historical_adjustment_factor", "float64", True)]),
+])
+def test_action_contract_metadata_and_definition_identity(dataset, expected_hash, fields):
+    contract = massive_actions.CONTRACTS[dataset]
+    common = ["ticker", "adjustment_basis", "date", "occurrence_id", "raw_receipt_id", "raw_hash",
+              "first_received_at", "observed_at", "id"]
+    expected_fields = [(name, "string", False) for name in common] + fields
+    assert [(c.name, c.physical_type, c.nullable) for c in contract.columns] == expected_fields
+    for column, (_, kind, _) in zip(contract.columns, expected_fields):
+        expected_metadata = ((None, None, None, None) if kind == "string" else
+                             ("provider_reported", None, None, "provider-reported value; no conversion"))
+        assert (column.unit, column.scale, column.timezone, column.adjustment_basis) == expected_metadata
+        assert (column.null_policy, column.sentinel_policy, column.allowed_range,
+                column.observation_time_semantics) == (None, None, None, None)
+    assert contract.contract_id == {"splits": "massive_splits.v1", "dividends": "massive_dividends.v1"}[dataset]
+    assert contract.definition_hash == expected_hash
+
+
 def action(dataset, identity="event-1", day="2026-08-10", ticker="SYNTH"):
     if dataset == "splits":
         return {"id": identity, "ticker": ticker, "execution_date": day,
@@ -342,7 +368,8 @@ def test_partial_or_invalid_parent_submission_refuses_before_storage(tmp_path, c
     assert not root.exists()
 
 
-def test_daily_refresh_preserves_other_ticker_basis_and_outside_dates(harness):
+def test_daily_refresh_preserves_other_ticker_basis_and_outside_dates(harness, monkeypatch):
+    from dataclasses import replace
     h = harness
     source, _, _ = daily.acquired(h, payload=daily.daily_payload([
         ("2026-08-01", 10), ("2026-08-10", 20), ("2026-08-31", 30)]))
@@ -367,7 +394,21 @@ def test_daily_refresh_preserves_other_ticker_basis_and_outside_dates(harness):
     _, document = support.run(h, source_attempt, support.fetching([], daily.daily_payload([("2026-08-10", 90)])), p)
     daily.committed_output(h, source_attempt, document)
     attempt, params = prepare(h, source_attempt.job_id, key="refresh", parent=parent, scope=scope_name, generation=3)
+    enumerations = []
+    class CountedRefs(tuple):
+        def __iter__(self):
+            enumerations.append(len(self))
+            return super().__iter__()
+    original_build = massive_refresh.build_candidate
+    def counted_build(conn, store, resolved, contract, *args):
+        prior = resolved.table_manifests[contract.table_name]
+        assert len(prior.fragment_refs) == 2  # One selected ticker and one untouched ticker.
+        counted = replace(prior, fragment_refs=CountedRefs(prior.fragment_refs))
+        wrapped = replace(resolved, table_manifests=resolved.table_manifests | {contract.table_name: counted})
+        return original_build(conn, store, wrapped, contract, *args)
+    monkeypatch.setattr(massive_refresh, "build_candidate", counted_build)
     updated = finish_snapshot(h, attempt, params)
+    assert enumerations == [2]  # The same member set serves selection and composition.
     actual = read(h, updated, massive_daily.CONTRACT)
     assert [(r["adjustment_basis"], r["date"], r["open"], r["high"], r["low"], r["close"], r["volume"])
             for r in actual] == [
@@ -810,13 +851,19 @@ def test_maximum_action_text_length_is_admitted(harness):
     assert read(h, result, massive_actions.CONTRACTS["splits"])[0]["id"] == "x" * 256
 
 
-def test_valid_incompatible_parent_contract_refuses_before_read(harness, monkeypatch):
+@pytest.mark.parametrize("old_definition", [False, True], ids=["different-version", "prior-text-metadata"])
+def test_valid_incompatible_parent_contract_refuses_before_read(harness, monkeypatch, old_definition):
     from dataclasses import replace
 
     from engine.v2.data import manifests
     h = harness
     expected = massive_actions.CONTRACTS["splits"]
-    other = replace(expected, contract_id="massive_splits.v2", semantic_version="2.0.0")
+    if old_definition:
+        other = replace(expected, columns=tuple(replace(c, unit="provider_reported",
+            adjustment_basis="provider-reported value; no conversion") if c.name in ("execution_date", "adjustment_type")
+            else c for c in expected.columns))
+    else:
+        other = replace(expected, contract_id="massive_splits.v2", semantic_version="2.0.0")
     other = replace(other, definition_hash=manifests.table_contract_hash(other))
     source, _, _ = acquired(h, "splits", key="source")
     with monkeypatch.context() as context:

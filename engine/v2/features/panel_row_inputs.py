@@ -21,7 +21,8 @@ The four always-made pinned-snapshot dependencies:
   the event-date one -- and whose outcome source was available on or before
   ``decision_session``), feeding ``panel_math.history_features`` with the
   non-skipped rows only (``skipped=true`` rows are excluded before that call,
-  never treated as a zero move);
+  never treated as a zero move); it also supplies the stored
+  ``mean_prior_or_implied`` (all rows, regardless of skipped/availability);
 * the bounded ``daily_market`` read for the fixed ticker ``"SPY"``, feeding
   ``regime.add_regime_features`` (a different, raw chronological shape than the
   derived/lagged ``scan_daily_state_inputs`` mapping, so not reused from it); a
@@ -36,6 +37,7 @@ caller-asserted value.
 """
 from __future__ import annotations
 
+import math
 import numbers
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -67,8 +69,10 @@ _RESULT_LIMIT = 10000
 #: Generous margin over add_runup_features's 300-session minimum.
 _RUNUP_LOOKBACK_SESSIONS = 400
 
+_IMPLIED_COLUMNS = ("event_ordinal", "admitted", "implied_move_pct",
+                    "mean_prior_or_implied", "n_prior_implied")
 _COMPUTED_COLUMNS = ("ticker", "event_date", "realized_move_pct", "skipped",
-                     "available_as_of_date")
+                     "available_as_of_date", *_IMPLIED_COLUMNS)
 _SPY_COLUMNS = ("ticker", "date", "spot")
 _REGIME_COLUMNS = (
     "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5", "spy_vol20",
@@ -159,13 +163,20 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
                          ticker: str, history_start: pd.Timestamp, decision: pd.Timestamp,
                          event_day: pd.Timestamp) -> list[dict[str, object]]:
     """``ticker``'s computed_moves rows strictly before the scored event day and
-    the decision session, whichever of the two is earlier, and only where the
-    outcome source was available on or before the decision session.
+    the decision session, whichever of the two is earlier.
 
-    ``event_day`` is the caller's already-validated, already-midnight-normalized
-    event day.
+    Every row in the window is returned; ``_available_rows`` applies the
+    outcome-availability filter separately. ``event_day`` is the caller's
+    already-validated, already-midnight-normalized event day.
     """
     contract = data_repository.table_contract(snapshot, _COMPUTED_MOVES_TABLE)
+    missing = [c for c in _IMPLIED_COLUMNS
+               if c not in {col.name for col in contract.columns}]
+    if missing:
+        raise errors.fail("CONTRACT_MISMATCH",
+                          "computed_moves lacks the stored implied-history columns (v3 table)",
+                          details={"table_name": _COMPUTED_MOVES_TABLE,
+                                   "missing_columns": missing})
     version = _pinned_version(snapshot, _COMPUTED_MOVES_TABLE)
     start = history_start.date().isoformat()
     end = min(event_day, decision).date().isoformat()
@@ -196,6 +207,12 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
         max_result_rows=max_result_rows,
     )
     rows = _consume(data_repository, query, _COMPUTED_MOVES_TABLE)
+    return rows
+
+
+def _available_rows(rows: list[dict[str, object]],
+                    decision: pd.Timestamp) -> list[dict[str, object]]:
+    """Rows whose outcome source was available on or before the decision session."""
     eligible: list[dict[str, object]] = []
     for row in rows:
         available = row["available_as_of_date"]
@@ -204,6 +221,70 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
         if _session_day(available, "available_as_of_date") <= decision:
             eligible.append(row)
     return eligible
+
+
+def _require_implied_keys(rows: list[dict[str, object]]) -> None:
+    """Refuse any row that lacks a stored implied-history column."""
+    missing = sorted({c for row in rows for c in _IMPLIED_COLUMNS if c not in row})
+    if missing:
+        raise errors.fail("CONTRACT_MISMATCH",
+                          "computed_moves row lacks the stored implied-history columns",
+                          details={"table_name": _COMPUTED_MOVES_TABLE,
+                                   "missing_columns": missing})
+
+
+def _validated_implied_fields(
+    last: dict[str, object],
+) -> tuple[bool, float | None, int, float | None]:
+    """The latest row's admitted/mean/n_prior/implied, each type-checked."""
+    admitted = last["admitted"]
+    if not isinstance(admitted, bool):
+        raise errors.fail("CONTRACT_MISMATCH",
+                          "computed_moves admitted must be a bool",
+                          details={"table_name": _COMPUTED_MOVES_TABLE, "field": "admitted"})
+    n_prior = last["n_prior_implied"]
+    if isinstance(n_prior, bool) or not isinstance(n_prior, int) or n_prior < 0:
+        raise errors.fail("CONTRACT_MISMATCH",
+                          "computed_moves n_prior_implied must be a non-negative int",
+                          details={"table_name": _COMPUTED_MOVES_TABLE,
+                                   "field": "n_prior_implied"})
+    mean = last["mean_prior_or_implied"]
+    implied = last["implied_move_pct"]
+    for name, value in (("mean_prior_or_implied", mean), ("implied_move_pct", implied)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, numbers.Real) \
+                or not math.isfinite(value):
+            raise errors.fail("CONTRACT_MISMATCH",
+                              f"computed_moves {name} must be None or a finite real number",
+                              details={"table_name": _COMPUTED_MOVES_TABLE, "field": name})
+    if (mean is None) != (n_prior == 0):
+        raise errors.fail("CONTRACT_MISMATCH",
+                          "computed_moves mean_prior_or_implied is inconsistent with "
+                          "n_prior_implied",
+                          details={"table_name": _COMPUTED_MOVES_TABLE,
+                                   "field": "mean_prior_or_implied"})
+    return admitted, mean, n_prior, implied
+
+
+def _stored_implied_mean(rows: list[dict[str, object]]) -> float | None:
+    """The scored event's mean prior implied move from the latest stored row.
+
+    The scored event has no row of its own; this is one carry step from the
+    latest row, reading stored aggregates, not a recomputation of the history.
+    """
+    if not rows:
+        return None
+    _require_implied_keys(rows)
+    last = max(rows, key=lambda row: pd.Timestamp(row["event_date"]))
+    admitted, mean, n_prior, implied = _validated_implied_fields(last)
+    if not admitted:
+        return None
+    if implied is None:
+        return mean
+    if n_prior == 0:
+        return float(implied)
+    return float((mean * n_prior + implied) / (n_prior + 1))
 
 
 def _read_spy_market(data_repository: repository.Repository, snapshot: SnapshotRef,
@@ -410,7 +491,7 @@ def scan_panel_row(
     )
 
     computed_rows = _read_computed_moves(repository, snapshot, key.ticker, start, decision, event_day)
-    kept_moves = _kept_prior_moves(computed_rows)
+    kept_moves = _kept_prior_moves(_available_rows(computed_rows, decision))
     history = _history_from_kept_moves(kept_moves)
     history_asof = _anchor(*(row["available_as_of_date"] for row in kept_moves))
 
@@ -441,6 +522,7 @@ def scan_panel_row(
     panel_row: dict[str, Any] = {
         **daily_state.values,
         **history,
+        "mean_prior_or_implied": _stored_implied_mean(computed_rows),
         **regime_features,
         **runup_features,
         **_legacy_named_inputs(daily_state.values, runup_features),

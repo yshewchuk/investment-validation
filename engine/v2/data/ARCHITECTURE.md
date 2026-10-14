@@ -48,6 +48,10 @@ refuses. `Repository.scan(DataQuery(...))` supplies existing bounded pinned read
 Ops performs live-fenced atomic snapshot publication; publishing object bytes
 alone does not expose a dataset. `massive_refresh` composes explicit pinned parents.
 Action keys are ticker/event ID, not date: same-day events remain distinct.
+Only numeric action columns carry reported-unit and adjustment metadata;
+text columns leave type-conditional metadata unset, as `ColumnContract` requires.
+Registered definitions are immutable; a mismatched parent definition refuses
+rather than being relabelled or overwritten by refresh.
 Selected actions require ID, ticker, event date and split ratio or cash/currency;
 optional reported dates, frequency, classifications and adjustment factors retain
 null absence; supplied strings are nonblank and at most 256 characters. No ratio or return is computed.

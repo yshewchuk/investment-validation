@@ -24,7 +24,8 @@ def _contract(dataset):
     columns = tuple(ColumnContract(name=n, physical_type="string", nullable=False)
                     for n in (*massive_daily._TEXT, "id"))
     columns += tuple(ColumnContract(name=n, physical_type=t, nullable=n not in _REQUIRED[dataset],
-        unit="provider_reported", adjustment_basis="provider-reported value; no conversion")
+        unit=None if t == "string" else "provider_reported",
+        adjustment_basis=None if t == "string" else "provider-reported value; no conversion")
         for n, t in _FIELDS[dataset].items())
     contract = replace(massive_daily.CONTRACT, contract_id=f"massive_{dataset}.v1",
         table_name=f"massive_{dataset}", columns=columns, primary_key=("ticker", "id"),
