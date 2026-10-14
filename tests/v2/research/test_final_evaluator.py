@@ -12,6 +12,7 @@ import pytest
 
 from engine.v2.contracts import FinalHoldoutDeclaration, FinalHoldoutRequest
 from engine.v2.data.errors import DataError
+from engine.v2.data.repository import Repository
 from engine.v2.foundation import artifact_reference
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research import _final_evaluator
@@ -23,8 +24,17 @@ from engine.v2.research._final_evaluator import (
 from engine.v2.research._final_population import load_final_population
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.experiment_trades import PROVENANCE
+from tests.data_scan_support import (
+    catalog_and_store,
+    commit_tables,
+    contract_for,
+    contract_ref_for,
+    publish_and_inspect,
+)
 from tests.test_v2_research_build_trades import _trade_row
+from tests.test_v2_research_replay import _event_rows
 from tests.v2.research.test_experiment_trades import (
+    _AMBIGUOUS,
     _OVERLAP,
     _RANDOM,
     _ROLLING,
@@ -90,9 +100,34 @@ def test_random_and_rolling_results_stay_separate(tmp_path):
             n_events=2, n_trades=2, n_without_trade=0, total_ret=0.75,
             mean_ret=0.375, win_rate=0.5)
         assert result.overlap_count == 1
+        assert result.snapshot_id == snapshot.snapshot_id
+        assert result.holdout_as_of_month == _AS_OF
+        assert result.variant_id == _WINNER_VARIANT
         assert tuple(field.name for field in fields(FinalMetrics)) == (
             "snapshot_id", "holdout_as_of_month", "variant_id", "random",
             "rolling", "overlap_count", "ambiguous_count")
+    finally:
+        conn.close()
+
+
+def test_ambiguous_event_enters_neither_set_and_is_counted(tmp_path):
+    extra = [
+        _winner_trade("EVENT-5", "2024-01-16", 0.0),
+        _winner_trade("EVENT-1", "2024-09-15", 0.5),
+        _winner_trade("EVENT-2", "2024-01-15", 7.0),
+    ]
+    conn, repository, snapshot = _holdout_snapshot(
+        tmp_path, [_RANDOM, _ROLLING, _AMBIGUOUS],
+        event_overrides={"EVENT-2": {"date_conflict": True}}, extra_trades=extra)
+    try:
+        result = _evaluate(repository, _request(snapshot))
+        assert result.ambiguous_count == 1
+        assert result.random == SetMetrics(
+            n_events=1, n_trades=1, n_without_trade=0, total_ret=0.0,
+            mean_ret=0.0, win_rate=0.0)
+        assert result.rolling == SetMetrics(
+            n_events=1, n_trades=1, n_without_trade=0, total_ret=0.5,
+            mean_ret=0.5, win_rate=1.0)
     finally:
         conn.close()
 
@@ -161,6 +196,8 @@ def test_no_winner_trade_in_either_set_collapses(tmp_path):
         with pytest.raises(DataError) as refusal:
             evaluate_final_holdout(repository, request, population)
         assert refusal.value.problem.code == "POPULATION_COLLAPSED"
+        assert refusal.value.problem.details == {
+            "snapshot_id": snapshot.snapshot_id, "variant_id": _WINNER_VARIANT}
     finally:
         conn.close()
 
@@ -174,6 +211,27 @@ def test_non_finite_ret_is_a_contract_mismatch(tmp_path):
         with pytest.raises(DataError) as refusal:
             evaluate_final_holdout(repository, request, population)
         assert refusal.value.problem.code == "CONTRACT_MISMATCH"
+    finally:
+        conn.close()
+
+
+def test_empty_trades_table_converts_to_population_collapsed(tmp_path):
+    conn, clock, store = catalog_and_store(tmp_path)
+    trades_contract = contract_for("trades")
+    events_contract = contract_for("earnings_events")
+    events_record = publish_and_inspect(
+        store, events_contract, contract_ref_for(events_contract), _event_rows(), "2024")
+    snapshot = commit_tables(
+        conn, clock, {"trades": [], "earnings_events": [events_record]},
+        {"trades": trades_contract, "earnings_events": events_contract}, store=store)
+    repository = Repository(conn, store)
+    try:
+        request = _request(snapshot)
+        population = load_final_population(repository, request)
+        with pytest.raises(DataError) as refusal:
+            evaluate_final_holdout(repository, request, population)
+        assert refusal.value.problem.code == "POPULATION_COLLAPSED"
+        assert refusal.value.problem.details == {"snapshot_id": snapshot.snapshot_id}
     finally:
         conn.close()
 
@@ -304,3 +362,14 @@ def test_does_not_write(tmp_path):
             mean_ret=0.5, win_rate=1.0)
     finally:
         conn.close()
+
+
+def test_set_metrics_requires_none_when_a_set_has_no_trade():
+    SetMetrics(n_events=0, n_trades=0, n_without_trade=0, total_ret=0.0,
+               mean_ret=None, win_rate=None)
+    with pytest.raises(ValueError):
+        SetMetrics(n_events=0, n_trades=0, n_without_trade=0, total_ret=0.0,
+                   mean_ret=0.0, win_rate=None)
+    with pytest.raises(ValueError):
+        SetMetrics(n_events=0, n_trades=0, n_without_trade=0, total_ret=0.0,
+                   mean_ret=None, win_rate=1.0)
