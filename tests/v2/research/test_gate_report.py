@@ -459,6 +459,28 @@ def test_report_rejects_scalar_type_provenance_drift(source):
         gate.render_gate_report(registered, result, spec=spec, no_ledger=True)
 
 
+@pytest.mark.parametrize("field", ["variant_id", "run_id", "spec_hash"])
+def test_report_rejects_each_identity_mismatch_with_valid_control(source, field):
+    spec, registered = _register(source)
+    result = gate.gate_result(source.repository, registered, spec)
+    assert result["variant_id"] == registered.variant_id
+    assert result["run_id"] == registered.run_id
+    assert spec.spec_hash == registered.document["spec_hash"]
+    assert result["provenance"] == registered.document
+    valid = gate.render_gate_report(registered, result, spec=spec, no_ledger=True)
+    assert json.loads(valid.split("```json\n", 1)[1].split("\n```", 1)[0]) == result
+    changed_result, changed_spec = dict(result), spec
+    if field == "spec_hash":
+        changed_spec = replace(spec, hypothesis="Different synthetic hypothesis")
+        assert changed_spec.spec_hash != registered.document["spec_hash"]
+    else:
+        changed_result[field] = "different-" + result[field]
+    with pytest.raises(OpsError) as failure:
+        gate.render_gate_report(registered, changed_result, spec=changed_spec, no_ledger=True)
+    assert failure.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert gate.render_gate_report(registered, result, spec=spec, no_ledger=True) == valid
+
+
 @pytest.mark.parametrize("alpha,selected_mean,all_mean", [(0.0, 1.2, 3.2), (1.0, 2.8, 4.8)])
 def test_real_gate_rejects_low_score_candidate_and_counts_only_selected_cashflows(
         tmp_path, alpha, selected_mean, all_mean):
