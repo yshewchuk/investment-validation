@@ -160,9 +160,17 @@ are the daily-state `im` and `rvol30` (absent when those are absent;
 `abs_dist_ema` are `abs(dist_high)` and `abs(dist_ema)`, NaN where the source
 is NaN (`engine/features.py` `add_absolute_features`); `has_implied_quote`
 is 1.0 when `or_implied` is present and above 0, else 0.0
-(`add_quote_indicators`). `mean_prior_or_implied` is deliberately NOT
-produced: `computed_moves` cannot reproduce legacy's admission (first four
-events per ticker excluded) or its `src_iv` row selection (tracked in an issue).
+(`add_quote_indicators`). `mean_prior_or_implied` is READ from the stored
+`computed_moves.v4` columns (`event_ordinal`, `admitted`, `implied_move_pct`,
+`mean_prior_or_implied`, `n_prior_implied`), never computed from history per
+run (platform rule, #651). The scored event has no row of its own, so the
+value is one carry step from the latest row strictly before
+`min(event_day, decision_session)` (any `skipped`/availability state; implied
+quotes are anchored before their own event): a non-admitted row gives `None`;
+an admitted row with stored mean `m` over `n` values and its own implied `i`
+gives `i` when `n=0`, `m` when `i` is null, else `(m*n+i)/(n+1)`; no row gives
+`None`. A null value is the key present with `None`, so it is never reported
+as a missing feature.
 It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
 (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never
@@ -222,6 +230,8 @@ scan validation and failures propagate.
 | snapshot has no `daily_market`/`computed_moves` table | `CONTRACT_MISMATCH`, propagated from the underlying read unchanged |
 | snapshot has no `price_history` table | `CONTRACT_MISMATCH`, propagated unchanged |
 | `computed_moves` has no row for `key.ticker` | `panel_math.history_features`'s own empty-input behavior: every key is still present (`n_prior=0`, the mean/EMA keys `None`), never absent; `regime`'s fields are unaffected (independent read) |
+| `computed_moves` is a v3 table (any of `event_ordinal`, `admitted`, `implied_move_pct`, `mean_prior_or_implied`, `n_prior_implied` absent from its contract), or a fetched row lacks one of them | `CONTRACT_MISMATCH` with `missing_columns`; no per-run fallback computation |
+| the latest row's `admitted` is not a bool, `n_prior_implied` is not a non-negative int, `mean_prior_or_implied`/`implied_move_pct` is non-null but not a finite real, or mean/count disagree (`n=0` with a mean, `n>0` with a null mean) | `CONTRACT_MISMATCH`, refused rather than coerced |
 | a non-null `computed_moves.available_as_of_date` is not a naive calendar day | `CONTRACT_MISMATCH`, refused before history arithmetic |
 | an eligible non-skipped `computed_moves` row has a null `realized_move_pct` (a repository-integrity violation — the contract allows that only when `skipped=true`) | `CONTRACT_MISMATCH`, refused before `panel_math.history_features` runs, never silently coerced |
 | `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
