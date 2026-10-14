@@ -1,0 +1,41 @@
+# Nightly serving projection job (#717)
+
+Design, not yet implemented. Decisions (owner, 2026-10-14): the projection is a new job after `publication`; its failure fails that job loudly, leaves CURRENT on the previous release, and never fails publication or points CURRENT at a partial projection. The read side is in [`engine/v2/serving/ARCHITECTURE.md`](../engine/v2/serving/ARCHITECTURE.md). `engine/v2/ops/ARCHITECTURE.md` is at its line ceiling, so the job contract lives here until that doc is compressed.
+
+## Job contract
+
+A **new job kind `serving_projection`** (not the existing render stage `projection`) runs after `publication` in `_DAG_STAGES`/`plans.py`. It is a leaf: `delivery`, `backup` and the session's publication result do not wait on it, and it is not `OPTIONAL`, so its failure is loud. Publication's contract is unchanged; it never reads the serving index.
+
+
+**Inputs.** Bound from the succeeded `publication` job's retained bindings and the same session's `score` job: `bundle.tar`, `finality.json`, the score artifact, the pinned snapshot id, the saved nightly plan, the source-provenance document and the native-score inputs the plan's `shadow_serving_scorer` needs. Every input is an artifact reference verified by `ArtifactStore.read_verified`; none is a local path or an unpinned latest.
+
+**Execution.** The worker launches `tools/v2_dashboard_project.py` as a child process. `tools/` is the one place allowed to compose ops and serving (neither package imports the other). The tool's coordinator becomes a callable `run_projection(...)`; the CLI stays a thin wrapper over it. It unpacks the bundle into `/tmp` scratch (removed on success; kept as diagnostics on failure), then calls `build_candidate`. No provider calls, no scoring beyond the shadow row source the plan already names.
+
+**Where it lives.** One configured **serving root**, `<ops_root>/serving` (overridable by ops configuration, never a checkout path), holds `serving.sqlite`, the content-addressed `objects/` store and `publisher/`, the serving pointer root (`CURRENT`, `releases/<ops_release_id>/projection_binding.json`). The API's `publication_root` and `serving_db` are that root's `publisher/` and `serving.sqlite`. The ops publication scope root (`<ops_root>/releases/<scope>`) keeps serving the bundle-only release that health and `delivery` read; the board no longer reads it.
+
+**Binding and swap (order matters).**
+1. `build_candidate` commits the projection release (objects first, then one index transaction).
+2. The job builds `projection_binding.json` from the committed row, runs `verify_projection_binding` on it against the live index, and registers it as an artifact.
+3. It submits a retained publication (`publication_submit.submit_retained_publication`: the succeeded publication's retained bindings plus `projection_binding.json`, `operation_id` derived from the source publication job id) targeting the serving pointer root. That fenced `publish_local` materializes the release directory, then moves `CURRENT` with one `os.replace`.
+4. The job re-reads `CURRENT` and the binding through the API's own resolver and `verify_projection_binding`; only then does it succeed.
+
+A reader sees the previous release or the new one, never a mix: the new release directory is complete before `CURRENT` moves, the pointer swap is atomic, and index rows are append-only (an old binding keeps verifying while the swap happens). Each API request resolves once, and `/releases/current` carries a new ETag after the swap.
+
+**Idempotency and retry.** `release_id` derives from content and index writes are `INSERT OR IGNORE`; the retained-publication `operation_id` is fixed per publication job, so a retry resubmits the identical job and `publish_local` accepts `observed == release_id`. A retry after a crash between steps 1 and 3 reuses the committed release; after step 3 it only re-verifies. Retryable causes (store/index busy, `LEASE_LOST`, `RESOURCE_UNAVAILABLE`) go through the supervisor's normal retry; typed refusals are terminal until an operator reruns the job.
+
+| Failure | Job outcome | `CURRENT` and board |
+|---|---|---|
+| A bound input missing or fails verification (`INPUT_CHANGED`/`INTEGRITY_FAILED`) | Fails, no index write | Previous release unchanged |
+| Findings not ok (`PROJECTION_REFUSED`) | Fails; the findings artifact is kept as a diagnostic | Unchanged |
+| Crash or error after the index commit, before step 3 | Fails or is retried; an unreferenced release row is inert | Unchanged |
+| Retained publication refused (`STALE_EXPECTATION`, `PUBLICATION_REFUSED`, `IDEMPOTENCY_CONFLICT`) | Fails with the typed code | Unchanged |
+| Crash between pointer swap and acknowledgement | Retry re-acknowledges (the existing O24 window) | New release, already complete |
+| Step 4 re-verification fails | Fails loudly (`CURRENT_BINDING_INVALID`) | New pointer is already visible; the operator re-points it with a rollback retained publication |
+| Serving root unconfigured or unwritable | Fails `RESOURCE_UNAVAILABLE`; nothing is created | Unchanged |
+
+A failure never fails `publication`, never marks `delivery` failed, and never points `CURRENT` at a partial projection: steps 1-2 are the only place a half-built projection can exist, and nothing reads it until step 3. The nightly completion report records `serving_projection` as a failed required-after-publication disposition (the session is `completed_degraded`), and `operations_status.json` already shows the published and attempted release ids, so the board's pinned release can be compared with the nightly's.
+
+**`/api/v1/releases/current` from a nightly.** The serving root's `CURRENT` -> that release's `projection_binding.json` -> projection release id, re-verified against the live index, exactly as the serving doc states; a night whose job failed still resolves to the previous night's release.
+
+**Slices** (each at most about 400 code lines): (1) serving root configuration and API wiring; (2) `run_projection` extracted from the tool, CLI unchanged; (3) `serving_projection` job kind, DAG/plan/profile wiring and the child-process worker; (4) serving-pointer retained publication, read-back verification and the failure table above; (5) completion and status integration; (6) a real-browser test of the board against a real nightly's release.
+

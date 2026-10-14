@@ -73,7 +73,9 @@ Serving launch paths: `python3 -m engine.v2.serving.api` (`api.main` -> `create_
 operator-invoked dashboard preview `preview.run` -> `_server.build_server` ->
 `operations.create_server` (layer 8 imports layer 7 only); the React client calls the HTTP API. Offline `tools/`:
 `v2_dashboard_project` builds a candidate from the serving loaders, projections and shadow
-row source and emits a projection binding for the ops publisher (it does not publish);
+row source and emits a projection binding for the ops publisher (it does not publish). The
+nightly's `serving_projection` ops job runs it as a child process after `publication` (see
+the [job contract](../../../guides/serving_projection_job.md), design for #717);
 `v2_dashboard_verified_input` builds a source-verified `PreviewInput` from a delivered
 release (ops catalog plus `load_legacy_bundle`); `v2_route_probe` probes `route_table`.
 Serving requests do not execute provider ingestion, fitting, scoring or financial simulation
@@ -188,6 +190,33 @@ ceiling, while a larger population retains the lookup limit.
 | Partial write | `build_candidate` publishes findings, details and manifest as content-addressed immutable objects before the index transaction; a crash before the index commit leaves only unreferenced objects (a rerun keeps any release row already committed); after the commit the complete release row is durable. Findings not ok: receipt published, `PROJECTION_REFUSED`, no release. |
 | Idempotency | `release_id` derives from content and index writes are `INSERT OR IGNORE`: a repeated candidate writes no new rows. |
 
+### Production serving root and nightly current release (design for #717)
+
+Production reads use one configured serving root, `<ops_root>/serving`: `serving.sqlite`,
+the immutable `objects/` store and `publisher/`, the serving pointer root the API takes as
+`publication_root`. It is configuration, never a checkout path. The ops publication scope
+root is a different pointer (bundle-only release, read by health and delivery); the API
+does not resolve "current" from it.
+
+`/releases/current` after a nightly resolves: serving `publisher/CURRENT` -> that release's
+`projection_binding.json` -> projection release id -> `verify_projection_binding` against the
+live index. Only the `serving_projection` job moves that pointer, and only after the
+projection is committed and its binding verified; the swap is one atomic file replace into a
+complete release directory. A request resolves once, so it sees the previous release or the
+new one, never a mix. Index rows are append-only, so the old binding verifies during the swap.
+
+| Condition | Read outcome |
+|---|---|
+| Nightly's `serving_projection` failed or has not run | `CURRENT` unchanged: the previous night's release is served |
+| Serving root has no `CURRENT` yet (first run, or no successful projection) | `NO_CURRENT_RELEASE` (503, retryable) |
+| Serving root missing or `serving.sqlite` unreadable | `SERVING_INDEX_UNREADABLE` (503, retryable) |
+| Pointer names a release whose binding fails verification | `CURRENT_BINDING_INVALID` (500); no fallback to an older release |
+
+Serving gains no write path, retry or job start: the swap is the ops job's fenced
+publisher, and the read contract above is otherwise unchanged. Clients compare the release
+they show with the operations status (published versus attempted release) to detect a
+night whose projection failed.
+
 ## Invariants
 
 Score population validation uses `foundation.score_population.population_difference`,
@@ -226,7 +255,7 @@ flowchart LR
   Findings -->|findings ok| Publish[details + manifest published]
   Publish --> Commit[index committed in one transaction]
   Commit --> Binding[tool prints projection_binding for the committed release]
-  Binding -.->|operator supplies as a publication input| Ops[ops publisher]
+  Binding -.->|nightly serving_projection job: retained publication into the serving pointer root| Ops[ops publisher]
 ```
 
 Operations listener: `create_server` serves health files, shell/view pages, model-release
