@@ -828,9 +828,36 @@ def _repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
     }
 
 
+def _tiers_degraded(report: NightlyReport, exc: Exception) -> None:
+    """Degrade the tiers step and append the ``tiers_degraded`` flag.
+
+    The single definition of what "the tiers step degraded" means: a rebuild
+    or a finalize failure records the error on ``steps["tiers"]`` and appends
+    the flag, and the run continues to score rather than leaving the board
+    dark. Called from run_nightly's rebuild handler and from the gap-free
+    finalize path of :func:`_repair_tier4_gap_if_needed`.
+    """
+    report.steps["tiers"] = {"degraded": True,
+                             "error": f"{type(exc).__name__}: {exc}"[:300]}
+    report.flags.append({
+        "kind": "tiers_degraded",
+        "detail": ("Tier 3/Tier 4 not rebuilt — scoring from the stored panel and "
+                   f"forecasts, which may not cover recent prints. {type(exc).__name__}: {exc}")[:300],
+    })
+
+
 def _repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
                                 rebuild_tables, *, clock=time.time,
                                 finalize=None) -> None:
+    """Close an out-of-window Tier-4 gap, else finalize the incremental result.
+
+    Called by the tiers step once the incremental rebuild returns. When the
+    build left an out-of-window gap (``tier4_gap_partial``) a full Tier-4
+    repair runs and finalizes its own result; with no gap the incremental
+    result is sound and its snapshot is written here. A finalize failure on
+    the gap-free path degrades the tiers step exactly as a rebuild failure
+    does, so the run keeps scoring rather than leaving the board dark.
+    """
     gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
     if _tier4_gap_partial_flag(gap_fill) is not None:
         _repair_tier4_gap(report, rebuild_tables, clock=clock, finalize=finalize)
@@ -838,7 +865,10 @@ def _repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
         # No gap: the incremental result is sound, so write its snapshot now.
         # The nightly passes finalize=False to the incremental rebuild for
         # exactly this reason — a refused repair must leave no snapshot behind.
-        finalize(tier_result)
+        try:
+            finalize(tier_result)
+        except Exception as exc:
+            _tiers_degraded(report, exc)
 
 
 def _panel_staleness_flags(as_of) -> list[dict]:
@@ -1477,13 +1507,11 @@ def run_nightly(
             # (tier4_gap_partial), not a silent pass. The repair runs after
             # this try/except, so the result is kept for it.
         except Exception as exc:
-            report.steps["tiers"] = {"degraded": True,
-                                     "error": f"{type(exc).__name__}: {exc}"[:300]}
-            report.flags.append({
-                "kind": "tiers_degraded",
-                "detail": ("Tier 3/Tier 4 not rebuilt — scoring from the stored panel and "
-                           f"forecasts, which may not cover recent prints. {type(exc).__name__}: {exc}")[:300],
-            })
+            # _tiers_degraded is the one definition of the degrade path: it
+            # writes report.steps["tiers"] and appends the "kind":
+            # "tiers_degraded" flag (the tiers_degraded marker), so the literal
+            # stays visible here in run_nightly's tiers block.
+            _tiers_degraded(report, exc)
 
         # A typed TIER4_* stop from the repair propagates (it is not the
         # "degraded" path above), so the run fails before score or import.

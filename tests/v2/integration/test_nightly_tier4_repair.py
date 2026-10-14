@@ -212,6 +212,40 @@ def test_rerunning_the_guard_after_a_repair_does_nothing():
     assert report.steps["tiers"]["tier4_repair"]["ran"] is True
 
 
+def test_repair_finalize_failure_stops_the_run_with_a_typed_code():
+    def boom(result):
+        raise RuntimeError("disk full")
+
+    def fake_rebuild_tables(tables, **kwargs):
+        return _result({})
+
+    report = _report()
+
+    with pytest.raises(NightlyStop) as caught:
+        _repair_tier4_gap(report, fake_rebuild_tables, finalize=boom)
+
+    assert caught.value.step == "tier4_repair"
+    assert caught.value.detail.startswith(
+        "TIER4_REPAIR_FAILED: RuntimeError: disk full")
+    assert "tier4_repair" not in report.steps["tiers"], \
+        "a refused finalize records no tier4_repair step"
+
+
+def test_gap_free_finalize_failure_degrades_the_tiers_step():
+    report = _report()
+
+    def boom(result):
+        raise RuntimeError("disk full")
+
+    _repair_tier4_gap_if_needed(report, _result({}), lambda *a, **k: _result({}),
+                                finalize=boom)
+
+    assert report.steps["tiers"]["degraded"] is True
+    assert "RuntimeError: disk full" in report.steps["tiers"]["error"]
+    degraded = [f for f in report.flags if f.get("kind") == "tiers_degraded"]
+    assert len(degraded) == 1, "the gap-free finalize failure raises one flag"
+
+
 # --------------------------------------------------------------------------
 # rebuild()/finalize_rebuild(): the snapshot is deferred, not written early
 # --------------------------------------------------------------------------
@@ -473,3 +507,36 @@ def test_run_nightly_finalizes_a_gap_free_incremental_result(monkeypatch, tmp_pa
     assert _marker(tmp_path).exists(), "the no-gap path writes the snapshot marker"
     assert len(marker_writes) == 1, "the snapshot marker is written exactly once"
     assert sentinel.touched, "the run proceeded to the scorer"
+
+
+def test_run_nightly_degrades_when_a_gap_free_finalize_raises(monkeypatch, tmp_path):
+    finalize_calls = []
+    nightly, _calls, captured, marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[_result({})],
+        finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
+    )
+
+    def boom(result):
+        finalize_calls.append(result)
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("engine.data.rebuild.finalize_rebuild", boom)
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(_Scored):
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=[], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    report = captured.get("report")
+    assert report is not None, "run_nightly never constructed a report"
+    assert report.steps["tiers"]["degraded"] is True
+    assert "RuntimeError: disk full" in report.steps["tiers"]["error"]
+    assert any(f.get("kind") == "tiers_degraded" for f in report.flags)
+    assert sentinel.touched, "the run proceeded to the scorer"
+    assert marker_writes == []
+    assert not _marker(tmp_path).exists(), "a failed finalize writes no snapshot"
