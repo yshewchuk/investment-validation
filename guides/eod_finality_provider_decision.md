@@ -50,7 +50,8 @@ acquisition path". Massive would need a new dataset (and plan, quota and pin wor
    (`_fetch_unit` in `data/incremental.py`), and that `cache_raw_receipt` call passes no
    `fence_check`, so these raw receipts are not attempt-fenced (snapshot publication fencing is a
    separate step). It is a "bytes first seen by" time, not a provider "complete as of" time or a
-   post-publication attestation, so it bounds readiness from above only.
+   post-publication attestation. It bounds raw-byte observation only and cannot upper-bound
+   publication readiness; that bound needs the later coordinator attestation.
 4. **Slice 1 of #497.** Add an `option_chains` ORATS acquisition (new `strikes` fetch unit), a
    scoped completion receipt, and a completed-empty rule. Without a provider marker it can only
    assert "all requested tickers returned, N rows". Roughly the stated 170 code lines, plus the
@@ -78,7 +79,7 @@ acquisition path". Massive would need a new dataset (and plan, quota and pin wor
    daily bars and actions, not chains.
 3. **Clock.** Best of the two: receipts carry `received_at` from the production `SystemClock` under a
    fence check (`verify_fence`, Massive path only), and `observed_at` is recorded separately from
-   `first_received_at`. Same limitation: it is an upper bound.
+   `first_received_at`. Same limitation: it bounds raw-byte observation only, not publication readiness.
 4. **Slice 1.** Add an options dataset to `massive_plan`, request descriptor, page validation and
    an empty-domain rule, then reuse the existing acquisition/pin machinery. Larger than ORATS
    slice 1 despite the reuse: roughly 200+ code lines, likely needing a split, and it depends on
