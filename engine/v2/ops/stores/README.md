@@ -10,7 +10,7 @@ the [Massive acquisition package](massive/ARCHITECTURE.md) composes stores, prov
 
 - Hold `refresh_contracts.REFRESH_INPUT_DOCUMENT_NAMES`: the staged identity
   document name for each refresh job kind.
-- Own supervised Massive raw acquisition through `massive.acquisition`.
+- Own supervised Massive acquisition through `massive.acquisition` and pinned daily snapshot publication through `massive.snapshot`.
 
 ## Non-responsibilities
 

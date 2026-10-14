@@ -10,6 +10,7 @@ from engine.v2.foundation import SystemClock, content_hash, to_document
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+from engine.v2.ops.legacy_adapter import configured_root
 from engine.v2.ops.massive_plan import SOURCE, plan
 from engine.v2.ops.stages import registry
 from engine.v2.ops.stores.massive.acquisition import (
@@ -51,7 +52,7 @@ def main(argv=None, *, clock=None):
         if params.generation is not None:
             closed_day(scoped["units"][0]["request"], clock.now())
         kind, schema = (HISTORY_KIND, HISTORY_SCHEMA) if params.generation is not None else (KIND, SCHEMA)
-        source = Path(__file__).resolve().parents[3]
+        source = configured_root()
         job = JobSpec(kind=kind, implementation_ref=content_hash(worker_source_manifest(source)),
                       environment_ref=content_hash(environment_identity(1)), spec_hash=None,
                       parameters=to_document(params), output_namespace="shadow", resource_class="io_fetch",
