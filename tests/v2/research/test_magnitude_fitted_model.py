@@ -8,8 +8,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from engine.models.no_fit import RuntimeFitForbidden as LegacyRuntimeFitForbidden
 from engine.v2.data.errors import DataError
 from engine.v2.foundation import canonical_json, to_document
+from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.training import magnitude as training
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_fitted as fitted
@@ -639,6 +641,17 @@ def test_failed_fit_never_falls_back_or_returns_partial_success(source, monkeypa
     assert len(calls) == 2
     assert (_catalog(source.conn), _objects(source.store)) == before
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))
+
+
+@pytest.mark.parametrize("guard", [RuntimeFitForbidden, LegacyRuntimeFitForbidden])
+def test_no_fit_guard_exception_propagates_unchanged(source, monkeypatch, guard):
+    error = guard("no-fit guard active")
+    def forbidden(kind, train, labels, test):
+        raise error
+    monkeypatch.setattr(fitted, "fit_magnitude_predictions", forbidden)
+    with pytest.raises(guard) as caught:
+        model.prediction_result(source.repository, source.registration)
+    assert caught.value is error
 
 
 @pytest.mark.parametrize("kind", ["empty-training", "late-evaluation", "nonfinite-evaluation"])
