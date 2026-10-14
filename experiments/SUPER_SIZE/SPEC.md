@@ -53,3 +53,25 @@ MissingIndicator, StandardScaler, Ridge and HistGradientBoostingRegressor.
 Stored research admission owns membership; generic training folds are not reused
 because their missing-row and fold-cutoff policies differ. Runtime never rebuilds
 features. These candidates are local development benchmarks, not a selected winner.
+
+## Plan a bounded nested search
+
+After preregistering a fitted candidate, use `python -m experiments.v2_magnitude_search
+prepare --spec <anchor-spec> --catalog <existing-catalog> --store-root <existing-store>
+--request <request-json>`. The command returns an immutable plan reference, not a run.
+Use `verify` with `--plan-ref <reference-json>` instead of `--request` to check it again.
+
+The request has schema `magnitude_search_request.v1`, `inner_years` mapping every
+outer year to explicit increasing earlier years, `space`, `max_candidates` and
+`max_fits`. Space maps `history_ridge` to an `alpha` array and/or `history_hgb` to
+arrays for all five knobs: `learning_rate`, `max_iter`, `max_leaf_nodes`,
+`min_samples_leaf`, `l2_regularization`. Each axis is increasing and nonempty;
+all other recipe settings stay fixed. No search size or compute budget is inferred.
+
+Inner folds stay inside outer training candidates and preserve event/horizon groups.
+The frozen policy selects by pooled inner RMSE, breaks exact ties by candidate ID,
+and reserves outer evaluation for the selected candidate. Latest-outer selection
+defines the prospective frozen winner; no winner exists until recorded execution.
+Every planned candidate must be attempted and failures recorded before selection.
+This command neither reads outcomes nor runs the search. Trial recording, actual
+selection and local resource-capped execution are subsequent implementation slices.

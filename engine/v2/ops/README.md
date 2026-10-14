@@ -151,6 +151,9 @@ and `errors.fail` before computing/reporting the admitted mean baseline.
 The registrar also consumes the history/fitted constructors and matching validators;
 `experiments/magnitude_history_report.py` consumes both history/fitted validators,
 and the history admission bridge uses `errors.fail`.
+`experiments/magnitude_search_plan.py` consumes the fitted constructor/validator,
+`fingerprints.source_closure`/`environment_identity` and `errors.fail`; its CLI uses
+`catalog.connect`, `experiments.experiment_spec_from_document` and `errors.OpsError`/`fail`.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection

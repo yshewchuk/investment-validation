@@ -188,6 +188,53 @@ Registration/replay never fit. Native smoke/recorded publication remains unchang
 | Existing key has changed code, environment, plan, snapshot, population or context, or corrupt stored evidence | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; existing catalog and artifact bytes stay unchanged. |
 | Publication or catalog commit fails | No partial registration is admitted; a complete unreferenced artifact may remain. No automatic retry. |
 
+## Sealed magnitude search plans
+
+`magnitude_search_plan.seal_search_plan` / `read_search_plan` compile and verify
+`magnitude_search_plan.v1` artifacts from a catalog-owned fitted v1.5 registration.
+They read registration/plan artifacts only, compare the installed source closure
+and environment, and never open repository metadata, features, labels or results.
+The original outer temporal plan and stored-feature context remain byte-identical.
+This is planning evidence, not a search reservation, trial, winner or read authority;
+execution must later re-admit the pinned native inputs and qualify actual labels.
+
+The closed request explicitly supplies each outer year's ordered inner years,
+Ridge `alpha` axes and/or HGB `learning_rate`, `max_iter`, `max_leaf_nodes`,
+`min_samples_leaf`, `l2_regularization` axes, plus candidate and fit caps.
+Axes are nonempty, increasing and finite; integer controls reject booleans/floats.
+Alpha/rate are positive, L2 nonnegative, leaves at least two, other integers positive.
+There are no defaults or extra knobs. Standard-library `itertools.product` expands
+the finite Cartesian space after cardinality admission; no estimator is imported.
+Two through 4096 candidates are supported, within the explicit candidate cap.
+Full detached v1.5-based recipes and their hashes define candidates; no fixed recipe
+or stored-history producer is modified. This protocol searches those two families only.
+
+Every inner evaluation year is earlier than its outer year and restricted to that
+outer fold's training candidates. All event horizons remain grouped. Inner training
+uses events strictly before the minimum of January 1 and evaluation forecast ceilings;
+its actual labels must later be qualified strictly before that boundary. Inner
+evaluation labels must be complete strictly before the outer fit boundary. Missing
+train/evaluation populations refuse; there is no automatic fold skipping. Issuers may
+overlap across time. The original metadata calendar is not re-proved as historical PIT.
+
+The sealed selection policy pools squared errors across all inner event/horizon pairs,
+uses MAE diagnostically and candidate ID for exact-score ties. All candidates require
+recorded attempts; failed candidates cannot win. Each outer evaluation scores only
+its inner-selected candidate; the latest outer winner freezes before its evaluation.
+Fit admission counts every candidate/inner-fold/horizon fit plus one refit per outer
+fold/horizon. It is a count bound, not a time, RAM, GPU or predictive-quality guarantee.
+No scores or selection are computed by this metadata-only boundary.
+
+`python -m experiments.v2_magnitude_search prepare|verify` requires an existing native
+catalog/store, the anchor spec and a request JSON (`prepare`) or plan-ref JSON (`verify`).
+Prepare publishes only canonical plan bytes; retries are content-addressed and leave
+catalog reservations/ledger unchanged. Verify is read-only and requires exact canonical
+reconstruction, including request, candidates, folds, source and environment.
+Malformed requests/budget overages refuse nonretryable `INVALID_EXPERIMENT_SPEC`;
+registration/plan identity or source drift refuses `EXPERIMENT_IDENTITY_CONFLICT`.
+CLI typed refusals preserve the full Problem and exit 2; filesystem/artifact failures
+use `RESOURCE_UNAVAILABLE`. No provider download, fitting, scheduling or final read occurs.
+
 ## Stored research-history entrypoint
 
 `python -m experiments.magnitude_history_store build|read` requires an existing catalog file.
