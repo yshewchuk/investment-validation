@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,10 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops.errors import OpsError, fail
-from engine.v2.ops.native_registration import validate_magnitude_fitted_execution
+from engine.v2.ops.native_registration import (
+    validate_magnitude_fitted_execution,
+    validate_magnitude_history_execution,
+)
 from experiments import magnitude_search_plan as search
 from experiments import native_registration as native
 from experiments import v2_magnitude_search as cli
@@ -211,8 +215,10 @@ def test_missing_request_fields_refuse_before_access(missing, monkeypatch):
     request = _request()
     del request[missing]
     monkeypatch.setattr(search, "verify_native_registration", _forbid)
-    with pytest.raises(OpsError, match="explicit valid axes"):
+    with pytest.raises(OpsError) as caught:
         search.seal_search_plan(object(), object(), object(), request)
+    assert to_document(caught.value.problem) == _problem(
+        "INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
 
 
 @pytest.mark.parametrize("axis,value", [
@@ -243,8 +249,10 @@ def test_invalid_axes_and_duplicate_numeric_values_refuse_before_expansion(axis,
 def test_unknown_and_incomplete_axes_refuse(kind, axes):
     request = _request()
     request["space"][kind] = axes
-    with pytest.raises(OpsError, match="explicit valid axes"):
+    with pytest.raises(OpsError) as caught:
         search.seal_search_plan(object(), object(), object(), request)
+    assert to_document(caught.value.problem) == _problem(
+        "INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
 
 
 @pytest.mark.parametrize("cap,value", [("max_candidates", 5), ("max_fits", 59)])
@@ -256,6 +264,50 @@ def test_budget_refusal_precedes_cartesian_expansion_and_publication(source, mon
     with pytest.raises(OpsError) as caught:
         search.seal_search_plan(source.conn, source.store, source.registration, request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+
+
+def test_singleton_grid_with_admissible_caps_refuses_before_access(monkeypatch):
+    request = _request()
+    request.update(space={"history_ridge": {"alpha": [1]}}, max_candidates=2)
+    monkeypatch.setattr(search, "verify_native_registration", _forbid)
+    monkeypatch.setattr(search.itertools, "product", _forbid)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(object(), object(), object(), request)
+    assert to_document(caught.value.problem) == _problem(
+        "INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
+
+
+def test_intact_catalog_owned_v14_anchor_refuses_before_nested_planning_or_publication(source, monkeypatch):
+    spec = replace(source.spec, experiment_id=source.spec.experiment_id + "-mean-anchor")
+    registration = native.register_native(source.conn, source.store, source.repository, spec,
+        code_root=ROOT, as_of_month=MONTH, magnitude_training_start="2022-01-01",
+        magnitude_labels_before=CUTOFF, magnitude_feature_snapshot_id=source.feature_snapshot.snapshot_id,
+        magnitude_history_start=HISTORY)
+    assert registration.document["schema_version"] == "native_experiment_registration.v1.4"
+    validate_magnitude_history_execution(registration.document)
+    assert native.read_native_registration(source.conn, source.store, spec).binding_json == registration.binding_json
+    before = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(search, "_nested", _forbid)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(source.conn, source.store, registration, _request())
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "fitted magnitude execution requires a sealed v1.5 plan")
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+@pytest.mark.parametrize("field", ["training_labels_before", "training_candidate_event_ids"])
+def test_outer_reconstruction_refuses_independently_changed_metadata(source, field):
+    binding = source.registration.document
+    if field == "training_labels_before":
+        binding["magnitude_plan"]["folds"][0][field] = "2024-01-02"
+    else:
+        binding["magnitude_plan"]["folds"][0][field].pop()
+    with pytest.raises(OpsError) as caught:
+        search._nested(binding, _request())
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "outer fold metadata differs from its declared boundaries")
 
 
 @pytest.mark.parametrize("years", [
@@ -384,6 +436,32 @@ def test_wrong_reference_schema_refuses_before_open(source, monkeypatch):
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
 
 
+@pytest.mark.parametrize("field", ["artifact_id", "storage_key", "byte_size", "schema_version"])
+def test_same_hash_reference_metadata_drift_refuses_before_plan_open(source, monkeypatch, field):
+    sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
+    ref = from_document(ArtifactRef, sealed["plan_ref"])
+    payload = source.store.read_verified(ref)
+    assert payload == canonical_json(sealed["plan"]).encode()
+    changes = {"artifact_id": ref.artifact_id + "-changed", "storage_key": ref.storage_key + "-changed",
+               "byte_size": ref.byte_size + 1, "schema_version": "artifact_ref.v9.0"}
+    changed = replace(ref, **{field: changes[field]})
+    assert changed.content_hash == ref.content_hash and changed != ref
+    original, opened = ArtifactStore.read_verified, []
+    def read(store, candidate):
+        assert candidate.schema_ref == "native_experiment_registration.v1.5", "rejected plan opened"
+        opened.append(candidate)
+        return original(store, candidate)
+    monkeypatch.setattr(ArtifactStore, "read_verified", read)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(OpsError) as caught:
+        search.read_search_plan(source.conn, source.store, source.registration, _request(), changed)
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+    assert opened and (_catalog(source.conn), _objects(source.store)) == before
+    assert (source.store.root / ref.storage_key).read_bytes() == payload
+
+
 def test_forged_metadata_schema_cannot_open_arbitrary_payload(source, monkeypatch):
     ref = source.store.publish_bytes(b"synthetic protected outcome", schema_ref="magnitude_search_plan.v1")
     original, opened = ArtifactStore.read_verified, []
@@ -462,13 +540,16 @@ def test_changed_catalog_anchor_refuses_before_plan_publication(source, monkeypa
 
 def test_fixed_v15_cannot_execute_search_recipe_or_sidecar(source):
     plan = search.seal_search_plan(source.conn, source.store, source.registration, _request())["plan"]
-    with pytest.raises(OpsError, match="sealed v1.5"):
+    expected = _problem("EXPERIMENT_IDENTITY_CONFLICT", "fitted magnitude execution requires a sealed v1.5 plan")
+    with pytest.raises(OpsError) as caught:
         validate_magnitude_fitted_execution(plan)
+    assert to_document(caught.value.problem) == expected
     for candidate in plan["candidates"]:
         binding = source.registration.document
         binding["magnitude_execution"]["fit_recipe"] = candidate["recipe"]
-        with pytest.raises(OpsError, match="sealed v1.5"):
+        with pytest.raises(OpsError) as caught:
             validate_magnitude_fitted_execution(binding)
+        assert to_document(caught.value.problem) == expected
 
 
 def test_planning_preserves_fresh_v15_registration_and_history_producer_bytes(source):
