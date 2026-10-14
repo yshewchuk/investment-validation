@@ -53,7 +53,12 @@ given a staged release root, `resolve_release_binding` resolves the live
 deployment pointer's model identity/artifact refs and the release's frozen
 payoff/recalibration/board-analog-matcher artifacts, plus the
 role-keyed `driver_residual_artifacts` mapping (empty when no driver pool
-member is staged), into one immutable `ScoringReleaseBinding`, raising
+member is staged) and `chooser_analog_artifacts`/`chooser_admissible_artifacts`
+tuples (empty independently when their family is absent), into one immutable
+`ScoringReleaseBinding`. Chooser tuples retain all distinct artifact keys;
+each declared chooser object must be a regular file no larger than 32 MiB.
+Request-specific selection and nightly chooser wiring are not performed here.
+The reader raises
 `NoCurrentRelease`/`ModelNotReady` (never a legacy or cached fallback) when
 the pointer, catalog or a named member is not ready.
 `engine.v2.ops.native_score_batch.py`'s `native_score_batch` job

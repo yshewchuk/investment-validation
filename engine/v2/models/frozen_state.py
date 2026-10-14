@@ -25,6 +25,11 @@ from typing import Any, Mapping
 
 from engine.v2.foundation.canonical import CONTENT_HASH_PREFIX, canonical_json
 from engine.v2.models.frozen_documents import FrozenState, frozen_state_from_document
+from engine.v2.models.frozen_state_io import (
+    BoundedStateReadError,
+    read_bounded_state,
+    valid_byte_limit,
+)
 
 __all__ = [
     "FrozenState",
@@ -57,8 +62,11 @@ def _from_document(document: Mapping[str, Any]) -> FrozenState:
 class FrozenStateLoader:
     """Hash-verified, read-only loading, cached by content hash."""
 
-    def __init__(self, artifact_root: Path | str) -> None:
+    def __init__(self, artifact_root: Path | str, *, max_bytes: int | None = None) -> None:
+        if not valid_byte_limit(max_bytes):
+            raise FrozenStateError("frozen state byte limit must be a positive integer below sys.maxsize")
         self._root = Path(artifact_root).resolve()
+        self._max_bytes = max_bytes
         self._cache: dict[str, FrozenState] = {}
 
     @property
@@ -72,7 +80,11 @@ class FrozenStateLoader:
         except ValueError as exc:
             raise FrozenStateError("artifact path escapes artifact root") from exc
         try:
+            if self._max_bytes is not None:
+                return read_bounded_state(path, self._max_bytes)
             return path.read_bytes()
+        except BoundedStateReadError as exc:
+            raise FrozenStateError(str(exc)) from exc
         except OSError as exc:
             raise FrozenStateError(f"missing frozen state: {ref.path}") from exc
 

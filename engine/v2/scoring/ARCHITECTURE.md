@@ -76,7 +76,7 @@ load-bearing entrypoints:
   runs in production).
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
-  identity, model artifact refs, and analog/payoff/recalibration/driver-residual
+  identity, model artifact refs, and analog/payoff/recalibration/residual/chooser
   artifacts;
   `resolve_production_release_binding()` is the same resolution against the
   one configured production release root
@@ -111,6 +111,11 @@ load-bearing entrypoints:
   `driver_residual_artifacts: Mapping[str, DriverResidualPoolArtifact]` is
   keyed by the loaded artifact's `.role` field and empty when no driver pool
   member is staged.
+  `chooser_analog_artifacts: tuple[ChooserAnalogPoolArtifact, ...]` and
+  `chooser_admissible_artifacts: tuple[AdmissibleDepthTable, ...]` expose all
+  verified objects from `chooser_analog_pool` and `admissible_table:dyn_sv`.
+  These immutable tuples preserve catalog order; identities come from each
+  artifact's own key, never object names or catalog strategy labels.
   Picking the object matching a request's own `(strategy, alpha, cutoff)`
   and mapping a binding to specific forecast-output names is the per-night
   assembler's job, not this module's.
@@ -142,8 +147,8 @@ from the board bucket-analog pool.
 native pricing and simulation. Invalid declared frozen state flags
 `MODEL_NOT_READY`; missing/nonfinite champion inputs flag the advisory
 `CHOOSER_MISSING_FEATURES` and withhold `chooser_score`.
-Feature math never fits; frozen executors own model inference. `release_bindings` does
-not expose the chooser pool/depth table, and nightly declares no chooser block.
+Feature math never fits; frozen executors own model inference. `release_bindings`
+exposes verified chooser pools/depth tables; nightly declares no chooser block.
 
 `application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores
 its members and resolves DYN-SV over finite simulation-bearing candidates:
@@ -505,6 +510,29 @@ R6: the same release and bytes yield an equal result; a caller resolving once
 per worker therefore sees one policy for the whole batch. The worker uses this
 result only when its `gate_policy` parameter is empty; a supplied policy wins
 and the release is not consulted for it.
+
+#### Chooser state members
+
+The chooser families use `FrozenStateLoader` with a 32 MiB per-object ceiling
+to verify object bytes and the decoded artifact's content hash. Only regular
+files are admitted; oversized objects are refused before hashing or decoding,
+including growth during the bounded read. This is an admission limit, not a
+total release-memory bound. Loading establishes release membership and
+typed integrity, not request-time eligibility: selection of the exact pool
+cutoff/table version and causal lineage remains the caller's responsibility.
+No pool rows are filtered, sorted, fitted or substituted during resolution.
+
+| Condition | Outcome |
+|---|---|
+| Family absent | Its tuple is empty; no invented state and no release refusal |
+| Nonregular chooser object or size above 32 MiB | Path-free `ModelNotReady` for that member; the whole release is unavailable, including STR-THRU-only consumers |
+| Several objects with distinct `(pool_id, cutoff)` or `(table_id, version)` keys | Preserve every verified object; no implicit latest-object selection |
+| Declared family has non-STAGED status, no objects, malformed references, missing/unreadable/escaped objects, corrupt bytes/schema, wrong artifact type, or duplicate semantic keys | Path-free `ModelNotReady` naming the exact catalog member; no binding, partial family, or fallback |
+| Valid pool declares `cutoff=None` | Preserve the existing artifact identity; loading does not authorize use for a request |
+| Cache, retry, transaction, partial write, idempotency | Existing release-reader R2–R6 apply: fresh verification per call, no internal retry or writes, and equal unchanged bindings |
+
+These members are optional independently. A declared-invalid chooser member
+refuses the whole release resolution even when a caller scores another strategy.
 
 #### Driver residual pool member (issue #479, release-loader slice)
 
