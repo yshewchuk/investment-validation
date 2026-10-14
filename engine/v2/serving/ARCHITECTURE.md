@@ -209,7 +209,8 @@ new one, never a mix. Index rows are append-only, so the old binding verifies du
 |---|---|
 | Nightly's `serving_projection` failed before the pointer swap, or has not run | `CURRENT` unchanged: the previous night's release is served |
 | Serving root has no `CURRENT` yet (first run, or no successful projection) | `NO_CURRENT_RELEASE` (503, retryable) |
-| Serving root missing or `serving.sqlite` unreadable | `SERVING_INDEX_UNREADABLE` (503, retryable) |
+| Serving root missing (no `CURRENT`) | `NO_CURRENT_RELEASE` (503, retryable), as today |
+| `serving.sqlite` fails to open, once `CURRENT` exists | Today the resolver opens the index outside its error translation. Translating open-time failures to `SERVING_INDEX_UNREADABLE` (503, retryable) is proposed work in slice 1, not current behavior |
 | Pointer names a release whose binding fails verification | `CURRENT_BINDING_INVALID` (500); no fallback to an older release |
 
 Serving gains no write path, retry or job start: the swap is the ops job's fenced
