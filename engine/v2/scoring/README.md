@@ -53,7 +53,12 @@ given a staged release root, `resolve_release_binding` resolves the live
 deployment pointer's model identity/artifact refs and the release's frozen
 payoff/recalibration/board-analog-matcher artifacts, plus the
 role-keyed `driver_residual_artifacts` mapping (empty when no driver pool
-member is staged), into one immutable `ScoringReleaseBinding`, raising
+member is staged) and `chooser_analog_artifacts`/`chooser_admissible_artifacts`
+tuples (empty independently when their family is absent), into one immutable
+`ScoringReleaseBinding`. Chooser tuples retain all distinct artifact keys;
+each declared chooser object must be a regular file no larger than 32 MiB.
+Request-specific selection and nightly chooser wiring are not performed here.
+The reader raises
 `NoCurrentRelease`/`ModelNotReady` (never a legacy or cached fallback) when
 the pointer, catalog or a named member is not ready.
 `engine.v2.ops.native_score_batch.py`'s `native_score_batch` job
@@ -92,7 +97,7 @@ production for eligible pinned-snapshot identities. See
 `ARCHITECTURE.md` for what
 runs in production today versus only in tests.
 
-<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, release_bindings, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
+<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
 
 ## Consumers
 

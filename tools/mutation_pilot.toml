@@ -199,9 +199,10 @@ tests = [
 
 [modules.native_analog]
 why = "Native analog selection: bucket widening order, population hashing and bootstrap seeding decide which history a row is compared against; an off-by-one silently changes n_analogs and the interval."
-mutate = ["engine/v2/scoring/native_analog.py"]
+mutate = ["engine/v2/scoring/native_analog.py", "engine/v2/scoring/native_analog_query.py"]
 tests = [
     "tests/test_v2_scoring_native_analog.py",
+    "tests/v2/scoring/test_native_analog_query.py",
     "tests/test_phase4_acceptance_independence.py",
     "tests/test_v2_scoring_runup_frozen.py",
     "tests/test_v2_scoring_actionable_flags.py",
@@ -376,6 +377,7 @@ mutate = [
     "engine/v2/data/computed_moves.py",
     "engine/v2/data/computed_moves_table.py",
     "engine/v2/data/event_history.py",
+    "engine/v2/data/massive_daily.py",
 ]
 tests = [
     "tests/v2/ops/test_massive_accounting_hooks.py",
@@ -383,6 +385,7 @@ tests = [
     "tests/v2/data/test_computed_moves.py",
     "tests/v2/data/test_computed_moves_table.py",
     "tests/v2/data/test_data_event_history.py",
+    "tests/v2/ops/test_massive_snapshot.py",
     "tests/test_v2_data_generic_incremental.py",
     "tests/test_v2_data_incremental.py",
     "tests/test_v2_data_incremental_persistence.py",
@@ -480,6 +483,9 @@ tests = [
     "tests/test_v2_scoring_release_bindings.py",
     "tests/v2/scoring/test_release_gate_policy.py",
     "tests/v2/scoring/test_release_driver_pools.py",
+    "tests/v2/scoring/test_release_chooser_states.py",
+    "tests/v2/models/test_bounded_frozen_state_loader.py",
+    "tests/v2/integration/test_chooser_release_readiness.py",
 ]
 
 [modules.board_analog]
@@ -643,6 +649,7 @@ tests = [
     "tests/v2/ops/test_native_gate_worker.py",
     "tests/v2/research/test_magnitude_registration.py",
     "tests/v2/research/test_magnitude_execution_registration.py",
+    "tests/v2/research/test_magnitude_history_model.py",
     "tests/v2/research/test_magnitude_baseline.py",
     "tests/v2/research/test_native_outcomes.py",
     "tests/v2/research/test_v2_prediction_cli.py",
@@ -814,6 +821,7 @@ tests = [
     "tests/v2/research/test_native_registration.py",
     "tests/v2/research/test_magnitude_registration.py",
     "tests/v2/research/test_magnitude_execution_registration.py",
+    "tests/v2/research/test_magnitude_history_model.py",
 ]
 
 [modules.ops_catalog_sched]
@@ -979,6 +987,7 @@ mutate = [
     "engine/v2/ops/plans.py",
     "engine/v2/ops/massive_plan.py",
     "engine/v2/ops/massive_acquire.py",
+    "engine/v2/ops/massive_snapshot.py",
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/forward_calendar_store.py",
     "engine/v2/ops/incremental_data.py",
@@ -1006,6 +1015,7 @@ tests = [
     "tests/v2/ops/test_native_parity_inputs_leaf.py",
     "tests/v2/ops/test_carried_set.py",
     "tests/v2/ops/test_massive_plan.py",
+    "tests/v2/ops/test_massive_snapshot.py",
     "tests/v2/ops/test_massive_coverage.py",
     "tests/v2/ops/test_massive_journal.py",
     "tests/v2/ops/test_massive_occurrence_integrity.py",
@@ -1089,6 +1099,7 @@ tests = [
     "tests/v2/research/test_magnitude_folds.py",
     "tests/v2/research/test_magnitude_registration.py",
     "tests/v2/research/test_magnitude_execution_registration.py",
+    "tests/v2/research/test_magnitude_history_model.py",
     "tests/v2/research/test_magnitude_training_inputs.py",
     "tests/v2/research/test_magnitude_baseline.py",
     "tests/v2/research/test_experiment_trades.py",

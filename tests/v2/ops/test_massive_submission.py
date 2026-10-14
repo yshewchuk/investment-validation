@@ -1,6 +1,10 @@
 """Offline operator submission, allowlist and source-registration contracts."""
+import hashlib
 import json
+import shutil
 import socket
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +16,91 @@ from engine.v2.ops import massive_acquire as cli
 from engine.v2.ops import providers
 from engine.v2.ops.bootstrap import open_catalog
 from tests.ops_support import FakeClock
+
+ROOTED_SUBMISSION = r'''
+import contextlib, io, json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+original_read = pathlib.Path.read_text
+dotenv_paths = []
+def synthetic_dotenv(path, *args, **kwargs):
+    if path.name == ".env":
+        dotenv_paths.append(str(path))
+        return "SUBMISSION_SENTINEL=synthetic-only\n"
+    return original_read(path, *args, **kwargs)
+def audit(event, args):
+    if event in ("socket.connect", "socket.sendto", "socket.getaddrinfo"):
+        raise AssertionError("submission attempted network")
+    if event == "open" and isinstance(args[0], str) and pathlib.Path(args[0]).name == ".env":
+        raise AssertionError("submission read nonsynthetic dotenv")
+sys.addaudithook(audit)
+pathlib.Path.read_text = synthetic_dotenv
+from engine.v2.ops import massive_acquire, massive_snapshot
+from tests.ops_support import FakeClock
+pathlib.Path.read_text = original_read
+assert dotenv_paths == [str(pathlib.Path(sys.argv[3]) / ".env")]
+outputs = []
+def invoke(module, args):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = module.main(args, clock=FakeClock())
+    document = json.loads(out.getvalue())
+    outputs.append([code, document])
+    return document
+arguments = json.loads(sys.argv[2])
+invoke(massive_acquire, arguments)
+history = invoke(massive_acquire, arguments + ["--idempotency-key", "history", "--generation", "initial"])
+invoke(massive_snapshot, ["--root", arguments[1], "--idempotency-key", "snapshot",
+    "--acquisition-job", history.get("job_id", "job_" + "0" * 32)])
+print(json.dumps(outputs))
+'''
+
+
+@pytest.fixture(scope="module")
+def alternate_source(tmp_path_factory):
+    from engine.v2.ops.fingerprints import worker_source_manifest
+    source = Path(__file__).resolve().parents[3]
+    alternate = tmp_path_factory.mktemp("synthetic-code-root")
+    manifest = worker_source_manifest(source)
+    for rel in manifest:
+        destination = alternate / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / rel, destination)
+    worker = alternate / "engine/v2/ops/worker.py"
+    worker.write_text(worker.read_text() + "\n# Synthetic alternate source identity.\n")
+    changed = dict(manifest)
+    changed["engine/v2/ops/worker.py"] = "sha256:" + hashlib.sha256(worker.read_bytes()).hexdigest()
+    return source, alternate, manifest, changed
+
+
+@pytest.mark.parametrize("mode", ["default", "override", "missing_source"])
+def test_submitters_use_configured_source_root_in_fresh_process(tmp_path, alternate_source, mode):
+    from engine.v2.foundation import content_hash
+    source, alternate, default_manifest, alternate_manifest = alternate_source
+    selected = source if mode == "default" else alternate if mode == "override" else tmp_path / "missing-code"
+    env = {"HOME": str(tmp_path)}
+    if mode != "default":
+        env["INVESTING_PLAN_ROOT"] = str(selected)
+    with open_catalog(tmp_path / "catalog.sqlite", clock=FakeClock()) as conn:
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", ROOTED_SUBMISSION,
+            str(source), json.dumps(arguments(tmp_path)), str(selected)],
+            cwd=tmp_path, env=env, text=True, capture_output=True, timeout=40, check=True)
+        assert result.stderr == ""
+        outputs = json.loads(result.stdout)
+        specs = [json.loads(row[0]) for row in conn.execute("SELECT spec_json FROM jobs ORDER BY kind")]
+        if mode == "missing_source":
+            assert outputs == [[2, {"refused": "INPUT_CHANGED"}]] * 3
+            assert specs == []
+        else:
+            assert [code for code, _ in outputs] == [0, 0, 0]
+            assert [item["state"] for _, item in outputs] == ["queued"] * 3
+            assert [spec["kind"] for spec in specs] == [
+                "massive_acquisition", "massive_daily_snapshot", "massive_history_acquisition"]
+            expected = content_hash(default_manifest if mode == "default" else alternate_manifest)
+            assert content_hash(default_manifest) != content_hash(alternate_manifest)
+            assert [spec["implementation_ref"] for spec in specs] == [expected] * 3
+        assert conn.execute("SELECT count(*) FROM attempts").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM data_raw_receipts").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM provider_reservations").fetchone()[0] == 0
 
 
 @pytest.fixture

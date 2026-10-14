@@ -1557,17 +1557,26 @@ def test_report_status_job_only_runs_when_plan_resolved_a_pr(jobs, context):
     job = jobs["report_status"]
     assert job["needs"] == ["plan", "report"]
     assert job["if"] == "always() && needs.plan.outputs.pr_number != ''"
-    assert job["permissions"] == {"statuses": "write"}
     step = _report_status_step(jobs)
     assert step["env"]["SHA"] == "${{ github.event.workflow_run.head_sha }}"
     assert step["env"]["MODULES"] == "${{ needs.plan.outputs.modules }}"
     assert step["env"]["REPORT_RESULT"] == "${{ needs.report.result }}"
     assert step["env"]["SKIPPED_COUNT"] == "${{ needs.report.outputs.skipped_count }}"
-    assert f'-f context="{context}"' in step["run"]
-    assert '-f state="$state"' in step["run"]
-    assert '-f description="$desc"' in step["run"]
-    assert '-f target_url="$RUN_URL"' in step["run"]
-    assert "/statuses/$SHA" in step["run"] and "gh api" in step["run"]
+    if jobs is MUT_JOBS:
+        assert job["permissions"] == {"statuses": "write"}
+        assert f'-f context="{context}"' in step["run"]
+        assert '-f state="$state"' in step["run"]
+        assert '-f description="$desc"' in step["run"]
+        assert '-f target_url="$RUN_URL"' in step["run"]
+        assert "/statuses/$SHA" in step["run"] and "gh api" in step["run"]
+    else:
+        assert job["permissions"] == {"checks": "write"}
+        assert "repos/$REPO/check-runs" in step["run"]
+        assert '-f name="mutation/pr"' in step["run"]
+        assert '-f conclusion="$state"' in step["run"]
+        assert '-f details_url="$RUN_URL"' in step["run"]
+        assert '-f "output[summary]=$desc"' in step["run"]
+        assert "/statuses/" not in step["run"]
 
 
 def _run_status_decision(run_script, modules, report_result, skipped_count="0"):
@@ -1600,7 +1609,8 @@ def test_report_status_decision_covers_skip_success_and_failure(jobs):
     state, desc = _run_status_decision(run_script, '["pnl_sim","canonical"]', "success")
     assert state == "success" and "2" in desc
     state, desc = _run_status_decision(run_script, '["pnl_sim"]', "failure")
-    assert state == "failure" and "failure" in desc
+    # gremlins: a report job that failed before classification is grey, never red; mutmut keeps the red mapping
+    assert state == ("neutral" if jobs is JOBS else "failure") and "failure" in desc
     state, desc = _run_status_decision(run_script, '["pnl_sim","canonical"]', "success",
                                        skipped_count="1")
     assert state == "failure"  # never success on a partial (stubbed) measurement
@@ -2744,11 +2754,63 @@ def test_select_pr_tests_shared_fixture_and_pins_still_select_the_full_suite(tmp
         assert pilot.select_pr_tests(cfg, [path, "docs/x.md"], graph=graph) is None
 
 
+def _architecture_doc_reader_oracle(graph, tests):
+    """Independent doc discovery and reachability, using only real import edges.
+
+    Import resolution has its own independent AST oracle below. This oracle
+    must not use the selector's literal scanner, closure walker or doc reader.
+    """
+    readers = set()
+    for path in graph:
+        tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)) and ast.get_docstring(node, clean=False) is not None:
+                node.body = node.body[1:]
+        if any(isinstance(node, ast.Constant) and isinstance(node.value, str)
+               and "ARCHITECTURE.md" in node.value for node in ast.walk(tree)):
+            readers.add(path)
+
+    importers = {path: set() for path in graph}
+    for importer, dependencies in graph.precise.items():
+        for dependency in dependencies:
+            importers[dependency].add(importer)
+    pending = list(readers)
+    while pending:
+        for importer in importers[pending.pop()] - readers:
+            readers.add(importer)
+            pending.append(importer)
+    return {test for test in tests if test in readers or any(
+        (parent / "conftest.py").as_posix() in readers for parent in Path(test).parents)}
+
+
+def _assert_architecture_doc_selection(selected, expected):
+    assert selected is not None, "doc-only selection unexpectedly requested the full suite"
+    actual = set(selected)
+    assert actual == expected, (
+        f"doc-only selection: unexpected={sorted(actual - expected)}, "
+        f"missing={sorted(expected - actual)}")
+
+
 def test_real_repo_architecture_doc_change_selects_a_narrow_set():
-    selected = pilot.select_pr_tests(CFG, ["ARCHITECTURE.md"])
-    assert selected is not None
-    assert "tests/test_architecture_docs.py" in selected
-    assert len(selected) < 50
+    graph = pilot.build_import_graph()
+    tests = set(pilot.pytest_test_files(set(graph)))
+    expected = _architecture_doc_reader_oracle(graph, tests)
+    expected |= set(CFG["pr_selection"]["always_run"]) & tests
+    unrelated = {"tests/v2/foundation/test_market_horizon.py",
+                 "tests/v2/data/test_string_date_intervals.py"}
+    assert unrelated <= tests  # A moved/deleted control must not make this vacuous.
+    assert expected.isdisjoint(unrelated)
+    assert "tests/test_architecture_docs.py" in expected
+    assert expected < tests
+    selected = pilot.select_pr_tests(CFG, ["ARCHITECTURE.md"], graph=graph)
+    _assert_architecture_doc_selection(selected, expected)
+
+    # Repository growth may add real readers, but even one unrelated extra
+    # must fail, as must returning all tracked test paths instead of None.
+    for broadened in (tests, expected | {sorted(unrelated)[0]}):
+        with pytest.raises(AssertionError, match="doc-only selection"):
+            _assert_architecture_doc_selection(broadened, expected)
 
 
 def test_select_pr_tests_helper_with_unresolved_dynamic_import_taints_its_importer(tmp_path, monkeypatch):

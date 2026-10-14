@@ -10,7 +10,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
-from experiments import magnitude_report
+from experiments import magnitude_history_report, magnitude_report
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from experiments import prediction_report as prediction
@@ -29,12 +29,20 @@ def main(argv=None):
     parser.add_argument("--target", choices=("positive_move", "absolute_move"), default="positive_move")
     parser.add_argument("--magnitude-training-start")
     parser.add_argument("--magnitude-labels-before")
+    parser.add_argument("--magnitude-model", choices=("pooled_mean", "history_mean"))
+    parser.add_argument("--magnitude-feature-snapshot-id")
+    parser.add_argument("--magnitude-history-start")
     args = parser.parse_args(argv)
     magnitude = args.target == "absolute_move"
     clocks = (args.magnitude_training_start, args.magnitude_labels_before)
     if (magnitude and not all(clocks)) or (not magnitude and any(clock is not None for clock in clocks)):
         parser.error("absolute_move requires both magnitude clocks; positive_move accepts neither")
-    reporter = magnitude_report if magnitude else prediction
+    history = args.magnitude_model == "history_mean"
+    history_options = (args.magnitude_feature_snapshot_id, args.magnitude_history_start)
+    if (not magnitude and args.magnitude_model is not None) or (
+            history and not all(history_options)) or (not history and any(v is not None for v in history_options)):
+        parser.error("history_mean requires absolute_move and both history options; other models accept neither")
+    reporter = magnitude_history_report if history else magnitude_report if magnitude else prediction
     store, conn, registration, attempted = None, None, None, False
     try:
         store = foundation.ArtifactStore(args.store_root)
@@ -48,6 +56,8 @@ def main(argv=None):
                        scope=args.scope, event_ids=args.event_id)
         if magnitude:
             binding.update(magnitude_training_start=clocks[0], magnitude_labels_before=clocks[1])
+        if history:
+            binding.update(magnitude_feature_snapshot_id=history_options[0], magnitude_history_start=history_options[1])
         if args.action == "register":
             registration = native.register_native(conn, store, repository, spec, **binding)
             print(json.dumps({"registered": registration.variant_id}))

@@ -33,6 +33,7 @@ exactly the DAG-shape drift ``nightly.GRAPH`` exists to avoid).
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from pathlib import Path
@@ -112,9 +113,37 @@ def _dimension_fields(dimension: str) -> tuple[str, ...]:
     return fields
 
 
-def _dimension_view(row: Mapping[str, Any], dimension: str) -> dict[str, Any]:
-    """One row's values for one dimension, read by the checker's field names."""
-    return {name: row.get(name) for name in _dimension_fields(dimension)}
+def _entry_cost_pct(row: Mapping[str, Any]) -> float | None:
+    """``entry_cost / spot * 100`` (checks/phase4_real._expected_financial_diagnostics).
+
+    Both operands are converted and validated first; a missing, non-numeric or
+    non-finite operand, or a ``spot`` that is zero after conversion, gives ``None``:
+    an unavailable value, never an exception. The comparator reports it as a
+    mismatch only when the other side has a value; ``None`` against ``None`` agrees.
+    """
+    try:
+        cost = float(row.get("entry_cost"))
+        spot = float(row.get("spot"))
+    except (TypeError, ValueError):
+        return None
+    if spot == 0.0 or not math.isfinite(cost) or not math.isfinite(spot):
+        return None
+    value = cost / spot * 100.0
+    return value if math.isfinite(value) else None
+
+
+def _dimension_view(row: Mapping[str, Any], dimension: str, *,
+                    legacy: bool = False) -> dict[str, Any]:
+    """One row's values for one dimension, read by the checker's field names.
+
+    Legacy score rows never carry ``entry_cost_pct`` (#681), so a LEGACY row
+    without the key has it derived from its own ``entry_cost`` and ``spot``. A
+    native row is never derived for: a missing native value stays missing.
+    """
+    view = {name: row.get(name) for name in _dimension_fields(dimension)}
+    if legacy and "entry_cost_pct" in view and "entry_cost_pct" not in row:
+        view["entry_cost_pct"] = _entry_cost_pct(row)
+    return view
 
 
 def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, Any],
@@ -124,8 +153,8 @@ def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, An
     mismatches = []
     for dimension in dimensions:
         result = compare_dimension(
-            _dimension_view(legacy, dimension), _dimension_view(native, dimension), dimension,
-            tolerance_policy=tolerance_policy)
+            _dimension_view(legacy, dimension, legacy=True), _dimension_view(native, dimension),
+            dimension, tolerance_policy=tolerance_policy)
         if not result["agree"]:
             mismatches.append({
                 "row_key": key,

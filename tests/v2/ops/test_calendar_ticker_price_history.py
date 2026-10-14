@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pandas as pd
@@ -154,7 +154,7 @@ def test_price_refresh_plan_always_plans_forced_ticker_daily():
     assert plan["daily"] == ["SPY"]
     assert plan["monthly"] == ["ZZZ"]
     fetched = pr.plan_refresh("2026-09-14", events=events, price_universe=["ZZZ"],
-                              fetch_history={"SPY": [date(2026, 9, 14)]},
+                              fetch_times={"SPY": [datetime(2026, 9, 14, 21, tzinfo=timezone.utc)]},
                               always_daily=("SPY",))
     assert "SPY" in fetched["skipped_already_fetched"]
     assert "SPY" not in fetched["daily"]

@@ -37,7 +37,7 @@ from tests.v2.ops.test_v2_ops_price_history import (
 )
 
 SESSION = "2026-09-11"
-FETCHED_AT = SESSION + "T20:00:00+00:00"
+FETCHED_AT = SESSION + "T21:00:00+00:00"  # after Friday's close + buffer
 PRICES = {"2026-09-10": 100.0, SESSION: 101.0}
 
 
@@ -95,7 +95,7 @@ def install_fetcher(monkeypatch):
                 """Verify writes target the selected source root."""
                 assert root == expected_root
 
-            def fetch(self, source, endpoint, params, *, live, note):
+            def fetch(self, source, endpoint, params, *, live, note, refetch_token=None):
                 """Write synthetic history or return the configured failure."""
                 ticker = params["ticker"]
                 assert (source, endpoint, params, live, note) == (
@@ -187,14 +187,20 @@ def test_ordinary_fetch_failure_is_nonfatal_and_reported(
 
 def test_selected_root_controls_daily_cache_and_fetch_writes(
         tmp_path, isolated_legacy_sources, install_fetcher):
-    """Daily cache reads and fetch writes stay within the selected root."""
+    """Daily cache reads and fetch writes stay within the selected root.
+
+    ``OLD``'s Thursday-evening stamp predates Friday's close plus the
+    coverage buffer, so it stays on the daily list even though it landed a
+    day ago and its body already holds Thursday's bar.
+    """
     root = tmp_path / "selected-source"
     global_root = isolated_legacy_sources
     for ticker in ("NEW", "SPY"):
         _write_tier1(global_root, ticker, PRICES, key="global-" + ticker,
                      fetched_at=FETCHED_AT)
     _write_tier1(root, "CACHED", PRICES, key="cached", fetched_at=FETCHED_AT)
-    _write_tier1(root, "OLD", PRICES, key="old", fetched_at="2026-09-10T20:00:00+00:00")
+    _write_tier1(root, "OLD", {"2026-09-09": 100.0, "2026-09-10": 101.0}, key="old",
+                 fetched_at="2026-09-10T20:00:00+00:00")
     _write_tier1(root, "UNRELATED", PRICES, key="unrelated",
                  fetched_at="2026-09-10T20:00:00+00:00")
     global_before = {p: p.read_bytes() for p in global_root.rglob("*") if p.is_file()}
@@ -238,8 +244,8 @@ def test_planned_dry_run_never_constructs_fetcher_or_writes(tmp_path, monkeypatc
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
         isolated_legacy_sources, monkeypatch, dry_run):
-    """Standalone calls retain event, inventory, cache and calendar planning inputs."""
-    loaders, fetcher_roots, requests = [], [], []
+    """Standalone calls retain event, inventory, cache, stamp and calendar inputs."""
+    loaders, fetcher_roots, requests, refetch_tokens = [], [], [], []
 
     def load_events():
         """Supply event-only daily, cached and out-of-window monthly tickers."""
@@ -262,6 +268,18 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
                 "INVENTORY_CACHED": ["2026-09-01"], "INVENTORY_OLD": ["2026-08-31"],
                 "SPY": ["2026-09-10"]}
 
+    def load_fetch_times():
+        """Only the cached event ticker carries a post-close stamp.
+
+        The stamp against the required day's close plus the buffer is the
+        whole daily coverage question: EVENT_DAILY's and SPY's 13:30Z
+        arrivals predate Friday's 20:00Z close, so they stay on the daily
+        list, while EVENT_CACHED's 21:00Z stamp excuses the session."""
+        loaders.append("times")
+        return {"EVENT_DAILY": [pd.Timestamp("2026-09-11T13:30:00+00:00")],
+                "EVENT_CACHED": [pd.Timestamp("2026-09-11T21:00:00+00:00")],
+                "SPY": [pd.Timestamp("2026-09-11T13:30:00+00:00")]}
+
     class SyntheticFetcher:
         """Record requests without contacting providers or writing any cache."""
 
@@ -269,14 +287,16 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
             """Record the standalone default-root selection."""
             fetcher_roots.append(root)
 
-        def fetch(self, source, endpoint, params, *, live, note):
+        def fetch(self, source, endpoint, params, *, live, note, refetch_token=None):
             """Return success for each request executed by the real refresh loop."""
             requests.append((source, endpoint, params, live, note))
+            refetch_tokens.append((params["ticker"], refetch_token))
             return SimpleNamespace(status=200)
 
     monkeypatch.setattr(price_refresh, "load_events", load_events)
     monkeypatch.setattr(price_refresh, "load_price_universe", load_price_universe)
     monkeypatch.setattr(price_refresh, "load_fetch_history", load_fetch_history)
+    monkeypatch.setattr(price_refresh, "load_fetch_times", load_fetch_times)
     monkeypatch.setattr(fetch, "Fetcher", SyntheticFetcher)
 
     result = invoke_price_refresh(SESSION, dry_run=dry_run)
@@ -295,7 +315,7 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
         "failed": [],
     }
     assert result == {"plan": expected_plan, "report": None if dry_run else expected_report}
-    assert loaders == ["events", "inventory", "history"]
+    assert loaders == ["events", "inventory", "history", "times"]
     assert fetcher_roots == ([] if dry_run else [None])
     expected_requests = [
         ("yfinance", "history", {"ticker": ticker, "period": "max"}, True, "price-refresh")
@@ -303,6 +323,14 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
                        "INVENTORY_OLD")
     ]
     assert requests == ([] if dry_run else expected_requests)
+    # Daily requests carry a unique per-call refetch nonce; monthly stay tokenless.
+    if dry_run:
+        assert refetch_tokens == []
+    else:
+        assert [t for t, tok in refetch_tokens if tok is not None] == ["EVENT_DAILY", "SPY"]
+        assert len({tok for _, tok in refetch_tokens if tok is not None}) == 2
+        assert [t for t, tok in refetch_tokens if tok is None] == [
+            "EVENT_ONLY_MONTHLY", "INVENTORY_MONTHLY", "INVENTORY_OLD"]
     assert not isolated_legacy_sources.exists()
 
 
@@ -316,6 +344,7 @@ def test_planned_refresh_without_source_root_refuses_before_discovery_or_fetch(
         pytest.fail("missing source root reached discovery or fetch")
 
     monkeypatch.setattr(price_refresh, "load_fetch_history", unexpected_io)
+    monkeypatch.setattr(price_refresh, "load_fetch_times", unexpected_io)
     monkeypatch.setattr(fetch, "Fetcher", unexpected_io)
 
     with pytest.raises(OpsError) as error:

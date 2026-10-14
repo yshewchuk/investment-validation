@@ -87,7 +87,7 @@ python3 -m pytest -q -n 4 --dist loadgroup -rfEs --durations=15 tests/ 2>&1 | ta
 - **`-n 4 --dist loadgroup`**: 4 workers when you are the only test runner.
   Use `-n 2` while a heavy job (nightly, D14, real scoring) or another agent's
   tests are running. `loadgroup` keeps the `xdist_group("serial")` files on
-  one worker (see `conftest.py`).
+  one worker (see `conftest.py`). `tests/v2/integration/test_markdown_lint_wiring.py` has its own `xdist_group("markdownlint_npx")` so its npx calls share one worker.
 - **Don't narrow the CPU affinity below 4 CPUs.** Don't run it under
   `taskset`, or `bounded_run --cores`/`--cpu-set`, with fewer than 4 CPUs.
   Real-`Service` tests admit jobs against this process's own affinity minus 1
@@ -341,13 +341,13 @@ the first two cancels an older still-running run of its own family:
 GitHub always lists it under the default branch's Actions history instead --
 so, since 2026-09-27, each backend's own last job, `report_status`, posts
 the outcome onto the PR's own head commit itself
-(`github.event.workflow_run.head_sha`) as a plain commit status: this
-design does not add either context to branch protection's required-checks
-list, so nothing here starts blocking merges on its own (a repo admin
-requiring a status context by name is a separate, later, explicit action,
+(`github.event.workflow_run.head_sha`): mutmut as a plain commit status, gremlins
+as one check run (below). This design does not add either name to branch protection's
+required-checks list, so nothing here starts blocking merges on its own (a repo admin
+requiring one by name is a separate, later, explicit action,
 not something this change does or enables by itself).** `report_status`
 needs `[plan, report]` and declares `statuses: write` for its
-`GITHUB_TOKEN` in both workflows (the existing workflow-level token grants
+`GITHUB_TOKEN` in mutmut and `checks: write` in gremlins (the existing workflow-level token grants
 only `contents: read`; every scope a job doesn't list itself becomes
 `none`), with `if: always() && needs.plan.outputs.pr_number != ''` (the
 `always()` is required: without it, GitHub Actions would skip
@@ -358,7 +358,7 @@ same reason -- `plan`'s own steps can fail *after* `select_pr` already set
 `pr_number` (e.g. its checkout or pip install step), and a
 `result == 'success'` guard would then skip `report_status` too, silently
 recreating the exact invisible-PR problem this job exists to fix; posting
-a `failure` status attributed to a "report" that never ran is still
+a status posted for a "report" that never ran (mutmut: `failure`; gremlins: `neutral`, "not a pass") is still
 strictly more informative than nothing). A fork PR, or a Tests run that
 failed, was cancelled, or was not itself a `pull_request` run, never
 reaches this far (`plan` is skipped, or leaves `pr_number` empty), so
@@ -368,17 +368,59 @@ workflow. When
 checkout, or a docs-only PR the `[pr_selection] inert` allowlist ruled out)
 the status is `success` with a "skipped by design" description rather
 than silence; a `report` job that itself failed or was skipped maps to
-`failure`. In between those two, `report` can also exit 0 having merged
+`failure` for mutmut and to `neutral` for gremlins (see below). Both backends share the
+PR-closed guard: `report` can exit 0 having merged
 one or more PR-closed placeholder modules (issue #64, above: `merge_dirs`'s
 `skipped_modules`) -- not a tool error, but not a real measurement either,
 so `report_status` reads `report`'s own `skipped_count` output (a `jq`
 count of `merged/summary.json`'s `skipped_modules`, computed by `report`'s
 own `skip` step) and posts `failure` with a "skipped (PR closed)"
-description instead: this must never read as `success`, which would claim
-every module was measured when some were only a stub. Only when none of
-that applies does the status mirror `report`'s own result as `success`.
-The two contexts, `mutation-mutmut/pr` and `mutation/pr`, are distinct from
-each other and from the `Tests` check.
+description: this must never read as `success`. Otherwise mutmut mirrors
+`report`'s own result as `success`, while gremlins posts the classified
+`state` (failure, success or neutral; see below).
+The two names, `mutation-mutmut/pr` (commit status) and `mutation/pr` (check run),
+are distinct from each other and from the `Tests` check.
+
+**`mutation/pr` (gremlins workflow) has three outcomes**, posted by `report_status`
+as ONE check run (`checks: write`, never a commit status; a rerun on the same SHA adds a
+newer check run of the same name, but an old commit status named `mutation/pr` from the
+earlier workflow is not superseded by a check run and may linger on old heads; mutmut's
+status is unchanged). The `report` job's
+`classify` step runs `tools/mutation_pr_status.py` over the merged report
+(`summary.json`, `results.jsonl`) and the files the PR changed (NUL-separated, from
+`git diff -z --name-only --no-renames base...head`, so tab or quote paths stay literal;
+attribution is by FILE, no diff parsing). A neutral description truncates only its
+reason, so "; not a pass" always survives the 140-character limit:
+
+- **failure (red)**: a surviving mutant in a file the PR changed, in a complete, clean report
+  (valid `expected_modules`; every planned module complete, no tool error, no failure reasons,
+  no gremlin ERROR results). Integrity is checked first (an unavailable summary, a missing
+  planned module, unreadable rows or no changed-file list is neutral before any attribution).
+  A nonzero module exit code is never red: a failing PR test suite is caught by the normal CI
+  `test` job, and real merged reports show nonzero exits come from the tool dying (issue #713).
+- **success (green)**: a clean measured run of every planned module (merge `complete`, no
+  tool error or failure reasons, no skipped module, exit code 0, no gremlin ERROR results),
+  readable rows, a non-empty changed-file list, and no survivor in a changed file.
+- **neutral (grey)**: everything else: nothing measured, infra or tool error (timeout, signal,
+  skipped, incomplete merge, null, missing or nonzero exit code: "module X exited N; not a pass"), and any missing, degraded or unexpected
+  input. The description gives a short reason and says "not a pass".
+
+User decision 2026-10-13: any malformed or partial report is neutral, even if some result
+rows are readable; partial evidence is not salvaged for this advisory check. A test failure
+that main also shows is not attributed here (no baseline; the `Tests` job is the gate).
+Row-count reconciliation is out of scope (a truncated-but-valid row file can at worst miss a
+survivor: grey or green instead of red). Until #713 (mutation runs on main never complete
+cleanly) is fixed, `mutation/pr` will mostly read neutral. The tool exits 0
+for every classified or degraded input; only argument errors and an unwritable
+`--github-output` file exit nonzero (after classification, so the step fails loudly).
+`mutation/pr` is not a required check. The PR-closed placeholder guard and the empty-plan
+`success` above are unchanged; a `report` job that failed before classification is
+neutral for gremlins (red for mutmut).
+
+Gremlins `report_status` decision, first match wins (`classified` = the tool's `state`,
+empty if the classify step did not run): empty plan `success`; skipped modules `failure`;
+`classified` `failure`/`neutral` posted as is; `classified` `success` posted only if the report
+job succeeded; otherwise report job not succeeded `neutral`, else `success`.
 
 **The two scores measure different things and are never comparable.** mutmut's
 score is (killed + timeout) / checked -- every mutant the run considered,

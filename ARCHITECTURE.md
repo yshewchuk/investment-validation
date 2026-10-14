@@ -265,6 +265,15 @@ evidence. See the models and data component contracts.
     taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
+  - **Mutation PR status** (`tools/mutation_pr_status.py`): the gremlins `report` job
+    classifies the merged mutation report by FILE (inputs: the merged `summary.json` and
+    `results.jsonl`, and the PR's changed-file list from `git diff -z --name-only`, NUL-separated). `state` is
+    `failure` for a surviving mutant in a file the PR changed (in a complete, clean report),
+    `success` only for a clean measured run of every planned module, and `neutral` for
+    everything else, including any malformed or partial report (integrity is checked before
+    any attribution; only a complete, well-formed report can be red or green; a nonzero module exit code is neutral, never red). `report_status` posts the state
+    as one check run named `mutation/pr` (never a commit status; not a required check). The rules
+    and the decision table are in `tests/README.md` ("Mutation CI").
 
 The active PR workflow uses `tools/mutation_pilot.py select-tests` and the
 import-graph policy described above. For each non-empty diff that yields a
@@ -430,6 +439,7 @@ Only a tracked path absent from the worktree reads as empty.
 
 - **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
 - **Massive acquisition — `python -m engine.v2.ops.massive_acquire`.** Explicit shadow-job submission; `ops serve` performs bounded, cache-first REST acquisition. See the [acquisition contract](engine/v2/ops/stores/massive/ARCHITECTURE.md).
+- **Massive daily snapshot — `python -m engine.v2.ops.massive_snapshot`.** A separate supervised offline job normalizes saved acquisition pins into a dedicated reconstructed native snapshot; research uses the data layer's existing bounded pinned reader. [Contract](engine/v2/ops/stores/massive/ARCHITECTURE.md#invariants).
 - **Shadow nightly coordination.** The operations trigger coordinates snapshot
   import, pinned planning, submission and bounded serving; preparation commands
   remain separate interfaces. It does not start the production legacy nightly.
@@ -600,7 +610,7 @@ Only a tracked path absent from the worktree reads as empty.
 
   The authenticated FastAPI API exposes `/api/v1/native_parity` and paginated
   `/api/v1/native_parity/mismatches` and `/api/v1/native_parity/unpaired` routes.
-  React currently presents the summary; row-level detail remains deferred. The
+  React presents the summary and a cursor-paged mismatch table (differing fields only); the unpaired view remains deferred. The
   operations listener has no native-parity HTML or JSON preview routes.
   The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
   records whole-package ownership, interfaces and its boundary with React;
