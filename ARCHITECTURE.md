@@ -109,6 +109,8 @@ evidence. See the models and data component contracts.
   `experiments.native_gate_entrypoint`. After the ops protocol's launch gate opens,
   its callback imports native pricing; ops never imports that adapter or research.
   The verified source closure includes both files; the receipt grants no recording authority.
+  `experiments.v2_gate` separately composes native preregistration, reconstructed-history
+  gate evaluation and the existing outcome/ledger lifecycle; its component contract owns timing.
   - `tools/oc_check.py` appends one best-effort JSONL line per run to
     `$OC_METRICS_DIR/oc_check.jsonl` (default `.oc_logs/oc_check.jsonl`, per worktree);
     its module docstring defines the fields and failure behavior.

@@ -112,6 +112,9 @@ the prediction outcome table cannot distinguish those event identities.
 `experiments.v2_gate_variant` consumes this population in sweep mode before
 fresh native replay, directly or through the smoke-only `native_gate_pricing`
 worker. Its no-report/no-ledger contract lives in `experiments/ARCHITECTURE.md`.
+`experiments.gate_report` separately composes population, observed calendar sessions,
+protected `event_history` and fresh replay for each fold's training/evaluation rows;
+its reconstructed date-ceiling and native publication contracts live in that same doc.
 `prediction_inputs.load_prediction_targets` consumes this population first,
 then scans each eligible ticker/event-date pair in pinned `computed_moves`.
 It returns the signed move, binary `positive_move` target, and
