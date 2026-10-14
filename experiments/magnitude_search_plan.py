@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
+from engine.v2.data.errors import DataError
 from engine.v2.foundation import (
     ArtifactError,
     artifact_reference,
@@ -18,6 +19,7 @@ from engine.v2.ops.native_registration import (
     magnitude_fitted_execution_document,
     validate_magnitude_fitted_execution,
 )
+from engine.v2.research.magnitude_fold_metadata import annual_fold
 from experiments.native_registration import verify_native_registration
 
 SCHEMA = "magnitude_search_plan.v1"
@@ -73,27 +75,14 @@ def _parameter(name, value):
             and (value >= 0 if name == "l2_regularization" else value > 0))
 
 
-def _fold(year, events):
-    evaluation = [event for event in events if event["event_date"][:4] == year]
-    if not evaluation:
-        raise ValueError
-    before = min(year + "-01-01", *(clock["source_session_ceiling"]
-                 for event in evaluation for clock in event["forecasts"]))
-    train = [event["event_id"] for event in events if event["event_date"] < before]
-    if not train:
-        raise ValueError
-    return {"year": year, "training_labels_before": before, "training_candidate_event_ids": train,
-            "evaluation_event_ids": [event["event_id"] for event in evaluation]}
-
-
 def _nested(binding, request):
     """Preserve annual event groups; inner scoring labels must predate outer fitting."""
     temporal = binding["magnitude_plan"]
     try:
-        expected = [_fold(year, temporal["events"]) for year in temporal["evaluation_years"]]
+        expected = [annual_fold(year, temporal["events"]) for year in temporal["evaluation_years"]]
         if expected != temporal["folds"]:
             raise ValueError
-    except ValueError:
+    except (DataError, ValueError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "outer fold metadata differs from its declared boundaries") from None
     if set(request["inner_years"]) != set(temporal["evaluation_years"]):
         raise fail("INVALID_EXPERIMENT_SPEC", "search inner years must cover every outer fold")
@@ -102,10 +91,10 @@ def _nested(binding, request):
         for outer in expected:
             members = set(outer["training_candidate_event_ids"])
             population = [event for event in temporal["events"] if event["event_id"] in members]
-            inner = [{**_fold(year, population), "evaluation_labels_before": outer["training_labels_before"]}
+            inner = [{**annual_fold(year, population), "evaluation_labels_before": outer["training_labels_before"]}
                      for year in request["inner_years"][outer["year"]]]
             nested.append({"outer": outer, "inner": inner})
-    except ValueError:
+    except DataError:
         raise fail("INVALID_EXPERIMENT_SPEC", "every search fold needs earlier training and evaluation candidates") from None
     return nested
 
@@ -170,7 +159,7 @@ def seal_search_plan(conn, store, registration, request):
     except ArtifactError as error:
         if error.code == "INTEGRITY_FAILED":
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed integrity verification") from None
-        raise
+        raise fail("RESOURCE_UNAVAILABLE", "search planning request could not be completed") from None
     return {"plan": plan, "plan_ref": to_document(ref)}
 
 
@@ -187,7 +176,7 @@ def read_search_plan(conn, store, registration, request, ref):
     except ArtifactError as error:
         if error.code == "INTEGRITY_FAILED":
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed integrity verification") from None
-        raise
+        raise fail("RESOURCE_UNAVAILABLE", "search planning request could not be completed") from None
     if raw != payload:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan differs from its complete binding")
     return expected

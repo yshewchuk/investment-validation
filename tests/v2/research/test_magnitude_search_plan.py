@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from engine.v2.contracts import ArtifactRef
+from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
+    ArtifactError,
     ArtifactStore,
     artifact_reference,
     canonical_json,
@@ -21,6 +23,8 @@ from engine.v2.ops.native_registration import (
     validate_magnitude_fitted_execution,
     validate_magnitude_history_execution,
 )
+from engine.v2.research import magnitude_folds
+from engine.v2.research.magnitude_fold_metadata import annual_fold
 from experiments import magnitude_search_plan as search
 from experiments import native_registration as native
 from experiments import v2_magnitude_search as cli
@@ -155,6 +159,50 @@ def _assert_candidates(plan):
     assert plan["candidate_count"] == 6 and plan["planned_fit_count"] == 60
 
 
+def test_public_fold_rule_is_shared_with_native_planning_without_changing_pinned_sources(source, monkeypatch):
+    original, calls = magnitude_folds._fold, []
+    def traced(year, events):
+        calls.append(year)
+        return original(year, events)
+    monkeypatch.setattr(magnitude_folds, "_fold", traced)
+    native_plan = magnitude_folds.plan_magnitude_folds(source.repository, source.snapshot,
+        as_of_month=MONTH, evaluation_years=["2024", "2025"], training_start="2022-01-01")
+    assert native_plan["folds"] == [fold["outer"] for fold in _expected_folds(source)]
+    assert calls == ["2024", "2025"]
+    _metadata_only(monkeypatch, source)
+    plan = search.seal_search_plan(source.conn, source.store, source.registration, _request())["plan"]
+    _assert_folds(source, plan)
+    assert calls == ["2024", "2025", "2024", "2025", "2023", "2023", "2024"]
+    public = "engine/v2/research/magnitude_fold_metadata.py"
+    assert public in plan["implementation"]["source_closure"]
+    assert public not in source.registration.document["source_closure"]
+    assert public not in source.build["context"]["producer"]["source_closure"]
+
+
+@pytest.mark.parametrize("events,message", [
+    ([], "every magnitude fold needs evaluation events"),
+    ([{"event_id": "evaluation", "event_date": "2024-06-12",
+       "forecasts": [{"source_session_ceiling": "2024-06-03"}]}],
+     "every magnitude fold needs training candidates"),
+])
+def test_public_fold_rule_preserves_exact_native_population_refusal(events, message):
+    with pytest.raises(DataError) as caught:
+        annual_fold("2024", events)
+    assert to_document(caught.value.problem) == _problem("POPULATION_COLLAPSED", message)
+
+
+@pytest.mark.parametrize("missing", ["evaluation", "training"])
+def test_shared_population_refusal_is_normalized_at_outer_reconstruction(source, missing):
+    binding = source.registration.document
+    events = binding["magnitude_plan"]["events"]
+    binding["magnitude_plan"]["events"] = [event for event in events
+        if (event["event_date"][:4] != "2024" if missing == "evaluation" else event["event_date"] >= "2024-01-01")]
+    with pytest.raises(OpsError) as caught:
+        search._nested(binding, _request())
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "outer fold metadata differs from its declared boundaries")
+
+
 def test_real_seal_verify_is_complete_metadata_only_idempotent_and_preserves_anchor(source, monkeypatch):
     opened = _metadata_only(monkeypatch, source)
     catalog, objects, anchor = _catalog(source.conn), _objects(source.store), source.registration.binding_json
@@ -216,7 +264,8 @@ def test_invalid_request_refuses_before_artifact_access(field, value, monkeypatc
     monkeypatch.setattr(search, "verify_native_registration", _forbid)
     with pytest.raises(OpsError) as caught:
         search.seal_search_plan(object(), object(), object(), request)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+    assert to_document(caught.value.problem) == _problem(
+        "INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
 
 
 @pytest.mark.parametrize("missing", list(_request()))
@@ -248,7 +297,8 @@ def test_invalid_axes_and_duplicate_numeric_values_refuse_before_expansion(axis,
     monkeypatch.setattr(search.itertools, "product", _forbid)
     with pytest.raises(OpsError) as caught:
         search.seal_search_plan(object(), object(), object(), request)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+    assert to_document(caught.value.problem) == _problem(
+        "INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
 
 
 @pytest.mark.parametrize("kind,axes", [
@@ -272,7 +322,9 @@ def test_budget_refusal_precedes_cartesian_expansion_and_publication(source, mon
     monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
     with pytest.raises(OpsError) as caught:
         search.seal_search_plan(source.conn, source.store, source.registration, request)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+    message = {"max_candidates": "search requires explicit valid axes, inner years and count caps",
+               "max_fits": "planned search fits exceed the explicit cap"}[cap]
+    assert to_document(caught.value.problem) == _problem("INVALID_EXPERIMENT_SPEC", message)
 
 
 def test_singleton_grid_with_admissible_caps_refuses_before_access(monkeypatch):
@@ -319,18 +371,21 @@ def test_outer_reconstruction_refuses_independently_changed_metadata(source, fie
         "EXPERIMENT_IDENTITY_CONFLICT", "outer fold metadata differs from its declared boundaries")
 
 
-@pytest.mark.parametrize("years", [
-    {"2024": ["2023"]}, {"2024": ["2023"], "2026": ["2024"]},
-    {"2024": ["2022"], "2025": ["2023", "2024"]},
-    {"2024": ["2021"], "2025": ["2023", "2024"]},
+@pytest.mark.parametrize("years,message", [
+    ({"2024": ["2023"]}, "search inner years must cover every outer fold"),
+    ({"2024": ["2023"], "2026": ["2024"]}, "search inner years must cover every outer fold"),
+    ({"2024": ["2022"], "2025": ["2023", "2024"]},
+     "every search fold needs earlier training and evaluation candidates"),
+    ({"2024": ["2021"], "2025": ["2023", "2024"]},
+     "every search fold needs earlier training and evaluation candidates"),
 ])
-def test_missing_or_empty_inner_folds_never_borrow_history_or_skip(source, monkeypatch, years):
+def test_missing_or_empty_inner_folds_never_borrow_history_or_skip(source, monkeypatch, years, message):
     request = _request()
     request["inner_years"] = years
     monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
     with pytest.raises(OpsError) as caught:
         search.seal_search_plan(source.conn, source.store, source.registration, request)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+    assert to_document(caught.value.problem) == _problem("INVALID_EXPERIMENT_SPEC", message)
 
 
 def test_canonical_order_detachment_and_distinct_declarations_are_not_a_reservation(source):
@@ -503,7 +558,8 @@ def test_rehashed_plan_drift_refuses_complete_reconstruction(source, field):
     before = _catalog(source.conn), _objects(source.store)
     with pytest.raises(OpsError) as caught:
         search.read_search_plan(source.conn, source.store, source.registration, _request(), ref)
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
@@ -555,7 +611,8 @@ def test_wrong_reference_schema_refuses_before_open(source, monkeypatch):
     monkeypatch.setattr(ArtifactStore, "read_verified", _forbid)
     with pytest.raises(OpsError) as caught:
         search.read_search_plan(source.conn, source.store, source.registration, _request(), ref)
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
 
 
 @pytest.mark.parametrize("field", ["artifact_id", "storage_key", "byte_size", "schema_version"])
@@ -594,7 +651,8 @@ def test_forged_metadata_schema_cannot_open_arbitrary_payload(source, monkeypatc
     monkeypatch.setattr(ArtifactStore, "read_verified", read)
     with pytest.raises(OpsError) as caught:
         search.read_search_plan(source.conn, source.store, source.registration, _request(), ref)
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
     assert opened and all(candidate.schema_ref == "native_experiment_registration.v1.5" for candidate in opened)
 
 
@@ -606,8 +664,8 @@ def test_unverifiable_installed_source_is_identity_refusal(source, monkeypatch, 
     monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
     with pytest.raises(OpsError) as caught:
         search.seal_search_plan(source.conn, source.store, source.registration, _request())
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
-    assert caught.value.problem.message == "search implementation sources cannot be verified"
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search implementation sources cannot be verified")
 
 
 def _problem(code, message, *, details=None):
@@ -645,6 +703,44 @@ def test_real_plan_byte_corruption_is_exact_nonretryable_library_and_cli_refusal
         path.chmod(0o444)
 
 
+def test_missing_plan_object_has_exact_resource_problem_without_publication(source, tmp_path, capsys, monkeypatch):
+    sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
+    ref = from_document(ArtifactRef, sealed["plan_ref"])
+    store = ArtifactStore(tmp_path / "registration-only")
+    store.publish_bytes(source.registration.binding_json, schema_ref="native_experiment_registration.v1.5")
+    assert not (store.root / ref.storage_key).exists()
+    before = _catalog(source.conn), _objects(store)
+    request, reference = tmp_path / "request.json", tmp_path / "reference.json"
+    request.write_text(json.dumps(_request()))
+    reference.write_text(json.dumps(sealed["plan_ref"]))
+    expected = _problem("RESOURCE_UNAVAILABLE", "search planning request could not be completed")
+    expected.update(category="resource", retryable=True)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
+    with pytest.raises(OpsError) as caught:
+        search.read_search_plan(source.conn, store, source.registration, _request(), ref)
+    assert to_document(caught.value.problem) == expected
+    args = _args(source, "verify", request, reference)
+    args[args.index("--store-root") + 1] = str(store.root)
+    assert cli.main(args) == 2
+    captured = capsys.readouterr()
+    assert not captured.err and json.loads(captured.out) == {"refused": expected}
+    assert (_catalog(source.conn), _objects(store)) == before
+
+
+@pytest.mark.parametrize("code", ["MISSING", "NOT_A_REGULAR_FILE", "UNSAFE_PATH"])
+def test_other_publication_artifact_failures_have_exact_resource_problem(source, monkeypatch, code):
+    before = _catalog(source.conn), _objects(source.store)
+    def broken(*args, **kwargs):
+        raise ArtifactError(code, "synthetic private detail")
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", broken)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(source.conn, source.store, source.registration, _request())
+    expected = _problem("RESOURCE_UNAVAILABLE", "search planning request could not be completed")
+    expected.update(category="resource", retryable=True)
+    assert to_document(caught.value.problem) == expected
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
 def test_changed_catalog_anchor_refuses_before_plan_publication(source, monkeypatch):
     monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
     before = _catalog(source.conn)
@@ -654,7 +750,8 @@ def test_changed_catalog_anchor_refuses_before_plan_publication(source, monkeypa
                             ("sha256:" + "0" * 64, source.registration.run_id))
         with pytest.raises(OpsError) as caught:
             search.seal_search_plan(source.conn, source.store, source.registration, _request())
-        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
+        assert to_document(caught.value.problem) == _problem(
+            "EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding")
     finally:
         source.conn.rollback()
     assert _catalog(source.conn) == before
