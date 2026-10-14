@@ -971,18 +971,25 @@ def test_main_exits_one_for_missed_then_zero_for_idle(tmp_path, monkeypatch, cap
 
 def test_main_records_the_submit_refusal_when_qualification_inputs_are_absent(
         tmp_path, monkeypatch, capsys):
-    """End-to-end production wiring: an unconfigured scheduled run builds the
-    real (blocked) plan in-process and records ``ops submit``'s typed refusal
-    as an ``error`` receipt -- it never bypasses the planned-population gate."""
+    """End-to-end production wiring: an unconfigured scheduled run (no
+    ``expected_population.json`` override) whose pinned snapshot's planning
+    window holds no earnings events refuses ``_snapshot_event_universe``'s
+    typed ``INVALID_REQUEST`` and records it as an ``error`` receipt -- it
+    never falls back to a plan built from an empty universe."""
     monkeypatch.setattr(nightly_trigger, "SystemClock", lambda: FakeClock(IN_WINDOW))
     monkeypatch.setattr(nightly_trigger, "_orats_probe",
                         lambda as_of, tickers: (True, "final"))
     # Cutover PR-7b-2: the wiring makes _submit_plan ensure the shadow snapshot
-    # BEFORE planning; this end-to-end test is about the plan/submit refusal on
-    # absent qualification inputs, not the snapshot import, so stub readiness --
-    # the flipped _default_plan literals then surface the typed refusal.
+    # BEFORE planning; this end-to-end test is about the universe derivation on
+    # absent qualification inputs, not the snapshot import, so stub readiness.
     monkeypatch.setattr(nightly_trigger, "_ensure_shadow_snapshot",
                         lambda root, as_of, clock, attempt: ("ready", "snap_stub"))
+    # The absent override means _prepare_default_plan reads the snapshot's own
+    # events; stand in for that read with the empty-window refusal it raises.
+    def no_events(root, as_of, clock, expected_shadow_snapshot_id):
+        raise fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's planning window")
+
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", no_events)
     code = nightly_trigger.main(["--as-of", AS_OF, "--root", str(tmp_path)])
     document = json.loads(capsys.readouterr().out.strip())
     assert code == 1 and document["status"] == "error"
@@ -1608,3 +1615,105 @@ def test_module_launcher_runs_main_in_a_subprocess():
     )
     assert done.returncode == 0, done.stderr
     assert "--as-of" in done.stdout and "--root" in done.stdout
+
+
+# --------------------------------------------------------------------------
+# 19. issue #471: _prepare_default_plan derives its universe from the snapshot
+# when the operator's expected_population.json override is absent
+# --------------------------------------------------------------------------
+
+
+def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_is_absent(
+        tmp_path, monkeypatch):
+    # The override file is absent, so the universe (and, with no explicit
+    # context, the context too) is exactly what snapshot_event_tickers returns
+    # off the same pinned head, then handed unchanged to _refresh_plan_prices
+    # and _default_plan.
+    events, refreshed = ("AAA", "BBB"), "snap_after_refresh"
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe",
+                        lambda root, as_of, clock, expected: events)
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices",
+                        lambda root, as_of, tickers, clock, expected:
+                        refreshed if tickers == events else _explode("wrong universe"))
+    monkeypatch.setattr(nightly_trigger, "_default_plan",
+                        lambda root, as_of, tickers, context, clock, *, full_run,
+                        expected_shadow_snapshot_id:
+                        (_explode("wrong context") if context != events
+                         or expected_shadow_snapshot_id != refreshed
+                         or not full_run or as_of != AS_OF else "plan_snap"))
+
+    assert (nightly_trigger._prepare_default_plan(
+        tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+        expected_shadow_snapshot_id="snap_before") == "plan_snap")
+    assert not (tmp_path / "reports" / "phase6" / "nightly_trigger"
+                / "expected_population.json").exists()  # the absent-override branch
+
+
+def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_snapshot(
+        tmp_path, monkeypatch):
+    # The override file is PRESENT, so it wins unchanged: snapshot_event_tickers
+    # is never consulted (a hard _explode proves it), and the existing
+    # refresh + _default_plan path continues with the file's own tickers.
+    document = _write_population(
+        tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    refreshed = "snap_from_override"
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices",
+                        lambda root, as_of, tickers, clock, expected:
+                        refreshed if tickers == ("AAA", "BBB") else _explode("wrong universe"))
+    monkeypatch.setattr(nightly_trigger, "_default_plan",
+                        lambda root, as_of, tickers, context, clock, *, full_run,
+                        expected_shadow_snapshot_id:
+                        (_explode("wrong context") if context != ("AAA", "BBB")
+                         or expected_shadow_snapshot_id != refreshed else "plan_override"))
+
+    assert (nightly_trigger._prepare_default_plan(
+        tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+        expected_shadow_snapshot_id="snap_before") == "plan_override")
+    assert document.is_file()
+
+
+@pytest.mark.parametrize("payload", [
+    "[]",                  # an empty list yields no ticker
+    "not json",            # an unreadable document is not a list
+    json.dumps({"a": 1}),  # a non-list document yields no ticker
+])
+def test_prepare_default_plan_refuses_an_override_that_yields_no_tickers(
+        tmp_path, monkeypatch, payload):
+    # Present-but-unusable (empty / unreadable / non-list): refuse
+    # INVALID_REQUEST rather than silently falling through to snapshot generation.
+    path = _write_population(tmp_path, [])
+    path.write_text(payload)
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._prepare_default_plan(
+            tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+            expected_shadow_snapshot_id="snap_before")
+    assert raised.value.code == "INVALID_REQUEST"
+    assert "yields no tickers" in raised.value.problem.message
+
+
+def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(tmp_path,
+                                                                                monkeypatch):
+    # An explicit --tickers selection (and its own context) still wins over both
+    # the override file and snapshot generation, and the snapshot universe
+    # helper is never consulted in that case either.
+    _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    refreshed = "snap_explicit"
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices",
+                        lambda root, as_of, tickers, clock, expected:
+                        refreshed if tickers == ("CCC", "DDD") else _explode("wrong universe"))
+    monkeypatch.setattr(nightly_trigger, "_default_plan",
+                        lambda root, as_of, tickers, context, clock, *, full_run,
+                        expected_shadow_snapshot_id:
+                        (_explode("wrong wiring") if tickers != ("CCC", "DDD")
+                         or context != ("CCC", "DDD", "EEE")
+                         or expected_shadow_snapshot_id != refreshed else "plan_explicit"))
+
+    assert (nightly_trigger._prepare_default_plan(
+        tmp_path, AS_OF, ("CCC", "DDD"), ("CCC", "DDD", "EEE"), FakeClock(IN_WINDOW),
+        expected_shadow_snapshot_id="snap_before") == "plan_explicit")

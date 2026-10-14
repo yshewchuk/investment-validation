@@ -663,17 +663,18 @@ def full_population(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
     The native nightly plan's own population document
     (``reports/phase6/nightly_trigger/expected_population.json``, a JSON list
-    of ``ticker|strategy|event_date`` keys) IS the full default population:
+    of ``ticker|strategy|event_date`` keys) is the full default population when present:
     every distinct ticker in it is both the watchlist and the historical
     evidence context, and the document is passed to the plan unchanged as
-    ``--expected-population``. The trigger takes no ticker-list argument, and
-    the document is not required for the trigger to run: without it the plan
-    still declares ``full_run=True``, and ``universe``/``context`` are both
-    empty, so ``commands._snapshot_inputs``/``pin_snapshot_inputs`` refuse at PLAN
-    time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
+    ``--expected-population`` (it is the explicit override and wins over snapshot
+    generation). The trigger takes no ticker-list argument, and the document is not
+    required for the trigger to run: absent, this function still returns ``((), ())``
+    (file-only read), while ``_prepare_default_plan`` derives the scheduled run's universe
+    from the shadow snapshot's own events via ``snapshot_event_tickers`` (issue #471)
+    instead of a plan-time ``INVALID_REQUEST`` refusal (Cutover PR-7b-2: before the
     ``input_mode="snapshot"`` flip, this same absent-population case built a
-    plan successfully and the refusal was ``ops submit``'s to make instead)
-    rather than the trigger silently scoring nothing.
+    plan successfully and the refusal was ``ops submit``'s to make instead).
+    ``main()`` is unchanged.
     """
     tickers = _population_tickers(_qualification_path(root, QUALIFICATION_POPULATION))
     return tickers, tickers
@@ -753,12 +754,63 @@ def _refresh_plan_prices(root, as_of, tickers, clock, expected_snapshot_id):
         conn.close()
 
 
+def _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id):
+    """The shadow snapshot's own event tickers, read once through the planning helper.
+
+    Opens the ops catalog, calls ``snapshot_event_tickers`` on the ``shadow`` scope's pinned
+    head (refusing ``INPUT_CHANGED`` if it moved vs ``expected_shadow_snapshot_id``), and
+    closes the connection in ``finally``. ``DataError``/empty-window refusals surface as the
+    helper's typed ``OpsError`` unchanged. Issue #471: the scheduled run's universe comes from
+    the snapshot, not from an operator file that may be absent.
+    """
+    from engine.v2.data.errors import DataError
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.snapshot_planning import snapshot_event_tickers
+
+    ops_root = _ops_root(root)
+    conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
+    try:
+        return snapshot_event_tickers(
+            conn, ArtifactStore(ops_root), "shadow", as_of=as_of, clock=clock,
+            expected_snapshot_id=expected_shadow_snapshot_id)
+    except DataError as exc:
+        raise fail("INPUT_CHANGED", "shadow snapshot events cannot be read for the universe",
+                   details={"data_code": exc.code}) from None
+    finally:
+        conn.close()
+
+
 def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=None, *,
                           full_run=True, expected_shadow_snapshot_id=None):
-    """The scheduled preparation uses the exact watchlist passed to planning."""
+    """The scheduled preparation uses the exact watchlist passed to planning.
+
+    Universe derivation (issue #471): if the operator's ``expected_population.json`` override
+    file is PRESENT (``_qualification_path`` not ``None``), it wins unchanged and
+    ``snapshot_event_tickers`` is never consulted; if present but yielding no tickers
+    (unreadable, non-list, or empty), refuse ``INVALID_REQUEST`` rather than silently falling
+    through to generation. If ABSENT and no ``tickers`` were passed, the universe is the
+    shadow snapshot's own event tickers (``snapshot_event_tickers`` on the same pinned head
+    ``expected_shadow_snapshot_id`` names; the catalog connection closes in ``finally``), and
+    that result is both ``universe`` and ``context``. The override file is NOT cross-checked
+    against the snapshot — the file wins, and the later score stage already refuses planned
+    keys with no observed row. The existing refresh + ``_default_plan`` path continues
+    unchanged (``_default_plan`` still passes ``expected_population=None`` when the file is
+    absent, so ``commands._planned_population`` generates the population from the same
+    snapshot's events).
+    """
     clock = clock or SystemClock()
-    universe = tuple(tickers) or _population_tickers(
-        _qualification_path(root, QUALIFICATION_POPULATION))
+    population_path = _qualification_path(root, QUALIFICATION_POPULATION)
+    universe = tuple(tickers)
+    if not universe:
+        if population_path is not None:
+            universe = _population_tickers(population_path)
+            if not universe:
+                raise fail("INVALID_REQUEST",
+                           "expected_population.json is present but yields no tickers; "
+                           "fix or remove it")
+        else:
+            universe = _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id)
     context = tuple(context_tickers) or universe
     if universe:
         expected_shadow_snapshot_id = _refresh_plan_prices(
@@ -782,13 +834,14 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     through ``commands._plan_command`` to ``pin_snapshot_inputs``; the scheduled
     caller has already refreshed and captured prices before this call.
     ``expected_population`` is the operator's population document when present
-    (``full_population`` derived
-    the universe from the same file); absent, ``universe``/``context`` are
-    both empty, and ``commands._snapshot_inputs``/``pin_snapshot_inputs`` now
-    refuse at PLAN time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
-    ``input_mode="snapshot"`` flip, this same absent-population case built a
-    plan successfully and the refusal was ``ops submit``'s to make instead).
-    ``input_manifest`` and ``year_start``/``year_end`` are derived fresh from
+    (``full_population`` derived the universe from the same file; it is the
+    explicit override and wins over snapshot generation); absent, ``_prepare_default_plan``
+    already derived ``universe``/``context`` from the shadow snapshot's own events via
+    ``snapshot_event_tickers`` (issue #471) before this call, so this path no longer sees an
+    empty universe just because the file is absent (the file itself stays absent, so
+    ``expected_population`` remains ``None`` and ``commands._planned_population`` generates
+    the population from the same snapshot's events). ``input_manifest`` and
+    ``year_start``/``year_end`` are derived fresh from
     ``as_of`` on every call (the manifest is captured and written per-``as_of``
     rather than read from one fixed filename, and the year span mirrors
     legacy's own scoring horizon) rather than being fixed constants.

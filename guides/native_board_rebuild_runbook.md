@@ -93,8 +93,10 @@ to the same tree later imported from `SOURCE_ROOT` (operator requirement, not lo
 
 6. Verify every readiness item below before starting the nightly trigger. `ops plan nightly --input-mode snapshot` now generates
    the population from the pinned snapshot (as_of to +35 days) when no `--expected-population` file is given; the scheduled trigger
-   still reads its universe from the hand-placed `reports/phase6/nightly_trigger/expected_population.json` (`nightly_trigger.py:652`),
-   until it generates one too (report step 13). Use a file for qualification: a generated population shares the scored snapshot's events, so it cannot detect a hole in them.
+   does the same: with `reports/phase6/nightly_trigger/expected_population.json` absent it takes its universe from the shadow
+   snapshot's events (`snapshot_event_tickers`) and the plan generates the population. A present file is an explicit override and wins
+   unchanged (an empty or unreadable file is refused `INVALID_REQUEST`, never ignored). Use a file for qualification: a generated
+   population shares the scored snapshot's events, so it cannot detect a hole in them.
 
 ## Proposed requirements R1–R6 (not current end-to-end guarantees)
 

@@ -58,7 +58,8 @@ from engine.v2.ops.snapshots import resolve_snapshot_head
 from engine.v2.registry.strategies import STRATEGY_IDS
 
 __all__ = ["GENERATED_HORIZON_DAYS", "REQUEST_SCHEMA_REF", "direct_scope_for",
-           "generated_population", "pin_snapshot_inputs", "scratch_estimate"]
+           "generated_population", "pin_snapshot_inputs", "scratch_estimate",
+           "snapshot_event_tickers"]
 
 REQUEST_SCHEMA_REF = "legacy_materialization_request.v1.0"
 #: Mirrors ``engine.dashboard.nightly.HORIZON_DAYS`` (as ``nightly_trigger._LEGACY_HORIZON_DAYS`` does);
@@ -109,11 +110,8 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
         # context universe) could only fail at execution, so refuse at plan time instead.
         raise fail("INVALID_REQUEST", "generated population needs the --tickers watchlist")
     try:
-        head = resolve_snapshot_head(conn, store, scope, clock=clock)
-        snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
-        if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
-            raise fail("INPUT_CHANGED",
-                       "the shadow snapshot head moved since it was verified for this session")
+        snapshot = _resolve_scope_snapshot(conn, store, scope, clock=clock,
+                                           expected_snapshot_id=expected_snapshot_id)
         repository = Repository(conn, store)
         requests = scan_forward_board_requests(
             repository, snapshot, as_of=as_of,
@@ -136,6 +134,55 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
                    details={"as_of": str(as_of), "horizon_days": GENERATED_HORIZON_DAYS,
                             "candidate_exclusions": list(evidence)})
     return population, snapshot.snapshot_id, evidence
+
+
+def _resolve_scope_snapshot(conn, store, scope, *, clock, expected_snapshot_id=None):
+    """Resolve ``scope``'s head once, load its ``SnapshotRef`` and refuse a moved head.
+
+    Shared by :func:`generated_population` and :func:`snapshot_event_tickers` (issue #471):
+    same head resolution, same ``SnapshotRef`` load, same ``INPUT_CHANGED`` refusal when
+    ``expected_snapshot_id`` is given and differs, so both callers pin the plan to one snapshot.
+    """
+    head = resolve_snapshot_head(conn, store, scope, clock=clock)
+    snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
+    if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
+        raise fail("INPUT_CHANGED",
+                   "the shadow snapshot head moved since it was verified for this session")
+    return snapshot
+
+
+def snapshot_event_tickers(conn, store, scope, *, as_of, clock,
+                           expected_snapshot_id: str | None = None) -> tuple[str, ...]:
+    """The sorted distinct tickers of every board request in ``scope``'s pinned snapshot's
+    own planning window (``as_of`` .. ``as_of + GENERATED_HORIZON_DAYS``): the event-ticker
+    universe :func:`generated_population` later restricts to its watchlist. Resolves the scope
+    head exactly once (same head resolution and ``SnapshotRef`` load as
+    :func:`generated_population`) and calls
+    ``scan_forward_board_requests(..., tickers=None)`` — the same single scan and the same
+    35-day window, never a second enumeration. Pure snapshot read: no provider or network call.
+
+    Failure semantics: a missing/unreadable snapshot head or events table, or a head that
+    moved vs ``expected_snapshot_id``, is ``INPUT_CHANGED`` with ``details.data_code`` (the
+    reader's ``DataError`` mapped like :func:`generated_population`'s); zero events in the
+    window is ``INVALID_REQUEST`` with ``details`` ``as_of`` and ``horizon_days``. Does not
+    filter by the carried set: the later ``generated_population`` call already filters
+    uncarried tickers and records their exclusions. An unreadable override file is not this
+    function's concern (the caller refuses that). """
+    try:
+        snapshot = _resolve_scope_snapshot(
+            conn, store, scope, clock=clock, expected_snapshot_id=expected_snapshot_id)
+        repository = Repository(conn, store)
+        requests = scan_forward_board_requests(
+            repository, snapshot, as_of=as_of,
+            horizon_days=GENERATED_HORIZON_DAYS, tickers=None)
+    except DataError as exc:
+        raise fail("INPUT_CHANGED", "snapshot events cannot be read for the event tickers",
+                   details={"data_code": exc.code}) from None
+    tickers = tuple(sorted({request.ticker for request in requests}))
+    if not tickers:
+        raise fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's planning window",
+                   details={"as_of": str(as_of), "horizon_days": GENERATED_HORIZON_DAYS})
+    return tickers
 
 
 def scratch_estimate(repository, store, request) -> int:
