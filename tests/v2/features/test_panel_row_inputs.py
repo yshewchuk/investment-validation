@@ -1091,6 +1091,10 @@ def _implied_row(day, move, skipped, **overrides):
 
 @pytest.mark.parametrize("admitted,mean,n,implied,expected", [
     (True, 2.0, 2, 5.0, 3.0),
+    (True, 1.5, 3, 5.0, 2.375),   # (1.5*3 + 5.0) / (3 + 1) = 9.5 / 4
+    (True, 10.0, 4, 0.0, 8.0),    # (10.0*4 + 0.0) / (4 + 1) = 40.0 / 5
+    (True, -2.0, 2, 7.0, 1.0),    # (-2.0*2 + 7.0) / (2 + 1) = 3.0 / 3
+    (True, 0.5, 1, 0.25, 0.375),  # (0.5*1 + 0.25) / (1 + 1) = 0.75 / 2
     (True, None, 0, 4.0, 4.0),
     (True, 2.0, 2, None, 2.0),
     (True, None, 0, None, None),
@@ -1217,6 +1221,23 @@ def test_40_row_missing_an_implied_key_refuses():
     assert exc.value.problem.details == {
         "table_name": COMPUTED_MOVES_TABLE_NAME,
         "missing_columns": ["n_prior_implied"]}
+
+
+def test_40b_row_missing_implied_keys_unions_across_rows_sorted():
+    batches = _default_batches()
+    earlier = _implied_row("2024-01-05", 1.0, False, admitted=True)
+    del earlier["event_ordinal"]
+    del earlier["implied_move_pct"]
+    later = _implied_row("2024-01-10", 1.0, False, admitted=True)
+    del later["n_prior_implied"]
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = [earlier, later]
+    with pytest.raises(DataError) as exc:
+        _scan(batches=batches)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {
+        "table_name": COMPUTED_MOVES_TABLE_NAME,
+        "missing_columns": sorted(["event_ordinal", "implied_move_pct", "n_prior_implied"])}
+
 
 
 @pytest.mark.parametrize("overrides,field", [
