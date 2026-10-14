@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import pathlib
 import threading
 import time
 
@@ -930,3 +931,77 @@ def test_republish_after_write_catalog_oserror(tmp_path, monkeypatch):
     resolved = deployment.resolve_release(store, "cand1")
     assert dataclasses.replace(resolved, release_id="prior1") == deployment.resolve_release(store,
                                                                                             "prior1")
+
+
+def test_carry_forward_prefers_named_prior_over_staged_decoy(tmp_path):
+    chosen_id = "release-2026-09-a"
+    inventory, chosen_body = _stage_prior(tmp_path, release_id=chosen_id, deployment_id="d1",
+                                          binding_id="b1")
+    decoy_names = {member_id: "decoy.bin"
+                   for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID,
+                                     UNRELATED_MEMBER_ID)}
+    _, decoy_body = _stage_prior(tmp_path, release_id="prior1", deployment_id="d9",
+                                 binding_id="b9", prior_names=decoy_names,
+                                 prior_sources={"pool_cutoff": "2026-08-01"})
+    args = _valid_derive_args(tmp_path, expected_prior_release_id=chosen_id)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+
+    path = assembly.carry_forward_release(tmp_path, prior_release_id=chosen_id, release_id="cand1",
+                                          inventory=inventory, **_carry_kwargs(args))
+    first_bytes = path.read_bytes()
+    catalog = phase5_release._read_catalog(path, "cand1")
+    assert catalog["sources"]["carried_from"] == chosen_id
+    assert catalog["deployment_id"] == "d1"
+    assert _prior_row(catalog, UNRELATED_MEMBER_ID) == _prior_row(chosen_body, UNRELATED_MEMBER_ID)
+    assert _prior_row(catalog, UNRELATED_MEMBER_ID) != _prior_row(decoy_body, UNRELATED_MEMBER_ID)
+
+    store = phase5_release.deployment_root(tmp_path)
+    resolved = deployment.resolve_release(store, "cand1")
+    chosen_model = deployment.resolve_release(store, chosen_id)
+    decoy_model = deployment.resolve_release(store, "prior1")
+    assert dataclasses.replace(resolved, release_id=chosen_id) == chosen_model
+    assert dataclasses.replace(resolved, release_id=chosen_id) != decoy_model
+
+    again = assembly.carry_forward_release(tmp_path, prior_release_id=chosen_id, release_id="cand1",
+                                           inventory=inventory, **_carry_kwargs(args))
+    assert again == path
+    assert again.read_bytes() == first_bytes
+
+
+def _deny_reads_of(monkeypatch, target):
+    real = pathlib.Path.read_bytes
+
+    def guarded(self):
+        if str(self) == str(target):
+            raise PermissionError("denied")
+        return real(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", guarded)
+
+
+_READ_FAILURE_CASES = (
+    ("supplied-pool", assembly.POOL_MEMBER_IDS[0], "OBJECT_UNVERIFIED"),
+    ("chooser", assembly.CHOOSER_MEMBER_ID, "OBJECT_UNVERIFIED"),
+    ("prior-model", None, "PRIOR_MISMATCH"),
+)
+
+
+@pytest.mark.parametrize("label, member_id, code", _READ_FAILURE_CASES,
+                         ids=[case[0] for case in _READ_FAILURE_CASES])
+def test_read_failure_classification(tmp_path, monkeypatch, label, member_id, code):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    if label == "prior-model":
+        prior = deployment.resolve_release(store, "prior1")
+        target = store / prior.bindings[0].members[0].path
+    else:
+        target = _object_path(tmp_path, _supplied_by_member(args)[member_id])
+    _deny_reads_of(monkeypatch, target)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == code
+    assert not _candidate_path(tmp_path).exists()
+    assert not deployment._manifest_path(store, "cand1").exists()
