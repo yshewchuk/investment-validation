@@ -171,9 +171,10 @@ identities and availability, omitted-history reasons, snapshot/dataset/month/
 membership-version/cutoff pins and their deterministic history digest.
 The `research_event_history.v2` identity also binds `read_inputs`: every decoded
 candidate object, including skipped/unavailable labels omitted from arithmetic.
-No cache, automatic retry, transaction, write or partial return occurs. This
-library seam has no supervisor, provider, market-price, report or ledger caller;
-production panel reads and final-read authority remain unchanged.
+No cache, automatic retry, transaction, write or partial return occurs.
+The reader performs no supervisor dispatch, provider/market-price access or
+publication; `experiments.gate_report` consumes it for fold-local exploratory
+reporting. Production panel reads and final-read authority remain unchanged.
 
 `magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
 pure contract over native `CalendarSessions`: horizons are five, three or one

@@ -43,7 +43,8 @@ def _spec(alpha=0.0, arm="candidate", **changes):
 
 
 def _source(tmp_path, *, delayed=None, missing_quotes=False, calendar_start="2020-12-01",
-            runup=False, test_quote_shift=0.0, rejected=False, early_january=False):
+            runup=False, test_quote_shift=0.0, rejected=False, early_january=False,
+            feature_driver=None, break_even=False):
     conn, clock, store = catalog_and_store(tmp_path)
     days = ["2021-02-02", "2021-05-04", "2022-02-02", "2022-05-04",
             "2023-02-02", "2023-05-04", "2024-02-02", "2024-05-02"]
@@ -58,9 +59,19 @@ def _source(tmp_path, *, delayed=None, missing_quotes=False, calendar_start="202
         eligible[4] = _event(days[4], ticker="AFTER")
     if rejected:
         eligible.append(_event("2023-06-01", ticker="NEW"))
+    history = []
+    if feature_driver:
+        eligible = [_event((pd.Timestamp(f"{2022 + i // 4}-02-02") + pd.offsets.BDay(i % 4)).date().isoformat(),
+                           ticker=f"T{i}") for i in range(8)]
+        # Independent quadrants: equal counts with different means, and vice versa.
+        counts, means = [1, 1, 2, 2] * 2, [2.0, 8.0, 2.0, 8.0] * 2
+        history = [(_event(day, ticker=event["ticker"]), mean)
+                   for event, count, mean in zip(eligible, counts, means, strict=True)
+                   for day in ("2021-02-02", "2021-05-04")[:count]]
     protected = [_event("2022-03-02", protected=True), _event("2024-12-02")]
-    events = eligible + protected
+    events = eligible + [event for event, _ in history] + protected
     moves = [_move(event, 2.0 * (index + 1)) for index, event in enumerate(eligible)]
+    moves += [_move(event, mean) for event, mean in history]
     moves += [_move(event, None) for event in protected]
     if delayed:
         moves[delayed[0]]["available_as_of_date"] = delayed[1]
@@ -75,6 +86,11 @@ def _source(tmp_path, *, delayed=None, missing_quotes=False, calendar_start="202
         if rejected and index == 8:
             exit_call = (9.0, 9.4)
         exit_put = (0.2, 0.6) if index in (0, 3) else (1.4, 1.8) if index == 1 else (2.0, 2.4)
+        if feature_driver:
+            positive = counts[index] == 2 if feature_driver == "n_prior" else means[index] == 8.0
+            exit_call, exit_put = ((3.0, 3.4), (2.0, 2.4)) if positive else ((0.2, 0.6), (0.2, 0.6))
+        if break_even and index == 1:
+            exit_call, exit_put = (2.4, 2.8), (1.4, 1.8)
         if index >= 4:
             exit_call = tuple(value + test_quote_shift for value in exit_call)
         for stamp, call, put in ((entry_day, (2.0, 2.4), (1.0, 1.4)), (exit_day, exit_call, exit_put)):
@@ -96,7 +112,7 @@ def _source(tmp_path, *, delayed=None, missing_quotes=False, calendar_start="202
         ref = contract_ref_for(contract)
         for row in rows:
             partition = str(row[contract.partition_columns[0]])
-            piece = row["event_date"] if name == "computed_moves" else "all"
+            piece = (row["ticker"], row["event_date"]) if name == "computed_moves" else "all"
             groups.setdefault((partition, piece), []).append(row)
         records = [publish_and_inspect(store, contract, ref,
             sorted(group, key=lambda row: tuple(row[key] for key in contract.primary_key)), partition)
@@ -181,6 +197,47 @@ def test_real_history_fold_features_scores_and_provenance(source):
             assert "holdout_exclusions" not in history
             assert all(item["target_available_on"] <= row["feature_ceiling"] for item in history["history"])
             assert all(item["object_id"] and item["content_hash"].startswith("sha256:") for item in history["read_inputs"])
+
+
+@pytest.mark.parametrize("feature,expected", [
+    ("n_prior", [0, 0, 1, 1]), ("mean_prior_abs_move", [0, 1, 0, 1]),
+])
+def test_real_multiticker_histories_require_each_fitted_feature(tmp_path, feature, expected):
+    source = _source(tmp_path, feature_driver=feature)
+    try:
+        # Historical events supply features but are not enrolled training trades.
+        spec, registered = _register(source, replace(_spec(), folds=("2023",)),
+            event_ids=[event["event_id"] for event in source.events])
+        result = gate.gate_result(source.repository, registered, spec)
+        fold = result["folds"][0]
+        for key in ("train_history", "test_history"):
+            assert [row["model_values"] for row in fold[key]] == [[1.0, 2.0], [1.0, 8.0], [2.0, 2.0], [2.0, 8.0]]
+        assert fold["training_labels"] == expected
+        # Only the named feature can make pure leaves. Dropping it makes every score 1/2.
+        assert fold["threshold"] == 0.5
+        assert [row["event_id"] for row in result["predictions"]] == [event["event_id"] for event in source.events[4:]]
+        assert [row["score"] for row in result["predictions"]] == expected
+        assert [row["selected"] for row in result["predictions"]] == [bool(value) for value in expected]
+        assert result["selected"] == {"count": 2, "mean_mark_pnl": pytest.approx(1.2)}
+    finally:
+        source.conn.close()
+
+
+def test_break_even_training_trade_is_negative_and_keeps_fold_probabilities(tmp_path):
+    source = _source(tmp_path, break_even=True)
+    try:
+        spec, registered = _register(source, replace(_spec(), folds=("2023",)))
+        result = gate.gate_result(source.repository, registered, spec)
+        fold = result["folds"][0]
+        assert fold["training_cashflows"][1] == {"event_id": source.events[1]["event_id"],
+            "entry_cost": pytest.approx(3.8), "exit_value": pytest.approx(3.8), "pnl": 0.0}
+        assert fold["training_labels"] == [0, 0, 1, 0]
+        # The first two histories form a zero-success leaf; the other leaf has 1/2 successes.
+        assert fold["threshold"] == 0.25
+        assert [row["score"] for row in result["predictions"]] == [0.5, 0.5]
+        assert [row["selected"] for row in result["predictions"]] == [True, True]
+    finally:
+        source.conn.close()
 
 
 def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, capsys, monkeypatch):
