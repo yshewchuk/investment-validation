@@ -28,7 +28,10 @@ Neither candidate currently supplies native `option_chains` bytes.
   `option_chains` table is produced by legacy code (`engine/data/normalize/n_chains.py`, fed by
   `strikes` pulls) and reaches v2 through legacy materialization.
 - Massive pinned acquisitions (`massive_plan.DATASETS = ("daily", "splits", "dividends")`) are stock
-  daily aggregates and corporate actions. Massive has no option-chain dataset in this repo.
+  daily aggregates and corporate actions. Massive has no option-chain acquisition in this repo. A recorded probe (2026-08-30, Polygon naming,
+  `engine/data/normalize/n_option_daily.py`) found the plan covers option daily aggregates,
+  reference and snapshots, while trades, quotes and intraday bars return NOT_AUTHORIZED, so
+  there is no bid/ask. Whether the current Massive account matches that probe is unconfirmed.
 
 So "which provider supplies the marker" is really "which provider gets a native option-chain
 acquisition path". Massive would need a new dataset (and plan, quota and pin work) first.
@@ -47,7 +50,7 @@ acquisition path". Massive would need a new dataset (and plan, quota and pin wor
    row", not that each ticker's strike/expiry chain is complete. A completed-empty ticker cannot be
    told from an unpublished one, because empty 2xx is mapped to not-final.
 3. **Clock.** `data_raw_receipts.received_at` is sampled from `SystemClock` at acquisition
-   (`_fetch_unit` in `data/incremental.py`), and that `cache_raw_receipt` call passes no
+   (`_fetch_unit` in `engine/v2/data/incremental.py`), and that `cache_raw_receipt` call passes no
    `fence_check`, so these raw receipts are not attempt-fenced (snapshot publication fencing is a
    separate step). It is a "bytes first seen by" time, not a provider "complete as of" time or a
    post-publication attestation. It bounds raw-byte observation only and cannot upper-bound
@@ -83,7 +86,9 @@ acquisition path". Massive would need a new dataset (and plan, quota and pin wor
 4. **Slice 1.** Add an options dataset to `massive_plan`, request descriptor, page validation and
    an empty-domain rule, then reuse the existing acquisition/pin machinery. Larger than ORATS
    slice 1 despite the reuse: roughly 200+ code lines, likely needing a split, and it depends on
-   the Massive plan tier offering options data (**unknown**, a cost and entitlement question).
+   the probed entitlement (daily aggregates yes; trades, quotes and intraday no). Option B therefore
+   lacks bid/ask, so it cannot replace ORATS chain quotes; whether a chain-level completion marker
+   exists stays **unknown**.
 5. **Gaps/risks.** Same retroactive gap (reconstructed snapshots "prove neither historical
    availability nor source finality", per the ops architecture note). New vendor surface for the
    most important table. Switching `option_chains` source changes price semantics and would need
@@ -94,7 +99,7 @@ acquisition path". Massive would need a new dataset (and plan, quota and pin wor
 | Option | What it buys | Cost / risk |
 |---|---|---|
 | A. ORATS | Same source as the existing table; no semantics change | No known marker; slice 1 is blocked on provider research; may end as ratio-based and so not genuine |
-| B. Massive | Cleanest receipts, fencing, pinning and clock already built | No option-chain dataset yet; entitlement unknown; source change for `option_chains` |
+| B. Massive | Cleanest receipts, fencing, pinning and clock already built | No option-chain dataset yet; probed plan has no bid/ask; source change for `option_chains` |
 | C. Neither (keep closed) | Zero false admission; honest status | Non-shadow callers stay blocked; cutover critical path unmoved |
 
 ## Recommendation (mine)
