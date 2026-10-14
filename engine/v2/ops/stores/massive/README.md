@@ -10,15 +10,15 @@ Validate requests, reuse verified raw bytes/intervals, coordinate a bounded prov
 
 ## Non-responsibilities
 
-Research admission, normalization, snapshots and provider entitlement verification.
+Research admission, corporate-action normalization, parent-snapshot refresh and provider entitlement verification.
 
 ## Public interface
 
-Internal ops modules `acquisition`, `coverage`, `journal` and `pages`; no cross-package research API.
+Internal ops modules `acquisition`, `coverage`, `journal`, `pages` and `snapshot`; research uses the data layer's bounded pinned reader.
 
 ## Consumers
 
-`engine.v2.ops.massive_acquire`, `engine.v2.ops.stages`, `engine.v2.ops.worker`, `tools.v2_massive_plan`.
+`engine.v2.ops.massive_acquire`, `engine.v2.ops.massive_snapshot`, `engine.v2.ops.stages`, `engine.v2.ops.worker`, `tools.v2_massive_plan`.
 
 ## Usage
 
@@ -28,6 +28,8 @@ After verifying account access and data-use terms, initialize an ops root with t
 python -m engine.v2.ops.massive_acquire --root ROOT --idempotency-key REQUEST_ID --ticker EXAMPLE --dataset daily --start 2026-08-01 --end 2026-08-31 --as-of 2026-10-12 --adjustment raw
 python -m engine.v2.ops --root ROOT serve
 ```
+
+Both submitters honor `INVESTING_PLAN_ROOT` for implementation fingerprinting; `--root` remains the ops store. If selecting a different source tree, launch `ops serve` from that tree too. The supervisor refuses different source bytes with `INPUT_CHANGED` before starting a worker.
 
 Use `splits` or `dividends` for corporate actions; adjustment remains explicit. One job reserves one call even if cached. A new idempotency key authorizes a distinct job; the same key and request returns the existing job. The Basic policy is versioned, not a live subscription probe. This implementation supports only one-day stock bars: second, minute, hour, week, month, quarter and year aggregate intervals are excluded, as are S3 flat files; this is implementation scope, not a claim about live entitlement. Storage/throughput sizing requires a bounded authorized pilot, not extrapolation here.
 
@@ -41,6 +43,22 @@ python -m tools.v2_massive_plan --catalog ROOT/catalog.sqlite --store-root ROOT 
 Planning is bounded/read-only; its HTTP count is a cap, not an exact page estimate. A missing occurrence may still be promotable from a verified exact raw hit under `initial`. The worker replans at execution; the completed result pins original receipts. New generations are acquisition namespaces, not coherent adjustment snapshots. Daily, split and dividend generation ranges must end before the observation's Eastern calendar day. Early cached observations fail once with `INTEGRITY_FAILED`; choose an explicit new generation to acquire fresh evidence. Later announcements/corrections still require explicit refresh.
 Each generation plan reports `candidate_count` against `candidate_limit` (100): intersecting occurrences for that family/generation, including overlapping candidates that lose selection. This is not a page or binding count. A 101st candidate refuses unchanged with `RESOURCE_LIMIT_EXCEEDED`; narrower date scopes can still plan. The read-only planner may show a bounded candidate set whose remaining gaps cannot fit. Before any gap fetch or raw-only adoption, the worker refuses if candidates plus remaining gaps exceed 100; each gap needs one completion slot even when paginated. Existing evidence remains unchanged. A new generation can deliberately reacquire evidence; it does not compact or migrate the old generation.
 Partial chains and empty responses never create interval coverage. Same-job retries recover verified page prefixes without refetching committed pages; only terminal complete chains become reusable intervals. Completed gaps survive a failed job, but resubmitting the same key does not restart it. Choose a distinct key only when authorizing a new bounded operation; it cannot inherit the failed job's partial chain or reset its allowance.
+
+## Daily native snapshot
+
+After a `massive_history_acquisition` daily job succeeds, submit its immutable
+output for separate network-free normalization:
+
+```sh
+python -m engine.v2.ops.massive_snapshot --root ROOT --acquisition-job job_EXAMPLE --idempotency-key daily-snapshot-1
+```
+
+Run it through `ops serve`. Its `snapshot_ref.v1.0` result pins `massive_daily.v1`
+with explicit price basis and original page provenance. Use `Repository.scan`
+with that snapshot ID, table contract, ticker predicate and explicit row/batch
+bounds; no live head or provider lookup belongs in research. This first slice
+creates a dedicated data-only snapshot; it does not update `price_history.v3`,
+construct targets or claim historical availability. Corporate actions follow later.
 
 ## Testing
 

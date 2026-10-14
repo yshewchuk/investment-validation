@@ -139,11 +139,18 @@ def _generic_problem(exc: BaseException):
         details={"exception_type": type(exc).__name__, "location": _last_frame(exc)})
 
 
-def dispatch(worker, parameters, root, *, envelope=None):
-    envelope = envelope or {}
+def _dispatch_massive(worker, parameters, root, envelope):
     if worker == "massive_acquisition":
         from engine.v2.ops.stores.massive.acquisition import run
-        return run(parameters, root, envelope)
+    else:
+        from engine.v2.ops.stores.massive.snapshot import run
+    return run(parameters, root, envelope)
+
+
+def dispatch(worker, parameters, root, *, envelope=None):
+    envelope = envelope or {}
+    if worker in ("massive_acquisition", "massive_daily_snapshot"):
+        return _dispatch_massive(worker, parameters, root, envelope)
     if worker in ("incremental_refresh", "computed_moves_refresh",
                   "forward_calendar_refresh"):
         return _dispatch_refresh(worker, parameters, root)

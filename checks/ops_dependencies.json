@@ -1,7 +1,7 @@
 {
   "levels": {"entry": 5, "runtime": 4, "workflows": 3, "stores": 2, "legacy": 1, "native": 1, "providers": 1, "core": 0},
   "packages": {
-    "entry": ["", "__main__", "cli", "massive_acquire"],
+    "entry": ["", "__main__", "cli", "massive_acquire", "massive_snapshot"],
     "core": ["bootstrap", "catalog", "checkpoints", "core", "core.snapshot_contracts",
       "decision_replay", "decision_validation", "diagnostics", "discovery", "errors",
       "executor_cgroup", "executor_watchdog", "fingerprints", "input_bindings", "lifecycle", "migrations", "outbox", "parity", "plans",
@@ -14,7 +14,7 @@
       "legacy_adapter", "materialization_worker", "render_inputs", "snapshot_roots", "snapshot_stages"],
     "stores": ["calendar_moves_jobs", "computed_moves_store", "forward_calendar_store", "incremental_data", "massive_plan", "pinned_partition_reader",
       "price_history_store", "reclaim", "refresh_staging", "snapshot_import", "snapshot_planning", "snapshot_promotion", "snapshots", "stores",
-      "native_registration", "stores.refresh_contracts", "stores.massive", "stores.massive.acquisition", "stores.massive.coverage", "stores.massive.journal", "stores.massive.pages", "unit_receipts"],
+      "native_registration", "stores.refresh_contracts", "stores.massive", "stores.massive.acquisition", "stores.massive.coverage", "stores.massive.journal", "stores.massive.pages", "stores.massive.pinned", "stores.massive.snapshot", "unit_receipts"],
     "native": ["carried_set", "native", "native.input_decoding", "native.parity_inputs", "native_board_universe", "native_parity_report", "native_runup_inputs", "native_score_batch", "native_score_batch_types", "native_shadow_render", "nightly_calendar_inputs",
       "nightly_quote_rows", "nightly_raw_row_producer", "nightly_raw_rows", "source_availability"],
     "providers": ["providers", "providers.massive", "providers.massive_policy", "providers.nasdaq_calendar", "providers.orats_daily_market", "providers.yfinance_edge"]

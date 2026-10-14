@@ -2,13 +2,15 @@
 
 ## Purpose
 
-Store-tier owner of explicit US-stock daily OHLCV, split or dividend acquisition under the versioned Basic policy. Exact mode preserves the one-request contract; generation mode adds refresh, interval reuse and bounded continuation recovery. No research read, normalization, snapshot publication or fallback provider.
+Store-tier owner of explicit US-stock daily OHLCV, split or dividend acquisition under the versioned Basic policy, plus daily-only native snapshots from saved acquisition pins. Exact mode preserves the one-request contract; generation mode adds refresh, interval reuse and bounded continuation recovery. No research target construction or fallback provider.
 
 ## Interfaces and dependencies
 
 `acquisition` owns parameters, validation, both job kinds and `run`; `coverage` owns occurrence identity and bounded interval planning; `journal` owns immutable page progress; `pages` validates row scope, credential-free continuations and closed-local-day eligibility. `ops.massive_acquire` submits; `stages` registers; `worker.dispatch` invokes `run`. `massive_plan` owns canonical requests/policy/exact cache validation, `provider_budget` admission/accounting, `lifecycle` fences, and `data.incremental.cache_raw_receipt` raw persistence. `providers.massive` owns the fixed HTTPS edge; `providers.massive_policy` owns the shared 16 MiB response limit imported directly by `pages` and the edge.
 
 ## Inputs and outputs
+
+Both submitters fingerprint shared `engine.paths.ROOT` through the declared ops adapter: `INVESTING_PLAN_ROOT` applies at engine startup, otherwise the imported checkout is used. CLI `--root` selects only the ops catalog. Missing selected source refuses without checkout fallback. Execution must use matching source bytes: ordinary `ops serve` fingerprints its own imported tree, not the override; it never loads another tree implicitly.
 
 One strict ticker/dataset/date/adjustment scope, policy version and expected request hash; a fixed source account and one reserved call. CLI and worker refuse `as_of` after the current UTC date before storage, preventing future-dated scopes from caching bars-so-far as complete. Valid symbols are uppercased before deduplication and request identity; daily response symbols compare case-insensitively. Existing uppercase request identities are unchanged; old lowercase raw keys are not migrated or silently aliased. Trusted executor context supplies the catalog, object store and attempt/fence, never submission paths. The standalone submitter requires an initialized catalog and creates only a shadow job; `ops serve` executes it later.
 Success writes `massive_acquisition.v1`: request hash, raw receipt/hash, first receipt time, this job's observation time, attempt/fence, cache-hit flag, HTTP-attempt count and policy identity. Every success produces this job output, including cache hits, so `no_work` is false. Supervisor completion publishes this output under its ordinary fence. A raw hit proves verified response bytes, not normalized coverage, entitlement, EOD finality or historical knowledge.
@@ -27,6 +29,25 @@ Explicit `generation` selects `massive_history_acquisition`: a plain namespace, 
 
 ## Invariants
 
+`snapshot` owns the separately submitted `massive_daily_snapshot` job. Its sole
+declared dependency is a successful history-acquisition job; the supervisor binds
+that job's committed output once. The worker verifies the original artifact,
+producer identity and saved complete mosaic, then rechecks only its original
+occurrence/page/raw evidence. It never replans against newer catalog coverage.
+Normalization uses `data.massive_daily`; page-specific clocks/receipts survive
+pagination and clipped overlap selection. Input artifacts are capped at 4 MiB,
+selected occurrences/pages at their existing bounds, total raw verification and
+decoding at 64 MiB each, and normalized output at 1,000 rows. No provider budget
+or network edge is involved. Supervisor resource limits still apply.
+The acquisition artifact, normalizer and contract define a dedicated immutable
+scope. `snapshots.commit_snapshot_for_attempt` atomically bootstraps its only
+table, receipt and head under a live fence and None/0 head expectation. An exact
+prior committed receipt resolves its original snapshot under the current live
+fence, recovering a postcommit crash without rebuilding or moving a head. A
+different existing head refuses. Cross-job checkpoint reuse is disabled.
+Snapshot failures return no successful worker result; an earlier atomic commit
+survives and is verified on retry. See Failure semantics. No parent/mixed-table refresh.
+
 - Account admission serializes this producer's jobs. The worker rechecks the exact cache after admission; verified hits consume zero HTTP attempts/charges but still require an available account reservation. Cross-job checkpoint reuse is disabled; raw receipts are the only fetch cache.
 - Exact mode has one attempt. Generation mode has at most 101 supervised attempts and acquires at most one page of one gap per attempt, without sleeping in the worker. Before each HTTP call, the fenced budget transaction sums this job/account's used calls across all reservations, including released attempts, and enforces its cumulative cap. No client retries/redirects; crashes do not refund uncertain calls. Versioned pacing/backoff remains account-wide; it does not police other clients or prove socket-send spacing after arbitrary stalls. Without quota observations, `remaining` is conservative local accounting and `uncertain=1` persists after success without itself refusing admission.
 - The edge requests identity encoding only, rejects other encodings, and bounds response bytes and whole-request duration. No token-bearing URL, provider error body, response headers or exception text is persisted. Credential echoes refuse before caching. Body-policy refusals preserve observed HTTP 200 accounting; only transport/deadline failures use transient accounting.
@@ -37,10 +58,16 @@ Explicit `generation` selects `massive_history_acquisition`: a plain namespace, 
 
 ## Failure semantics
 
-No refusal emits a success artifact or invents whole-scope coverage. Completed gaps survive a later failure. Generation mode retries retryable failures under the supervisor with a 13-second delay even when uncharged, plus account backoff; attempt exhaustion can stop before the HTTP cap. Invalid cached observations fail once. Same-key submission only reattaches; generic `resume` does not reset terminal jobs. A new key is separately authorized work with a new cap, never continuation of the old budget.
+No refusal returns a successful worker result or invents whole-scope coverage. Completed acquisition gaps survive a later failure. Generation acquisition retries retryable failures under the supervisor with a 13-second delay even when uncharged, plus account backoff; attempt exhaustion can stop before the HTTP cap. Snapshot jobs have three attempts with 1/2-second retry backoff. Invalid cached observations fail once. Same-key submission only reattaches; generic `resume` does not reset terminal jobs. A new acquisition key is separately authorized work with a new cap, never continuation of the old budget.
 
 | Condition | Outcome |
 |---|---|
+| Submitter's selected implementation source lacks a required file | `INPUT_CHANGED` before job submission; no checkout fallback. |
+| Supervisor's source tree differs from the submitted implementation fingerprint | `INPUT_CHANGED` before child launch; no provider access or snapshot publication. |
+| Snapshot: malformed saved pin or row; unusable raw/native artifact evidence, including artifact-store refusals | `INTEGRITY_FAILED`; terminal. |
+| Snapshot: artifact, raw verification/decoding or row bound exceeded | `RESOURCE_LIMIT_EXCEEDED`. |
+| Snapshot: empty selected rows | `SOURCE_EMPTY`. |
+| Snapshot: SQLite/OS error or head CAS conflict without an exact committed receipt | `RESOURCE_UNAVAILABLE`; a commit preceding output failure remains recoverable. |
 | Invalid scope, future `as_of`, policy, identity, account, dependencies, trusted context or parameters | `INVALID_REQUEST` before provider access; validation precedes storage. |
 | Exact-cache lookup lacks `data_raw_receipts` (exact mode or initial-generation first-page acquisition) | `VALIDATION_FAILED` before HTTP; no migration. |
 | Generation CLI/worker evidence lookup queries an absent occurrence, page or raw-receipt table | `RESOURCE_UNAVAILABLE`; no migration or general schema preflight. Gap-only planning need not read raw/page tables. |

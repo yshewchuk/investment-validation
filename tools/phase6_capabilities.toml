@@ -572,6 +572,20 @@ notes = "S9H adds the native per-event analog view: GET /analogs.json?release_id
 # ------------------------------------------------------------- operations
 
 [[row]]
+id = "operations-massive-daily-snapshot"
+evidence = "cli:engine.v2.ops.massive_snapshot"
+area = "operations"
+capability = "Publish daily OHLCV from saved acquisition pins as a native snapshot"
+old = []
+new = ["cli:engine/v2/ops/massive_snapshot.py", "py:engine/v2/ops/stores/massive/snapshot.py::run"]
+producer = "massive_daily_snapshot supervised kind"
+identity = "Acquisition artifact, normalizer and contract; reconstructed native snapshot"
+tests = ["tests/v2/ops/test_massive_snapshot.py"]
+disposition = "native"
+owner = "P6-2"
+notes = "Explicit bounded offline normalization, original page provenance and live-fenced first-snapshot commit. Existing bounded Repository reads; no provider access, historical-availability claim, corporate-action normalization or parent refresh."
+
+[[row]]
 id = "operations-massive-acquisition"
 evidence = "cli:engine.v2.ops.massive_acquire"
 area = "operations"
