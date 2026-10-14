@@ -1081,24 +1081,37 @@ def test_snapshot_event_universe_is_the_real_wrapper_closing_its_catalog_connect
     # helper gets the pinned head / scope / horizon inputs, its tuple comes back unchanged,
     # and the connection closes in finally -- the seam _prepare_default_plan itself calls.
     from engine.v2.data.errors import fail as data_fail
+    from engine.v2.foundation import ArtifactStore
     from engine.v2.ops import bootstrap, snapshot_planning
     from engine.v2.ops.errors import fail as ops_fail
 
-    closed, calls = [], []
+    closed, calls, opened = [], [], []
 
     class _TrackingConn(_DummyConn):
         def close(self):
             closed.append(True)
             return super().close()
 
-    monkeypatch.setattr(bootstrap, "open_catalog",
-                        lambda *a, **k: calls.append(("open", a, k)) or _TrackingConn())
+    def fake_open_catalog(*a, **k):
+        calls.append(("open", a, k))
+        # The catalog path, computed here independently of _ops_root.
+        assert Path(a[0]) == tmp_path / "data" / "operations" / "catalog.sqlite"
+        conn = _TrackingConn()
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(bootstrap, "open_catalog", fake_open_catalog)
     # _snapshot_event_universe imports the helper at call time, so patch it where the
     # local ``from ... import snapshot_event_tickers`` resolves it -- on the helper's module.
+    def fake_snapshot_event_tickers(conn, store, scope, *, as_of, clock, expected_snapshot_id):
+        assert conn is opened[-1]  # the very connection open_catalog returned, unchanged
+        assert isinstance(store, ArtifactStore)
+        assert store.root == tmp_path / "data" / "operations"
+        calls.append(("helper", scope, as_of, clock, expected_snapshot_id))
+        return ("AAA", "BBB")
+
     monkeypatch.setattr(snapshot_planning, "snapshot_event_tickers",
-                        lambda conn, store, scope, *, as_of, clock, expected_snapshot_id:
-                        calls.append(("helper", scope, as_of, clock, expected_snapshot_id))
-                        or ("AAA", "BBB"))
+                        fake_snapshot_event_tickers)
 
     result = nightly_trigger._snapshot_event_universe(
         tmp_path, AS_OF, _CLOCK, "snap_pinned")
@@ -1722,11 +1735,13 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
     events, refreshed = ("AAA", "BBB"), "snap_after_refresh"
 
     def fake_snapshot_event_universe(root, as_of, clock, expected):
+        assert root == tmp_path  # the caller's own root, forwarded unchanged
         assert as_of == AS_OF  # the plan's as_of, never the clock's calendar date
         assert expected == "snap_before"  # the incoming pin, unchanged
         return events
 
     def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert root == tmp_path  # the caller's own root, forwarded unchanged
         assert as_of == AS_OF  # the plan's as_of, never the clock's calendar date
         assert expected == "snap_before"  # the incoming pin, unchanged
         return refreshed if tickers == events else _explode("wrong universe")
@@ -1750,6 +1765,41 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
                 / "expected_population.json").exists()  # the absent-override branch
 
 
+def test_prepare_default_plan_keeps_the_callers_context_when_the_universe_is_the_snapshot(
+        tmp_path, monkeypatch):
+    # No population file and no explicit --tickers: the universe is the snapshot's own
+    # event tickers, but a supplied context is PRESERVED -- the snapshot's tickers never
+    # overwrite it, and _default_plan gets the two distinct tuples unchanged.
+    def fake_snapshot_event_universe(root, as_of, clock, expected):
+        assert root == tmp_path  # the caller's own root, forwarded unchanged
+        assert as_of == AS_OF
+        assert expected == "snap_before"  # the incoming pin, unchanged
+        return ("AAA", "BBB")
+
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe",
+                        fake_snapshot_event_universe)
+    refreshed = "snap_with_context"
+
+    def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert root == tmp_path
+        assert expected == "snap_before"  # the incoming pin, unchanged
+        return refreshed if tickers == ("AAA", "BBB") else _explode("wrong universe")
+
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", fake_refresh_plan_prices)
+    monkeypatch.setattr(nightly_trigger, "_default_plan",
+                        lambda root, as_of, tickers, context, clock, *, full_run,
+                        expected_shadow_snapshot_id:
+                        (_explode("wrong wiring") if tickers != ("AAA", "BBB")
+                         or context != ("XXX", "YYY")
+                         or expected_shadow_snapshot_id != refreshed else "plan_context"))
+
+    assert (nightly_trigger._prepare_default_plan(
+        tmp_path, AS_OF, (), ("XXX", "YYY"), FakeClock(IN_WINDOW),
+        expected_shadow_snapshot_id="snap_before") == "plan_context")
+    assert not (tmp_path / "reports" / "phase6" / "nightly_trigger"
+                / "expected_population.json").exists()  # the absent-override branch
+
+
 def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_snapshot(
         tmp_path, monkeypatch):
     # The override file is PRESENT, so it wins unchanged: snapshot_event_tickers
@@ -1761,6 +1811,7 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     refreshed = "snap_from_override"
 
     def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert root == tmp_path  # the caller's own root, forwarded unchanged
         assert expected == "snap_before"  # the incoming pin, unchanged
         return refreshed if tickers == ("AAA", "BBB") else _explode("wrong universe")
 
@@ -1811,6 +1862,7 @@ def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(
     refreshed = "snap_explicit"
 
     def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert root == tmp_path  # the caller's own root, forwarded unchanged
         assert expected == "snap_before"  # the incoming pin, unchanged
         return refreshed if tickers == ("CCC", "DDD") else _explode("wrong universe")
 

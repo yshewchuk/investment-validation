@@ -57,6 +57,7 @@ def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_ticke
     # One head resolve (clock + expected id), EXACTLY one scan with tickers=None (never a
     # restricted watchlist), the fixed 35-day horizon, and the result de-duplicated and sorted.
     resolved, resolve_args = [], []
+    conn, store = object(), object()  # sentinels: identity-checked against the helper's own args
 
     def fake_resolve(*args, **kwargs):
         resolve_args.append(args)
@@ -75,7 +76,7 @@ def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_ticke
     monkeypatch.setattr(snapshot_planning, "scan_forward_board_requests", fake_scan)
 
     result = snapshot_planning.snapshot_event_tickers(
-        _DummyConn(), object(), "shadow", as_of=_AS_OF, clock=_CLOCK,
+        conn, store, "shadow", as_of=_AS_OF, clock=_CLOCK,
         expected_snapshot_id="snap_pinned")
 
     assert result == expected
@@ -83,6 +84,8 @@ def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_ticke
                            "horizon_days": _HORIZON, "tickers": None}]  # exactly one scan
     assert scan_calls[0]["as_of"] == _AS_OF  # the scan's own window start
     assert resolved == [{"clock": _CLOCK, "expected_snapshot_id": "snap_pinned"}]
+    assert resolve_args[0][0] is conn  # the caller's own connection, unchanged
+    assert resolve_args[0][1] is store  # the caller's own store, unchanged
     assert resolve_args[0][2] == "shadow"  # the head was resolved for this scope
 
 

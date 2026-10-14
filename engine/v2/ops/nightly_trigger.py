@@ -828,7 +828,9 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
 
     ``full_run=True`` is the native nightly plan's full-population option and
     is always declared for a scheduled run, so the plan's effect scope is the
-    global ``shadow`` scope, never a slice. ``input_mode`` is always
+    global ``shadow`` scope, never a slice (a generated population with
+    carried-set exclusions gets subset effects instead, see nightly.py).
+    ``input_mode`` is always
     ``"snapshot"`` and ``snapshot_scope`` is always ``"shadow"`` (Cutover
     PR-7b): the shadow nightly's plan always reads a pinned snapshot of the
     ``shadow`` scope, never the legacy live store directly.
@@ -837,8 +839,10 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     caller has already refreshed and captured prices before this call.
     ``expected_population`` is the operator's population document when present
     (``full_population`` derived the universe from the same file; it is the
-    explicit override and wins over snapshot generation); absent, ``_prepare_default_plan``
-    already derived ``universe``/``context`` from the shadow snapshot's own events via
+    explicit override and wins over snapshot generation); absent,
+    ``_prepare_default_plan`` already derived ``universe``/``context`` (when
+    no explicit caller tickers/context_tickers were supplied) from the shadow
+    snapshot's own events via
     ``snapshot_event_tickers`` (issue #471) before this call, so this path no longer sees an
     empty universe just because the file is absent (the file itself stays absent, so
     ``expected_population`` remains ``None`` and ``commands._planned_population`` generates
