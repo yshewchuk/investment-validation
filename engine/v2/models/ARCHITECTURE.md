@@ -43,8 +43,8 @@ gets fit — see its own package doc reference in the root index. Nothing in
 `engine/v2/models` reads a live panel, calls `.fit()`, or writes
 `registry.json`.
 
-An automated nightly append cycle for the pool/residual/cutoff artifacts:
-design only, not yet implemented — see #192.
+An automated nightly append cycle for the pool/residual/cutoff artifacts: release
+assembly is §2.1; the stage worker and tick sidecar are design only — see #192.
 
 ## 2. Primary contracts and public interfaces
 
@@ -104,8 +104,40 @@ size check. Existing callers omitting the ceiling retain their read contract.
 | Object at/below the ceiling | Existing byte-hash, canonical-hash and typed validation apply |
 | Cache, retry, transaction, partial write | Existing per-loader content-hash cache; no retries or writes; failure returns no partial state |
 
-`carry_forward_release`, `derive_catalog`: design only, not yet
-implemented — see #192.
+### 2.1 Pool release assembly (#192 slice 2)
+
+`checks/phase5_release_assembly.py` (the catalog lives in `checks/phase5_release.py`,
+so the helper sits beside it):
+
+- `derive_catalog(prior_catalog, *, release_id, expected_prior_release_id, outputs, chooser, cutoff) -> dict`
+  — pure. Returns the candidate catalog body: the six pool members
+  (`driver_residual_pool:{size,implied_t1,runup_move}`, `paired_residual_pool`,
+  `trailing_pnl_cutoff`, `board_analog_matcher`) and `chooser_analog_pool` get
+  the supplied objects; every other member row is copied unchanged;
+  `sources.pool_cutoff` advances to `cutoff`.
+- `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
+  — verifies the prior staged release and every supplied object on disk, re-stages
+  the prior model bindings unchanged under the new `release_id`
+  (`deployment.stage_release`), then writes the candidate catalog. It never
+  touches `DEPLOYED`.
+
+Both refuse with `ReleaseAssemblyRefusal.code` (stable): `PRIOR_MISMATCH` (prior
+catalog malformed, wrong id, a pool/chooser row missing or not `STAGED`, or no
+`sources.pool_cutoff`), `POOL_SET_MISMATCH` (outputs are not exactly the six
+members once each, or a malformed hash), `CUTOFF_MISMATCH` (an output or the
+chooser disagrees with `cutoff`), `CHOOSER_MISMATCH` (wrong member id),
+`CUTOFF_NOT_ADVANCED` (`cutoff` is not strictly after the prior's),
+`OBJECT_UNVERIFIED` (object missing or its bytes do not hash to the claim),
+`ID_CONFLICT` (candidate id equals the prior's, or already exists with different content).
+
+| Rule | Behaviour |
+|---|---|
+| R1 verified input | Prior release, each output, chooser row, identities, hashes and cutoff validated before any write |
+| R2 cache | None; the prior catalog, staged manifest and objects are re-read each call |
+| R3 retry | Repeatable only with the same validated inputs; no fallback to old pools or live registries |
+| R4 transaction | Writes only under the new candidate id; objects are content-addressed |
+| R5 partial failure | Orphaned objects or a staged manifest without a catalog may remain; no catalog, no candidate, nothing promoted |
+| R6 idempotency | Identical inputs give identical catalog bytes (no clock in the catalog); same id with different content refuses `ID_CONFLICT` |
 
 ## 3. Inputs
 
