@@ -46,8 +46,8 @@ Native experiment registration also exposes these existing submodule APIs:
 execution policy with an explicit evaluation-label cutoff) and
 `native_registration.validate_magnitude_execution` (pure closed-envelope validation).
 Stored history additionally exposes `native_registration.magnitude_history_request`;
-`magnitude_history_execution_document` and `validate_magnitude_history_execution`
-seal/check v1.4. `magnitude_fitted_execution_document` and `validate_magnitude_fitted_execution`
+`native_registration.magnitude_history_execution_document` and `native_registration.validate_magnitude_history_execution`
+seal/check v1.4. `native_registration.magnitude_fitted_execution_document` and `native_registration.validate_magnitude_fitted_execution`
 seal/check v1.5 recipes owned by registration, without importing training.
 These constructors/validators do not grant read authority.
 They compose one resolved plan, source/environment binding and primary catalog
