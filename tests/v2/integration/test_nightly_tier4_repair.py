@@ -132,6 +132,51 @@ def test_repair_budget_reports_the_complete_detail_string(monkeypatch):
     assert finalized == [], "an over-budget repair is refused before finalizing"
 
 
+def test_repair_at_exactly_the_budget_succeeds(monkeypatch):
+    """The budget check is ``>``, so exactly TIER4_REPAIR_BUDGET_S is accepted."""
+    from engine.dashboard import nightly
+
+    monkeypatch.setattr(nightly, "TIER4_REPAIR_BUDGET_S", 100)
+
+    def fake_rebuild_tables(tables, **kwargs):
+        return _result({})
+
+    finalized = []
+    readings = iter([0, 100.0])
+    report = _report()
+
+    repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings),
+                      finalize=finalized.append)
+
+    repair = report.steps["tiers"]["tier4_repair"]
+    assert repair["ran"] is True, "exactly-on-budget repair is not refused"
+    assert repair["elapsed_s"] == 100.0
+    assert len(finalized) == 1, "the on-budget repair is finalized once"
+
+
+def test_repair_just_over_the_budget_raises(monkeypatch):
+    """One tick past the budget crosses the ``>`` check and stops the run."""
+    from engine.dashboard import nightly
+
+    monkeypatch.setattr(nightly, "TIER4_REPAIR_BUDGET_S", 100)
+
+    def fake_rebuild_tables(tables, **kwargs):
+        return _result({})
+
+    finalized = []
+    readings = iter([0, 100.001])
+    report = _report()
+
+    with pytest.raises(NightlyStop) as caught:
+        repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings),
+                          finalize=finalized.append)
+
+    assert caught.value.step == "tier4_repair"
+    assert caught.value.detail.startswith("TIER4_REPAIR_BUDGET: ")
+    assert finalized == [], "a just-over-budget repair is refused before finalizing"
+    assert "tier4_repair" not in report.steps["tiers"]
+
+
 def test_the_helper_finalizes_a_gap_free_incremental_result_once():
     report = _report()
     calls = []
@@ -775,3 +820,72 @@ def test_run_nightly_refused_repair_writes_no_snapshot_with_calendar_names(
     assert finalize_calls == [], "neither the refresh nor the tiers result finalizes"
     assert marker_writes == []
     assert not _marker(tmp_path).exists(), "a refused repair leaves no SNAPSHOT"
+
+
+# --------------------------------------------------------------------------
+# the REAL refresh_calendar_data's finalize plumbing
+# --------------------------------------------------------------------------
+
+
+class _StubFetchRecord:
+    """A minimal ``Fetcher`` record: not from cache, one synthetic row."""
+
+    from_cache = False
+
+    def json(self):
+        return {"data": [{"ticker": "AAA"}]}
+
+
+class _StubFetcher:
+    """A ``Fetcher`` stand-in for refresh_calendar_data's own ORATS calls."""
+
+    def __init__(self):
+        self.calls = []
+
+    def fetch(self, source, endpoint, params, **kwargs):
+        self.calls.append((source, endpoint, params))
+        return _StubFetchRecord()
+
+
+def test_real_refresh_calendar_data_forwards_finalize_to_the_rebuild(monkeypatch):
+    """The REAL refresh_calendar_data delegates its ``finalize`` flag to rebuild().
+
+    Every network/IO dependency below the real function's own signature is
+    stubbed — the forward-calendar pull, the history backfill, the recently-
+    printed lookup, the chain pull and the ``Fetcher`` — so the only behaviour
+    under test is the ``finalize`` plumbing into ``engine.data.rebuild.rebuild``.
+    """
+    from engine.dashboard import nightly
+    from engine.data.pulls import forward_calendar
+
+    monkeypatch.setattr(
+        forward_calendar, "refresh_forward_calendar",
+        lambda *a, **k: SimpleNamespace(as_dict=lambda: {"stub": True}))
+    monkeypatch.setattr(nightly, "backfill_ticker_history",
+                        lambda *a, **k: {"calls": 0})
+    monkeypatch.setattr(nightly, "_recently_printed", lambda as_of, tickers: [])
+    monkeypatch.setattr(nightly, "refresh_forward_chains",
+                        lambda *a, **k: {"calls": 0})
+
+    recorded = []
+
+    class _RebuildResult:
+        snapshot = "snap-1"
+        elapsed_s = 1.5
+
+    def fake_rebuild(tables, **kwargs):
+        recorded.append(kwargs.get("finalize"))
+        return _RebuildResult()
+
+    monkeypatch.setattr("engine.data.rebuild.rebuild", fake_rebuild)
+
+    fetcher = _StubFetcher()
+    out = nightly.refresh_calendar_data(
+        ["AAA"], "2026-10-13", fetcher=fetcher, finalize=False)
+
+    assert recorded == [False], "finalize=False must reach the rebuild"
+    assert out["rebuild"] == {"snapshot": "snap-1", "elapsed_s": 1.5}
+
+    nightly.refresh_calendar_data(["AAA"], "2026-10-13", fetcher=fetcher)
+
+    assert recorded == [False, True], "the default finalize=True reaches the rebuild"
