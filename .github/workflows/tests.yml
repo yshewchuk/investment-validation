@@ -82,7 +82,9 @@ jobs:
     name: tests (${{ matrix.shard }})
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 45, not 25 (2026-10-14): a 6-car merge train's research shard needs ~40 min;
+    # single PRs take 10-18. Follow-up on the combined slowdown is tracked separately.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
