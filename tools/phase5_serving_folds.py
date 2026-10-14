@@ -1,4 +1,4 @@
-"""Offline size-fold declaration from bounded cache bytes and registered policy.
+"""Offline role-specific fold declarations from bounded bytes and registered policy.
 
 The descriptor is preparation metadata, not a runtime loader or inference view.
 Legacy cache decoding stays outside the native model package.
@@ -12,9 +12,13 @@ import re
 from dataclasses import dataclass
 from datetime import date
 
+from engine.v2.foundation import from_document, to_document
 from engine.v2.models import ArtifactMember, ModelRelease
-from engine.v2.models.deployment import StagedManifest
-from engine.v2.models.serving_folds import ServingFoldDescriptor, SizeFoldPolicy
+from engine.v2.models.deployment import StagedManifest, semantic_release_hash
+from engine.v2.models.serving_folds import (
+    ChooserFoldPolicy, ChooserServingFoldDescriptor, ServingFoldDescriptor, SizeFoldPolicy,
+    chooser_fold_outputs,
+)
 
 MAX_FOLD_BYTES = 32 * 1024 * 1024
 
@@ -31,9 +35,38 @@ class ValidatedSizeFold:
     release: ModelRelease
 
 
+@dataclass(frozen=True)
+class ValidatedChooserFold:
+    """Validated chooser metadata; never reuses a size descriptor or retains arrays."""
+
+    fold_start: str
+    decision_clock_id: str
+    digest: str
+    pool_count: int
+    policy: ChooserFoldPolicy
+    release: ModelRelease
+
+
 def preflight_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
                         release: ModelRelease) -> ValidatedSizeFold:
     """Pure authoring validation of bounded bytes against a release; refuse with fixed messages."""
+    return _preflight_fold(data, name, policy, release, role="size",
+                           output="forecast_abs_move", interval_policy="size-heldout-deciles.v1",
+                           result_type=ValidatedSizeFold)
+
+
+def preflight_chooser_fold(data: bytes, name: str, policy: ChooserFoldPolicy,
+                           release: ModelRelease) -> ValidatedChooserFold:
+    try:
+        policy = from_document(ChooserFoldPolicy, to_document(policy))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid chooser serving policy") from exc
+    output, _column = chooser_fold_outputs(policy.role)
+    return _preflight_fold(data, name, policy, release, role=policy.role, output=output,
+                           interval_policy="chooser-heldout-deciles.v1", result_type=ValidatedChooserFold)
+
+
+def _preflight_fold(data, name, policy, release, *, role, output, interval_policy, result_type):
     if len(data) > MAX_FOLD_BYTES:
         raise ValueError("serving fold exceeds byte limit")
     if (not isinstance(policy.panel_sha256, str)
@@ -41,16 +74,16 @@ def preflight_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
             or not policy.feature_order
             or any(not isinstance(key, str) or not key for key in policy.feature_order)
             or len(set(policy.feature_order)) != len(policy.feature_order)
-            or policy.interval_policy != "size-heldout-deciles.v1"
+            or policy.interval_policy != interval_policy
             or (policy.interval_floor is not None
                 and (type(policy.interval_floor) not in (int, float)
                      or not math.isfinite(policy.interval_floor)))):
-        raise ValueError("invalid size serving policy")
-    bindings = [b for b in release.bindings if b.role == "size" and b.strategy_id == "*"]
+        raise ValueError(f"invalid {role} serving policy")
+    bindings = [b for b in release.bindings if b.role == role and b.strategy_id == "*"]
     if (len(bindings) != 1 or bindings[0].model_id != policy.model_id
             or bindings[0].feature_order != policy.feature_order
-            or bindings[0].output_names != ("forecast_abs_move",)):
-        raise ValueError("size serving policy disagrees with release binding")
+            or bindings[0].output_names != (output,)):
+        raise ValueError(f"{role} serving policy disagrees with release binding")
     try:
         import joblib
 
@@ -82,28 +115,33 @@ def preflight_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
             raise ValueError("invalid paired arrays")
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("invalid serving fold held-out pool") from exc
-    return ValidatedSizeFold(fold_start=fold.isoformat(),
+    return result_type(fold_start=fold.isoformat(),
                              decision_clock_id=bindings[0].decision_clock_id,
                              digest=hashlib.sha256(data).hexdigest(), pool_count=len(pools[0]),
                              policy=policy, release=release)
 
 
-def _descriptor_from_validated(validated: ValidatedSizeFold,
-                               manifest: StagedManifest) -> ServingFoldDescriptor:
+def _descriptor_from_validated(validated: ValidatedSizeFold | ValidatedChooserFold,
+                               manifest: StagedManifest) -> ServingFoldDescriptor | ChooserServingFoldDescriptor:
     """Trusted construction from retained validated metadata; refuses a different staged release."""
-    if manifest.release != validated.release:
+    if semantic_release_hash(manifest.release) != semantic_release_hash(validated.release):
         raise ValueError("staged release disagrees with validated fold")
-    return ServingFoldDescriptor(
+    descriptor, extra = ServingFoldDescriptor, {}
+    if isinstance(validated, ValidatedChooserFold):
+        output, column = chooser_fold_outputs(validated.policy.role)
+        descriptor, extra = ChooserServingFoldDescriptor, {"output_name": output, "producer_output": column}
+    return descriptor(
         parent_release_id=manifest.release.release_id, parent_release_hash=manifest.release_hash,
         policy=validated.policy, fold_start=validated.fold_start,
         decision_clock_id=validated.decision_clock_id,
         estimator=ArtifactMember(name="estimator", path=f"objects/{validated.digest}",
                                  content_hash=f"sha256:{validated.digest}"),
-        pool_count=validated.pool_count)
+        pool_count=validated.pool_count, **extra)
 
 
-def descriptor_from_preflight(validated: ValidatedSizeFold, policy: SizeFoldPolicy,
-                              manifest: StagedManifest) -> ServingFoldDescriptor:
+def descriptor_from_preflight(validated: ValidatedSizeFold | ValidatedChooserFold,
+                              policy: SizeFoldPolicy | ChooserFoldPolicy,
+                              manifest: StagedManifest) -> ServingFoldDescriptor | ChooserServingFoldDescriptor:
     """Describe staged folds only under the exact validated policy; no independent substitution."""
     if policy != validated.policy:
         raise ValueError("descriptor policy disagrees with validated fold")

@@ -69,9 +69,11 @@ from engine.v2.foundation import CONTENT_HASH_PREFIX, to_document  # noqa: E402
 from engine.v2.models import deployment  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease  # noqa: E402
 from engine.v2.models.releases import ModelReleaseInventory  # noqa: E402
-from engine.v2.models.serving_folds import SizeFoldPolicy  # noqa: E402
+from engine.v2.models.serving_folds import ChooserFoldPolicy, SizeFoldPolicy, chooser_fold_outputs  # noqa: E402
 from tools.phase5_pinned_panel import COPY_PREFIX, PinnedPanelContext, verify_panel_copy  # noqa: E402
-from tools.phase5_serving_folds import describe_size_fold, descriptor_from_preflight, preflight_size_fold  # noqa: E402
+from tools.phase5_serving_folds import (  # noqa: E402
+    describe_size_fold, descriptor_from_preflight, preflight_chooser_fold, preflight_size_fold,
+)
 
 JOBLIB_ADAPTER = "joblib-estimator.v1"
 #: Output name per role for the frozen binding, following the Phase 4 native
@@ -104,6 +106,7 @@ class StateBuild:
     payloads: dict[str, bytes]  # object name -> bytes
     detail: str
     size_fold_policy: SizeFoldPolicy | None = None
+    chooser_fold_policy: ChooserFoldPolicy | None = None
 
 
 # --------------------------------------------------------------------------
@@ -302,9 +305,15 @@ def tier4_fold_payloads(tier4_dir: Path, model_ids: Mapping[str, str], snapshot:
 
 def build_states(available_payloads: Mapping[str, Mapping[str, bytes]],
                  notes: Mapping[str, str] | None = None, *,
-                 size_fold_policy: SizeFoldPolicy | None = None) -> list[StateBuild]:
+                 size_fold_policy: SizeFoldPolicy | None = None,
+                 chooser_fold_policies: Mapping[str, ChooserFoldPolicy] | None = None) -> list[StateBuild]:
     """One build row per catalog state: STAGED, MISSING or PENDING, never skipped."""
     notes = notes or {}
+    chooser_fold_policies = dict(chooser_fold_policies or {})
+    for role, policy in chooser_fold_policies.items():
+        chooser_fold_outputs(role)
+        if not isinstance(policy, ChooserFoldPolicy) or policy.role != role:
+            raise PrepareRefused("chooser fold policy role disagrees with member")
     builds = []
     for spec in STATE_SPECS:
         payloads = dict(available_payloads.get(spec.member_id, {}))
@@ -319,6 +328,9 @@ def build_states(available_payloads: Mapping[str, Mapping[str, bytes]],
     for build in builds:
         if build.spec.member_id == "tier4_folds:size":
             build.size_fold_policy = size_fold_policy
+        for role, policy in chooser_fold_policies.items():
+            if build.spec.member_id == f"tier4_folds:{role}":
+                build.chooser_fold_policy = policy
     return builds
 
 
@@ -369,6 +381,28 @@ def _destination_digest(path: Path) -> str | None:
         return None
 
 
+def _chooser_preflight(release, states, panel_identity=None):
+    validated = {}
+    for build in states:
+        policy = build.chooser_fold_policy
+        if policy is None:
+            continue
+        if (not isinstance(policy, ChooserFoldPolicy)
+                or build.spec.member_id != f"tier4_folds:{policy.role}"):
+            raise PrepareRefused("chooser fold policy role disagrees with member")
+        if panel_identity is not None and policy.panel_sha256 != panel_identity["panel_copy_sha256"]:
+            raise PrepareRefused("chooser fold policy does not match the pinned panel")
+        for name, data in sorted(build.payloads.items()):
+            key = build.spec.member_id, name
+            if key in validated or not isinstance(data, bytes):
+                raise PrepareRefused("duplicate or non-byte chooser fold object")
+            try:
+                validated[key] = preflight_chooser_fold(data, name, policy, release)
+            except ValueError as exc:
+                raise PrepareRefused(f"chooser fold refused: {exc}") from exc
+    return validated
+
+
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
                   payloads: Mapping[str, bytes], states: list[StateBuild], *,
                   sources: Mapping[str, str] | None = None,
@@ -376,14 +410,16 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     """Stage the model bindings, write the state objects, write the manifest."""
     if sources and any(str(key).startswith(COPY_PREFIX) for key in sources):
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
-    if pinned_panel is not None:
+    if pinned_panel is not None or any(build.chooser_fold_policy is not None for build in states):
         states = [dataclasses.replace(build, payloads=dict(build.payloads)) for build in states]
         release = dataclasses.replace(release, bindings=tuple(
             dataclasses.replace(binding, members=tuple(dataclasses.replace(
                 member, path=object_relpath(member.content_hash)) for member in binding.members))
             for binding in release.bindings))
+    if pinned_panel is not None:
         identity, validated = _pinned_preflight(release, states, pinned_panel)
         sources = {**dict(sources or {}), **identity}
+    chooser_validated = _chooser_preflight(release, states, None if pinned_panel is None else identity)
     out = Path(out)
     root = deployment_root(out)
     root.mkdir(parents=True, exist_ok=True)
@@ -406,6 +442,12 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
                               if pinned_panel is None else descriptor_from_preflight(
                                   validated[name], build.size_fold_policy, staged))
                 objects[-1]["serving_fold"] = to_document(descriptor)
+            if build.chooser_fold_policy is not None:
+                preflight = chooser_validated[build.spec.member_id, name]
+                if _destination_digest(deployment_root(out) / rel) != preflight.digest:
+                    raise PrepareRefused("chooser fold object bytes differ from preflight")
+                objects[-1]["serving_fold"] = to_document(descriptor_from_preflight(
+                    preflight, build.chooser_fold_policy, staged))
         rows.append(member_row(build.spec, build.status, objects, build.detail))
     body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
     return write_manifest(out, body)
@@ -484,7 +526,21 @@ def _real_inputs(args, pinned_panel: PinnedPanelContext | None = None
         raise PrepareRefused("unsupported size serving output")
     policy = SizeFoldPolicy(model_id=producer.model_id, feature_order=producer.features,
                             panel_sha256=snapshot, interval_floor=producer.interval_floor)
-    return release, inventory, payloads, build_states(found, size_fold_policy=policy)
+    chooser_policies = {}
+    for role, factory in (("implied_t1", tier4.im_t1_feature_model),
+                          ("runup_move", tier4.runup_move_feature_model)):
+        if found.get(f"tier4_folds:{role}"):
+            try:
+                producer = factory()
+            except tier4.Tier4Error as exc:
+                raise PrepareRefused(f"chooser {role} producer disagrees with registered recipe") from exc
+            if producer.produces != chooser_fold_outputs(role)[1]:
+                raise PrepareRefused("unsupported chooser serving output")
+            chooser_policies[role] = ChooserFoldPolicy(
+                role=role, model_id=producer.model_id, feature_order=producer.features,
+                panel_sha256=snapshot, interval_floor=producer.interval_floor)
+    return release, inventory, payloads, build_states(
+        found, size_fold_policy=policy, chooser_fold_policies=chooser_policies)
 
 
 def main(argv=None) -> int:
@@ -515,7 +571,10 @@ def main(argv=None) -> int:
         release, inventory, payloads, states = _real_inputs(args, pinned)
         plan = _plan(release, states)
         if args.plan_only and pinned is not None:
-            _pinned_preflight(release, states, pinned)
+            identity, _validated = _pinned_preflight(release, states, pinned)
+            _chooser_preflight(release, states, identity)
+        elif args.plan_only:
+            _chooser_preflight(release, states)
         manifest = (None if pinned is None or args.plan_only else write_release(
             args.out, release, inventory, payloads, states, incumbent=args.incumbent,
             pinned_panel=pinned))

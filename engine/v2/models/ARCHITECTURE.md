@@ -65,6 +65,11 @@ The full list is `README.md`'s `<!-- public-interface: ... -->` directive
 
 - `deployment.stage_release(root, release, inventory, payloads, *, clock) -> StagedManifest`
   — validate, then durably stage. Never touches `DEPLOYED`.
+- `deployment.semantic_release_hash(release: ModelRelease) -> str` — pure
+  `sha256:` identity over the typed release's inference meaning. Binding/member
+  collection order and storage paths are ignored; feature/output order is not.
+  No I/O, cache, completeness validation or artifact verification; those remain
+  with staging/loaders. It does not rewrite stored manifest hashes or versions.
 - `deployment.promote(root, release_id, *, clock, expected_previous_release_id=None) -> PointerState` /
   `deployment.rollback(root, *, clock) -> PointerState` — the one atomic
   pointer swap, in either direction. Rollback selects the prior incumbent
@@ -168,9 +173,36 @@ metadata before catalog publication. No fitting or inference occurs here.
 | Explicit policy and coherent size cache | Emit descriptor covered by the catalog self-hash; repeat inputs yield identical metadata |
 | Header/model/features/full panel/month disagreement, missing or malformed pool, oversized bytes | Refuse publication; never infer metadata from a filename prefix alone |
 | No explicit policy in a programmatic legacy caller | Preserve the existing catalog shape; it cannot supply the future fold path |
-| Other fold roles | Keep existing opaque catalog objects; this descriptor contract covers size only |
+| Other fold roles without their own explicit policy | Keep existing opaque catalog objects; never reinterpret them as size descriptors |
 | Failed preparation | No deployment-pointer changes; ordinary staging may leave unreferenced files; retry is permitted |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
+
+**Chooser producer fold authoring.** `ChooserFoldPolicy` and
+`ChooserServingFoldDescriptor` separately declare `implied_t1` and `runup_move`
+monthly caches under their exact `tier4_folds:<role>` members. The descriptor
+binds the parent release, full panel hash, ordered features, clock, estimator
+bytes, paired pool count and explicit held-out-decile/floor policy. It records
+both the champion binding output and raw D14 chooser column; runup output is
+never day-scaled here. Standard release preparation obtains each present role's
+policy from its registered producer and validates the cache against that role's
+unique wildcard champion. Size descriptors keep their existing schema.
+The chooser descriptor hash covers its complete canonical typed document,
+including parent, role and estimator identity, rather than a display string.
+Retained fold-parent checks reuse deployment's semantic release identity:
+binding/member collection order and storage paths may differ on retry;
+feature and output order, and every other identity field, remain significant.
+
+| Chooser fold authoring condition | Outcome |
+|---|---|
+| Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
+| Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
+| Registered chooser producer rejects recipe features/target | Fixed `PrepareRefused` with original cause; CLI exits 2 without a traceback |
+| Pinned COPY context | Full panel hash must match; preflight precedes output effects and destination bytes must retain the validated hash |
+| No policy on a programmatic caller | Preserve opaque catalog objects; no chooser fold declaration is invented |
+| Retry/cache/partial write | Validate anew; no descriptor cache or pointer changes; ordinary staging may leave unreferenced files on failure |
+
+These descriptors authorize no runtime fold selection or chooser activation.
+COPY consistency does not prove training-source availability or finality.
 
 **Pinned offline COPY authoring.** `tools.phase5_prepare_release` accepts an
 explicit committed snapshot/catalog and artifact-store context. Existing size
