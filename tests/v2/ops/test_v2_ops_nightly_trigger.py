@@ -1082,6 +1082,7 @@ def test_snapshot_event_universe_is_the_real_wrapper_closing_its_catalog_connect
     # and the connection closes in finally -- the seam _prepare_default_plan itself calls.
     from engine.v2.data.errors import fail as data_fail
     from engine.v2.ops import bootstrap, snapshot_planning
+    from engine.v2.ops.errors import fail as ops_fail
 
     closed, calls = [], []
 
@@ -1109,6 +1110,39 @@ def test_snapshot_event_universe_is_the_real_wrapper_closing_its_catalog_connect
     assert open_call[0][2]["clock"] is _CLOCK
     helper_call = [c for c in calls if c[0] == "helper"]
     assert helper_call == [("helper", "shadow", AS_OF, _CLOCK, "snap_pinned")]
+
+    # A second success: a different as_of and pin pass through unchanged and are recorded
+    # by the helper call (scope always "shadow"), with its own connection closed again.
+    del closed[:]
+    del calls[:]
+    monkeypatch.setattr(snapshot_planning, "snapshot_event_tickers",
+                        lambda conn, store, scope, *, as_of, clock, expected_snapshot_id:
+                        calls.append(("helper", scope, as_of, clock, expected_snapshot_id))
+                        or ("CCC",))
+    result = nightly_trigger._snapshot_event_universe(
+        tmp_path, "2026-10-01", _CLOCK, "snap_other")
+
+    assert result == ("CCC",)
+    assert closed == [True]
+    helper_call = [c for c in calls if c[0] == "helper"]
+    assert helper_call == [("helper", "shadow", "2026-10-01", _CLOCK, "snap_other")]
+
+    # A typed OpsError the helper itself raises (the empty-window INVALID_REQUEST) passes
+    # through UNCHANGED -- same code, same details -- and the same finally still closes
+    # the connection. Only DataError is remapped (next case).
+    del closed[:]
+    del calls[:]
+
+    def _raise_ops(*a, **k):
+        raise ops_fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's "
+                       "planning window", details={"as_of": AS_OF})
+
+    monkeypatch.setattr(snapshot_planning, "snapshot_event_tickers", _raise_ops)
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._snapshot_event_universe(tmp_path, AS_OF, _CLOCK, "snap_pinned")
+    assert raised.value.code == "INVALID_REQUEST"
+    assert raised.value.problem.details["as_of"] == AS_OF
+    assert closed == [True]
 
     # A DataError raised by the helper surfaces as INPUT_CHANGED with its data_code, and
     # the same finally still closes the connection.
@@ -1682,14 +1716,18 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
     # The override file is absent, so the universe (and, with no explicit
     # context, the context too) is exactly what snapshot_event_tickers returns
     # off the same pinned head, then handed unchanged to _refresh_plan_prices
-    # and _default_plan. Both stubs assert the incoming pin ("snap_before").
+    # and _default_plan. Both stubs assert the incoming pin ("snap_before") and the
+    # plan's as_of. IN_WINDOW's calendar date (2026-09-26) differs from AS_OF
+    # (2026-09-25), so a clock-derived date could never satisfy those asserts by luck.
     events, refreshed = ("AAA", "BBB"), "snap_after_refresh"
 
     def fake_snapshot_event_universe(root, as_of, clock, expected):
+        assert as_of == AS_OF  # the plan's as_of, never the clock's calendar date
         assert expected == "snap_before"  # the incoming pin, unchanged
         return events
 
     def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert as_of == AS_OF  # the plan's as_of, never the clock's calendar date
         assert expected == "snap_before"  # the incoming pin, unchanged
         return refreshed if tickers == events else _explode("wrong universe")
 
@@ -1721,9 +1759,12 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
     refreshed = "snap_from_override"
-    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices",
-                        lambda root, as_of, tickers, clock, expected:
-                        refreshed if tickers == ("AAA", "BBB") else _explode("wrong universe"))
+
+    def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert expected == "snap_before"  # the incoming pin, unchanged
+        return refreshed if tickers == ("AAA", "BBB") else _explode("wrong universe")
+
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", fake_refresh_plan_prices)
     monkeypatch.setattr(nightly_trigger, "_default_plan",
                         lambda root, as_of, tickers, context, clock, *, full_run,
                         expected_shadow_snapshot_id:
@@ -1768,9 +1809,12 @@ def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(
     _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
     refreshed = "snap_explicit"
-    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices",
-                        lambda root, as_of, tickers, clock, expected:
-                        refreshed if tickers == ("CCC", "DDD") else _explode("wrong universe"))
+
+    def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert expected == "snap_before"  # the incoming pin, unchanged
+        return refreshed if tickers == ("CCC", "DDD") else _explode("wrong universe")
+
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", fake_refresh_plan_prices)
     monkeypatch.setattr(nightly_trigger, "_default_plan",
                         lambda root, as_of, tickers, context, clock, *, full_run,
                         expected_shadow_snapshot_id:

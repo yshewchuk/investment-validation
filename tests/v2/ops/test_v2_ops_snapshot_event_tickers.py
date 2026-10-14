@@ -56,9 +56,14 @@ def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_ticke
         monkeypatch, request_tickers, expected):
     # One head resolve (clock + expected id), EXACTLY one scan with tickers=None (never a
     # restricted watchlist), the fixed 35-day horizon, and the result de-duplicated and sorted.
-    resolved = []
-    monkeypatch.setattr(snapshot_planning, "_resolve_scope_snapshot",
-                        lambda *args, **kwargs: resolved.append(kwargs) or _SNAPSHOT)
+    resolved, resolve_args = [], []
+
+    def fake_resolve(*args, **kwargs):
+        resolve_args.append(args)
+        resolved.append(kwargs)
+        return _SNAPSHOT
+
+    monkeypatch.setattr(snapshot_planning, "_resolve_scope_snapshot", fake_resolve)
     monkeypatch.setattr(snapshot_planning, "Repository", lambda *args: object())
     scan_calls = []
 
@@ -76,7 +81,9 @@ def test_snapshot_event_tickers_scans_once_and_returns_the_sorted_distinct_ticke
     assert result == expected
     assert scan_calls == [{"snapshot": "snap_pinned", "as_of": _AS_OF,
                            "horizon_days": _HORIZON, "tickers": None}]  # exactly one scan
+    assert scan_calls[0]["as_of"] == _AS_OF  # the scan's own window start
     assert resolved == [{"clock": _CLOCK, "expected_snapshot_id": "snap_pinned"}]
+    assert resolve_args[0][2] == "shadow"  # the head was resolved for this scope
 
 
 def test_an_empty_window_is_a_typed_invalid_request_with_as_of_and_horizon(monkeypatch):
