@@ -68,7 +68,9 @@ arrays for all five knobs: `learning_rate`, `max_iter`, `max_leaf_nodes`,
 `min_samples_leaf`, `l2_regularization`. Each axis is increasing and nonempty;
 all other recipe settings stay fixed. No search size or compute budget is inferred.
 
-Inner folds stay inside outer training candidates and preserve event/horizon groups.
+Inner folds stay inside outer training candidates and group each event across all
+horizons. Execution must later qualify training labels strictly before
+each inner fit and inner evaluation labels as complete strictly before the outer fit.
 The frozen policy selects by pooled inner RMSE, breaks exact ties by candidate ID,
 and reserves outer evaluation for the selected candidate. Latest-outer selection
 defines the prospective frozen winner; no winner exists until recorded execution.

@@ -210,10 +210,11 @@ Full detached v1.5-based recipes and their hashes define candidates; no fixed re
 or stored-history producer is modified. This protocol searches those two families only.
 
 Every inner evaluation year is earlier than its outer year and restricted to that
-outer fold's training candidates. All event horizons remain grouped. Inner training
+outer fold's training candidates. Folds group each event across all horizons. Inner training
 uses events strictly before the minimum of January 1 and evaluation forecast ceilings;
 its actual labels must later be qualified strictly before that boundary. Inner
-evaluation labels must be complete strictly before the outer fit boundary. Missing
+evaluation labels must later be qualified as complete strictly before the outer fit
+boundary. Planning records this requirement without qualifying any labels. Missing
 train/evaluation populations refuse; there is no automatic fold skipping. Issuers may
 overlap across time. The original metadata calendar is not re-proved as historical PIT.
 
@@ -234,7 +235,8 @@ before opening the requested artifact, then checks its bytes; schema alone never
 Malformed requests/budget overages refuse nonretryable `INVALID_EXPERIMENT_SPEC`;
 Registration/plan integrity or source drift refuses `EXPERIMENT_IDENTITY_CONFLICT`.
 CLI typed refusals preserve the full Problem and exit 2; unavailable filesystem/artifact inputs
-use `RESOURCE_UNAVAILABLE`. No provider download, fitting, scheduling or final read occurs.
+use `RESOURCE_UNAVAILABLE`. This standalone planning CLI has no production caller yet.
+No provider download, fitting, scheduling or final read occurs.
 
 ## Stored research-history entrypoint
 
