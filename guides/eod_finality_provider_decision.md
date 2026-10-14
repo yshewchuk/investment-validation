@@ -102,10 +102,11 @@ acquisition path". Massive would need a new dataset (and plan, quota and pin wor
 1. **Do not start #497 slice 1 yet.** Spend one small, bounded investigation first: confirm from
    ORATS and Massive documentation or one captured response whether either exposes a request-scoped
    completion field for option chains (ORATS `strikes`; Massive options). The repo cannot answer this.
-2. If ORATS exposes a marker, choose **A**: lowest blast radius, same table, and the receipt/clock
+2. If ORATS exposes the same two-sided evidence (non-empty and completed-empty), choose **A**: lowest blast radius, same table, and the receipt/clock
    plumbing (`cache_raw_receipt`, `received_at`; no attempt fence on that path today) already applies.
-3. If ORATS has none but Massive offers options with a usable marker or explicit empty responses,
-   choose **B**, accepting the larger slice and the source-change parity work.
+3. If ORATS has none but Massive offers options with request-scoped completion evidence for both
+   non-empty results and completed-empty results (R-A and R-B; neither a marker nor explicit empty
+   responses alone suffices), choose **B**, accepting the larger slice and the source-change parity work.
 4. If neither does, choose **C** and leave admission closed. Do not substitute a ratio or row-count
    heuristic; that is the defect this issue exists to remove.
 
