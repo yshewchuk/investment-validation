@@ -733,7 +733,8 @@ change their arithmetic or imply that source receipt production is available.
   change lands in `engine/*`, `engine/dashboard/nightly.py` or the legacy
   ledger path to support v2 work. If legacy must change at all before
   cutover, that is itself a decision requiring sign-off, not a routine PR.
-- **Exactly one official writer, fenced by an authority generation.** At
+- **Exactly one official writer, fenced by an authority generation**
+  (target behaviour: design, not yet implemented). At
   any instant only one deployment (legacy or v2) may commit official
   decisions, settlements, exports or consumer-visible releases. Authority
   moves only fence-first: the current writer is fenced and verified, then
