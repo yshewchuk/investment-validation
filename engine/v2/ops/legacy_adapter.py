@@ -45,8 +45,8 @@ _LEGACY_FINALITY_ORIGINALS = {
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
            "invoke_price_refresh", "invoke_score_calendar", "iter_raw_fetch_cache",
            "manifest_files", "overlay_read_set", "projected_trading_sessions",
-           "run_engineering_gate", "run_legacy_rebuild", "run_legacy_script",
-           "run_security_scan", "verify_export_generation"]
+           "run_engineering_gate", "run_legacy_rebuild",
+           "run_legacy_script", "run_security_scan", "verify_export_generation"]
 
 
 def projected_trading_sessions(start, end) -> tuple[str, ...]:
@@ -307,16 +307,31 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     from engine.data.pulls.price_refresh import (
         load_events,
         load_fetch_history,
+        load_fetch_times,
         load_price_universe,
         plan_refresh,
         run_refresh,
     )
     from engine.v2.data.price_history_table import CALENDAR_TICKER
 
+    # Daily coverage is stamp-based: a board ticker is skipped only when a
+    # cached fetch's own ``fetched_at`` post-dates the required trading day's
+    # regular 16:00 ET close plus the coverage buffer (a half-day fetch made
+    # before 16:30 ET may be refetched, accepted). A bad post-close
+    # response is not retried until a run targets a session whose close
+    # (plus the buffer) is at or after that fetch's stamp; that run refetches
+    # it.
+    # Capture rejects a retrieval that starts later than the stored history
+    # but does not check coverage of the requested session, so a valid
+    # response missing trailing bars can pass capture and then counts as
+    # covered (accepted trade-off). The loader reads fetch metadata only --
+    # no body parsing anywhere on this path.
     fetch_root = None
     if planned_tickers is None:
         plan = plan_refresh(session, events=load_events(), price_universe=load_price_universe(),
-                            fetch_history=load_fetch_history(), always_daily=(CALENDAR_TICKER,))
+                            fetch_history=load_fetch_history(),
+                            fetch_times=load_fetch_times(),
+                            always_daily=(CALENDAR_TICKER,))
     else:
         import pandas as pd
 
@@ -325,6 +340,7 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
         fetch_root = Path(source_root) / "data" / "raw" / "fetch"
         plan = plan_refresh(session, events=pd.DataFrame(columns=["ticker", "event_date"]),
                             price_universe=(), fetch_history=load_fetch_history(fetch_root=fetch_root),
+                            fetch_times=load_fetch_times(fetch_root=fetch_root),
                             always_daily=(*planned_tickers, CALENDAR_TICKER))
     if dry_run:
         return {"plan": plan, "report": None}
