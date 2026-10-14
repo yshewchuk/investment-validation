@@ -523,8 +523,11 @@ def finalize_rebuild(result: RebuildResult) -> RebuildResult:
     _banner("manifest + snapshot")
     stats = manifest.collect_stats()
     result.tables = stats
-    result.snapshot = manifest.write_snapshot(stats)
+    # Write the manifest BEFORE the snapshot: the snapshot is the file the
+    # native import reads, so it must be the last write. A manifest failure
+    # then leaves no snapshot for the night to import.
     manifest_path = manifest.write_manifest(stats)
+    result.snapshot = manifest.write_snapshot(stats)
     print(f"  snapshot {result.snapshot}", flush=True)
     print(f"  manifest {manifest_path}", flush=True)
 

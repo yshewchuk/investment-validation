@@ -276,14 +276,52 @@ def test_rebuild_defers_the_snapshot_until_finalize(monkeypatch):
 
     assert rebuilt is result
     assert result.snapshot == "snap-1"
-    assert writes == [("snapshot", {"panel": "hash"}), ("manifest", {"panel": "hash"})]
+    assert writes == [("manifest", {"panel": "hash"}), ("snapshot", {"panel": "hash"})]
 
     writes.clear()
     default = rebuild_mod.rebuild(("panel", "tier4"))
 
     assert default.snapshot == "snap-1"
-    assert writes == [("snapshot", {"panel": "hash"}), ("manifest", {"panel": "hash"})], \
+    assert writes == [("manifest", {"panel": "hash"}), ("snapshot", {"panel": "hash"})], \
         "the default rebuild path still finalizes exactly once"
+
+
+def test_finalize_writes_manifest_before_snapshot(monkeypatch):
+    """A manifest failure must leave no snapshot: manifest is written first."""
+    from engine.data import rebuild as rebuild_mod
+
+    writes = []
+
+    def fake_write_manifest(stats):
+        writes.append(("manifest", stats))
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(rebuild_mod, "build_panel_table", lambda: {"rows": 3})
+    monkeypatch.setattr(rebuild_mod, "build_tier4_table",
+                        lambda since=None: {"rows": 3, "producers": {}})
+    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats",
+                        lambda: {"panel": "hash"})
+    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot",
+                        lambda stats: writes.append(("snapshot", stats)) or "snap-1")
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest", fake_write_manifest)
+
+    result = rebuild_mod.rebuild(("panel", "tier4"), finalize=False)
+
+    with pytest.raises(OSError):
+        rebuild_mod.finalize_rebuild(result)
+
+    assert writes == [("manifest", {"panel": "hash"})], \
+        "a manifest failure must not have written the snapshot"
+
+    # Success path: the manifest lands first and the snapshot last.
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest",
+                        lambda stats: writes.append(("manifest", stats)) or "manifest-1")
+    writes.clear()
+    rebuilt = rebuild_mod.finalize_rebuild(result)
+
+    assert rebuilt.snapshot == "snap-1"
+    assert [kind for kind, _ in writes] == ["manifest", "snapshot"]
 
 
 # --------------------------------------------------------------------------
