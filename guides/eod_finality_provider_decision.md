@@ -85,7 +85,7 @@ acquisition path". Massive would need a new dataset (and plan, quota and pin wor
    `first_received_at`. Same limitation: it bounds raw-byte observation only, not publication readiness.
 4. **Slice 1.** Add an options dataset to `massive_plan`, request descriptor, page validation and
    an empty-domain rule, then reuse the existing acquisition/pin machinery. Larger than ORATS
-   slice 1 despite the reuse: roughly 200+ code lines, likely needing a split, and it depends on
+   slice 1 despite the reuse: roughly 200+ code lines **(mine)**, likely needing a split, and it depends on
    the probed entitlement (daily aggregates yes; trades, quotes and intraday no). Option B therefore
    lacks bid/ask, so it cannot replace ORATS chain quotes; whether a chain-level completion marker
    exists stays **unknown**.
