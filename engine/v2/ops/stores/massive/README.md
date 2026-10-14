@@ -10,7 +10,7 @@ Validate requests, reuse verified raw bytes/intervals, coordinate a bounded prov
 
 ## Non-responsibilities
 
-Research admission, corporate-action normalization, parent-snapshot refresh and provider entitlement verification.
+Research admission, price/return adjustment and provider entitlement verification.
 
 ## Public interface
 
@@ -44,21 +44,29 @@ Planning is bounded/read-only; its HTTP count is a cap, not an exact page estima
 Each generation plan reports `candidate_count` against `candidate_limit` (100): intersecting occurrences for that family/generation, including overlapping candidates that lose selection. This is not a page or binding count. A 101st candidate refuses unchanged with `RESOURCE_LIMIT_EXCEEDED`; narrower date scopes can still plan. The read-only planner may show a bounded candidate set whose remaining gaps cannot fit. Before any gap fetch or raw-only adoption, the worker refuses if candidates plus remaining gaps exceed 100; each gap needs one completion slot even when paginated. Existing evidence remains unchanged. A new generation can deliberately reacquire evidence; it does not compact or migrate the old generation.
 Partial chains and empty responses never create interval coverage. Same-job retries recover verified page prefixes without refetching committed pages; only terminal complete chains become reusable intervals. Completed gaps survive a failed job, but resubmitting the same key does not restart it. Choose a distinct key only when authorizing a new bounded operation; it cannot inherit the failed job's partial chain or reset its allowance.
 
-## Daily native snapshot
+## Native snapshot and refresh
 
-After a `massive_history_acquisition` daily job succeeds, submit its immutable
+After a `massive_history_acquisition` daily, split or dividend job succeeds, submit its immutable
 output for separate network-free normalization:
 
 ```sh
 python -m engine.v2.ops.massive_snapshot --root ROOT --acquisition-job job_EXAMPLE --idempotency-key daily-snapshot-1
 ```
 
-Run it through `ops serve`. Its `snapshot_ref.v1.0` result pins `massive_daily.v1`
-with explicit price basis and original page provenance. Use `Repository.scan`
+Run it through `ops serve`. Its `snapshot_ref.v1.0` result pins `massive_daily.v1`,
+`massive_splits.v1` or `massive_dividends.v1`, with original page provenance. Use `Repository.scan`
 with that snapshot ID, table contract, ticker predicate and explicit row/batch
-bounds; no live head or provider lookup belongs in research. This first slice
-creates a dedicated data-only snapshot; it does not update `price_history.v3`,
-construct targets or claim historical availability. Corporate actions follow later.
+bounds; no live head or provider lookup belongs in research. Without a parent,
+this creates a dedicated data-only snapshot; it never updates `price_history.v3`,
+constructs targets or claims historical availability.
+To refresh an explicit parent, add `--parent-snapshot SNAPSHOT_ID --scope SCOPE
+--head-generation GENERATION` (all three required). The worker replaces only the
+requested ticker/basis/date interval, carrying unrelated membership forward,
+and refuses a stale head CAS. Each job updates one table; repeat with the newly
+pinned parent for another table. No live-head discovery or multi-job atomicity.
+Action normalization requires stable event IDs and usable economics; optional
+provider fields remain nullable. Reported adjustment factors are stored, never
+applied. Empty action intervals remain refused, as tracked in issue #690.
 
 ## Testing
 

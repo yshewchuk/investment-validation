@@ -2,7 +2,7 @@
 import json
 from datetime import date, timedelta
 
-from engine.v2.data import massive_daily
+from engine.v2.data import massive_actions, massive_daily
 from engine.v2.data.incremental import load_raw_receipt
 from engine.v2.foundation import content_hash
 from engine.v2.ops import checkpoints, input_bindings, massive_plan
@@ -36,7 +36,7 @@ def acquisition_input(conn, store, attempt_id, source_job):
 
 def _plan_identity(plan):
     request = plan["request"]
-    canonical = massive_plan._request_descriptor("daily", request["ticker"], request["start"],
+    canonical = massive_plan._request_descriptor(request["dataset"], request["ticker"], request["start"],
                                                   request["end"], request["adjustment_basis"])
     coverage.validate_generation(plan["generation"])
     if (request != canonical or plan["schema_version"] != coverage.VERSION or plan["gaps"]
@@ -86,9 +86,10 @@ def normalized_rows(conn, store, plan):
             decoded += len(body)
             if decoded > coverage.MAX_VERIFIED_BYTES:
                 raise fail("RESOURCE_LIMIT_EXCEEDED", "Massive normalization exceeds raw byte bound")
-            result.extend(massive_daily.normalize_rows(json.loads(body)["results"], request, binding, page))
+            normalizer = massive_daily if request["dataset"] == "daily" else massive_actions
+            result.extend(normalizer.normalize_rows(json.loads(body)["results"], request, binding, page))
             if len(result) > 1000:
                 raise fail("RESOURCE_LIMIT_EXCEEDED", "Massive normalized row bound exceeded")
     if not result:
-        raise fail("SOURCE_EMPTY", "Massive saved interval contains no selected daily rows")
+        raise fail("SOURCE_EMPTY", "Massive saved interval contains no selected rows")
     return result

@@ -74,28 +74,29 @@ def normalize_rows(rows, request, binding, evidence):
     return result
 
 
-def build_candidate(store, rows, acquisition_id, request_hash):
+def build_candidate(store, rows, acquisition_id, request_hash, *, contract=CONTRACT):
     """Publish immutable bytes; return one inspected native dataset and snapshot."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    ordered = sorted(rows, key=lambda r: tuple(r[k] for k in CONTRACT.primary_key))
-    if (not ordered or len(ordered) > 1000 or len({r["date"] for r in ordered}) != len(ordered)
-            or len({(r["ticker"], r["adjustment_basis"]) for r in ordered}) != 1):
+    ordered = sorted(rows, key=lambda r: tuple(r[k] for k in contract.primary_key))
+    if (not ordered or len(ordered) > 1000
+            or len({tuple(r[k] for k in contract.primary_key) for r in ordered}) != len(ordered)
+            or len({r["ticker"] for r in ordered}) != 1):
         raise errors.fail("CONTRACT_MISMATCH", "Massive daily candidate identity is invalid")
     schema = pa.schema([pa.field(c.name, query.arrow_type_for(c.physical_type), nullable=c.nullable)
-                        for c in CONTRACT.columns])
+                        for c in contract.columns])
     sink = pa.BufferOutputStream()
     pq.write_table(pa.Table.from_pylist(ordered, schema=schema), sink)
     artifact = store.publish_bytes(sink.getvalue().to_pybytes(), schema_ref="parquet_fragment.v1")
     obj = ObjectRef(kind="parquet_fragment", object_id=artifact.artifact_id,
                     content_hash=artifact.content_hash, byte_size=artifact.byte_size)
-    ref = TableContractRef(contract_id=CONTRACT.contract_id, definition_hash=CONTRACT.definition_hash)
-    inspection = objects.inspect_fragment(store, obj, CONTRACT, ref, ordered[0]["ticker"])
+    ref = TableContractRef(contract_id=contract.contract_id, definition_hash=contract.definition_hash)
+    inspection = objects.inspect_fragment(store, obj, contract, ref, ordered[0]["ticker"])
     record = manifests.fragment_record(inspection, ref,
         input_receipt_refs=sorted({r["raw_receipt_id"] for r in ordered}), import_request_hash=request_hash)
     manifest = manifests.dataset_manifest(ref, (record,), knowledge_mode="reconstructed",
         coverage_receipt_refs=(acquisition_id,), availability_evidence_refs=())
-    snapshot = manifests.snapshot_ref({TABLE: manifest}, calendar_version="massive_eastern_session_date.v1",
+    snapshot = manifests.snapshot_ref({contract.table_name: manifest}, calendar_version="massive_eastern_session_date.v1",
         source_priority_version="massive_only.v1", finality_receipt_refs=())
     return record, manifest, snapshot

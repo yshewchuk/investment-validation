@@ -648,8 +648,8 @@ def test_replay_rechecks_cancellation_after_reading_prior_success(harness, monke
     _, expected = execute(h, attempt, params)
     original = snapshot._existing
     calls = []
-    def cancelled(*args):
-        result = original(*args)
+    def cancelled(*args, **kwargs):
+        result = original(*args, **kwargs)
         assert result == expected
         calls.append(True)
         request_cancel(h.conn, attempt.job_id, attempt.attempt_id, clock=h.clock)

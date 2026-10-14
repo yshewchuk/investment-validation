@@ -33,20 +33,31 @@ fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).
 
 ## Primary contracts and public interfaces
 
-**Massive daily reconstruction.** `massive_daily` owns `massive_daily.v1`, a separate
-OHLCV contract, strict row normalization and native fragment/manifest construction.
-It never changes `price_history.v3` or imports ops/provider code. One snapshot
-contains one ticker and explicit `raw` or `split_adjusted` response basis; no
+**Massive reconstruction.** `massive_daily` owns `massive_daily.v1`; `massive_actions`
+owns `massive_splits.v1` and `massive_dividends.v1`, with original page provenance.
+It never changes `price_history.v3` or imports ops/provider code. Each
+normalization input contains one ticker and explicit response basis; no
 dividend adjustment or cross-basis conversion is inferred. Eastern session dates,
 finite float64-exact positive OHLC, consistent bounds, nonnegative volume and canonical UTC clocks are required;
-duplicate session dates refuse, including identical duplicates. Rows retain their
+duplicate ticker/basis/session keys refuse, including identical duplicates. Rows retain their
 original page's raw receipt and observation time plus completion occurrence ID.
 The dataset also pins the saved acquisition artifact. Knowledge is `reconstructed`,
 without historical-availability, calendar completeness or finality evidence.
 Only rows inside saved clipped bindings are included; an empty selected view
 refuses. `Repository.scan(DataQuery(...))` supplies existing bounded pinned reads.
-Ops performs the live-fenced atomic first-snapshot commit; publishing object bytes
-alone does not expose a dataset. Corporate actions and parent refresh remain separate.
+Ops performs live-fenced atomic snapshot publication; publishing object bytes
+alone does not expose a dataset. `massive_refresh` composes explicit pinned parents.
+Action keys are ticker/event ID, not date: same-day events remain distinct.
+Selected actions require ID, ticker, event date and split ratio or cash/currency;
+optional reported dates, frequency, classifications and adjustment factors retain
+null absence; supplied strings are nonblank and at most 256 characters. No ratio or return is computed.
+Refresh replaces the selected ticker/basis's closed date interval, preserving
+outside rows, other partitions and unrelated table versions. Duplicate keys refuse.
+The affected ticker's prior object bytes are capped at 64 MiB and rows at 1,000;
+the rewritten partition also has a 1,000-row cap. Original row receipts survive.
+Updated manifests retain old coverage pins and add the acquisition artifact;
+unrelated manifests and snapshot-wide policy/finality references carry forward.
+Shared catalog identity reconciliation retains first-stored lineage/provenance.
 
 The exhaustive name-by-name list is `README.md`'s checker-enforced Public
 interface section; this names only the load-bearing entry points.
