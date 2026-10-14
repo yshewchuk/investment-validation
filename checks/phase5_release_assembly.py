@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import fcntl
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -29,7 +31,7 @@ from checks.phase5_release import (
     object_relpath,
     sha256_bytes,
 )
-from engine.v2.models import deployment
+from engine.v2.models import deployment, releases
 
 POOL_MEMBER_IDS: tuple[str, ...] = (
     "driver_residual_pool:size",
@@ -42,11 +44,12 @@ POOL_MEMBER_IDS: tuple[str, ...] = (
 CHOOSER_MEMBER_ID = "chooser_analog_pool"
 _REFUSAL_CODES = (
     "PRIOR_MISMATCH", "POOL_SET_MISMATCH", "CUTOFF_MISMATCH", "CHOOSER_MISMATCH",
-    "CUTOFF_NOT_ADVANCED", "OBJECT_UNVERIFIED", "ID_CONFLICT",
+    "CUTOFF_NOT_ADVANCED", "OBJECT_UNVERIFIED", "ID_CONFLICT", "INVENTORY_MISMATCH",
 )
 _REQUIRED_MEMBER_IDS = (*POOL_MEMBER_IDS, CHOOSER_MEMBER_ID)
 _SPEC_BY_ID = {spec.member_id: spec for spec in STATE_SPECS}
 _HEX = frozenset("0123456789abcdef")
+_UNSAFE_ID_CHARS = ("/", "\\", "\0")
 
 
 class ReleaseAssemblyRefusal(ValueError):
@@ -82,13 +85,26 @@ def _parse_day(value: object, code: str, detail: str) -> date:
         raise ReleaseAssemblyRefusal(code, detail) from exc
 
 
+def _admit(output: object, code: str) -> PoolOutput:
+    """Refuse a malformed object with ``code`` before it is used as a mapping key."""
+    if not isinstance(output, PoolOutput):
+        raise ReleaseAssemblyRefusal(code, "an object is not a PoolOutput")
+    if not isinstance(output.member_id, str):
+        raise ReleaseAssemblyRefusal(code, "an object member id is not a string")
+    if not isinstance(output.name, str) or not output.name:
+        raise ReleaseAssemblyRefusal(code, "an object name is not a non-empty string")
+    if (not isinstance(output.payload_bytes, int) or isinstance(output.payload_bytes, bool)
+            or output.payload_bytes < 0):
+        raise ReleaseAssemblyRefusal(code, "an object payload_bytes is not a non-negative int")
+    return output
+
+
 def _outputs_by_member(outputs: object) -> dict[str, PoolOutput]:
     if not isinstance(outputs, (list, tuple)):
         raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "outputs are not a sequence")
     by_member: dict[str, PoolOutput] = {}
     for output in outputs:
-        if not isinstance(output, PoolOutput):
-            raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "an output is not a PoolOutput")
+        _admit(output, "POOL_SET_MISMATCH")
         if output.member_id in by_member:
             raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "a member id appears twice")
         by_member[output.member_id] = output
@@ -132,9 +148,13 @@ def derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_rel
     _prior_pool_rows(prior.get("members"))
     prior_day = _parse_day(prior_cutoff, "PRIOR_MISMATCH", "prior pool_cutoff is not an ISO date")
 
-    if not isinstance(release_id, str) or release_id == prior["release_id"]:
+    if (not isinstance(release_id, str) or not release_id or release_id.startswith(".")
+            or any(char in release_id for char in _UNSAFE_ID_CHARS)):
+        raise ReleaseAssemblyRefusal("ID_CONFLICT", "candidate release id is not a safe new string")
+    if release_id == prior["release_id"]:
         raise ReleaseAssemblyRefusal("ID_CONFLICT", "candidate release id is not a new string")
 
+    _admit(chooser, "CHOOSER_MISMATCH")
     by_member = _outputs_by_member(outputs)
     if not _content_hash_valid(chooser.content_hash):
         raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "the chooser hash is malformed")
@@ -169,13 +189,45 @@ def _verify_objects(store: Path, supplied: tuple[PoolOutput, ...]) -> None:
     for output in supplied:
         path = store / object_relpath(output.content_hash)
         try:
-            if not path.is_file():
+            if path.is_symlink() or not path.is_file():
                 raise ReleaseAssemblyRefusal("OBJECT_UNVERIFIED", "a supplied object is missing")
             payload = path.read_bytes()
         except OSError as exc:
             raise ReleaseAssemblyRefusal("OBJECT_UNVERIFIED", "a supplied object is unreadable") from exc
         if sha256_bytes(payload) != output.content_hash or len(payload) != output.payload_bytes:
             raise ReleaseAssemblyRefusal("OBJECT_UNVERIFIED", "an object disagrees with its claim")
+
+
+def _read_prior_payloads(store: Path, prior) -> dict[str, bytes]:
+    """Read every prior model binding's payload, refusing symlinks and non-regular files."""
+    payloads: dict[str, bytes] = {}
+    for binding in prior.bindings:
+        for member in binding.members:
+            path = store / member.path
+            try:
+                if path.is_symlink() or not path.is_file():
+                    raise ReleaseAssemblyRefusal(
+                        "PRIOR_MISMATCH", "a prior model object is missing or unreadable")
+                payloads[member.content_hash] = path.read_bytes()
+            except OSError as exc:
+                raise ReleaseAssemblyRefusal(
+                    "PRIOR_MISMATCH", "a prior model object is missing or unreadable") from exc
+    return payloads
+
+
+@contextmanager
+def _publication_lock(store: Path):
+    """Serialise the stage/verify/write publication block for one release store."""
+    store.mkdir(parents=True, exist_ok=True)
+    handle = open(store / ".carry_forward.lock", "a")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
@@ -202,33 +254,55 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
 
     _verify_objects(store, (*outputs, chooser))
 
+    try:
+        prior = deployment.resolve_release(store, prior_release_id)
+    except (deployment.DeploymentError, OSError, ValueError) as exc:
+        raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release could not be resolved") from exc
+    payloads = _read_prior_payloads(store, prior)
+
     candidate_path = _catalog_path(root, release_id)
-    try:
-        existing = _read_catalog(candidate_path, release_id)
-    except ReleaseLayoutError as exc:
-        raise ReleaseAssemblyRefusal(
-            "ID_CONFLICT", "candidate catalog exists but cannot be read or validated") from exc
-    if existing is not None:
-        if existing == body:
-            return candidate_path
-        raise ReleaseAssemblyRefusal("ID_CONFLICT", "candidate catalog already exists with different content")
-
-    prior = deployment.resolve_release(store, prior_release_id)
     candidate = dataclasses.replace(prior, release_id=release_id)
-    payloads = {}
-    for binding in prior.bindings:
-        for member in binding.members:
-            payloads[member.content_hash] = (store / member.path).read_bytes()
-    try:
-        deployment.stage_release(store, candidate, inventory, payloads)
-    except deployment.StagingRefused as exc:
-        if any(issue.code == "RELEASE_ID_REUSED" for issue in exc.issues):
+    with _publication_lock(store):
+        try:
+            deployment.stage_release(store, candidate, inventory, payloads)
+        except deployment.StagingRefused as exc:
+            if any(issue.code == "RELEASE_ID_REUSED" for issue in exc.issues):
+                raise ReleaseAssemblyRefusal(
+                    "ID_CONFLICT", "candidate release id is already staged with different content") from exc
             raise ReleaseAssemblyRefusal(
-                "ID_CONFLICT", "candidate release id is already staged with different content") from exc
-        raise
+                "INVENTORY_MISMATCH",
+                "inventory is incomplete or incompatible with the prior release") from exc
+        except releases.ModelReleaseRefusal as exc:
+            raise ReleaseAssemblyRefusal(
+                "INVENTORY_MISMATCH",
+                "inventory is incomplete or incompatible with the prior release") from exc
+        except (deployment.DeploymentError, OSError, ValueError) as exc:
+            raise ReleaseAssemblyRefusal(
+                "INVENTORY_MISMATCH",
+                "inventory is incomplete or incompatible with the prior release") from exc
 
-    _verify_staged(store, release_id)
-    _write_catalog(candidate_path, body)
+        try:
+            _verify_staged(store, release_id)
+        except ReleaseLayoutError as exc:
+            raise ReleaseAssemblyRefusal(
+                "ID_CONFLICT", "candidate staged release could not be verified") from exc
+
+        try:
+            existing = _read_catalog(candidate_path, release_id)
+        except ReleaseLayoutError as exc:
+            raise ReleaseAssemblyRefusal(
+                "ID_CONFLICT", "candidate catalog exists but cannot be read or validated") from exc
+        if existing is not None:
+            if existing == body:
+                return candidate_path
+            raise ReleaseAssemblyRefusal(
+                "ID_CONFLICT", "candidate catalog already exists with different content")
+
+        try:
+            _write_catalog(candidate_path, body)
+        except OSError as exc:
+            raise ReleaseAssemblyRefusal(
+                "ID_CONFLICT", "candidate catalog could not be written") from exc
     return candidate_path
 
 

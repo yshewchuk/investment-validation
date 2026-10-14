@@ -43,8 +43,8 @@ gets fit — see its own package doc reference in the root index. Nothing in
 `engine/v2/models` reads a live panel, calls `.fit()`, or writes
 `registry.json`.
 
-An automated nightly append cycle for the pool/residual/cutoff artifacts: release
-assembly is §2.1; the stage worker and tick sidecar are design only — see #192.
+An automated nightly append cycle for the pool/residual/cutoff artifacts:
+release assembly is §2.1; the rest is design only — see #192.
 
 ## 2. Primary contracts and public interfaces
 
@@ -104,7 +104,7 @@ size check. Existing callers omitting the ceiling retain their read contract.
 | Object at/below the ceiling | Existing byte-hash, canonical-hash and typed validation apply |
 | Cache, retry, transaction, partial write | Existing per-loader content-hash cache; no retries or writes; failure returns no partial state |
 
-### 2.1 Pool release assembly (#192 slice 2)
+### 2.1 Pool release assembly
 
 `checks/phase5_release_assembly.py` (the catalog lives in `checks/phase5_release.py`,
 so the helper sits beside it):
@@ -128,7 +128,16 @@ members once each, or a malformed hash), `CUTOFF_MISMATCH` (an output or the
 chooser disagrees with `cutoff`), `CHOOSER_MISMATCH` (wrong member id),
 `CUTOFF_NOT_ADVANCED` (`cutoff` is not strictly after the prior's),
 `OBJECT_UNVERIFIED` (object missing or its bytes do not hash to the claim),
-`ID_CONFLICT` (candidate id equals the prior's, or already exists with different content).
+`ID_CONFLICT` (candidate id empty, unsafe, equal to the prior's, or already
+exists with different content), `INVENTORY_MISMATCH` (inventory incomplete or
+incompatible with the prior bindings). Missing prior model objects refuse
+`PRIOR_MISMATCH`; no upstream exception escapes raw. The helpers have no
+production caller yet.
+
+Every call re-runs all validation, including when an identical candidate
+catalog already exists; the staging and catalog write run under one exclusive
+`flock` on `deployment/.carry_forward.lock`, so of two conflicting concurrent
+calls the loser refuses `ID_CONFLICT`.
 
 | Rule | Behaviour |
 |---|---|
