@@ -774,6 +774,53 @@ def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
     }
 
 
+#: Wall-clock ceiling for the full Tier-4 repair rebuild (~17-24 min healthy,
+#: gap nights only). Checked after the rebuild returns, not enforced mid-run.
+TIER4_REPAIR_BUDGET_S = 3600
+
+
+def _repair_tier4_gap(report: NightlyReport, rebuild_tables) -> None:
+    """Full Tier-4 rebuild (no ``--since``) to close an out-of-window gap.
+
+    The incremental build's backfill window skipped keys it can never reach;
+    a full rebuild is the only thing that closes them. A repair that raises,
+    blows :data:`TIER4_REPAIR_BUDGET_S`, or still leaves a gap stops the run
+    with a typed code at the start of the detail — a gapped Tier-4 must not
+    be scored, published, or imported over. Success records
+    ``steps["tiers"]["tier4_repair"]`` and appends no flag.
+    """
+    start = time.time()
+    try:
+        result = rebuild_tables(("tier4",), tier4_since=None)
+    except Exception as exc:
+        raise NightlyStop(
+            "tier4_repair",
+            f"TIER4_REPAIR_FAILED: {type(exc).__name__}: {str(exc)[:300]}",
+        )
+    elapsed = time.time() - start
+    if elapsed > TIER4_REPAIR_BUDGET_S:
+        raise NightlyStop(
+            "tier4_repair",
+            (f"TIER4_REPAIR_BUDGET: full Tier-4 rebuild took {elapsed:.1f}s, "
+             f"over the {TIER4_REPAIR_BUDGET_S}s budget")[:300],
+        )
+    gap_fill = result.reports.get("tier4", {}).get("gap_fill", {})
+    flag = _tier4_gap_partial_flag(gap_fill)
+    if flag is not None:
+        raise NightlyStop("tier4_repair", "TIER4_GAP_REMAINS: " + flag["detail"])
+    report.steps["tiers"]["tier4_repair"] = {
+        "ran": True,
+        "elapsed_s": round(elapsed, 1),
+    }
+
+
+def _repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
+                                rebuild_tables) -> None:
+    gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
+    if _tier4_gap_partial_flag(gap_fill) is not None:
+        _repair_tier4_gap(report, rebuild_tables)
+
+
 def _panel_staleness_flags(as_of) -> list[dict]:
     """Flag a Tier-3/Tier-4 panel that has stopped tracking the calendar.
 
@@ -1386,6 +1433,7 @@ def run_nightly(
                            f"since {moves_since}. {type(exc).__name__}: {exc}")[:300],
             })
 
+        tier_result = None
         try:
             # Tier 4 only has to redo the tail Tier 3 actually moved. Its own
             # contract: "Tier 3 changing at date D makes every forecast from D
@@ -1400,13 +1448,9 @@ def run_nightly(
             }
             # A bounded gap-fill (engine/data/features/tier4.py) can now close
             # a hole in the carried prefix without raising at all — but a gap
-            # OLDER than its backfill window is a named, logged skip, not a
-            # silent pass. Surface that here too, or the only place it would
-            # be visible is a JSON report field nobody is watching.
-            gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
-            flag = _tier4_gap_partial_flag(gap_fill)
-            if flag is not None:
-                report.flags.append(flag)
+            # OLDER than its backfill window is a named, logged skip
+            # (tier4_gap_partial), not a silent pass. The repair runs after
+            # this try/except, so the result is kept for it.
         except Exception as exc:
             report.steps["tiers"] = {"degraded": True,
                                      "error": f"{type(exc).__name__}: {exc}"[:300]}
@@ -1415,6 +1459,11 @@ def run_nightly(
                 "detail": ("Tier 3/Tier 4 not rebuilt — scoring from the stored panel and "
                            f"forecasts, which may not cover recent prints. {type(exc).__name__}: {exc}")[:300],
             })
+
+        # A typed TIER4_* stop from the repair propagates (it is not the
+        # "degraded" path above), so the run fails before score or import.
+        if tier_result is not None and "degraded" not in report.steps.get("tiers", {}):
+            _repair_tier4_gap_if_needed(report, tier_result, rebuild_tables)
 
         # -- 2b(ii). did any of that actually advance? ----------------------
         # The failure this exists for was silent: the pull wrote nothing, the

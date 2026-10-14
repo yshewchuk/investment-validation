@@ -134,6 +134,18 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Missing input / refresh failure** — degrades to cached data (staleness
   stays visible in `meta.json`) — except a rotated credential, which stops
   the run rather than burning retries against a dead key.
+- **Tier-4 gap repair** — when the incremental Tier-4 build leaves an
+  out-of-window gap (`tier4_gap_partial`), the tiers step immediately runs a
+  full Tier-4 rebuild (no `--since`; ~17-24 min, gap nights only) and
+  re-checks the gap, so a repaired night reports no `tier4_gap_partial` flag
+  and `steps.tiers.tier4_repair` records the repair. The repair raising,
+  exceeding its wall-clock budget (`TIER4_REPAIR_BUDGET_S`), or leaving the
+  gap stops the run with `NightlyStop` carrying a typed code
+  (`TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET`, `TIER4_GAP_REMAINS`) as the
+  start of its detail; exit 1, nothing scored or published, and the native
+  import (which needs a successful legacy nightly) does not start on a gapped
+  Tier-4. Idempotent: a rerun with no gap skips the repair. The budget is
+  checked after the rebuild returns, not enforced mid-run.
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.
 - **Selfcheck mismatch** — stops the publish; the nightly records raw
