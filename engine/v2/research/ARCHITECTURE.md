@@ -340,11 +340,11 @@ Other experiment report/ledger publication remains outside this library seam.
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
 snapshot-read helpers), `_pricing.py` (except the names carved out above),
-`_trades_revisions.py`, `_final_population.py`.
+`_trades_revisions.py`, `_final_population.py`, `_final_evaluator.py`.
 
 ### Proposed authorized final read (#490)
 
-Request preparation, the private ops authorization/spend primitive and the private metadata-only final population reader are implemented; no production authorization entrypoint, final read or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
+Request preparation, the private ops authorization/spend primitive, the private metadata-only final population reader and the private frozen evaluator are implemented; no production authorization entrypoint, final-read caller or result retrieval exists. The remaining lifecycle belongs to later #490 slices and preserves #445's union exclusion; #555 refusal/audit integration is dropped and handled separately in #489.
 The [user decision](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6072905454)
 permits agents/supervisors to prepare requests, never to authorize them.
 
@@ -371,6 +371,16 @@ Request validity proves neither winner selection nor read eligibility. The later
 | `resolve` raising a non-integrity `DataError` (such as not-found), `ValueError`, `TypeError` or `KeyError` | `SNAPSHOT_UNRESOLVED`. An integrity-category `DataError` (such as `MANIFEST_CORRUPT`) and any other exception propagate unchanged. Integrity failures during the scan propagate as the repository's typed refusal. |
 | Both sets empty after ambiguity exclusion | `POPULATION_COLLAPSED`; never an empty success. Preregistered completeness remains the later preflight's refusal. |
 | Retry, cache, write | None; read-only, identical pinned inputs return identical populations. |
+
+**Evaluator.** Private `_final_evaluator.evaluate_final_holdout(repository, request, population)` takes only a validated `FinalHoldoutRequest` and the `FinalPopulation` that `load_final_population` returns; it has no other parameter, fit, alternate arm, threshold search or callback. It scores the committed `trades` rows of the pinned snapshot with this package's provenance whose `variant` equals `request.variant_id` (the frozen winner); the table is read whole, then filtered. It returns frozen `FinalMetrics` with the random and rolling results separately, each with event count, trade count, events without a trade, total and mean `ret` and win rate (`None` when a set has no trade), plus overlap and ambiguity counts; the sets are never averaged or merged. It does no writes, caching or retries, never imports ops, and checks no fence or revocation: the later leaf does that before invoking it.
+
+| Evaluator condition | Outcome |
+|---|---|
+| `population` is not a `FinalPopulation` (event-ID list, training/selection/sweep frame), or differs from the one derived from `request` | `HOLDOUT_ACCESS_DENIED` before any trades read; an equal hand-built population is indistinguishable and accepted. |
+| Invalid request, or snapshot mismatch | The population reader's refusal (`HOLDOUT_ACCESS_DENIED`, `SNAPSHOT_UNRESOLVED`), before any trades read. |
+| Trades table has no fragments, or no winner trade falls in either set | `POPULATION_COLLAPSED`. |
+| Retained winner trade's event date or ticker differs from its pinned canonical event (for example after a calendar correction that kept the event ID) | `CONTRACT_MISMATCH` listing the offending event IDs; never skipped or scored. |
+| Non-finite `ret` | `CONTRACT_MISMATCH`; infinities are already refused at publication. |
 
 **Authority/ownership.** A proposed `tools/v2_final_holdout.py` leaf composes ops'
 private authorization/state owner with a private research final evaluator. It is
