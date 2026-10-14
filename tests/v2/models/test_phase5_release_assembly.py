@@ -775,8 +775,8 @@ def _stage_rich_prior(root, *, release_id="prior1", deployment_id="d1",
 
 
 @pytest.mark.parametrize("release_id", ["candA", "candB"])
-@pytest.mark.parametrize("prior_cutoff, cutoff", [("2026-09-01", "2026-10-01"),
-                                                  ("2026-08-20", "2026-12-31")])
+@pytest.mark.parametrize("prior_cutoff, cutoff", [("2026-08-20", "2026-10-01"),
+                                                  ("2026-07-15", "2026-12-31")])
 def test_rich_carry_forward_preserves_untouched_rows_and_release(tmp_path, release_id, prior_cutoff,
                                                                  cutoff):
     inventory, prior_body = _stage_rich_prior(tmp_path, prior_cutoff=prior_cutoff,
@@ -788,6 +788,13 @@ def test_rich_carry_forward_preserves_untouched_rows_and_release(tmp_path, relea
                                           inventory=inventory, **_carry_kwargs(args))
     catalog = phase5_release._read_catalog(path, release_id)
     carrier = (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID)
+    assert catalog["sources"]["pool_cutoff"] == cutoff
+    assert catalog["sources"]["carried_from"] == "prior1"
+    supplied = _supplied_by_member(args)
+    for member_id in carrier:
+        expected = _expected_row(_spec(member_id), supplied[member_id],
+                                 f"carried forward {cutoff}")
+        assert next(r for r in catalog["members"] if r["member_id"] == member_id) == expected
     for row in prior_body["members"]:
         if row["member_id"] not in carrier:
             assert next(r for r in catalog["members"]
@@ -796,6 +803,15 @@ def test_rich_carry_forward_preserves_untouched_rows_and_release(tmp_path, relea
     prior_model = deployment.resolve_release(store, "prior1")
     candidate_model = deployment.resolve_release(store, release_id)
     assert dataclasses.replace(candidate_model, release_id="prior1") == prior_model
+
+
+@pytest.mark.parametrize("cutoff", ["2026-03-15", "2026-03-14"])
+def test_cutoff_not_advanced_refusal(tmp_path, cutoff):
+    _, prior_body = _stage_prior(tmp_path, prior_sources={"pool_cutoff": "2026-03-15"})
+    args = _valid_derive_args(tmp_path, cutoff=cutoff)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "CUTOFF_NOT_ADVANCED"
 
 
 def _object_path(root, target):
