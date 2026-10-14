@@ -112,8 +112,11 @@ so the helper sits beside it):
 - `derive_catalog(prior_catalog, *, release_id, expected_prior_release_id, outputs, chooser, cutoff) -> dict`
   — pure. Returns the candidate catalog body: the six pool members
   (`driver_residual_pool:{size,implied_t1,runup_move}`, `paired_residual_pool`,
-  `trailing_pnl_cutoff`, `board_analog_matcher`) and `chooser_analog_pool` get
-  the supplied objects; every other member row is copied unchanged;
+  `trailing_pnl_cutoff`, `board_analog_matcher`) and `chooser_analog_pool` each
+  get the full set of supplied objects (`outputs` holds one or more
+  `PoolOutput` per pool member; `chooser` is one or more; object names are
+  unique within a member, and every object carries `cutoff`), replacing that
+  row's objects wholesale; every other member row is copied unchanged;
   `sources.pool_cutoff` advances to `cutoff`.
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release and every supplied object on disk, re-stages
@@ -123,8 +126,8 @@ so the helper sits beside it):
 
 Both refuse with `ReleaseAssemblyRefusal.code` (stable): `PRIOR_MISMATCH` (prior
 catalog malformed, wrong id, a pool/chooser row missing or not `STAGED`, or no
-`sources.pool_cutoff`), `POOL_SET_MISMATCH` (outputs are not exactly the six
-members once each, or a malformed hash), `CUTOFF_MISMATCH` (an output or the
+`sources.pool_cutoff`), `POOL_SET_MISMATCH` (outputs do not cover exactly the
+six pool members, a member has a duplicate object name, or a malformed field/hash), `CUTOFF_MISMATCH` (an output or the
 chooser disagrees with `cutoff`), `CHOOSER_MISMATCH` (wrong member id),
 `CUTOFF_NOT_ADVANCED` (`cutoff` is not strictly after the prior's),
 `OBJECT_UNVERIFIED` (object missing or its bytes do not hash to the claim),

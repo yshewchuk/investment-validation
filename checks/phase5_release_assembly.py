@@ -100,21 +100,39 @@ def _admit(output: object, code: str) -> PoolOutput:
     return output
 
 
-def _outputs_by_member(outputs: object) -> dict[str, PoolOutput]:
+def _normalize_objects(value: object, code: str, detail: str) -> tuple[PoolOutput, ...]:
+    """Normalize a single PoolOutput or a sequence of them to a tuple."""
+    if isinstance(value, PoolOutput):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(value)
+    raise ReleaseAssemblyRefusal(code, detail)
+
+
+def _all_outputs(by_member: dict[str, tuple[PoolOutput, ...]]) -> tuple[PoolOutput, ...]:
+    return tuple(output for member_outputs in by_member.values() for output in member_outputs)
+
+
+def _outputs_by_member(outputs: object) -> dict[str, tuple[PoolOutput, ...]]:
     if not isinstance(outputs, (list, tuple)):
         raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "outputs are not a sequence")
-    by_member: dict[str, PoolOutput] = {}
+    by_member: dict[str, list[PoolOutput]] = {}
+    names_by_member: dict[str, set[str]] = {}
     for output in outputs:
         _admit(output, "POOL_SET_MISMATCH")
-        if output.member_id in by_member:
-            raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "a member id appears twice")
-        by_member[output.member_id] = output
+        names = names_by_member.setdefault(output.member_id, set())
+        if output.name in names:
+            raise ReleaseAssemblyRefusal(
+                "POOL_SET_MISMATCH", "an object name appears twice within a member")
+        names.add(output.name)
+        by_member.setdefault(output.member_id, []).append(output)
     if set(by_member) != set(POOL_MEMBER_IDS):
         raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "outputs are not exactly the six pool members")
-    for output in by_member.values():
-        if not _content_hash_valid(output.content_hash):
-            raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "an output hash is malformed")
-    return by_member
+    for member_outputs in by_member.values():
+        for output in member_outputs:
+            if not _content_hash_valid(output.content_hash):
+                raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "an output hash is malformed")
+    return {member_id: tuple(member_outputs) for member_id, member_outputs in by_member.items()}
 
 
 def _prior_pool_rows(members: object) -> None:
@@ -136,7 +154,7 @@ def _prior_pool_rows(members: object) -> None:
 
 
 def derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_release_id: str,
-                   outputs: object, chooser: PoolOutput, cutoff: str) -> dict:
+                   outputs: object, chooser: object, cutoff: str) -> dict:
     """Return the pure candidate catalog body for carrying ``prior_catalog`` forward."""
     try:
         return _derive_catalog(prior_catalog, release_id=release_id,
@@ -150,7 +168,7 @@ def derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_rel
 
 
 def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_release_id: str,
-                    outputs: object, chooser: PoolOutput, cutoff: str) -> dict:
+                    outputs: object, chooser: object, cutoff: str) -> dict:
     if not isinstance(expected_prior_release_id, str) or not expected_prior_release_id:
         raise ReleaseAssemblyRefusal(
             "PRIOR_MISMATCH", "expected prior release id must be a non-empty string")
@@ -171,31 +189,39 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
     if release_id == prior["release_id"]:
         raise ReleaseAssemblyRefusal("ID_CONFLICT", "candidate release id is not a new string")
 
-    _admit(chooser, "CHOOSER_MISMATCH")
+    chooser_objects = _normalize_objects(
+        chooser, "CHOOSER_MISMATCH", "chooser is not a PoolOutput or a sequence")
+    if not chooser_objects:
+        raise ReleaseAssemblyRefusal("CHOOSER_MISMATCH", "chooser is empty")
     by_member = _outputs_by_member(outputs)
-    if not _content_hash_valid(chooser.content_hash):
-        raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "the chooser hash is malformed")
-    if chooser.member_id != CHOOSER_MEMBER_ID:
-        raise ReleaseAssemblyRefusal("CHOOSER_MISMATCH", "chooser member id is not chooser_analog_pool")
+    chooser_names: set[str] = set()
+    for output in chooser_objects:
+        _admit(output, "CHOOSER_MISMATCH")
+        if not _content_hash_valid(output.content_hash):
+            raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "the chooser hash is malformed")
+        if output.member_id != CHOOSER_MEMBER_ID:
+            raise ReleaseAssemblyRefusal("CHOOSER_MISMATCH", "chooser member id is not chooser_analog_pool")
+        if output.name in chooser_names:
+            raise ReleaseAssemblyRefusal("CHOOSER_MISMATCH", "a chooser object name appears twice")
+        chooser_names.add(output.name)
 
     cutoff_day = _parse_day(cutoff, "CUTOFF_MISMATCH", "cutoff is not an ISO date")
-    for output in (*by_member.values(), chooser):
+    for output in (*_all_outputs(by_member), *chooser_objects):
         if output.cutoff != cutoff:
             raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "an object cutoff disagrees with cutoff")
     if cutoff_day <= prior_day:
         raise ReleaseAssemblyRefusal("CUTOFF_NOT_ADVANCED", "cutoff is not after the prior pool_cutoff")
 
-    chosen = {output.member_id: output for output in (*by_member.values(), chooser)}
+    all_by_member = {**by_member, CHOOSER_MEMBER_ID: chooser_objects}
     rows = copy.deepcopy(prior["members"])
     position = {row["member_id"]: index for index, row in enumerate(rows)}
     for member_id in _REQUIRED_MEMBER_IDS:
-        output = chosen[member_id]
         objects = [{
             "name": output.name,
             "path": object_relpath(output.content_hash),
             "content_hash": output.content_hash,
             "bytes": output.payload_bytes,
-        }]
+        } for output in all_by_member[member_id]]
         rows[position[member_id]] = member_row(
             _SPEC_BY_ID[member_id], STAGED, objects, f"carried forward {cutoff}")
     carried = {**sources, "pool_cutoff": cutoff, "carried_from": expected_prior_release_id}
@@ -251,7 +277,7 @@ def _publication_lock(store: Path):
 
 
 def carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
-                          inventory, outputs, chooser: PoolOutput, cutoff: str) -> Path:
+                          inventory, outputs, chooser: object, cutoff: str) -> Path:
     """Verify, re-stage the prior model bindings and write the candidate catalog."""
     if not isinstance(getattr(inventory, "release_id", None), str):
         raise ReleaseAssemblyRefusal("INVENTORY_MISMATCH", "inventory is missing or has no release id")
@@ -270,7 +296,7 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
 
 
 def _carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
-                           inventory, outputs, chooser: PoolOutput, cutoff: str) -> Path:
+                           inventory, outputs, chooser: object, cutoff: str) -> Path:
     if not isinstance(prior_release_id, str) or not prior_release_id:
         raise ReleaseAssemblyRefusal(
             "PRIOR_MISMATCH", "expected prior release id must be a non-empty string")
@@ -293,7 +319,9 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
     if inventory.release_id != release_id:
         raise ReleaseAssemblyRefusal("ID_CONFLICT", "inventory release id does not match the candidate")
 
-    _verify_objects(store, (*outputs, chooser))
+    _verify_objects(store, (*_normalize_objects(
+        outputs, "POOL_SET_MISMATCH", "outputs are not a sequence"), *_normalize_objects(
+        chooser, "CHOOSER_MISMATCH", "chooser is not a PoolOutput or a sequence")))
 
     try:
         prior = deployment.resolve_release(store, prior_release_id)

@@ -292,7 +292,9 @@ def test_cutoff_not_advanced(tmp_path, cutoff):
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         assembly.derive_catalog(prior_body, **args)
     assert error.value.code == "CUTOFF_NOT_ADVANCED"
+    store = phase5_release.deployment_root(tmp_path)
     assert not _candidate_path(tmp_path).exists()
+    assert not deployment._manifest_path(store, "cand1").exists()
 
 
 @pytest.mark.parametrize("mode", ["missing", "hash", "length"])
@@ -316,7 +318,7 @@ def test_object_unverified_leaves_no_candidate_catalog(tmp_path, mode):
     assert not _candidate_path(tmp_path).exists()
 
 
-@pytest.mark.parametrize("release_id", ["prior1", "", "a/b", ".hidden", "a\\b"])
+@pytest.mark.parametrize("release_id", ["prior1", "", "a/b", ".hidden", "a\\b", "a\x00b"])
 def test_id_conflict_on_bad_candidate_id(tmp_path, release_id):
     _, prior_body = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
@@ -368,13 +370,17 @@ def test_id_conflict_when_candidate_already_exists(tmp_path, setup, no_catalog):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
     setup(tmp_path)
+    catalog_path = _candidate_path(tmp_path)
+    existing_bytes = catalog_path.read_bytes() if catalog_path.exists() else None
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                        inventory=dataclasses.replace(inventory, release_id="cand1"),
                                        **_carry_kwargs(args))
     assert error.value.code == "ID_CONFLICT"
     if no_catalog:
-        assert not _candidate_path(tmp_path).exists()
+        assert not catalog_path.exists()
+    else:
+        assert catalog_path.read_bytes() == existing_bytes
 
 
 def test_incomplete_inventory_on_retry_is_refused(tmp_path):
@@ -847,6 +853,9 @@ def test_cutoff_not_advanced_refusal(tmp_path, cutoff):
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         assembly.derive_catalog(prior_body, **args)
     assert error.value.code == "CUTOFF_NOT_ADVANCED"
+    store = phase5_release.deployment_root(tmp_path)
+    assert not _candidate_path(tmp_path).exists()
+    assert not deployment._manifest_path(store, "cand1").exists()
 
 
 def _object_path(root, target):
@@ -1003,5 +1012,180 @@ def test_read_failure_classification(tmp_path, monkeypatch, label, member_id, co
         assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                        inventory=inventory, **_carry_kwargs(args))
     assert error.value.code == code
+    assert not _candidate_path(tmp_path).exists()
+    assert not deployment._manifest_path(store, "cand1").exists()
+
+
+_POOL_OBJECT_ORDER = (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID)
+_PRIOR_MULTI_COUNTS = dict(zip(_POOL_OBJECT_ORDER, (2, 2, 2, 2, 4, 3, 2)))
+_SUPPLIED_MULTI_COUNTS = dict(zip(_POOL_OBJECT_ORDER, (3, 3, 3, 2, 2, 4, 2)))
+
+
+def _stage_prior_with_multi_objects(root, *, release_id="prior1", deployment_id="d1",
+                                    prior_cutoff="2026-09-01"):
+    inventory, _ = _stage_prior(root, release_id=release_id, deployment_id=deployment_id)
+    catalog = phase5_release._read_catalog(phase5_release._catalog_path(root, release_id), release_id)
+    members = []
+    for row in catalog["members"]:
+        member_id = row["member_id"]
+        count = _PRIOR_MULTI_COUNTS.get(member_id, 0)
+        if not count:
+            members.append(row)
+            continue
+        objects = []
+        for index in range(count):
+            payload = f"prior-{member_id}-{index}".encode()
+            content_hash, rel = phase5_release.write_object(root, payload)
+            objects.append({"name": f"prior-{member_id}-{index}.bin", "path": rel,
+                            "content_hash": content_hash, "bytes": len(payload)})
+        members.append(phase5_release.member_row(_spec(member_id), phase5_release.STAGED,
+                                                 objects, "prior"))
+    body = phase5_release.manifest_body(catalog["release_id"], catalog["deployment_id"], members,
+                                        {**catalog["sources"], "pool_cutoff": prior_cutoff})
+    phase5_release.write_manifest(root, body)
+    return inventory, body
+
+
+def _multi_objects_args(root, *, cutoff="2026-10-01", prefix="multi"):
+    outputs = []
+    for member_id in assembly.POOL_MEMBER_IDS:
+        for index in range(_SUPPLIED_MULTI_COUNTS[member_id]):
+            payload = f"{prefix}-{member_id}-{index}".encode()
+            content_hash, _ = phase5_release.write_object(root, payload)
+            outputs.append(assembly.PoolOutput(member_id=member_id,
+                                               name=f"{prefix}-{member_id}-{index}.bin",
+                                               content_hash=content_hash, cutoff=cutoff,
+                                               payload_bytes=len(payload)))
+    chooser = []
+    for index in range(_SUPPLIED_MULTI_COUNTS[assembly.CHOOSER_MEMBER_ID]):
+        payload = f"{prefix}-chooser-{index}".encode()
+        content_hash, _ = phase5_release.write_object(root, payload)
+        chooser.append(assembly.PoolOutput(member_id=assembly.CHOOSER_MEMBER_ID,
+                                           name=f"{prefix}-chooser-{index}.bin",
+                                           content_hash=content_hash, cutoff=cutoff,
+                                           payload_bytes=len(payload)))
+    return dict(release_id="cand1", expected_prior_release_id="prior1",
+                outputs=outputs, chooser=chooser, cutoff=cutoff)
+
+
+def _supplied_by_member_multi(args):
+    by_member = {}
+    for obj in (*args["outputs"], *args["chooser"]):
+        by_member.setdefault(obj.member_id, []).append(obj)
+    return by_member
+
+
+def _objects_of(outputs):
+    return sorted(
+        [{"name": obj.name, "path": phase5_release.object_relpath(obj.content_hash),
+          "content_hash": obj.content_hash, "bytes": obj.payload_bytes} for obj in outputs],
+        key=lambda entry: entry["name"])
+
+
+@pytest.mark.parametrize("derive", [True, False],
+                         ids=["derive_catalog", "carry_forward_release"])
+def test_multiple_objects_per_pool_row_carried_forward(tmp_path, derive):
+    inventory, prior_body = _stage_prior_with_multi_objects(tmp_path)
+    args = _multi_objects_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    if derive:
+        catalog = assembly.derive_catalog(prior_body, **args)
+    else:
+        path = assembly.carry_forward_release(tmp_path, prior_release_id="prior1",
+                                              release_id="cand1", inventory=inventory,
+                                              **_carry_kwargs(args))
+        catalog = phase5_release._read_catalog(path, "cand1")
+    supplied = _supplied_by_member_multi(args)
+    for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID):
+        row = _prior_row(catalog, member_id)
+        assert row["objects"] == _objects_of(supplied[member_id])
+        prior_names = {obj["name"] for obj in _prior_row(prior_body, member_id)["objects"]}
+        assert not prior_names & {obj["name"] for obj in row["objects"]}
+    assert _prior_row(catalog, UNRELATED_MEMBER_ID) == _prior_row(prior_body, UNRELATED_MEMBER_ID)
+
+
+def test_duplicate_object_with_same_member_and_name_is_refused(tmp_path):
+    _, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    args = {**args, "outputs": [*args["outputs"], args["outputs"][0]]}
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "POOL_SET_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def _extra_chooser_object(root, *, cutoff="2026-10-01", prefix="extra"):
+    payload = f"{prefix}-chooser".encode()
+    content_hash, _ = phase5_release.write_object(root, payload)
+    return assembly.PoolOutput(member_id=assembly.CHOOSER_MEMBER_ID, name=f"{prefix}.bin",
+                               content_hash=content_hash, cutoff=cutoff,
+                               payload_bytes=len(payload))
+
+
+def test_chooser_sequence_of_objects_is_accepted(tmp_path):
+    _, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    args["chooser"] = [args["chooser"], _extra_chooser_object(tmp_path)]
+    derived = assembly.derive_catalog(prior_body, **args)
+    row = _prior_row(derived, assembly.CHOOSER_MEMBER_ID)
+    assert row["objects"] == _objects_of(args["chooser"])
+
+
+@pytest.mark.parametrize("chooser", [[], ()], ids=["empty-list", "empty-tuple"])
+def test_empty_chooser_sequence_is_refused(tmp_path, chooser):
+    _, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    args["chooser"] = chooser
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "CHOOSER_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_duplicate_chooser_names_are_refused(tmp_path):
+    _, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    args["chooser"] = [args["chooser"], args["chooser"]]
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "CHOOSER_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_chooser_sequence_wrong_cutoff_on_second_object(tmp_path):
+    _, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    args["chooser"] = [args["chooser"], _extra_chooser_object(tmp_path, cutoff="2026-09-15")]
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "CUTOFF_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+
+
+def test_chooser_sequence_damaged_second_object_is_unverified(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    args["chooser"] = [args["chooser"], _extra_chooser_object(tmp_path)]
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    _object_path(tmp_path, args["chooser"][1]).write_bytes(b"damaged")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "OBJECT_UNVERIFIED"
+    store = phase5_release.deployment_root(tmp_path)
+    assert not _candidate_path(tmp_path).exists()
+    assert not deployment._manifest_path(store, "cand1").exists()
+
+
+@pytest.mark.parametrize("cutoff", ["2026-03-15", "2026-03-14"])
+def test_carry_forward_cutoff_not_advanced_leaves_no_candidate(tmp_path, cutoff):
+    inventory, _ = _stage_prior(tmp_path, prior_sources={"pool_cutoff": "2026-03-15"})
+    args = _valid_derive_args(tmp_path, cutoff=cutoff)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "CUTOFF_NOT_ADVANCED"
+    store = phase5_release.deployment_root(tmp_path)
     assert not _candidate_path(tmp_path).exists()
     assert not deployment._manifest_path(store, "cand1").exists()
