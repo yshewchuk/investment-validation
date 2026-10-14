@@ -136,7 +136,7 @@ def test_ambiguous_event_enters_neither_set_and_is_counted(tmp_path):
         conn.close()
 
 
-def test_other_variants_and_provenance_are_never_read(tmp_path):
+def test_other_variants_and_provenance_are_never_scored(tmp_path):
     extra = [
         _winner_trade("EVENT-5", "2024-01-16", 0.5),
         _winner_trade("EVENT-5", "2024-01-16", 50.0,
@@ -159,15 +159,17 @@ def test_other_variants_and_provenance_are_never_read(tmp_path):
 def test_unscored_event_counts_without_trade(tmp_path):
     extra = [_winner_trade("EVENT-5", "2024-01-16", 0.5)]
     conn, repository, snapshot = _holdout_snapshot(
-        tmp_path, [_RANDOM, _OVERLAP, _ROLLING], extra_trades=extra)
+        tmp_path, [_RANDOM, _ROLLING], extra_trades=extra)
     try:
         result = _evaluate(repository, _request(snapshot))
-        assert result.random.n_events == 2
+        assert result.random.n_events == 1
         assert result.random.n_trades == 1
-        assert result.random.n_without_trade == 1
+        assert result.random.n_without_trade == 0
         assert result.rolling == SetMetrics(
-            n_events=2, n_trades=0, n_without_trade=2, total_ret=0.0,
+            n_events=1, n_trades=0, n_without_trade=1, total_ret=0.0,
             mean_ret=None, win_rate=None)
+        assert result.overlap_count == 0
+        assert result.ambiguous_count == 0
     finally:
         conn.close()
 
@@ -223,9 +225,18 @@ def test_non_finite_ret_is_a_contract_mismatch(tmp_path):
 
 
 def test_stale_trade_date_against_canonical_event_is_a_contract_mismatch(tmp_path):
-    """A calendar correction keeps the event_id but changes the canonical date."""
-    extra = [_winner_trade("EVENT-5", "2024-02-20", 0.5)]
-    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM], extra_trades=extra)
+    """Calendar corrections keep the event_id but change the canonical date.
+
+    The valid winner row is never listed; only the distinct, plural offending
+    ids appear, sorted.
+    """
+    extra = [
+        _winner_trade("EVENT-5", "2024-01-16", 0.5),
+        _winner_trade("EVENT-1", "2024-02-20", 0.25),
+        _winner_trade("EVENT-30", "2024-02-21", 0.75),
+    ]
+    conn, repository, snapshot = _holdout_snapshot(
+        tmp_path, [_RANDOM, _ROLLING, _OVERLAP], extra_trades=extra)
     try:
         request = _request(snapshot)
         population = load_final_population(repository, request)
@@ -233,14 +244,21 @@ def test_stale_trade_date_against_canonical_event_is_a_contract_mismatch(tmp_pat
             evaluate_final_holdout(repository, request, population)
         assert refusal.value.problem.code == "CONTRACT_MISMATCH"
         assert refusal.value.problem.details == {
-            "snapshot_id": snapshot.snapshot_id, "event_ids": ["EVENT-5"]}
+            "snapshot_id": snapshot.snapshot_id,
+            "event_ids": ["EVENT-1", "EVENT-30"]}
     finally:
         conn.close()
 
 
 def test_winner_ticker_mismatch_against_canonical_event_is_a_contract_mismatch(tmp_path):
-    extra = [_winner_trade("EVENT-5", "2024-01-16", 0.5, ticker="ZZZZ")]
-    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM], extra_trades=extra)
+    """The valid winner row is never listed; only distinct wrong-ticker ids."""
+    extra = [
+        _winner_trade("EVENT-5", "2024-01-16", 0.5),
+        _winner_trade("EVENT-1", "2024-09-15", 0.25, ticker="ZZZZ"),
+        _winner_trade("EVENT-30", "2024-09-16", 0.75, ticker="YYYY"),
+    ]
+    conn, repository, snapshot = _holdout_snapshot(
+        tmp_path, [_RANDOM, _ROLLING, _OVERLAP], extra_trades=extra)
     try:
         request = _request(snapshot)
         population = load_final_population(repository, request)
@@ -248,7 +266,8 @@ def test_winner_ticker_mismatch_against_canonical_event_is_a_contract_mismatch(t
             evaluate_final_holdout(repository, request, population)
         assert refusal.value.problem.code == "CONTRACT_MISMATCH"
         assert refusal.value.problem.details == {
-            "snapshot_id": snapshot.snapshot_id, "event_ids": ["EVENT-5"]}
+            "snapshot_id": snapshot.snapshot_id,
+            "event_ids": ["EVENT-1", "EVENT-30"]}
     finally:
         conn.close()
 
