@@ -1,0 +1,78 @@
+# Nightly serving projection job (#717)
+
+Design, not yet implemented. Decisions (owner, 2026-10-14): the projection is a new job after `publication`; a failure before the pointer swap fails that job loudly, leaves CURRENT on the previous release, and never fails publication or points CURRENT at a partial projection. Every failure after the swap (acknowledgement or step-4 read-back, below) leaves the new, pre-verified pointer visible; those are the stated exceptions. The read side is the last section of this guide; `engine/v2/serving/ARCHITECTURE.md` and `engine/v2/ops/ARCHITECTURE.md` change when each slice implements its part. `engine/v2/ops/ARCHITECTURE.md` is at its line ceiling, so the job contract lives here until that doc is compressed.
+
+## Job contract
+
+A **new job kind `serving_projection`** (not the existing render stage `projection`) runs after `publication` in `_DAG_STAGES`/`plans.py`. It is a leaf: `delivery`, `backup` and the session's publication result do not wait on it, and it is not `OPTIONAL`, so its failure is loud. Publication's contract is unchanged; it never reads the serving index.
+
+
+**Inputs.** Bound from the succeeded `publication` job's retained bindings and the same session's `score` job: `bundle.tar`, `finality.json`, the score artifact, the pinned snapshot id, the saved nightly plan, the source-provenance document and the native-score inputs the plan's `shadow_serving_scorer` needs. Every input is an artifact reference verified by `ArtifactStore.read_verified`; none is a local path or an unpinned latest.
+
+**Execution.** The worker launches `tools/v2_dashboard_project.py` as a child process. `tools/` is the one place allowed to compose ops and serving (neither package imports the other). The tool's coordinator becomes a callable `run_projection(...)`; the CLI stays a thin wrapper over it. It unpacks the bundle into `/tmp` scratch (removed on success; kept as diagnostics on failure), then calls `build_candidate`. No provider calls, no scoring beyond the shadow row source the plan already names.
+
+**Where it lives.** One configured **serving root**, `<ops_root>/serving` (overridable by ops configuration, never a checkout path), holds `serving.sqlite`, the content-addressed `objects/` store and `publisher/`, the serving pointer root (`CURRENT`, `releases/<ops_release_id>/projection_binding.json`). The API's `publication_root` and `serving_db` are that root's `publisher/` and `serving.sqlite`. The ops publication scope root (`<ops_root>/releases/<scope>`) keeps serving the bundle-only release that health and `delivery` read; the board no longer reads it.
+
+**Binding and swap (order matters).**
+1. `build_candidate` commits the projection release (objects first, then one index transaction).
+2. The job builds `projection_binding.json` from the committed row, runs `verify_projection_binding` on it against the live index, and registers it as an artifact.
+3. It submits a retained publication (`publication_submit.submit_retained_publication`: the succeeded publication's retained bindings plus `projection_binding.json`, `operation_id` derived from the source publication job id) targeting the serving pointer root. That fenced `publish_local` materializes the release directory, then moves `CURRENT` with one `os.replace`.
+4. The job re-reads `CURRENT` and the binding through the API's own resolver and `verify_projection_binding`; only then does it succeed.
+
+A reader sees the previous release or the new one, never a mix: the new release directory is complete before `CURRENT` moves, the pointer swap is atomic, and index rows are append-only (an old binding keeps verifying while the swap happens). Each API request resolves once, and `/releases/current` carries a new ETag only when the response document changes: the existing validator hashes the projection identity and response, not the pointer, so republishing the same projection keeps the ETag. No new validator is designed here.
+
+**Idempotency and retry.** `release_id` derives from content and index writes are `INSERT OR IGNORE`; the retained-publication `operation_id` is fixed per publication job, so a retry resubmits the identical job and `publish_local` accepts `observed == release_id`. A retry after a crash between steps 1 and 3 reuses the committed release; after step 3 it first completes or confirms the retained publication's durable acknowledgement (release row, outbox, watermarks; reading a valid pointer does not replace it) and only then runs the step-4 read-back. Retryable causes (store/index busy, `LEASE_LOST`, `RESOURCE_UNAVAILABLE`) go through the supervisor's normal retry; typed refusals are terminal until an operator reruns the job.
+
+| Failure | Job outcome | `CURRENT` and board |
+|---|---|---|
+| A bound input missing or fails verification (`INPUT_CHANGED`/`INTEGRITY_FAILED`) | Fails, no index write | Previous release unchanged |
+| Findings not ok (`PROJECTION_REFUSED`) | Fails; the findings artifact is kept as a diagnostic | Unchanged |
+| Crash or error after the index commit, before step 3 | Fails or is retried; an unreferenced release row is inert | Unchanged |
+| Retained publication refused (`STALE_EXPECTATION`, `PUBLICATION_REFUSED`, `IDEMPOTENCY_CONFLICT`) | Fails with the typed code | Unchanged |
+| Crash between pointer swap and acknowledgement | Retry re-acknowledges (the existing O24 window) | New release, already complete |
+| Step 4 re-verification fails (needs index damage after step 2's pre-swap check passed) | Fails loudly with the read-back's own code: `CURRENT_BINDING_INVALID` for a binding mismatch, `SERVING_INDEX_UNREADABLE` (retryable) for an unreadable index; a missing manifest object registration surfaces as `ServingIndexError(INTEGRITY_FAILED)`, which the resolver does not translate today (slice 4 assigns it a typed `SERVING_INDEX_UNREADABLE`-class refusal with a test) | Exception to "previous release": the new pointer is already visible. A binding mismatch makes the board refuse until the operator re-points with a rollback retained publication; an unreadable index is not repaired by a rollback and clears only when the index is readable again (retry). |
+| Serving root unconfigured or unwritable | Fails `RESOURCE_UNAVAILABLE`; nothing is created | Unchanged |
+
+A failure never fails `publication`, never marks `delivery` failed, and never points `CURRENT` at a partial projection: steps 1-2 are the only place a half-built projection can exist, and nothing reads it until step 3. "Previous release stays" holds for every failure before the swap; every post-swap failure (the acknowledgement-crash row and the step-4 row) leaves the new pointer visible. Acknowledgement recovery is a retry that completes the durable acknowledgement; a read-back failure is a verification fault and does not change the pointer. Completion role: slice 5 introduces a post-publication role for `serving_projection` that keeps existing required-job semantics (a failed job is `failed` for that job) but records the session as `completed_degraded` rather than failing the already-published session.
+
+**Status.** The existing `operations_status.json` is written during publication and read from the ops scope root, so it cannot show a projection failure that happens before retained publication starts. Slice 5 adds a `serving_status.json` sidecar written by the `serving_projection` job on every attempt (success or typed failure) into the serving root (`<serving_root>/serving_status.json`, atomic replace): the session, the attempted ops release id, the served projection release id and the failure code. The API reads it from the configured serving root and exposes it with the current-release discovery, so clients show "tonight's projection failed, serving the previous release" instead of inferring it. Current-release discovery also takes the current attempt's id (the catalog attempt id of the latest `serving_projection` attempt, which changes on every retry, written into the sidecar too and required to match), session and attempted ops release id from an independent source (the catalog's latest `serving_projection` job, read by the ops-side status reader and handed to the API as configuration, not inferred from the sidecar). A missing, malformed, unreadable or identity-mismatched sidecar reads as unknown. Attempted and served ids need not match: a pre-swap failure legitimately has different ones.
+
+**`/api/v1/releases/current` from a nightly.** The serving root's `CURRENT` -> that release's `projection_binding.json` -> projection release id, re-verified against the live index, exactly as the serving doc states; a night whose job failed before the pointer swap still resolves to the previous night's release (the step-4 row is the exception). Slice 1 also translates open-time index failures to `SERVING_INDEX_UNREADABLE`.
+
+**Slices** (each at most about 400 code lines): (1) serving root configuration and API wiring; (2) `run_projection` extracted from the tool, CLI unchanged; (3) `serving_projection` job kind, DAG/plan/profile wiring and the child-process worker; (4) serving-pointer retained publication, read-back verification and the failure table above; (5) completion disposition and the `serving_status.json` sidecar plus API exposure; (6) a real-browser test of the board against a real nightly's release.
+
+Regression cases: slice 1 asserts `/releases/current` ETag changes when the response changes and stays constant only when the complete response is unchanged when the same projection is republished. Slice 5 also adds a same-job retry case: an earlier attempt's failure sidecar, while a new attempt runs or crashes before replacing it, reads unknown. Slice 5 adds the case that a changed status field (attempted id or failure code) with an unchanged projection changes the ETag.
+
+Estimates (code / test / doc lines): 1: 120 / 100 / 15; 2: 150 / 120 / 10; 3: 250 / 200 / 20; 4: 300 / 250 / 25; 5: 200 / 150 / 20; 6: 40 / 150 / 10. Slice 4 must first confirm `submit_retained_publication` can target the separate serving pointer root; if it needs a parameter, that goes in slice 4.
+
+
+## Read side: serving root and nightly current release
+
+Production reads use one configured serving root, `<ops_root>/serving`: `serving.sqlite`,
+the immutable `objects/` store and `publisher/`, the serving pointer root the API takes as
+`publication_root`. It is configuration, never a checkout path. The ops publication scope
+root is a different pointer (bundle-only release, read by health and delivery); the API
+does not resolve "current" from it.
+
+`/releases/current` after a nightly resolves: serving `publisher/CURRENT` -> that release's
+`projection_binding.json` -> projection release id -> `verify_projection_binding` against the
+live index. Only the fenced ops publisher replaces that pointer, on request from the nightly
+`serving_projection` job (after the projection is committed and its binding verified) or an
+operator rollback retained publication; the swap is one atomic file replace into a
+complete release directory. A request resolves once, so it sees the previous release or the
+new one, never a mix. Index rows are append-only, so the old binding verifies during the swap.
+
+| Condition | Read outcome |
+|---|---|
+| Nightly's `serving_projection` failed before the pointer swap, or has not run | `CURRENT` unchanged: the previous night's release is served |
+| Serving root has no `CURRENT` yet (first run, or no successful projection) | `NO_CURRENT_RELEASE` (503, retryable) |
+| Serving root missing (no `CURRENT`) | `NO_CURRENT_RELEASE` (503, retryable), as today |
+| `serving.sqlite` fails to open, once `CURRENT` exists | Today the resolver opens the index outside its error translation. Translating open-time failures to `SERVING_INDEX_UNREADABLE` (503, retryable) is proposed work in slice 1, not current behavior |
+| Pointer names a release whose binding fails verification | `CURRENT_BINDING_INVALID` (500); no fallback to an older release |
+
+Serving gains no write path, retry or job start: the swap is the ops job's fenced
+publisher, and the read contract above is otherwise unchanged. Clients compare the release
+they show with the job's `serving_status.json` sidecar in the serving root (attempted versus
+served release and failure code; unknown when unreadable) to detect a night whose projection
+failed. The full proposed contract stays in the guide until implemented.
+
