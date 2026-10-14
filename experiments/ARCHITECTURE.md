@@ -229,7 +229,7 @@ resolves its immutable plan and reprices its own training and evaluation rows.
 The registration binds recipe source, environment, snapshot, population and
 holdouts; the report also binds actual history, cutoffs and replay inputs.
 
-This is exploratory reconstructed-history research (user decision 2026-10-14).
+This is exploratory reconstructed-history research.
 Calendar sessions come from the exact snapshot without projected extensions.
 The feature ceiling is the completed session strictly before the earlier of
 the strategy's decision and entry. Protected `load_event_history` supplies

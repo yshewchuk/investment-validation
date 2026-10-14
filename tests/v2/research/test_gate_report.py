@@ -43,14 +43,19 @@ def _spec(alpha=0.0, arm="candidate", **changes):
 
 
 def _source(tmp_path, *, delayed=None, missing_quotes=False, calendar_start="2020-12-01",
-            runup=False, test_quote_shift=0.0, rejected=False):
+            runup=False, test_quote_shift=0.0, rejected=False, early_january=False):
     conn, clock, store = catalog_and_store(tmp_path)
     days = ["2021-02-02", "2021-05-04", "2022-02-02", "2022-05-04",
             "2023-02-02", "2023-05-04", "2024-02-02", "2024-05-02"]
     if runup:
         days[3] = "2023-01-03"
         days[5] = "2024-01-01"
+    if early_january:
+        days[3:6] = ["2022-12-29", "2022-12-30", "2023-01-02"]
     eligible = [_event(day) for day in days]
+    if early_january:
+        # A separate ticker keeps its Jan 2 exit quote distinct from the test entry.
+        eligible[4] = _event(days[4], ticker="AFTER")
     if rejected:
         eligible.append(_event("2023-06-01", ticker="NEW"))
     protected = [_event("2022-03-02", protected=True), _event("2024-12-02")]
@@ -114,10 +119,10 @@ def source(tmp_path):
     value.conn.close()
 
 
-def _register(source, spec=None):
+def _register(source, spec=None, **kwargs):
     spec = spec or _spec()
     registered = native_registration.register_native(source.conn, source.store, source.repository,
-        spec, code_root=REPO, as_of_month=MONTH)
+        spec, code_root=REPO, as_of_month=MONTH, **kwargs)
     return spec, registered
 
 
@@ -413,6 +418,102 @@ def test_real_gate_rejects_low_score_candidate_and_counts_only_selected_cashflow
         assert rejected["pnl"] == pytest.approx(selected_mean + 6.0)
         assert fold["selected"] == {"count": 2, "mean_mark_pnl": pytest.approx(selected_mean)}
         assert fold["all_candidates"] == {"count": 3, "mean_mark_pnl": pytest.approx(all_mean)}
+        # Four ordinary selected trades and one rejected trade worth six more.
+        assert result["selected"] == {"count": 4, "mean_mark_pnl": pytest.approx(selected_mean)}
+        assert result["all_candidates"] == {"count": 5, "mean_mark_pnl": pytest.approx(selected_mean + 6 / 5)}
+        # Calculate from the fixture's two leg quotes, independently of replay/report helpers.
+        entry = 3.8 - 0.8 * alpha
+        exits = [0.4, 3.4, 5.0, 0.4, 5.0, 5.0, 5.0, 5.0, 11.0]
+        cashflows = {event["event_id"]: {"event_id": event["event_id"],
+            "entry_cost": pytest.approx(entry), "exit_value": pytest.approx(exit_bid + 0.8 * alpha),
+            "pnl": pytest.approx(exit_bid + 0.8 * alpha - entry)}
+            for event, exit_bid in zip(source.events, exits, strict=True)}
+        for fold, indexes in zip(result["folds"], ([0, 1, 2, 3], [8, 0, 1, 2, 3, 4, 5]), strict=True):
+            assert fold["training_cashflows"] == [cashflows[source.events[i]["event_id"]] for i in indexes]
+        for row in result["predictions"]:
+            assert {key: row[key] for key in ("event_id", "entry_cost", "exit_value", "pnl")} == cashflows[row["event_id"]]
+    finally:
+        source.conn.close()
+
+
+def test_real_gate_empty_selected_group_has_no_mean(tmp_path):
+    source = _source(tmp_path, rejected=True)
+    try:
+        spec = replace(_spec(), folds=("2023",))
+        # Train on four earlier SYNTH events, evaluate only the unseen NEW ticker.
+        spec, registered = _register(source, spec,
+            event_ids=[event["event_id"] for event in source.events[:4] + source.events[-1:]])
+        result = gate.gate_result(source.repository, registered, spec)
+        assert result["predictions"] == [{"event_id": source.events[-1]["event_id"], "fold": "2023",
+            "score": 0.0, "selected": False, "entry_cost": pytest.approx(3.8),
+            "exit_value": pytest.approx(11.0), "pnl": pytest.approx(7.2),
+            "population_use": "post-release selection"}]
+        for summary in (result, result["folds"][0]):
+            assert summary["selected"] == {"count": 0, "mean_mark_pnl": None}
+            assert summary["all_candidates"] == {"count": 1, "mean_mark_pnl": pytest.approx(7.2)}
+    finally:
+        source.conn.close()
+
+
+def test_early_january_training_exits_must_precede_prior_year_feature_ceiling(tmp_path):
+    source = _source(tmp_path, early_january=True)
+    try:
+        spec, registered = _register(source, replace(_spec(), folds=("2023",)))
+        rows, _ = gate._metadata(source.repository, source.snapshot, registered.document, "STR-THRU")
+        planned = rows.set_index("event_id")
+        at_ceiling, after_ceiling, evaluation = [event["event_id"] for event in source.events[3:6]]
+        assert planned.loc[at_ceiling, "exit_date"] == pd.Timestamp("2022-12-30")
+        assert planned.loc[after_ceiling, "exit_date"] == pd.Timestamp("2023-01-02")
+        assert planned.loc[evaluation, "gate_session"] == pd.Timestamp("2023-01-02")
+        assert planned.loc[evaluation, "feature_ceiling"] == pd.Timestamp("2022-12-30")
+        result = gate.gate_result(source.repository, registered, spec)
+        fold = result["folds"][0]
+        assert fold["training_exits_before"] == "2022-12-30"
+        assert fold["train_inputs"]["event_ids"] == [event["event_id"] for event in source.events[:3]]
+        assert fold["training_exits"] == ["2021-02-03", "2021-05-05", "2022-02-03"]
+        assert fold["test_inputs"]["event_ids"] == [evaluation]
+    finally:
+        source.conn.close()
+
+
+@pytest.mark.parametrize("kind,message", [
+    ("incomplete_plan", "gate population needs complete calendar plans"),
+    ("empty_evaluation", "gate fold has no evaluation events"),
+    ("empty_training", "gate fold has no closed training events"),
+])
+def test_plan_and_fold_failures_record_one_failed_attempt_without_partial_report(
+        tmp_path, capsys, monkeypatch, kind, message):
+    source = _source(tmp_path, calendar_start="2021-03-01" if kind == "incomplete_plan" else "2020-12-01")
+    try:
+        # The second empty evaluation fold fails after the first fold has really completed.
+        years = ("2023", "2025") if kind == "empty_evaluation" else ("2021", "2023") if kind == "empty_training" else ("2023", "2024")
+        spec, ledger = replace(_spec(), folds=years), source.root / "ledger.csv"
+        _invoke(source, capsys, "register", spec)
+        real_result, failures = gate.gate_result, []
+        def result(*args, **kwargs):
+            with pytest.raises(OpsError) as failure:
+                real_result(*args, **kwargs)
+            assert failure.value.code == "EXPERIMENT_VARIANT_FAILED"
+            assert failure.value.problem.message == message
+            failures.append(failure.value.code)
+            raise failure.value
+        monkeypatch.setattr(gate, "gate_result", result)
+        response = _invoke(source, capsys, "run", spec, "--ledger", ledger, status=2)
+        assert response["refused"] == "EXPERIMENT_VARIANT_FAILED"
+        assert failures == ["EXPERIMENT_VARIANT_FAILED"]
+        rows = list(csv.DictReader(ledger.open()))
+        assert len(rows) == 1 and rows[0]["stage"] == "failed"
+        evidence = json.loads(source.conn.execute("SELECT evidence_json FROM experiment_runs").fetchone()[0])
+        outcome = json.loads(source.store.read_verified(from_document(ArtifactRef, evidence["native_outcome"])))
+        assert rows[0]["spec_hash"] == outcome["variant_id"] == evidence["variant_id"]
+        assert outcome["failure_code"] == "EXPERIMENT_VARIANT_FAILED"
+        assert outcome["attempted_variants"] == 1 and outcome["report_ref"] is None
+        assert not list(source.root.rglob("REPORT.md"))
+        before = ledger.read_bytes()
+        monkeypatch.setattr(gate, "gate_result", _forbid)
+        assert _invoke(source, capsys, "run", spec, "--ledger", ledger, status=2) == {
+            "refused": "EXPERIMENT_VARIANT_FAILED", "replayed": True}
+        assert ledger.read_bytes() == before
     finally:
         source.conn.close()
 
