@@ -90,6 +90,9 @@ def test_action_values_ids_clocks_pins_and_same_day_events(harness, dataset):
     attempt, params = prepare(h, source, key="publish")
     protocol, result = daily.execute(h, attempt, params)
     contract = massive_actions.CONTRACTS[dataset]
+    expected_contract = {"splits": "massive_splits.v1", "dividends": "massive_dividends.v1"}[dataset]
+    assert result.table_versions["massive_" + dataset].table_contract_ref.contract_id == expected_contract
+    assert contract.semantic_version == "1.0.0"
     rows = read(h, result, contract)
     evidence = document["coverage"]["bindings"][0]
     expected = [{**value, "date": "2026-08-10", "adjustment_basis": "corporate_action",
@@ -295,11 +298,30 @@ def test_stale_parent_generation_refuses_atomic_publication(harness, wrong_gener
     assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
 
 
+def test_changed_generation_cannot_replay_the_same_acquisition_parent_and_scope(harness):
+    h = harness
+    parent, scope, _ = bootstrap(h)
+    source, _, _ = acquired(h, "splits", key="actions")
+    attempt, params = prepare(h, source, key="first", parent=parent, scope=scope, generation=1)
+    committed = finish_snapshot(h, attempt, params)
+    attempt, params = prepare(h, source, key="changed-generation", parent=parent, scope=scope, generation=2)
+    before = tuple(h.conn.iterdump())
+    with pytest.raises(OpsError) as error:
+        daily.execute(h, attempt, params)
+    assert error.value.code == "RESOURCE_UNAVAILABLE" and tuple(h.conn.iterdump()) == before
+    assert h.conn.execute("SELECT snapshot_id,generation FROM data_snapshot_heads WHERE scope=?", (scope,)).fetchone()[:] == (committed.snapshot_id, 2)
+    assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
+
+
 @pytest.mark.parametrize("args", [["--parent-snapshot", "snap_" + "a" * 32],
     ["--scope", "x"], ["--head-generation", "1"],
     ["--parent-snapshot", "bad", "--scope", "x", "--head-generation", "1"],
-    ["--parent-snapshot", "snap_" + "a" * 32, "--scope", "x", "--head-generation", "0"]])
-def test_partial_or_invalid_parent_submission_refuses_before_storage(tmp_path, capsys, args):
+    ["--parent-snapshot", "snap_" + "a" * 32, "--scope", "x", "--head-generation", "0"],
+    *[["--parent-snapshot", "snap_" + "a" * 32, "--scope", scope, "--head-generation", "1"]
+      for scope in ("", " padded", "padded ", "x" * 129)]])
+def test_partial_or_invalid_parent_submission_refuses_before_storage(tmp_path, capsys, monkeypatch, args):
+    from engine.v2.ops import catalog
+    monkeypatch.setattr(catalog, "connect", lambda *_a, **_k: pytest.fail("invalid parent opened catalog"))
     root = tmp_path / "absent"
     assert massive_snapshot.main(["--root", str(root), "--acquisition-job", "job_" + "a" * 32,
                                   "--idempotency-key", "test", *args]) == 2
@@ -421,6 +443,51 @@ def test_parent_admission_bounds_precede_parquet_read_and_publication(harness, m
     assert tuple(h.conn.iterdump()) == before
 
 
+@pytest.mark.parametrize("limit", ["bytes", "rows"])
+def test_cumulative_parent_fragment_bound_refuses_before_scan(harness, monkeypatch, limit):
+    from engine.v2.data import manifests, objects
+    from engine.v2.ops import snapshots
+    h = harness
+    source, acquisition_ref, _ = daily.acquired(h, payload=daily.daily_payload([
+        ("2026-08-01", 10), ("2026-08-02", 20), ("2026-08-03", 30)]))
+    attempt, params = prepare(h, source, key="bootstrap")
+    original = daily.execute(h, attempt, params)[1]
+    rows = read(h, original, massive_daily.CONTRACT)
+    records = tuple(massive_daily.build_candidate(h.store, [row], acquisition_ref.artifact_id,
+                    content_hash(["fragment", i]))[0] for i, row in enumerate(rows))
+    ref = records[0].table_contract_ref
+    object_refs = [r.object_ref for r in records]
+    logical_hash = objects.partition_logical_hash(h.store, object_refs, massive_daily.CONTRACT, ref, "SYNTH")
+    manifest = manifests.dataset_manifest(ref, records, knowledge_mode="reconstructed",
+        coverage_receipt_refs=(acquisition_ref.artifact_id,), availability_evidence_refs=(),
+        partition_logical_hashes={"SYNTH": logical_hash})
+    candidate = manifests.snapshot_ref({"massive_daily": manifest}, calendar_version=original.calendar_version,
+        source_priority_version=original.source_priority_version, finality_receipt_refs=())
+    receipt = snapshots.commit_snapshot_for_attempt(h.conn, h.store, scope="multifragment-parent",
+        request_hash=content_hash(["multifragment-parent"]), contracts=(massive_daily.CONTRACT,),
+        objects=object_refs, records=records, manifests=(manifest,), snapshot=candidate,
+        expected_head_snapshot_id=None, expected_head_generation=0, receipt_id="multifragment-parent",
+        attempt_id=attempt.attempt_id, fence=attempt.fence, clock=h.clock, audit_partitions=True)
+    parent = Repository(h.conn, h.store).resolve_full(receipt.snapshot_ref.snapshot_id)
+    assert len(parent.records) == 3 and {r.partition_key for r in parent.records} == {"SYNTH"}
+    assert read(h, parent.snapshot, massive_daily.CONTRACT) == rows
+    support.finish(h, attempt)
+    h.clock.advance(13)
+    sizes = [r.object_ref.byte_size if limit == "bytes" else r.row_count for r in parent.records]
+    bound = max(sizes) + 1
+    assert all(size < bound for size in sizes) and sum(sizes) > bound
+    monkeypatch.setattr(massive_refresh, "MAX_PARENT_BYTES" if limit == "bytes" else "MAX_PARENT_ROWS", bound)
+    attempt, params = prepare(h, source, key="refresh", parent=parent.snapshot,
+                              scope="multifragment-parent", generation=1)
+    monkeypatch.setattr(Repository, "scan", lambda *_a, **_k: pytest.fail("cumulative overflow reached scan"))
+    monkeypatch.setattr(massive_daily, "build_candidate", lambda *_a, **_k: pytest.fail("overflow reached publication"))
+    before = tuple(h.conn.iterdump())
+    with pytest.raises(OpsError) as error:
+        daily.execute(h, attempt, params)
+    assert error.value.code == "RESOURCE_LIMIT_EXCEEDED" and tuple(h.conn.iterdump()) == before
+    assert not (h.root / attempt.attempt_id / "snapshot.json").exists()
+
+
 def test_rewritten_partition_bound_after_preserving_outside_rows(harness):
     h = harness
     rows = [action("splits", f"old-{i:04d}", "2026-08-01") for i in range(1000)]
@@ -461,7 +528,7 @@ def test_cli_parent_fields_are_immutable_job_parameters(harness, monkeypatch, ca
     from engine.v2.ops import fingerprints
     h = harness
     parent, scope, _ = bootstrap(h)
-    source, _, _ = acquired(h, "splits", key="actions")
+    source, acquisition_ref, _ = acquired(h, "splits", key="actions")
     # Isolate only source fingerprint cost; the real CLI and submission/catalog path run.
     monkeypatch.setattr(fingerprints, "worker_source_manifest", lambda _: {"synthetic": "code"})
     monkeypatch.setattr(fingerprints, "environment_identity", lambda _: {"synthetic": "environment"})
@@ -481,6 +548,14 @@ def test_cli_parent_fields_are_immutable_job_parameters(harness, monkeypatch, ca
                                  (source,), parent.snapshot_id, scope, 1)
     result = daily.execute(h, attempt, params)[1]
     assert set(result.table_versions) == {"massive_daily", "massive_splits"}
+    identity = content_hash([acquisition_ref.artifact_id, "massive_actions_normalizer.v1",
+        result.table_versions["massive_splits"].table_contract_ref.definition_hash,
+        "massive_interval_replace.v1", parent.snapshot_id, scope, 1])
+    receipt = h.conn.execute("SELECT receipt_id,source_manifest_hash,scope,result_snapshot_id "
+                             "FROM data_import_receipts WHERE receipt_id=?", (identity,)).fetchone()
+    assert receipt is not None and tuple(receipt) == (identity, identity, scope, result.snapshot_id)
+    records = Repository(h.conn).fragment_records(result, "massive_splits")
+    assert len(records) == 1 and records[0].import_request_hash == identity
 
 
 @pytest.mark.parametrize("dataset", ["splits", "dividends"])
@@ -584,7 +659,8 @@ def test_zero_dividend_values_are_reported_values_not_missing_defaults(harness):
     assert {k: actual[k] for k in row} == row
 
 
-@pytest.mark.parametrize("field,value", [("parent_snapshot_id", "bad"), ("scope", None), ("head_generation", 0)])
+@pytest.mark.parametrize("field,value", [("parent_snapshot_id", "bad"), ("scope", None), ("head_generation", 0),
+    *(("scope", scope) for scope in ("", " padded", "padded ", "x" * 129))])
 def test_worker_rejects_unusable_parent_parameters_before_storage(harness, monkeypatch, field, value):
     h = harness
     parent, scope, _ = bootstrap(h)
@@ -614,42 +690,70 @@ def test_stale_parent_id_with_current_generation_cannot_remove_new_table(harness
     assert h.conn.execute("SELECT snapshot_id FROM data_snapshot_heads WHERE scope=?", (scope,)).fetchone()[0] == added.snapshot_id
 
 
-@pytest.mark.parametrize("mode", ["knowledge", "calendar_version", "source_priority_version", "finality_receipt_refs"])
+@pytest.mark.parametrize("mode", ["knowledge", "availability", "coverage", "missing_unrelated", "changed_unrelated",
+                                  "calendar_version", "source_priority_version", "finality_receipt_refs"])
 def test_refresh_replay_refuses_valid_but_substituted_native_output(harness, monkeypatch, mode):
     from engine.v2.data import manifests
     from engine.v2.ops import snapshots
     h = harness
-    parent, scope, _ = bootstrap(h)
+    parent, scope, daily_ref = bootstrap(h)
     source, _, _ = acquired(h, "splits", key="actions")
     attempt, params = prepare(h, source, key="refresh", parent=parent, scope=scope, generation=1)
     result = daily.execute(h, attempt, params)[1]
     resolved = Repository(h.conn).resolve_full(result.snapshot_id)
     tables = dict(resolved.table_manifests)
-    if mode == "knowledge":
+    all_records, all_objects = resolved.records, resolved.objects
+    if mode in ("knowledge", "availability", "coverage"):
         old = tables["massive_splits"]
         records = [r for r in resolved.records if r.table_contract_ref == old.dataset_version_ref.table_contract_ref]
         tables["massive_splits"] = manifests.dataset_manifest(old.dataset_version_ref.table_contract_ref,
-            records, knowledge_mode="observed", coverage_receipt_refs=old.coverage_receipt_refs,
-            availability_evidence_refs=("synthetic-availability",))
+            records, knowledge_mode="observed" if mode == "knowledge" else old.knowledge_mode,
+            coverage_receipt_refs=(daily_ref.artifact_id,) if mode == "coverage" else old.coverage_receipt_refs,
+            availability_evidence_refs=("synthetic-availability",) if mode != "coverage" else old.availability_evidence_refs,
+            parent_dataset_version_id=old.parent_dataset_version_id, partition_logical_hashes=old.partition_logical_hashes)
+    elif mode == "missing_unrelated":
+        del tables["massive_daily"]
+    elif mode == "changed_unrelated":
+        original_rows = read(h, parent, massive_daily.CONTRACT)
+        changed_rows = [row | {"volume": row["volume"] + 1} for row in original_rows]
+        record, manifest, _ = massive_daily.build_candidate(h.store, changed_rows, daily_ref.artifact_id,
+                                                           content_hash(["changed-unrelated"]))
+        tables["massive_daily"] = manifest
+        all_records = tuple(r for r in all_records if r.table_contract_ref != record.table_contract_ref) + (record,)
+        all_objects = tuple(r.object_ref for r in all_records)
     policies = {k: getattr(parent, k) for k in ("calendar_version", "source_priority_version", "finality_receipt_refs")}
-    if mode != "knowledge":
+    if mode in policies:
         policies[mode] = ("synthetic-proof",) if mode == "finality_receipt_refs" else "synthetic-policy"
     alternate = manifests.snapshot_ref(tables, parent_snapshot_id=parent.snapshot_id, **policies)
     receipt = snapshots.commit_snapshot_for_attempt(h.conn, h.store, scope="synthetic-alternate",
-        request_hash=content_hash([mode]), contracts=resolved.contracts, objects=resolved.objects,
-        records=resolved.records, manifests=tuple(tables.values()), snapshot=alternate,
+        request_hash=content_hash([mode]), contracts=resolved.contracts, objects=all_objects,
+        records=all_records, manifests=tuple(tables.values()), snapshot=alternate,
         expected_head_snapshot_id=None, expected_head_generation=0, receipt_id="synthetic-" + mode,
         attempt_id=attempt.attempt_id, fence=attempt.fence, clock=h.clock)
-    assert Repository(h.conn).resolve(receipt.snapshot_ref.snapshot_id) == receipt.snapshot_ref
+    verified = Repository(h.conn, h.store).resolve_full(receipt.snapshot_ref.snapshot_id)
+    assert verified.snapshot == receipt.snapshot_ref and verified.table_manifests == tables
+    if mode == "availability":
+        assert (verified.table_manifests["massive_splits"].knowledge_mode,
+                verified.table_manifests["massive_splits"].availability_evidence_refs) == (
+                    "reconstructed", ("synthetic-availability",))
+    elif mode == "coverage":
+        assert verified.table_manifests["massive_splits"].coverage_receipt_refs == (daily_ref.artifact_id,)
+    elif mode in ("missing_unrelated", "changed_unrelated"):
+        assert verified.table_manifests["massive_splits"] == resolved.table_manifests["massive_splits"]
+        if mode == "missing_unrelated":
+            assert set(verified.table_manifests) == {"massive_splits"}
+        else:
+            assert read(h, verified.snapshot, massive_daily.CONTRACT) == changed_rows != original_rows
     original_receipt = h.conn.execute("SELECT update_receipt_ref FROM data_snapshot_heads WHERE scope=?", (scope,)).fetchone()[0]
     h.conn.execute("DROP TRIGGER data_import_receipts_no_update")
     h.conn.execute("UPDATE data_import_receipts SET result_snapshot_id=? WHERE receipt_id=?",
-                   (alternate.snapshot_id, original_receipt))
+                   (verified.snapshot.snapshot_id, original_receipt))
     before = tuple(h.conn.iterdump())
     monkeypatch.setattr(pinned, "normalized_rows", support.no_fetch)
     with pytest.raises(OpsError) as error:
         daily.execute(h, attempt, params)
-    assert error.value.code == "INTEGRITY_FAILED" and tuple(h.conn.iterdump()) == before
+    assert error.value.code == "INTEGRITY_FAILED" and not error.value.problem.retryable
+    assert tuple(h.conn.iterdump()) == before
 
 
 def test_maximum_action_text_length_is_admitted(harness):

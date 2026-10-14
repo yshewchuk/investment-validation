@@ -35,7 +35,7 @@ def _contract(dataset):
 CONTRACTS = {dataset: _contract(dataset) for dataset in _FIELDS}
 
 
-def _number(name, kind, value):
+def _validate_reported_number(name, kind, value):
     if (type(value) not in (int, float) or not math.isfinite(value) or float(value) != value
             or value < 0 or (kind == "int64" and (type(value) is not int or value > 2**63 - 1))):
         raise ValueError
@@ -52,7 +52,7 @@ def _value(name, kind, value):
         if name.endswith("_date") and date.fromisoformat(value).isoformat() != value:
             raise ValueError
     else:
-        _number(name, kind, value)
+        _validate_reported_number(name, kind, value)
     return value
 
 
