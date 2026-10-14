@@ -576,6 +576,41 @@ def test_renderer_rejects_each_rehashed_policy_field_without_provenance_drift(so
     assert caught.value.problem.message == "history report differs from its registered result"
 
 
+@pytest.mark.parametrize("api", ["prediction", "renderer"])
+@pytest.mark.parametrize("defect", ["missing", "null", "list", "string", "unknown-schema",
+    "null-schema", "list-schema", "empty-v1.4", "empty-v1.5"])
+def test_malformed_registration_is_typed_before_report_reads_or_fitting(source, monkeypatch, api, defect):
+    result = model.prediction_result(source.repository, source.registration) if api == "renderer" else None
+    document = source.registration.document
+    if defect == "missing":
+        document.pop("schema_version")
+    elif defect in ("null", "list", "string"):
+        document = {"null": None, "list": [], "string": "invalid"}[defect]
+    elif defect.startswith("empty-"):
+        document = {"schema_version": "native_experiment_registration." + defect.removeprefix("empty-")}
+    else:
+        document["schema_version"] = {"unknown-schema": "unknown", "null-schema": None, "list-schema": []}[defect]
+    malformed = native.NativeRegistration(source.registration.run_id, canonical_json(document).encode())
+    before = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(source.repository, "scan", _forbid)
+    monkeypatch.setattr(fitted, "fit_magnitude_predictions", _forbid)
+    for name in ("history_binding", "read_stored", "preflight_magnitude_targets",
+                 "qualify_magnitude_training_targets", "load_magnitude_targets"):
+        monkeypatch.setattr(model, name, _forbid)
+    with pytest.raises(OpsError) as caught:
+        if api == "prediction":
+            model.prediction_result(source.repository, malformed)
+        else:
+            model.render_prediction_report(malformed, result, spec=source.spec, no_ledger=True)
+    message = ("fitted magnitude execution requires a sealed v1.5 plan" if defect == "empty-v1.5"
+               else "history execution requires a sealed v1.4 plan")
+    assert to_document(caught.value.problem) == {
+        "code": "EXPERIMENT_IDENTITY_CONFLICT", "category": "validation", "retryable": False,
+        "message": message, "stage": None, "trace_id": None, "dependency_refs": [],
+        "retry_after_seconds": None, "diagnostic_ref": None, "details": {}, "schema_version": "problem.v1.0"}
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
 def test_catalog_backed_fitted_registration_has_no_final_holdout_authority(source, monkeypatch):
     before = _catalog(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", _forbid)

@@ -48,7 +48,7 @@ for kind in ('history_ridge', 'history_hgb'):
     assert magnitude_fitted_execution_document('2026-01-01', kind)['model'] == kind
 assert not any(name.startswith(('engine.v2.models.training', 'sklearn')) for name in sys.modules)
 """
-    completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+    completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=30)
     assert completed.returncode == 0, completed.stderr
 
 

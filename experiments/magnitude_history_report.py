@@ -26,6 +26,9 @@ from experiments.prediction_report import _years
 
 def _validate(binding):
     """Select the exact sealed policy without broadening older schema admission."""
+    if not isinstance(binding, dict) or binding.get("schema_version") not in (
+            "native_experiment_registration.v1.4", "native_experiment_registration.v1.5"):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "history execution requires a sealed v1.4 plan")
     fitted = binding["schema_version"] == "native_experiment_registration.v1.5"
     (validate_magnitude_fitted_execution if fitted else validate_magnitude_history_execution)(binding)
     return fitted
