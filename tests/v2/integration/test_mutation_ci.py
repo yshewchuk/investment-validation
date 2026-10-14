@@ -2540,8 +2540,11 @@ def test_scoring_stages_change_no_longer_selects_every_enabled_module():
     selected = pilot.changed_modules(CFG, names, changed)
     # data_incremental also runs Massive raw-receipt fence tests; their real
     # supervisor/worker imports reach scoring.application and scoring exports.
+    # ops_final_holdout/research reach scoring through fitted tests and history
+    # report imports: training.__init__ -> job -> calibration -> payoff ->
+    # scoring.__init__ and its application/stages imports (no DYNAMIC cascade).
     assert set(selected) == set(names) - {
-        "canonical", "no_fit", "ops_experiment_folds", "ops_final_holdout", "research",
+        "canonical", "no_fit", "ops_experiment_folds",
     }, (
         "selection drifted from the exact expected set -- re-check whether "
         "this is a narrowing regression (e.g. back toward all 33) or a "
