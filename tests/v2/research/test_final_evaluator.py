@@ -71,10 +71,14 @@ def _request(snapshot, **overrides):
     return replace(value, **overrides)
 
 
-def _winner_trade(event_id, date, ret, *, trade_id=None, variant=None, provenance=PROVENANCE):
-    return {**_trade_row(trade_id or f"W-{event_id}", "STR-THRU", provenance),
-            "event_id": event_id, "event_date": pd.Timestamp(date),
-            "variant": _WINNER_VARIANT if variant is None else variant, "ret": ret}
+def _winner_trade(event_id, date, ret, *, trade_id=None, variant=None, provenance=PROVENANCE,
+                  ticker=None):
+    row = {**_trade_row(trade_id or f"W-{event_id}", "STR-THRU", provenance),
+           "event_id": event_id, "event_date": pd.Timestamp(date),
+           "variant": _WINNER_VARIANT if variant is None else variant, "ret": ret}
+    if ticker is not None:
+        row["ticker"] = ticker
+    return row
 
 
 def _evaluate(repository, request):
@@ -214,6 +218,37 @@ def test_non_finite_ret_is_a_contract_mismatch(tmp_path):
         with pytest.raises(DataError) as refusal:
             evaluate_final_holdout(repository, request, population)
         assert refusal.value.problem.code == "CONTRACT_MISMATCH"
+    finally:
+        conn.close()
+
+
+def test_stale_trade_date_against_canonical_event_is_a_contract_mismatch(tmp_path):
+    """A calendar correction keeps the event_id but changes the canonical date."""
+    extra = [_winner_trade("EVENT-5", "2024-02-20", 0.5)]
+    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM], extra_trades=extra)
+    try:
+        request = _request(snapshot)
+        population = load_final_population(repository, request)
+        with pytest.raises(DataError) as refusal:
+            evaluate_final_holdout(repository, request, population)
+        assert refusal.value.problem.code == "CONTRACT_MISMATCH"
+        assert refusal.value.problem.details == {
+            "snapshot_id": snapshot.snapshot_id, "event_ids": ["EVENT-5"]}
+    finally:
+        conn.close()
+
+
+def test_winner_ticker_mismatch_against_canonical_event_is_a_contract_mismatch(tmp_path):
+    extra = [_winner_trade("EVENT-5", "2024-01-16", 0.5, ticker="ZZZZ")]
+    conn, repository, snapshot = _holdout_snapshot(tmp_path, [_RANDOM], extra_trades=extra)
+    try:
+        request = _request(snapshot)
+        population = load_final_population(repository, request)
+        with pytest.raises(DataError) as refusal:
+            evaluate_final_holdout(repository, request, population)
+        assert refusal.value.problem.code == "CONTRACT_MISMATCH"
+        assert refusal.value.problem.details == {
+            "snapshot_id": snapshot.snapshot_id, "event_ids": ["EVENT-5"]}
     finally:
         conn.close()
 
