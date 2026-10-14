@@ -73,7 +73,7 @@ Applied to every step above (S1-S8, B1-B6) unless a row says otherwise.
 | **R5 partial write** | A partial backup is not accepted: completeness is the verified backup manifest, published last; the restore drill also hashes the result; partial scratch is removed or kept as diagnostics | A crash between fence and grant leaves **no** writer; it is detected by `status` and finished or reversed by an operator command | A crash after the pointer swap but before the receipt: re-run `verify` first completes or confirms the retained publication's durable acknowledgement (release row, outbox delivery, watermarks; a valid pointer alone does not replace it) and only then records success; no second swap | A crash mid-batch leaves a torn line or some ids appended; recovery truncates the torn line and replays the rest; rows are never deleted |
 | **R6 idempotency** | `switch_id` + step name keys the receipt; a rerun is a no-op when the hashes match | Fencing an already-fenced writer or granting an already-granted side is a no-op, a grant to the wrong generation refuses | As S5 | Keyed by decision id; a duplicate append is a no-op, a differing payload is a divergence and stops |
 
-Cross-cutting: no receipt, log or artifact carries a local path or raw exception text (`ARCHITECTURE.md` §6); the typed code and the operation id are enough to find the private diagnostic.
+Cross-cutting: no receipt, log or artifact carries a local path or raw exception text (`ARCHITECTURE.md` §5); the typed code and the operation id are enough to find the private diagnostic.
 
 ## Negative controls and expected outcomes
 
