@@ -54,7 +54,7 @@ def _open_parity(browser, server, *, code=200, body=SUMMARY, hold=False, mismatc
 
     def handle(route):
         url = route.request.url
-        path = url.split("?")[0]
+        path = urlsplit(url).path
         if path.endswith("/native_parity/mismatches"):
             page.mismatch_calls.append(url)
             status, response = mismatches(parse_qs(urlsplit(url).query).get("cursor", [None])[0])
@@ -506,7 +506,7 @@ def test_mismatch_loading_state(browser, server):
 
     def handle(route):
         url = route.request.url
-        path = url.split("?")[0]
+        path = urlsplit(url).path
         if path.endswith("/native_parity/mismatches"):
             page.mismatch_calls.append(url)
             mismatch_pending.append(route)
