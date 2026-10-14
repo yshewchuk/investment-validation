@@ -134,25 +134,20 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Missing input / refresh failure** — degrades to cached data (staleness
   stays visible in `meta.json`) — except a rotated credential, which stops
   the run rather than burning retries against a dead key.
-- **Tier-4 gap repair** — when the incremental Tier-4 build leaves an
-  out-of-window gap (`tier4_gap_partial`), the tiers step immediately runs a
-  full Tier-4 rebuild (no `--since`; ~17-24 min, gap nights only) and
-  re-checks the gap, so a repaired night reports no `tier4_gap_partial` flag
-  and `steps.tiers.tier4_repair` records the repair. The repair raising,
-  exceeding its wall-clock budget (`TIER4_REPAIR_BUDGET_S`), or leaving the
-  gap stops the run with `NightlyStop` carrying a typed code
-  (`TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET`, `TIER4_GAP_REMAINS`) as the
-  start of its detail; exit 1, nothing scored or published, so no snapshot is
-  produced for that night: the incremental rebuild runs with `finalize=False`
-  (`engine.data.rebuild`), and `finalize_rebuild` writes the manifest and
-  SNAPSHOT only once the gap check passes (the repair's full rebuild is also
-  `finalize=False`; its result is finalized after both the budget and gap
-  checks pass, and a finalize failure there is `TIER4_REPAIR_FAILED`). On a
-  gap-free night a finalize failure degrades the tiers step (`tiers_degraded`)
-  as a rebuild failure always did. The native import reads the SNAPSHOT date, finds no
-  session for the night (`nightly_trigger` returns `not_yet`) and does not run
-  on a gapped Tier-4. Idempotent: a rerun with no gap skips the repair. The budget is
-  checked after the rebuild returns, not enforced mid-run.
+- **Tier-4 gap repair** — the tiers step writes the manifest and SNAPSHOT
+  (manifest first, SNAPSHOT last, via `finalize_rebuild`) only after the
+  Tier-4 gap check passes. The budget (`TIER4_REPAIR_BUDGET_S`) is checked
+  after the repair returns, not enforced mid-run. A rerun with no gap skips
+  the repair. Store side effect: a refused night leaves the panel and Tier-4
+  tables rebuilt while SNAPSHOT keeps the previous digests.
+
+  | Condition | Outcome |
+  | --- | --- |
+  | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`, ~17-24 min); `steps.tiers.tier4_repair` records it, no gap flag |
+  | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no SNAPSHOT, so the native import sees no session for the night (`not_yet`) |
+  | No gap, finalize fails | `tiers_degraded` (as any rebuild failure) |
+  | Repaired, or no gap | SNAPSHOT written once |
+
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.
 - **Selfcheck mismatch** — stops the publish; the nightly records raw

@@ -132,7 +132,7 @@ def test_repair_budget_reports_the_complete_detail_string(monkeypatch):
     assert finalized == [], "an over-budget repair is refused before finalizing"
 
 
-def test_a_night_with_no_gap_finalizes_the_incremental_result_once():
+def test_the_helper_finalizes_a_gap_free_incremental_result_once():
     report = _report()
     calls = []
     finalized = []
@@ -141,8 +141,9 @@ def test_a_night_with_no_gap_finalizes_the_incremental_result_once():
         calls.append((tables, kwargs))
         return _result({})
 
-    # The call-site guard from run_nightly's tiers block: the repair runs only
-    # when the incremental build actually left an out-of-window gap.
+    # This exercises the HELPER only (not run_nightly's call site): with no
+    # out-of-window gap the helper finalizes the incremental result and does
+    # not run the repair.
     tier_result = fake_rebuild_tables(("panel", "tier4"), tier4_since="2026-10-10",
                                       finalize=False)
     _repair_tier4_gap_if_needed(report, tier_result, fake_rebuild_tables,
@@ -578,3 +579,24 @@ def test_run_nightly_degrades_when_a_gap_free_finalize_raises(monkeypatch, tmp_p
     assert sentinel.touched, "the run proceeded to the scorer"
     assert marker_writes == []
     assert not _marker(tmp_path).exists(), "a failed finalize writes no snapshot"
+
+
+def test_run_nightly_degrades_when_the_incremental_rebuild_raises(monkeypatch, tmp_path):
+    finalize_calls = []
+    calls, sentinel, captured, marker_writes = _run(
+        monkeypatch, tmp_path,
+        rebuild_results=[RuntimeError("boom")],
+        finalize_calls=finalize_calls,
+    )
+
+    assert calls == [(("panel", "tier4"), {"tier4_since": None, "finalize": False})], \
+        "a failed incremental build is never repaired"
+    assert finalize_calls == [], "the repair rebuild and finalize are never called"
+    report = captured.get("report")
+    assert report is not None, "run_nightly never constructed a report"
+    assert report.steps["tiers"]["degraded"] is True
+    assert "RuntimeError: boom" in report.steps["tiers"]["error"]
+    assert any(f.get("kind") == "tiers_degraded" for f in report.flags)
+    assert sentinel.touched, "the run proceeded to the scorer"
+    assert marker_writes == []
+    assert not _marker(tmp_path).exists(), "a failed rebuild writes no snapshot"
