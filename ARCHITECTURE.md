@@ -734,7 +734,7 @@ change their arithmetic or imply that source receipt production is available.
   ledger path to support v2 work. If legacy must change at all before
   cutover, that is itself a decision requiring sign-off, not a routine PR.
 - **At most one official writer, fenced by an authority generation**
-  (target behaviour, not enforced until the guide's slices 1a/1b land). At
+  (target behaviour; not yet enforced, see the design guide). At
   any instant only one deployment (legacy or v2) may commit official
   decisions, settlements, exports or consumer-visible releases. Authority
   moves only fence-first: the current writer is fenced and verified, then
