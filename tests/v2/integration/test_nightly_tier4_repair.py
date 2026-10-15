@@ -83,6 +83,25 @@ def test_planted_gap_runs_a_full_rebuild_and_records_the_repair():
     assert "degraded" not in report.steps["tiers"]
 
 
+def test_repair_elapsed_is_stored_at_one_decimal():
+    """The recorded repair elapsed keeps one decimal, not two."""
+    report = _report()
+    finalized = []
+
+    def fake_rebuild_tables(tables, **kwargs):
+        return _result({})
+
+    readings = iter([0, 7.56])
+    repair_tier4_gap(report, fake_rebuild_tables, clock=lambda: next(readings),
+                      finalize=finalized.append)
+
+    repair = report.steps["tiers"]["tier4_repair"]
+    assert repair["ran"] is True
+    assert repair["elapsed_s"] == 7.6, \
+        "7.56s records as 7.6; a round(..., 2) would store 7.56"
+    assert len(finalized) == 1
+
+
 def test_repair_raising_stops_the_run_with_a_typed_code(monkeypatch):
     from engine.dashboard import nightly
 
@@ -106,6 +125,30 @@ def test_repair_raising_stops_the_run_with_a_typed_code(monkeypatch):
     stops = [f for f in report.flags if f.get("kind") == "tiers_stop"]
     assert len(stops) == 1, "a refusal appends exactly one tiers_stop flag"
     assert "TIER4_REPAIR_FAILED" in stops[0]["detail"]
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
+
+
+def test_repair_failure_detail_is_truncated_to_300_characters(monkeypatch):
+    """A very long exception text is cut to exactly 300 characters."""
+    from engine.dashboard import nightly
+
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
+    finalized = []
+
+    def boom(tables, **kwargs):
+        raise RuntimeError("x" * 500)
+
+    report = _report()
+    with pytest.raises(NightlyStop) as caught:
+        repair_tier4_gap(report, boom, finalize=finalized.append)
+
+    expected = ("TIER4_REPAIR_FAILED: RuntimeError: " + "x" * 500)[:300]
+    assert caught.value.detail == expected, \
+        "the typed detail is the full formatted string cut to 300 chars"
+    assert len(caught.value.detail) == 300
+    assert finalized == [], "a refused repair must not finalize anything"
     assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
@@ -489,6 +532,35 @@ def test_tiers_degraded_scrubs_local_paths_from_both_fields(monkeypatch):
         "the flag detail redacts the host-local path to <local path>"
     assert "/root/secret/x" not in detail, "the flag detail must not leak the path"
     assert "RuntimeError: " in detail, "the exception type stays visible"
+
+
+def test_mark_tiers_degraded_truncates_both_fields_to_300_characters(monkeypatch):
+    """A very long exception text is cut to exactly 300 chars in both fields."""
+    from engine.dashboard.nightly import mark_tiers_degraded
+
+    # The degrade path writes the deferred snapshot; stub it out so this unit
+    # test never touches the real store.
+    monkeypatch.setattr("engine.data.rebuild.finalize_current_store", lambda: None)
+
+    report = _report()
+
+    mark_tiers_degraded(report, RuntimeError("y" * 500))
+
+    error = report.steps["tiers"]["error"]
+    assert error == ("RuntimeError: " + "y" * 500)[:300], \
+        "the step error is the full formatted string cut to 300 chars"
+    assert len(error) == 300
+    degraded = [f for f in report.flags if f.get("kind") == "tiers_degraded"]
+    assert len(degraded) == 1
+    expected = (
+        "Tier 3/Tier 4 step incomplete (the rebuild or its snapshot "
+        "write failed) — scoring from the stored panel and "
+        "forecasts, which may not cover recent prints. "
+        "RuntimeError: " + "y" * 500
+    )[:300]
+    assert degraded[0]["detail"] == expected, \
+        "the flag detail is the full formatted string cut to 300 chars"
+    assert len(degraded[0]["detail"]) == 300
 
 
 # --------------------------------------------------------------------------
