@@ -4,7 +4,7 @@ Design, not yet implemented: everything below is target behaviour; "today" marks
 
 **Decision (owner, 2026-10-14, #740, Option C; not reopened here).** Native decisions are written to a **separate scratch catalog**. They never enter the official ledger, the production ops catalog or the legacy ledger until cutover authority moves. The scratch catalog is also the P7-3 rehearsal target where it can be.
 
-**Standard tools.** None applies: the catalog is the repo's own SQLite schema (`engine/v2/ledger/decisions.py`), and no standard format covers append-only decision facts. Reused as is: `decisions.insert`/`record_divergence`, `export_generation`, `population_key`/`population_difference` (`engine/v2/foundation/score_population.py`) and the legacy candidate builder `legacy_adapter._action_decisions`. Reused with adaptation (slice 6, not assumed here): `backup.py` (needs its outbox infrastructure in the scratch root) and `tools/v2_restore_drill.py` (needs pinned score artifacts and a complete ops catalog, so a drill restores a copy into a scratch ops root). `import_lines` is **not** used: it inserts under owner `catalog`, and scratch never imports history.
+**Standard tools.** None applies: the catalog is the repo's own SQLite schema (`engine/v2/ledger/decisions.py`), and no standard format covers append-only decision facts. Reused as is: `decisions.insert`/`record_divergence`, `export_generation`, `population_key`/`population_difference` (`engine/v2/foundation/score_population.py`). Reused by shape only: `legacy_adapter._action_decisions` (it loads legacy action files, finality and a decision plan and writes `decisions.json`, so it cannot take native score records); the native candidate builder (slice 2) reuses its row serialization shape and pinned-timestamp handling. Reused with adaptation (slice 6, not assumed here): `backup.py` (needs its outbox infrastructure in the scratch root) and `tools/v2_restore_drill.py` (needs pinned score artifacts and a complete ops catalog, so a drill restores a copy into a scratch ops root). `import_lines` is **not** used: it inserts under owner `catalog`, and scratch never imports history.
 
 ## Today
 
@@ -53,9 +53,9 @@ Two stages, kept separate. (1) Chooser scoring/ranking: the DYN-SV chooser is re
 |---|---|
 | Scratch path resolves to, or into, the official catalog (incl. via symlink) | Refuse `SCRATCH_PATH_OFFICIAL`; nothing opened for write |
 | Catalog has no `scratch_meta`, wrong origin or wrong `line_id` | Refuse `SCRATCH_META_INVALID`; no write |
-| `decision_authority.owner != scratch` on the target | `DecisionConflict` from `decisions.insert`; no write |
+| `decision_authority.owner != scratch` on the target | `DecisionConflict` from the wrapper's initial authority check (before any lookup); no write |
 | Same logical key, identical payload (retry, same session rerun) | Return the committed row; no new row |
-| Same logical key, different payload within the same native generation | `IDEMPOTENCY_CONFLICT`; the first row stays; `record_divergence` appends evidence |
+| Same logical key, different payload within the same native generation | Refuse `IDEMPOTENCY_CONFLICT`; the first row stays; no write and no divergence row (same-generation drift is a defect, not evidence) |
 | Later generation, same occurrence (same `decision_id`), identical content | Return the existing row; nothing written |
 | Later generation, same occurrence, different content | First commit stays authoritative; divergence evidence only (existing rule); never a silent duplicate |
 | `reset` with a counted night, `closed_at` set, or inside the rollback window | Refuse `RETENTION_ACTIVE`; nothing deleted (use a new `line_id` to start over) |
