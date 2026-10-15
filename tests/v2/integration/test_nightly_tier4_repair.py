@@ -21,7 +21,6 @@ The orchestration cases drive ``run_nightly`` with every heavy step patched.
 from __future__ import annotations
 
 import contextlib
-import json
 import stat
 from types import SimpleNamespace
 
@@ -562,8 +561,8 @@ def test_main_json_report_is_written_atomically(tmp_path, monkeypatch):
 def test_write_flag_report_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
     """A failed replace leaves the previous flag report and no temp file."""
     from engine import paths
-    from engine.data import manifest as manifest_mod
     from engine.dashboard import nightly
+    from engine.data import manifest as manifest_mod
 
     monkeypatch.setattr(paths, "REPORTS", tmp_path)
 
@@ -757,15 +756,24 @@ def _events_stub(tickers, *, as_of="2026-10-13", ahead_days=2):
     })
 
 
-def _refresh_recorder(record):
+def _refresh_recorder(record, marker_path=None, marker_writes=None):
     """A stand-in ``refresh_calendar_data`` that records its ``finalize`` kwarg.
 
     Returns the deferred-snapshot shape the refresh rebuild now reports when it
-    is told not to finalize (``rebuild.snapshot`` is ``None``).
+    is told not to finalize (``rebuild.snapshot`` is ``None``). When
+    ``marker_path`` is given it also honours ``finalize``: a ``finalize=True``
+    call writes the snapshot marker (and appends to ``marker_writes``) exactly
+    as the real refresh rebuild would, so a regression to finalize-on-defer
+    fails the "no marker" assertions rather than passing silently.
     """
 
     def recorder(tickers, as_of, **kwargs):
-        record.append({"tickers": list(tickers), "finalize": kwargs.get("finalize")})
+        finalize = kwargs.get("finalize")
+        record.append({"tickers": list(tickers), "finalize": finalize})
+        if finalize and marker_path is not None:
+            if marker_writes is not None:
+                marker_writes.append("refresh")
+            marker_path.write_text("snapshot")
         return {"calls": 0, "rebuild": {"snapshot": None, "elapsed_s": 0}}
 
     return recorder
@@ -1364,7 +1372,8 @@ def test_run_nightly_refused_repair_writes_no_snapshot_with_calendar_names(
         marker_path=_marker(tmp_path),
         events=_events_stub(["AAA"]),
     )
-    monkeypatch.setattr(nightly, "refresh_calendar_data", _refresh_recorder([]))
+    monkeypatch.setattr(nightly, "refresh_calendar_data",
+                        _refresh_recorder([], _marker(tmp_path), marker_writes))
     sentinel = _ScorerSentinel()
 
     with pytest.raises(NightlyStop) as caught:
@@ -1401,7 +1410,8 @@ def test_run_nightly_red_validation_keeps_the_previous_snapshot(monkeypatch, tmp
         marker_path=_marker(tmp_path),
         events=_events_stub(["AAA"]),
     )
-    monkeypatch.setattr(nightly, "refresh_calendar_data", _refresh_recorder([]))
+    monkeypatch.setattr(nightly, "refresh_calendar_data",
+                        _refresh_recorder([], _marker(tmp_path), marker_writes))
     monkeypatch.setattr(nightly, "validate_refresh",
                         lambda *a, **k: [{"name": "daily_freshness", "passed": False,
                                           "detail": "newest daily row stale"}])

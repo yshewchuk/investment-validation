@@ -1527,7 +1527,7 @@ def run_nightly(
     # which is wrong but visible; a nightly that refuses to render leaves the
     # board dark, which is worse and less visible.
     if refresh and tiers:
-        from engine.data.rebuild import rebuild as rebuild_tables, finalize_rebuild
+        from engine.data.rebuild import finalize_rebuild, rebuild as rebuild_tables
 
         # -- 2b(i). realized moves, the layer BOTH tiers are derived from ----
         # Rebuilding Tier 3/4 without this cannot advance coverage by a day:
