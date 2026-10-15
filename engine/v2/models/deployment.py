@@ -342,11 +342,47 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     fsync_directory(path.parent)
 
 
+MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+#: ``stat.S_IFMT``/``stat.S_IFREG``, inlined rather than imported to keep this
+#: module's fan-out within budget.
+_S_IFMT = 0o170000
+_S_IFREG = 0o100000
+
+
+def _read_bounded_regular(path: Path, limit: int) -> bytes:
+    """Read at most ``limit`` bytes from a regular file, refusing symlinks and oversize input."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError("staged manifest is not a bounded regular file") from exc
+    try:
+        if (os.fstat(fd).st_mode & _S_IFMT) != _S_IFREG:
+            raise ValueError("staged manifest is not a bounded regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(fd, min(limit + 1 - total, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        raise ValueError("staged manifest is not a bounded regular file")
+    return data
+
+
 def _read_manifest(root: Path, release_id: str) -> StagedManifest | None:
     path = _manifest_path(root, release_id)
-    if not path.is_file():
+    try:
+        path.lstat()
+    except FileNotFoundError:
         return None
-    return _decode(StagedManifest, path.read_bytes())
+    return _decode(StagedManifest, _read_bounded_regular(path, MAX_MANIFEST_BYTES))
 
 
 # --------------------------------------------------------------------------

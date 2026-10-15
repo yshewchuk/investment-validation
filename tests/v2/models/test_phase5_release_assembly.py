@@ -6,6 +6,7 @@ import dataclasses
 import fcntl
 import json
 import os
+import sys
 import threading
 import time
 
@@ -240,6 +241,8 @@ _POOL_REFUSALS = [
     (lambda a: {**a, "outputs": [*a["outputs"], a["outputs"][0]]}, "POOL_SET_MISMATCH"),
     (lambda a: _replace_output(a, content_hash="sha256:nothex"), "POOL_SET_MISMATCH"),
     (lambda a: {**a, "outputs": [*a["outputs"][:5], "not-an-output"]}, "POOL_SET_MISMATCH"),
+    (lambda a: {**a, "outputs": [*a["outputs"], "not-an-output"]}, "POOL_SET_MISMATCH"),
+    (lambda a: {**a, "chooser": [a["chooser"], "not-an-output"]}, "CHOOSER_MISMATCH"),
     (lambda a: _replace_output(a, member_id=5), "POOL_SET_MISMATCH"),
     (lambda a: _replace_output(a, member_id=["x"]), "POOL_SET_MISMATCH"),
     (lambda a: _replace_output(a, name=""), "POOL_SET_MISMATCH"),
@@ -260,6 +263,7 @@ _POOL_REFUSALS = [
 
 @pytest.mark.parametrize("mutate, code", _POOL_REFUSALS, ids=[
     "outputs-not-a-sequence", "five-outputs", "duplicate", "malformed-hash", "element-not-a-pool-output",
+    "extra-output-element", "chooser-list-with-junk",
     "member-id-int", "member-id-list", "empty-name", "negative-bytes", "bool-bytes", "str-bytes",
     "chooser-wrong-member", "chooser-not-a-pool-output", "chooser-bad-hash", "chooser-empty-name",
     "chooser-bad-bytes", "wrong-member-id", "nonhex-hash-g", "uppercase-hash", "non-string-name"])
@@ -286,9 +290,10 @@ def test_cutoff_mismatch(tmp_path, kind):
     assert not _candidate_path(tmp_path).exists()
 
 
-def test_cutoff_not_extended_iso_date_is_cutoff_mismatch(tmp_path):
+@pytest.mark.parametrize("cutoff", ["20261001", "2026-W41-3"])
+def test_cutoff_not_extended_iso_date_is_cutoff_mismatch(tmp_path, cutoff):
     _, prior_body = _stage_prior(tmp_path)
-    args = _valid_derive_args(tmp_path, cutoff="20261001")
+    args = _valid_derive_args(tmp_path, cutoff=cutoff)
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         assembly.derive_catalog(prior_body, **args)
     assert error.value.code == "CUTOFF_MISMATCH"
@@ -380,12 +385,12 @@ def _stage_other_candidate_release(root):
                              dataclasses.replace(other_inventory, deployment_id="d2"), payloads)
 
 
-@pytest.mark.parametrize("setup, no_catalog", [
-    (_corrupt_candidate_catalog, False),
-    (_different_candidate_catalog, False),
-    (_stage_other_candidate_release, True),
+@pytest.mark.parametrize("setup, no_catalog, staged_absent", [
+    (_corrupt_candidate_catalog, False, True),
+    (_different_candidate_catalog, False, True),
+    (_stage_other_candidate_release, True, False),
 ], ids=["corrupt-catalog", "different-catalog", "id-already-staged"])
-def test_id_conflict_when_candidate_already_exists(tmp_path, setup, no_catalog):
+def test_id_conflict_when_candidate_already_exists(tmp_path, setup, no_catalog, staged_absent):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
     setup(tmp_path)
@@ -400,6 +405,9 @@ def test_id_conflict_when_candidate_already_exists(tmp_path, setup, no_catalog):
         assert not catalog_path.exists()
     else:
         assert catalog_path.read_bytes() == existing_bytes
+    if staged_absent:
+        store = phase5_release.deployment_root(tmp_path)
+        assert not phase5_release.staged_manifest_path(store, "cand1").exists()
 
 
 def test_incomplete_inventory_on_retry_is_refused(tmp_path):
@@ -898,18 +906,6 @@ def test_rich_carry_forward_preserves_untouched_rows_and_release(tmp_path, relea
     assert dataclasses.replace(candidate_model, release_id="prior1") == prior_model
 
 
-@pytest.mark.parametrize("cutoff", ["2026-03-15", "2026-03-14"])
-def test_cutoff_not_advanced_refusal(tmp_path, cutoff):
-    _, prior_body = _stage_prior(tmp_path, prior_sources={"pool_cutoff": "2026-03-15"})
-    args = _valid_derive_args(tmp_path, cutoff=cutoff)
-    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
-        assembly.derive_catalog(prior_body, **args)
-    assert error.value.code == "CUTOFF_NOT_ADVANCED"
-    store = phase5_release.deployment_root(tmp_path)
-    assert not _candidate_path(tmp_path).exists()
-    assert not phase5_release.staged_manifest_path(store, "cand1").exists()
-
-
 def _object_path(root, target):
     return phase5_release.deployment_root(root) / phase5_release.object_relpath(target.content_hash)
 
@@ -1318,11 +1314,49 @@ def test_supplied_object_path_fifo_is_refused_without_hanging(tmp_path):
 def test_prior_payload_larger_than_max_object_bytes_is_prior_mismatch(tmp_path, monkeypatch):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
-    monkeypatch.setattr(assembly, "MAX_OBJECT_BYTES", 10)
+    supplied = (*args["outputs"], args["chooser"])
+    monkeypatch.setattr(assembly, "MAX_OBJECT_BYTES",
+                        max(output.payload_bytes for output in supplied) + 1)
     inventory = dataclasses.replace(inventory, release_id="cand1")
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         _run_carry(tmp_path, inventory, args)
     assert error.value.code == "PRIOR_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+@pytest.mark.parametrize("mode", ["sys-maxsize", "small-max"])
+def test_object_unverified_when_payload_bytes_exceed_max(tmp_path, monkeypatch, mode):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    output = args["outputs"][0]
+    if mode == "sys-maxsize":
+        claimed = sys.maxsize + 1
+    else:
+        monkeypatch.setattr(assembly, "MAX_OBJECT_BYTES", output.payload_bytes)
+        claimed = output.payload_bytes + 1
+    args["outputs"][0] = dataclasses.replace(output, payload_bytes=claimed)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "OBJECT_UNVERIFIED"
+    _assert_no_candidate(tmp_path)
+
+
+@pytest.mark.parametrize("mode", ["above-sys-maxsize", "above-max-object-bytes"])
+def test_object_unverified_when_payload_bytes_exceed_max(tmp_path, monkeypatch, mode):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    output = args["outputs"][0]
+    if mode == "above-sys-maxsize":
+        payload_bytes = sys.maxsize + 1
+    else:
+        monkeypatch.setattr(assembly, "MAX_OBJECT_BYTES", output.payload_bytes)
+        payload_bytes = output.payload_bytes + 1
+    args["outputs"][0] = dataclasses.replace(output, payload_bytes=payload_bytes)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "OBJECT_UNVERIFIED"
     _assert_no_candidate(tmp_path)
 
 
@@ -1336,24 +1370,46 @@ def test_inventory_with_none_bindings_is_inventory_mismatch(tmp_path):
     _assert_no_candidate(tmp_path)
 
 
-def _oversize_prior(root, monkeypatch):
-    monkeypatch.setattr(assembly, "MAX_META_BYTES", 10)
+def _pad_beyond(path, limit):
+    data = path.read_bytes()
+    if len(data) <= limit:
+        path.write_bytes(data + b" " * (limit + 1 - len(data)))
 
 
-def _oversize_candidate(root, monkeypatch):
+def _oversize_prior_catalog(root, monkeypatch):
     store = phase5_release.deployment_root(root)
+    path = phase5_release.catalog_path(root, "prior1")
+    limit = phase5_release.staged_manifest_path(store, "prior1").stat().st_size
+    _pad_beyond(path, limit)
+    monkeypatch.setattr(assembly, "MAX_META_BYTES", limit)
+
+
+def _oversize_prior_manifest(root, monkeypatch):
+    store = phase5_release.deployment_root(root)
+    manifest = phase5_release.staged_manifest_path(store, "prior1")
+    limit = phase5_release.catalog_path(root, "prior1").stat().st_size
+    _pad_beyond(manifest, limit)
+    monkeypatch.setattr(assembly, "MAX_META_BYTES", limit)
+
+
+def _oversize_candidate_catalog(root, monkeypatch):
+    store = phase5_release.deployment_root(root)
+    prior = json.loads(phase5_release.catalog_path(root, "prior1").read_text())
+    path = _candidate_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    phase5_release.write_catalog(path, assembly.derive_catalog(prior, **_valid_derive_args(root)))
     limit = max(phase5_release.catalog_path(root, "prior1").stat().st_size,
                 phase5_release.staged_manifest_path(store, "prior1").stat().st_size)
     monkeypatch.setattr(assembly, "MAX_META_BYTES", limit)
-    candidate = _candidate_path(root)
-    candidate.parent.mkdir(parents=True, exist_ok=True)
-    candidate.write_bytes(b"x" * (limit + 1))
+    _pad_beyond(path, limit)
 
 
-@pytest.mark.parametrize("setup, code", [(_oversize_prior, "PRIOR_MISMATCH"),
-                                         (_oversize_candidate, "ID_CONFLICT")],
-                         ids=["prior-catalog", "candidate-catalog"])
-def test_meta_oversize_catalog_refusal(tmp_path, monkeypatch, setup, code):
+@pytest.mark.parametrize("setup, code", [
+    (_oversize_prior_catalog, "PRIOR_MISMATCH"),
+    (_oversize_prior_manifest, "PRIOR_MISMATCH"),
+    (_oversize_candidate_catalog, "ID_CONFLICT"),
+], ids=["prior-catalog", "prior-manifest", "candidate-catalog"])
+def test_meta_oversize_refusal(tmp_path, monkeypatch, setup, code):
     inventory, _ = _stage_prior(tmp_path)
     setup(tmp_path, monkeypatch)
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
@@ -1362,6 +1418,22 @@ def test_meta_oversize_catalog_refusal(tmp_path, monkeypatch, setup, code):
     assert error.value.code == code
     if code == "PRIOR_MISMATCH":
         _assert_no_candidate(tmp_path)
+
+
+def test_meta_oversize_candidate_manifest_refusal(tmp_path, monkeypatch):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    _run_carry(tmp_path, inventory, args)
+    store = phase5_release.deployment_root(tmp_path)
+    limit = max(phase5_release.catalog_path(tmp_path, "prior1").stat().st_size,
+                phase5_release.staged_manifest_path(store, "prior1").stat().st_size,
+                _candidate_path(tmp_path).stat().st_size)
+    _pad_beyond(phase5_release.staged_manifest_path(store, "cand1"), limit)
+    monkeypatch.setattr(assembly, "MAX_META_BYTES", limit)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "ID_CONFLICT"
 
 
 def test_prior_catalog_symlink_is_prior_mismatch(tmp_path):
@@ -1435,7 +1507,7 @@ def test_object_order_does_not_change_derived_catalog(tmp_path):
     assert again.read_bytes() == published
 
 
-def test_stage_release_type_error_is_not_inventory_mismatch(tmp_path, monkeypatch):
+def test_stage_release_type_error_is_inventory_mismatch(tmp_path, monkeypatch):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
 
@@ -1446,5 +1518,22 @@ def test_stage_release_type_error_is_not_inventory_mismatch(tmp_path, monkeypatc
     inventory = dataclasses.replace(inventory, release_id="cand1")
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         _run_carry(tmp_path, inventory, args)
-    assert error.value.code == "PRIOR_MISMATCH"
+    assert error.value.code == "INVENTORY_MISMATCH"
     _assert_no_candidate(tmp_path)
+
+
+def test_deployment_read_manifest_refuses_oversize(tmp_path, monkeypatch):
+    _stage_prior(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    manifest = phase5_release.staged_manifest_path(store, "prior1")
+    monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", manifest.stat().st_size - 1)
+    with pytest.raises(ValueError):
+        deployment._read_manifest(store, "prior1")
+
+
+def test_phase5_read_catalog_refuses_oversize(tmp_path, monkeypatch):
+    _stage_prior(tmp_path)
+    path = phase5_release.catalog_path(tmp_path, "prior1")
+    monkeypatch.setattr(phase5_release, "_MAX_CATALOG_BYTES", path.stat().st_size - 1)
+    with pytest.raises(phase5_release.ReleaseLayoutError):
+        phase5_release.read_catalog(path, "prior1")

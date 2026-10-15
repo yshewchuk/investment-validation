@@ -88,7 +88,7 @@ def _content_hash_valid(value: object) -> bool:
 
 def _parse_day(value: object, code: str, detail: str) -> date:
     try:
-        if not isinstance(value, str) or len(value) != 10:
+        if not isinstance(value, str) or value != date.fromisoformat(value).isoformat():
             raise ValueError("not an extended ISO date")
         return date.fromisoformat(value)
     except (TypeError, ValueError) as exc:
@@ -203,11 +203,12 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
         chooser, "CHOOSER_MISMATCH", "chooser is not a PoolOutput or a sequence")
     if not chooser_objects:
         raise ReleaseAssemblyRefusal("CHOOSER_MISMATCH", "chooser is empty")
+    for output in chooser_objects:
+        _admit(output, "CHOOSER_MISMATCH")
     chooser_objects = tuple(sorted(chooser_objects, key=lambda output: output.name))
     by_member = _outputs_by_member(outputs)
     chooser_names: set[str] = set()
     for output in chooser_objects:
-        _admit(output, "CHOOSER_MISMATCH")
         if not _content_hash_valid(output.content_hash):
             raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "the chooser hash is malformed")
         if output.member_id != CHOOSER_MEMBER_ID:
@@ -250,7 +251,10 @@ def _read_regular(path: Path, limit: int, code: str, detail: str) -> bytes:
             raise ReleaseAssemblyRefusal(code, detail)
         with os.fdopen(fd, "rb") as handle:
             fd = -1
-            data = handle.read(limit + 1)
+            try:
+                data = handle.read(limit + 1)
+            except (OverflowError, ValueError) as exc:
+                raise ReleaseAssemblyRefusal(code, detail) from exc
     finally:
         if fd >= 0:
             os.close(fd)
@@ -270,11 +274,16 @@ def _probe_regular(path: Path, limit: int, code: str, detail: str) -> None:
 
 def _verify_objects(store: Path, supplied: tuple[PoolOutput, ...]) -> None:
     for output in supplied:
+        payload_bytes = output.payload_bytes
+        if (not isinstance(payload_bytes, int) or isinstance(payload_bytes, bool)
+                or payload_bytes < 0 or payload_bytes > MAX_OBJECT_BYTES):
+            raise ReleaseAssemblyRefusal(
+                "OBJECT_UNVERIFIED", "a supplied object payload is not a bounded size")
         path = store / object_relpath(output.content_hash)
         payload = _read_regular(
-            path, output.payload_bytes, "OBJECT_UNVERIFIED",
+            path, payload_bytes, "OBJECT_UNVERIFIED",
             "a supplied object is missing or unreadable")
-        if sha256_bytes(payload) != output.content_hash or len(payload) != output.payload_bytes:
+        if sha256_bytes(payload) != output.content_hash or len(payload) != payload_bytes:
             raise ReleaseAssemblyRefusal("OBJECT_UNVERIFIED", "an object disagrees with its claim")
 
 
@@ -384,6 +393,8 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
         prior = deployment.resolve_release(store, prior_release_id)
     except (deployment.DeploymentError, OSError, ValueError) as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release could not be resolved") from exc
+    except (TypeError, AttributeError, KeyError) as exc:
+        raise ReleaseAssemblyRefusal("INVENTORY_MISMATCH", "inventory is malformed") from exc
     if prior_catalog.get("deployment_id") != prior.deployment_id:
         raise ReleaseAssemblyRefusal(
             "PRIOR_MISMATCH", "prior catalog deployment id disagrees with its staged release")
@@ -395,6 +406,17 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
     candidate_path = catalog_path(root, release_id)
     candidate = dataclasses.replace(prior, release_id=release_id)
     with _publication_lock(store):
+        _probe_regular(candidate_path, MAX_META_BYTES, "ID_CONFLICT",
+                       "candidate catalog is missing or unreadable")
+        try:
+            existing = read_catalog(candidate_path, release_id)
+        except ReleaseLayoutError as exc:
+            raise ReleaseAssemblyRefusal(
+                "ID_CONFLICT", "candidate catalog exists but cannot be read or validated") from exc
+        if existing is not None and existing != body:
+            raise ReleaseAssemblyRefusal(
+                "ID_CONFLICT", "candidate catalog already exists with different content")
+
         try:
             deployment.stage_release(store, candidate, inventory, payloads)
         except deployment.StagingRefused as exc:
@@ -409,6 +431,8 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
             raise ReleaseAssemblyRefusal(
                 "INVENTORY_MISMATCH",
                 "inventory is incomplete or incompatible with the prior release") from exc
+        except (TypeError, AttributeError, KeyError) as exc:
+            raise ReleaseAssemblyRefusal("INVENTORY_MISMATCH", "inventory is malformed") from exc
 
         _probe_regular(staged_manifest_path(store, release_id), MAX_META_BYTES,
                        "ID_CONFLICT", "candidate manifest is missing or unreadable")
@@ -418,18 +442,8 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
             raise ReleaseAssemblyRefusal(
                 "ID_CONFLICT", "candidate staged release could not be verified") from exc
 
-        _probe_regular(candidate_path, MAX_META_BYTES, "ID_CONFLICT",
-                       "candidate catalog is missing or unreadable")
-        try:
-            existing = read_catalog(candidate_path, release_id)
-        except ReleaseLayoutError as exc:
-            raise ReleaseAssemblyRefusal(
-                "ID_CONFLICT", "candidate catalog exists but cannot be read or validated") from exc
         if existing is not None:
-            if existing == body:
-                return candidate_path
-            raise ReleaseAssemblyRefusal(
-                "ID_CONFLICT", "candidate catalog already exists with different content")
+            return candidate_path
 
         try:
             write_catalog(candidate_path, body)

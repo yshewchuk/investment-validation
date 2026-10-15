@@ -32,6 +32,8 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -214,6 +216,31 @@ def _validate_catalog(body: Any, expected_id: str | None = None) -> dict:
     return body
 
 
+_MAX_CATALOG_BYTES = 64 * 1024 * 1024
+
+
+def _read_bounded_regular(path: Path, limit: int) -> bytes:
+    """Read at most ``limit`` bytes from a regular file, refusing symlinks and oversize input."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("phase5 catalog is not a bounded regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(fd, min(limit + 1 - total, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        raise ValueError("phase5 catalog is not a bounded regular file")
+    return data
+
+
 def _read_catalog(path: Path, expected_id: str | None = None) -> dict | None:
     try:
         try:
@@ -222,7 +249,8 @@ def _read_catalog(path: Path, expected_id: str | None = None) -> dict | None:
             return None
         if not path.is_file():
             raise ReleaseLayoutError("phase5 catalog is not a readable file")
-        return _validate_catalog(json.loads(path.read_bytes()), expected_id)
+        return _validate_catalog(
+            json.loads(_read_bounded_regular(path, _MAX_CATALOG_BYTES)), expected_id)
     except (OSError, ValueError) as exc:
         raise ReleaseLayoutError("phase5 catalog could not be read or validated") from exc
 

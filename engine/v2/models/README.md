@@ -132,6 +132,9 @@ from causal source rows. engine.v2.ops.cli imports the no-fit guard
 (not a v2 package, so not part of this graph) is the P5-1 inventory's CLI.
 `checks/phase5_acceptance.py` publishes staging success after acceptance.
 `tools/phase5_prepare_release.py` invalidates prior success before re-preparation.
+`checks/phase5_release_assembly.py` re-stages a prior release under a new id
+(`deployment.stage_release`, `resolve_release`, `manifest_path`, and the
+`releases` inventory types) when carrying pool objects forward.
 engine.v2.serving.operations (P6-4) imports the deployment pointer
 (`current_pointer`, `resolve_release`, plus the two refusal exception types)
 to serve the deployed model release read-only at `/models/release.json` --
