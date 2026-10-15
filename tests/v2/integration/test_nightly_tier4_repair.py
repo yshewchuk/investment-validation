@@ -108,6 +108,33 @@ def test_repair_raising_stops_the_run_with_a_typed_code(monkeypatch):
     assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
+def test_refuse_is_best_effort_when_the_flag_report_write_raises(monkeypatch):
+    """A failed flag write must not mask the typed stop being raised.
+
+    ``_refuse`` writes the run's flag report best-effort: with ``_write_flag_report``
+    raising ``OSError`` (a full disk), the ``TIER4_REPAIR_FAILED`` ``NightlyStop``
+    still propagates — not the ``OSError`` — and ``report.stopped`` is still set.
+    """
+    from engine.dashboard import nightly
+
+    def boom_write(as_of, flags, steps):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(nightly, "_write_flag_report", boom_write)
+
+    def boom(tables, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    report = _report()
+    with pytest.raises(NightlyStop) as caught:
+        repair_tier4_gap(report, boom, finalize=lambda *a, **k: None)
+
+    assert caught.value.step == "tier4_repair"
+    assert caught.value.detail.startswith(
+        "TIER4_REPAIR_FAILED: RuntimeError: disk on fire")
+    assert report.stopped == "tier4_repair"
+
+
 def test_repair_that_still_leaves_the_gap_stops_the_run(monkeypatch):
     from engine.dashboard import nightly
 
@@ -495,6 +522,57 @@ def test_main_json_report_is_written_atomically(tmp_path, monkeypatch):
         rebuild_mod.main(["--table", "tier4", "--json", str(target)])
 
     assert target.read_text() == "PRE-EXISTING REPORT", \
+        "a failed --json write must leave the previous report unchanged"
+    assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
+        "a failed --json write must leave no temp file behind"
+
+
+def test_write_flag_report_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
+    """A failed replace leaves the previous flag report and no temp file."""
+    from engine import paths
+    from engine.data import manifest as manifest_mod
+    from engine.dashboard import nightly
+
+    monkeypatch.setattr(paths, "REPORTS", tmp_path)
+
+    path = nightly._write_flag_report(
+        "2026-10-13", [{"kind": "first"}], {"tiers": {}})
+    original = path.read_text()
+
+    monkeypatch.setattr(manifest_mod.os, "replace", _raise_disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        nightly._write_flag_report(
+            "2026-10-13", [{"kind": "second"}], {"tiers": {}})
+
+    assert path.read_text() == original, \
+        "a failed write must leave the previous flag report unchanged"
+    assert sorted(p.name for p in path.parent.glob("*.tmp*")) == [], \
+        "a failed write must leave no temp file behind"
+
+
+def test_tier4_main_json_report_is_written_atomically(tmp_path, monkeypatch):
+    """The Tier-4 ``--json`` report goes through the atomic helper too.
+
+    As with the rebuild ``--json`` report, patching ``os.replace`` to fail only
+    affects an atomic write: a plain ``write_text`` would succeed and overwrite,
+    failing the "previous report survives" assertion. The pre-existing report at
+    the destination must survive and the sibling temp file must be cleaned up.
+    """
+    from engine.data import manifest as manifest_mod
+    from engine.data.features import tier4 as tier4_mod
+
+    monkeypatch.setattr(tier4_mod, "build_table",
+                        lambda since=None, out=None: {"rows": 3, "producers": {}})
+
+    target = tmp_path / "tier4.json"
+    tier4_mod.main(["--json", str(target)])
+    original = target.read_text()
+
+    monkeypatch.setattr(manifest_mod.os, "replace", _raise_disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        tier4_mod.main(["--json", str(target)])
+
+    assert target.read_text() == original, \
         "a failed --json write must leave the previous report unchanged"
     assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
         "a failed --json write must leave no temp file behind"

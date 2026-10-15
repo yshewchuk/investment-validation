@@ -84,8 +84,8 @@ def _sanitize_reason(text: str) -> str:
     return re.sub(r"\S+", _redact_token, text)
 
 
-#: Public alias so callers outside this module (the nightly's degrade path)
-#: need not import a private name.
+#: Public alias so callers outside this module need not import a private name:
+#: used by the nightly's degrade path and its repair-failure message.
 sanitize_reason = _sanitize_reason
 
 

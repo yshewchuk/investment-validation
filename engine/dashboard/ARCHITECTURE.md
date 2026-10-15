@@ -67,7 +67,7 @@ drift, quota below reserve) and a backup sync.
 
 Imports observed in this package, top-level and lazy (an `ast` walk over
 every `.py` file reporting every `engine.*` import at any depth, including
-inside function bodies) — 25 distinct legacy `engine.*` modules in total, not 3:
+inside function bodies) — well over three legacy `engine.*` modules:
 
 - Top-level: `engine.paths` (all four of `model_evidence.py`/`nightly.py`/
   `publish.py`/`render.py`), `engine.data.throttle` (quota guard, also
@@ -137,10 +137,11 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   the run rather than burning retries against a dead key.
 - **Tier-4 gap repair** — with tiers on, at most one SNAPSHOT per night,
   written after the Tier-4 gap check; a failed write keeps the previous file.
-  A stop after the store rebuild leaves the previous SNAPSHOT in place (user
-  decision; fail-closed readers are #771). The repair budget
-  (`TIER4_REPAIR_BUDGET_S`) is checked after the repair returns. A rerun with
-  no gap skips the repair. Public helpers: `repair_tier4_gap`,
+  A stop after the store rebuild leaves the previous SNAPSHOT in place. The
+  repair budget (`TIER4_REPAIR_BUDGET_S`) is checked after the repair
+  returns. A rerun with no gap skips the repair. The flag report and
+  `rebuild --json` are written atomically (a failed write keeps the previous
+  file); writing the flag report is best-effort. Public helpers: `repair_tier4_gap`,
   `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
 
   | Condition | Outcome |

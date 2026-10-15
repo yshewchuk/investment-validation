@@ -112,7 +112,7 @@ def _run_worker(root: Path, mode: str, out: Path, cache_out: Path) -> None:
 
 
 def _worker(mode: str, report: Path, cache_report: Path) -> int:
-    """One subprocess build, called exactly as the nightly calls it."""
+    """One subprocess build, called as the nightly calls it."""
     from engine import paths
     from engine.data import manifest, rebuild
 

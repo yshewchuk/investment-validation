@@ -831,7 +831,7 @@ def _repair_failed(report: NightlyReport, exc: Exception) -> NightlyStop:
 
 
 def repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
-                      finalize) -> None:
+                     finalize) -> None:
     """Full Tier-4 rebuild (no ``--since``) to close an out-of-window gap.
 
     The incremental build's backfill window skipped keys it can never reach;
