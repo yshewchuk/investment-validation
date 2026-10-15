@@ -135,13 +135,13 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Missing input / refresh failure** — degrades to cached data (staleness
   stays visible in `meta.json`) — except a rotated credential, which stops
   the run rather than burning retries against a dead key.
-- **Tier-4 gap repair** — with tiers on, at most one SNAPSHOT per night,
+- **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per night,
   written after the Tier-4 gap check; a failed write keeps the previous file.
   A stop after the store rebuild leaves the previous SNAPSHOT in place. The
   repair budget (`TIER4_REPAIR_BUDGET_S`) is checked after the repair
   returns. A rerun with no gap skips the repair. The flag report and
   `rebuild --json` are written atomically (a failed write keeps the previous
-  file); writing the flag report is best-effort. Public helpers: `repair_tier4_gap`,
+  file); the flag report written for a tiers refusal is best-effort. Public helpers: `repair_tier4_gap`,
   `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
 
   | Condition | Outcome |

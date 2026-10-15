@@ -1,6 +1,6 @@
 """Automatic full Tier-4 repair when the incremental build leaves a gap (#494).
 
-Contract: engine/dashboard/ARCHITECTURE.md § "Tier-4 gap repair". An
+Contract: engine/dashboard/ARCHITECTURE.md the "Tier-4 gap repair" bullet. An
 out-of-window ``tier4_gap_partial`` from the incremental Tier-4 build is no
 longer just flagged — the tiers step immediately runs a full Tier-4 rebuild
 (no ``--since``) and re-checks the gap, so a repaired night reports no flag
@@ -106,6 +106,38 @@ def test_repair_raising_stops_the_run_with_a_typed_code(monkeypatch):
     assert len(stops) == 1, "a refusal appends exactly one tiers_stop flag"
     assert "TIER4_REPAIR_FAILED" in stops[0]["detail"]
     assert len(written) == 1, "the refusal writes the flag report exactly once"
+
+
+def test_repair_failure_scrubs_local_paths_from_the_typed_detail(monkeypatch):
+    """A refused repair publishes no absolute local path in its detail (#490).
+
+    The repair failure detail reaches the published bundle, so an exception
+    carrying a host-local path must have it redacted to ``<local path>`` while
+    the ``TIER4_REPAIR_FAILED``/``RuntimeError`` prefix stays intact.
+    """
+    from engine.dashboard import nightly
+
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
+    finalized = []
+
+    def boom(tables, **kwargs):
+        raise RuntimeError("cannot open /root/secret/data/x.parquet")
+
+    report = _report()
+    with pytest.raises(NightlyStop) as caught:
+        repair_tier4_gap(report, boom, finalize=finalized.append)
+
+    assert caught.value.step == "tier4_repair"
+    assert caught.value.detail.startswith("TIER4_REPAIR_FAILED: RuntimeError:")
+    assert "/root/secret" not in caught.value.detail, \
+        "the typed detail must not leak the host-local path"
+    assert caught.value.detail == (
+        "TIER4_REPAIR_FAILED: RuntimeError: cannot open <local path>"), \
+        "the local path is scrubbed to <local path>, the type prefix stays"
+    assert finalized == [], "a refused repair must not finalize anything"
+    assert report.stopped == "tier4_repair"
 
 
 def test_refuse_is_best_effort_when_the_flag_report_write_raises(monkeypatch):
