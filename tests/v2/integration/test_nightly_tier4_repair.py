@@ -21,6 +21,7 @@ The orchestration cases drive ``run_nightly`` with every heavy step patched.
 from __future__ import annotations
 
 import contextlib
+import json
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -713,6 +714,63 @@ def test_rebuild_stamps_elapsed_when_it_defers_finalize(monkeypatch):
     assert result.snapshot is None, "finalize=False writes no snapshot"
     assert result.elapsed_s > 0, "elapsed_s is stamped before the deferred finalize"
     assert result.elapsed_s == pytest.approx(7.5)
+
+
+def test_finalize_rebuild_stamps_elapsed_from_the_saved_start(monkeypatch):
+    """finalize_rebuild uses result.started, not its own wall-clock start."""
+    from engine.data import rebuild as rebuild_mod
+
+    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats", lambda: {})
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest", lambda stats: Path("m"))
+    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot", lambda stats: "snap")
+
+    readings = iter([112.5])
+    monkeypatch.setattr(rebuild_mod, "time",
+                        SimpleNamespace(time=lambda: next(readings)))
+
+    result = rebuild_mod.finalize_rebuild(rebuild_mod.RebuildResult(started=100.0))
+
+    assert result.elapsed_s == pytest.approx(12.5), \
+        "elapsed is finalize-time minus the saved started, not a local clock diff"
+
+
+def test_rebuild_stamps_started_and_elapsed_when_it_defers_finalize(monkeypatch):
+    """rebuild(finalize=False) stamps result.started and elapsed_s from its clock."""
+    from engine.data import rebuild as rebuild_mod
+
+    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
+
+    readings = iter([50.0, 53.0])
+    monkeypatch.setattr(rebuild_mod, "time",
+                        SimpleNamespace(time=lambda: next(readings)))
+
+    result = rebuild_mod.rebuild(tables=(), finalize=False)
+
+    assert result.started == pytest.approx(50.0), \
+        "the build's start clock is stashed on the result"
+    assert result.elapsed_s == pytest.approx(3.0), \
+        "elapsed_s is end-clock minus the stashed start"
+
+
+def test_rebuild_default_path_stamps_started_and_elapsed(monkeypatch):
+    """The default finalize=True path stamps started and elapsed_s the same way."""
+    from engine.data import rebuild as rebuild_mod
+
+    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats", lambda: {})
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest", lambda stats: Path("m"))
+    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot", lambda stats: "snap")
+
+    readings = iter([10.0, 17.0])
+    monkeypatch.setattr(rebuild_mod, "time",
+                        SimpleNamespace(time=lambda: next(readings)))
+
+    result = rebuild_mod.rebuild(tables=())
+
+    assert result.started == pytest.approx(10.0)
+    assert result.elapsed_s == pytest.approx(7.0), \
+        "the default path stamps elapsed_s via finalize_rebuild"
 
 
 def test_finalize_writes_manifest_before_snapshot(monkeypatch):
@@ -1599,3 +1657,63 @@ def test_cli_returns_1_and_prints_the_code_when_run_nightly_stops(
     assert result == 1, "a typed NightlyStop is an exit-1 run"
     assert "TIER4_REPAIR_FAILED: x" in capsys.readouterr().err, \
         "the typed code must reach stderr"
+
+
+# --------------------------------------------------------------------------
+# tools/verify_incremental_rebuild.py::_worker writes its reports atomically
+# --------------------------------------------------------------------------
+
+
+def test_verify_worker_writes_report_and_empty_cache_report(tmp_path, monkeypatch):
+    """_worker writes the rebuild report and an empty cache report."""
+    from tools import verify_incremental_rebuild
+
+    monkeypatch.setattr("engine.paths.ensure_dirs", lambda: None)
+
+    class _FakeResult:
+        def as_dict(self):
+            return {"k": 1}
+
+    # The fake rebuild constructs no InputCache, so ``built`` stays empty and
+    # the cache report is ``{}``.
+    monkeypatch.setattr("engine.data.rebuild.rebuild",
+                        lambda **kwargs: _FakeResult())
+
+    report = tmp_path / "report.json"
+    cache_report = tmp_path / "cache.json"
+
+    assert verify_incremental_rebuild._worker("full", report, cache_report) == 0
+
+    assert json.loads(report.read_text()) == {"k": 1}, \
+        "the worker persists the rebuild result's as_dict()"
+    assert json.loads(cache_report.read_text()) == {}, \
+        "no InputCache instances means an empty cache report"
+
+
+def test_verify_worker_failed_replace_keeps_old_report(tmp_path, monkeypatch):
+    """A failed os.replace leaves the previous report and no temp file."""
+    from engine.data import manifest as manifest_mod
+    from tools import verify_incremental_rebuild
+
+    monkeypatch.setattr("engine.paths.ensure_dirs", lambda: None)
+
+    class _FakeResult:
+        def as_dict(self):
+            return {"k": 1}
+
+    monkeypatch.setattr("engine.data.rebuild.rebuild",
+                        lambda **kwargs: _FakeResult())
+
+    report = tmp_path / "report.json"
+    report.write_bytes(b"old")
+    cache_report = tmp_path / "cache.json"
+
+    monkeypatch.setattr(manifest_mod.os, "replace", _raise_disk_full)
+
+    with pytest.raises(OSError, match="disk full"):
+        verify_incremental_rebuild._worker("full", report, cache_report)
+
+    assert report.read_bytes() == b"old", \
+        "a failed write must leave the previous report unchanged"
+    assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
+        "a failed write must leave no temp file behind"
