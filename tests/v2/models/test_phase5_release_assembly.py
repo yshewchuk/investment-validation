@@ -2030,7 +2030,7 @@ def test_malformed_inventory_members_are_inventory_mismatch(tmp_path, bad):
 _DEEP = b"[" * 200_000 + b"]" * 200_000
 
 
-def test_deeply_nested_prior_catalog_is_prior_mismatch(tmp_path):
+def test_balanced_deeply_nested_prior_catalog_is_prior_mismatch(tmp_path):
     inventory, _ = _stage_prior(tmp_path)
     phase5_release.catalog_path(tmp_path, "prior1").write_bytes(_DEEP)
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:

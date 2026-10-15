@@ -392,8 +392,10 @@ def test_state_catalog_fifo_refuses_without_hanging(tmp_path):
     errors = []
 
     def run():
-        try: resolve_release_binding(tmp_path)
-        except BaseException as exc: errors.append(exc)
+        try:
+            resolve_release_binding(tmp_path)
+        except BaseException as exc:
+            errors.append(exc)
 
     try:
         worker = threading.Thread(target=run, daemon=True)
