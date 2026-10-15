@@ -371,11 +371,16 @@ def test_counters_record_decoded_rows_when_a_scan_fails_midway(tmp_path, monkeyp
     import engine.v2.ops.nightly_chain_batch as batch
 
     repository, snapshot = _snap(tmp_path)
-    monkeypatch.setattr(batch, "_RESULT_CAP", 1)
+    monkeypatch.setattr(batch, "_BATCH_CAP", 2)   # the 5 AAA rows decode as batches of 2, 2, 1
+    monkeypatch.setattr(batch, "_RESULT_CAP", 3)  # the 4th row trips the limit inside batch 2
     with pytest.raises(DataError) as exc:
         scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
     assert exc.value.code == "RESULT_LIMIT_EXCEEDED"
-    assert repository.read_counters.snapshot()["option_chains"]["rows_decoded"] > 0
+    counters = repository.read_counters.snapshot()["option_chains"]
+    # Batch 2 was interrupted mid-yield; its counts must still be recorded
+    # (post-loop-only accounting would report only batch 1: decoded 2).
+    assert counters["rows_decoded"] == 4
+    assert 0 < counters["rows_returned"] <= counters["rows_decoded"]
 
 
 def test_counting_errors_never_fail_a_scan(tmp_path):
