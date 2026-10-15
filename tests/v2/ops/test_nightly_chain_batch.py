@@ -352,3 +352,16 @@ def test_bad_quote_is_refused_by_the_quote_reader_only(tmp_path):
         scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
                         decision_session=_SESSION, chain_rows=bad)
     assert exc.value.code == "CONTRACT_MISMATCH"
+
+
+def test_counting_errors_never_fail_a_scan(tmp_path):
+    ReadCounters().add("t", scans="x")  # a bad amount is swallowed, not raised
+
+    class _Boom(dict):
+        def setdefault(self, *args, **kwargs):
+            raise RuntimeError("counter storage failed")
+
+    repository, snapshot = _snap(tmp_path)
+    repository.read_counters._tables = _Boom()
+    slices = scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
+    assert len(slices["AAA"]) == 5

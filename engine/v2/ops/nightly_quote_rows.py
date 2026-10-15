@@ -116,7 +116,9 @@ def scan_quote_rows(
     ``QuoteRowInputs`` with ``quote_status="empty"``, never a raise; a
     missing ``option_chains`` table raises ``CONTRACT_MISMATCH``
     (``Repository.table_contract``'s own typed refusal). Malformed
-    key/date inputs raise ``INVALID_REQUEST``; repository failures
+    key/date inputs raise ``INVALID_REQUEST``; a row (scanned or given) with a
+    null expiry, strike or right, an unusable strike or right, or a non-numeric
+    bid or ask raises ``CONTRACT_MISMATCH``; repository failures
     propagate unchanged. ``chain_rows`` (that ticker's rows for the session, from
     one batched build read) replaces the scan when given; ``None`` keeps
     the per-key scan.
