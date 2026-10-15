@@ -491,6 +491,7 @@ tests = [
     "tests/v2/scoring/test_release_chooser_states.py",
     "tests/v2/models/test_bounded_frozen_state_loader.py",
     "tests/v2/integration/test_chooser_release_readiness.py",
+    "tests/v2/integration/test_chooser_fold_authoring.py",
 ]
 
 [modules.board_analog]
