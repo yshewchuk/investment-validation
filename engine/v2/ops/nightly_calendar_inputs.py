@@ -16,6 +16,7 @@ module never imports ``engine.score``/``engine.structures``/``engine.replay``/
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -127,36 +128,10 @@ def _validated_candidate(row: dict) -> tuple[str, str, float]:
     return _date_string(row["expiry"]), right, strike
 
 
-def scan_decision_calendar(repository: Repository, snapshot: SnapshotRef, *,
-                           decision_session: Any, event_through: Any) -> CalendarSessions:
-    """The pinned session calendar: the SPY price series through the decision
-    session is the only source; the observed maximum is its own date, never a
-    projected endpoint."""
-    session_day = _calendar_day(decision_session, "decision_session")
-    through_day = _calendar_day(event_through, "event_through")
-    series = get_price_series(repository, PriceQuery(
-        ticker=_CALENDAR_TICKER, session_date=session_day, observation_ceiling=session_day,
-        lookback_sessions=0), snapshot)
-    if not series:
-        raise data_fail("CONTRACT_MISMATCH", "no eligible SPY sessions through the decision session")
-    source_dates = tuple(sorted({row.date for row in series}))
-    return build_calendar_sessions(source_dates, event_through=through_day)
-
-
-def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: BoardRequest, *,
-                            decision_session: Any) -> tuple[str, ...]:
-    """One bounded ``option_chains`` scan of the exact ``(ticker, decision_session)``
-    slice, projected to raw ``(right, strike, expiry)``: no other session, no
-    quote-usability filter, no expiry before the decision session. Every
-    projected row's ``expiry``/``strike``/``right`` is validated before any
-    expiry filtering -- a malformed one is ``CONTRACT_MISMATCH``. The key's
-    strategy and session domains are checked before any scan, so an unsupported
-    nonempty value is ``INVALID_REQUEST`` rather than a masked empty expiry
-    domain. The eligible domain follows the native strategy policy; the result
-    is the sorted distinct ISO tuple, empty only when the domain is empty."""
-    _require_key(key)
-    _require_supported_domains(key)
-    session_day = _calendar_day(decision_session, "decision_session")
+def _scan_candidate_rows(repository: Repository, snapshot: SnapshotRef, key: BoardRequest,
+                         session_day: str):
+    """The per-key bounded scan of one ``(ticker, session)`` slice, projected to
+    ``_CANDIDATE_COLUMNS``; yields row dicts."""
     contract = repository.table_contract(snapshot, _CHAIN_TABLE)
     version = snapshot.table_versions[_CHAIN_TABLE]
     key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
@@ -176,17 +151,56 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
         order_by=tuple(contract.primary_key),
         max_batch_rows=max_batch_rows,
         max_result_rows=max_result_rows)
+    for batch in repository.scan(query, table_name=_CHAIN_TABLE):
+        yield from batch.to_pylist()
+
+
+def scan_decision_calendar(repository: Repository, snapshot: SnapshotRef, *,
+                           decision_session: Any, event_through: Any) -> CalendarSessions:
+    """The pinned session calendar: the SPY price series through the decision
+    session is the only source; the observed maximum is its own date, never a
+    projected endpoint."""
+    session_day = _calendar_day(decision_session, "decision_session")
+    through_day = _calendar_day(event_through, "event_through")
+    series = get_price_series(repository, PriceQuery(
+        ticker=_CALENDAR_TICKER, session_date=session_day, observation_ceiling=session_day,
+        lookback_sessions=0), snapshot)
+    if not series:
+        raise data_fail("CONTRACT_MISMATCH", "no eligible SPY sessions through the decision session")
+    source_dates = tuple(sorted({row.date for row in series}))
+    return build_calendar_sessions(source_dates, event_through=through_day)
+
+
+def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: BoardRequest, *,
+                            decision_session: Any,
+                            chain_rows: Sequence[Mapping[str, Any]] | None = None
+                            ) -> tuple[str, ...]:
+    """One bounded ``option_chains`` scan of the exact ``(ticker, decision_session)``
+    slice, projected to raw ``(right, strike, expiry)``: no other session, no
+    quote-usability filter, no expiry before the decision session. Every
+    projected row's ``expiry``/``strike``/``right`` is validated before any
+    expiry filtering -- a malformed one is ``CONTRACT_MISMATCH``. The key's
+    strategy and session domains are checked before any scan, so an unsupported
+    nonempty value is ``INVALID_REQUEST`` rather than a masked empty expiry
+    domain. The eligible domain follows the native strategy policy; the result
+    is the sorted distinct ISO tuple, empty only when the domain is empty.
+    ``chain_rows`` (that ticker's rows for the session, from one batched build
+    read, #754) replaces the scan when given; ``None`` keeps the per-key scan."""
+    _require_key(key)
+    _require_supported_domains(key)
+    session_day = _calendar_day(decision_session, "decision_session")
+    rows = (_scan_candidate_rows(repository, snapshot, key, session_day)
+            if chain_rows is None else chain_rows)
     calls: dict[str, set[float]] = {}
     puts: dict[str, set[float]] = {}
-    for batch in repository.scan(query, table_name=_CHAIN_TABLE):
-        for row in batch.to_pylist():
-            expiry_day, right, strike = _validated_candidate(row)
-            if expiry_day < session_day:
-                continue
-            if right == "C":
-                calls.setdefault(expiry_day, set()).add(strike)
-            else:
-                puts.setdefault(expiry_day, set()).add(strike)
+    for row in rows:
+        expiry_day, right, strike = _validated_candidate(row)
+        if expiry_day < session_day:
+            continue
+        if right == "C":
+            calls.setdefault(expiry_day, set()).add(strike)
+        else:
+            puts.setdefault(expiry_day, set()).add(strike)
     if key.strategy in _STRADDLE_DOMAIN:
         expiries = {day for day in calls if calls[day] & puts.get(day, set())}
     else:
@@ -195,7 +209,9 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
 
 
 def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key: BoardRequest, *,
-                             decision_session: Any, calendar: CalendarSessions) -> CalendarRowInputs:
+                             decision_session: Any, calendar: CalendarSessions,
+                             chain_rows: Sequence[Mapping[str, Any]] | None = None
+                             ) -> CalendarRowInputs:
     """One row's pinned spot, resolved strategy expiry and independent planned
     exit staged into ``scan_calendar_row``. A missing or unusable exact-session
     spot raises the per-key ``PRICE_HISTORY_NOT_AVAILABLE`` refusal; a
@@ -224,7 +240,8 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
     if spot is None or not math.isfinite(spot) or spot <= 0:
         raise NativeScoreBatchRowRefusal(
             key, "PRICE_HISTORY_NOT_AVAILABLE", PRICE_HISTORY_NOT_AVAILABLE_DETAIL)
-    candidates = scan_candidate_expiries(repository, snapshot, key, decision_session=session_day)
+    candidates = scan_candidate_expiries(repository, snapshot, key, decision_session=session_day,
+                                         chain_rows=chain_rows)
     if not candidates:
         raise _no_resolvable(key)
     inputs = {"event_date": key.event_date, "session": key.session,

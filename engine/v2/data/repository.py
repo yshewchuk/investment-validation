@@ -142,7 +142,7 @@ from engine.v2.contracts.data import (
     TableContract,
     TableContractRef,
 )
-from engine.v2.data import chains, documents, errors, events, manifests, objects
+from engine.v2.data import chains, documents, errors, events, manifests, objects, read_counters
 from engine.v2.data import query as query_mod
 from engine.v2.foundation import (
     ArtifactStore,
@@ -187,6 +187,7 @@ class Repository:
         self._pin_snapshots = pin_snapshots
         self._pinned_snapshots: dict[str, SnapshotRef] = {}
         self._pinned_tables: dict[tuple[str, str], tuple] = {}
+        self.read_counters = read_counters.ReadCounters()
 
     def resolve(self, snapshot_id: str) -> SnapshotRef:
         if not self._pin_snapshots:
@@ -304,6 +305,7 @@ class Repository:
         snap = self.resolve(validated.snapshot_id)
         contract, records = self._table_records(snap, table_name, validated.table_contract_ref)
         query_mod.validate_query(contract, validated)
+        self.read_counters.add(contract.table_name, scans=1)
         yield from self._execute_scan(contract, records, validated)
 
     def _validated_query(self, query: DataQuery) -> DataQuery:
@@ -426,8 +428,15 @@ class Repository:
         fallback: caught here, decided the first time it happens, and kept
         for the rest of this fragment's batches (lazily compiling the row
         matcher only then, if it was not already compiled)."""
+        opened_at = read_counters.clock()
         path = objects.verify_object_path(self._store, record.object_ref)
         parquet_file = self._open_parquet(path)
+        try:
+            size = path.stat().st_size
+        except Exception:
+            size = 0
+        self.read_counters.add(contract.table_name, fragments_opened=1, bytes_read=size,
+                               seconds=read_counters.clock() - opened_at)
         # Slice A (PR 360): footer-vs-manifest row-count integrity, decided
         # before schema matching, batch iteration or filtering -- extra rows
         # a predicate would have hidden still refuse here, and no corrupt
@@ -439,17 +448,28 @@ class Repository:
         present, missing = self._match_columns(contract, needed, parquet_file.schema_arrow)
         batch_matcher = query_mod.compile_batch_matcher(contract, query)
         row_matcher = None if batch_matcher is not None else query_mod.compile_row_matcher(contract, query)
-        for batch in self._iter_batches(parquet_file, present, batch_cap):
+        batches = iter(self._iter_batches(parquet_file, present, batch_cap))
+        while True:
+            read_at = read_counters.clock()
+            batch = next(batches, None)
+            if batch is None:
+                break
+            decoded = batch.num_rows
             if batch_matcher is not None:
                 try:
                     batch = self._filter_batch(batch, contract, present, query, batch_matcher)
                 except Exception:
                     batch_matcher = None
                     row_matcher = query_mod.compile_row_matcher(contract, query)
+            read_seconds = read_counters.clock() - read_at
+            returned = 0
             for row in self._decode_rows(batch, needed, present, missing):
                 if row_matcher is not None and not row_matcher(row):
                     continue
+                returned += 1
                 yield query_mod.order_key(row, contract), row
+            self.read_counters.add(contract.table_name, rows_decoded=decoded,
+                                   rows_returned=returned, seconds=read_seconds)
 
     def _filter_batch(self, batch: pa.RecordBatch, contract: TableContract, present: list[str],
                       query: DataQuery, batch_matcher) -> pa.RecordBatch:

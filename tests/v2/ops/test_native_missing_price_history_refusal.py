@@ -170,7 +170,7 @@ def _patch_context(
         }
 
     def forbidden_quotes(repository, snapshot, key, *, expiry,
-                        decision_session):
+                        decision_session, chain_rows=None):
         """Fail loudly if a quote scan is reached after a spot refusal."""
         raise AssertionError("quote scan must not be reached after a spot refusal")
 
@@ -181,7 +181,8 @@ def _patch_context(
     if real_spot:
         return
 
-    def calendar_row(repository, snapshot, key, *, decision_session, calendar):
+    def calendar_row(repository, snapshot, key, *, decision_session, calendar,
+                     chain_rows=None):
         """One fixture calendar row with a usable pinned spot for ``key``."""
         return CalendarRowInputs(
             calendar_revision="cal-v1",
@@ -197,7 +198,8 @@ def _patch_context(
                 "calendar_observed_through": _AS_OF,
             })
 
-    def quotes(repository, snapshot, key, *, expiry, decision_session):
+    def quotes(repository, snapshot, key, *, expiry, decision_session,
+               chain_rows=None):
         """One fixture call/put quote pair per key at the fixture expiry."""
         rows = tuple(
             {
@@ -409,7 +411,8 @@ def test_missing_exact_session_spot_is_refused_and_other_ticker_scores(
     _patch_context(monkeypatch, _requests(("GAP", "GOOD")), real_spot=True)
 
     monkeypatch.setattr(nci, "scan_candidate_expiries",
-                        lambda repository, snapshot, key, *, decision_session: (_EVENT_DATE,))
+                        lambda repository, snapshot, key, *, decision_session,
+                        chain_rows=None: (_EVENT_DATE,))
 
     def calendar_row(repository, snapshot, key, *, entry_date, exit_date,
                      expiry, spot, calendar_observed_through):
@@ -426,7 +429,7 @@ def test_missing_exact_session_spot_is_refused_and_other_ticker_scores(
     monkeypatch.setattr(nci, "scan_calendar_row", calendar_row)
     monkeypatch.setattr(nci, "planned_exit_date", lambda key, calendar: _EVENT_DATE)
 
-    def quotes(repository, snapshot, key, *, expiry, decision_session):
+    def quotes(repository, snapshot, key, *, expiry, decision_session, chain_rows=None):
         rows = tuple({
             "ticker": key.ticker, "right": right, "strike": 100.0,
             "expiry": expiry, "bid": 1.0, "ask": 1.2,
