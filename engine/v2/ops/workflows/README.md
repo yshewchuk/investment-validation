@@ -33,7 +33,7 @@ bounded, no-follow regular-file readers `read_bounded_json(path, max_bytes)` and
 (`read_bounded_bytes`) and by `nightly_trigger` (with
 `MAX_EXPECTED_POPULATION_BYTES`).
 
-<!-- public-interface: _plan_command, _submit_command, read_bounded_json, read_bounded_bytes -->
+<!-- public-interface: _plan_command, _submit_command, read_bounded_json, read_bounded_bytes, MAX_EXPECTED_POPULATION_BYTES, MAX_INPUT_MANIFEST_BYTES -->
 
 ## Consumers
 

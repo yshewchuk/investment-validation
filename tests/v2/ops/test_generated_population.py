@@ -402,7 +402,7 @@ def test_a_supplied_file_overrides_generation(env, monkeypatch):
     assert pin.calls[0]["expected_snapshot_id"] is None  # nothing was generated or pre-resolved
 
 
-def test_a_symlinked_or_malformed_override_keeps_its_refusals(env, monkeypatch):
+def test_a_symlinked_or_malformed_override_is_invalid_request(env, monkeypatch):
     real = env[3] / "real.json"
     real.write_text(json.dumps(["AAA|STR-THRU|2026-12-20"]))
     link = env[3] / "link.json"

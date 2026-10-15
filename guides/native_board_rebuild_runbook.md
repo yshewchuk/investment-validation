@@ -15,7 +15,7 @@ explicit. No step has been shown unsafe or error-prone enough to justify sequenc
   (`legacy_mapping.py:107-109`), `feature_panel` + `tier4_forecasts` (`import_snapshot.py:175-183`),
   and reference inputs (`:185-189`) — eight legacy datasets, never the native
   `price_history.v3`/`computed_moves.v3`; and `nightly_trigger._ensure_shadow_snapshot`
-  (`nightly_trigger.py:1011-1085`) reads the head, plans, submits, drives the import (`:1074-1083`) before nightly planning — no native capture (report step 7, gap 3).
+  reads the head, plans, submits, drives the import before nightly planning — no native capture (report step 7, gap 3).
 - 2026-10-06 supervisor-provided fresh-root measurement: `snapshot plan-import` → `submit` → `serve --once` took 24.0 min under `bounded_run --heavy --cores 8 --max-rss-gb 6.5` — the `--max-rss-gb 6.5` flag was the historical RSS cap, the measured peak RSS was <1 GB, and the separately measured ~5.9 GiB was free headroom admission; neither number is a recommended override — and the run produced exactly eight legacy tables with no `price_history` or `computed_moves`; same-box `ledger import-history --dry-run` counted 2,374 predictions, 14,634 outcomes, and 7 divergent prediction rows — confirms gap 3 on a real store.
 - Gap 4: `price_history_store._commit_generation` carries every other table's manifest forward
   (`price_history_store.py:593-604`) and copies the base receipt's reference inputs and lineage
