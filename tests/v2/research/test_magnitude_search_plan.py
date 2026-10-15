@@ -270,6 +270,34 @@ def test_real_seal_verify_is_complete_metadata_only_idempotent_and_preserves_anc
     _assert_candidates(reread)
 
 
+@pytest.mark.parametrize("years", [{"0003": ["0002"]}, {"9998": ["9997"]}])
+def test_request_admits_both_year_endpoints(years):
+    request = _request()
+    request["inner_years"] = years
+    admitted, count = search._request(request)
+    assert admitted == request and count == 6
+    admitted["inner_years"].clear()
+    assert request["inner_years"] == years
+
+
+def test_minimum_integer_leaf_count_has_exact_published_recipes(source, monkeypatch):
+    _metadata_only(monkeypatch, source)
+    request = _request()
+    request.update(space={"history_hgb": {"learning_rate": [0.05], "max_iter": [10],
+        "max_leaf_nodes": [2, 4], "min_samples_leaf": [2], "l2_regularization": [0]}},
+        max_candidates=2, max_fits=24)
+    sealed = search.seal_search_plan(source.conn, source.store, source.registration, request)
+    recipes = [_recipe("history_hgb", {**HGB_PARAMS, "learning_rate": 0.05,
+        "max_iter": 10, "max_leaf_nodes": leaves, "min_samples_leaf": 2, "l2_regularization": 0})
+        for leaves in (2, 4)]
+    assert sealed["plan"]["candidates"] == sorted([
+        {"candidate_id": _sha(recipe), "recipe": recipe} for recipe in recipes],
+        key=lambda candidate: candidate["candidate_id"])
+    assert sealed["plan"]["candidate_count"] == 2
+    assert sealed["plan"]["planned_fit_count"] == 24
+    assert source.store.read_verified(from_document(ArtifactRef, sealed["plan_ref"])) == canonical_json(sealed["plan"]).encode()
+
+
 @pytest.mark.parametrize("field,value", [
     ("schema_version", "wrong"), ("extra", 1), ("max_candidates", 1), ("max_candidates", 4097),
     ("max_candidates", True), ("max_candidates", 6.0), ("max_candidates", "6"),
@@ -639,6 +667,20 @@ def test_wrong_reference_schema_refuses_before_open(source, monkeypatch):
         "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
 
 
+@pytest.mark.parametrize("kind", ["none", "document"])
+def test_nonreference_values_refuse_before_preparation_or_artifacts(source, monkeypatch, kind):
+    ref = None if kind == "none" else to_document(artifact_reference(b"metadata", search.SCHEMA))
+    before = _catalog(source.conn), _objects(source.store)
+    monkeypatch.setattr(search, "_prepare", _forbid)
+    monkeypatch.setattr(ArtifactStore, "read_verified", _forbid)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
+    with pytest.raises(OpsError) as caught:
+        search.read_search_plan(source.conn, source.store, source.registration, _request(), ref)
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
 @pytest.mark.parametrize("field", ["artifact_id", "storage_key", "byte_size", "schema_version"])
 def test_same_hash_reference_metadata_drift_refuses_before_plan_open(source, monkeypatch, field):
     sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
@@ -680,8 +722,11 @@ def test_forged_metadata_schema_cannot_open_arbitrary_payload(source, monkeypatc
     assert opened and all(candidate.schema_ref == "native_experiment_registration.v1.5" for candidate in opened)
 
 
-@pytest.mark.parametrize("failure", [fail("INPUT_CHANGED", "missing source"), SyntaxError("invalid source")])
+@pytest.mark.parametrize("failure", [fail("INPUT_CHANGED", "missing source"), SyntaxError("invalid source"),
+    OSError("unreadable source"), ArtifactError("UNSAFE_PATH", "invalid source path"), ValueError("invalid source")])
 def test_unverifiable_installed_source_is_identity_refusal(source, monkeypatch, failure):
+    _metadata_only(monkeypatch, source)
+    before = _catalog(source.conn), _objects(source.store)
     def broken(*args):
         raise failure
     monkeypatch.setattr(search, "source_closure", broken)
@@ -690,6 +735,7 @@ def test_unverifiable_installed_source_is_identity_refusal(source, monkeypatch, 
         search.seal_search_plan(source.conn, source.store, source.registration, _request())
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "search implementation sources cannot be verified")
+    assert (_catalog(source.conn), _objects(source.store)) == before
 
 
 def _problem(code, message, *, details=None):
