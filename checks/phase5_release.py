@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -221,16 +222,23 @@ MAX_CATALOG_BYTES = 64 * 1024 * 1024
 def _read_catalog(path: Path, expected_id: str | None = None) -> dict | None:
     try:
         try:
-            st = path.lstat()
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             return None
-        if (stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode)
-                or st.st_size > MAX_CATALOG_BYTES):
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise ReleaseLayoutError("phase5 catalog is not a bounded regular file")
+            handle = os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            data = handle.read(MAX_CATALOG_BYTES + 1)
+        if len(data) > MAX_CATALOG_BYTES:
             raise ReleaseLayoutError("phase5 catalog is not a bounded regular file")
-        if not path.is_file():
-            raise ReleaseLayoutError("phase5 catalog is not a readable file")
-        return _validate_catalog(json.loads(path.read_bytes()), expected_id)
-    except (OSError, ValueError) as exc:
+        return _validate_catalog(json.loads(data), expected_id)
+    except (OSError, ValueError, RecursionError) as exc:
         raise ReleaseLayoutError("phase5 catalog could not be read or validated") from exc
 
 

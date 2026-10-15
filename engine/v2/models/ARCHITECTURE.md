@@ -124,15 +124,14 @@ size check. Existing callers omitting the ceiling retain their read contract.
   (`deployment.stage_release`), then writes the candidate catalog. It never
   touches `DEPLOYED`.
 
-Both refuse with a stable `ReleaseAssemblyRefusal.code`; no upstream exception
-escapes raw (stray `OSError`/`KeyError`/`TypeError`/`AttributeError`/
-`RecursionError` are translated at the boundary). No production caller exists yet.
+Both refuse with a stable `ReleaseAssemblyRefusal.code` (stray `OSError`,
+`KeyError`, `TypeError`, `AttributeError`, `RecursionError` translated). No caller yet.
 
 | Condition | Code |
 |---|---|
-| Prior release id empty or not a string; prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest or model payload missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
+| Prior release id empty, not a string or unsafe (`/`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest or model payload missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
 | Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
-| Chooser empty, not `PoolOutput`, wrong member id, malformed hash or duplicate name | `CHOOSER_MISMATCH` |
+| Chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
 | An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
 | `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
 | Supplied object missing, unreadable, not a regular file, `payload_bytes` above `MAX_OBJECT_BYTES`, longer than its claim, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
@@ -144,10 +143,10 @@ Supplied objects, prior payloads, both catalogs, the lock file and staged
 manifests are opened without following links, must be regular files, and are
 read under a byte cap. A missing, symlinked, non-regular or oversize prior
 refuses `PRIOR_MISMATCH`; the same candidate file refuses `ID_CONFLICT`. Every
-call re-runs all validation, even when an identical candidate catalog exists.
-Staging and the catalog write run under one exclusive, bounded-wait `flock` on
-`deployment/.carry_forward.lock`; the loser of two conflicting calls refuses
-`ID_CONFLICT`.
+call re-runs all validation. Staging and the catalog write run under one
+exclusive `flock` on `deployment/.carry_forward.lock`; a loser that waits out
+`LOCK_WAIT_S` refuses `PUBLICATION_FAILED`, otherwise `ID_CONFLICT` once the
+winner has published.
 
 | Rule | Behaviour |
 |---|---|
@@ -423,7 +422,7 @@ promotion and rollback refuse without matching staging success.
 | Condition | Outcome |
 |---|---|
 | Unstaged `release_id` | `resolve_release` refuses `ReleaseNotStaged` |
-| Staged manifest cannot be read or parsed, is a symlink or non-regular file, or exceeds 64 MiB | Both refuse `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error (issue #207); a missing file is still "not staged" — `current_release` inherits this from its own call to `resolve_release` |
+| Staged manifest cannot be read or parsed, is a symlink or non-regular file, or exceeds 64 MiB | Both refuse `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error; a missing file is still "not staged" — `current_release` inherits this from its own call to `resolve_release` |
 | Release staged under a superseded hash version (legacy) | Still resolves — replay of a score already recorded against it must never become unreplayable. Only the write path (§7.2) enforces the current hash version |
 | No live pointer | `current_release` returns `None` |
 | Caching, retry, transaction, partial write | None of these apply: read-only, no cache, nothing to retry, no write |

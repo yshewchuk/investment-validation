@@ -1338,6 +1338,44 @@ def test_candidate_catalog_fifo_is_id_conflict(tmp_path):
     assert not _candidate_path(tmp_path).is_file()
 
 
+def _forbid_nonregular_reads(monkeypatch):
+    real = os.fdopen
+
+    def watch(fd, *a, **k):
+        assert stat.S_ISREG(os.fstat(fd).st_mode), "non-regular file was read"
+        return real(fd, *a, **k)
+
+    monkeypatch.setattr(os, "fdopen", watch)
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+@pytest.mark.parametrize("site, code", [
+    (lambda root, args: _object_path(root, args["outputs"][0]), "OBJECT_UNVERIFIED"),
+    (lambda root, _args: phase5_release.catalog_path(root, "prior1"), "PRIOR_MISMATCH"),
+    (lambda root, _args: phase5_release.staged_manifest_path(
+        phase5_release.deployment_root(root), "prior1"), "PRIOR_MISMATCH"),
+], ids=["supplied-object", "prior-catalog", "prior-manifest"])
+def test_nonregular_inputs_never_reach_a_read(tmp_path, monkeypatch, site, kind, code):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    path = site(tmp_path, args)
+    if kind == "directory":
+        path.unlink()
+        path.mkdir()
+        holder = None
+    else:
+        _make_fifo(path)
+        holder = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    _forbid_nonregular_reads(monkeypatch)
+    try:
+        _refused_without_hanging(tmp_path, dataclasses.replace(inventory, release_id="cand1"),
+                                 args, code)
+    finally:
+        if holder is not None:
+            os.close(holder)
+    _assert_no_candidate(tmp_path)
+
+
 def test_prior_payload_larger_than_max_object_bytes_is_prior_mismatch(tmp_path, monkeypatch):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
@@ -1393,7 +1431,7 @@ def _oversize_prior_catalog(root, monkeypatch):
     path = phase5_release.catalog_path(root, "prior1")
     limit = phase5_release.staged_manifest_path(store, "prior1").stat().st_size
     _pad_beyond(path, limit)
-    monkeypatch.setattr(assembly, "MAX_META_BYTES", limit)
+    monkeypatch.setattr(assembly, "MAX_CATALOG_BYTES", limit)
 
 
 def _oversize_prior_manifest(root, monkeypatch):
@@ -1401,7 +1439,7 @@ def _oversize_prior_manifest(root, monkeypatch):
     manifest = phase5_release.staged_manifest_path(store, "prior1")
     limit = phase5_release.catalog_path(root, "prior1").stat().st_size
     _pad_beyond(manifest, limit)
-    monkeypatch.setattr(assembly, "MAX_META_BYTES", limit)
+    monkeypatch.setattr(assembly, "MAX_MANIFEST_BYTES", limit)
 
 
 def _oversize_candidate_catalog(root, monkeypatch):
@@ -1412,7 +1450,7 @@ def _oversize_candidate_catalog(root, monkeypatch):
     phase5_release.write_catalog(path, assembly.derive_catalog(prior, **_valid_derive_args(root)))
     limit = max(phase5_release.catalog_path(root, "prior1").stat().st_size,
                 phase5_release.staged_manifest_path(store, "prior1").stat().st_size)
-    monkeypatch.setattr(assembly, "MAX_META_BYTES", limit)
+    monkeypatch.setattr(assembly, "MAX_CATALOG_BYTES", limit)
     _pad_beyond(path, limit)
 
 
@@ -1442,7 +1480,7 @@ def test_meta_oversize_candidate_manifest_refusal(tmp_path, monkeypatch):
                 phase5_release.staged_manifest_path(store, "prior1").stat().st_size,
                 _candidate_path(tmp_path).stat().st_size)
     _pad_beyond(phase5_release.staged_manifest_path(store, "cand1"), limit)
-    monkeypatch.setattr(assembly, "MAX_META_BYTES", limit)
+    monkeypatch.setattr(assembly, "MAX_MANIFEST_BYTES", limit)
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         _run_carry(tmp_path, inventory, args)
     assert error.value.code == "ID_CONFLICT"

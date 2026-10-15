@@ -21,6 +21,7 @@ from datetime import date
 from pathlib import Path
 
 from checks.phase5_release import (
+    MAX_CATALOG_BYTES,
     STAGED,
     STATE_SPECS,
     ReleaseLayoutError,
@@ -36,6 +37,7 @@ from checks.phase5_release import (
     write_catalog,
 )
 from engine.v2.models import deployment, releases
+from engine.v2.models.deployment import MAX_MANIFEST_BYTES
 
 POOL_MEMBER_IDS: tuple[str, ...] = (
     "driver_residual_pool:size",
@@ -57,7 +59,6 @@ _HEX = frozenset("0123456789abcdef")
 _UNSAFE_ID_CHARS = ("/", "\\", "\0")
 _STRAY_ERRORS = (KeyError, TypeError, AttributeError, ValueError, RecursionError)
 MAX_OBJECT_BYTES = 512 * 1024 * 1024
-MAX_META_BYTES = 64 * 1024 * 1024
 LOCK_WAIT_S = 30.0
 
 
@@ -255,11 +256,12 @@ def _read_regular(path: Path, limit: int, code: str, detail: str) -> bytes:
         raise ReleaseAssemblyRefusal(code, detail) from exc
     try:
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
                 raise ReleaseAssemblyRefusal(code, detail)
             with os.fdopen(fd, "rb") as handle:
                 fd = -1
-                data = handle.read(limit + 1)
+                data = handle.read(min(st.st_size, limit) + 1)
         except OSError as exc:
             raise ReleaseAssemblyRefusal(code, detail) from exc
     finally:
@@ -281,7 +283,7 @@ def _load_catalog(path: Path, expected_id: str, code: str, detail: str) -> dict 
         return None
     except OSError as exc:
         raise ReleaseAssemblyRefusal(code, detail) from exc
-    data = _read_regular(path, MAX_META_BYTES, code, detail)
+    data = _read_regular(path, MAX_CATALOG_BYTES, code, detail)
     try:
         body = json.loads(data)
     except (ValueError, RecursionError) as exc:
@@ -413,7 +415,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
         "prior catalog could not be read or validated")
     if prior_catalog is None:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "no prior catalog exists for that release id")
-    _probe_regular(staged_manifest_path(store, prior_release_id), MAX_META_BYTES,
+    _probe_regular(staged_manifest_path(store, prior_release_id), MAX_MANIFEST_BYTES,
                    "PRIOR_MISMATCH", "prior manifest is missing or unreadable")
     try:
         verify_staged(store, prior_release_id)
@@ -476,7 +478,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
         except (TypeError, AttributeError, KeyError) as exc:
             raise ReleaseAssemblyRefusal("INVENTORY_MISMATCH", "inventory is malformed") from exc
 
-        _probe_regular(staged_manifest_path(store, release_id), MAX_META_BYTES,
+        _probe_regular(staged_manifest_path(store, release_id), MAX_MANIFEST_BYTES,
                        "ID_CONFLICT", "candidate manifest is missing or unreadable")
         try:
             verify_staged(store, release_id)
@@ -496,7 +498,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
 
 
 __all__ = [
-    "CHOOSER_MEMBER_ID", "LOCK_WAIT_S", "MAX_META_BYTES", "MAX_OBJECT_BYTES",
+    "CHOOSER_MEMBER_ID", "LOCK_WAIT_S", "MAX_OBJECT_BYTES",
     "POOL_MEMBER_IDS", "PoolOutput", "ReleaseAssemblyRefusal", "carry_forward_release",
     "derive_catalog",
 ]

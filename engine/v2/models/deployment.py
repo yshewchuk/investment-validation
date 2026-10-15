@@ -60,6 +60,7 @@ from engine.v2.foundation import (
 
 from . import contracts, releases
 
+# Module imports plus aliases keep this file within the layer fan-out budget (checks/layer_map.py).
 ArtifactMember = contracts.ArtifactMember
 ModelRelease = contracts.ModelRelease
 ModelReleaseInventory = releases.ModelReleaseInventory
