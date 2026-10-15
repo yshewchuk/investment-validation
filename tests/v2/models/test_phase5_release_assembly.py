@@ -1516,6 +1516,42 @@ def test_prior_manifest_symlink_is_prior_mismatch(tmp_path):
     _assert_no_candidate(tmp_path)
 
 
+def test_carried_object_with_wrong_bytes_claim_is_prior_mismatch(tmp_path):
+    inventory, prior_body = _stage_prior(tmp_path)
+    members = copy.deepcopy(prior_body["members"])
+    next(row for row in members
+         if row["member_id"] == UNRELATED_MEMBER_ID)["objects"][0]["bytes"] += 1
+    body = _rebuilt_prior(prior_body, members)
+    phase5_release.write_catalog(phase5_release.catalog_path(tmp_path, "prior1"), body)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, dataclasses.replace(inventory, release_id="cand1"),
+                   _valid_derive_args(tmp_path))
+    assert error.value.code == "PRIOR_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+def test_metadata_readers_accept_files_exactly_at_the_cap(tmp_path, monkeypatch):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    _run_carry(tmp_path, inventory, args)
+    store = phase5_release.deployment_root(tmp_path)
+    catalog_cap = max(phase5_release.catalog_path(tmp_path, rid).stat().st_size
+                      for rid in ("prior1", "cand1"))
+    manifest_cap = max(phase5_release.staged_manifest_path(store, rid).stat().st_size
+                       for rid in ("prior1", "cand1"))
+    monkeypatch.setattr(assembly, "MAX_CATALOG_BYTES", catalog_cap)
+    monkeypatch.setattr(assembly, "MAX_MANIFEST_BYTES", manifest_cap)
+    _run_carry(tmp_path, inventory, args)
+    exact = {"MAX_CATALOG_BYTES": catalog_cap, "MAX_MANIFEST_BYTES": manifest_cap}
+    for name, cap in (("MAX_CATALOG_BYTES", catalog_cap - 1),
+                      ("MAX_MANIFEST_BYTES", manifest_cap - 1)):
+        monkeypatch.setattr(assembly, name, cap)
+        with pytest.raises(assembly.ReleaseAssemblyRefusal):
+            _run_carry(tmp_path, inventory, args)
+        monkeypatch.setattr(assembly, name, exact[name])
+
+
 @pytest.mark.parametrize("mode", ["catalog", "manifest"])
 def test_candidate_symlink_is_id_conflict(tmp_path, mode):
     inventory, _ = _stage_prior(tmp_path)
