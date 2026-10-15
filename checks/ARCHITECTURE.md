@@ -13,6 +13,18 @@ every other path, including undeclared paths under `data/`, uses ordinary
 No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.
 Some checks also expose callable report functions.
 
+`phase5_release.write_object` returns the hash/path in the existing flat
+deployment object layout. Within that store, new objects use a unique exclusive
+file under disposable `tmp/`, flush/fsync, and create-only hard-link publication;
+the object and deployment directories are synced before return. Existing paths
+resolving to regular files are retained, not repaired or rehashed; callers own
+byte verification and final-symlink refusal. Other collisions refuse without replacement.
+I/O failures raise fixed
+`ReleaseLayoutError` with the `OSError` cause. Only this call's temporary directory
+is cleaned; post-link failure can leave a complete unreferenced object. Retry
+syncs directories again. No cross-filesystem copy fallback or catalog/pointer
+update occurs here; whole-release concurrency and root ownership stay with callers.
+
 `tier0_support.py` owns `DEFAULT_CORPUS`, `round_params` and `finding_dicts`.
 The default retains the corpus runner's checkout-relative `fixtures/tier0`
 location. Rounding deep-copies the record and rounds only float values directly
@@ -63,6 +75,8 @@ Commands write findings/progress to standard streams and may write reports or ev
 ## Dependencies
 
 Checks use Python and repository metadata; evidence checks may import application packages or read built stores. `repo_hygiene.py` avoids `engine` imports.
+`phase5_release` uses foundation's public `ensure_directory`/`fsync_directory`
+and models deployment for the existing store/catalog contracts.
 Tier-0 support imports only the standard library and the diagnosis receipt
 interface; it never imports the corpus runner or starts a process.
 
