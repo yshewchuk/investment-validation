@@ -319,11 +319,22 @@ def test_chain_rows_are_checked_before_other_refusals(tmp_path):
 
 @pytest.mark.parametrize("change", [
     {"strike": None}, {"strike": "abc"}, {"right": "X"}, {"right": None},
-    {"expiry": None}, {"bid": "abc"}, {"ask": "abc"}])
+    {"expiry": None}, {"bid": "abc"}, {"ask": "abc"},
+    {"strike": float("nan")}, {"strike": float("inf")}])
 def test_unusable_chain_row_fields_are_contract_mismatch(tmp_path, change):
     row = dict(_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0), **change)
     repository, snapshot = _snap(tmp_path)
     with pytest.raises(DataError) as exc:
         scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
                         decision_session=_SESSION, chain_rows=[row])
+    assert exc.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("change", [{"strike": None}, {"right": "X"}, {"expiry": None}])
+def test_per_key_quote_scan_refuses_the_same_unusable_fields(tmp_path, change):
+    row = dict(_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0), **change)
+    repository, snapshot = _snapshot(
+        tmp_path, price={"AAA": [_price_row("AAA", _SESSION)]}, chains=[row])
+    with pytest.raises(DataError) as exc:
+        scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY, decision_session=_SESSION)
     assert exc.value.code == "CONTRACT_MISMATCH"

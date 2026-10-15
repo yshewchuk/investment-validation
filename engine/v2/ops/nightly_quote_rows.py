@@ -157,6 +157,7 @@ def scan_quote_rows(
         rows = []
         for batch in repository.scan(query, table_name=_QUOTE_TABLE):
             rows.extend(batch.to_pylist())
+        rows = require_chain_rows(rows, key.ticker, session_day)
     quote_rows = _matching_quote_rows(rows, expiry_day, session_day)
     if not quote_rows:
         return QuoteRowInputs(quote_rows=(), quote_status="empty")
