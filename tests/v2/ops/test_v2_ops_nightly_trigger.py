@@ -2042,12 +2042,15 @@ def test_ensure_plan_ref_records_source_not_final_as_not_yet_never_a_setup_error
                                 plan=_plan_fn_raising_source_not_final,
                                 submit=submit, serve=serve)
     assert receipt.status == "not_yet"
-    assert "partial" in receipt.detail
+    assert receipt.detail == nightly_trigger._problem_detail(fail("SOURCE_NOT_FINAL", "partial"))
     assert receipt.error_count == 0
     assert receipt.plan_ref is None
     assert submit.calls == [] and serve.calls == []
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.status == "not_yet" and stored.error_count == 0
+    # _ensure_plan_ref's snapshot_attempt (prior.snapshot_attempt else 0): prior is None here.
+    assert receipt.snapshot_attempt == stored.snapshot_attempt == 0
+    assert stored.detail == receipt.detail
 
 
 def test_ensure_plan_ref_keeps_snapshot_not_yet_for_a_resuming_source_not_final(tmp_path):
@@ -2064,11 +2067,14 @@ def test_ensure_plan_ref_keeps_snapshot_not_yet_for_a_resuming_source_not_final(
                                 plan=_plan_fn_raising_source_not_final,
                                 submit=submit, serve=serve, prior=prior)
     assert receipt.status == "snapshot_not_yet"
-    assert "partial" in receipt.detail
+    assert receipt.detail == nightly_trigger._problem_detail(fail("SOURCE_NOT_FINAL", "partial"))
     assert receipt.error_count == 0
     assert submit.calls == []
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.status == "snapshot_not_yet"
+    assert receipt.snapshot_attempt == 1
+    assert stored.snapshot_attempt == 1
+    assert stored.detail == receipt.detail
 
 
 def test_prepare_default_plan_ignores_a_population_file_created_mid_run(tmp_path, monkeypatch):
