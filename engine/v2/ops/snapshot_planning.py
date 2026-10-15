@@ -157,7 +157,7 @@ def _load_snapshot_ref(store, head):
     try:
         document = json.loads(store.read_verified(head))
         return from_document(SnapshotRef, document)
-    except (ArtifactError, DocumentError, ValueError) as exc:
+    except (ArtifactError, DocumentError, ValueError, RecursionError) as exc:
         raise fail("INPUT_CHANGED", "the shadow snapshot head artifact cannot be read",
                    details={"artifact_error": type(exc).__name__}) from None
 

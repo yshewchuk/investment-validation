@@ -428,10 +428,7 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     later tick must not re-litigate the window (gate-round-5 fix,
     generalizing round 4's "timed_out"-only version, Cutover PR-7b-2).
 
-    ``tickers``/``context_tickers`` are the plan's watchlist (the plan step
-    (``_validated_override``) derives the override tickers when it exists,
-    otherwise derived later from the shadow snapshot) and historical
-    evidence universe. ``plan_fn``,
+    ``tickers``/``context_tickers`` are the plan watchlist and historical evidence universe; when empty, ``_prepare_default_plan`` derives them from the validated override or, absent that, from the shadow snapshot; explicit tickers set the universe while an present override is still validated. ``plan_fn``,
     ``submit_fn``, ``serve_fn``, ``ensure_snapshot_fn`` and ``provider`` are
     injected seams; the production defaults are the real in-process
     plan/submit/serve and the native ORATS probe.
@@ -763,7 +760,7 @@ def _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id):
     Opens the ops catalog, calls ``snapshot_event_tickers`` on the ``shadow`` scope's pinned
     head (refusing ``INPUT_CHANGED`` if it moved vs ``expected_shadow_snapshot_id``), and
     closes the connection in ``finally``. Empty-window refusals surface as the
-    helper's typed ``OpsError`` unchanged. Issue #471: the scheduled run's universe comes from
+    helper's typed ``OpsError`` unchanged. The scheduled run's universe comes from
     the snapshot, not from an operator file that may be absent.
     """
     from engine.v2.foundation import ArtifactStore
@@ -810,7 +807,7 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
                           full_run=True, expected_shadow_snapshot_id=None):
     """The scheduled preparation uses the exact watchlist passed to planning.
 
-    Universe derivation (issue #471), when no explicit ``tickers`` were supplied: an
+    Universe derivation: explicit ``tickers`` set the universe (the override is still validated); otherwise: an
     ``expected_population.json`` override that exists is PRESENT and wins; one that yields no
     tickers (unreadable, too large, non-list, empty) is refused ``INVALID_REQUEST``, never
     replaced by generation; a symlink or non-regular override (FIFO, directory, dangling
@@ -865,14 +862,13 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     through ``commands._plan_command`` to ``pin_snapshot_inputs``; the scheduled
     caller has already refreshed and captured prices before this call.
     The decided ``expected_population`` is the operator's population document when present
-    (the plan step ``_validated_override`` derives the override tickers from the same
-    file; it is the explicit override and wins over snapshot generation); absent,
+    (    ``_prepare_default_plan`` (via ``_validated_override``) derives the override tickers from the same file; it is the explicit override and wins over snapshot generation); absent,
     ``_prepare_default_plan`` already derived ``universe``/``context`` (when
     no explicit caller tickers/context_tickers were supplied) from the shadow
     snapshot's own events via
-    ``snapshot_event_tickers`` (issue #471) before this call, so when called
-    through ``_prepare_default_plan`` (the only scheduled caller) this path no
-    longer sees an empty universe just because the file is absent; a direct
+    ``snapshot_event_tickers`` before this call, so when called
+    through ``_prepare_default_plan`` (the only scheduled caller) this path does
+    not see an empty universe just because the file is absent; a direct
     call with no tickers and no file builds an empty universe, which the plan
     refuses at plan time (``INVALID_REQUEST``, generated population needs the
     watchlist); with the file absent and a non-empty universe,
@@ -1264,7 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
     clock = SystemClock()
     root = Path(args.root).resolve()
     as_of = args.as_of or default_as_of(clock)
-    # The plan step reads expected_population.json exactly once (_validated_override); main passes no tickers.
+    # _prepare_default_plan reads expected_population.json once; main passes no tickers.
     try:
         receipt = run_trigger(root, as_of, tickers=(), context_tickers=(),
                               deadline_et=DEFAULT_DEADLINE_ET,

@@ -2379,3 +2379,22 @@ def test_read_bounded_bytes_rejects_a_file_that_grows_past_the_cap_after_fstat(
     monkeypatch.setattr(commands.os, "fstat", fstat_wrapper)
     with pytest.raises(ValueError, match="not a bounded regular file"):
         commands.read_bounded_bytes(path, 8)
+
+
+def test_bounded_readers_accept_exactly_the_cap_and_refuse_one_more(tmp_path, monkeypatch):
+    from engine.v2.ops.workflows import commands
+
+    at_cap = tmp_path / "at.json"
+    at_cap.write_text('["a"]' + " " * 3)
+    over = tmp_path / "over.json"
+    over.write_text('["a"]' + " " * 4)
+    assert len(at_cap.read_bytes()) == 8
+    assert len(over.read_bytes()) == 9
+
+    assert commands.read_bounded_bytes(at_cap, 8) == at_cap.read_bytes()
+    with pytest.raises(ValueError, match="not a bounded regular file"):
+        commands.read_bounded_bytes(over, 8)
+
+    monkeypatch.setattr(nightly_trigger, "_MAX_POPULATION_BYTES", 8)
+    assert nightly_trigger._read_document(at_cap) == ["a"]
+    assert nightly_trigger._read_document(over) is None
