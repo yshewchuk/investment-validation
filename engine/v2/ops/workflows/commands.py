@@ -26,7 +26,7 @@ from engine.v2.ops.plans import nightly_plan, request_from_plan, save_plan
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit, submit_graph
 
-_MAX_EXPECTED_POPULATION_BYTES = 16 * 1024 * 1024
+MAX_EXPECTED_POPULATION_BYTES = 16 * 1024 * 1024
 
 
 def read_bounded_json(path, max_bytes):
@@ -117,11 +117,13 @@ def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
 def _read_expected_population(args):
     keys = getattr(args, "expected_population_keys", None)
     if keys is not None:
+        if not all(isinstance(v, str) for v in keys):
+            raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
         return tuple(keys)
     if not args.expected_population:
         return ()
     try:
-        payload = read_bounded_json(args.expected_population, _MAX_EXPECTED_POPULATION_BYTES)
+        payload = read_bounded_json(args.expected_population, MAX_EXPECTED_POPULATION_BYTES)
     except FileNotFoundError:
         raise fail("INPUT_CHANGED", "expected population file is missing") from None
     except (OSError, ValueError, RecursionError):

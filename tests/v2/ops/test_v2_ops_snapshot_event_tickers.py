@@ -3,9 +3,9 @@
 Every seam the function touches is monkeypatched -- no catalog, no artifact store, no
 network. The requests the fake scan returns carry only the ``.ticker`` attribute the
 function reads. ``_resolve_scope_snapshot`` is patched for the scan, empty-window and
-``DataError``-mapping cases; only the moved-head refusal reaches the real helper, with
-its own head resolve and ``SnapshotRef`` load patched so that refusal fires before
-``Repository`` or the scan is ever built.
+``DataError``-mapping cases; only the moved-head and unreadable-artifact refusals reach
+the real helper, with its head resolve (and, for the moved-head case, its ``SnapshotRef``
+load) patched so that refusal fires before ``Repository`` or the scan is ever built.
 """
 from __future__ import annotations
 

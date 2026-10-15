@@ -50,6 +50,7 @@ from zoneinfo import ZoneInfo
 
 from engine.v2.foundation import SystemClock, format_timestamp
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.workflows.commands import MAX_EXPECTED_POPULATION_BYTES as _MAX_POPULATION_BYTES
 
 __all__ = [
     "TriggerReceipt",
@@ -81,8 +82,6 @@ STATE_DIR = ("reports", "phase6", "nightly_trigger")
 #: Where the operator drops the native nightly's own qualification documents.
 QUALIFICATION_INPUT_MANIFEST = "input_manifest.json"
 QUALIFICATION_POPULATION = "expected_population.json"
-#: A qualification document is never read past this cap.
-_MAX_POPULATION_BYTES = 16 * 1024 * 1024
 #: "the caller did not decide the population" -- distinguishes an explicit
 #: ``expected_population=None`` from an omitted argument.
 _UNSET = object()

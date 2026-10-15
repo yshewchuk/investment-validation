@@ -426,7 +426,7 @@ def test_an_oversize_or_non_json_override_is_invalid_request(env, monkeypatch):
     junk.write_text("not json")
 
     with monkeypatch.context() as cap:  # only the big file is capped; junk sees the real limit
-        cap.setattr(commands, "_MAX_EXPECTED_POPULATION_BYTES", 8)
+        cap.setattr(commands, "MAX_EXPECTED_POPULATION_BYTES", 8)
         with pytest.raises(OpsError) as oversize:
             _plan(env, monkeypatch, "--expected-population", str(big))
     with pytest.raises(OpsError) as unparsable:
@@ -575,3 +575,23 @@ def test_a_planned_chooser_key_must_still_be_observed(env, monkeypatch, tmp_path
         _score_stage(monkeypatch, tmp_path, [*population, "ZZZ|DYN-SV|2026-12-22"])
 
     assert raised.value.problem.details["missing"] == ["ZZZ|DYN-SV|2026-12-22"]
+
+
+def test_a_missing_override_file_is_input_changed(env, monkeypatch):
+    with pytest.raises(OpsError) as raised:
+        _plan(env, monkeypatch, "--expected-population", str(env[3] / "nope.json"))
+
+    assert raised.value.code == "INPUT_CHANGED"
+
+
+def test_non_string_decided_keys_are_invalid_request():
+    import argparse
+
+    from engine.v2.ops.workflows import commands
+
+    with pytest.raises(OpsError) as raised:
+        commands._read_expected_population(argparse.Namespace(
+            expected_population=None,
+            expected_population_keys=("AAA|X|2026-09-25", 3)))
+
+    assert raised.value.code == "INVALID_REQUEST"
