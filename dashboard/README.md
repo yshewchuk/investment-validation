@@ -433,9 +433,9 @@ trading session strictly before today in America/New_York (weekends and US
 market holidays skipped). That session's retry window is 00:00–06:00 ET on the
 calendar day after it: a Friday as-of is retried Saturday 00:00–06:00 and
 MISSED at Saturday 06:00, and up to five minutes of grace keeps a 06:00 tick
-that fires seconds late inside. The tick probes ORATS once (the market-wide
-summaries/cores pair, never a refresh job); a not-final probe records
-`not_yet` and submits nothing.
+that fires seconds late inside. The tick probes ORATS twice (the market-wide
+summaries/cores pair, then a day-level probe over the derived universe; never a
+refresh job); a not-final probe records `not_yet` and submits nothing.
 
 Before probing, the tick takes a NON-BLOCKING `flock` (LOCK_EX|LOCK_NB) on
 `reports/.nightly.lock` and holds it for the ENTIRE native run — probe, plan,

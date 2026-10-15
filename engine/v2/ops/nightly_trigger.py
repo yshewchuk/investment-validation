@@ -7,7 +7,8 @@ parallel shadow-mode qualification DAG that already exists (``ops plan nightly``
 
 * the as-of session is published at the provider -- a single lightweight ORATS
   market-wide probe (the summaries/cores pair legacy nightly step 1 already
-  makes), never a refresh job; and
+  makes; the plan step adds a day-level probe over its derived universe), never
+  a refresh job; and
 * no other heavy run holds ``<repo>/reports/.nightly.lock`` -- a NON-BLOCKING
   ``fcntl.flock`` (LOCK_EX|LOCK_NB) taken before the probe and held for the
   ENTIRE run (probe -> plan -> submit -> serve to terminal). A legacy nightly
@@ -889,13 +890,10 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     ops_root = _ops_root(root)
     ensure_directory(ops_root)
     if expected_population is _UNSET:
-        population_path = _qualification_path(root, QUALIFICATION_POPULATION)
-        population_keys = None
+        population_keys, _ = _validated_override(root)
     else:
-        population_path = None
         population_keys = expected_population
-    universe = (tuple(tickers) or _tickers_from_keys(population_keys)
-                or _population_tickers(population_path))
+    universe = tuple(tickers) or _tickers_from_keys(population_keys)
     context = tuple(context_tickers) or universe
     year_start, year_end = _derive_years(as_of)
     # issue #104: capture this call's own manifest only when there is a universe to capture
@@ -907,7 +905,7 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
         command="plan", kind="nightly", as_of=as_of, mode="shadow", spec=None,
         no_ledger=False,
         input_manifest=manifest_path,
-        expected_population=population_path,
+        expected_population=None,
         expected_population_keys=population_keys,
         tickers=",".join(universe), context_tickers=",".join(context),
         full_run=bool(full_run), year_start=year_start, year_end=year_end,

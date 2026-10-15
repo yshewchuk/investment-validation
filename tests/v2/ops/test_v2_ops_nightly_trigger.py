@@ -923,7 +923,8 @@ def test_default_plan_passes_full_run_and_the_full_population(tmp_path, monkeypa
     assert plan_ref == "plan_full"
     args = captured["args"]
     assert args.full_run is True
-    assert args.expected_population == document
+    assert args.expected_population is None
+    assert args.expected_population_keys == ("AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25")
     assert args.tickers == "AAA,BBB" and args.context_tickers == "AAA,BBB"
     assert args.input_manifest == manifest_path
     assert args.input_mode == "snapshot" and args.snapshot_scope == "shadow"
@@ -1908,12 +1909,20 @@ def test_prepare_default_plan_refuses_an_oversized_population_document(tmp_path,
     assert "yields no tickers" in raised.value.problem.message
 
 
-def test_read_document_returns_none_immediately_for_a_fifo(tmp_path):
+def test_a_fifo_with_valid_json_is_refused_as_not_a_regular_file(tmp_path):
     if not hasattr(os, "mkfifo"):
         pytest.skip("os.mkfifo unavailable")
-    fifo = tmp_path / "population.fifo"
+    fifo = tmp_path / "p.fifo"
     os.mkfifo(fifo)
-    assert nightly_trigger._read_document(fifo) is None
+    fd = os.open(fifo, os.O_RDWR)
+    os.write(fd, b'["a"]')
+    try:
+        assert nightly_trigger._read_document(fifo) is None
+        from engine.v2.ops.workflows import commands
+        with pytest.raises(ValueError, match="not a bounded regular file"):
+            commands.read_bounded_bytes(fifo, 100)
+    finally:
+        os.close(fd)
 
 
 def test_prepare_default_plan_propagates_the_absent_override_snapshot_refusal(
@@ -2398,3 +2407,34 @@ def test_bounded_readers_accept_exactly_the_cap_and_refuse_one_more(tmp_path, mo
     monkeypatch.setattr(nightly_trigger, "_MAX_POPULATION_BYTES", 8)
     assert nightly_trigger._read_document(at_cap) == ["a"]
     assert nightly_trigger._read_document(over) is None
+
+
+def test_default_plan_without_decided_keys_refuses_a_dangling_symlink_override(
+        tmp_path, monkeypatch):
+    from engine.v2.ops import bootstrap
+    from engine.v2.ops.workflows import commands
+
+    path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(tmp_path / "missing.json")
+    monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
+    monkeypatch.setattr(commands, "_plan_command", _explode)
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._default_plan(
+            tmp_path, AS_OF, (), (), None, expected_shadow_snapshot_id="s")
+    assert raised.value.code == "INVALID_REQUEST"
+
+
+def test_default_plan_without_decided_keys_refuses_a_dangling_symlink_override(tmp_path, monkeypatch):
+    from engine.v2.ops import bootstrap
+    from engine.v2.ops.workflows import commands
+
+    path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(tmp_path / "missing.json")
+    monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
+    monkeypatch.setattr(commands, "_plan_command", _explode)
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._default_plan(tmp_path, AS_OF, (), (), None,
+                                      expected_shadow_snapshot_id="s")
+    assert raised.value.code == "INVALID_REQUEST"

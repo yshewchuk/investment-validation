@@ -137,8 +137,8 @@ def test_a_data_error_from_the_scan_is_input_changed_with_its_data_code(monkeypa
 
 def test_a_data_error_from_the_head_resolve_is_the_same_input_changed_mapping(monkeypatch):
     # A head resolve that already refuses (no committed head, an unreadable events
-    # table, ...) maps through the SAME except-DataError clause: both callers' failure
-    # semantics live in ONE shared try/except path, and neither reaches the scan.
+    # table, ...) maps to INPUT_CHANGED in each caller's own except-DataError clause,
+    # and neither reaches the scan.
     def missing_head(*args, **kwargs):
         raise data_fail("SNAPSHOT_NOT_READY", "this scope has no committed head")
 
