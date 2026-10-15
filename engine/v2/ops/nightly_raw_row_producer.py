@@ -5,8 +5,9 @@
 enumeration, so request order and each original ``BoardRequest`` timestamp
 identity survive -- classifies every intraday key before any context read, reads
 one build-scoped decision calendar plus one panel row/anchor per distinct
-``(ticker, event_date, session)``, then composes calendar and quote rows per
-request. The calendar helper still refuses an intraday event date, so this
+``(ticker, event_date, session)``, reads ``option_chains`` once for the whole
+build (``nightly_chain_batch.scan_chain_slices``), then composes calendar and
+quote rows per request from each ticker's rows. The calendar helper still refuses an intraday event date, so this
 producer is the admission boundary #243 requires: such a key is refused under
 its exact, never-normalized identity. Nothing scores, publishes or writes; a
 complete calendar-and-quote composition becomes an event, a typed per-key
