@@ -595,6 +595,10 @@ def refresh_calendar_data(
 
     Everything is ``live=True``, one cache entry per source per day, so a re-run
     the same day is a cache hit rather than a re-spend.
+
+    ``finalize=False`` defers the refresh rebuild's manifest/SNAPSHOT write;
+    the nightly passes it when the tiers step will write the one SNAPSHOT
+    after the Tier-4 gap check.
     """
     from engine.data.fetch import Fetcher
 

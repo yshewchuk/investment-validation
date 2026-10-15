@@ -1332,7 +1332,7 @@ def test_run_nightly_defers_the_refresh_snapshot_when_tiers_will_finalize(
     ``finalize_rebuild`` writes the one snapshot after the Tier-4 gap check.
     """
     refresh_calls = []
-    nightly, calls, _captured, _marker_writes = _patch_run_nightly(
+    nightly, calls, _captured, marker_writes = _patch_run_nightly(
         monkeypatch,
         rebuild_results=[_result({})],
         finalize_calls=[],
@@ -1353,6 +1353,8 @@ def test_run_nightly_defers_the_refresh_snapshot_when_tiers_will_finalize(
         "with tiers on, the refresh rebuild defers; the tiers step finalizes"
     assert calls == [(("panel", "tier4"), {"tier4_since": None, "finalize": False})], \
         "the refresh deferral leaves the one finalize to the tiers step"
+    assert marker_writes == ["finalize"], \
+        "exactly one snapshot write, and it comes from the tiers step"
     assert sentinel.touched, "the run proceeded to the scorer"
 
 
