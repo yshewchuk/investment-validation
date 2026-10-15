@@ -41,8 +41,8 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   `scrub_mismatches`: re-scores board rows directly through the engine and
   stops the publish on a mismatch.
 - `model_evidence.py` — `load_model_evidence`, `evidence_path`,
-  `_sanitize_reason`: the model-evidence page and its own free-text
-  sanitizer (see Invariants).
+  `sanitize_reason`: the model-evidence page and its free-text
+  sanitizer (see Invariants), also used by `nightly.py`.
 - `publish.py` — `publish_bundle`, `LocalPublisher` (atomic
   release-symlink flip, the default target), `CommandPublisher` (a shell
   command target; see Failure semantics for what "atomic" does and does
@@ -85,7 +85,8 @@ bodies) — 24 distinct legacy `engine.*` modules in total, not 3:
   (`nightly.py::run_nightly`); `engine.data.pulls`
   (`nightly.py::run_nightly`); `engine.data.pulls.forward_calendar`
   (`nightly.py::refresh_calendar_data`); `engine.data.rebuild`
-  (`nightly.py::refresh_calendar_data`/`run_nightly`); `engine.data.schemas`
+  (`nightly.py::refresh_calendar_data`/`run_nightly`/`mark_tiers_degraded`);
+  `engine.data.schemas`
   (`model_evidence.py::_replay_trades`); `engine.entry_rules`
   (`render.py::build_strategies`); `engine.features`
   (`model_evidence.py::_champion_block_impl`/`_dataset_for`,
@@ -148,7 +149,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); `steps.tiers.tier4_repair` records it, no gap flag |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no session for the night (`not_yet`) |
   | Run stops between refresh and tiers (red validation, as-of finality stop) | Store refreshed, no new SNAPSHOT; the previous SNAPSHOT is kept |
-  | Tier-3/4 rebuild raises | `tiers_degraded` (error text sanitised); the run continues and scores the refreshed store, whose SNAPSHOT is written at the degrade (a failure to write it sets `steps.tiers.snapshot_error`, type only) so the scorer's digest describes the store scored |
+  | Tier-3/4 rebuild raises | `tiers_degraded` (error text sanitised); the run continues and scores the store as found; the degrade step writes a SNAPSHOT of that store (the deferred refresh snapshot, when refresh ran) so the scorer's digest describes the store scored; a failure to write it sets `steps.tiers.snapshot_error` (type only) |
   | No gap, finalize fails | `tiers_degraded` as above |
   | Repaired, or no gap | SNAPSHOT written once |
 
@@ -184,7 +185,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   (root doc §5, "legacy board, nightly and ledger stay unchanged until
   cutover").
 - Free-text fields that reach the bundle are sanitised before publish, not
-  passed through raw: `model_evidence.py::_sanitize_reason` and
+  passed through raw: `model_evidence.py::sanitize_reason` and
   `selfcheck.py::scrub_mismatches` are the existing enforcement points for
   this package; a new free-text field added anywhere in this package
   (a new `degraded_reason`, a new flag detail, a caught exception's

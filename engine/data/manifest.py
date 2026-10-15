@@ -23,7 +23,8 @@ from engine import paths
 from engine.data import store
 from engine.data.schemas import CONVENTIONS, SCHEMAS, SOURCE_PRIORITY
 
-__all__ = ["snapshot_hash", "collect_stats", "write_manifest", "write_snapshot", "read_snapshot"]
+__all__ = ["snapshot_hash", "collect_stats", "write_manifest", "write_snapshot", "read_snapshot",
+           "write_text_atomic"]
 
 
 def collect_stats() -> dict:
@@ -35,7 +36,7 @@ def _panel_digest() -> str | None:
     return store.file_sha256(paths.PANEL) if paths.PANEL.exists() else None
 
 
-def _write_text_atomic(path: Path, text: str) -> None:
+def write_text_atomic(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically via a unique sibling temp file.
 
     A reader must never observe a half-written SNAPSHOT or MANIFEST — the
@@ -93,7 +94,7 @@ def write_snapshot(stats: dict | None = None, path: Path | None = None) -> str:
     digest = snapshot_hash(stats)
     path = paths.assert_writable(path or paths.SNAPSHOT_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic(
+    write_text_atomic(
         path,
         json.dumps(
             {
@@ -218,5 +219,5 @@ def write_manifest(
     for title, body in (extra_sections or {}).items():
         sections += [f"## {title}", "", body, ""]
 
-    _write_text_atomic(path, "\n".join(sections))
+    write_text_atomic(path, "\n".join(sections))
     return path

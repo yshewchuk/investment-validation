@@ -21,6 +21,7 @@ The orchestration cases drive ``run_nightly`` with every heavy step patched.
 from __future__ import annotations
 
 import contextlib
+import json
 import stat
 from types import SimpleNamespace
 
@@ -405,6 +406,29 @@ def test_write_manifest_lands_mode_0644(tmp_path, monkeypatch):
     manifest_mod.write_manifest(stats, path=target)
 
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_main_json_report_is_written_atomically(tmp_path, monkeypatch):
+    """``--json`` lands the run report in one atomic write, leaving no temp file."""
+    from engine.data import rebuild as rebuild_mod
+
+    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(rebuild_mod, "build_tier4_table",
+                        lambda since=None: {"rows": 3, "producers": {}})
+    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats",
+                        lambda: {"panel": "hash"})
+    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot", lambda stats: "snap-1")
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest", lambda stats: "manifest-1")
+
+    target = tmp_path / "r.json"
+    rc = rebuild_mod.main(["--table", "tier4", "--json", str(target)])
+
+    assert rc == 0
+    payload = json.loads(target.read_text())
+    assert payload["snapshot"] == "snap-1"
+    assert payload["reports"]["tier4"]["rows"] == 3
+    assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
+        "the atomic write must leave no temp file behind"
 
 
 # --------------------------------------------------------------------------

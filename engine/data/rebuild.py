@@ -585,7 +585,8 @@ def main(argv: list[str] | None = None) -> int:
     result = rebuild(tables=tables, sample=args.sample, tier4_since=args.tier4_since,
                      incremental=args.incremental)
     if args.json:
-        Path(args.json).write_text(json.dumps(result.as_dict(), indent=1, default=str))
+        manifest.write_text_atomic(Path(args.json),
+                                   json.dumps(result.as_dict(), indent=1, default=str))
     return 0
 
 
