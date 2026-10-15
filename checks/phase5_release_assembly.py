@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import fcntl
+import json
 import os
 import stat
 import time
@@ -28,7 +29,6 @@ from checks.phase5_release import (
     manifest_body,
     member_row,
     object_relpath,
-    read_catalog,
     sha256_bytes,
     staged_manifest_path,
     validate_catalog,
@@ -55,6 +55,7 @@ _REQUIRED_MEMBER_IDS = (*POOL_MEMBER_IDS, CHOOSER_MEMBER_ID)
 _SPEC_BY_ID = {spec.member_id: spec for spec in STATE_SPECS}
 _HEX = frozenset("0123456789abcdef")
 _UNSAFE_ID_CHARS = ("/", "\\", "\0")
+_STRAY_ERRORS = (KeyError, TypeError, AttributeError, ValueError, RecursionError)
 MAX_OBJECT_BYTES = 512 * 1024 * 1024
 MAX_META_BYTES = 64 * 1024 * 1024
 LOCK_WAIT_S = 30.0
@@ -107,6 +108,14 @@ def _admit(output: object, code: str) -> PoolOutput:
             or output.payload_bytes < 0):
         raise ReleaseAssemblyRefusal(code, "an object payload_bytes is not a non-negative int")
     return output
+
+
+def _require_safe_id(value: object, code: str, detail: str) -> str:
+    """Refuse an unsafe release id; return it once admitted."""
+    if (not isinstance(value, str) or not value or value.startswith(".")
+            or any(char in value for char in _UNSAFE_ID_CHARS)):
+        raise ReleaseAssemblyRefusal(code, detail)
+    return value
 
 
 def _normalize_objects(value: object, code: str, detail: str) -> tuple[PoolOutput, ...]:
@@ -172,17 +181,15 @@ def derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_rel
                                outputs=outputs, chooser=chooser, cutoff=cutoff)
     except ReleaseAssemblyRefusal:
         raise
-    except (KeyError, TypeError, AttributeError, ValueError, RecursionError) as exc:
+    except _STRAY_ERRORS as exc:
         raise ReleaseAssemblyRefusal(
             "PRIOR_MISMATCH", "prior catalog rows or identity are malformed") from exc
 
 
 def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_release_id: str,
                     outputs: object, chooser: object, cutoff: str) -> dict:
-    if (not isinstance(expected_prior_release_id, str) or not expected_prior_release_id
-            or expected_prior_release_id.startswith(".")
-            or any(char in expected_prior_release_id for char in _UNSAFE_ID_CHARS)):
-        raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release id is not a safe string")
+    _require_safe_id(
+        expected_prior_release_id, "PRIOR_MISMATCH", "prior release id is not a safe string")
     try:
         prior = validate_catalog(prior_catalog, expected_prior_release_id)
     except ReleaseLayoutError as exc:
@@ -194,9 +201,8 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
     _prior_pool_rows(prior.get("members"))
     prior_day = _parse_day(prior_cutoff, "PRIOR_MISMATCH", "prior pool_cutoff is not an ISO date")
 
-    if (not isinstance(release_id, str) or not release_id or release_id.startswith(".")
-            or any(char in release_id for char in _UNSAFE_ID_CHARS)):
-        raise ReleaseAssemblyRefusal("ID_CONFLICT", "candidate release id is not a safe new string")
+    _require_safe_id(
+        release_id, "ID_CONFLICT", "candidate release id is not a safe new string")
     if release_id == prior["release_id"]:
         raise ReleaseAssemblyRefusal("ID_CONFLICT", "candidate release id is not a new string")
 
@@ -265,6 +271,26 @@ def _read_regular(path: Path, limit: int, code: str, detail: str) -> bytes:
     if len(data) > limit:
         raise ReleaseAssemblyRefusal(code, detail)
     return data
+
+
+def _load_catalog(path: Path, expected_id: str, code: str, detail: str) -> dict | None:
+    """Load and validate a catalog without a racy check-then-read."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ReleaseAssemblyRefusal(code, detail) from exc
+    data = _read_regular(path, MAX_META_BYTES, code, detail)
+    try:
+        body = json.loads(data)
+    except (ValueError, RecursionError) as exc:
+        raise ReleaseAssemblyRefusal(code, detail) from exc
+    try:
+        validate_catalog(body, expected_id)
+    except ReleaseLayoutError as exc:
+        raise ReleaseAssemblyRefusal(code, detail) from exc
+    return body
 
 
 def _probe_regular(path: Path, limit: int, code: str, detail: str) -> None:
@@ -370,26 +396,21 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
     except OSError as exc:
         raise ReleaseAssemblyRefusal(
             "PUBLICATION_FAILED", "a filesystem error occurred while assembling the release") from exc
-    except (KeyError, TypeError, AttributeError, ValueError, RecursionError) as exc:
+    except _STRAY_ERRORS as exc:
         raise ReleaseAssemblyRefusal(
             "PRIOR_MISMATCH", "prior catalog rows or identity are malformed") from exc
 
 
 def _carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
                            inventory, outputs, chooser: object, cutoff: str) -> Path:
-    if (not isinstance(prior_release_id, str) or not prior_release_id
-            or prior_release_id.startswith(".")
-            or any(char in prior_release_id for char in _UNSAFE_ID_CHARS)):
-        raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release id is not a safe string")
+    _require_safe_id(
+        prior_release_id, "PRIOR_MISMATCH", "prior release id is not a safe string")
     root = Path(release_root)
     store = deployment_root(root)
     prior_path = catalog_path(root, prior_release_id)
-    _probe_regular(prior_path, MAX_META_BYTES, "PRIOR_MISMATCH",
-                   "prior catalog is missing or unreadable")
-    try:
-        prior_catalog = read_catalog(prior_path, prior_release_id)
-    except ReleaseLayoutError as exc:
-        raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior catalog could not be read or validated") from exc
+    prior_catalog = _load_catalog(
+        prior_path, prior_release_id, "PRIOR_MISMATCH",
+        "prior catalog could not be read or validated")
     if prior_catalog is None:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "no prior catalog exists for that release id")
     _probe_regular(staged_manifest_path(store, prior_release_id), MAX_META_BYTES,
@@ -431,13 +452,9 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
     candidate_path = catalog_path(root, release_id)
     candidate = dataclasses.replace(prior, release_id=release_id)
     with _publication_lock(store):
-        _probe_regular(candidate_path, MAX_META_BYTES, "ID_CONFLICT",
-                       "candidate catalog is missing or unreadable")
-        try:
-            existing = read_catalog(candidate_path, release_id)
-        except ReleaseLayoutError as exc:
-            raise ReleaseAssemblyRefusal(
-                "ID_CONFLICT", "candidate catalog exists but cannot be read or validated") from exc
+        existing = _load_catalog(
+            candidate_path, release_id, "ID_CONFLICT",
+            "candidate catalog exists but cannot be read or validated")
         if existing is not None and existing != body:
             raise ReleaseAssemblyRefusal(
                 "ID_CONFLICT", "candidate catalog already exists with different content")

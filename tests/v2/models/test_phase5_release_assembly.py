@@ -6,6 +6,7 @@ import dataclasses
 import fcntl
 import json
 import os
+import stat
 import sys
 import threading
 import time
@@ -1284,16 +1285,15 @@ def test_supplied_object_path_replaced_by_directory_is_refused(tmp_path):
     _assert_no_candidate(tmp_path)
 
 
-def test_supplied_object_path_fifo_is_refused_without_hanging(tmp_path):
-    inventory, _ = _stage_prior(tmp_path)
-    args = _valid_derive_args(tmp_path)
-    path = _object_path(tmp_path, args["outputs"][0])
+def _make_fifo(path):
     path.unlink()
     try:
         os.mkfifo(path)
     except (AttributeError, OSError):
         pytest.skip("os.mkfifo is not supported on this platform")
-    inventory = dataclasses.replace(inventory, release_id="cand1")
+
+
+def _refused_without_hanging(tmp_path, inventory, args, code):
     outcome = {}
 
     def worker():
@@ -1307,8 +1307,35 @@ def test_supplied_object_path_fifo_is_refused_without_hanging(tmp_path):
     thread.join(5)
     assert not thread.is_alive(), "carry_forward hung reading a FIFO"
     assert isinstance(outcome.get("error"), assembly.ReleaseAssemblyRefusal)
-    assert outcome["error"].code == "OBJECT_UNVERIFIED"
+    assert outcome["error"].code == code
+
+
+def test_supplied_object_path_fifo_is_refused_without_hanging(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    _make_fifo(_object_path(tmp_path, args["outputs"][0]))
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    _refused_without_hanging(tmp_path, inventory, args, "OBJECT_UNVERIFIED")
     _assert_no_candidate(tmp_path)
+
+
+def test_prior_catalog_fifo_is_prior_mismatch(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    _make_fifo(phase5_release.catalog_path(tmp_path, "prior1"))
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    _refused_without_hanging(tmp_path, inventory, args, "PRIOR_MISMATCH")
+    _assert_no_candidate(tmp_path)
+
+
+def test_candidate_catalog_fifo_is_id_conflict(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    _run_carry(tmp_path, inventory, args)
+    _make_fifo(_candidate_path(tmp_path))
+    _refused_without_hanging(tmp_path, inventory, args, "ID_CONFLICT")
+    assert not _candidate_path(tmp_path).is_file()
 
 
 def test_prior_payload_larger_than_max_object_bytes_is_prior_mismatch(tmp_path, monkeypatch):
@@ -1324,17 +1351,20 @@ def test_prior_payload_larger_than_max_object_bytes_is_prior_mismatch(tmp_path, 
     _assert_no_candidate(tmp_path)
 
 
-@pytest.mark.parametrize("mode", ["above-sys-maxsize", "above-max-object-bytes"])
+@pytest.mark.parametrize("mode", ["claim-above-sys-maxsize", "above-max-object-bytes"])
 def test_object_unverified_when_payload_bytes_exceed_max(tmp_path, monkeypatch, mode):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)
     output = args["outputs"][0]
-    if mode == "above-sys-maxsize":
-        payload_bytes = sys.maxsize + 1
+    if mode == "claim-above-sys-maxsize":
+        args["outputs"][0] = dataclasses.replace(output, payload_bytes=sys.maxsize + 1)
     else:
-        monkeypatch.setattr(assembly, "MAX_OBJECT_BYTES", output.payload_bytes)
-        payload_bytes = output.payload_bytes + 1
-    args["outputs"][0] = dataclasses.replace(output, payload_bytes=payload_bytes)
+        limit = _prior_payload_size()
+        monkeypatch.setattr(assembly, "MAX_OBJECT_BYTES", limit)
+        payload = b"q" * (limit + 1)
+        content_hash, _ = phase5_release.write_object(tmp_path, payload)
+        args["outputs"][0] = dataclasses.replace(
+            output, content_hash=content_hash, payload_bytes=limit + 1)
     inventory = dataclasses.replace(inventory, release_id="cand1")
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         _run_carry(tmp_path, inventory, args)
