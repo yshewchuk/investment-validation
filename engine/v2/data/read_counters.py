@@ -23,7 +23,8 @@ _FIELDS = ("scans", "fragments_opened", "rows_decoded", "rows_returned",
 
 class ReadCounters:
     """Per-table totals of scans, fragments opened, rows decoded and returned,
-    bytes read (fragment file size) and seconds (open plus read-and-filter)."""
+    bytes read (fragment file size) and seconds (fragment open plus the batch
+    reads; Python-side fallback filtering is not timed)."""
 
     def __init__(self) -> None:
         self._tables: dict[str, dict[str, float]] = {}

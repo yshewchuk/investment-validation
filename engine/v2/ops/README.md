@@ -84,7 +84,7 @@ returns `QuoteRowInputs` from a pinned `option_chains` snapshot for an exact
 ticker's rows from the batched read. `nightly_raw_row_producer` is its
 production caller; see the component architecture contract.
 
-`nightly_chain_batch.scan_chain_slices`, `CHAIN_COLUMNS`,
+`nightly_chain_batch.scan_chain_slices`, `CHAIN_COLUMNS`, `CHAIN_TABLE`,
 `require_chain_rows` and `require_usable_fields` are the internal batched
 `option_chains` read: one scan per producer build, rows grouped by ticker,
 handed to the quote and calendar readers as `chain_rows`.

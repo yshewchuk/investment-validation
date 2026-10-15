@@ -340,6 +340,7 @@ tests = [
     "tests/test_v2_data_query.py",
     "tests/test_v2_data_repository.py",
     "tests/test_v2_data_roundtrip.py",
+    "tests/v2/data/test_read_counters.py",
     "tests/v2/ops/test_nightly_chain_batch.py",
     "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/serving/test_v2_serving_api.py",
