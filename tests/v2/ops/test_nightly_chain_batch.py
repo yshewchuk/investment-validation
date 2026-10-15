@@ -7,7 +7,8 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from engine.v2.data.errors import DataError, fail as data_fail
+from engine.v2.data.errors import DataError
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.read_counters import ReadCounters
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
@@ -17,11 +18,23 @@ from engine.v2.ops.nightly_chain_batch import require_chain_rows, scan_chain_sli
 from engine.v2.ops.nightly_quote_rows import scan_quote_rows
 from tests.v2.ops.chain_support import (
     CHAINS_NAME as _CHAINS_NAME,
+)
+from tests.v2.ops.chain_support import (
     SESSION as _SESSION,
+)
+from tests.v2.ops.chain_support import (
     STRADDLE_KEY as _STRADDLE_KEY,
+)
+from tests.v2.ops.chain_support import (
     chain_row as _chain_row,
+)
+from tests.v2.ops.chain_support import (
     domain_chain_rows as _domain_chain_rows,
+)
+from tests.v2.ops.chain_support import (
     price_row as _price_row,
+)
+from tests.v2.ops.chain_support import (
     snapshot as _snapshot,
 )
 

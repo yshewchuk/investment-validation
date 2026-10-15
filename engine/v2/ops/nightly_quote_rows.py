@@ -29,7 +29,7 @@ from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_board_universe import BoardRequest
-from engine.v2.ops.nightly_chain_batch import require_chain_rows
+from engine.v2.ops.nightly_chain_batch import CHAIN_COLUMNS, require_chain_rows
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
     validated_as_of,
@@ -38,7 +38,6 @@ from engine.v2.scoring.nightly_source_bundle import (
 __all__ = ["QuoteRowInputs", "scan_quote_rows"]
 
 _QUOTE_TABLE = "option_chains"
-_QUOTE_COLUMNS = ("ticker", "obs_date", "expiry", "strike", "right", "bid", "ask")
 _BATCH_CAP = 50_000
 _RESULT_CAP = 2_000_000
 
@@ -110,8 +109,8 @@ def scan_quote_rows(
     resolved ``decision_session`` must not be after the resolved ``expiry``
     (a quote as of a date past the contract's own expiry is never
     meaningful -- ``QUERY_NOT_BOUNDED``, mirroring ``ChainQuery``'s own
-    ceiling check). One bounded ``option_chains`` scan reads exactly
-    ``(key.ticker, decision_session)``; the requested ``expiry`` narrows the
+    ceiling check). When ``chain_rows`` is None, one bounded ``option_chains`` scan reads
+    exactly ``(key.ticker, decision_session)``; the requested ``expiry`` narrows the
     fetched rows in Python, because a chain's own expiry is data, not a key
     predicate. A slice with no surviving row returns an empty
     ``QuoteRowInputs`` with ``quote_status="empty"``, never a raise; a
@@ -152,7 +151,7 @@ def scan_quote_rows(
                           else min(contract.maximum_batch_rows, _BATCH_CAP))
         query = DataQuery(
             snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
-            columns=_QUOTE_COLUMNS,
+            columns=CHAIN_COLUMNS,
             key_filter=key_filter,
             order_by=tuple(contract.primary_key),
             max_batch_rows=max_batch_rows,

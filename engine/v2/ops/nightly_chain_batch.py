@@ -21,7 +21,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import fail
 from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal, validated_as_of
 
-__all__ = ["CHAIN_COLUMNS", "require_chain_rows", "require_usable_fields",
+__all__ = ["CHAIN_COLUMNS", "CHAIN_TABLE", "require_chain_rows", "require_usable_fields",
            "scan_chain_slices"]
 
 CHAIN_TABLE = "option_chains"

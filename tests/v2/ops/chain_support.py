@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pandas as pd
+
 from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT
 from engine.v2.data.repository import Repository
 from engine.v2.ops.native_board_universe import BoardRequest
@@ -14,7 +16,6 @@ from tests.data_scan_support import (
     fake_hash,
     publish_and_inspect,
 )
-import pandas as pd
 
 CHAINS = contract_for("option_chains")
 CHAINS_REF = contract_ref_for(CHAINS)

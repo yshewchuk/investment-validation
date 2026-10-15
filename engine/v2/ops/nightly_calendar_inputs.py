@@ -37,7 +37,7 @@ from engine.v2.ops.native_score_batch_types import (
     PRICE_HISTORY_NOT_AVAILABLE_DETAIL,
     NativeScoreBatchRowRefusal,
 )
-from engine.v2.ops.nightly_chain_batch import require_chain_rows, require_usable_fields
+from engine.v2.ops.nightly_chain_batch import CHAIN_TABLE, require_chain_rows, require_usable_fields
 from engine.v2.ops.nightly_raw_rows import CalendarRowInputs, scan_calendar_row
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
@@ -48,7 +48,6 @@ from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
 __all__ = ["scan_calendar_row_inputs", "scan_candidate_expiries", "scan_decision_calendar"]
 
 _CALENDAR_TICKER = CALENDAR_TICKER
-_CHAIN_TABLE = "option_chains"
 _CANDIDATE_COLUMNS = ("right", "strike", "expiry")
 #: STR-THRU/STR-RUNUP need a common call-and-put strike; every other native
 #: context (put menu, DYN-SV) is a listed put. Mirrors generation's own
@@ -120,12 +119,12 @@ def _scan_candidate_rows(repository: Repository, snapshot: SnapshotRef, key: Boa
                          session_day: str):
     """The per-key bounded scan of one ``(ticker, session)`` slice, projected to
     ``_CANDIDATE_COLUMNS``; yields row dicts."""
-    contract = repository.table_contract(snapshot, _CHAIN_TABLE)
-    version = snapshot.table_versions[_CHAIN_TABLE]
+    contract = repository.table_contract(snapshot, CHAIN_TABLE)
+    version = snapshot.table_versions[CHAIN_TABLE]
     key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
                   KeyPredicate(column="obs_date", operator="eq", values=(session_day,)))
     population_bound = repository.scan_population_bound(
-        snapshot.snapshot_id, table_name=_CHAIN_TABLE,
+        snapshot.snapshot_id, table_name=CHAIN_TABLE,
         table_contract_ref=version.table_contract_ref,
         key_filter=key_filter, time_interval=None)
     max_result_rows = min(_RESULT_CAP, population_bound)
@@ -139,7 +138,7 @@ def _scan_candidate_rows(repository: Repository, snapshot: SnapshotRef, key: Boa
         order_by=tuple(contract.primary_key),
         max_batch_rows=max_batch_rows,
         max_result_rows=max_result_rows)
-    for batch in repository.scan(query, table_name=_CHAIN_TABLE):
+    for batch in repository.scan(query, table_name=CHAIN_TABLE):
         yield from batch.to_pylist()
 
 
