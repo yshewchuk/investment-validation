@@ -158,56 +158,58 @@ that binding through `FrozenInference`; no second prediction engine is added.
 | Corrupt, oversized, escaped-path or header/descriptor mismatch | `MODEL_NOT_READY` before inference; redact filesystem details |
 | Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
 
-**Offline descriptor authoring.** `ServingFoldDescriptor` in
-`serving_folds.py` is an immutable typed document under each size fold catalog
-object. It records parent release/model-manifest identity, model, ordered
-features, output/clock, exact month, full panel SHA-256, estimator member,
-embedded pool fields/count and explicit interval policy. The enclosing catalog
-hash binds catalog identity without a self-reference inside the descriptor.
-`tools.phase5_prepare_release` obtains `SizeFoldPolicy` from the registered size
-producer; `tools.phase5_serving_folds` validates bounded cache bytes and emits
-metadata before catalog publication. No fitting or inference occurs here.
+**Offline descriptor authoring.** Immutable `serving_folds.ServingFoldDescriptor`
+records parent release/model-manifest identity, model, ordered features, output/clock,
+exact month, full panel SHA-256, estimator member, embedded pool fields/count and
+explicit interval policy. The enclosing catalog hash binds catalog identity
+without a self-reference inside the descriptor.
+`tools.phase5_prepare_release` obtains the registered producer's `SizeFoldPolicy`;
+`tools.phase5_serving_folds` validates cache bytes before catalog publication, without fitting/inference.
+Declared size/chooser folds must be uncompressed; supported uncompressed pickle protocols remain valid.
+The serialized byte cap is not a decoded-memory bound; pickle inputs remain trusted.
 Retained fold-parent checks reuse deployment's semantic release identity:
 binding/member collection order and storage paths may differ on retry;
 feature and output order, and every other identity field, remain significant.
 All Tier-4 collector roles and chooser/pinned-size destination reads admit
 regular files of at most 32 MiB with final-component `O_NOFOLLOW`; final symlinks
 refuse. Parent directories remain operator-trusted, not traversed no-follow.
+`read_bounded_state(path, limit, no_follow=False)` preserves frozen-loader defaults;
+fold/publication callers opt in. It admits nonnegative limits below `sys.maxsize`;
+invalid limits/nonregular/oversize raise coded `BoundedStateReadError`; I/O errors propagate.
 Absent directories/unmatched files remain empty. Reader/chooser mismatches are unprefixed;
-pinned COPY verification and size byte mismatches use `panel_copy_refused:`.
+pinned COPY verification and pinned-size byte mismatches use `panel_copy_refused:`.
 
 | Offline authoring condition | Outcome |
 |---|---|
 | Explicit policy and coherent size cache | Emit descriptor covered by the catalog self-hash; repeat inputs yield identical metadata |
-| Header/model/features/full panel/month disagreement, missing or malformed pool, oversized bytes | Refuse publication; never infer metadata from a filename prefix alone |
+| Header/model/features/full panel/month disagreement, malformed pool, oversized bytes or compressed/uninspectable stream | Refuse publication before decode for oversize/compression inspection; never infer metadata from a filename prefix |
 | No explicit policy in a programmatic legacy caller | Preserve the existing catalog shape; it cannot supply the future fold path |
 | Other fold roles without their own explicit policy | Keep existing opaque catalog objects; never reinterpret them as size descriptors |
-| Collector read or destination verification encounters unreadable bytes or a final symlink | Fixed read refusal with I/O cause; no new catalog or pointer; collector refuses before decode/output |
-| Collector read or destination verification encounters a special file | Fixed regular-file refusal before content reads; no new catalog or pointer |
-| Collector read or destination verification sees an initial size above 32 MiB | Fixed byte-limit refusal before content reads; no new catalog or pointer |
-| Collector read or destination verification detects growth beyond 32 MiB | Fixed byte-limit refusal after bounded read; no new catalog or pointer |
-| Pinned-size destination bytes differ from preflight | Role-specific mismatch refusal; never repair or relabel an existing regular object |
+| Collector or post-write fold recheck encounters unreadable bytes/final symlink | Fixed read refusal with I/O cause; no new catalog/pointer; collector refuses before decode/output |
+| Collector or post-write fold recheck encounters a special file | Fixed regular-file refusal before content reads; no new catalog/pointer |
+| Collector or post-write fold recheck exceeds 32 MiB, initially or through growth | Fixed byte-limit refusal, before content reads if initially oversized; no new catalog/pointer |
+| Shared writer finds retained bytes different from, or longer than, supplied payload | Verification refusal (role-specific mismatch for declared folds); never repair/relabel; no new catalog/pointer |
 | Retry with an unchanged corrupt address | Refuse again without changing the object, catalog or pointer |
 | Partial write | No pointer changes; staging may leave unreferenced files; no automatic store repair |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
 **Chooser producer fold authoring.** `ChooserFoldPolicy` and
-`ChooserServingFoldDescriptor` separately declare `implied_t1` and `runup_move`
-monthly caches under their exact `tier4_folds:<role>` members. The descriptor
+`ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor
 binds the parent release, full panel hash, ordered features, clock, whole-cache
 estimator object (not the champion member), pool count and decile/floor policy. It records
 both the champion binding output and raw D14 chooser column; runup output is
 never day-scaled here. Standard release preparation obtains each present role's
 policy from its registered producer and validates the cache against that role's
 unique wildcard champion. Size descriptors keep their existing schema.
-The chooser descriptor hash is `content_hash` of its canonical typed document, covering parent, role and estimator identity.
-Without pinned COPY context, the explicit panel digest is caller-asserted; preparation does not verify panel bytes.
+The descriptor hash covers its canonical typed document, including parent, role and estimator identity.
+Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
 
 | Chooser fold authoring condition | Outcome |
 |---|---|
 | Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
 | Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
-| Construction/typed decoding: invalid panel digest, role/output pair or cache-object path/hash | `DocumentError`: `BAD_PANEL_HASH`, `CHOOSER_OUTPUT_MISMATCH` or `BAD_FOLD_OBJECT`; authoring wraps policy refusals |
+| Invalid chooser role/features/panel/interval policy/floor | `DocumentError`: `BAD_CHOOSER_ROLE`, `BAD_FEATURE_ORDER`, `BAD_PANEL_HASH`, `BAD_INTERVAL_POLICY`, `BAD_INTERVAL_FLOOR` |
+| Invalid descriptor month/count/parent hash/clock/output/object | `DocumentError`: `BAD_FOLD_MONTH`, `BAD_POOL_COUNT`, `BAD_PARENT_HASH`, `BAD_FOLD_CLOCK`, `CHOOSER_OUTPUT_MISMATCH`, `BAD_FOLD_OBJECT`; decode preserves nested paths |
 | Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
 | Registered chooser producer rejects recipe features/target | Fixed `PrepareRefused` with original cause; CLI exits 2 without a traceback |
 | Pinned COPY context | Full panel hash must match; preflight precedes output effects and destination bytes must retain the validated hash |

@@ -13,17 +13,17 @@ every other path, including undeclared paths under `data/`, uses ordinary
 No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.
 Some checks also expose callable report functions.
 
-`phase5_release.write_object` returns the hash/path in the existing flat
-deployment object layout. Within that store, new objects use a unique exclusive
-file under disposable `tmp/`, flush/fsync, and create-only hard-link publication;
-the object and deployment directories are synced before return. Existing paths
-resolving to regular files are retained, not repaired or rehashed; callers own
-byte verification and final-symlink refusal. Other collisions refuse without replacement.
-I/O failures raise fixed
-`ReleaseLayoutError` with the `OSError` cause. Only this call's temporary directory
-is cleaned; post-link failure can leave a complete unreferenced object. Retry
-syncs directories again. No cross-filesystem copy fallback or catalog/pointer
-update occurs here; whole-release concurrency and root ownership stay with callers.
+`phase5_release.write_object` returns hash/path in the existing flat deployment layout after exact bounded no-follow byte verification.
+New objects are durable before return; create-only publication never overwrites or repairs incumbents.
+Every retry verifies the object and syncs its directories; the byte allowance is the supplied payload length, including zero.
+Only invocation-owned staging is cleaned; no unbounded read or cross-filesystem copy fallback is permitted.
+Post-link failure may leave a complete unreferenced object, but no new catalog/pointer. Whole-release concurrency/root ownership stays with callers.
+
+| Object publication condition | Outcome |
+|---|---|
+| Existing/racing identical regular object | Verify exact bytes and retain the incumbent |
+| Wrong/oversized/unreadable/symlinked bytes | Fixed `ObjectVerificationError` (`ReleaseLayoutError`); retain bounded-read/I/O cause and incumbent |
+| Other collision or publication I/O failure | Fixed `ReleaseLayoutError` with original `OSError`; never replace; no catalog/pointer |
 
 `tier0_support.py` owns `DEFAULT_CORPUS`, `round_params` and `finding_dicts`.
 The default retains the corpus runner's checkout-relative `fixtures/tier0`

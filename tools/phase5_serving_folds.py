@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import io
 import math
-import re
 from dataclasses import dataclass
 from datetime import date
 
@@ -17,7 +16,7 @@ from engine.v2.models import ArtifactMember, ModelRelease
 from engine.v2.models.deployment import StagedManifest, semantic_release_hash
 from engine.v2.models.serving_folds import (
     ChooserFoldPolicy, ChooserServingFoldDescriptor, ServingFoldDescriptor, SizeFoldPolicy,
-    chooser_fold_outputs,
+    FOLD_PANEL_SHA256_PATTERN, chooser_fold_outputs,
 )
 
 MAX_FOLD_BYTES = 32 * 1024 * 1024
@@ -66,11 +65,23 @@ def preflight_chooser_fold(data: bytes, name: str, policy: ChooserFoldPolicy,
                            interval_policy="chooser-heldout-deciles.v1", result_type=ValidatedChooserFold)
 
 
+def _require_uncompressed_fold(data: bytes) -> None:
+    """Use pinned joblib's own detector without decoding or imposing a pickle protocol."""
+    try:
+        from joblib.numpy_pickle_utils import _COMPRESSORS, _detect_compressor
+
+        kind = _detect_compressor(io.BytesIO(data))
+    except Exception as exc:
+        raise ValueError("serving fold compression cannot be inspected") from exc
+    if kind != "not-compressed" or kind in _COMPRESSORS:
+        raise ValueError("compressed serving folds are not supported")
+
+
 def _preflight_fold(data, name, policy, release, *, role, output, interval_policy, result_type):
     if len(data) > MAX_FOLD_BYTES:
         raise ValueError("serving fold exceeds byte limit")
-    if (not isinstance(policy.panel_sha256, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", policy.panel_sha256)
+    if role == "size" and (not isinstance(policy.panel_sha256, str)
+            or not FOLD_PANEL_SHA256_PATTERN.fullmatch(policy.panel_sha256)
             or not policy.feature_order
             or any(not isinstance(key, str) or not key for key in policy.feature_order)
             or len(set(policy.feature_order)) != len(policy.feature_order)
@@ -84,6 +95,7 @@ def _preflight_fold(data, name, policy, release, *, role, output, interval_polic
             or bindings[0].feature_order != policy.feature_order
             or bindings[0].output_names != (output,)):
         raise ValueError(f"{role} serving policy disagrees with release binding")
+    _require_uncompressed_fold(data)
     try:
         import joblib
 

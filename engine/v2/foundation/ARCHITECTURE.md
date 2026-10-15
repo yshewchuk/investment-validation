@@ -55,9 +55,11 @@ calendar/date/session input. Negative distances are returned for caller policy;
 no calendar days, missing sessions or horizon defaults are invented.
 
 The shared typed-document decoder reports `UNSUPPORTED_VERSION` before `UNKNOWN_FIELD` when a document has both an unsupported schema version and undeclared fields. Supported versions still report `UNKNOWN_FIELD` for undeclared fields.
-Constructor-raised `DocumentError` paths are relative to that dataclass; decoding
-under a nested or explicit prefix rebases them, preserving code and message and
-chaining the original error. Root-constructor and annotation/schema errors are unchanged.
+
+| Typed constructor condition | Outcome |
+|---|---|
+| Class-relative `DocumentError` at nested/custom prefix | Rebase `$`/`$.field`; preserve code/message and original cause |
+| Root constructor error or already-qualified decoder path | Retain path without duplicate prefix |
 
 `score_population.population_key` preserves the `ticker|strategy|event_date` identity;
 `population_difference` returns sorted missing and unplanned keys for ops scoring

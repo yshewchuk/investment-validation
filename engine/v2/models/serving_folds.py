@@ -1,12 +1,16 @@
 """Immutable role-specific serving-fold metadata; no runtime loading."""
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Literal
 
 from engine.v2.foundation import DocumentError, content_hash, to_document
 from engine.v2.models.contracts import ArtifactMember
+
+FOLD_PANEL_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -68,9 +72,24 @@ class ChooserFoldPolicy:
     schema_version: str = "chooser_fold_policy.v1.0"
 
     def __post_init__(self) -> None:
+        if self.role not in ("implied_t1", "runup_move"):
+            raise DocumentError("BAD_CHOOSER_ROLE", "$.role", "unsupported chooser fold role")
+        if (not isinstance(self.feature_order, (list, tuple)) or not self.feature_order
+                or any(not isinstance(key, str) or not key for key in self.feature_order)
+                or len(set(self.feature_order)) != len(self.feature_order)):
+            raise DocumentError("BAD_FEATURE_ORDER", "$.feature_order", "expected nonempty unique feature names")
         object.__setattr__(self, "feature_order", tuple(self.feature_order))
-        if not isinstance(self.panel_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", self.panel_sha256):
+        if not isinstance(self.panel_sha256, str) or not FOLD_PANEL_SHA256_PATTERN.fullmatch(self.panel_sha256):
             raise DocumentError("BAD_PANEL_HASH", "$.panel_sha256", "expected 64 lowercase hex digits")
+        if self.interval_policy != "chooser-heldout-deciles.v1":
+            raise DocumentError("BAD_INTERVAL_POLICY", "$.interval_policy", "unsupported chooser interval policy")
+        try:
+            finite_floor = (self.interval_floor is None or type(self.interval_floor) in (int, float)
+                            and math.isfinite(self.interval_floor))
+        except OverflowError:
+            finite_floor = False
+        if not finite_floor:
+            raise DocumentError("BAD_INTERVAL_FLOOR", "$.interval_floor", "expected a finite number or null")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -97,6 +116,20 @@ class ChooserServingFoldDescriptor:
         if (not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
                 or self.estimator.path != f"objects/{digest.removeprefix('sha256:')}"):
             raise DocumentError("BAD_FOLD_OBJECT", "$.estimator", "expected matching content-addressed cache object")
+        try:
+            month = date.fromisoformat(self.fold_start)
+            valid_month = month.day == 1 and month.isoformat() == self.fold_start
+        except (TypeError, ValueError):
+            valid_month = False
+        if not valid_month:
+            raise DocumentError("BAD_FOLD_MONTH", "$.fold_start", "expected canonical ISO month start")
+        if type(self.pool_count) is not int or self.pool_count < 0:
+            raise DocumentError("BAD_POOL_COUNT", "$.pool_count", "expected a nonnegative integer")
+        if (not isinstance(self.parent_release_hash, str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", self.parent_release_hash)):
+            raise DocumentError("BAD_PARENT_HASH", "$.parent_release_hash", "expected canonical SHA-256 content hash")
+        if not isinstance(self.decision_clock_id, str) or not self.decision_clock_id:
+            raise DocumentError("BAD_FOLD_CLOCK", "$.decision_clock_id", "expected a nonempty clock identity")
 
     @property
     def descriptor_hash(self) -> str:
