@@ -660,11 +660,6 @@ def _qualification_location(root: Path, name: str) -> Path:
     return Path(root).joinpath(*STATE_DIR, name)
 
 
-def _qualification_path(root: Path, name: str) -> Path | None:
-    path = _qualification_location(root, name)
-    return path if path.is_file() else None
-
-
 def _population_keys(path) -> tuple[str, ...] | None:
     document = _read_document(path)
     if isinstance(document, list) and all(isinstance(item, str) for item in document):
@@ -675,10 +670,6 @@ def _population_keys(path) -> tuple[str, ...] | None:
 def _tickers_from_keys(keys) -> tuple[str, ...]:
     return tuple(sorted({str(key).split("|")[0] for key in (keys or ())
                          if "|" in key and key.split("|")[0]}))
-
-
-def _population_tickers(path: Path | None) -> tuple[str, ...]:
-    return _tickers_from_keys(_population_keys(path) or ())
 
 
 def _ops_root(root: Path) -> Path:

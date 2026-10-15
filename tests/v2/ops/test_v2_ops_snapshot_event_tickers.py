@@ -174,13 +174,13 @@ def test_a_head_that_moves_vs_the_expected_snapshot_id_is_refused_before_the_sca
     assert not raised.value.problem.details
 
 
-@pytest.mark.parametrize("payload, artifact_error", [
-    (ArtifactError("ARTIFACT_MISSING", "gone"), "ArtifactError"),
-    (b"not json", "JSONDecodeError"),
-    (b"{}", "DocumentError"),
+@pytest.mark.parametrize("payload, artifact_error, artifact_code", [
+    (ArtifactError("MISSING", "gone"), "ArtifactError", "MISSING"),
+    (b"not json", "JSONDecodeError", None),
+    (b"{}", "DocumentError", "MISSING_FIELD"),
 ])
 def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(
-        monkeypatch, payload, artifact_error):
+        monkeypatch, payload, artifact_error, artifact_code):
     # The REAL _resolve_scope_snapshot path through snapshot_event_tickers: only the head
     # resolve is patched, the store's own read/decode refuses, and the scan never runs.
     monkeypatch.setattr(snapshot_planning, "resolve_snapshot_head",
@@ -201,6 +201,7 @@ def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(
 
     assert raised.value.code == "INPUT_CHANGED"
     assert raised.value.problem.details["artifact_error"] == artifact_error
+    assert raised.value.problem.details["artifact_code"] == artifact_code
 
 
 def test_success_path_does_not_consult_the_carried_set(monkeypatch):

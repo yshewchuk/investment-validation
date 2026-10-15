@@ -162,7 +162,9 @@ def _planned_population(args, root, conn, clock, tickers):
     ``--expected-population`` file always wins, unchanged. Otherwise ``--input-mode snapshot``
     generates it (:func:`~engine.v2.ops.snapshot_planning.generated_population`) for the ``--tickers``
     watchlist and forwards the snapshot id it read plus the uncarried-ticker exclusions it built;
-    any other mode has no snapshot and yields ``()`` and empty exclusions."""
+    any other mode has no snapshot and yields ``()`` and empty exclusions. When
+    ``args.expected_population_keys`` is set (the scheduled trigger's already-decided keys) they
+    are used as the supplied population without reading a file."""
     if (args.expected_population or getattr(args, "expected_population_keys", None) is not None
             or args.input_mode != "snapshot"):
         return _read_expected_population(args), None, ()
