@@ -42,6 +42,7 @@ class DocumentError(ValueError):
         super().__init__(f"{code} at {path}: {message}")
         self.code = code
         self.path = path
+        self.message = message
 
 
 def parse_schema_version(text: Any) -> tuple[str, int, int]:
@@ -83,7 +84,12 @@ def from_document(cls: type, doc: Any, *, path: str = "$") -> Any:
         elif (spec.default is dataclasses.MISSING
               and spec.default_factory is dataclasses.MISSING):
             raise DocumentError("MISSING_FIELD", f"{path}.{name}", "required")
-    return cls(**kwargs)
+    try:
+        return cls(**kwargs)
+    except DocumentError as exc:
+        if path == "$" or not exc.path.startswith("$"):
+            raise
+        raise DocumentError(exc.code, path + exc.path[1:], exc.message) from exc
 
 
 def _check_version(fields: dict, doc: dict, path: str) -> None:

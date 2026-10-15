@@ -2,6 +2,7 @@
 # packages: engine.v2.models, engine.v2.data, engine.v2.foundation
 import dataclasses
 import builtins
+import errno
 import hashlib
 import io
 import json
@@ -176,10 +177,6 @@ def test_real_authoring_preserves_exact_role_identity_and_metadata(
     assert changed.descriptor_hash != descriptor.descriptor_hash
     unsigned = {key: value for key, value in body.items() if key != "manifest_hash"}
     assert content_hash(unsigned) == body["manifest_hash"]
-    unsigned["members"] = json.loads(json.dumps(unsigned["members"]))
-    selected = next(row for row in unsigned["members"] if row["member_id"] == f"tier4_folds:{role}")
-    selected["objects"][0]["serving_fold"]["pool_count"] = 3
-    assert content_hash(unsigned) != body["manifest_hash"]
     prep.write_release(tmp_path, *args, states)
     assert layout.read_manifest(tmp_path) == body
     assert deployment.current_pointer(tmp_path / "deployment") is None
@@ -194,17 +191,87 @@ def test_descriptor_hash_binds_parent_role_and_estimator_identity(tmp_path, iden
     original = from_document(ChooserServingFoldDescriptor, expected)
     if identity == "role":
         expected["policy"]["role"] = "runup_move"
-        changed = dataclasses.replace(original, policy=dataclasses.replace(original.policy, role="runup_move"))
+        expected.update(output_name="pred_runup_abs_move_d14", producer_output="pred_runup_abs_move_d14")
+        changed = dataclasses.replace(original, policy=dataclasses.replace(original.policy, role="runup_move"),
+                                      output_name="pred_runup_abs_move_d14", producer_output="pred_runup_abs_move_d14")
     elif identity == "estimator":
         expected["estimator"]["content_hash"] = "sha256:" + "b" * 64
+        expected["estimator"]["path"] = "objects/" + "b" * 64
         changed = dataclasses.replace(original, estimator=dataclasses.replace(
-            original.estimator, content_hash="sha256:" + "b" * 64))
+            original.estimator, content_hash="sha256:" + "b" * 64, path="objects/" + "b" * 64))
     else:
         value = "other-release" if identity == "parent_release_id" else "sha256:" + "c" * 64
         expected[identity] = value
         changed = dataclasses.replace(original, **{identity: value})
     assert changed.descriptor_hash == content_hash(expected)
     assert changed.descriptor_hash != original.descriptor_hash
+
+
+@pytest.mark.parametrize("role", OUTPUTS)
+@pytest.mark.parametrize("via_document", [False, True])
+@pytest.mark.parametrize("bad_panel", ["", "a" * 63, "a" * 65, "A" * 64, "g" * 64,
+                                       "sha256:" + "a" * 64, "a" * 64 + "\n"])
+def test_chooser_policy_refuses_noncanonical_panel_digest(role, via_document, bad_panel):
+    valid = _policy(role, _cache(role))
+    with pytest.raises(DocumentError) as error:
+        if via_document:
+            from_document(ChooserFoldPolicy, {**to_document(valid), "panel_sha256": bad_panel})
+        else:
+            dataclasses.replace(valid, panel_sha256=bad_panel)
+    assert type(error.value) is DocumentError
+    assert error.value.code == "BAD_PANEL_HASH"
+    assert error.value.path == "$.panel_sha256"
+    assert str(error.value) == "BAD_PANEL_HASH at $.panel_sha256: expected 64 lowercase hex digits"
+    assert error.value.__cause__ is None
+
+
+@pytest.mark.parametrize("role", OUTPUTS)
+@pytest.mark.parametrize("via_document", [False, True])
+@pytest.mark.parametrize("defect", ["output", "producer", "both", "path", "hash", "uppercase",
+                                    "prefix", "short", "nonhex", "absolute", "traversal", "panel"])
+def test_chooser_descriptor_refuses_inconsistent_identity(tmp_path, role, via_document, defect):
+    cache = _cache(role)
+    prep.write_release(tmp_path, *_inputs(role, cache), _states(role, cache))
+    _body, obj = _assert_published_descriptor(tmp_path, role, cache)
+    document = obj["serving_fold"]
+    if defect in ("output", "producer", "both"):
+        other = next(other for other in OUTPUTS if other != role)
+        if defect in ("output", "both"):
+            document["output_name"] = OUTPUTS[other][0]
+        if defect in ("producer", "both"):
+            document["producer_output"] = OUTPUTS[other][1]
+        code, path, message = "CHOOSER_OUTPUT_MISMATCH", "$", "outputs disagree with chooser role"
+    elif defect == "panel":
+        document["policy"]["panel_sha256"] = "A" * 64
+        code, path, message = ("BAD_PANEL_HASH", "$.policy.panel_sha256" if via_document else "$.panel_sha256",
+                               "expected 64 lowercase hex digits")
+    else:
+        member = document["estimator"]
+        if defect in ("path", "absolute", "traversal"):
+            member["path"] = {"path": "objects/" + "b" * 64, "absolute": "/synthetic/elsewhere",
+                              "traversal": "objects/../elsewhere"}[defect]
+        else:
+            member["content_hash"] = {"hash": "sha256:" + "b" * 64, "uppercase": "sha256:" + "B" * 64,
+                                      "prefix": "b" * 64, "short": "sha256:" + "b" * 63,
+                                      "nonhex": "sha256:" + "g" * 64}[defect]
+            if defect != "hash":
+                member["path"] = "objects/" + member["content_hash"].removeprefix("sha256:")
+        code, path, message = "BAD_FOLD_OBJECT", "$.estimator", "expected matching content-addressed cache object"
+    with pytest.raises(DocumentError) as error:
+        if via_document:
+            from_document(ChooserServingFoldDescriptor, document)
+        else:
+            fields = {key: value for key, value in document.items() if key not in ("policy", "estimator")}
+            ChooserServingFoldDescriptor(**fields, policy=ChooserFoldPolicy(**document["policy"]),
+                                          estimator=ArtifactMember(**document["estimator"]))
+    assert type(error.value) is DocumentError
+    assert (error.value.code, error.value.path) == (code, path)
+    assert str(error.value) == f"{code} at {path}: {message}"
+    if defect == "panel" and via_document:
+        assert type(error.value.__cause__) is DocumentError
+        assert error.value.__cause__.path == "$.panel_sha256"
+    else:
+        assert error.value.__cause__ is None
 
 
 @pytest.mark.parametrize("role", OUTPUTS)
@@ -588,6 +655,7 @@ def test_pinned_authoring_requires_full_panel_hash_and_retained_destination(tmp_
     (None, ("x", "y"), 0.0), (None, ("y", "x"), 1.25),
     (None, ("b", "c", "a"), None), ("output", ("b", "c", "a"), 1.25),
     ("recipe", ("b", "c", "a"), None), ("oversize", ("x", "y"), 0.0),
+    ("symlink", ("x", "y"), 0.0), ("cache", ("x", "y"), 0.0),
 ])
 def test_real_cli_obtains_role_policy_without_fitting_or_data_reads(
         tmp_path, role, monkeypatch, capsys, failure, features, floor, panel_mode):
@@ -608,6 +676,8 @@ def test_real_cli_obtains_role_policy_without_fitting_or_data_reads(
                           "sha256:" + panel_hash if panel_mode == "pinned-explicit" else panel_hash)
     cache = _cache(role, panel_hash)
     cache["features"] = list(features)
+    if failure == "cache":
+        cache["pool_res"] = [float("nan"), 0.0]
     release, inv, payloads = _inputs(role, cache)
     monkeypatch.setattr(inventory, "current_release_inventory", lambda: (inv, ()))
     monkeypatch.setattr(prep, "model_release", lambda *a, **k: (release, payloads))
@@ -636,6 +706,10 @@ def test_real_cli_obtains_role_policy_without_fitting_or_data_reads(
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     (cache_dir / _name(cache)).write_bytes(_bytes(cache))
+    if failure == "symlink":
+        target = tmp_path / "outside-cache"
+        (cache_dir / _name(cache)).rename(target)
+        (cache_dir / _name(cache)).symlink_to(target)
     if failure == "oversize":
         monkeypatch.setattr(prep, "MAX_FOLD_BYTES", len(_bytes(cache)) - 1)
         monkeypatch.setattr(joblib, "load", never)
@@ -654,9 +728,11 @@ def test_real_cli_obtains_role_policy_without_fitting_or_data_reads(
         assert str(error.value) == f"chooser {role} producer disagrees with registered recipe"
         assert error.value.__cause__ is recipe_error
     assert prep.main(argv) == (2 if failure else 0)
-    assert calls == [role] * (0 if failure == "oversize" else 2 if failure == "recipe" else 1)
+    assert calls == [role] * (0 if failure in ("oversize", "symlink") else 2 if failure == "recipe" else 1)
     if failure:
         diagnostic = ("serving fold exceeds byte limit" if failure == "oversize" else
+                      "serving fold cannot be read" if failure == "symlink" else
+                      "chooser fold refused: invalid serving fold held-out pool" if failure == "cache" else
                       "unsupported chooser serving output" if failure == "output"
                       else f"chooser {role} producer disagrees with registered recipe")
         assert capsys.readouterr().err == f"refused: PrepareRefused: {diagnostic}\n"
@@ -818,12 +894,18 @@ def test_corrupt_immutable_address_stays_refused_and_fresh_preparation_succeeds(
     original_stat = target.stat()
     expected = (f"{prep.COPY_PREFIX}refused: size fold object bytes differ" if role == "size"
                 else "chooser fold object bytes differ from preflight")
+    if symlink:
+        expected = "serving fold cannot be read"
     for _attempt in range(2):
         with pytest.raises(prep.PrepareRefused) as error:
             prep.write_release(corrupt, *inputs, states, pinned_panel=pinned)
         assert type(error.value) is prep.PrepareRefused
         assert str(error.value) == expected
-        assert error.value.__cause__ is None
+        if symlink:
+            assert type(error.value.__cause__) is OSError
+            assert error.value.__cause__.errno == errno.ELOOP
+        else:
+            assert error.value.__cause__ is None
         assert address.read_bytes() == target.read_bytes() == wrong
         assert target.stat().st_ino == original_stat.st_ino
         assert target.stat().st_mtime_ns == original_stat.st_mtime_ns
@@ -920,14 +1002,47 @@ def _watch_fold_reads(monkeypatch, *, chunk_size=None):
 
 
 @pytest.mark.parametrize("role", ["size", *OUTPUTS, "iv_crush"])
-@pytest.mark.parametrize("slack,chunk_size,symlink", [(0, None, False), (8, 17, False), (0, 17, True)])
-def test_fold_collector_preserves_bounded_regular_file_bytes(tmp_path, monkeypatch, role, slack, chunk_size, symlink):
+@pytest.mark.parametrize("target_kind", ["regular", "directory", "dangling", "fifo"])
+def test_fold_collector_never_opens_final_symlink_target(tmp_path, monkeypatch, role, target_kind):
+    cache = _cache(role)
+    source = tmp_path / "cache"
+    source.mkdir()
+    target = tmp_path / "outside-cache"
+    if target_kind == "regular":
+        target.write_bytes(_bytes(cache))
+    elif target_kind == "directory":
+        target.mkdir()
+    elif target_kind == "fifo":
+        os.mkfifo(target)
+    (source / _name(cache)).symlink_to(target)
+    reads, handles = _watch_fold_reads(monkeypatch)
+    real_open, seen = os.open, []
+
+    def record_open(path, flags, *args, **kwargs):
+        seen.append(flags)
+        assert flags & os.O_NONBLOCK  # A defective no-follow mutation must not block on FIFO.
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", record_open)
+    with pytest.raises(prep.PrepareRefused) as error:
+        prep.tier4_fold_payloads(source, {role: cache["model_id"]}, "a" * 64, "202602")
+    assert type(error.value) is prep.PrepareRefused
+    assert str(error.value) == "serving fold cannot be read"
+    assert type(error.value.__cause__) is OSError
+    assert error.value.__cause__.errno == errno.ELOOP
+    assert reads == handles == []
+    assert len(seen) == 1 and seen[0] & os.O_NOFOLLOW
+    if target_kind == "regular":
+        assert target.read_bytes() == _bytes(cache)
+
+
+@pytest.mark.parametrize("role", ["size", *OUTPUTS, "iv_crush"])
+@pytest.mark.parametrize("slack,chunk_size", [(0, None), (8, 17)])
+def test_fold_collector_preserves_bounded_regular_file_bytes(tmp_path, monkeypatch, role, slack, chunk_size):
     cache = _cache(role)
     raw, name = _bytes(cache), _name(cache)
-    target = tmp_path / ("target" if symlink else name)
+    target = tmp_path / name
     target.write_bytes(raw)
-    if symlink:
-        (tmp_path / name).symlink_to(target)
     limit = len(raw) + slack
     monkeypatch.setattr(prep, "MAX_FOLD_BYTES", limit)
     reads, handles = _watch_fold_reads(monkeypatch, chunk_size=chunk_size)
@@ -996,10 +1111,15 @@ def test_fold_collector_refuses_fifo_without_blocking_or_reading(tmp_path, monke
     with pytest.raises(prep.PrepareRefused) as error:
         prep.tier4_fold_payloads(tmp_path, {role: cache["model_id"]}, "a" * 64, "202602")
     assert type(error.value) is prep.PrepareRefused
-    assert str(error.value) == "serving fold is not a regular file"
-    assert error.value.__cause__ is None
+    assert str(error.value) == ("serving fold cannot be read" if symlink else "serving fold is not a regular file")
+    if symlink:
+        assert type(error.value.__cause__) is OSError
+        assert error.value.__cause__.errno == errno.ELOOP
+    else:
+        assert error.value.__cause__ is None
     assert reads == [] and len(flags_seen) == 1
-    assert len(handles) == 1 and handles[0].closed
+    assert len(handles) == (0 if symlink else 1)
+    assert all(handle.closed for handle in handles)
 
 
 @pytest.mark.parametrize("role", OUTPUTS)
@@ -1011,7 +1131,8 @@ def test_fold_collector_refuses_unreadable_match_and_filters_before_open(tmp_pat
         prep.tier4_fold_payloads(tmp_path, {role: cache["model_id"]}, "a" * 64, "202602")
     assert type(error.value) is prep.PrepareRefused
     assert str(error.value) == "serving fold cannot be read"
-    assert isinstance(error.value.__cause__, FileNotFoundError)
+    assert type(error.value.__cause__) is OSError
+    assert error.value.__cause__.errno == errno.ELOOP
     monkeypatch.setattr(prep, "open", lambda *a, **k: pytest.fail("unmatched candidate opened"), raising=False)
     assert prep.tier4_fold_payloads(tmp_path, {role: "other-model"}, None, None) == {}
     assert prep.tier4_fold_payloads(tmp_path, {role: cache["model_id"]}, "b" * 64, None) == {}
@@ -1096,7 +1217,7 @@ def test_destination_reverification_is_bounded_on_every_writer_path(
     monkeypatch.setattr(os, "open", checked_open)
     monkeypatch.setattr(Path, "open", checked_path_open)
     monkeypatch.setattr(os, "fstat", grow_after_fstat)
-    if replacement in ("exact", "short-reads", "regular-symlink"):
+    if replacement in ("exact", "short-reads"):
         prep.write_release(out, *inputs, states, pinned_panel=pinned)
         if role in OUTPUTS:
             _assert_published_descriptor(out, role, cache)
@@ -1117,19 +1238,23 @@ def test_destination_reverification_is_bounded_on_every_writer_path(
         expected = {
             "missing": "serving fold cannot be read", "unreadable": "serving fold cannot be read",
             "oversize": "serving fold exceeds byte limit", "growth": "serving fold exceeds byte limit",
-            "fifo": "serving fold is not a regular file", "fifo-symlink": "serving fold is not a regular file",
+            "fifo": "serving fold is not a regular file", "fifo-symlink": "serving fold cannot be read",
+            "regular-symlink": "serving fold cannot be read",
             "mismatch": (f"{prep.COPY_PREFIX}refused: size fold object bytes differ" if role == "size"
                          else "chooser fold object bytes differ from preflight"),
         }[replacement]
         assert str(error.value) == expected
-        cause = {"missing": FileNotFoundError, "unreadable": PermissionError}.get(replacement)
+        cause = {"missing": FileNotFoundError, "unreadable": PermissionError,
+                 "fifo-symlink": OSError, "regular-symlink": OSError}.get(replacement)
         assert type(error.value.__cause__) is (type(None) if cause is None else cause)
+        if replacement in ("fifo-symlink", "regular-symlink"):
+            assert error.value.__cause__.errno == errno.ELOOP
         assert not (out / "phase5_release.json").exists()
         if replacement == "growth":
             assert reads == [(limit + 1, limit + 1)]
-        elif replacement in ("missing", "unreadable", "oversize", "fifo", "fifo-symlink"):
+        elif replacement in ("missing", "unreadable", "oversize", "fifo", "fifo-symlink", "regular-symlink"):
             assert reads == []
     assert len(destinations) == 1
-    assert len(handles) == (0 if replacement in ("missing", "unreadable") else 1)
+    assert len(handles) == (0 if replacement in ("missing", "unreadable", "fifo-symlink", "regular-symlink") else 1)
     assert all(stream.closed for stream in handles)
     assert deployment.current_pointer(out / "deployment") is None

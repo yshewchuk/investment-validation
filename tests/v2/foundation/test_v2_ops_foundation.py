@@ -49,6 +49,62 @@ from engine.v2.foundation.market_calendar import (  # noqa: E402
 # canonical hash continuity
 # --------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class ConstructorRefusal:
+    error_path: str
+
+    def __post_init__(self):
+        raise DocumentError("BAD_VALUE", self.error_path, "fixed constructor refusal")
+
+
+@dataclass(frozen=True)
+class NestedConstructorRefusal:
+    leaf: ConstructorRefusal
+
+
+@pytest.mark.parametrize("prefix,relative,expected,chained", [
+    ("$", "$", "$", False),
+    ("$", "$.value", "$.value", False),
+    ("$.items[0]", "$", "$.items[0]", True),
+    ("$.items[0]", "$.value", "$.items[0].value", True),
+    ("$.items[0]", "$.items[0]", "$.items[0].items[0]", True),
+    ("$.items[0]", "$.items[0].value", "$.items[0].items[0].value", True),
+    ("$.items[0]", "$.items[0][1]", "$.items[0].items[0][1]", True),
+    ("$.items[0]", "$.items[00].value", "$.items[0].items[00].value", True),
+    ("$.items[0]", "relative", "relative", False),
+])
+def test_constructor_document_errors_keep_exact_prefixed_paths(prefix, relative, expected, chained):
+    with pytest.raises(DocumentError) as error:
+        from_document(ConstructorRefusal, {"error_path": relative}, path=prefix)
+    assert type(error.value) is DocumentError
+    assert (error.value.code, error.value.path, error.value.message) == (
+        "BAD_VALUE", expected, "fixed constructor refusal")
+    assert str(error.value) == f"BAD_VALUE at {expected}: fixed constructor refusal"
+    if chained:
+        assert type(error.value.__cause__) is DocumentError
+        assert (error.value.__cause__.code, error.value.__cause__.path, error.value.__cause__.message) == (
+            "BAD_VALUE", relative, "fixed constructor refusal")
+    else:
+        assert error.value.__cause__ is None
+
+
+@pytest.mark.parametrize("prefix", ["$", "$.capture", "$.leaf"])
+def test_nested_constructor_refusal_and_annotation_paths(prefix):
+    with pytest.raises(DocumentError) as error:
+        from_document(NestedConstructorRefusal, {"leaf": {"error_path": "$.value"}}, path=prefix)
+    assert type(error.value) is DocumentError
+    assert (error.value.code, error.value.path, error.value.message) == (
+        "BAD_VALUE", prefix + ".leaf.value", "fixed constructor refusal")
+    assert type(error.value.__cause__) is DocumentError
+    assert error.value.__cause__.path == "$.value"
+    with pytest.raises(DocumentError) as annotation_error:
+        from_document(NestedConstructorRefusal, {"leaf": {"error_path": 123}}, path=prefix)
+    assert type(annotation_error.value) is DocumentError
+    assert (annotation_error.value.code, annotation_error.value.path) == (
+        "BAD_TYPE", prefix + ".leaf.error_path")
+    assert annotation_error.value.__cause__ is None
+
+
 #: Computed 2026-09-12 by engine.v2.diagnosis.canonical at e9a1f43, pre-move.
 GOLDEN = {
     "floats": (

@@ -170,11 +170,11 @@ metadata before catalog publication. No fitting or inference occurs here.
 Retained fold-parent checks reuse deployment's semantic release identity:
 binding/member collection order and storage paths may differ on retry;
 feature and output order, and every other identity field, remain significant.
-All Tier-4 collector roles admit opened regular files of at most 32 MiB;
-regular-file symlinks remain compatible. Absent directories and unmatched
-model/snapshot/month files remain empty. Chooser and pinned-size destinations
-use the same reader. Its fixed `PrepareRefused` diagnostics are unprefixed in
-both modes; pinned identity failures separately use `panel_copy_refused:`.
+All Tier-4 collector roles and chooser/pinned-size destination reads admit
+regular files of at most 32 MiB with final-component `O_NOFOLLOW`; final symlinks
+refuse. Parent directories remain operator-trusted, not traversed no-follow.
+Absent directories/unmatched files remain empty. Reader `PrepareRefused` messages
+are unprefixed; pinned identity and byte-mismatch refusals keep `panel_copy_refused:`.
 
 | Offline authoring condition | Outcome |
 |---|---|
@@ -182,7 +182,7 @@ both modes; pinned identity failures separately use `panel_copy_refused:`.
 | Header/model/features/full panel/month disagreement, missing or malformed pool, oversized bytes | Refuse publication; never infer metadata from a filename prefix alone |
 | No explicit policy in a programmatic legacy caller | Preserve the existing catalog shape; it cannot supply the future fold path |
 | Other fold roles without their own explicit policy | Keep existing opaque catalog objects; never reinterpret them as size descriptors |
-| Collector read or destination verification encounters unreadable bytes | Fixed read refusal with I/O cause; no new catalog or pointer; collector refuses before decode/output |
+| Collector read or destination verification encounters unreadable bytes or a final symlink | Fixed read refusal with I/O cause; no new catalog or pointer; collector refuses before decode/output |
 | Collector read or destination verification encounters a special file | Fixed regular-file refusal before content reads; no new catalog or pointer |
 | Collector read or destination verification sees an initial size above 32 MiB | Fixed byte-limit refusal before content reads; no new catalog or pointer |
 | Collector read or destination verification detects growth beyond 32 MiB | Fixed byte-limit refusal after bounded read; no new catalog or pointer |
@@ -194,8 +194,8 @@ both modes; pinned identity failures separately use `panel_copy_refused:`.
 **Chooser producer fold authoring.** `ChooserFoldPolicy` and
 `ChooserServingFoldDescriptor` separately declare `implied_t1` and `runup_move`
 monthly caches under their exact `tier4_folds:<role>` members. The descriptor
-binds the parent release, full panel hash, ordered features, clock, estimator
-bytes, paired pool count and explicit held-out-decile/floor policy. It records
+binds the parent release, full panel hash, ordered features, clock, whole-cache
+estimator object (not the champion member), pool count and decile/floor policy. It records
 both the champion binding output and raw D14 chooser column; runup output is
 never day-scaled here. Standard release preparation obtains each present role's
 policy from its registered producer and validates the cache against that role's
@@ -207,11 +207,12 @@ Without pinned COPY context, the explicit panel digest is caller-asserted; prepa
 |---|---|
 | Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
 | Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
+| Construction/typed decoding: invalid panel digest, role/output pair or cache-object path/hash | `DocumentError`: `BAD_PANEL_HASH`, `CHOOSER_OUTPUT_MISMATCH` or `BAD_FOLD_OBJECT`; authoring wraps policy refusals |
 | Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
 | Registered chooser producer rejects recipe features/target | Fixed `PrepareRefused` with original cause; CLI exits 2 without a traceback |
 | Pinned COPY context | Full panel hash must match; preflight precedes output effects and destination bytes must retain the validated hash |
 | No policy on a programmatic caller | Preserve opaque catalog objects; no chooser fold declaration is invented |
-| Collector read or destination verification encounters unreadable bytes | Fixed read refusal with I/O cause; no new catalog or pointer; collector refuses before decode/output |
+| Collector read or destination verification encounters unreadable bytes or a final symlink | Fixed read refusal with I/O cause; no new catalog or pointer; collector refuses before decode/output |
 | Collector read or destination verification encounters a special file | Fixed regular-file refusal before content reads; no new catalog or pointer |
 | Collector read or destination verification sees an initial size above 32 MiB | Fixed byte-limit refusal before content reads; no new catalog or pointer |
 | Collector read or destination verification detects growth beyond 32 MiB | Fixed byte-limit refusal after bounded read; no new catalog or pointer |
@@ -219,8 +220,7 @@ Without pinned COPY context, the explicit panel digest is caller-asserted; prepa
 | Retry after failure | Corrected inputs may retry; an unchanged corrupt address remains refused; re-prepare into a fresh root without copying corrupt incumbent objects |
 | Cache/partial write | Validate anew; no descriptor cache or pointer changes; staging may leave unreferenced files; no automatic store repair |
 
-These descriptors authorize no runtime fold selection or chooser activation.
-COPY consistency does not prove training-source availability or finality.
+Zero pool counts authorize no runtime selection or activation; COPY consistency does not prove training-source availability or finality.
 
 **Pinned offline COPY authoring.** `tools.phase5_prepare_release` accepts an
 explicit committed snapshot/catalog and artifact-store context. Existing size

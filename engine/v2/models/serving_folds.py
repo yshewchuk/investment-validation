@@ -1,10 +1,11 @@
 """Immutable role-specific serving-fold metadata; no runtime loading."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
-from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation import DocumentError, content_hash, to_document
 from engine.v2.models.contracts import ArtifactMember
 
 
@@ -68,6 +69,8 @@ class ChooserFoldPolicy:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "feature_order", tuple(self.feature_order))
+        if not isinstance(self.panel_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", self.panel_sha256):
+            raise DocumentError("BAD_PANEL_HASH", "$.panel_sha256", "expected 64 lowercase hex digits")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -86,6 +89,14 @@ class ChooserServingFoldDescriptor:
     pool_pred_field: Literal["pool_pred"] = "pool_pred"
     pool_res_field: Literal["pool_res"] = "pool_res"
     schema_version: str = "chooser_serving_fold_descriptor.v1.0"
+
+    def __post_init__(self) -> None:
+        if (self.output_name, self.producer_output) != chooser_fold_outputs(self.policy.role):
+            raise DocumentError("CHOOSER_OUTPUT_MISMATCH", "$", "outputs disagree with chooser role")
+        digest = self.estimator.content_hash
+        if (not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+                or self.estimator.path != f"objects/{digest.removeprefix('sha256:')}"):
+            raise DocumentError("BAD_FOLD_OBJECT", "$.estimator", "expected matching content-addressed cache object")
 
     @property
     def descriptor_hash(self) -> str:

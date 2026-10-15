@@ -309,7 +309,7 @@ def tier4_fold_payloads(tier4_dir: Path, model_ids: Mapping[str, str], snapshot:
 def _read_fold_payload(path: Path) -> bytes:
     try:
         with open(path, "rb", buffering=0,
-                  opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK)) as handle:
+                  opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK | os.O_NOFOLLOW)) as handle:
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode):
                 raise PrepareRefused("serving fold is not a regular file")
@@ -600,7 +600,7 @@ def main(argv=None) -> int:
         if args.plan_only and pinned is not None:
             identity, _validated = _pinned_preflight(release, states, pinned)
             _chooser_preflight(release, states, identity)
-        elif args.plan_only:
+        elif pinned is None:
             _chooser_preflight(release, states)
         manifest = (None if pinned is None or args.plan_only else write_release(
             args.out, release, inventory, payloads, states, incumbent=args.incumbent,
