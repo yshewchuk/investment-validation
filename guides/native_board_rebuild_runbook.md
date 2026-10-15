@@ -15,7 +15,7 @@ explicit. No step has been shown unsafe or error-prone enough to justify sequenc
   (`legacy_mapping.py:107-109`), `feature_panel` + `tier4_forecasts` (`import_snapshot.py:175-183`),
   and reference inputs (`:185-189`) — eight legacy datasets, never the native
   `price_history.v3`/`computed_moves.v3`; and `nightly_trigger._ensure_shadow_snapshot`
-  (`nightly_trigger.py:1011-1085`) reads the head, plans, submits, drives the import (`:1074-1083`) before nightly planning — no native capture (report step 7, gap 3).
+  reads the head, plans, submits, drives the import before nightly planning — no native capture (report step 7, gap 3).
 - 2026-10-06 supervisor-provided fresh-root measurement: `snapshot plan-import` → `submit` → `serve --once` took 24.0 min under `bounded_run --heavy --cores 8 --max-rss-gb 6.5` — the `--max-rss-gb 6.5` flag was the historical RSS cap, the measured peak RSS was <1 GB, and the separately measured ~5.9 GiB was free headroom admission; neither number is a recommended override — and the run produced exactly eight legacy tables with no `price_history` or `computed_moves`; same-box `ledger import-history --dry-run` counted 2,374 predictions, 14,634 outcomes, and 7 divergent prediction rows — confirms gap 3 on a real store.
 - Gap 4: `price_history_store._commit_generation` carries every other table's manifest forward
   (`price_history_store.py:593-604`) and copies the base receipt's reference inputs and lineage
@@ -93,8 +93,10 @@ to the same tree later imported from `SOURCE_ROOT` (operator requirement, not lo
 
 6. Verify every readiness item below before starting the nightly trigger. `ops plan nightly --input-mode snapshot` now generates
    the population from the pinned snapshot (as_of to +35 days) when no `--expected-population` file is given; the scheduled trigger
-   still reads its universe from the hand-placed `reports/phase6/nightly_trigger/expected_population.json` (`nightly_trigger.py:652`),
-   until it generates one too (report step 13). Use a file for qualification: a generated population shares the scored snapshot's events, so it cannot detect a hole in them.
+   does the same: with `reports/phase6/nightly_trigger/expected_population.json` absent it takes its universe from the shadow
+   snapshot's events (`snapshot_event_tickers`) and the plan generates the population. A present file is an explicit override and wins
+   unchanged (an empty or unreadable file is refused `INVALID_REQUEST`, never ignored). Use a file for qualification: a generated
+   population shares the scored snapshot's events, so it cannot detect a hole in them.
 
 ## Proposed requirements R1–R6 (not current end-to-end guarantees)
 
@@ -121,7 +123,7 @@ produce only the eight legacy tables, and price-history capture is the existing 
 - [ ] Catalog `decisions` holds the imported prediction/outcome history the rebuilt tree needs.
 - [ ] Legacy selected session is exactly `AS_OF` — wait for currency, never import later/partial.
 - [ ] A staged model release exists under `MODEL_RELEASE_ROOT` and passed Phase 5 acceptance.
-- [ ] The expected population document exists and matches the intended nightly population (the trigger still needs the file; a qualification run needs an independent one, see step 6).
+- [ ] The expected population document is optional for scheduled runs (absent, the trigger derives the universe from the shadow snapshot; present, it is an override and must match the intended nightly population); a qualification run still needs an independent file, see step 6.
 - [ ] Operations root, legacy store root, and timer target the same intended catalogs/tree.
 
 ## Retained derived inputs (supervisor recommendation; report step 5 / gap 2)
@@ -140,7 +142,7 @@ the new panel hash — costing more to build and validate; listed for review, no
 Regenerate snapshot IDs and preregistration hashes in affected experiment `spec.yaml` files by
 hand; recapture the v17 corpus with `tools/capture_tier0_corpus.py` and rerun corpus parity; rerun
 the D14, D15, and D19 evidence with their standard checks; old catalog attempts and receipts are
-not current evidence. Follow-up issues: spec-hash rebinding, scheduled-trigger population generation ([#471](https://github.com/yshewchuk/investment-validation/issues/471)), the
+not current evidence. Follow-up issues: spec-hash rebinding, the
 retention-vs-producers decision, a measured rebuild duration.
 
 ## Proposed slices

@@ -1099,6 +1099,23 @@ def _scan_cache_put(entries: list, key: tuple, value) -> None:
         entries.pop(0)
 
 
+def retain_scan_caches_for(repo_root: str) -> None:
+    """Drop every `_GRAPH_CACHE`/`_UNRESOLVED_CACHE` entry whose cache-key repo
+    field (`key[0]`) differs from `repo_root`. Mutates the lists IN PLACE, so
+    every holder of the module attribute sees the sweep. Passing "" matches
+    no real root, so it empties both caches."""
+    repo_root = str(repo_root)
+    for entries in (_GRAPH_CACHE, _UNRESOLVED_CACHE):
+        entries[:] = [e for e in entries if e[0][0] == repo_root]
+
+
+def scan_cache_repo_roots() -> list[str]:
+    """The sorted distinct cache-key repo roots (`key[0]`) currently held
+    across both scan caches."""
+    return sorted({e[0][0] for e in _GRAPH_CACHE}
+                  | {e[0][0] for e in _UNRESOLVED_CACHE})
+
+
 def _copy_import_graph(graph: dict[str, set[str]]) -> "_ImportGraph":
     """A defensive copy of an `_ImportGraph` (its `precise` mapping too), so a
     caller mutating a returned graph cannot corrupt the cached snapshot."""

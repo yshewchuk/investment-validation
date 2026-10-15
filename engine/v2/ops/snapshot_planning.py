@@ -48,7 +48,7 @@ from engine.v2.data.reference_catalog import (
     reference_inputs_for_snapshot,
 )
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import from_document, to_document
+from engine.v2.foundation import ArtifactError, DocumentError, from_document, to_document
 from engine.v2.ops.carried_set import build_uncarried_exclusions, resolve_carried_set
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import register_artifact
@@ -58,7 +58,8 @@ from engine.v2.ops.snapshots import resolve_snapshot_head
 from engine.v2.registry.strategies import STRATEGY_IDS
 
 __all__ = ["GENERATED_HORIZON_DAYS", "REQUEST_SCHEMA_REF", "direct_scope_for",
-           "generated_population", "pin_snapshot_inputs", "scratch_estimate"]
+           "generated_population", "pin_snapshot_inputs", "scratch_estimate",
+           "snapshot_event_tickers"]
 
 REQUEST_SCHEMA_REF = "legacy_materialization_request.v1.0"
 #: Mirrors ``engine.dashboard.nightly.HORIZON_DAYS`` (as ``nightly_trigger._LEGACY_HORIZON_DAYS`` does);
@@ -87,7 +88,8 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     ``tickers``, each crossed with every ``STRATEGY_IDS`` member: the rows the legacy ``score``
     stage's ``score_calendar`` emits per event (disabled CAL-P/CND-P included). Never
     ``DYN-SV``: ``score_calendar`` appends that row only for events its chooser ranked, so no
-    plan can list it. Pure snapshot read: no provider or network call.
+    plan can list it. No provider or network call; it resolves the head, which publishes and
+    registers the head ref.
 
     Plan-time exclusion: after scanning, the carried set is resolved from the SAME repository
     and snapshot (:func:`engine.v2.ops.carried_set.resolve_carried_set`); exclusions are built
@@ -103,17 +105,17 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     ``INVALID_REQUEST``; a mismatch with ``expected_snapshot_id`` is ``INPUT_CHANGED``; a
     missing head, a missing/malformed events table, or an unreadable carried-set table is the
     reader's ``DataError`` as ``INPUT_CHANGED`` (``details.data_code``), as
-    ``pin_snapshot_inputs`` reports it."""
+    ``pin_snapshot_inputs`` reports it; any ArtifactError (missing, integrity-failed, unsafe
+    path) or an undecodable artifact is also ``INPUT_CHANGED`` (``details.artifact_error`` and
+    ``details.artifact_code``: the error's own code, e.g. ``MISSING`` vs ``INTEGRITY_FAILED``,
+    so tamper and absence are distinguishable)."""
     if not tickers:
         # The score stage scores the watchlist only: a population over any wider scope (the
         # context universe) could only fail at execution, so refuse at plan time instead.
         raise fail("INVALID_REQUEST", "generated population needs the --tickers watchlist")
     try:
-        head = resolve_snapshot_head(conn, store, scope, clock=clock)
-        snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
-        if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
-            raise fail("INPUT_CHANGED",
-                       "the shadow snapshot head moved since it was verified for this session")
+        snapshot = _resolve_scope_snapshot(conn, store, scope, clock=clock,
+                                           expected_snapshot_id=expected_snapshot_id)
         repository = Repository(conn, store)
         requests = scan_forward_board_requests(
             repository, snapshot, as_of=as_of,
@@ -136,6 +138,73 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
                    details={"as_of": str(as_of), "horizon_days": GENERATED_HORIZON_DAYS,
                             "candidate_exclusions": list(evidence)})
     return population, snapshot.snapshot_id, evidence
+
+
+def _resolve_scope_head(conn, store, scope, *, clock, expected_snapshot_id=None):
+    """Resolve ``scope``'s head once, load its ``SnapshotRef`` and refuse a moved head,
+    returning the ``(head, snapshot)`` pair.
+
+    Shared by :func:`generated_population` and :func:`snapshot_event_tickers`:
+    same head resolution, same ``SnapshotRef`` load, same ``INPUT_CHANGED`` refusal when
+    ``expected_snapshot_id`` is given and differs, so both callers pin the plan to one snapshot.
+    """
+    head = resolve_snapshot_head(conn, store, scope, clock=clock)
+    snapshot = _load_snapshot_ref(store, head)
+    if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
+        raise fail("INPUT_CHANGED",
+                   "the shadow snapshot head moved since it was verified for this session")
+    return head, snapshot
+
+
+def _resolve_scope_snapshot(conn, store, scope, *, clock, expected_snapshot_id=None):
+    return _resolve_scope_head(conn, store, scope, clock=clock, expected_snapshot_id=expected_snapshot_id)[1]
+
+
+def _load_snapshot_ref(store, head):
+    try:
+        document = json.loads(store.read_verified(head))
+        return from_document(SnapshotRef, document)
+    except (ArtifactError, DocumentError, ValueError, RecursionError) as exc:
+        raise fail("INPUT_CHANGED", "the shadow snapshot head artifact cannot be read",
+                   details={"artifact_error": type(exc).__name__,
+                            "artifact_code": getattr(exc, "code", None)}) from None
+
+
+def snapshot_event_tickers(conn, store, scope, *, as_of, clock,
+                           expected_snapshot_id: str | None = None) -> tuple[str, ...]:
+    """The sorted distinct tickers of every board request in ``scope``'s pinned snapshot's
+    own planning window (``as_of`` .. ``as_of + GENERATED_HORIZON_DAYS``): the event-ticker
+    universe :func:`generated_population` later restricts to its watchlist. Resolves the scope
+    head exactly once (same head resolution and ``SnapshotRef`` load as
+    :func:`generated_population`) and calls
+    ``scan_forward_board_requests(..., tickers=None)`` — the same single scan and the same
+    35-day window, one scan within this call. No provider or network call; it resolves the head,
+    which publishes and registers the head ref.
+
+    Failure semantics: any ArtifactError (missing, integrity-failed, unsafe path) or an
+    undecodable artifact, and the reader's ``DataError``, are both ``INPUT_CHANGED``, differing only
+    in details — ``artifact_error`` (the exception type name) and ``artifact_code`` (its own code)
+    vs ``data_code`` — whereas a head that moved vs ``expected_snapshot_id``
+    is ``INPUT_CHANGED`` with no ``details``; zero events in the
+    window is ``INVALID_REQUEST`` with ``details`` ``as_of`` and ``horizon_days``. Does not
+    filter by the carried set: the later ``generated_population`` call already filters
+    uncarried tickers and records their exclusions. An unreadable override file is not this
+    function's concern (the caller refuses that). """
+    try:
+        snapshot = _resolve_scope_snapshot(
+            conn, store, scope, clock=clock, expected_snapshot_id=expected_snapshot_id)
+        repository = Repository(conn, store)
+        requests = scan_forward_board_requests(
+            repository, snapshot, as_of=as_of,
+            horizon_days=GENERATED_HORIZON_DAYS, tickers=None)
+    except DataError as exc:
+        raise fail("INPUT_CHANGED", "snapshot events cannot be read for the event tickers",
+                   details={"data_code": exc.code}) from None
+    tickers = tuple(sorted({request.ticker for request in requests}))
+    if not tickers:
+        raise fail("INVALID_REQUEST", "no earnings events in the pinned snapshot's planning window",
+                   details={"as_of": str(as_of), "horizon_days": GENERATED_HORIZON_DAYS})
+    return tickers
 
 
 def scratch_estimate(repository, store, request) -> int:
@@ -216,11 +285,8 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
         raise fail("INVALID_REQUEST",
                    "direct scope tickers are not covered by the evidence scope tickers")
     try:
-        head = resolve_snapshot_head(conn, store, scope, clock=clock)
-        snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
-        if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
-            raise fail("INPUT_CHANGED",
-                       "the shadow snapshot head moved since it was verified for this session")
+        head, snapshot = _resolve_scope_head(
+            conn, store, scope, clock=clock, expected_snapshot_id=expected_snapshot_id)
         # External review #5: resolve "latest committed receipt for this
         # snapshot" exactly once, here, and carry the receipt_id itself
         # forward in the returned dict -- nightly._stage_parameters stamps

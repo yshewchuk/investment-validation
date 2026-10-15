@@ -34,11 +34,12 @@ import importlib
 import json
 import os
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, ensure_directory, fsync_directory
 from engine.v2.models import deployment
 
 PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
@@ -168,15 +169,30 @@ def deployment_root(release_root: Path) -> Path:
 
 
 def write_object(release_root: Path, payload: bytes) -> tuple[str, str]:
-    """Write ``payload`` content-addressed; return ``(content_hash, relpath)``."""
+    """Durably create, never replace; callers verify existing object bytes."""
     digest = sha256_bytes(payload)
     rel = object_relpath(digest)
     dest = deployment_root(release_root) / rel
-    if not dest.is_file():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_name(dest.name + ".tmp")
-        tmp.write_bytes(payload)
-        tmp.replace(dest)
+    try:
+        ensure_directory(dest.parent)
+        if not dest.is_file():
+            scratch = deployment_root(release_root) / "tmp"
+            ensure_directory(scratch)
+            with tempfile.TemporaryDirectory(prefix="phase5-object-", dir=scratch) as directory:
+                tmp = Path(directory) / "payload"
+                with tmp.open("xb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                try:
+                    os.link(tmp, dest)
+                except FileExistsError:
+                    if not dest.is_file():
+                        raise
+        fsync_directory(dest.parent)
+        fsync_directory(dest.parent.parent)
+    except OSError as exc:
+        raise ReleaseLayoutError("phase5 object could not be published") from exc
     return digest, rel
 
 

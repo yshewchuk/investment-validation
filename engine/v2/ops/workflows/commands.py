@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,6 +25,44 @@ from engine.v2.ops.nightly import (
 from engine.v2.ops.plans import nightly_plan, request_from_plan, save_plan
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit, submit_graph
+
+MAX_EXPECTED_POPULATION_BYTES = 16 * 1024 * 1024
+MAX_INPUT_MANIFEST_BYTES = 64 * 1024 * 1024
+
+
+def read_bounded_bytes(path, max_bytes):
+    """Read at most ``max_bytes`` from a regular, non-symlink file.
+
+    Raises ``OSError``/``ValueError`` unchanged, and
+    ``ValueError("not a bounded regular file")`` for a non-regular or oversize
+    file (a symlink raises ``OSError`` from ``O_NOFOLLOW``).
+    """
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+            raise ValueError("not a bounded regular file")
+        chunks = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > max_bytes:
+            raise ValueError("not a bounded regular file")
+        return data
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def read_bounded_json(path, max_bytes):
+    """Read at most ``max_bytes`` from a regular, non-symlink file and parse it."""
+    return json.loads(read_bounded_bytes(path, max_bytes))
 
 
 def _check_nightly_manifest(raw_bytes: bytes) -> None:
@@ -68,9 +107,12 @@ def _check_submitted_nightly_manifest(plan, conn, store):
 def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
     if not args.input_manifest:
         return None
-    if not args.input_manifest.is_file() or args.input_manifest.is_symlink():
-        raise fail("INPUT_CHANGED", "input manifest is missing")
-    raw_bytes = args.input_manifest.read_bytes()
+    try:
+        raw_bytes = read_bounded_bytes(args.input_manifest, MAX_INPUT_MANIFEST_BYTES)
+    except FileNotFoundError:
+        raise fail("INPUT_CHANGED", "input manifest is missing") from None
+    except (OSError, ValueError):
+        raise fail("INPUT_CHANGED", "input manifest is not a bounded regular file (symlink, non-regular or oversize) or is unreadable") from None
     if nightly:
         _check_nightly_manifest(raw_bytes)
     manifest = ArtifactStore(root).publish_bytes(
@@ -82,11 +124,21 @@ def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
 
 
 def _read_expected_population(args):
+    keys = getattr(args, "expected_population_keys", None)
+    if keys is not None:
+        if not all(isinstance(v, str) for v in keys):
+            raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
+        return tuple(keys)
     if not args.expected_population:
         return ()
-    if not args.expected_population.is_file() or args.expected_population.is_symlink():
-        raise fail("INPUT_CHANGED", "expected population file is missing")
-    payload = json.loads(args.expected_population.read_text())
+    try:
+        payload = read_bounded_json(args.expected_population, MAX_EXPECTED_POPULATION_BYTES)
+    except FileNotFoundError:
+        raise fail("INPUT_CHANGED", "expected population file is missing") from None
+    except (OSError, ValueError, RecursionError):
+        raise fail("INVALID_REQUEST",
+                   "expected population file is unreadable, a symlink, not a regular file, "
+                   "oversize, or not valid JSON") from None
     if not isinstance(payload, list) or not all(isinstance(v, str) for v in payload):
         raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
     return tuple(payload)
@@ -110,8 +162,11 @@ def _planned_population(args, root, conn, clock, tickers):
     ``--expected-population`` file always wins, unchanged. Otherwise ``--input-mode snapshot``
     generates it (:func:`~engine.v2.ops.snapshot_planning.generated_population`) for the ``--tickers``
     watchlist and forwards the snapshot id it read plus the uncarried-ticker exclusions it built;
-    any other mode has no snapshot and yields ``()`` and empty exclusions."""
-    if args.expected_population or args.input_mode != "snapshot":
+    any other mode has no snapshot and yields ``()`` and empty exclusions. When
+    ``args.expected_population_keys`` is set (the scheduled trigger's already-decided keys) they
+    are used as the supplied population without reading a file."""
+    if (args.expected_population or getattr(args, "expected_population_keys", None) is not None
+            or args.input_mode != "snapshot"):
         return _read_expected_population(args), None, ()
     if not args.snapshot_scope:
         raise fail("INVALID_REQUEST", "snapshot input mode needs --snapshot-scope")

@@ -1,4 +1,4 @@
-"""Submit saved daily acquisition pins for separate native snapshot publication."""
+"""Submit saved acquisition pins for separate native snapshot publication."""
 import argparse
 import json
 import sqlite3
@@ -24,10 +24,14 @@ def main(argv=None, *, clock=None):
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--acquisition-job", required=True)
     parser.add_argument("--idempotency-key", required=True)
+    parser.add_argument("--parent-snapshot")
+    parser.add_argument("--scope")
+    parser.add_argument("--head-generation", type=int)
     try:
         args = parser.parse_args(argv)
         params = snapshot.Parameters(args.acquisition_job,
-            {"acquisition.json": args.acquisition_job + "#massive_acquisition"}, (args.acquisition_job,))
+            {"acquisition.json": args.acquisition_job + "#massive_acquisition"}, (args.acquisition_job,),
+            args.parent_snapshot, args.scope, args.head_generation)
         job = JobSpec(kind=snapshot.KIND, implementation_ref="pending", environment_ref="pending",
             spec_hash=None, parameters=to_document(params), output_namespace="shadow", resource_class="io_fetch",
             retry_policy_ref="bounded", checkpoint_contract_ref=snapshot.SCHEMA,

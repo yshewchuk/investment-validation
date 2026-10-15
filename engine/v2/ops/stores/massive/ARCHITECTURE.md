@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Store-tier owner of explicit US-stock daily OHLCV, split or dividend acquisition under the versioned Basic policy, plus daily-only native snapshots from saved acquisition pins. Exact mode preserves the one-request contract; generation mode adds refresh, interval reuse and bounded continuation recovery. No research target construction or fallback provider.
+Store-tier owner of explicit US-stock daily OHLCV, split or dividend acquisition under the versioned Basic policy, plus native snapshots from saved acquisition pins. Exact mode preserves the one-request contract; generation mode adds refresh, interval reuse and bounded continuation recovery. No research target construction or fallback provider.
 
 ## Interfaces and dependencies
 
@@ -31,22 +31,32 @@ Explicit `generation` selects `massive_history_acquisition`: a plain namespace, 
 
 `snapshot` owns the separately submitted `massive_daily_snapshot` job. Its sole
 declared dependency is a successful history-acquisition job; the supervisor binds
-that job's committed output once. The worker verifies the original artifact,
+that job's committed output once. `stores.massive.pinned` is that worker's
+recheck module: it verifies the saved acquisition artifact (producer identity,
+complete mosaic, original occurrence/page/raw evidence) and normalizes the rows.
+The worker verifies the original artifact,
 producer identity and saved complete mosaic, then rechecks only its original
 occurrence/page/raw evidence. It never replans against newer catalog coverage.
-Normalization uses `data.massive_daily`; page-specific clocks/receipts survive
+Normalization uses `data.massive_daily`/`massive_actions`; page clocks/receipts survive
 pagination and clipped overlap selection. Input artifacts are capped at 4 MiB,
 selected occurrences/pages at their existing bounds, total raw verification and
 decoding at 64 MiB each, and normalized output at 1,000 rows. No provider budget
 or network edge is involved. Supervisor resource limits still apply.
-The acquisition artifact, normalizer and contract define a dedicated immutable
-scope. `snapshots.commit_snapshot_for_attempt` atomically bootstraps its only
-table, receipt and head under a live fence and None/0 head expectation. An exact
+The acquisition artifact, normalizer and contract define bootstrap identity.
+Optional parent snapshot, scope and positive head generation must be supplied
+together; they join refresh identity and fence the selected scope's head CAS.
+`data.massive_refresh` replaces one pinned request interval while preserving
+unrelated membership; one acquisition updates one table per atomic commit.
+Bootstrap retains its dedicated scope and None/0 head expectation. An exact
 prior committed receipt resolves its original snapshot under the current live
 fence, recovering a postcommit crash without rebuilding or moving a head. A
-different existing head refuses. Cross-job checkpoint reuse is disabled.
+stale head expectation without that receipt refuses. Cross-job checkpoint reuse is disabled.
 Snapshot failures return no successful worker result; an earlier atomic commit
-survives and is verified on retry. See Failure semantics. No parent/mixed-table refresh.
+survives and is verified on retry, even after another head advance. Shared native
+identity reconciliation retains first-stored parents. No empty-range deletion:
+the acquisition and selected-row nonempty requirements remain authoritative.
+Native membership preservation does not copy receipt-scoped compatibility inputs
+or confer legacy materialization/decision authority.
 
 - Account admission serializes this producer's jobs. The worker rechecks the exact cache after admission; verified hits consume zero HTTP attempts/charges but still require an available account reservation. Cross-job checkpoint reuse is disabled; raw receipts are the only fetch cache.
 - Exact mode has one attempt. Generation mode has at most 101 supervised attempts and acquires at most one page of one gap per attempt, without sleeping in the worker. Before each HTTP call, the fenced budget transaction sums this job/account's used calls across all reservations, including released attempts, and enforces its cumulative cap. No client retries/redirects; crashes do not refund uncertain calls. Versioned pacing/backoff remains account-wide; it does not police other clients or prove socket-send spacing after arbitrary stalls. Without quota observations, `remaining` is conservative local accounting and `uncertain=1` persists after success without itself refusing admission.
@@ -64,8 +74,8 @@ No refusal returns a successful worker result or invents whole-scope coverage. C
 |---|---|
 | Submitter's selected implementation source lacks a required file | `INPUT_CHANGED` before job submission; no checkout fallback. |
 | Supervisor's source tree differs from the submitted implementation fingerprint | `INPUT_CHANGED` before child launch; no provider access or snapshot publication. |
-| Snapshot: malformed saved pin or row; unusable raw/native artifact evidence, including artifact-store refusals | `INTEGRITY_FAILED`; terminal. |
-| Snapshot: artifact, raw verification/decoding or row bound exceeded | `RESOURCE_LIMIT_EXCEEDED`. |
+| Snapshot: malformed saved pin or row; missing/incompatible parent; unusable raw/native artifact evidence, including artifact-store refusals | `INTEGRITY_FAILED`; terminal. |
+| Snapshot: artifact, raw verification/decoding, selected parent bytes/rows or rewritten row bound exceeded | `RESOURCE_LIMIT_EXCEEDED`. |
 | Snapshot: empty selected rows | `SOURCE_EMPTY`. |
 | Snapshot: SQLite/OS error or head CAS conflict without an exact committed receipt | `RESOURCE_UNAVAILABLE`; a commit preceding output failure remains recoverable. |
 | Invalid scope, future `as_of`, policy, identity, account, dependencies, trusted context or parameters | `INVALID_REQUEST` before provider access; validation precedes storage. |

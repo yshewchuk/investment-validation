@@ -143,6 +143,13 @@ Useful flags: `--tier3-snapshot <sha256>` pins the Tier-4 fold snapshot
 instead of hashing the panel; `--fold-month YYYYMM` stages one serving month
 only; `--tier4-dir` points at a copy of the fold cache.
 
+If preparation refuses an existing corrupt fold object, retrying the same output
+root does not repair it. Re-run standard preparation from the validated source
+inputs into a fresh output root, without copying the corrupt incumbent store.
+Do not overwrite, delete or relabel an immutable object to make the retry pass.
+The failed attempt publishes no new catalog or pointer; staged unreferenced
+files may remain. A healthy unchanged retry is idempotent.
+
 ## 3. Run the acceptance gate
 
 **[heavy, supervisor]** — loads every staged estimator once (a few MB each):

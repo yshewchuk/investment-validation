@@ -350,8 +350,9 @@ def _read_fragment_rows(store: ArtifactStore, record) -> pd.DataFrame:
 
 def _has_live_rows(rows: pd.DataFrame) -> bool:
     """True iff ``rows`` has at least one date whose latest version is not
-    tombstoned -- an empty parseable retrieval tombstones every prior live
-    row, so a non-empty frame is not by itself a usable ticker."""
+    tombstoned -- a stored fragment may still hold tombstones written before
+    ``diff_retrieval`` started refusing omissions instead (issue #719), so a
+    non-empty frame is not by itself a usable ticker."""
     return bool(len(rows)) and bool((~price_history.latest_state(rows)["deleted"].astype(bool)).any())
 
 
@@ -526,10 +527,15 @@ def _capture_ticker(conn: sqlite3.Connection, ticker: str, entries: list[tuple[s
             new_rows = price_history.diff_retrieval(
                 stored, frame, retrieved_at=retrieved_at, source_kind=source_kind,
                 source_hash=source_hash, capture_id=capture_id)
-        except DataError:
+        except DataError as exc:
             _record(_attempt(capture_id, ticker, source_kind, source_hash, retrieved_at,
                              "refused_partial", 0, 0, created_at))
-            results.append({"ticker": ticker, "outcome": "error", "error": "VALIDATION_FAILED"})
+            result = {"ticker": ticker, "outcome": "error",
+                      "error": getattr(exc, "code", type(exc).__name__)}
+            details = dict(getattr(exc.problem, "details", None) or {})
+            if details:
+                result["details"] = details
+            results.append(result)
             continue
         if new_rows.empty:
             _record(_attempt(capture_id, ticker, source_kind, source_hash, retrieved_at,
@@ -794,15 +800,25 @@ def _aggregate_overlap(disagreements: dict) -> dict:
 def _summarize(results: list[dict], disagreements: dict, *, dry_run: bool) -> dict:
     by_outcome: dict[str, int] = {}
     tickers_seen = set()
+    failed_tickers = set()
     rows_added = rows_tombstoned = estimated_bytes = 0
+    failures: list[dict] = []
     for r in results:
         by_outcome[r["outcome"]] = by_outcome.get(r["outcome"], 0) + 1
         tickers_seen.add(r["ticker"])
         rows_added += r.get("rows_added", 0)
         rows_tombstoned += r.get("rows_tombstoned", 0)
         estimated_bytes += r.get("estimated_compressed_bytes", 0)
+        if r["outcome"] == "error":
+            failed_tickers.add(r["ticker"])
+            failure = {"ticker": r["ticker"], "error": r.get("error")}
+            if r.get("details"):
+                failure["details"] = r["details"]
+            failures.append(failure)
+    failures.sort(key=lambda failure: failure["ticker"])
     return {"schema_version": "price_history_capture_report.v1.0", "dry_run": dry_run,
            "tickers_seen": len(tickers_seen), "by_outcome": by_outcome, "rows_added": rows_added,
            "rows_tombstoned": rows_tombstoned, "estimated_compressed_bytes": estimated_bytes,
+           "failed_tickers": len(failed_tickers), "failures": failures,
            "overlapping_tickers": len(disagreements),
            "overlap_by_column": _aggregate_overlap(disagreements)}

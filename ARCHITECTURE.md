@@ -109,6 +109,8 @@ evidence. See the models and data component contracts.
   `experiments.native_gate_entrypoint`. After the ops protocol's launch gate opens,
   its callback imports native pricing; ops never imports that adapter or research.
   The verified source closure includes both files; the receipt grants no recording authority.
+  `experiments.v2_gate` separately composes native preregistration, reconstructed-history
+  gate evaluation and the existing outcome/ledger lifecycle; its component contract owns timing.
   - `tools/oc_check.py` appends one best-effort JSONL line per run to
     `$OC_METRICS_DIR/oc_check.jsonl` (default `.oc_logs/oc_check.jsonl`, per worktree);
     its module docstring defines the fields and failure behavior.
@@ -282,7 +284,12 @@ narrowed test selection, its result includes the configured
 the diff changes only an unrelated test file; full-suite results include all
 tests. The layout ratchet's regression test,
 `tests/v2/integration/test_mutation_ci.py::test_select_pr_tests_always_runs_ratchet_for_unrelated_test_only_diff`,
-covers that selection. The package-layout selector in `checks/test_selection.py`
+covers that selection. `tools/mutation_pilot.py` keeps two bounded in-process
+scan caches (the default full-repository import graph, and unresolved-import
+results per tracked-file list); its public helpers
+`retain_scan_caches_for(repo_root)` and `scan_cache_repo_roots()` let tests
+drop entries for other (temporary) repo roots and inspect what is held, and
+change no selection behaviour. The package-layout selector in `checks/test_selection.py`
 is separate from the active workflow; see [package test selection by
 layer](guides/test_selection_by_layer.md). The checked-in test-layout ratchet
 (`checks/test_layout_budget.py`) keeps root-level tests from growing while
@@ -439,7 +446,7 @@ Only a tracked path absent from the worktree reads as empty.
 
 - **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
 - **Massive acquisition — `python -m engine.v2.ops.massive_acquire`.** Explicit shadow-job submission; `ops serve` performs bounded, cache-first REST acquisition. See the [acquisition contract](engine/v2/ops/stores/massive/ARCHITECTURE.md).
-- **Massive daily snapshot — `python -m engine.v2.ops.massive_snapshot`.** A separate supervised offline job normalizes saved acquisition pins into a dedicated reconstructed native snapshot; research uses the data layer's existing bounded pinned reader. [Contract](engine/v2/ops/stores/massive/ARCHITECTURE.md#invariants).
+- **Massive snapshot — `python -m engine.v2.ops.massive_snapshot`.** A separate supervised offline job normalizes saved daily/action pins into a reconstructed native snapshot, optionally refreshing an explicit parent interval; research uses the data layer's bounded pinned reader. [Contract](engine/v2/ops/stores/massive/ARCHITECTURE.md#invariants).
 - **Shadow nightly coordination.** The operations trigger coordinates snapshot
   import, pinned planning, submission and bounded serving; preparation commands
   remain separate interfaces. It does not start the production legacy nightly.
@@ -731,6 +738,14 @@ change their arithmetic or imply that source receipt production is available.
   change lands in `engine/*`, `engine/dashboard/nightly.py` or the legacy
   ledger path to support v2 work. If legacy must change at all before
   cutover, that is itself a decision requiring sign-off, not a routine PR.
+- **At most one official writer, fenced by an authority generation**
+  (target behaviour; not yet enforced, see the design guide). At
+  any instant only one deployment (legacy or v2) may commit official
+  decisions, settlements, exports or consumer-visible releases. Authority
+  moves only fence-first: the current writer is fenced and verified, then
+  the other is granted; a crash between the two leaves no writer, never
+  two. Rollback reconciles committed v2 facts into legacy rather than
+  deleting them. Design: `guides/authority_fence_switch_rollback.md`.
 - **Every `ARCHITECTURE.md` stays under a growth ceiling.**
   `checks/architecture_doc_budgets.py` enforces a growth ceiling, not an
   absolute cap: below 1000 lines, one PR may add at most 50 net lines to

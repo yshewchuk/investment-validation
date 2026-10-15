@@ -378,6 +378,8 @@ mutate = [
     "engine/v2/data/computed_moves_table.py",
     "engine/v2/data/event_history.py",
     "engine/v2/data/massive_daily.py",
+    "engine/v2/data/massive_actions.py",
+    "engine/v2/data/massive_refresh.py",
 ]
 tests = [
     "tests/v2/ops/test_massive_accounting_hooks.py",
@@ -386,6 +388,7 @@ tests = [
     "tests/v2/data/test_computed_moves_table.py",
     "tests/v2/data/test_data_event_history.py",
     "tests/v2/ops/test_massive_snapshot.py",
+    "tests/v2/ops/test_massive_actions_refresh.py",
     "tests/test_v2_data_generic_incremental.py",
     "tests/test_v2_data_incremental.py",
     "tests/test_v2_data_incremental_persistence.py",
@@ -434,6 +437,8 @@ skip = [
     "*/training/trailing_cutoff.py",
 ]
 tests = [
+    "tests/v2/models/training/test_magnitude_estimators.py",
+    "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_phase5_datasets.py",
     "tests/test_v2_models_recalibration_artifact.py",
@@ -486,6 +491,7 @@ tests = [
     "tests/v2/scoring/test_release_chooser_states.py",
     "tests/v2/models/test_bounded_frozen_state_loader.py",
     "tests/v2/integration/test_chooser_release_readiness.py",
+    "tests/v2/integration/test_chooser_fold_authoring.py",
 ]
 
 [modules.board_analog]
@@ -643,6 +649,8 @@ mutate = [
     "engine/v2/ops/experiments.py",
 ]
 tests = [
+    "tests/v2/models/training/test_magnitude_estimators.py",
+    "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
@@ -653,6 +661,7 @@ tests = [
     "tests/v2/research/test_magnitude_baseline.py",
     "tests/v2/research/test_native_outcomes.py",
     "tests/v2/research/test_v2_prediction_cli.py",
+    "tests/v2/research/test_gate_report.py",
     "tests/v2/research/test_native_outcome_validation.py",
     "tests/test_v2_ops_authority.py",
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
@@ -676,7 +685,7 @@ tests = [
 [modules.ops_experiment_folds]
 why = "Fold-local experiment fitting: an experiment's fit must stay inside its own fold boundaries; a leaked boundary or wrong fold map contaminates the out-of-sample result."
 mutate = ["engine/v2/ops/experiment_folds.py"]
-tests = ["tests/test_v2_ops_experiment_folds.py", "tests/v2/research/test_prediction_report.py"]
+tests = ["tests/test_v2_ops_experiment_folds.py", "tests/v2/research/test_prediction_report.py", "tests/v2/research/test_gate_report.py"]
 
 [modules.ops_runtime]
 why = "Supervisor, workers, executors, resources, recovery and provider budget: job execution and admission."
@@ -816,6 +825,7 @@ tests = [
 why = "Catalog-bound native registration verification and immutable user-only final-read spend: forged metadata or a duplicate act must never create authority."
 mutate = ["engine/v2/ops/native_registration.py", "engine/v2/ops/final_holdout.py"]
 tests = [
+    "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/research/test_native_registration.py",
@@ -1016,6 +1026,7 @@ tests = [
     "tests/v2/ops/test_carried_set.py",
     "tests/v2/ops/test_massive_plan.py",
     "tests/v2/ops/test_massive_snapshot.py",
+    "tests/v2/ops/test_massive_actions_refresh.py",
     "tests/v2/ops/test_massive_coverage.py",
     "tests/v2/ops/test_massive_journal.py",
     "tests/v2/ops/test_massive_occurrence_integrity.py",
@@ -1089,7 +1100,9 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/research/test_gate_variant.py",
+    "tests/v2/research/test_gate_report.py",
     "tests/v2/research/test_prediction_inputs.py",
     "tests/v2/research/test_event_history.py",
     "tests/v2/research/test_history_fragment_index.py",

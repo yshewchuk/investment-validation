@@ -906,11 +906,12 @@ def test_invalid_model_options_refuse_before_store_or_spec(monkeypatch, capsys, 
 
 
 @pytest.mark.parametrize("action", ["register", "run"])
+@pytest.mark.parametrize("kind", ["history_mean", "history_ridge", "history_hgb"])
 @pytest.mark.parametrize("option,value", [
     ("--magnitude-feature-snapshot-id", "synthetic-feature-pin"),
     ("--magnitude-history-start", HISTORY),
 ])
-def test_history_cli_half_pair_refuses_at_exact_parser_guard(monkeypatch, capsys, action, option, value):
+def test_history_cli_half_pair_refuses_at_exact_parser_guard(monkeypatch, capsys, action, kind, option, value):
     monkeypatch.setattr(cli.foundation, "ArtifactStore", _forbid)
     monkeypatch.setattr(cli, "connect", _forbid)
     monkeypatch.setattr(Path, "read_text", _forbid)
@@ -918,12 +919,12 @@ def test_history_cli_half_pair_refuses_at_exact_parser_guard(monkeypatch, capsys
         cli.main([action, "--spec", "unused", "--catalog", "unused", "--store-root", "unused",
             "--as-of-month", MONTH, "--no-ledger", "--target", "absolute_move",
             "--magnitude-training-start", START, "--magnitude-labels-before", CUTOFF,
-            "--magnitude-model", "history_mean", option, value])
+            "--magnitude-model", kind, option, value])
     assert caught.value.code == 2
     captured = capsys.readouterr()
     assert not captured.out
     assert captured.err.split(": error: ")[-1] == (
-        "history_mean requires absolute_move and both history options; other models accept neither\n")
+        "history_mean/history_ridge/history_hgb require absolute_move and both history options; other models accept neither\n")
 
 
 @pytest.fixture
