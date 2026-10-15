@@ -152,6 +152,34 @@ def test_repair_failure_detail_is_truncated_to_300_characters(monkeypatch):
     assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
+def test_refusal_persists_the_full_300_char_tiers_stop_detail(monkeypatch):
+    """The truncated detail is what lands in report.flags and the flag report."""
+    from engine.dashboard import nightly
+
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
+    finalized = []
+
+    def boom(tables, **kwargs):
+        raise RuntimeError("x" * 500)
+
+    report = _report()
+    with pytest.raises(NightlyStop):
+        repair_tier4_gap(report, boom, finalize=finalized.append)
+
+    expected = ("TIER4_REPAIR_FAILED: RuntimeError: " + "x" * 500)[:300]
+    stops = [f for f in report.flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1, "a refusal appends exactly one tiers_stop flag"
+    assert stops[0]["detail"] == expected, \
+        "the persisted flag detail is the same 300-char cut as the typed stop"
+    assert len(stops[0]["detail"]) == 300
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
+    assert any(f.get("kind") == "tiers_stop" and f["detail"] == expected
+               for f in written[0]), \
+        "the flag-report writer receives the same 300-char flag detail"
+
+
 def test_repair_failure_scrubs_local_paths_from_the_typed_detail(monkeypatch):
     """A refused repair publishes no absolute local path in its detail (#490).
 
@@ -960,6 +988,27 @@ def test_finalize_current_store_writes_the_manifest_before_the_snapshot(monkeypa
         "exactly one SNAPSHOT write, and it is the last write"
     assert result.tables == {"t": 1}, "the collected stats become the result tables"
     assert result.snapshot == Path("s")
+
+
+def test_finalize_current_store_stamps_start_and_elapsed_from_the_clock(monkeypatch):
+    """finalize_current_store stamps started and elapsed_s from its own clock."""
+    from engine.data import rebuild as rebuild_mod
+
+    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats", lambda: {"t": 1})
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest",
+                        lambda stats: Path("m"))
+    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot",
+                        lambda stats: Path("s"))
+
+    readings = iter([200.0, 205.5])
+    monkeypatch.setattr(rebuild_mod, "time",
+                        SimpleNamespace(time=lambda: next(readings)))
+
+    result = rebuild_mod.finalize_current_store()
+
+    assert result.started == 200.0, "the started stamp is the first clock reading"
+    assert result.elapsed_s == 5.5, \
+        "elapsed_s is the finalize clock reading minus the started stamp"
 
 
 # --------------------------------------------------------------------------
