@@ -358,3 +358,20 @@ def test_member_decoder_recursion_error_refuses(tmp_path):
     assert error.value.detail == "driver residual pool could not be verified or loaded"
     assert isinstance(error.value.__cause__, RecursionError)
     _assert_no_leak(tmp_path, error.value)
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_state_catalog_directory_or_symlink_refuses(tmp_path, kind):
+    _stage_and_promote(tmp_path)
+    _write_catalog(tmp_path, rows=[])
+    catalog = tmp_path / "phase5_release.json"
+    if kind == "directory":
+        catalog.unlink()
+        catalog.mkdir()
+    else:
+        target = tmp_path / "elsewhere.json"
+        catalog.rename(target)
+        catalog.symlink_to(target)
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "phase5_release.json"

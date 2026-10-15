@@ -129,7 +129,7 @@ Both refuse with a stable `ReleaseAssemblyRefusal.code` (stray `OSError`,
 
 | Condition | Code |
 |---|---|
-| Prior release id empty, not a string or unsafe (`/`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest or model payload missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
+| Prior release id empty, not a string or unsafe (`/`, `\`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest or model payload missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
 | Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
 | Chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
 | An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
@@ -139,14 +139,14 @@ Both refuse with a stable `ReleaseAssemblyRefusal.code` (stray `OSError`,
 | Inventory missing, malformed, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
 | Filesystem error or lock timeout while publishing (inputs not at fault) | `PUBLICATION_FAILED` |
 
-Supplied objects, prior payloads, both catalogs, the lock file and staged
-manifests are opened without following links, must be regular files, and are
-read under a byte cap. A missing, symlinked, non-regular or oversize prior
-refuses `PRIOR_MISMATCH`; the same candidate file refuses `ID_CONFLICT`. Every
-call re-runs all validation. Staging and the catalog write run under one
-exclusive `flock` on `deployment/.carry_forward.lock`; a loser that waits out
-`LOCK_WAIT_S` refuses `PUBLICATION_FAILED`, otherwise `ID_CONFLICT` once the
-winner has published.
+Supplied objects, prior payloads, both catalogs and staged manifests are
+opened without following links, must be regular files, and are read under a
+byte cap; the lock file is opened without following links and must be regular.
+A missing, symlinked, non-regular or oversize prior refuses `PRIOR_MISMATCH`;
+the same candidate file refuses `ID_CONFLICT`. Staging and the catalog write
+run under one exclusive `flock` on `deployment/.carry_forward.lock`; a loser
+that waits out `LOCK_WAIT_S` refuses `PUBLICATION_FAILED`; otherwise identical
+content succeeds and different content refuses `ID_CONFLICT`.
 
 | Rule | Behaviour |
 |---|---|
@@ -154,7 +154,7 @@ winner has published.
 | R2 cache | None; the prior catalog, staged manifest and objects are re-read each call |
 | R3 retry | Repeatable only with the same validated inputs; no fallback to old pools or live registries |
 | R4 transaction | Candidate artifacts are written only under the new candidate id (objects are content-addressed); the only other write is the `deployment/.carry_forward.lock` coordination file |
-| R5 partial failure | Orphaned objects or a staged manifest without a catalog may remain; no catalog, no candidate, nothing promoted |
+| R5 partial failure | Orphaned objects or a staged manifest without a catalog may remain and a retry completes it; no catalog, nothing promoted |
 | R6 idempotency | Identical inputs give identical catalog bytes (no clock in the catalog); same id with different content refuses `ID_CONFLICT` |
 
 ## 3. Inputs
@@ -466,7 +466,7 @@ production scoring instead selects the release named by `DEPLOYED`.
 | Selected release-local catalog exists | It is authoritative; schema, self-hash and release identity must validate |
 | Cache | `checks.phase5_release.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
-| Local catalog corrupt or unreadable, a symlink or non-regular file, or over 64 MiB (`checks.phase5_release.read_manifest`) | Refuse (`ReleaseLayoutError`); never fall back to a valid root copy. The scoring reader `_read_state_catalog` is unchanged here |
+| Local catalog corrupt or unreadable, a symlink or non-regular file, or over 64 MiB (`checks.phase5_release.read_manifest`; scoring `_read_state_catalog` likewise) | Refuse (`ReleaseLayoutError`, scoring `ModelNotReady`); never fall back to a valid root copy |
 | Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs; incumbent validation is read-only and precedes copying |
 | Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee, except `carry_forward_release` calls, which serialize on `deployment/.carry_forward.lock` (§2.1) |
 | Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |

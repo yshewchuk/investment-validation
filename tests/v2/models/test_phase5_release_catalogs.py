@@ -150,22 +150,21 @@ def test_bad_local_never_falls_back_to_valid_root(tmp_path, damage):
     assert not destination.exists()
 
 
-def test_unreadable_local_and_read_race_are_not_absence(tmp_path, monkeypatch):
+def test_unreadable_local_catalog_is_not_absence(tmp_path, monkeypatch):
     _stage(tmp_path)
     deployment.promote(layout.deployment_root(tmp_path), "A")
     real_open = os.open
-    # A missing file at open is absence (atomic open); only an unreadable one is an error.
-    for exception in (PermissionError,):
-        def unreadable(path, *args, **kwargs):
-            if Path(path) == _local(tmp_path):
-                raise exception("private path")
-            return real_open(path, *args, **kwargs)
-        monkeypatch.setattr(layout.os, "open", unreadable)
-        with pytest.raises(ModelNotReady) as error:
-            resolve_release_binding(tmp_path)
-        assert "private path" not in str(error.value)
-        with pytest.raises(layout.ReleaseLayoutError):
-            layout.read_manifest(tmp_path)
+    # A catalog missing at open is absence (atomic open); an unreadable one is an error.
+    def unreadable(path, *args, **kwargs):
+        if Path(path) == _local(tmp_path):
+            raise PermissionError("private path")
+        return real_open(path, *args, **kwargs)
+    monkeypatch.setattr(layout.os, "open", unreadable)
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert "private path" not in str(error.value)
+    with pytest.raises(layout.ReleaseLayoutError):
+        layout.read_manifest(tmp_path)
 
 
 def test_directory_or_symlink_local_catalog_is_not_absence(tmp_path):

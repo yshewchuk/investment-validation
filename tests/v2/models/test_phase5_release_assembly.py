@@ -1555,8 +1555,20 @@ def _lock_symlinked(root):
     return None
 
 
-@pytest.mark.parametrize("setup, wait", [(_lock_held, 0.2), (_lock_symlinked, None)],
-                         ids=["held-timeout", "symlink"])
+def _lock_fifo(root):
+    lock = phase5_release.deployment_root(root) / ".carry_forward.lock"
+    if lock.exists() or lock.is_symlink():
+        lock.unlink()
+    try:
+        os.mkfifo(lock)
+    except (AttributeError, OSError):
+        pytest.skip("os.mkfifo is not supported on this platform")
+    return None
+
+
+@pytest.mark.parametrize("setup, wait",
+                         [(_lock_held, 0.2), (_lock_symlinked, None), (_lock_fifo, None)],
+                         ids=["held-timeout", "symlink", "fifo"])
 def test_publication_lock_failure_is_publication_failed(tmp_path, monkeypatch, setup, wait):
     inventory, _ = _stage_prior(tmp_path)
     args = _valid_derive_args(tmp_path)

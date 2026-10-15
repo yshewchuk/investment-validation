@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -61,6 +63,7 @@ __all__ = [
 
 _DEPLOYMENT_DIR = "deployment"
 _STATE_CATALOG_NAME = "phase5_release.json"
+_MAX_CATALOG_BYTES = 64 * 1024 * 1024
 _PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
 _PAYOFF_PREFIXES = ("payoff_line:", "payoff_surface:")
 _RECALIBRATION_PREFIX = "recalibration_map:"
@@ -397,22 +400,40 @@ def _resolve_model_bindings(
     return identity, refs
 
 
+def _read_catalog_bytes(local: Path, root_copy: Path) -> bytes:
+    """No-follow, non-blocking, regular-file, size-capped read; local first, then the legacy root copy when local is absent."""
+    unreadable = ModelNotReady(_STATE_CATALOG_NAME, "catalog is not a readable file")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        try:
+            fd = os.open(local, flags)
+        except FileNotFoundError:
+            fd = os.open(root_copy, flags)
+    except OSError as exc:
+        raise ModelNotReady(_STATE_CATALOG_NAME, f"cannot read {_STATE_CATALOG_NAME}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise unreadable
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read(_MAX_CATALOG_BYTES + 1)
+    except OSError as exc:
+        raise ModelNotReady(_STATE_CATALOG_NAME, f"cannot read {_STATE_CATALOG_NAME}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(raw) > _MAX_CATALOG_BYTES:
+        raise unreadable
+    return raw
+
+
 def _read_state_catalog(release_root: Path, expected_release_id: str) -> Mapping:
     """The ``phase5_release.json`` catalog: parsed, schema-checked,
     self-hash-verified, and checked against the live pointer's release_id --
     all before any of its rows are trusted."""
     path = deployment._manifest_path(
         release_root / _DEPLOYMENT_DIR, expected_release_id).with_name(_STATE_CATALOG_NAME)
-    try:
-        try:
-            path.lstat()
-        except FileNotFoundError:
-            path = release_root / _STATE_CATALOG_NAME
-        if not path.is_file():
-            raise ModelNotReady(_STATE_CATALOG_NAME, "catalog is not a readable file")
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise ModelNotReady(_STATE_CATALOG_NAME, f"cannot read {_STATE_CATALOG_NAME}") from exc
+    raw = _read_catalog_bytes(path, release_root / _STATE_CATALOG_NAME)
     try:
         body = json.loads(raw)
     except ValueError as exc:
