@@ -62,6 +62,7 @@ from .releases import ModelReleaseInventory, ReleaseIssue, require_complete_rele
 
 __all__ = [
     "DEPLOYMENT_REFUSAL",
+    "MAX_MANIFEST_BYTES",
     "MODEL_RELEASE_ROOT_ENV",
     "POINTER_STATE_V1",
     "STAGED_MANIFEST_V1",

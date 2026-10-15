@@ -117,7 +117,8 @@ so the helper sits beside it):
   `PoolOutput` per pool member; `chooser` is one or more; object names are
   unique within a member, and every object carries `cutoff`), replacing that
   row's objects wholesale; every other member row is copied unchanged;
-  `sources.pool_cutoff` advances to `cutoff`.
+  `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
+  the prior release id.
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release and every supplied object on disk, re-stages
   the prior model bindings unchanged under the new `release_id`
@@ -130,12 +131,12 @@ translated at the boundary). No production caller exists yet.
 
 | Condition | Code |
 |---|---|
-| Prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest or model payload missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
+| Prior release id empty or not a string; prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest or model payload missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
 | Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
-| Chooser empty, not `PoolOutput`, wrong member id or duplicate name | `CHOOSER_MISMATCH` |
+| Chooser empty, not `PoolOutput`, wrong member id, malformed hash or duplicate name | `CHOOSER_MISMATCH` |
 | An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
 | `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
-| Supplied object missing, not a regular file, longer than its claimed `payload_bytes`, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
+| Supplied object missing, unreadable, not a regular file, `payload_bytes` above `MAX_OBJECT_BYTES`, longer than its claim, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
 | Candidate id empty, unsafe or equal to the prior's; inventory `release_id` differs from it; candidate catalog or staged manifest exists with different or corrupt content | `ID_CONFLICT` |
 | Inventory missing, malformed, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
 | Filesystem error or lock timeout while publishing (inputs not at fault) | `PUBLICATION_FAILED` |
@@ -421,7 +422,7 @@ promotion and rollback refuse without matching staging success.
 | Condition | Outcome |
 |---|---|
 | Unstaged `release_id` | `resolve_release` refuses `ReleaseNotStaged` |
-| Staged manifest cannot be read or parsed | Both refuse `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error (issue #207) — `current_release` inherits this from its own call to `resolve_release` |
+| Staged manifest cannot be read or parsed, is a symlink or non-regular file, or exceeds 64 MiB | Both refuse `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error (issue #207); a missing file is still "not staged" — `current_release` inherits this from its own call to `resolve_release` |
 | Release staged under a superseded hash version (legacy) | Still resolves — replay of a score already recorded against it must never become unreplayable. Only the write path (§7.2) enforces the current hash version |
 | No live pointer | `current_release` returns `None` |
 | Caching, retry, transaction, partial write | None of these apply: read-only, no cache, nothing to retry, no write |
@@ -467,7 +468,7 @@ production scoring instead selects the release named by `DEPLOYED`.
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
 | Local catalog corrupt or unreadable | Refuse; never fall back to a valid root copy |
 | Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs; incumbent validation is read-only and precedes copying |
-| Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee |
+| Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee, except `carry_forward_release` calls, which serialize on `deployment/.carry_forward.lock` (§2.1) |
 | Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |
 | Historical catalog was already overwritten before migration | It cannot be recovered from a model manifest; rebuilding that catalog is required |
 

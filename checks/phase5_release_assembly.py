@@ -210,7 +210,7 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
     chooser_names: set[str] = set()
     for output in chooser_objects:
         if not _content_hash_valid(output.content_hash):
-            raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "the chooser hash is malformed")
+            raise ReleaseAssemblyRefusal("CHOOSER_MISMATCH", "the chooser hash is malformed")
         if output.member_id != CHOOSER_MEMBER_ID:
             raise ReleaseAssemblyRefusal("CHOOSER_MISMATCH", "chooser member id is not chooser_analog_pool")
         if output.name in chooser_names:
@@ -247,17 +247,20 @@ def _read_regular(path: Path, limit: int, code: str, detail: str) -> bytes:
     except OSError as exc:
         raise ReleaseAssemblyRefusal(code, detail) from exc
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ReleaseAssemblyRefusal(code, detail)
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ReleaseAssemblyRefusal(code, detail)
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
                 data = handle.read(limit + 1)
-            except (OverflowError, ValueError) as exc:
-                raise ReleaseAssemblyRefusal(code, detail) from exc
+        except OSError as exc:
+            raise ReleaseAssemblyRefusal(code, detail) from exc
     finally:
         if fd >= 0:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError as exc:
+                raise ReleaseAssemblyRefusal(code, detail) from exc
     if len(data) > limit:
         raise ReleaseAssemblyRefusal(code, detail)
     return data
@@ -269,14 +272,30 @@ def _probe_regular(path: Path, limit: int, code: str, detail: str) -> None:
         path.lstat()
     except FileNotFoundError:
         return
-    _read_regular(path, limit, code, detail)
+    except OSError as exc:
+        raise ReleaseAssemblyRefusal(code, detail) from exc
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise ReleaseAssemblyRefusal(code, detail) from exc
+    try:
+        try:
+            stat_result = os.fstat(fd)
+        except OSError as exc:
+            raise ReleaseAssemblyRefusal(code, detail) from exc
+        if not stat.S_ISREG(stat_result.st_mode) or stat_result.st_size > limit:
+            raise ReleaseAssemblyRefusal(code, detail)
+    finally:
+        try:
+            os.close(fd)
+        except OSError as exc:
+            raise ReleaseAssemblyRefusal(code, detail) from exc
 
 
 def _verify_objects(store: Path, supplied: tuple[PoolOutput, ...]) -> None:
     for output in supplied:
         payload_bytes = output.payload_bytes
-        if (not isinstance(payload_bytes, int) or isinstance(payload_bytes, bool)
-                or payload_bytes < 0 or payload_bytes > MAX_OBJECT_BYTES):
+        if payload_bytes > MAX_OBJECT_BYTES:
             raise ReleaseAssemblyRefusal(
                 "OBJECT_UNVERIFIED", "a supplied object payload is not a bounded size")
         path = store / object_relpath(output.content_hash)
@@ -394,7 +413,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
     except (deployment.DeploymentError, OSError, ValueError) as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release could not be resolved") from exc
     except (TypeError, AttributeError, KeyError) as exc:
-        raise ReleaseAssemblyRefusal("INVENTORY_MISMATCH", "inventory is malformed") from exc
+        raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release could not be resolved") from exc
     if prior_catalog.get("deployment_id") != prior.deployment_id:
         raise ReleaseAssemblyRefusal(
             "PRIOR_MISMATCH", "prior catalog deployment id disagrees with its staged release")
