@@ -295,7 +295,7 @@ def test_calendar_reader_forwards_chain_rows_and_never_scans(tmp_path, monkeypat
     monkeypatch.setattr(Repository, "scan", counting)
     batched = nci.scan_calendar_row_inputs(repository, snapshot, _AAA,
                                            decision_session=_SESSION, calendar=calendar,
-                                           chain_rows=slices["AAA"])
+                                           chain_rows=iter(slices["AAA"]))
     assert batched == per_key
     assert "option_chains" not in scans
 
@@ -308,8 +308,7 @@ def test_chain_rows_are_checked_before_other_refusals(tmp_path):
     slices = scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
     with pytest.raises(OpsError) as after_expiry:
         scan_quote_rows(repository, snapshot, _AAA, expiry="2024-01-04",
-                        decision_session=_SESSION, chain_rows=slices["BBB"] if "BBB" in slices
-                        else [{"ticker": "BBB"}])
+                        decision_session=_SESSION, chain_rows=[{"ticker": "BBB"}])
     assert after_expiry.value.code == "INVALID_REQUEST"
     calendar = CalendarSessions(days=("2024-01-05", "2024-01-08"), observed_through="2024-01-08")
     with pytest.raises(OpsError) as no_spot:
