@@ -7,8 +7,8 @@ Registered causal feature recipes and their population policy
 (`panel_math.py`) that a later native feature-computation path will build
 on. It replaces (per the system rearchitecture's §4.4) `features.py`,
 `data/features/panel.py`, and `data/features/tier4.py`, but does so
-incrementally: this change ports the first slice of that math without yet
-wiring anything to call it.
+incrementally: the math is reached in production through
+`panel_row_inputs.scan_panel_row`, called by `nightly_raw_row_producer`.
 
 ## Primary contracts and interfaces
 
@@ -77,8 +77,8 @@ Inputs are not mutated.
 | Cache, retry, transaction | No cache or side effects; identical inputs give identical outputs |
 
 This module depends only on pandas, NumPy, and the sibling anchor helper.
-It performs no I/O, training, inference, or legacy import. It has no production
-caller yet; adding this arithmetic alone does not change a nightly or board.
+It performs no I/O, training, inference, or legacy import. `panel_row_inputs`
+calls it; the arithmetic alone does not change a nightly or board.
 
 ## Inputs
 
@@ -131,7 +131,7 @@ before `NightlyEventInputs` assembly.
 `scan_panel_row(repository, snapshot, key, *, decision_session,
 history_start)` is implemented in `panel_row_inputs.py`. The native raw-row
 producer calls it once per distinct `(ticker, event_date, session)` triple
-(`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"); it is its one call for one
+(`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer"); it is its one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
 pair. `panel_row.date` is the scored event's ISO calendar date, required by
 the scoring source-bundle consumer; it is never the decision or source-anchor
@@ -171,11 +171,11 @@ that row is not admitted or no row exists. A null value is the key present with 
 as a missing feature.
 It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
-(`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never
+(`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer"). `key.strategy` never
 changes which reads it makes or which keys the result carries — every
 call builds the full superset, `STR-RUNUP`'s fields included — so the one
 `panel_row`/`panel_anchor` pair built per `(ticker, event_date, session)`
-triple (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6") is valid and
+triple (`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer") is valid and
 reused unchanged across every strategy sharing that triple; a strategy
 that does not name a superset-only key in its `feature_names` simply
 never selects it (`../scoring/ARCHITECTURE.md` "Inputs"). Its
@@ -324,11 +324,11 @@ uses no implicit clock, and owns no cache.
   (`engine/v2/scoring/application.py`).
 - `regime` uses `panel_math._anchor_index` plus NumPy/pandas; it has no
   filesystem/network access or legacy imports. `panel_row_inputs.scan_panel_row`
-  calls `regime.add_regime_features` (its one production-adjacent caller so
-  far; production forward-panel assembly itself is still absent); every
-  other caller is a test. Neither input frame is mutated.
+  calls `regime.add_regime_features`, and `nightly_raw_row_producer` calls
+  `scan_panel_row` in production; every other caller is a test. Neither input
+  frame is mutated.
 - `panel_math` supplies anchoring to `regime`; both have focused parity tests.
-  Neither has a production forward-panel caller.
+  Both are reached in production through `scan_panel_row`.
 
 ## External systems and libraries
 
