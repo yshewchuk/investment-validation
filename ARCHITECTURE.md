@@ -285,7 +285,8 @@ the diff changes only an unrelated test file; full-suite results include all
 tests. The layout ratchet's regression test,
 `tests/v2/integration/test_mutation_ci.py::test_select_pr_tests_always_runs_ratchet_for_unrelated_test_only_diff`,
 covers that selection. `tools/mutation_pilot.py` keeps two bounded in-process
-scan caches for the default full-repository import graph; its public helpers
+scan caches (the default full-repository import graph, and unresolved-import
+results per tracked-file list); its public helpers
 `retain_scan_caches_for(repo_root)` and `scan_cache_repo_roots()` let tests
 drop entries for other (temporary) repo roots and inspect what is held, and
 change no selection behaviour. The package-layout selector in `checks/test_selection.py`
