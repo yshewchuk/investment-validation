@@ -1732,6 +1732,9 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
         assert root == tmp_path  # the caller's own root, forwarded unchanged
         assert as_of == AS_OF  # the plan's as_of, never the clock's calendar date
         assert expected == "snap_before"  # the incoming pin, unchanged
+        # The population is decided ONCE, before this stub ran: a file appearing
+        # after the universe was chosen must never reach the plan.
+        _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
         return events
 
     def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
@@ -1746,10 +1749,11 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
                         fake_refresh_plan_prices)
     monkeypatch.setattr(nightly_trigger, "_default_plan",
                         lambda root, as_of, tickers, context, clock, *, full_run,
-                        expected_shadow_snapshot_id:
+                        expected_shadow_snapshot_id, expected_population:
                         (_explode("wrong context") if tickers != events
                          or context != events
                          or expected_shadow_snapshot_id != refreshed
+                         or expected_population is not None
                          or not full_run or as_of != AS_OF else "plan_snap"))
 
     assert (nightly_trigger._prepare_default_plan(
@@ -1791,10 +1795,11 @@ def test_prepare_default_plan_keeps_the_callers_context_when_the_universe_is_the
     monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", fake_refresh_plan_prices)
     monkeypatch.setattr(nightly_trigger, "_default_plan",
                         lambda root, as_of, tickers, context, clock, *, full_run,
-                        expected_shadow_snapshot_id:
+                        expected_shadow_snapshot_id, expected_population:
                         (_explode("wrong wiring") if tickers != ("AAA", "BBB")
                          or context != ("XXX", "YYY")
-                         or expected_shadow_snapshot_id != refreshed else "plan_context"))
+                         or expected_shadow_snapshot_id != refreshed
+                         or expected_population is not None else "plan_context"))
 
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), ("XXX", "YYY"), FakeClock(IN_WINDOW),
@@ -1808,7 +1813,7 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     # is never consulted (a hard _explode proves it), and the existing
     # refresh + _default_plan path continues with the file's own tickers. The
     # ticker-level finality check is not run on this branch either.
-    _write_population(
+    override_path = _write_population(
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
     monkeypatch.setattr(nightly_trigger, "_orats_probe", _explode)
@@ -1822,10 +1827,11 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", fake_refresh_plan_prices)
     monkeypatch.setattr(nightly_trigger, "_default_plan",
                         lambda root, as_of, tickers, context, clock, *, full_run,
-                        expected_shadow_snapshot_id:
+                        expected_shadow_snapshot_id, expected_population:
                         (_explode("wrong context") if tickers != ("AAA", "BBB")
                          or context != ("AAA", "BBB")
-                         or expected_shadow_snapshot_id != refreshed else "plan_override"))
+                         or expected_shadow_snapshot_id != refreshed
+                         or expected_population != override_path else "plan_override"))
 
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
@@ -1966,7 +1972,7 @@ def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(
     # the override file and snapshot generation, and the snapshot universe
     # helper is never consulted in that case either -- nor is the ticker-level
     # finality probe.
-    _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
+    population_path = _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
     monkeypatch.setattr(nightly_trigger, "_orats_probe", _explode)
     refreshed = "snap_explicit"
@@ -1979,10 +1985,11 @@ def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(
     monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", fake_refresh_plan_prices)
     monkeypatch.setattr(nightly_trigger, "_default_plan",
                         lambda root, as_of, tickers, context, clock, *, full_run,
-                        expected_shadow_snapshot_id:
+                        expected_shadow_snapshot_id, expected_population:
                         (_explode("wrong wiring") if tickers != ("CCC", "DDD")
                          or context != ("CCC", "DDD", "EEE")
-                         or expected_shadow_snapshot_id != refreshed else "plan_explicit"))
+                         or expected_shadow_snapshot_id != refreshed
+                         or expected_population != population_path else "plan_explicit"))
 
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, ("CCC", "DDD"), ("CCC", "DDD", "EEE"), FakeClock(IN_WINDOW),
@@ -2038,3 +2045,117 @@ def test_ensure_plan_ref_keeps_snapshot_not_yet_for_a_resuming_source_not_final(
     assert submit.calls == []
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.status == "snapshot_not_yet"
+
+
+def test_prepare_default_plan_ignores_a_population_file_created_mid_run(tmp_path, monkeypatch):
+    # Absent override: the population is decided ONCE, before the snapshot universe
+    # stub ran -- the valid list it writes at the override path WHILE the run is
+    # underway is ignored, and _default_plan still receives expected_population=None.
+    events, refreshed = ("AAA", "BBB"), "snap"
+    captured = {}
+
+    def fake_snapshot_event_universe(root, as_of, clock, expected):
+        assert root == tmp_path  # the caller's own root, forwarded unchanged
+        assert as_of == AS_OF  # the plan's as_of, never the clock's calendar date
+        assert expected == "snap_before"  # the incoming pin, unchanged
+        # A file appearing after the universe was chosen must never reach the plan.
+        _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
+        return events
+
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe",
+                        fake_snapshot_event_universe)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe",
+                        lambda as_of, tickers: (True, "final"))
+
+    def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert root == tmp_path  # the caller's own root, forwarded unchanged
+        assert expected == "snap_before"  # the incoming pin, unchanged
+        return refreshed if tickers == events else _explode("wrong universe")
+
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", fake_refresh_plan_prices)
+
+    def fake_default_plan(root, as_of, tickers, context, clock, *, full_run,
+                          expected_shadow_snapshot_id, expected_population):
+        captured["expected_population"] = expected_population
+        return "plan_midrun"
+
+    monkeypatch.setattr(nightly_trigger, "_default_plan", fake_default_plan)
+
+    assert (nightly_trigger._prepare_default_plan(
+        tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+        expected_shadow_snapshot_id="snap_before") == "plan_midrun")
+    assert captured["expected_population"] is None  # the file created mid-run is ignored
+
+
+def test_prepare_default_plan_passes_the_override_path_as_expected_population(tmp_path,
+                                                                              monkeypatch):
+    # The override file is PRESENT and valid: _default_plan receives the override's
+    # own Path unchanged as expected_population -- the snapshot universe helper is
+    # never consulted (a hard _explode proves it).
+    override_path = _write_population(
+        tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
+    captured = {}
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+
+    def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
+        assert root == tmp_path  # the caller's own root, forwarded unchanged
+        assert expected == "snap_before"  # the incoming pin, unchanged
+        return "snap_from_override" if tickers == ("AAA", "BBB") else _explode("wrong universe")
+
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", fake_refresh_plan_prices)
+
+    def fake_default_plan(root, as_of, tickers, context, clock, *, full_run,
+                          expected_shadow_snapshot_id, expected_population):
+        captured["expected_population"] = expected_population
+        return "plan_override"
+
+    monkeypatch.setattr(nightly_trigger, "_default_plan", fake_default_plan)
+
+    assert (nightly_trigger._prepare_default_plan(
+        tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+        expected_shadow_snapshot_id="snap_before") == "plan_override")
+    assert captured["expected_population"] == override_path
+
+
+def test_full_population_refuses_a_symlink_override(tmp_path):
+    # A symlink at the override path -- even to a real regular file holding a valid
+    # population list -- is refused: _read_document opens with O_NOFOLLOW, so the
+    # document never loads and full_population falls back to the empty-universe
+    # pair rather than reading through the link.
+    target = tmp_path / "real_population.json"
+    target.write_text(json.dumps(["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"]))
+    path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(target)
+    assert full_population(tmp_path) == ((), ())
+
+
+def test_main_records_the_symlink_refusal_when_the_override_is_a_symlink(
+        tmp_path, monkeypatch, capsys):
+    """Wiring with the override path replaced by a symlink to a valid population
+    file: the end-to-end scheduled run raises _prepare_default_plan's typed
+    ``INVALID_REQUEST`` symlink refusal and records it as an ``error`` receipt --
+    never reading through the link, never falling back to the snapshot universe."""
+    target = tmp_path / "real_population.json"
+    target.write_text(json.dumps(["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"]))
+    path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(target)
+    monkeypatch.setattr(nightly_trigger, "SystemClock", lambda: FakeClock(IN_WINDOW))
+    monkeypatch.setattr(nightly_trigger, "_orats_probe",
+                        lambda as_of, tickers: (True, "final"))
+    # Cutover PR-7b-2: the wiring makes _submit_plan ensure the shadow snapshot
+    # BEFORE planning; this end-to-end test is about the override-path refusal, not
+    # the snapshot import, so stub readiness.
+    monkeypatch.setattr(nightly_trigger, "_ensure_shadow_snapshot",
+                        lambda root, as_of, clock, attempt: ("ready", "snap_stub"))
+    # The symlink refusal fires before the universe is ever derived: the snapshot
+    # universe helper must never be consulted on this branch.
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    code = nightly_trigger.main(["--as-of", AS_OF, "--root", str(tmp_path)])
+    document = json.loads(capsys.readouterr().out.strip())
+    assert code == 1 and document["status"] == "error"
+    assert "INVALID_REQUEST" in document["detail"]
+    assert "symlink" in document["detail"]
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "error"

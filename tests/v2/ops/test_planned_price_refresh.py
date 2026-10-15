@@ -372,10 +372,11 @@ def test_production_submit_prepares_exact_watchlist_before_planning(
     planned = []
 
     def final_plan(root, as_of, actual_tickers, actual_context, clock, *, full_run,
-                   expected_shadow_snapshot_id):
+                   expected_shadow_snapshot_id, expected_population=None):
         """Assert the final planner sees the completed capture and exact universe."""
         assert (root, as_of, actual_tickers, actual_context, clock, full_run) == (
             state.root, SESSION, expected, context or expected, state.clock, True)
+        assert expected_population == population_path
         report = _read_report(root)
         assert expected_shadow_snapshot_id == report["capture"]["result_snapshot_id"]
         assert expected_shadow_snapshot_id != state.base.snapshot_id
