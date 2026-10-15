@@ -885,7 +885,8 @@ def mark_tiers_degraded(report: NightlyReport, exc: Exception) -> None:
                              "error": f"{type(exc).__name__}: {reason}"[:300]}
     report.flags.append({
         "kind": "tiers_degraded",
-        "detail": ("Tier 3/Tier 4 not rebuilt — scoring from the stored panel and "
+        "detail": ("Tier 3/Tier 4 step incomplete (the rebuild or its snapshot "
+                   "write failed) — scoring from the stored panel and "
                    f"forecasts, which may not cover recent prints. {type(exc).__name__}: {reason}")[:300],
     })
     from engine.data.rebuild import finalize_current_store

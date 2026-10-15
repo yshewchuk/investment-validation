@@ -68,7 +68,7 @@ drift, quota below reserve) and a backup sync.
 Imports observed in this package, top-level and lazy (mechanically walked
 by `.oc_logs/import_scan.py`, an `ast` walk over every `.py` file that
 reports every `engine.*` import at any depth, including inside function
-bodies) — 24 distinct legacy `engine.*` modules in total, not 3:
+bodies) — 25 distinct legacy `engine.*` modules in total, not 3:
 
 - Top-level: `engine.paths` (all four of `model_evidence.py`/`nightly.py`/
   `publish.py`/`render.py`), `engine.data.throttle` (quota guard, also
@@ -86,6 +86,7 @@ bodies) — 24 distinct legacy `engine.*` modules in total, not 3:
   (`nightly.py::run_nightly`); `engine.data.pulls.forward_calendar`
   (`nightly.py::refresh_calendar_data`); `engine.data.rebuild`
   (`nightly.py::refresh_calendar_data`/`run_nightly`/`mark_tiers_degraded`);
+  `engine.data.manifest` (`nightly.py::_write_flag_report`);
   `engine.data.schemas`
   (`model_evidence.py::_replay_trades`); `engine.entry_rules`
   (`render.py::build_strategies`); `engine.features`
@@ -149,7 +150,9 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   (the tiers step owns the SNAPSHOT, recorded in `steps.tiers.snapshot`);
   `steps.tiers.elapsed_s` is the incremental build only, and the repair's time
   is `steps.tiers.tier4_repair.elapsed_s`. Every refusal sets `report.stopped`
-  and writes the flag report.
+  and writes the flag report (best-effort: a failed flag-report write is
+  swallowed; the flag report and `rebuild --json` are written atomically, so
+  a failed write keeps the previous file).
 
   | Condition | Outcome |
   | --- | --- |

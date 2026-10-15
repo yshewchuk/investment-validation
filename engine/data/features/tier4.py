@@ -1406,7 +1406,9 @@ def main(argv: list[str] | None = None) -> int:
         help="recompute from this date's fold forward; earlier rows are carried over",
     )
     ap.add_argument("--out", default=None, help="write here instead of the canonical path")
-    ap.add_argument("--json", default=None, help="write the run report to this path")
+    ap.add_argument("--json", default=None,
+                    help="write the run report to this path (written atomically; "
+                    "a failed write keeps the previous report)")
     args = ap.parse_args(argv)
 
     report = build_table(since=args.since, out=args.out)

@@ -18,7 +18,7 @@ snapshot id are excluded; see :data:`IGNORED_STAT_KEYS`) and the quarantine
 flags (ignoring ``flagged_at``). The warm run FAILs unless every cached table
 reused at least one input with nothing re-parsed. The worker calls
 ``engine.data.rebuild.rebuild(tables=("events", "daily", "chains"),
-incremental=...)`` exactly as ``engine/dashboard/nightly.py`` does, so the
+incremental=...)`` as ``engine/dashboard/nightly.py`` does, so the
 ``_with_cache`` path and the manifest/snapshot writes are exercised.
 
 A source root missing any raw input tree the rebuild reads is refused with exit
