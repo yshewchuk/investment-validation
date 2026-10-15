@@ -315,3 +315,15 @@ def test_chain_rows_are_checked_before_other_refusals(tmp_path):
         nci.scan_calendar_row_inputs(repository, snapshot, _AAA, decision_session="2024-01-08",
                                      calendar=calendar, chain_rows=slices["AAA"])
     assert no_spot.value.code == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize("change", [
+    {"strike": None}, {"strike": "abc"}, {"right": "X"}, {"right": None},
+    {"expiry": None}, {"bid": "abc"}, {"ask": "abc"}])
+def test_unusable_chain_row_fields_are_contract_mismatch(tmp_path, change):
+    row = dict(_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0), **change)
+    repository, snapshot = _snap(tmp_path)
+    with pytest.raises(DataError) as exc:
+        scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
+                        decision_session=_SESSION, chain_rows=[row])
+    assert exc.value.code == "CONTRACT_MISMATCH"

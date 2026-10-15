@@ -1,4 +1,4 @@
-"""Per-``Repository`` read counters (#754): observational only.
+"""Per-``Repository`` read counters: observational only.
 
 One :class:`ReadCounters` lives on each ``Repository`` instance, so counts are
 scoped to the job attempt that owns the repository; nothing is global. A

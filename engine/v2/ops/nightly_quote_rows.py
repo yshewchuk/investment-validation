@@ -118,7 +118,7 @@ def scan_quote_rows(
     (``Repository.table_contract``'s own typed refusal). Malformed
     key/date inputs raise ``INVALID_REQUEST``; repository failures
     propagate unchanged. ``chain_rows`` (that ticker's rows for the session, from
-    one batched build read, #754) replaces the scan when given; ``None`` keeps
+    one batched build read) replaces the scan when given; ``None`` keeps
     the per-key scan.
     """
     if not isinstance(key, BoardRequest) or any(

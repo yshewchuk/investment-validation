@@ -1,4 +1,4 @@
-"""Read-only native raw-row composition for cutover PR-6 slice 4b.
+"""Read-only native raw-row composition.
 
 ``build_native_score_batch_events`` enumerates the forward board through
 ``nightly_raw_rows.scan_forward_board_requests`` -- the slice's only
@@ -285,7 +285,7 @@ def build_native_score_batch_events(
     panels = _shared_panel_rows(repository, snapshot, [key for _, key in admitted],
                                 decision_session=decision_session,
                                 history_start=history_start)
-    # One option_chains read per build (#754): grouped by ticker, shared by both scanners.
+    # One option_chains read per build: grouped by ticker, shared by both scanners.
     chains = scan_chain_slices(repository, snapshot, {key.ticker for _, key in admitted},
                                decision_session=decision_session)
     events: list[dict[str, Any]] = []

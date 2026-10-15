@@ -11,10 +11,12 @@ falls back to per-key scans.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from engine.v2.contracts import DataQuery, KeyPredicate, SnapshotRef
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import fail
 from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal, validated_as_of
@@ -38,6 +40,34 @@ def _day(value: Any) -> str:
     return stamp.date().isoformat()
 
 
+def _number_or_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _require_usable_fields(row: Mapping[str, Any]) -> None:
+    """The candidate/quote field checks both readers rely on; malformed pinned
+    input is ``CONTRACT_MISMATCH`` (the per-key candidate path's own code)."""
+    if row["expiry"] is None or row["strike"] is None or row["right"] is None:
+        raise data_fail("CONTRACT_MISMATCH", "option chain row has a null expiry, strike or right")
+    if str(row["right"]).upper() not in ("C", "P"):
+        raise data_fail("CONTRACT_MISMATCH", "option chain row has a right outside C/P")
+    try:
+        strike = float(row["strike"])
+    except (TypeError, ValueError):
+        raise data_fail("CONTRACT_MISMATCH",
+                        "option chain row has an unconvertible strike") from None
+    if not math.isfinite(strike):
+        raise data_fail("CONTRACT_MISMATCH", "option chain row has a non-finite strike")
+    if not (_number_or_missing(row["bid"]) and _number_or_missing(row["ask"])):
+        raise data_fail("CONTRACT_MISMATCH", "option chain row has an unconvertible quote")
+
+
 def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,
                        session_day: str) -> list[Mapping[str, Any]]:
     """A materialised copy of ``rows`` after checking every row is ``ticker``'s
@@ -50,6 +80,7 @@ def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,
             raise fail("INVALID_REQUEST", "chain rows must carry every chain column")
         if row["ticker"] != ticker or _day(row["obs_date"]) != session_day:
             raise fail("INVALID_REQUEST", "chain rows do not match the key and session")
+        _require_usable_fields(row)
     return staged
 
 

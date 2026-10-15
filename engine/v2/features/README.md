@@ -39,7 +39,7 @@ shared streak and price-history inputs from caller-selected event/price frames.
 history_start, decision_session)` reads one ticker's bounded `daily_market` rows
 from a pinned snapshot and returns `daily_state_inputs.DailyStateInputs`. The
 result is session-only: it is not a complete forward panel or a qualified
-board, and no production raw-row assembler calls it yet.
+board.
 
 `panel_row_inputs.scan_panel_row(repository, snapshot, key, *,
 decision_session, history_start)` composes `daily_state_inputs`/`panel_math`/

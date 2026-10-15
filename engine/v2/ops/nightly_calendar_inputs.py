@@ -1,4 +1,4 @@
-"""Pinned calendar/expiry/spot staging for cutover PR-6 slice 4a.2.
+"""Pinned calendar/expiry/spot staging for the raw-row producer.
 
 Composition over three reads, none of which chooses a strike, prices a leg or
 touches a provider: the session calendar from the pinned SPY price series
@@ -186,7 +186,7 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
     domain. The eligible domain follows the native strategy policy; the result
     is the sorted distinct ISO tuple, empty only when the domain is empty.
     ``chain_rows`` (that ticker's rows for the session, from one batched build
-    read, #754) replaces the scan when given; ``None`` keeps the per-key scan."""
+    read) replaces the scan when given; ``None`` keeps the per-key scan."""
     _require_key(key)
     _require_supported_domains(key)
     session_day = _calendar_day(decision_session, "decision_session")
