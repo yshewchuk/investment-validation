@@ -1,7 +1,8 @@
 """Pinned ``option_chains`` quote-row staging for the raw-row producer.
 
-Stages one exact ``(ticker, obs_date)`` chain slice -- read directly off the
-pinned snapshot, explicitly un-admitted -- into the plain quote rows the
+Stages one exact ``(ticker, obs_date)`` chain slice -- read off the pinned
+snapshot (once per build by ``nightly_chain_batch``, handed in as ``chain_rows``,
+or by its own per-key scan when none is given), explicitly un-admitted -- into the plain quote rows the
 raw-row producer's assembler passes
 to ``nightly_source_bundle``. The read is SHADOW-only and safe by namespace
 isolation, not by source admission: ``native_score_batch`` is registered

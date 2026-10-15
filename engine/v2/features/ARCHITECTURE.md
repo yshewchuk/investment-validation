@@ -7,8 +7,8 @@ Registered causal feature recipes and their population policy
 (`panel_math.py`) that a later native feature-computation path will build
 on. It replaces (per the system rearchitecture's §4.4) `features.py`,
 `data/features/panel.py`, and `data/features/tier4.py`, but does so
-incrementally: this change ports the first slice of that math without yet
-wiring anything to call it.
+incrementally: the math is reached in production through
+`panel_row_inputs.scan_panel_row`, called by `nightly_raw_row_producer`.
 
 ## Primary contracts and interfaces
 

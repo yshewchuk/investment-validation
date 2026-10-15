@@ -3,7 +3,7 @@
 Composition over three reads, none of which chooses a strike, prices a leg or
 touches a provider: the session calendar from the pinned SPY price series
 through the decision session, the strategy-eligible listed expiry set from one
-exact ``option_chains`` session, and the exact-session pinned raw-close spot.
+exact ``option_chains`` session (the producer's batched ``chain_rows``, or this module's own per-key scan when none is given), and the exact-session pinned raw-close spot.
 ``generation.resolve_expiry`` applies the native strategy policy to the
 candidate days; ``planned_exit_date`` fixes the session-based exit independently
 of that expiry; ``nightly_raw_rows.scan_calendar_row`` matches the pinned event
