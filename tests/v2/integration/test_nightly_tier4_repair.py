@@ -677,6 +677,39 @@ def test_main_json_report_is_written_atomically(tmp_path, monkeypatch):
         "a failed --json write must leave no temp file behind"
 
 
+def test_main_json_report_has_the_rebuild_payload(tmp_path, monkeypatch):
+    """A successful ``--json`` run publishes the ``RebuildResult`` payload.
+
+    Same fake build as the atomicity case above, but with no replace failure:
+    the report that lands is exactly what ``RebuildResult.as_dict`` enumerates
+    (``started`` is deliberately not serialised). ``elapsed_s`` is wall-clock,
+    so each deterministic field is asserted on its own.
+    """
+    from engine.data import rebuild as rebuild_mod
+
+    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(rebuild_mod, "build_tier4_table",
+                        lambda since=None: {"rows": 3, "producers": {}})
+    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats",
+                        lambda: {"panel": "hash"})
+    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot", lambda stats: "snap-1")
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest", lambda stats: "manifest-1")
+
+    target = tmp_path / "r.json"
+    rebuild_mod.main(["--table", "tier4", "--json", str(target)])
+
+    payload = json.loads(target.read_text())
+    assert sorted(payload) == ["elapsed_s", "reports", "snapshot", "tables"], \
+        "as_dict enumerates exactly these four fields; started is not serialised"
+    assert payload["reports"] == {"tier4": {"rows": 3, "producers": {}}}, \
+        "the payload carries the built Tier-4 report verbatim"
+    assert payload["tables"] == {"panel": "hash"}, \
+        "the collected stats become the payload's tables"
+    assert payload["snapshot"] == "snap-1", "the snapshot the finalize produced"
+    assert isinstance(payload["elapsed_s"], float) and payload["elapsed_s"] >= 0, \
+        "elapsed_s is the rounded wall-clock duration"
+
+
 def test_write_flag_report_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
     """A failed replace leaves the previous flag report and no temp file."""
     from engine import paths
@@ -688,6 +721,12 @@ def test_write_flag_report_is_atomic_when_the_replace_fails(tmp_path, monkeypatc
     path = nightly._write_flag_report(
         "2026-10-13", [{"kind": "first"}], {"tiers": {}})
     original = path.read_text()
+    payload = json.loads(original)
+
+    assert payload["as_of"] == "2026-10-13"
+    assert payload["flags"] == [{"kind": "first"}]
+    assert payload["steps"] == ["tiers"], "steps is the step-name list, not the dict"
+    assert "generated_at" in payload, "the report stamps when it was written"
 
     monkeypatch.setattr(manifest_mod.os, "replace", _raise_disk_full)
     with pytest.raises(OSError, match="disk full"):
@@ -698,6 +737,24 @@ def test_write_flag_report_is_atomic_when_the_replace_fails(tmp_path, monkeypatc
         "a failed write must leave the previous flag report unchanged"
     assert sorted(p.name for p in path.parent.glob("*.tmp*")) == [], \
         "a failed write must leave no temp file behind"
+
+
+def test_write_flag_report_lists_the_step_names_in_order(tmp_path, monkeypatch):
+    """The flag report serialises the step names in the report's own order."""
+    from engine import paths
+    from engine.dashboard import nightly
+
+    monkeypatch.setattr(paths, "REPORTS", tmp_path)
+
+    path = nightly._write_flag_report(
+        "2026-10-13", [], {"refresh": {}, "tiers": {}})
+    payload = json.loads(path.read_text())
+
+    assert payload["as_of"] == "2026-10-13"
+    assert payload["flags"] == []
+    assert payload["steps"] == ["refresh", "tiers"], \
+        "steps lists every step name, in insertion order"
+    assert "generated_at" in payload
 
 
 def test_tier4_main_json_report_is_written_atomically(tmp_path, monkeypatch):
@@ -717,6 +774,9 @@ def test_tier4_main_json_report_is_written_atomically(tmp_path, monkeypatch):
     target = tmp_path / "tier4.json"
     tier4_mod.main(["--json", str(target)])
     original = target.read_text()
+
+    assert json.loads(original) == {"rows": 3, "producers": {}}, \
+        "the --json report is the literal build_table payload, byte for byte"
 
     monkeypatch.setattr(manifest_mod.os, "replace", _raise_disk_full)
     with pytest.raises(OSError, match="disk full"):
