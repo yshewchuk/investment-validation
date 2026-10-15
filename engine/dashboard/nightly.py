@@ -35,7 +35,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1987,24 +1986,10 @@ def _backup_sync(flags: list) -> dict:
 
 
 def _write_report_atomic(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically via a sibling temp file."""
+    """Write ``text`` to ``path``; delegates to the shared atomic text writer."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    tmp_path = Path(tmp_name)
-    fd_open = True
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            fd_open = False
-            handle.write(text)
-
-        os.chmod(tmp_path, 0o644)
-        os.replace(tmp_path, path)
-    finally:
-        if fd_open:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        with contextlib.suppress(OSError):
-            tmp_path.unlink()
+    from engine.data.manifest import write_text_atomic
+    write_text_atomic(path, text)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
