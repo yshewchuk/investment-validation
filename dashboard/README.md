@@ -450,8 +450,8 @@ The plan is the native nightly plan's full-population option (`--full-run`):
 the scheduled universe is the full default population: the shadow
 snapshot's events by default, or, as an explicit override when present, the
 tickers of `reports/phase6/nightly_trigger/expected_population.json` (a JSON list of
-`ticker|strategy|event_date` keys, read once by the plan (the decided
-keys are passed in-process) — never a
+`ticker|strategy|event_date` keys; the plan reads it once and passes the
+decided keys on in-process). The trigger takes no
 ticker-list argument and never a slice of the context. A crash between submit
 and the state write cannot double-submit: the trigger writes `submitting` with
 the plan_ref before calling submit, resubmits that SAME plan_ref on the next

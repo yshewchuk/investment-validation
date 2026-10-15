@@ -817,11 +817,13 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
     symlink) is refused ``INVALID_REQUEST`` without being read. An ABSENT override means the
     universe is ``snapshot_event_tickers`` on the pinned head ``expected_shadow_snapshot_id``
     names, also used as the context unless ``context_tickers`` were supplied. The override is
-    NOT cross-checked against the snapshot; a planned key with no observed row is only
-    recorded as a ``PLANNED_ROW_MISSING`` finding by the serving bridge. The price
+    NOT cross-checked against the snapshot; a planned key with no observed row is refused
+    by the score stage (``VALIDATION_FAILED``, ``details.missing``). The price
     refresh receives the universe chosen here (snapshot-derived, override or explicit),
     and the pre-refresh pin is used to derive it because price capture does not write
-    earnings_events.
+    earnings_events. Price capture carries every non-price table forward unchanged
+    (price_history_store.capture), so the pre-refresh pin yields the same events as the
+    refreshed one.
     """
     clock = clock or SystemClock()
     keys, override_tickers = _validated_override(root)

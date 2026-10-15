@@ -2377,5 +2377,5 @@ def test_read_bounded_bytes_rejects_a_file_that_grows_past_the_cap_after_fstat(
         return SimpleNamespace(st_mode=st.st_mode, st_size=1)
 
     monkeypatch.setattr(commands.os, "fstat", fstat_wrapper)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not a bounded regular file"):
         commands.read_bounded_bytes(path, 8)

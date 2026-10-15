@@ -53,7 +53,6 @@ def test_an_oversize_symlinked_or_missing_manifest_is_input_changed(tmp_path, mo
     real = _incomplete_manifest_path(tmp_path)
     link = tmp_path / "link.json"
     link.symlink_to(real)
-    monkeypatch.setattr(commands, "MAX_INPUT_MANIFEST_BYTES", 4)
 
     args = SimpleNamespace(input_manifest=missing)
     with pytest.raises(OpsError) as excinfo:
@@ -61,10 +60,16 @@ def test_an_oversize_symlinked_or_missing_manifest_is_input_changed(tmp_path, mo
     assert excinfo.value.code == "INPUT_CHANGED"
     assert "input manifest is missing" in str(excinfo.value)
 
-    for path in (link, real):
-        args = SimpleNamespace(input_manifest=path)
-        with pytest.raises(OpsError) as excinfo:
-            _read_input_manifest_ref(args, root, conn, clock, nightly=False)
-        assert excinfo.value.code == "INPUT_CHANGED"
-        assert "not a bounded regular file" in str(excinfo.value)
+    args = SimpleNamespace(input_manifest=link)
+    with pytest.raises(OpsError) as excinfo:
+        _read_input_manifest_ref(args, root, conn, clock, nightly=False)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert "not a bounded regular file" in str(excinfo.value)
+
+    monkeypatch.setattr(commands, "MAX_INPUT_MANIFEST_BYTES", 4)
+    args = SimpleNamespace(input_manifest=real)
+    with pytest.raises(OpsError) as excinfo:
+        _read_input_manifest_ref(args, root, conn, clock, nightly=False)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert "not a bounded regular file" in str(excinfo.value)
     conn.close()
