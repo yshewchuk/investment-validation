@@ -1645,7 +1645,7 @@ def test_damaged_untouched_carried_object_is_prior_mismatch(tmp_path, mode):
 def test_inventory_hash_not_matching_prior_payload_is_inventory_mismatch(tmp_path):
     inventory, _ = _stage_prior(tmp_path)
     artifact = inventory.artifacts[0]
-    member = dataclasses.replace(artifact.members[0], content_hash="a" * 64)
+    member = dataclasses.replace(artifact.members[0], content_hash="sha256:" + "a" * 64)
     artifact = dataclasses.replace(artifact, members=(member,) + artifact.members[1:])
     inventory = dataclasses.replace(inventory, release_id="cand1",
                                     artifacts=(artifact,) + inventory.artifacts[1:])
@@ -1835,3 +1835,22 @@ def test_deeply_nested_prior_catalog_is_prior_mismatch(tmp_path):
         _run_carry(tmp_path, inventory, args)
     assert error.value.code == "PRIOR_MISMATCH"
     _assert_no_candidate(tmp_path)
+
+
+def test_shared_readers_accept_exact_cap_and_refuse_one_below(tmp_path, monkeypatch):
+    _stage_prior(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    catalog = phase5_release.catalog_path(tmp_path, "prior1")
+    size = catalog.stat().st_size
+    monkeypatch.setattr(phase5_release, "MAX_CATALOG_BYTES", size)
+    assert phase5_release.read_catalog(catalog, "prior1")["release_id"] == "prior1"
+    monkeypatch.setattr(phase5_release, "MAX_CATALOG_BYTES", size - 1)
+    with pytest.raises(phase5_release.ReleaseLayoutError):
+        phase5_release.read_catalog(catalog, "prior1")
+    manifest = phase5_release.staged_manifest_path(store, "prior1")
+    msize = manifest.stat().st_size
+    monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", msize)
+    assert deployment.resolve_release(store, "prior1").release_id == "prior1"
+    monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", msize - 1)
+    with pytest.raises(deployment.StagingRefused):
+        deployment.resolve_release(store, "prior1")
