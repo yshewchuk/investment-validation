@@ -139,7 +139,7 @@ def scan_chain_slices(repository: Repository, snapshot: SnapshotRef, tickers: It
         count += len(rows)
     worker_progress.step_start("option_chains_rows_returned")
     worker_progress.step_end("option_chains_rows_returned", units=count)
-    if max_result_rows > 0 and count >= 0.8 * max_result_rows:
+    if count >= 0.8 * _RESULT_CAP:
         logging.getLogger(__name__).warning("option_chains read returned %d of %d allowed rows",
-                                            count, max_result_rows)
+                                            count, _RESULT_CAP)
     return slices
