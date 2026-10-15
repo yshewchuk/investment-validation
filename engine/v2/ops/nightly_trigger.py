@@ -904,7 +904,7 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     clock = clock or SystemClock()
     ops_root = _ops_root(root)
     ensure_directory(ops_root)
-    population = _qualification_location(root, QUALIFICATION_POPULATION)
+    population = _qualification_path(root, QUALIFICATION_POPULATION)
     universe = tuple(tickers) or _population_tickers(population)
     context = tuple(context_tickers) or universe
     year_start, year_end = _derive_years(as_of)
