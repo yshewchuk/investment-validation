@@ -11,13 +11,15 @@ falls back to per-key scans.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import date
 from typing import Any
 
 from engine.v2.contracts import DataQuery, KeyPredicate, SnapshotRef
 from engine.v2.data.repository import Repository
+from engine.v2.ops.errors import fail
 
-__all__ = ["CHAIN_COLUMNS", "scan_chain_slices"]
+__all__ = ["CHAIN_COLUMNS", "require_chain_rows", "scan_chain_slices"]
 
 CHAIN_TABLE = "option_chains"
 #: Union of the candidate-expiry columns and the quote-row columns.
@@ -26,11 +28,35 @@ _BATCH_CAP = 50_000
 _RESULT_CAP = 2_000_000
 
 
+def _day(value: Any) -> str:
+    return value.date().isoformat() if hasattr(value, "date") else str(value)[:10]
+
+
+def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,
+                       session_day: str) -> list[Mapping[str, Any]]:
+    """A materialised copy of ``rows`` after checking every row is ``ticker``'s
+    at ``session_day``; any other row is ``INVALID_REQUEST`` (never echoed)."""
+    staged = list(rows)
+    for row in staged:
+        if row["ticker"] != ticker or _day(row["obs_date"]) != session_day:
+            raise fail("INVALID_REQUEST", "chain rows do not match the key and session")
+    return staged
+
+
 def scan_chain_slices(repository: Repository, snapshot: SnapshotRef, tickers: Iterable[str], *,
                       decision_session: str) -> dict[str, list[dict[str, Any]]]:
     """Every ``tickers`` entry's ``option_chains`` rows for ``decision_session``
     (an ISO ``YYYY-MM-DD`` string), from a single ``Repository.scan``."""
-    wanted = sorted(set(tickers))
+    if not isinstance(decision_session, str):
+        raise fail("INVALID_REQUEST", "decision_session must be an ISO date string")
+    try:
+        date.fromisoformat(decision_session)
+    except ValueError:
+        raise fail("INVALID_REQUEST", "decision_session must be an ISO date string") from None
+    unique = set(tickers)
+    if any(not isinstance(ticker, str) or not ticker.strip() for ticker in unique):
+        raise fail("INVALID_REQUEST", "tickers must be non-empty strings")
+    wanted = sorted(unique)
     slices: dict[str, list[dict[str, Any]]] = {ticker: [] for ticker in wanted}
     if not wanted:
         return slices

@@ -9,18 +9,20 @@ import pytest
 
 from engine.v2.data.errors import DataError, fail as data_fail
 from engine.v2.data.repository import Repository
+from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.nightly_calendar_inputs import scan_candidate_expiries
 from engine.v2.ops.nightly_chain_batch import scan_chain_slices
 from engine.v2.ops.nightly_quote_rows import scan_quote_rows
-from tests.v2.ops.test_v2_ops_nightly_calendar_inputs import (
-    _CHAINS_NAME,
-    _SESSION,
-    _STRADDLE_KEY,
-    _chain_row,
-    _domain_chain_rows,
-    _price_row,
-    _snapshot,
+from engine.v2.ops.nightly_chain_batch import require_chain_rows
+from tests.v2.ops.chain_support import (
+    CHAINS_NAME as _CHAINS_NAME,
+    SESSION as _SESSION,
+    STRADDLE_KEY as _STRADDLE_KEY,
+    chain_row as _chain_row,
+    domain_chain_rows as _domain_chain_rows,
+    price_row as _price_row,
+    snapshot as _snapshot,
 )
 
 _AAA = _STRADDLE_KEY
@@ -139,3 +141,32 @@ def test_empty_ticker_set_does_no_scan(tmp_path, monkeypatch):
     scans = _count_scans(monkeypatch)
     assert scan_chain_slices(repository, snapshot, [], decision_session=_SESSION) == {}
     assert scans == []
+
+
+@pytest.mark.parametrize("session", ["2024-13-45", "not-a-date", None, 20240105])
+def test_non_iso_decision_session_is_invalid_request(tmp_path, session):
+    repository, snapshot = _snap(tmp_path)
+    with pytest.raises(OpsError) as exc:
+        scan_chain_slices(repository, snapshot, ["AAA"], decision_session=session)
+    assert exc.value.code == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize("tickers", [[None], [""], ["AAA", 7]])
+def test_bad_tickers_are_invalid_request(tmp_path, tickers):
+    repository, snapshot = _snap(tmp_path)
+    with pytest.raises(OpsError) as exc:
+        scan_chain_slices(repository, snapshot, tickers, decision_session=_SESSION)
+    assert exc.value.code == "INVALID_REQUEST"
+
+
+def test_chain_rows_for_another_ticker_or_session_are_refused(tmp_path):
+    repository, snapshot = _snap(tmp_path)
+    slices = scan_chain_slices(repository, snapshot, ["AAA", "BBB"], decision_session=_SESSION)
+    with pytest.raises(OpsError) as exc:
+        scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
+                        decision_session=_SESSION, chain_rows=slices["BBB"])
+    assert exc.value.code == "INVALID_REQUEST"
+    with pytest.raises(OpsError):
+        scan_candidate_expiries(repository, snapshot, _AAA, decision_session="2024-01-04",
+                                chain_rows=slices["AAA"])
+    assert require_chain_rows(iter(slices["AAA"]), "AAA", _SESSION) == slices["AAA"]

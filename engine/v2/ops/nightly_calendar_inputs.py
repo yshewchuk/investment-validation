@@ -37,6 +37,7 @@ from engine.v2.ops.native_score_batch_types import (
     PRICE_HISTORY_NOT_AVAILABLE_DETAIL,
     NativeScoreBatchRowRefusal,
 )
+from engine.v2.ops.nightly_chain_batch import require_chain_rows
 from engine.v2.ops.nightly_raw_rows import CalendarRowInputs, scan_calendar_row
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
@@ -190,7 +191,7 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
     _require_supported_domains(key)
     session_day = _calendar_day(decision_session, "decision_session")
     rows = (_scan_candidate_rows(repository, snapshot, key, session_day)
-            if chain_rows is None else chain_rows)
+            if chain_rows is None else require_chain_rows(chain_rows, key.ticker, session_day))
     calls: dict[str, set[float]] = {}
     puts: dict[str, set[float]] = {}
     for row in rows:

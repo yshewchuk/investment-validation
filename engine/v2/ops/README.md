@@ -79,15 +79,21 @@ It has no production caller; see the component architecture contract.
 
 `nightly_quote_rows.scan_quote_rows` is also an internal staging API. It
 returns `QuoteRowInputs` from a pinned `option_chains` snapshot for an exact
-`(ticker, decision_session)` request. It has no production caller; see the
-component architecture contract.
+`(ticker, decision_session)` request; an optional `chain_rows` supplies that
+ticker's rows from the batched read. `nightly_raw_row_producer` is its
+production caller; see the component architecture contract.
+
+`nightly_chain_batch.scan_chain_slices` and `CHAIN_COLUMNS` are the internal
+batched `option_chains` read: one scan per producer build, rows grouped by
+ticker, handed to the quote and calendar readers as `chain_rows`. The
+producer is the only caller.
 
 `nightly_calendar_inputs.scan_decision_calendar`,
 `nightly_calendar_inputs.scan_candidate_expiries`, and
-`nightly_calendar_inputs.scan_calendar_row_inputs` are internal staging APIs
+`nightly_calendar_inputs.scan_calendar_row_inputs` (both of the latter accept
+an optional `chain_rows`) are internal staging APIs
 for pinned raw-row calendar inputs. They compose decision-calendar sessions,
-strategy-eligible expiries and calendar-row inputs; this slice adds no
-production caller. See the component architecture contract.
+strategy-eligible expiries and calendar-row inputs; `nightly_raw_row_producer` calls them. See the component architecture contract.
 
 `nightly_raw_row_producer.build_native_score_batch_events` is an internal
 producer that composes native raw-row event and refusal documents from pinned

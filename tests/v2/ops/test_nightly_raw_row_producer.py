@@ -296,29 +296,29 @@ def test_mixed_midnight_and_intraday_rows_keep_order_and_refuse_intraday(
     assert json.dumps(refusals_document)
 
 
-def test_option_chains_is_read_once_per_build_and_grouped_rows_reach_both_readers(
+def test_producer_routes_each_tickers_grouped_rows_to_both_readers(
         tmp_path, monkeypatch):
     repository, snapshot = _snapshot(tmp_path, [
         _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight"),
         _event_row("BBB", _MIDNIGHT, "BMO", event_id="bbb-midnight"),
     ])
     rig = _ReaderRig(monkeypatch)
-    scanned: list[str] = []
-    real_scan = Repository.scan
-
-    def counting_scan(self, query, *, table_name):
-        scanned.append(table_name)
-        return real_scan(self, query, table_name=table_name)
-
-    monkeypatch.setattr(Repository, "scan", counting_scan)
+    monkeypatch.setattr(
+        nrp, "scan_chain_slices",
+        lambda repo, snap, tickers, *, decision_session: {
+            ticker: [{"ticker": ticker, "marker": ticker}] for ticker in tickers})
 
     events_document, _ = nrp.build_native_score_batch_events(
         repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
 
     assert len(events_document) > 1
-    assert scanned.count("option_chains") == 1
     assert len(rig.chain_rows_seen) == 2 * len(events_document)
-    assert all(rows == [] for rows in rig.chain_rows_seen)
+    assert {row["marker"] for rows in rig.chain_rows_seen for row in rows} == {"AAA", "BBB"}
+    assert all(len({row["ticker"] for row in rows}) == 1 for rows in rig.chain_rows_seen)
+    seen_tickers = [rows[0]["ticker"] for rows in rig.chain_rows_seen]
+    called_tickers = [key.ticker for pair in zip(rig.calendar_row_calls, rig.quote_calls)
+                      for key in pair]
+    assert seen_tickers == called_tickers
 
 
 def test_empty_enumeration_returns_empty_documents_before_context_readers(

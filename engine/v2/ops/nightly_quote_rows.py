@@ -28,6 +28,7 @@ from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_board_universe import BoardRequest
+from engine.v2.ops.nightly_chain_batch import require_chain_rows
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
     validated_as_of,
@@ -130,7 +131,7 @@ def scan_quote_rows(
     if session_day > expiry_day:
         raise data_fail("QUERY_NOT_BOUNDED", "decision_session is after the contract expiry")
     if chain_rows is not None:
-        rows = list(chain_rows)
+        rows = require_chain_rows(chain_rows, key.ticker, session_day)
     else:
         contract = repository.table_contract(snapshot, _QUOTE_TABLE)
         version = snapshot.table_versions[_QUOTE_TABLE]
