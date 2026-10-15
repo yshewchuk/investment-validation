@@ -292,18 +292,22 @@ def test_gap_free_finalize_failure_degrades_the_tiers_step():
     assert len(degraded) == 1, "the gap-free finalize failure raises one flag"
 
 
-def test_tiers_degraded_scrubs_local_paths_from_both_fields():
+def test_tiers_degraded_scrubs_local_paths_from_both_fields(monkeypatch):
     """A degraded tiers step publishes no absolute local path (#490).
 
     The flag detail and the step error reach the published bundle, so an
     exception carrying a host-local path must have it redacted while the
     ``type(exc).__name__`` prefix stays.
     """
-    from engine.dashboard.nightly import _tiers_degraded
+    from engine.dashboard.nightly import mark_tiers_degraded
+
+    # The degrade path also writes the deferred snapshot; stub it out so this
+    # unit test never touches the real store.
+    monkeypatch.setattr("engine.data.rebuild.finalize_current_store", lambda: None)
 
     report = _report()
 
-    _tiers_degraded(report, RuntimeError("failed to read /root/secret/x"))
+    mark_tiers_degraded(report, RuntimeError("failed to read /root/secret/x"))
 
     assert report.steps["tiers"]["degraded"] is True
     error = report.steps["tiers"]["error"]
@@ -340,7 +344,7 @@ def test_write_snapshot_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
 
     assert target.read_text() == "PRE-EXISTING SNAPSHOT", \
         "a failed write must leave the previous SNAPSHOT unchanged"
-    assert sorted(p.name for p in tmp_path.glob("*.tmp")) == [], \
+    assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
         "a failed write must leave no temp file behind"
 
 
@@ -361,7 +365,7 @@ def test_write_manifest_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
 
     assert target.read_text() == "PRE-EXISTING MANIFEST", \
         "a failed write must leave the previous MANIFEST unchanged"
-    assert sorted(p.name for p in tmp_path.glob("*.tmp")) == [], \
+    assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
         "a failed write must leave no temp file behind"
 
 
@@ -534,7 +538,8 @@ def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_p
     records every fake rebuild invocation and ``captured["report"]`` is the
     ``NightlyReport`` the run built. ``marker_writes`` counts snapshot writes:
     the fake ``rebuild`` writes ``marker_path`` when it finalizes (the
-    default), and the fake ``finalize_rebuild`` writes the same file.
+    default), the fake ``finalize_rebuild`` writes the same file, and the fake
+    ``finalize_current_store`` — the degrade path's snapshot write — does too.
 
     ``events`` is the earnings-events table the store stub returns. It defaults
     to empty (no calendar, so refresh and finality are skipped); pass
@@ -595,8 +600,14 @@ def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_p
         marker_writes.append("finalize")
         marker_path.write_text("snapshot")
 
+    def fake_finalize_current_store():
+        marker_writes.append("degrade")
+        marker_path.write_text("snapshot")
+
     monkeypatch.setattr("engine.data.rebuild.rebuild", fake_rebuild)
     monkeypatch.setattr("engine.data.rebuild.finalize_rebuild", fake_finalize_rebuild)
+    monkeypatch.setattr("engine.data.rebuild.finalize_current_store",
+                        fake_finalize_current_store)
 
     captured = {}
 
@@ -770,10 +781,13 @@ def test_run_nightly_degrades_when_a_gap_free_finalize_raises(monkeypatch, tmp_p
     assert report is not None, "run_nightly never constructed a report"
     assert report.steps["tiers"]["degraded"] is True
     assert "RuntimeError: disk full" in report.steps["tiers"]["error"]
+    assert "snapshot_error" not in report.steps["tiers"]
     assert any(f.get("kind") == "tiers_degraded" for f in report.flags)
     assert sentinel.touched, "the run proceeded to the scorer"
-    assert marker_writes == []
-    assert not _marker(tmp_path).exists(), "a failed finalize writes no snapshot"
+    assert marker_writes == ["degrade"], \
+        "the degrade path writes exactly one snapshot"
+    assert _marker(tmp_path).exists(), \
+        "the degrade path still writes the deferred refresh snapshot"
 
 
 def test_run_nightly_degrades_when_the_incremental_rebuild_raises(monkeypatch, tmp_path):
@@ -791,10 +805,53 @@ def test_run_nightly_degrades_when_the_incremental_rebuild_raises(monkeypatch, t
     assert report is not None, "run_nightly never constructed a report"
     assert report.steps["tiers"]["degraded"] is True
     assert "RuntimeError: boom" in report.steps["tiers"]["error"]
+    assert "snapshot_error" not in report.steps["tiers"]
     assert any(f.get("kind") == "tiers_degraded" for f in report.flags)
     assert sentinel.touched, "the run proceeded to the scorer"
+    assert marker_writes == ["degrade"], \
+        "the degrade path writes exactly one snapshot"
+    assert _marker(tmp_path).exists(), \
+        "the degrade path still writes the deferred refresh snapshot"
+
+
+def test_run_nightly_survives_a_failing_finalize_current_store(monkeypatch, tmp_path):
+    """A failed degrade-path snapshot write is recorded, not raised.
+
+    The refresh rebuild deferred its snapshot to the tiers step; when the
+    tiers step degrades, ``mark_tiers_degraded`` writes that snapshot. If the
+    write itself fails the run still scores: the failure is recorded as
+    ``steps.tiers.snapshot_error`` (type only) and swallowed.
+    """
+    finalize_calls = []
+    nightly, _calls, captured, marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[RuntimeError("boom")],
+        finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
+    )
+
+    def boom():
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("engine.data.rebuild.finalize_current_store", boom)
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(_Scored):
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=[], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    report = captured.get("report")
+    assert report is not None, "run_nightly never constructed a report"
+    assert report.steps["tiers"]["degraded"] is True
+    assert report.steps["tiers"]["snapshot_error"] == "RuntimeError", \
+        "only the exception type is recorded, no text"
+    assert any(f.get("kind") == "tiers_degraded" for f in report.flags)
+    assert sentinel.touched, "the run still scored despite the failed snapshot write"
     assert marker_writes == []
-    assert not _marker(tmp_path).exists(), "a failed rebuild writes no snapshot"
+    assert not _marker(tmp_path).exists(), "a failed snapshot write leaves no marker"
 
 
 # --------------------------------------------------------------------------

@@ -34,7 +34,8 @@ from engine.data.features import tier4 as tier4_mod
 from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n_securities, n_trades
 from engine.data.rebuild_cache import InputCache
 
-__all__ = ["rebuild", "finalize_rebuild", "RebuildResult", "TABLE_ORDER"]
+__all__ = ["rebuild", "finalize_rebuild", "finalize_current_store", "RebuildResult",
+           "TABLE_ORDER"]
 
 #: ``daily_market`` before ``securities`` (which is derived from it) and before
 #: the panel (which joins it).
@@ -535,6 +536,17 @@ def finalize_rebuild(result: RebuildResult) -> RebuildResult:
     result.elapsed_s = time.time() - result.started
     print(f"\nrebuild complete in {result.elapsed_s:.0f}s", flush=True)
     return result
+
+
+def finalize_current_store() -> RebuildResult:
+    """Write the manifest and SNAPSHOT for the store as it stands now.
+
+    Used by the nightly when the tiers step degrades after the refresh rebuild
+    was deferred: the refresh rebuild was told ``finalize=False`` because the
+    tiers step would finalize, and a degraded tiers step still scores against
+    the refreshed store, so its snapshot is written here.
+    """
+    return finalize_rebuild(RebuildResult(started=time.time()))
 
 
 def main(argv: list[str] | None = None) -> int:

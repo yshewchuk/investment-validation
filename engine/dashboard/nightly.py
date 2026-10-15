@@ -52,7 +52,7 @@ from engine.score import LADDER_STEP
 __all__ = [
     "NightlyStop", "NightlyReport", "run_nightly", "refresh_calendar_data",
     "repair_tier4_gap", "repair_tier4_gap_if_needed",
-    "single_run_lock",
+    "single_run_lock", "mark_tiers_degraded",
     "strike_ladder", "validate_refresh",
 ]
 
@@ -832,7 +832,7 @@ def repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
     }
 
 
-def _tiers_degraded(report: NightlyReport, exc: Exception) -> None:
+def mark_tiers_degraded(report: NightlyReport, exc: Exception) -> None:
     """Degrade the tiers step and append the ``tiers_degraded`` flag.
 
     The single definition of what "the tiers step degraded" means: a rebuild
@@ -841,13 +841,18 @@ def _tiers_degraded(report: NightlyReport, exc: Exception) -> None:
     dark. Called from run_nightly's rebuild handler and from the gap-free
     finalize path of :func:`repair_tier4_gap_if_needed`.
 
+    A degraded tiers step still scores against the refreshed store, so the
+    refresh rebuild's deferred snapshot is written here (the scorer reads the
+    SNAPSHOT digest). A failure to write it is recorded as
+    ``steps["tiers"]["snapshot_error"]`` and swallowed: the board stays up.
+
     The exception text reaches the published bundle, so it is scrubbed of any
-    absolute local path with ``model_evidence._sanitize_reason`` before either
+    absolute local path with ``model_evidence.sanitize_reason`` before either
     field is built.
     """
-    from engine.dashboard.model_evidence import _sanitize_reason
+    from engine.dashboard.model_evidence import sanitize_reason
 
-    reason = _sanitize_reason(str(exc))
+    reason = sanitize_reason(str(exc))
     report.steps["tiers"] = {"degraded": True,
                              "error": f"{type(exc).__name__}: {reason}"[:300]}
     report.flags.append({
@@ -855,6 +860,12 @@ def _tiers_degraded(report: NightlyReport, exc: Exception) -> None:
         "detail": ("Tier 3/Tier 4 not rebuilt — scoring from the stored panel and "
                    f"forecasts, which may not cover recent prints. {type(exc).__name__}: {reason}")[:300],
     })
+    from engine.data.rebuild import finalize_current_store
+
+    try:
+        finalize_current_store()
+    except Exception as snap_exc:
+        report.steps["tiers"]["snapshot_error"] = f"{type(snap_exc).__name__}"
 
 
 def repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
@@ -879,7 +890,7 @@ def repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
         try:
             finalize(tier_result)
         except Exception as exc:
-            _tiers_degraded(report, exc)
+            mark_tiers_degraded(report, exc)
 
 
 def _panel_staleness_flags(as_of) -> list[dict]:
@@ -1351,8 +1362,10 @@ def run_nightly(
         from engine.data.throttle import QuotaExhausted
 
         try:
-            # When the tiers step will run, its own finalize_rebuild writes the
-            # one snapshot after the Tier-4 gap check; when tiers is off, the
+            # The snapshot is deferred to the tiers step: its own
+            # finalize_rebuild writes the one snapshot after the Tier-4 gap
+            # check — or mark_tiers_degraded writes it when the tiers step
+            # degrades. When tiers is off there is no later finalize, so the
             # refresh rebuild finalizes as before. So defer here exactly when a
             # later step will finalize.
             report.steps["refresh"] = refresh_calendar_data(
@@ -1522,10 +1535,10 @@ def run_nightly(
             # (tier4_gap_partial), not a silent pass. The repair runs after
             # this try/except, so the result is kept for it.
         except Exception as exc:
-            # _tiers_degraded is the one definition of the degrade path: the
+            # mark_tiers_degraded is the one definition of the degrade path: the
             # "kind": "tiers_degraded" literal lives there (not here); it also
             # writes report.steps["tiers"].
-            _tiers_degraded(report, exc)
+            mark_tiers_degraded(report, exc)
 
         # A typed TIER4_* stop from the repair propagates (it is not the
         # "degraded" path above), so the run fails before score or import.

@@ -15,6 +15,7 @@ import contextlib
 import hashlib
 import json
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,18 +36,23 @@ def _panel_digest() -> str | None:
 
 
 def _write_text_atomic(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically via a sibling temp file.
+    """Write ``text`` to ``path`` atomically via a unique sibling temp file.
 
     A reader must never observe a half-written SNAPSHOT or MANIFEST — the
     native import reads the former directly — so the content lands in a
-    sibling temp file first and is swapped in with ``os.replace`` (atomic on
-    the same filesystem). A failed write removes the temp file and leaves the
-    previous content untouched. Same technique as
+    uniquely named sibling temp file first (``tempfile.mkstemp`` in the same
+    directory, so ``os.replace`` stays atomic on one filesystem) and is
+    swapped in with ``os.replace``. A failed write removes the temp file and
+    leaves the previous content untouched. The unique name keeps two writers
+    from clobbering each other's temp file. Same technique as
     ``engine/dashboard/nightly.py::_write_report_atomic``.
     """
-    tmp = path.with_name(path.name + ".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".",
+                                    suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
-        tmp.write_text(text)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):

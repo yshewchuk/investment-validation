@@ -149,8 +149,8 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`, ~17-24 min); `steps.tiers.tier4_repair` records it, no gap flag |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no session for the night (`not_yet`) |
   | Run stops between refresh and tiers (red validation, as-of finality stop) | Store refreshed, no new SNAPSHOT; the previous SNAPSHOT is kept |
-  | Tier-3/4 rebuild raises | `tiers_degraded` (error text sanitised); the run continues; no new SNAPSHOT |
-  | No gap, finalize fails | `tiers_degraded` (as any rebuild failure); no new SNAPSHOT |
+  | Tier-3/4 rebuild raises | `tiers_degraded` (error text sanitised); the run continues and scores the refreshed store, whose SNAPSHOT is written at the degrade (a failure to write it sets `steps.tiers.snapshot_error`, type only) so the scorer's digest describes the store scored |
+  | No gap, finalize fails | `tiers_degraded` as above |
   | Repaired, or no gap | SNAPSHOT written once |
 
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
