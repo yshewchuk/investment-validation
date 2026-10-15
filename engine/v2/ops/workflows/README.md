@@ -25,9 +25,12 @@ peer above it.
 `commands` exposes module-private services used across modules by name
 (`_plan_command`, `_submit_command`, `_submit_nightly`, `_ticker_list`,
 `_read_input_manifest_ref`, `_check_nightly_manifest`, `_snapshot_inputs`,
-`_primary_runner_bindings`); there is no re-export. `read_bounded_json(path, max_bytes)` is the bounded, no-follow regular-file JSON reader used by `ops plan --expected-population` and by `nightly_trigger` (with `MAX_EXPECTED_POPULATION_BYTES`).
+`_primary_runner_bindings`); there is no re-export. Its public helpers are the
+bounded, no-follow regular-file readers `read_bounded_json(path, max_bytes)` and
+`read_bounded_bytes(path, max_bytes)`, used by `ops plan --expected-population`
+and by `nightly_trigger` (with `MAX_EXPECTED_POPULATION_BYTES`).
 
-<!-- public-interface: _plan_command, _submit_command -->
+<!-- public-interface: _plan_command, _submit_command, read_bounded_json, read_bounded_bytes -->
 
 ## Consumers
 

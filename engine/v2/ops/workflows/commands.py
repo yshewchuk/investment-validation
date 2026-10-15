@@ -27,12 +27,13 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit, submit_graph
 
 MAX_EXPECTED_POPULATION_BYTES = 16 * 1024 * 1024
+MAX_INPUT_MANIFEST_BYTES = 64 * 1024 * 1024
 
 
-def read_bounded_json(path, max_bytes):
-    """Read at most ``max_bytes`` from a regular, non-symlink file and parse it.
+def read_bounded_bytes(path, max_bytes):
+    """Read at most ``max_bytes`` from a regular, non-symlink file.
 
-    Raises ``OSError``/``ValueError``/``RecursionError`` unchanged, and
+    Raises ``OSError``/``ValueError`` unchanged, and
     ``ValueError("not a bounded regular file")`` for a non-regular or oversize
     file (a symlink raises ``OSError`` from ``O_NOFOLLOW``).
     """
@@ -53,10 +54,15 @@ def read_bounded_json(path, max_bytes):
         data = b"".join(chunks)
         if len(data) > max_bytes:
             raise ValueError("not a bounded regular file")
-        return json.loads(data)
+        return data
     finally:
         if fd is not None:
             os.close(fd)
+
+
+def read_bounded_json(path, max_bytes):
+    """Read at most ``max_bytes`` from a regular, non-symlink file and parse it."""
+    return json.loads(read_bounded_bytes(path, max_bytes))
 
 
 def _check_nightly_manifest(raw_bytes: bytes) -> None:
@@ -101,9 +107,10 @@ def _check_submitted_nightly_manifest(plan, conn, store):
 def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
     if not args.input_manifest:
         return None
-    if not args.input_manifest.is_file() or args.input_manifest.is_symlink():
-        raise fail("INPUT_CHANGED", "input manifest is missing")
-    raw_bytes = args.input_manifest.read_bytes()
+    try:
+        raw_bytes = read_bounded_bytes(args.input_manifest, MAX_INPUT_MANIFEST_BYTES)
+    except (OSError, ValueError):
+        raise fail("INPUT_CHANGED", "input manifest is missing") from None
     if nightly:
         _check_nightly_manifest(raw_bytes)
     manifest = ArtifactStore(root).publish_bytes(

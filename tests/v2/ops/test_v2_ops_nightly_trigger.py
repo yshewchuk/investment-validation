@@ -1832,6 +1832,7 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     "[]",                  # an empty list yields no ticker
     "not json",            # an unreadable document is not a list
     json.dumps({"a": 1}),  # a non-list document yields no ticker
+    "[1, 2]",              # a list of non-strings yields no ticker
 ])
 def test_prepare_default_plan_refuses_an_override_that_yields_no_tickers(
         tmp_path, monkeypatch, payload):
