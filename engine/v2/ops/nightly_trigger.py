@@ -41,7 +41,6 @@ import argparse
 import fcntl
 import json
 import os
-import stat
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from datetime import time as clock_time
@@ -654,29 +653,11 @@ def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, pla
 def _read_document(path: Path | None):
     if path is None:
         return None
-    fd = None
+    from engine.v2.ops.workflows.commands import read_bounded_json
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_POPULATION_BYTES:
-            return None
-        chunks = []
-        remaining = _MAX_POPULATION_BYTES + 1
-        while remaining > 0:
-            chunk = os.read(fd, min(65536, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-        if len(data) > _MAX_POPULATION_BYTES:
-            return None
-        return json.loads(data)
+        return read_bounded_json(path, _MAX_POPULATION_BYTES)
     except (OSError, ValueError, RecursionError):
         return None
-    finally:
-        if fd is not None:
-            os.close(fd)
 
 
 def _qualification_location(root: Path, name: str) -> Path:
@@ -938,7 +919,7 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     else:
         population_path = None
         population_keys = expected_population
-    universe = (tuple(tickers) or population_keys
+    universe = (tuple(tickers) or _tickers_from_keys(population_keys)
                 or _population_tickers(population_path))
     context = tuple(context_tickers) or universe
     year_start, year_end = _derive_years(as_of)

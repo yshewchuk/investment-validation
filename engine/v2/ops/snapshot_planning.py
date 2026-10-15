@@ -145,16 +145,20 @@ def _resolve_scope_snapshot(conn, store, scope, *, clock, expected_snapshot_id=N
     ``expected_snapshot_id`` is given and differs, so both callers pin the plan to one snapshot.
     """
     head = resolve_snapshot_head(conn, store, scope, clock=clock)
-    try:
-        document = json.loads(store.read_verified(head))
-        snapshot = from_document(SnapshotRef, document)
-    except (ArtifactError, DocumentError, ValueError) as exc:
-        raise fail("INPUT_CHANGED", "the shadow snapshot head artifact cannot be read",
-                   details={"artifact_error": type(exc).__name__}) from None
+    snapshot = _load_snapshot_ref(store, head)
     if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
         raise fail("INPUT_CHANGED",
                    "the shadow snapshot head moved since it was verified for this session")
     return snapshot
+
+
+def _load_snapshot_ref(store, head):
+    try:
+        document = json.loads(store.read_verified(head))
+        return from_document(SnapshotRef, document)
+    except (ArtifactError, DocumentError, ValueError) as exc:
+        raise fail("INPUT_CHANGED", "the shadow snapshot head artifact cannot be read",
+                   details={"artifact_error": type(exc).__name__}) from None
 
 
 def snapshot_event_tickers(conn, store, scope, *, as_of, clock,
@@ -272,7 +276,7 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
                    "direct scope tickers are not covered by the evidence scope tickers")
     try:
         head = resolve_snapshot_head(conn, store, scope, clock=clock)
-        snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
+        snapshot = _load_snapshot_ref(store, head)
         if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
             raise fail("INPUT_CHANGED",
                        "the shadow snapshot head moved since it was verified for this session")

@@ -1718,7 +1718,7 @@ def test_prepare_default_plan_uses_the_snapshot_event_tickers_when_the_override_
     # and _default_plan. Both stubs assert the incoming pin ("snap_before") and the
     # plan's as_of. IN_WINDOW's calendar date (2026-09-26) differs from AS_OF
     # (2026-09-25), so a clock-derived date could never satisfy those asserts by luck.
-    # The ticker-level finality check runs once over that snapshot-derived universe.
+    # The day-level finality check runs once over that snapshot-derived universe.
     events, refreshed = ("AAA", "BBB"), "snap_after_refresh"
     probe_calls = []
 
@@ -1767,7 +1767,7 @@ def test_prepare_default_plan_keeps_the_callers_context_when_the_universe_is_the
     # No population file and no explicit --tickers: the universe is the snapshot's own
     # event tickers, but a supplied context is PRESERVED -- the snapshot's tickers never
     # overwrite it, and _default_plan gets the two distinct tuples unchanged. The
-    # ticker-level finality check runs once over the snapshot-derived universe, never
+    # day-level finality check runs once over the snapshot-derived universe, never
     # over the caller's context.
     probe_calls = []
 
@@ -1812,7 +1812,7 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     # The override file is PRESENT, so it wins unchanged: snapshot_event_tickers
     # is never consulted (a hard _explode proves it), and the existing
     # refresh + _default_plan path continues with the file's own tickers. The
-    # ticker-level finality check is not run on this branch either.
+    # day-level finality check is not run on this branch either.
     override_path = _write_population(
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
@@ -1945,7 +1945,7 @@ def test_prepare_default_plan_propagates_the_absent_override_snapshot_refusal(
 
 def test_prepare_default_plan_raises_source_not_final_when_the_probe_refuses_the_universe(
         tmp_path, monkeypatch):
-    # Absent override: the snapshot-derived universe gets the ticker-level finality
+    # Absent override: the snapshot-derived universe gets the day-level finality
     # check; a non-final probe verdict refuses SOURCE_NOT_FINAL before the price
     # refresh or the plan build ever run.
     def fake_snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id):
@@ -1970,7 +1970,7 @@ def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(
                                                                                 monkeypatch):
     # An explicit --tickers selection (and its own context) still wins over both
     # the override file and snapshot generation, and the snapshot universe
-    # helper is never consulted in that case either -- nor is the ticker-level
+    # helper is never consulted in that case either -- nor is the day-level
     # finality probe.
     population_path = _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
@@ -1997,7 +1997,7 @@ def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(
 
 
 # --------------------------------------------------------------------------
-# 20. SOURCE_NOT_FINAL: the ticker-level finality refusal recorded as
+# 20. SOURCE_NOT_FINAL: the day-level finality refusal recorded as
 # not_yet / snapshot_not_yet, never a setup error, never a submit
 # --------------------------------------------------------------------------
 
@@ -2239,7 +2239,7 @@ def test_read_document_rejects_a_padded_valid_list_by_the_post_read_cap(tmp_path
     from types import SimpleNamespace
 
     path = tmp_path / "padded.json"
-    path.write_text('["AAA|X|2026-09-25"]' + " " * 50)
+    path.write_text("[1,2]" + " " * 50)
     monkeypatch.setattr(nightly_trigger, "_MAX_POPULATION_BYTES", 8)
     # Control: the real fstat sees a size over the cap, so the fstat guard
     # alone refuses the document before any bytes are read.
@@ -2252,8 +2252,9 @@ def test_read_document_rejects_a_padded_valid_list_by_the_post_read_cap(tmp_path
         return SimpleNamespace(st_mode=st.st_mode, st_size=1)
 
     monkeypatch.setattr(nightly_trigger.os, "fstat", fstat_wrapper)
-    # The fstat guard now passes (st_size=1 <= 8), so only the post-read cap
-    # can refuse this still-valid JSON list padded past the cap.
+    # The fstat guard now passes (st_size=1 <= 8) and the first cap+1 bytes
+    # ('[1,2]' plus padding) parse as JSON, so only the post-read cap refuses.
+    assert json.loads(path.read_bytes()[:9]) == [1, 2]
     assert nightly_trigger._read_document(path) is None
 
 

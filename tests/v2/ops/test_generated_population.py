@@ -214,6 +214,25 @@ def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(mo
     assert raised.value.problem.details["artifact_error"] == "ArtifactError"
 
 
+def test_pin_snapshot_inputs_maps_an_unreadable_head_artifact_to_input_changed(monkeypatch):
+    from engine.v2.foundation import ArtifactError
+
+    monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: "head")
+
+    class _Store:
+        def read_verified(self, head):
+            raise ArtifactError("ARTIFACT_MISSING", "gone")
+
+    with pytest.raises(OpsError) as raised:
+        planning.pin_snapshot_inputs(object(), _Store(), "shadow", tickers=("AAA",),
+                                     year_start=2026, year_end=2027,
+                                     expected_population=("AAA|STR-THRU|2026-12-20",),
+                                     session="2026-12-18", clock=object())
+
+    assert raised.value.code == "INPUT_CHANGED"
+    assert raised.value.problem.details["artifact_error"] == "ArtifactError"
+
+
 def test_no_planned_tickers_is_refused(env):
     with pytest.raises(OpsError) as raised:
         _generate(env, tickers=())
@@ -396,8 +415,25 @@ def test_a_symlinked_or_malformed_override_keeps_its_refusals(env, monkeypatch):
     with pytest.raises(OpsError) as malformed:
         _plan(env, monkeypatch, "--expected-population", str(bad))
 
-    assert symlinked.value.code == "INPUT_CHANGED"
+    assert symlinked.value.code == "INVALID_REQUEST"
     assert malformed.value.code == "INVALID_REQUEST"
+
+
+def test_an_oversize_or_non_json_override_is_invalid_request(env, monkeypatch):
+    big = env[3] / "big.json"
+    big.write_text(json.dumps(["AAA|STR-THRU|2026-12-20"]))
+    junk = env[3] / "junk.json"
+    junk.write_text("not json")
+
+    with monkeypatch.context() as cap:  # only the big file is capped; junk sees the real limit
+        cap.setattr(commands, "_MAX_EXPECTED_POPULATION_BYTES", 8)
+        with pytest.raises(OpsError) as oversize:
+            _plan(env, monkeypatch, "--expected-population", str(big))
+    with pytest.raises(OpsError) as unparsable:
+        _plan(env, monkeypatch, "--expected-population", str(junk))
+
+    assert oversize.value.code == "INVALID_REQUEST"
+    assert unparsable.value.code == "INVALID_REQUEST"
 
 
 def test_a_supplied_empty_list_is_refused_by_the_pin_and_blocks_a_legacy_plan(env, monkeypatch):

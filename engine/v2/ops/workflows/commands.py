@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,6 +25,38 @@ from engine.v2.ops.nightly import (
 from engine.v2.ops.plans import nightly_plan, request_from_plan, save_plan
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit, submit_graph
+
+_MAX_EXPECTED_POPULATION_BYTES = 16 * 1024 * 1024
+
+
+def read_bounded_json(path, max_bytes):
+    """Read at most ``max_bytes`` from a regular, non-symlink file and parse it.
+
+    Raises ``OSError``/``ValueError``/``RecursionError`` unchanged, and
+    ``ValueError("not a bounded regular file")`` for a non-regular or oversize
+    file (a symlink raises ``OSError`` from ``O_NOFOLLOW``).
+    """
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+            raise ValueError("not a bounded regular file")
+        chunks = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > max_bytes:
+            raise ValueError("not a bounded regular file")
+        return json.loads(data)
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _check_nightly_manifest(raw_bytes: bytes) -> None:
@@ -87,9 +120,14 @@ def _read_expected_population(args):
         return tuple(keys)
     if not args.expected_population:
         return ()
-    if not args.expected_population.is_file() or args.expected_population.is_symlink():
-        raise fail("INPUT_CHANGED", "expected population file is missing")
-    payload = json.loads(args.expected_population.read_text())
+    try:
+        payload = read_bounded_json(args.expected_population, _MAX_EXPECTED_POPULATION_BYTES)
+    except FileNotFoundError:
+        raise fail("INPUT_CHANGED", "expected population file is missing") from None
+    except (OSError, ValueError, RecursionError):
+        raise fail("INVALID_REQUEST",
+                   "expected population file is unreadable, a symlink, not a regular file, "
+                   "oversize, or not valid JSON") from None
     if not isinstance(payload, list) or not all(isinstance(v, str) for v in payload):
         raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
     return tuple(payload)
