@@ -77,8 +77,8 @@ Inputs are not mutated.
 | Cache, retry, transaction | No cache or side effects; identical inputs give identical outputs |
 
 This module depends only on pandas, NumPy, and the sibling anchor helper.
-It performs no I/O, training, inference, or legacy import. It has no production
-caller yet; adding this arithmetic alone does not change a nightly or board.
+It performs no I/O, training, inference, or legacy import. `panel_row_inputs`
+calls it; the arithmetic alone does not change a nightly or board.
 
 ## Inputs
 

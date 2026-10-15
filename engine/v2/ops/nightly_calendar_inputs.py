@@ -191,7 +191,8 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
     _require_supported_domains(key)
     session_day = _calendar_day(decision_session, "decision_session")
     rows = (_scan_candidate_rows(repository, snapshot, key, session_day)
-            if chain_rows is None else require_chain_rows(chain_rows, key.ticker, session_day))
+            if chain_rows is None
+            else require_chain_rows(chain_rows, key.ticker, session_day, check_quotes=False))
     calls: dict[str, set[float]] = {}
     puts: dict[str, set[float]] = {}
     for row in rows:
@@ -231,7 +232,7 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
     _calendar_day(key.event_date, "event_date")
     session_day = _calendar_day(decision_session, "decision_session")
     if chain_rows is not None:
-        chain_rows = require_chain_rows(chain_rows, key.ticker, session_day)
+        chain_rows = require_chain_rows(chain_rows, key.ticker, session_day, check_quotes=False)
     series = get_price_series(repository, PriceQuery(
         ticker=key.ticker, session_date=session_day, observation_ceiling=session_day,
         lookback_sessions=0), snapshot)

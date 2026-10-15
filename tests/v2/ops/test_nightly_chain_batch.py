@@ -338,3 +338,16 @@ def test_per_key_quote_scan_refuses_the_same_unusable_fields(tmp_path, change):
     with pytest.raises(DataError) as exc:
         scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY, decision_session=_SESSION)
     assert exc.value.code == "CONTRACT_MISMATCH"
+
+
+def test_bad_quote_is_refused_by_the_quote_reader_only(tmp_path):
+    repository, snapshot = _snap(tmp_path)
+    slices = scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
+    bad = [dict(row, bid="abc") for row in slices["AAA"]]
+    assert scan_candidate_expiries(repository, snapshot, _AAA, decision_session=_SESSION,
+                                   chain_rows=bad) == scan_candidate_expiries(
+        repository, snapshot, _AAA, decision_session=_SESSION)
+    with pytest.raises(DataError) as exc:
+        scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
+                        decision_session=_SESSION, chain_rows=bad)
+    assert exc.value.code == "CONTRACT_MISMATCH"

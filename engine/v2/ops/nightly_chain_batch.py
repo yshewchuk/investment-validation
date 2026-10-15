@@ -50,7 +50,7 @@ def _number_or_missing(value: Any) -> bool:
     return True
 
 
-def _require_usable_fields(row: Mapping[str, Any]) -> None:
+def _require_usable_fields(row: Mapping[str, Any], check_quotes: bool) -> None:
     """The candidate/quote field checks both readers rely on; malformed pinned
     input is ``CONTRACT_MISMATCH`` (the per-key candidate path's own code)."""
     if row["expiry"] is None or row["strike"] is None or row["right"] is None:
@@ -64,14 +64,16 @@ def _require_usable_fields(row: Mapping[str, Any]) -> None:
                         "option chain row has an unconvertible strike") from None
     if not math.isfinite(strike):
         raise data_fail("CONTRACT_MISMATCH", "option chain row has a non-finite strike")
-    if not (_number_or_missing(row["bid"]) and _number_or_missing(row["ask"])):
+    if check_quotes and not (_number_or_missing(row["bid"]) and _number_or_missing(row["ask"])):
         raise data_fail("CONTRACT_MISMATCH", "option chain row has an unconvertible quote")
 
 
 def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,
-                       session_day: str) -> list[Mapping[str, Any]]:
+                       session_day: str, *, check_quotes: bool = True) -> list[Mapping[str, Any]]:
     """A materialised copy of ``rows`` after checking every row is ``ticker``'s
-    at ``session_day``; any other row is ``INVALID_REQUEST`` (never echoed)."""
+    at ``session_day`` and carries every chain column (any other row is
+    ``INVALID_REQUEST``, never echoed) and usable expiry/strike/right fields (and
+    bid/ask when ``check_quotes``; otherwise ``CONTRACT_MISMATCH``)."""
     if isinstance(rows, (str, bytes)) or not isinstance(rows, Iterable):
         raise fail("INVALID_REQUEST", "chain rows must be a collection of rows")
     staged = list(rows)
@@ -80,7 +82,7 @@ def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,
             raise fail("INVALID_REQUEST", "chain rows must carry every chain column")
         if row["ticker"] != ticker or _day(row["obs_date"]) != session_day:
             raise fail("INVALID_REQUEST", "chain rows do not match the key and session")
-        _require_usable_fields(row)
+        _require_usable_fields(row, check_quotes)
     return staged
 
 

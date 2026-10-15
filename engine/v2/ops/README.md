@@ -75,7 +75,8 @@ mutation. Malformed pointer or history data refuses planning with typed
 
 Internal staging API: `nightly_raw_rows.scan_calendar_row` returns
 `CalendarRowInputs` from a pinned earnings event and explicit market context.
-It has no production caller; see the component architecture contract.
+`nightly_calendar_inputs.scan_calendar_row_inputs` calls it; see the
+component architecture contract.
 
 `nightly_quote_rows.scan_quote_rows` is also an internal staging API. It
 returns `QuoteRowInputs` from a pinned `option_chains` snapshot for an exact
