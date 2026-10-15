@@ -16,7 +16,7 @@ leaves no snapshot for the native import to read.
 Every rebuild here is a synthetic fake — no real Tier-3/Tier-4 rebuild runs.
 The orchestration cases drive ``run_nightly`` with every heavy step patched.
 """
-# packages: engine.v2.dashboard, engine.v2.data
+# packages: engine.v2.ops, engine.v2.data
 
 from __future__ import annotations
 
@@ -489,7 +489,7 @@ def test_finalize_writes_manifest_before_snapshot(monkeypatch):
 
     result = rebuild_mod.rebuild(("panel", "tier4"), finalize=False)
 
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="disk full"):
         rebuild_mod.finalize_rebuild(result)
 
     assert writes == [("manifest", {"panel": "hash"})], \
