@@ -56,10 +56,19 @@ features. These candidates are local development benchmarks, not a selected winn
 
 ## Plan a bounded nested search
 
+The shared public annual-fold helper changes producer and runner source hashes.
+Existing artifacts remain intact; new-code execution needs a newly built history
+context and fresh experiment/arm registration. Existing source snapshots are reusable.
+Search preparation requires the fitted registration, not a completed benchmark run.
+
 After preregistering a fitted candidate, use `python -m experiments.v2_magnitude_search
-prepare --spec <anchor-spec> --catalog <existing-catalog> --store-root <existing-store>
+prepare --no-ledger --spec <anchor-spec> --catalog <existing-catalog> --store-root <existing-store>
 --request <request-json>`. The command returns an immutable plan reference, not a run.
 Use `verify` with the same request plus `--plan-ref <reference-json>` to check it again.
+Both actions accept `--no-ledger` as a no-op: planning never writes a ledger.
+JSON syntax uses the standard library. `jsonschema` was considered for shape checks;
+domain validation still needs ordered axes, fit caps, cross-field years and native
+identity checks, so a second schema dependency would duplicate only part of admission.
 
 The request has schema `magnitude_search_request.v1`, `inner_years` mapping every
 outer year to explicit increasing earlier years, `space`, `max_candidates` and

@@ -273,9 +273,9 @@ annual evaluation folds from one admitted snapshot and its pinned calendar.
 same pure request validation to native preregistration and returns a detached
 canonical window; invalid requests refuse `CONTRACT_MISMATCH` without reads.
 
-`magnitude_fold_metadata.annual_fold(year, events)` exposes the same internal annual
-rule for already-admitted event metadata to `experiments.magnitude_search_plan`.
-The wrapper leaves the existing planner and its source identity unchanged.
+`magnitude_folds.annual_fold(year, events)` is the public annual rule shared by
+the native planner and `experiments.magnitude_search_plan` for admitted metadata.
+Promoting this rule changes producer/runner source identities, not fold semantics.
 
 | Shared annual-rule condition | Outcome |
 |---|---|
@@ -558,7 +558,7 @@ Callers: no `engine/` modules import this package (checked by `checks/import_lay
 `load_magnitude_targets` and `qualify_magnitude_training_targets`.
 `experiments/native_registration.py` consumes
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
-`experiments/magnitude_search_plan.py` consumes `magnitude_fold_metadata.annual_fold`.
+`experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`.
 `experiments/magnitude_history_store.py` consumes the stored-history context, build and read APIs.
 Other consumers include `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
 trade, calendar, and chain inputs from pinned v2 data. The archived

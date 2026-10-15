@@ -19,10 +19,11 @@ from engine.v2.ops.native_registration import (
     magnitude_fitted_execution_document,
     validate_magnitude_fitted_execution,
 )
-from engine.v2.research.magnitude_fold_metadata import annual_fold
+from engine.v2.research import magnitude_folds
 from experiments.native_registration import verify_native_registration
 
 SCHEMA = "magnitude_search_plan.v1"
+_HORIZONS = (5, 3, 1)
 _AXES = {"history_ridge": {"alpha"}, "history_hgb": {
     "learning_rate", "max_iter", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"}}
 _INTEGERS = {"max_iter", "max_leaf_nodes", "min_samples_leaf"}
@@ -59,7 +60,7 @@ def _request(request):
         if not 2 <= count <= request["max_candidates"]:
             raise ValueError
         return json.loads(canonical_json(request)), count
-    except (ValueError, TypeError, OverflowError, ArtifactError):
+    except (ValueError, TypeError, OverflowError):
         raise fail("INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps") from None
 
 
@@ -79,7 +80,7 @@ def _nested(binding, request):
     """Preserve annual event groups; inner scoring labels must predate outer fitting."""
     temporal = binding["magnitude_plan"]
     try:
-        expected = [annual_fold(year, temporal["events"]) for year in temporal["evaluation_years"]]
+        expected = [magnitude_folds.annual_fold(year, temporal["events"]) for year in temporal["evaluation_years"]]
         if expected != temporal["folds"]:
             raise ValueError
     except (DataError, ValueError):
@@ -91,7 +92,7 @@ def _nested(binding, request):
         for outer in expected:
             members = set(outer["training_candidate_event_ids"])
             population = [event for event in temporal["events"] if event["event_id"] in members]
-            inner = [{**annual_fold(year, population), "evaluation_labels_before": outer["training_labels_before"]}
+            inner = [{**magnitude_folds.annual_fold(year, population), "evaluation_labels_before": outer["training_labels_before"]}
                      for year in request["inner_years"][outer["year"]]]
             nested.append({"outer": outer, "inner": inner})
     except DataError:
@@ -132,14 +133,14 @@ def _prepare(conn, store, registration, request):
     binding = registration.document
     validate_magnitude_fitted_execution(binding)
     nested = _nested(binding, request)
-    fits = 3 * (count * sum(len(fold["inner"]) for fold in nested) + len(nested))
+    fits = len(_HORIZONS) * (count * sum(len(fold["inner"]) for fold in nested) + len(nested))
     if fits > request["max_fits"]:
         raise fail("INVALID_EXPERIMENT_SPEC", "planned search fits exceed the explicit cap")
     identity = {"schema_version": SCHEMA, "request": request,
         "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id,
             "registration_ref": to_document(artifact_reference(registration.binding_json, binding["schema_version"]))},
         "implementation": _implementation(binding), "candidates": _candidates(binding, request),
-        "folds": nested, "horizons": [5, 3, 1], "candidate_count": count, "planned_fit_count": fits,
+        "folds": nested, "horizons": list(_HORIZONS), "candidate_count": count, "planned_fit_count": fits,
         "selection": {"primary_metric": "inner_event_horizon_pooled_rmse", "secondary_metrics": ["mae"],
             "tie_break": "candidate_id_ascending", "cohort": "shared_qualified_labels_across_candidates",
             "training_labels": "strictly_before_inner_fit", "validation_labels": "complete_before_outer_fit",
@@ -170,11 +171,9 @@ def read_search_plan(conn, store, registration, request, ref):
     if ref != artifact_reference(payload, SCHEMA):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
     try:
-        raw = store.read_verified(ref)
+        store.read_verified(ref)
     except ArtifactError as error:
         raise _artifact_failure(error) from None
-    if raw != payload:
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan differs from its complete binding")
     return expected
 
 

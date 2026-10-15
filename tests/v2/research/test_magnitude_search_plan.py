@@ -1,5 +1,6 @@
 """Native metadata-only search sealing with independent folds, grids and refusals."""
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -28,7 +29,7 @@ from engine.v2.ops.native_registration import (
     validate_magnitude_history_execution,
 )
 from engine.v2.research import magnitude_folds
-from engine.v2.research.magnitude_fold_metadata import annual_fold
+from engine.v2.research.magnitude_folds import annual_fold
 from experiments import magnitude_search_plan as search
 from experiments import native_registration as native
 from experiments import v2_magnitude_search as cli
@@ -163,12 +164,12 @@ def _assert_candidates(plan):
     assert plan["candidate_count"] == 6 and plan["planned_fit_count"] == 60
 
 
-def test_public_fold_rule_is_shared_with_native_planning_without_changing_pinned_sources(source, monkeypatch):
-    original, calls = magnitude_folds._fold, []
+def test_public_fold_rule_is_shared_with_native_planning_and_all_source_bindings(source, monkeypatch):
+    original, calls = magnitude_folds.annual_fold, []
     def traced(year, events):
         calls.append(year)
         return original(year, events)
-    monkeypatch.setattr(magnitude_folds, "_fold", traced)
+    monkeypatch.setattr(magnitude_folds, "annual_fold", traced)
     native_plan = magnitude_folds.plan_magnitude_folds(source.repository, source.snapshot,
         as_of_month=MONTH, evaluation_years=["2024", "2025"], training_start="2022-01-01")
     assert native_plan["folds"] == [fold["outer"] for fold in _expected_folds(source)]
@@ -177,10 +178,11 @@ def test_public_fold_rule_is_shared_with_native_planning_without_changing_pinned
     plan = search.seal_search_plan(source.conn, source.store, source.registration, _request())["plan"]
     _assert_folds(source, plan)
     assert calls == ["2024", "2025", "2024", "2025", "2023", "2023", "2024"]
-    public = "engine/v2/research/magnitude_fold_metadata.py"
-    assert public in plan["implementation"]["source_closure"]
-    assert public not in source.registration.document["source_closure"]
-    assert public not in source.build["context"]["producer"]["source_closure"]
+    public = "engine/v2/research/magnitude_folds.py"
+    digest = "sha256:" + hashlib.sha256((ROOT / public).read_bytes()).hexdigest()
+    assert plan["implementation"]["source_closure"][public] == digest
+    assert source.registration.document["source_closure"][public] == digest
+    assert source.build["context"]["producer"]["source_closure"][public] == digest
 
 
 def test_public_fold_rule_preserves_input_order_with_independent_boundary():
@@ -584,7 +586,7 @@ def test_rehashed_plan_drift_refuses_complete_reconstruction(source, field):
     assert (_catalog(source.conn), _objects(source.store)) == before
 
 
-@pytest.mark.parametrize("drift", ["anchor_source", "planner_source", "environment"])
+@pytest.mark.parametrize("drift", ["anchor_source", "fold_source", "planner_source", "environment"])
 def test_installed_identity_drift_refuses_without_publication(source, monkeypatch, drift):
     sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
     if drift == "environment":
@@ -593,7 +595,8 @@ def test_installed_identity_drift_refuses_without_publication(source, monkeypatc
         original = search.source_closure
         def closure(*args):
             sources = original(*args)
-            path = "experiments/v2_prediction.py" if drift == "anchor_source" else "experiments/magnitude_search_plan.py"
+            path = {"anchor_source": "experiments/v2_prediction.py", "fold_source":
+                    "engine/v2/research/magnitude_folds.py", "planner_source": "experiments/magnitude_search_plan.py"}[drift]
             return {**sources, path: "sha256:" + "0" * 64}
         monkeypatch.setattr(search, "source_closure", closure)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
@@ -605,14 +608,14 @@ def test_installed_identity_drift_refuses_without_publication(source, monkeypatc
     assert to_document(caught.value.problem) == _problem("EXPERIMENT_IDENTITY_CONFLICT", message)
 
 
-@pytest.mark.parametrize("drift", ["anchor_source", "environment"])
+@pytest.mark.parametrize("drift", ["anchor_source", "fold_source", "environment"])
 def test_prepare_rejects_installed_anchor_drift_before_publication(source, monkeypatch, drift):
     _metadata_only(monkeypatch, source)
     before = _catalog(source.conn), _objects(source.store)
     if drift == "environment":
         monkeypatch.setattr(search, "environment_identity", lambda _: {"changed": True})
     else:
-        path = "experiments/v2_prediction.py"
+        path = "engine/v2/research/magnitude_folds.py" if drift == "fold_source" else "experiments/v2_prediction.py"
         assert path in source.registration.document["source_closure"]
         original = search.source_closure
         def closure(*args):
@@ -829,6 +832,12 @@ def test_real_cli_prepare_verify_preserves_catalog_and_no_trial_state(source, tm
     assert _catalog(source.conn) == before
     assert _objects(source.store) == after_prepare
     assert {str(path.relative_to(source.store.root)) for path in source.store.root.rglob("*") if path.is_file()} == paths_after
+    assert cli.main([*_args(source, "prepare", request), "--no-ledger"]) == 0
+    assert json.loads(capsys.readouterr().out) == output
+    assert cli.main([*_args(source, "verify", request, reference), "--no-ledger"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"verified": output["plan_id"]}
+    assert _catalog(source.conn) == before and _objects(source.store) == after_prepare
+    assert {str(path.relative_to(source.store.root)) for path in source.store.root.rglob("*") if path.is_file()} == paths_after
 
 
 @pytest.mark.parametrize("action,options,diagnostic", [
@@ -865,7 +874,6 @@ def test_cli_forwards_exact_typed_refusal_and_closes_catalog(source, tmp_path, m
     assert cli.main(_args(source, "prepare", request)) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "independent synthetic refusal", details={"marker": "native"})}
-    import sqlite3
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         connections[0].execute("SELECT 1")
 
@@ -924,7 +932,7 @@ def test_cli_bounds_each_external_document_before_catalog(
         source, tmp_path, monkeypatch, capsys, option, kind, message):
     request, reference, bad = (tmp_path / name for name in ("request", "reference", "bad"))
     request.write_text(json.dumps(_request()))
-    reference.write_text("{}")
+    reference.write_text(json.dumps(to_document(artifact_reference(b"unused", search.SCHEMA))))
     if kind == "directory":
         bad.mkdir()
     elif kind == "symlink":
@@ -1019,7 +1027,7 @@ def test_bounded_reader_keeps_opened_descriptor_across_path_replacement(tmp_path
 
 
 @pytest.mark.parametrize("stage", ["connect", "read_native_registration", "seal_search_plan"])
-@pytest.mark.parametrize("error_type", [KeyError, TypeError, ValueError])
+@pytest.mark.parametrize("error_type", [KeyError, TypeError, ValueError, RecursionError])
 def test_cli_does_not_misclassify_unexpected_builtins(source, tmp_path, monkeypatch, capsys, stage, error_type):
     request = tmp_path / "request"
     request.write_text(json.dumps(_request()))
@@ -1043,12 +1051,16 @@ def test_cli_does_not_misclassify_unexpected_builtins(source, tmp_path, monkeypa
             conn.execute("SELECT 1")
 
 
-@pytest.mark.parametrize("kind", ["ref_shape", "spec_input_files", "huge_integer"])
+@pytest.mark.parametrize("kind", ["ref_shape", "spec_input_files", "huge_integer", "deep_json"])
 def test_cli_typed_input_conversions_still_refuse_before_catalog(source, tmp_path, monkeypatch, capsys, kind):
     request, reference = tmp_path / "request", tmp_path / "reference"
     request.write_text("9" * 5000 if kind == "huge_integer" else json.dumps(_request()))
+    if kind == "deep_json":
+        request.write_text("[" * 100_000 + "0" + "]" * 100_000)
+        with pytest.raises(RecursionError):
+            json.loads(request.read_text())
     reference.write_text("{}")
-    args = _args(source, "verify", request, reference)
+    args = _args(source, "verify", request, reference) if kind == "ref_shape" else _args(source, "prepare", request)
     if kind == "spec_input_files":
         spec = json.loads(source.spec_path.read_text())
         spec["input_files"] = None
@@ -1059,6 +1071,49 @@ def test_cli_typed_input_conversions_still_refuse_before_catalog(source, tmp_pat
     assert cli.main(args) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": _problem(
         "INVALID_EXPERIMENT_SPEC", "search planning request could not be completed")}
+
+
+def test_cli_unopenable_socket_is_resource_failure_before_catalog(source, tmp_path, monkeypatch, capsys):
+    path = tmp_path / "sock"
+    original = os.open
+    def open_error(candidate, flags, *args, **kwargs):
+        if str(candidate) == str(path):
+            raise OSError(errno.ENXIO, "independent unopenable socket")
+        return original(candidate, flags, *args, **kwargs)
+    monkeypatch.setattr(cli.os, "open", open_error)
+    monkeypatch.setattr(cli, "connect", _forbid)
+    before = _catalog(source.conn), _objects(source.store)
+    assert cli.main(_args(source, "prepare", path)) == 2
+    expected = _problem("RESOURCE_UNAVAILABLE", "search planning request could not be completed")
+    expected.update(category="resource", retryable=True)
+    assert json.loads(capsys.readouterr().out) == {"refused": expected}
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+@pytest.mark.parametrize("kind,code,message,details", [
+    ("missing", "INVALID_REQUEST", "experiment specification is missing a required field", {"field": "hypothesis"}),
+    ("shape", "INVALID_EXPERIMENT_SPEC", "arms and folds must be JSON arrays", {"field": "arms", "type": "str"}),
+    ("unknown", "INVALID_EXPERIMENT_SPEC", "experiment specification declares fields this resolver does not know",
+     {"fields": ["unexpected"]}),
+])
+def test_cli_preserves_native_spec_conversion_refusals(
+        source, tmp_path, monkeypatch, capsys, kind, code, message, details):
+    spec = json.loads(source.spec_path.read_text())
+    if kind == "missing":
+        del spec["hypothesis"]
+    elif kind == "shape":
+        spec["arms"] = "invalid"
+    else:
+        spec["unexpected"] = True
+    path = tmp_path / "spec"
+    path.write_text(json.dumps(spec))
+    args = _args(source, "prepare", tmp_path / "never-read-request")
+    args[args.index("--spec") + 1] = str(path)
+    monkeypatch.setattr(cli, "connect", _forbid)
+    before = _catalog(source.conn), _objects(source.store)
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": _problem(code, message, details=details)}
+    assert (_catalog(source.conn), _objects(source.store)) == before
 
 
 def test_bounded_reader_accumulates_short_unbuffered_reads(tmp_path, monkeypatch):

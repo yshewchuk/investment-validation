@@ -375,7 +375,8 @@ def test_environment_only_drift_changes_context_and_refuses_old_feature_snapshot
 
 
 @pytest.mark.parametrize("path", ["engine/v2/features/panel_math.py",
-    "engine/v2/research/magnitude_history_table.py", "engine/v2/foundation/experiment_holdouts.py"])
+    "engine/v2/research/magnitude_history_table.py", "engine/v2/foundation/experiment_holdouts.py",
+    "engine/v2/research/magnitude_folds.py"])
 def test_source_only_drift_changes_context_and_refuses_old_feature_snapshot(source, monkeypatch, path):
     built, output = _build(source)
     original = built["context"]

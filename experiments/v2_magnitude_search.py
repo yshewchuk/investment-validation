@@ -49,7 +49,7 @@ def _read_document(path):
         raise
     try:
         return json.loads(raw.decode("utf-8"))
-    except ValueError:
+    except (ValueError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "search planning request could not be completed") from None
 
 
@@ -61,6 +61,7 @@ def main(argv=None):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--request", required=True)
     parser.add_argument("--plan-ref")
+    parser.add_argument("--no-ledger", action="store_true", help="accepted no-op; planning never writes a ledger")
     args = parser.parse_args(argv)
     if (args.action == "verify") != (args.plan_ref is not None):
         parser.error("verify requires --plan-ref in addition to --request; prepare accepts no --plan-ref")

@@ -200,13 +200,14 @@ metadata boundaries. Standard-library Cartesian enumeration supplies candidate r
 Direct dependencies are `engine.v2.contracts`, `engine.v2.data.errors`, foundation,
 ops and research, plus the native-registration experiment adapter. Planning code identity
 uses this installed repository root; the supplied anchor must match that installation.
-This metadata-only CLI never writes a ledger and needs no `--no-ledger` switch.
+This metadata-only CLI accepts `--no-ledger` as a no-op for runner compatibility;
+both flag states publish/verify the same plan and never write a ledger.
 
 | Condition | Enforced outcome |
 |---|---|
 | Request shape | `magnitude_search_request.v1`: explicit `inner_years`, `space`, `max_candidates`, `max_fits`; Ridge `alpha` and/or HGB `learning_rate`, `max_iter`, `max_leaf_nodes`, `min_samples_leaf`, `l2_regularization` axes. |
 | Valid fitted anchor and closed request | Return detached canonical plan bytes binding request, anchor, installed sources/environment, full recipes/hashes, grouped event/horizon metadata, count limits and recorded selection policy. No estimator construction, fitting, labels, features, repository scans or results. |
-| Missing/extra fields, invalid or unordered axes/years, or candidate count outside the explicit supported cap | Nonretryable `INVALID_EXPERIMENT_SPEC` before artifact access/expansion. Ridge alpha and all five HGB axes are explicit; no inferred knobs. |
+| Missing/extra fields, invalid or unordered axes/years, or candidate count outside 2..`max_candidates` (itself 2..4096) | Nonretryable `INVALID_EXPERIMENT_SPEC` before artifact access/expansion. Ridge alpha and all five HGB axes are explicit; no inferred knobs. |
 | Reconstructed outer metadata differs from the anchor | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; no publication. |
 | Inner-year map omits an outer year or lacks earlier training/evaluation candidates | Nonretryable `INVALID_EXPERIMENT_SPEC`; no fold skipping or publication. |
 | Valid nested metadata | Inner events come only from outer training membership; each event remains grouped across horizons. The shared annual rule defines the conservative fit boundary. Recorded label/selection policies are metadata, not evidence of qualified labels or a selected winner. |
@@ -214,10 +215,10 @@ This metadata-only CLI never writes a ledger and needs no `--no-ledger` switch.
 | Catalog ownership, fitted schema, installed anchor sources or environment differ | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; no publication. |
 | Prepare succeeds or repeats unchanged inputs | Publish/return the same immutable content-addressed plan; no catalog reservation, attempt, ledger or final authority. Existing anchor/producer bytes remain unchanged. |
 | Verify receives a reference differing from complete request reconstruction | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT` before that plan object opens. |
-| Verified bytes fail integrity or complete reconstruction | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; no repair or automatic retry. |
+| Verified bytes fail integrity | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; no repair or automatic retry. |
 | Non-integrity foundation `ArtifactError` at plan publication/read, including a missing plan object | `RESOURCE_UNAVAILABLE` with a sanitized `Problem`; no automatic retry or partial success. |
 | Opened CLI spec/request/plan-ref descriptor is nonregular or exceeds 1 MiB, or opening refuses a leaf symlink | Nonretryable `INVALID_EXPERIMENT_SPEC` before catalog access; bounded descriptor reads reject growth beyond the cap. |
-| CLI typed refusal | Preserve the full `Problem`, return exit 2 and close an opened catalog connection. Filesystem/artifact unavailability maps to `RESOURCE_UNAVAILABLE`; malformed JSON maps to `INVALID_EXPERIMENT_SPEC`. |
+| CLI typed refusal | Preserve the full `Problem` (including native spec conversion), return exit 2 and close an opened catalog connection. Filesystem/artifact unavailability, including an unopenable socket path, maps to `RESOURCE_UNAVAILABLE`; malformed or excessively nested JSON maps to `INVALID_EXPERIMENT_SPEC`. |
 | Unexpected builtin exception from catalog/registration/planning code | Propagate it after closing the catalog; do not misclassify it as malformed user JSON. |
 
 ## Stored research-history entrypoint
