@@ -411,3 +411,42 @@ def test_candidate_expiries_refuse_unusable_rows_on_both_paths(tmp_path, change)
         scan_candidate_expiries(repository, snapshot, _AAA, decision_session=_SESSION,
                                 chain_rows=[row])
     assert batched.value.code == "CONTRACT_MISMATCH"
+
+
+def test_scan_chain_slices_records_rows_returned_step(tmp_path):
+    from engine.v2.ops import worker_progress
+
+    worker_progress.configure(tmp_path)
+    try:
+        repository, snapshot = _snap(tmp_path)
+        slices = scan_chain_slices(repository, snapshot, ["AAA", "BBB"],
+                                   decision_session=_SESSION)
+    finally:
+        worker_progress.reset()
+    records, _ = worker_progress.read_new_records(
+        tmp_path / "diagnostics" / worker_progress.STEPS_FILENAME, 0)
+    ends = [record for record in records
+            if record["event"] == "end" and record["step"] == "option_chains_rows_returned"]
+    assert len(ends) == 1
+    assert ends[0]["units"] == sum(len(rows) for rows in slices.values()) == 7
+
+
+def test_rows_returned_warning_observes_only_at_the_eighty_percent_line(tmp_path, monkeypatch,
+                                                                        caplog):
+    import engine.v2.ops.nightly_chain_batch as batch
+
+    repository, snapshot = _snap(tmp_path)
+    monkeypatch.setattr(batch, "_RESULT_CAP", 7)
+    with caplog.at_level("WARNING", logger=batch.__name__):
+        slices = scan_chain_slices(repository, snapshot, ["AAA", "BBB"],
+                                   decision_session=_SESSION)
+    assert sum(len(rows) for rows in slices.values()) == 7
+    assert [record.getMessage() for record in caplog.records] == [
+        "option_chains read returned 7 of 7 allowed rows"]
+    caplog.clear()
+    (tmp_path / "large").mkdir()
+    repository, snapshot = _snap(tmp_path / "large")
+    monkeypatch.setattr(batch, "_RESULT_CAP", 1_000_000)
+    with caplog.at_level("WARNING", logger=batch.__name__):
+        scan_chain_slices(repository, snapshot, ["AAA", "BBB"], decision_session=_SESSION)
+    assert caplog.records == []
