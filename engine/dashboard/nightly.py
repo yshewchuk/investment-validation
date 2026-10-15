@@ -743,6 +743,32 @@ def _recently_printed(as_of, tickers: Sequence[str]) -> list[str]:
 MAX_PANEL_LAG_SESSIONS = 2
 
 
+def _tier4_gap_distinct_keys(gap_fill: dict) -> tuple[dict, set]:
+    """Split a Tier-4 build's ``gap_fill`` into producers-with-a-gap and keys.
+
+    ``gap_fill`` maps producer name -> report entry; an entry's
+    ``out_of_window_gap`` (when present) is a list of ``{"ticker",
+    "event_date"}`` dicts for keys that producer's build left ABSENT this run
+    (see ``engine.data.features.tier4`` §6a — never a null-forecast row).
+
+    The SAME gap normally shows up in every producer's list (they all read
+    the same on-disk table), so counting event(s) by summing each producer's
+    list length overcounts by a factor of however many producers are wired —
+    a 3-event gap across 4 producers would report as 12. This returns the
+    ``{name: info}`` map of producers that left a gap together with the
+    DISTINCT ``(ticker, event_date)`` keys they name, so every caller counts
+    events the same way.
+    """
+    partial = {name: info for name, info in gap_fill.items()
+               if info.get("out_of_window_gap")}
+    distinct = {
+        (entry["ticker"], entry["event_date"])
+        for info in partial.values()
+        for entry in info["out_of_window_gap"]
+    }
+    return partial, distinct
+
+
 def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
     """The ``tier4_gap_partial`` flag for a Tier-4 build report's ``gap_fill``
     section, or ``None`` if nothing is out-of-window.
@@ -758,15 +784,9 @@ def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
     a 3-event gap across 4 producers would report as 12. Count DISTINCT
     ``(ticker, event_date)`` keys instead.
     """
-    partial = {name: info for name, info in gap_fill.items()
-               if info.get("out_of_window_gap")}
+    partial, distinct = _tier4_gap_distinct_keys(gap_fill)
     if not partial:
         return None
-    distinct = {
-        (entry["ticker"], entry["event_date"])
-        for info in partial.values()
-        for entry in info["out_of_window_gap"]
-    }
     n = len(distinct)
     return {
         "kind": "tier4_gap_partial",
@@ -840,9 +860,14 @@ def repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
              f"over the {TIER4_REPAIR_BUDGET_S}s budget")[:300],
         )
     gap_fill = result.reports.get("tier4", {}).get("gap_fill", {})
-    flag = _tier4_gap_partial_flag(gap_fill)
-    if flag is not None:
-        raise _refuse(report, "tier4_repair", "TIER4_GAP_REMAINS: " + flag["detail"])
+    partial, distinct = _tier4_gap_distinct_keys(gap_fill)
+    if partial:
+        detail = (
+            "TIER4_GAP_REMAINS: the full Tier-4 rebuild ran and still left "
+            f"{len(distinct)} event(s) unfilled (absent from the table) in "
+            f"{sorted(partial)}"
+        )[:300]
+        raise _refuse(report, "tier4_repair", detail)
     try:
         finalized = finalize(result)
     except Exception as exc:

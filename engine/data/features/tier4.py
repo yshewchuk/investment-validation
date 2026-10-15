@@ -956,8 +956,9 @@ def _carried_prefix(
         detail += (
             f"; {len(unfilled):,} event(s) still uncovered beyond the "
             f"{BACKFILL_WINDOW_MONTHS}-month backfill window — left ABSENT from "
-            f"the table (flagged tier4_gap_partial; no --since rebuild covers "
-            f"them, only a full Tier-4 rebuild with no --since closes them): "
+            f"the table (reported in the build's gap_fill; no --since rebuild "
+            f"covers them, only a full Tier-4 rebuild with no --since closes "
+            f"them — the legacy nightly runs that rebuild automatically): "
             f"{list(map(tuple, unfilled[['ticker', 'event_date']].head(10).to_numpy()))}"
         )
     log(detail)

@@ -1275,6 +1275,50 @@ def test_run_nightly_refused_repair_writes_no_snapshot_with_calendar_names(
         "the refusal writes the flag report exactly once"
 
 
+def test_run_nightly_red_validation_keeps_the_previous_snapshot(monkeypatch, tmp_path):
+    """A red validation battery stops before tiers; the previous SNAPSHOT stays.
+
+    The refresh rebuild deferred its snapshot (``finalize=False``, because tiers
+    is on), so a red validation battery — which stops the run before the tiers
+    step — leaves no new SNAPSHOT: neither the deferred refresh nor the tiers
+    step ever writes the marker, and a previous SNAPSHOT is kept unchanged.
+    """
+    finalize_calls = []
+    nightly, _calls, captured, marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[],
+        finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
+        events=_events_stub(["AAA"]),
+    )
+    monkeypatch.setattr(nightly, "refresh_calendar_data", _refresh_recorder([]))
+    monkeypatch.setattr(nightly, "validate_refresh",
+                        lambda *a, **k: [{"name": "daily_freshness", "passed": False,
+                                          "detail": "newest daily row stale"}])
+    sentinel = _ScorerSentinel()
+
+    previous = "PREVIOUS SNAPSHOT"
+    _marker(tmp_path).write_text(previous)
+
+    with pytest.raises(NightlyStop) as caught:
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=["AAA"], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert caught.value.step == "validate"
+    assert "daily_freshness" in caught.value.detail
+    assert not sentinel.touched, "a red battery must never reach the scorer"
+    assert finalize_calls == [], "neither the refresh nor the tiers result finalizes"
+    assert marker_writes == [], "no snapshot write on either path"
+    assert _marker(tmp_path).read_text() == previous, \
+        "the previous SNAPSHOT is kept unchanged"
+    assert captured["report"].stopped == "validate"
+    assert len(captured["flag_reports"]) == 1, \
+        "the refusal writes the flag report exactly once"
+
+
 # --------------------------------------------------------------------------
 # the REAL refresh_calendar_data's finalize plumbing
 # --------------------------------------------------------------------------
