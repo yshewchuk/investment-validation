@@ -1,16 +1,56 @@
 """Prepare or verify a bounded nested magnitude search plan; never execute trials."""
 import argparse
+import errno
 import json
+import os
 import sqlite3
+import stat
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
-from engine.v2.foundation import ArtifactError, ArtifactStore, from_document, to_document
+from engine.v2.foundation import (
+    ArtifactError,
+    ArtifactStore,
+    DocumentError,
+    from_document,
+    to_document,
+)
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments.magnitude_search_plan import read_search_plan, seal_search_plan
 from experiments.native_registration import read_native_registration
+
+MAX_METADATA_BYTES = 1024 * 1024
+
+
+def _read_document(path):
+    """Bound the opened regular file before parsing; never block on a FIFO."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_METADATA_BYTES:
+                raise fail("INVALID_EXPERIMENT_SPEC", "search metadata requires bounded regular files")
+            raw = bytearray()
+            with os.fdopen(descriptor, "rb", buffering=0, closefd=False) as stream:
+                while len(raw) <= MAX_METADATA_BYTES:
+                    chunk = stream.read(MAX_METADATA_BYTES + 1 - len(raw))
+                    if not chunk:
+                        break
+                    raw.extend(chunk)
+            if len(raw) > MAX_METADATA_BYTES:
+                raise fail("INVALID_EXPERIMENT_SPEC", "search metadata exceeds its byte limit")
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise fail("INVALID_EXPERIMENT_SPEC", "search metadata must not follow leaf symlinks") from None
+        raise
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise fail("INVALID_EXPERIMENT_SPEC", "search planning request could not be completed") from None
 
 
 def main(argv=None):
@@ -28,10 +68,17 @@ def main(argv=None):
     try:
         if not Path(args.store_root).is_dir():
             raise fail("RESOURCE_UNAVAILABLE", "search requires an existing artifact store")
-        spec = experiment_spec_from_document(json.loads(Path(args.spec).read_text()))
-        document = json.loads(Path(args.request).read_text())
-        reference = None if args.plan_ref is None else from_document(
-            ArtifactRef, json.loads(Path(args.plan_ref).read_text()))
+        spec_document = _read_document(args.spec)
+        try:
+            spec = experiment_spec_from_document(spec_document)
+        except TypeError:
+            raise fail("INVALID_EXPERIMENT_SPEC", "search planning request could not be completed") from None
+        document = _read_document(args.request)
+        try:
+            reference = None if args.plan_ref is None else from_document(
+                ArtifactRef, _read_document(args.plan_ref))
+        except DocumentError:
+            raise fail("INVALID_EXPERIMENT_SPEC", "search planning request could not be completed") from None
         conn = connect(args.catalog, must_exist=True)
         store = ArtifactStore(args.store_root)
         registration = read_native_registration(conn, store, spec)
@@ -46,9 +93,8 @@ def main(argv=None):
     except OpsError as error:
         print(json.dumps({"refused": to_document(error.problem)}, sort_keys=True))
         return 2
-    except (ArtifactError, OSError, sqlite3.Error, ValueError, TypeError, KeyError) as error:
-        problem = fail("RESOURCE_UNAVAILABLE" if isinstance(error, (ArtifactError, OSError, sqlite3.Error))
-                       else "INVALID_EXPERIMENT_SPEC", "search planning request could not be completed").problem
+    except (ArtifactError, OSError, sqlite3.Error):
+        problem = fail("RESOURCE_UNAVAILABLE", "search planning request could not be completed").problem
         print(json.dumps({"refused": to_document(problem)}, sort_keys=True))
         return 2
     finally:

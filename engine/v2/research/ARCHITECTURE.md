@@ -279,7 +279,7 @@ The wrapper leaves the existing planner and its source identity unchanged.
 
 | Shared annual-rule condition | Outcome |
 |---|---|
-| Admitted event metadata has evaluation events and strictly earlier candidates | Return detached year, conservative fit cutoff and ordered training/evaluation IDs; no I/O or label qualification. |
+| Admitted event metadata has evaluation events and strictly earlier candidates | Return detached year, conservative fit cutoff and training/evaluation IDs in input order; no I/O or label qualification. |
 | No evaluation events or earlier candidates | Preserve the native `POPULATION_COLLAPSED` `DataError`; callers own boundary-specific translation. |
 
 - Exact snapshot and random/rolling/ambiguous-union admission precede calendar

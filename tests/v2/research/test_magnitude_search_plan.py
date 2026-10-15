@@ -2,6 +2,10 @@
 import copy
 import hashlib
 import json
+import os
+import sqlite3
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -177,6 +181,23 @@ def test_public_fold_rule_is_shared_with_native_planning_without_changing_pinned
     assert public in plan["implementation"]["source_closure"]
     assert public not in source.registration.document["source_closure"]
     assert public not in source.build["context"]["producer"]["source_closure"]
+
+
+def test_public_fold_rule_preserves_input_order_with_independent_boundary():
+    events = [{"event_id": event_id, "event_date": day,
+               "forecasts": [] if ceiling is None else [{"source_session_ceiling": ceiling}]}
+              for event_id, day, ceiling in [
+                  ("eval-z", "2024-12-02", "2024-11-25"),
+                  ("train-z", "2023-11-01", None),
+                  ("future", "2025-01-01", None),
+                  ("eval-a", "2024-01-08", "2023-12-28"),
+                  ("boundary", "2023-12-28", None),
+                  ("train-a", "2022-01-01", None)]]
+    result = annual_fold("2024", events)
+    events.clear()
+    assert result == {"year": "2024", "training_labels_before": "2023-12-28",
+                      "training_candidate_event_ids": ["train-z", "train-a"],
+                      "evaluation_event_ids": ["eval-z", "eval-a"]}
 
 
 @pytest.mark.parametrize("events,message", [
@@ -794,15 +815,20 @@ def test_real_cli_prepare_verify_preserves_catalog_and_no_trial_state(source, tm
     request, reference = tmp_path / "request.json", tmp_path / "reference.json"
     request.write_text(json.dumps(_request()))
     before = _catalog(source.conn)
+    paths_before = {str(path.relative_to(source.store.root)) for path in source.store.root.rglob("*") if path.is_file()}
     assert cli.main(_args(source, "prepare", request)) == 0
     output = json.loads(capsys.readouterr().out)
     assert set(output) == {"plan_ref", "plan_id", "candidate_count", "planned_fit_count"}
     assert output["candidate_count"] == 6 and output["planned_fit_count"] == 60
+    after_prepare = _objects(source.store)
+    paths_after = {str(path.relative_to(source.store.root)) for path in source.store.root.rglob("*") if path.is_file()}
+    assert paths_after - paths_before <= {output["plan_ref"]["storage_key"]}
     reference.write_text(json.dumps(output["plan_ref"]))
     assert cli.main(_args(source, "verify", request, reference)) == 0
     assert json.loads(capsys.readouterr().out) == {"verified": output["plan_id"]}
     assert _catalog(source.conn) == before
-    assert not list(tmp_path.rglob("REPORT.md")) and not list(tmp_path.rglob("LEDGER.csv"))
+    assert _objects(source.store) == after_prepare
+    assert {str(path.relative_to(source.store.root)) for path in source.store.root.rglob("*") if path.is_file()} == paths_after
 
 
 @pytest.mark.parametrize("action,options,diagnostic", [
@@ -884,3 +910,189 @@ def test_independent_oracles_reject_hardcoded_grid_and_temporal_leak(source):
     broken["folds"][1]["inner"][1]["evaluation_event_ids"].extend(_ids(source, ("2024-12-27", "2024-12-30")))
     with pytest.raises(AssertionError):
         _assert_folds(source, broken)
+
+
+@pytest.mark.parametrize("option", ["--spec", "--request", "--plan-ref"])
+@pytest.mark.parametrize("kind,message", [
+    ("oversized", "search metadata requires bounded regular files"),
+    ("directory", "search metadata requires bounded regular files"),
+    ("symlink", "search metadata must not follow leaf symlinks"),
+    ("invalid_utf8", "search planning request could not be completed"),
+    ("invalid_json", "search planning request could not be completed"),
+])
+def test_cli_bounds_each_external_document_before_catalog(
+        source, tmp_path, monkeypatch, capsys, option, kind, message):
+    request, reference, bad = (tmp_path / name for name in ("request", "reference", "bad"))
+    request.write_text(json.dumps(_request()))
+    reference.write_text("{}")
+    if kind == "directory":
+        bad.mkdir()
+    elif kind == "symlink":
+        bad.symlink_to(request)
+    else:
+        bad.write_bytes({"oversized": b" " * (1024 * 1024 + 1),
+                         "invalid_utf8": b"\xff", "invalid_json": b"{"}[kind])
+    args = _args(source, "verify", request, reference)
+    args[args.index(option) + 1] = str(bad)
+    monkeypatch.setattr(cli, "connect", _forbid)
+    before = _catalog(source.conn), _objects(source.store)
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": _problem("INVALID_EXPERIMENT_SPEC", message)}
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+def test_cli_fifo_refuses_without_blocking(source, tmp_path):
+    path = tmp_path / "fifo"
+    os.mkfifo(path)
+    before = _catalog(source.conn), _objects(source.store)
+    result = subprocess.run([sys.executable, "-m", "experiments.v2_magnitude_search",
+        *_args(source, "prepare", path)], cwd=ROOT, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 2 and not result.stderr
+    assert json.loads(result.stdout) == {"refused": _problem(
+        "INVALID_EXPERIMENT_SPEC", "search metadata requires bounded regular files")}
+    assert (_catalog(source.conn), _objects(source.store)) == before
+
+
+def test_bounded_reader_accepts_exact_limit_and_closes_descriptor(tmp_path, monkeypatch):
+    path = tmp_path / "metadata"
+    path.write_bytes(b"{}" + b" " * (1024 * 1024 - 2))
+    opened, original = [], os.open
+    def capture(*args):
+        descriptor = original(*args)
+        opened.append(descriptor)
+        return descriptor
+    monkeypatch.setattr(cli.os, "open", capture)
+    assert cli.MAX_METADATA_BYTES == 1024 * 1024
+    assert cli._read_document(path) == {}
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+def test_bounded_reader_checks_growth_overshoot_before_parse_and_closes(tmp_path, monkeypatch):
+    path = tmp_path / "metadata"
+    path.write_bytes(b"{}")
+    original, original_stream, opened, consumed = os.fstat, os.fdopen, [], []
+    def earlier_size(descriptor):
+        opened.append(descriptor)
+        info = original(descriptor)
+        with path.open("ab") as stream:
+            stream.write(b" " * (2 * 1024 * 1024))
+        return info
+    class BoundedStream:
+        def __init__(self, descriptor, mode, **kwargs):
+            assert kwargs == {"buffering": 0, "closefd": False}
+            self.stream = original_stream(descriptor, mode, **kwargs)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.stream.close()
+        def read(self, requested):
+            assert requested == 1024 * 1024 + 1 - sum(consumed)
+            data = self.stream.read(requested)
+            consumed.append(len(data))
+            return data
+    monkeypatch.setattr(cli.os, "fstat", earlier_size)
+    monkeypatch.setattr(cli.os, "fdopen", BoundedStream)
+    monkeypatch.setattr(cli.json, "loads", _forbid)
+    with pytest.raises(OpsError) as caught:
+        cli._read_document(path)
+    assert to_document(caught.value.problem) == _problem(
+        "INVALID_EXPERIMENT_SPEC", "search metadata exceeds its byte limit")
+    assert sum(consumed) == 1024 * 1024 + 1
+    with pytest.raises(OSError):
+        original(opened[0])
+
+
+def test_bounded_reader_keeps_opened_descriptor_across_path_replacement(tmp_path, monkeypatch):
+    path, replacement = tmp_path / "metadata", tmp_path / "replacement"
+    path.write_text('{"opened":1}')
+    replacement.write_text('{"opened":2}')
+    original = os.open
+    def replace_after_open(*args):
+        descriptor = original(*args)
+        replacement.replace(path)
+        return descriptor
+    monkeypatch.setattr(cli.os, "open", replace_after_open)
+    assert cli._read_document(path) == {"opened": 1}
+    assert json.loads(path.read_text()) == {"opened": 2}
+
+
+@pytest.mark.parametrize("stage", ["connect", "read_native_registration", "seal_search_plan"])
+@pytest.mark.parametrize("error_type", [KeyError, TypeError, ValueError])
+def test_cli_does_not_misclassify_unexpected_builtins(source, tmp_path, monkeypatch, capsys, stage, error_type):
+    request = tmp_path / "request"
+    request.write_text(json.dumps(_request()))
+    error = error_type("independent internal defect")
+    connections, original = [], cli.connect
+    def connect(*args, **kwargs):
+        conn = original(*args, **kwargs)
+        connections.append(conn)
+        return conn
+    def broken(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(cli, "connect", connect)
+    monkeypatch.setattr(cli, stage, broken)
+    before = _catalog(source.conn), _objects(source.store)
+    with pytest.raises(error_type) as caught:
+        cli.main(_args(source, "prepare", request))
+    assert caught.value is error and not capsys.readouterr().out
+    assert (_catalog(source.conn), _objects(source.store)) == before
+    for conn in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("kind", ["ref_shape", "spec_input_files", "huge_integer"])
+def test_cli_typed_input_conversions_still_refuse_before_catalog(source, tmp_path, monkeypatch, capsys, kind):
+    request, reference = tmp_path / "request", tmp_path / "reference"
+    request.write_text("9" * 5000 if kind == "huge_integer" else json.dumps(_request()))
+    reference.write_text("{}")
+    args = _args(source, "verify", request, reference)
+    if kind == "spec_input_files":
+        spec = json.loads(source.spec_path.read_text())
+        spec["input_files"] = None
+        path = tmp_path / "spec"
+        path.write_text(json.dumps(spec))
+        args[args.index("--spec") + 1] = str(path)
+    monkeypatch.setattr(cli, "connect", _forbid)
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": _problem(
+        "INVALID_EXPERIMENT_SPEC", "search planning request could not be completed")}
+
+
+def test_bounded_reader_accumulates_short_unbuffered_reads(tmp_path, monkeypatch):
+    path = tmp_path / "metadata"
+    path.write_text('{"independent": [1,2,3]}')
+    original, lengths = os.fdopen, []
+    class ShortReader:
+        def __init__(self, descriptor, mode, **kwargs):
+            assert kwargs == {"buffering": 0, "closefd": False}
+            self.stream = original(descriptor, mode, **kwargs)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.stream.close()
+        def read(self, requested):
+            assert requested == 1024 * 1024 + 1 - sum(lengths)
+            chunk = self.stream.read(min(3, requested))
+            lengths.append(len(chunk))
+            return chunk
+    monkeypatch.setattr(cli.os, "fdopen", ShortReader)
+    assert cli._read_document(path) == {"independent": [1, 2, 3]}
+    assert lengths[-1] == 0 and len(lengths) > 2
+
+
+@pytest.mark.parametrize("kind", ["oversized", "directory"])
+def test_bounded_reader_rejects_descriptor_before_read_or_parse(tmp_path, monkeypatch, kind):
+    path = tmp_path / "metadata"
+    if kind == "oversized":
+        path.write_bytes(b" " * (1024 * 1024 + 1))
+    else:
+        path.mkdir()
+    monkeypatch.setattr(cli.os, "fdopen", _forbid)
+    monkeypatch.setattr(cli.json, "loads", _forbid)
+    with pytest.raises(OpsError) as caught:
+        cli._read_document(path)
+    assert to_document(caught.value.problem) == _problem(
+        "INVALID_EXPERIMENT_SPEC", "search metadata requires bounded regular files")

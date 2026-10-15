@@ -157,9 +157,7 @@ def seal_search_plan(conn, store, registration, request):
     try:
         ref = store.publish_bytes(canonical_json(plan).encode(), schema_ref=SCHEMA)
     except ArtifactError as error:
-        if error.code == "INTEGRITY_FAILED":
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed integrity verification") from None
-        raise fail("RESOURCE_UNAVAILABLE", "search planning request could not be completed") from None
+        raise _artifact_failure(error) from None
     return {"plan": plan, "plan_ref": to_document(ref)}
 
 
@@ -174,9 +172,14 @@ def read_search_plan(conn, store, registration, request, ref):
     try:
         raw = store.read_verified(ref)
     except ArtifactError as error:
-        if error.code == "INTEGRITY_FAILED":
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed integrity verification") from None
-        raise fail("RESOURCE_UNAVAILABLE", "search planning request could not be completed") from None
+        raise _artifact_failure(error) from None
     if raw != payload:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan differs from its complete binding")
     return expected
+
+
+def _artifact_failure(error):
+    """Share the publication/read integrity distinction without leaking paths."""
+    if error.code == "INTEGRITY_FAILED":
+        return fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed integrity verification")
+    return fail("RESOURCE_UNAVAILABLE", "search planning request could not be completed")

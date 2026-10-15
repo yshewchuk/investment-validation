@@ -176,6 +176,7 @@ Registration/replay never fit. Native smoke/recorded publication remains unchang
 | Unknown recipe or missing magnitude/history inputs | `INVALID_EXPERIMENT_SPEC` before repository admission; CLI parser errors exit 2 before store access. |
 | Changed recipe, parameter, feature order, preprocessing, source or pin | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; no implicit registration or fit. |
 | Invalid fit arrays, estimator failure, wrong-shaped/nonfinite predictions | `EXPERIMENT_VARIANT_FAILED`; no partial successful report or baseline fallback. |
+| A no-fit guard raises `RuntimeFitForbidden` (v2 or legacy type) during a fit | Propagates unchanged; it is never converted to `EXPERIMENT_VARIANT_FAILED`. |
 | Missing/late evaluation labels or empty qualified training | Existing whole-assessment refusal; no row dropping or horizon omission. |
 | v1.5 final-request preparation | `INVALID_EXPERIMENT_SPEC`; no final-read authority. |
 
@@ -196,6 +197,10 @@ The standalone `python -m experiments.v2_magnitude_search prepare|verify` CLI ha
 production caller. It consumes an existing native catalog/store, anchor spec and request
 JSON; verify additionally takes a plan-ref JSON. The public research fold rule supplies
 metadata boundaries. Standard-library Cartesian enumeration supplies candidate recipes.
+Direct dependencies are `engine.v2.contracts`, `engine.v2.data.errors`, foundation,
+ops and research, plus the native-registration experiment adapter. Planning code identity
+uses this installed repository root; the supplied anchor must match that installation.
+This metadata-only CLI never writes a ledger and needs no `--no-ledger` switch.
 
 | Condition | Enforced outcome |
 |---|---|
@@ -211,7 +216,9 @@ metadata boundaries. Standard-library Cartesian enumeration supplies candidate r
 | Verify receives a reference differing from complete request reconstruction | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT` before that plan object opens. |
 | Verified bytes fail integrity or complete reconstruction | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; no repair or automatic retry. |
 | Non-integrity foundation `ArtifactError` at plan publication/read, including a missing plan object | `RESOURCE_UNAVAILABLE` with a sanitized `Problem`; no automatic retry or partial success. |
+| Opened CLI spec/request/plan-ref descriptor is nonregular or exceeds 1 MiB, or opening refuses a leaf symlink | Nonretryable `INVALID_EXPERIMENT_SPEC` before catalog access; bounded descriptor reads reject growth beyond the cap. |
 | CLI typed refusal | Preserve the full `Problem`, return exit 2 and close an opened catalog connection. Filesystem/artifact unavailability maps to `RESOURCE_UNAVAILABLE`; malformed JSON maps to `INVALID_EXPERIMENT_SPEC`. |
+| Unexpected builtin exception from catalog/registration/planning code | Propagate it after closing the catalog; do not misclassify it as malformed user JSON. |
 
 ## Stored research-history entrypoint
 
