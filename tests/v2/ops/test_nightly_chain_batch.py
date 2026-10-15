@@ -225,9 +225,10 @@ def test_seconds_use_the_counter_clock(tmp_path, monkeypatch):
     assert repository.read_counters.snapshot()["option_chains"]["seconds"] == 1.0
 
 
-def test_obs_date_with_trailing_text_is_refused(tmp_path):
+@pytest.mark.parametrize("obs_date", ["2024-01-05 10:00", "2024-01-05 garbage"])
+def test_obs_date_with_trailing_text_is_refused(tmp_path, obs_date):
     rows = [dict(_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0),
-                 obs_date="2024-01-05 10:00")]
+                 obs_date=obs_date)]
     repository, snapshot = _snap(tmp_path)
     with pytest.raises(OpsError) as exc:
         scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
