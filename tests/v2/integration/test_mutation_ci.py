@@ -30,6 +30,11 @@ import mutation_pilot as pilot  # noqa: E402
 import mutation_report as rep  # noqa: E402
 import mutation_results as mr  # noqa: E402
 
+# The real-repo graph tests share one xdist worker so the ~22 s real-repo
+# import graph is built once per run, not once per worker
+# (CI runs `--dist loadgroup`).
+pytestmark = pytest.mark.xdist_group("mutation_ci_real_import_graph")
+
 SEP = "ǁ"
 SOURCE = '''\
 def add(a, b):
@@ -2065,6 +2070,24 @@ def _empty_import_graph_for_synthetic_cfg(request, monkeypatch):
     graph."""
     if request.node.get_closest_marker("synthetic_cfg"):
         monkeypatch.setattr(pilot, "build_import_graph", lambda *a, **k: {})
+
+
+@pytest.fixture(autouse=True)
+def _keep_real_repo_scan_caches():
+    """Tests that monkeypatch `pilot.REPO` to a tmp_path and call the default
+    (tracked=None) `build_import_graph` path push tmp-repo entries into the
+    `_SCAN_CACHE_LIMIT = 2` module caches, evicting the real repo's entry and
+    forcing the ~22 s real-repo graph to be rebuilt several times per process
+    (#747). Sweep the caches down to real-repo entries after each test; the
+    setup side reads `pilot.REPO` before the test body can patch it."""
+    real = str(Path(pilot.REPO).resolve())
+    yield
+    # Re-read the module attributes: a test may have replaced a cache object
+    # wholesale, and mutate in place because other code holds the lists by
+    # module attribute.
+    for name in ("_GRAPH_CACHE", "_UNRESOLVED_CACHE"):
+        cache = getattr(pilot, name)
+        cache[:] = [e for e in cache if e[0][0] == real]
 
 
 def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
