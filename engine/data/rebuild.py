@@ -520,7 +520,7 @@ def finalize_rebuild(result: RebuildResult) -> RebuildResult:
     Split from :func:`rebuild` so a caller can build the tables first and only
     publish a snapshot after deciding the result is sound -- the nightly
     defers finalizing the incremental Tier-3/4 build until the Tier-4 gap check
-    passes, so a night whose full repair is refused leaves no snapshot behind.
+    passes, so a night whose full repair is refused leaves no new snapshot behind.
     """
     _banner("manifest + snapshot")
     stats = manifest.collect_stats()

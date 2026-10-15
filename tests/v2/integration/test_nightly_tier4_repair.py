@@ -11,7 +11,7 @@ typed code; a night with no gap skips the repair entirely.
 The snapshot is deferred: the incremental rebuild runs with
 ``finalize=False`` and the snapshot is written only once the gap check passes
 (or the full repair finalizes it). A night whose repair is refused therefore
-leaves no snapshot for the native import to read.
+leaves no new snapshot for the native import to read.
 
 Every rebuild here is a synthetic fake — no real Tier-3/Tier-4 rebuild runs.
 The orchestration cases drive ``run_nightly`` with every heavy step patched.
@@ -1717,3 +1717,48 @@ def test_verify_worker_failed_replace_keeps_old_report(tmp_path, monkeypatch):
         "a failed write must leave the previous report unchanged"
     assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
         "a failed write must leave no temp file behind"
+
+
+def test_verify_worker_failed_cache_report_replace_keeps_old_cache_report(
+        tmp_path, monkeypatch):
+    """A failed cache-report replace keeps the old cache; the report lands."""
+    import os
+
+    from engine.data import manifest as manifest_mod
+    from tools import verify_incremental_rebuild
+
+    monkeypatch.setattr("engine.paths.ensure_dirs", lambda: None)
+
+    class _FakeResult:
+        def as_dict(self):
+            return {"k": 1}
+
+    monkeypatch.setattr("engine.data.rebuild.rebuild",
+                        lambda **kwargs: _FakeResult())
+
+    report = tmp_path / "report.json"
+    report.write_bytes(b"old-report")
+    cache_report = tmp_path / "cache.json"
+    cache_report.write_bytes(b"old-cache")
+
+    real_replace = os.replace
+    calls = []
+
+    def _replace_once_then_fail(src, dst):
+        calls.append(dst)
+        if len(calls) > 1:
+            raise OSError("disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(manifest_mod.os, "replace", _replace_once_then_fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        verify_incremental_rebuild._worker("full", report, cache_report)
+
+    assert json.loads(report.read_text()) == {"k": 1}, \
+        "the first (report) replace landed"
+    assert cache_report.read_bytes() == b"old-cache", \
+        "a failed cache write must leave the previous cache report unchanged"
+    assert sorted(p.name for p in tmp_path.glob("*.tmp*")
+                  if p.name not in {"report.json", "cache.json"}) == [], \
+        "a failed cache write must leave no temp file behind"
