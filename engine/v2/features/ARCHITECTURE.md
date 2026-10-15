@@ -131,7 +131,7 @@ before `NightlyEventInputs` assembly.
 `scan_panel_row(repository, snapshot, key, *, decision_session,
 history_start)` is implemented in `panel_row_inputs.py`. The native raw-row
 producer calls it once per distinct `(ticker, event_date, session)` triple
-(`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"); it is its one call for one
+(`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer"); it is its one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
 pair. `panel_row.date` is the scored event's ISO calendar date, required by
 the scoring source-bundle consumer; it is never the decision or source-anchor
@@ -171,11 +171,11 @@ that row is not admitted or no row exists. A null value is the key present with 
 as a missing feature.
 It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
-(`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never
+(`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer"). `key.strategy` never
 changes which reads it makes or which keys the result carries — every
 call builds the full superset, `STR-RUNUP`'s fields included — so the one
 `panel_row`/`panel_anchor` pair built per `(ticker, event_date, session)`
-triple (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6") is valid and
+triple (`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer") is valid and
 reused unchanged across every strategy sharing that triple; a strategy
 that does not name a superset-only key in its `feature_names` simply
 never selects it (`../scoring/ARCHITECTURE.md` "Inputs"). Its
