@@ -144,7 +144,8 @@ def test_empty_ticker_set_does_no_scan(tmp_path, monkeypatch):
     assert scans == []
 
 
-@pytest.mark.parametrize("session", ["2024-13-45", "not-a-date", None, 20240105])
+@pytest.mark.parametrize("session", ["2024-13-45", "not-a-date", None, 20240105,
+                                     "2024-01-05 10:00"])
 def test_non_iso_decision_session_is_invalid_request(tmp_path, session):
     repository, snapshot = _snap(tmp_path)
     with pytest.raises(OpsError) as exc:
@@ -152,7 +153,7 @@ def test_non_iso_decision_session_is_invalid_request(tmp_path, session):
     assert exc.value.code == "INVALID_REQUEST"
 
 
-@pytest.mark.parametrize("tickers", [[None], [""], ["AAA", 7]])
+@pytest.mark.parametrize("tickers", [[None], [""], ["AAA", 7], [["AAA"]], "AAA"])
 def test_bad_tickers_are_invalid_request(tmp_path, tickers):
     repository, snapshot = _snap(tmp_path)
     with pytest.raises(OpsError) as exc:
@@ -187,3 +188,28 @@ def test_readers_given_chain_rows_never_scan(tmp_path, monkeypatch):
     scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY, decision_session=_SESSION,
                     chain_rows=slices["AAA"])
     assert scans == []
+
+
+def test_short_chain_rows_are_invalid_request(tmp_path):
+    repository, snapshot = _snap(tmp_path)
+    short = [{"ticker": "AAA", "obs_date": datetime(2024, 1, 5)}]
+    with pytest.raises(OpsError) as exc:
+        scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
+                        decision_session=_SESSION, chain_rows=short)
+    assert exc.value.code == "INVALID_REQUEST"
+    with pytest.raises(OpsError) as non_mapping:
+        scan_candidate_expiries(repository, snapshot, _AAA, decision_session=_SESSION,
+                                chain_rows=[("AAA",)])
+    assert non_mapping.value.code == "INVALID_REQUEST"
+
+
+def test_result_ceiling_fails_the_build_without_fallback(tmp_path, monkeypatch):
+    import engine.v2.ops.nightly_chain_batch as batch
+
+    repository, snapshot = _snap(tmp_path)
+    monkeypatch.setattr(batch, "_RESULT_CAP", 1)
+    scans = _count_scans(monkeypatch)
+    with pytest.raises(DataError) as exc:
+        scan_chain_slices(repository, snapshot, ["AAA", "BBB"], decision_session=_SESSION)
+    assert exc.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert scans == ["option_chains"]

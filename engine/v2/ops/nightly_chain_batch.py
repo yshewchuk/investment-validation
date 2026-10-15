@@ -1,4 +1,4 @@
-"""One batched ``option_chains`` read per producer build (#754).
+"""One batched ``option_chains`` read per producer build.
 
 ``scan_chain_slices`` replaces the per-event pair of exact ``(ticker, obs_date)``
 scans: one ``DataQuery`` with ``ticker in <tickers>`` and ``obs_date eq
@@ -38,6 +38,8 @@ def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,
     at ``session_day``; any other row is ``INVALID_REQUEST`` (never echoed)."""
     staged = list(rows)
     for row in staged:
+        if not isinstance(row, Mapping) or any(column not in row for column in CHAIN_COLUMNS):
+            raise fail("INVALID_REQUEST", "chain rows must carry every chain column")
         if row["ticker"] != ticker or _day(row["obs_date"]) != session_day:
             raise fail("INVALID_REQUEST", "chain rows do not match the key and session")
     return staged
@@ -54,10 +56,12 @@ def scan_chain_slices(repository: Repository, snapshot: SnapshotRef, tickers: It
     if day != day.normalize():
         raise fail("INVALID_REQUEST", "decision_session must be a midnight date")
     decision_session = day.date().isoformat()
-    unique = set(tickers)
-    if any(not isinstance(ticker, str) or not ticker.strip() for ticker in unique):
+    if isinstance(tickers, str):
+        raise fail("INVALID_REQUEST", "tickers must be a collection of strings")
+    listed = list(tickers)
+    if any(not isinstance(ticker, str) or not ticker.strip() for ticker in listed):
         raise fail("INVALID_REQUEST", "tickers must be non-empty strings")
-    wanted = sorted(unique)
+    wanted = sorted(set(listed))
     slices: dict[str, list[dict[str, Any]]] = {ticker: [] for ticker in wanted}
     if not wanted:
         return slices
