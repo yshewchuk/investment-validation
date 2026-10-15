@@ -11,8 +11,10 @@ later: *was this produced from the same data?*
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +32,26 @@ def collect_stats() -> dict:
 
 def _panel_digest() -> str | None:
     return store.file_sha256(paths.PANEL) if paths.PANEL.exists() else None
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically via a sibling temp file.
+
+    A reader must never observe a half-written SNAPSHOT or MANIFEST — the
+    native import reads the former directly — so the content lands in a
+    sibling temp file first and is swapped in with ``os.replace`` (atomic on
+    the same filesystem). A failed write removes the temp file and leaves the
+    previous content untouched. Same technique as
+    ``engine/dashboard/nightly.py::_write_report_atomic``.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _tier4_digest() -> str | None:
@@ -61,7 +83,8 @@ def write_snapshot(stats: dict | None = None, path: Path | None = None) -> str:
     digest = snapshot_hash(stats)
     path = paths.assert_writable(path or paths.SNAPSHOT_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    _write_text_atomic(
+        path,
         json.dumps(
             {
                 "snapshot": digest,
@@ -73,7 +96,7 @@ def write_snapshot(stats: dict | None = None, path: Path | None = None) -> str:
             },
             indent=1,
             sort_keys=True,
-        )
+        ),
     )
     return digest
 
@@ -185,5 +208,5 @@ def write_manifest(
     for title, body in (extra_sections or {}).items():
         sections += [f"## {title}", "", body, ""]
 
-    path.write_text("\n".join(sections))
+    _write_text_atomic(path, "\n".join(sections))
     return path

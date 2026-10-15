@@ -16,7 +16,7 @@ leaves no snapshot for the native import to read.
 Every rebuild here is a synthetic fake — no real Tier-3/Tier-4 rebuild runs.
 The orchestration cases drive ``run_nightly`` with every heavy step patched.
 """
-# packages: engine.v2.dashboard
+# packages: engine.v2.dashboard, engine.v2.data
 
 from __future__ import annotations
 
@@ -290,6 +290,79 @@ def test_gap_free_finalize_failure_degrades_the_tiers_step():
     assert "RuntimeError: disk full" in report.steps["tiers"]["error"]
     degraded = [f for f in report.flags if f.get("kind") == "tiers_degraded"]
     assert len(degraded) == 1, "the gap-free finalize failure raises one flag"
+
+
+def test_tiers_degraded_scrubs_local_paths_from_both_fields():
+    """A degraded tiers step publishes no absolute local path (#490).
+
+    The flag detail and the step error reach the published bundle, so an
+    exception carrying a host-local path must have it redacted while the
+    ``type(exc).__name__`` prefix stays.
+    """
+    from engine.dashboard.nightly import _tiers_degraded
+
+    report = _report()
+
+    _tiers_degraded(report, RuntimeError("failed to read /root/secret/x"))
+
+    assert report.steps["tiers"]["degraded"] is True
+    error = report.steps["tiers"]["error"]
+    assert "/root/secret/x" not in error, "the step error must not leak the path"
+    assert error.startswith("RuntimeError: "), "the exception type stays visible"
+    degraded = [f for f in report.flags if f.get("kind") == "tiers_degraded"]
+    assert len(degraded) == 1
+    detail = degraded[0]["detail"]
+    assert "/root/secret/x" not in detail, "the flag detail must not leak the path"
+    assert "RuntimeError: " in detail, "the exception type stays visible"
+
+
+# --------------------------------------------------------------------------
+# manifest/snapshot atomicity: a failed write leaves the old file untouched
+# --------------------------------------------------------------------------
+
+
+def _raise_disk_full(*_args, **_kwargs):
+    raise OSError("disk full")
+
+
+def test_write_snapshot_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
+    """A failed replace leaves the pre-existing SNAPSHOT and no temp file."""
+    from engine.data import manifest as manifest_mod
+
+    target = tmp_path / "SNAPSHOT"
+    target.write_text("PRE-EXISTING SNAPSHOT")
+    monkeypatch.setattr(manifest_mod, "_panel_digest", lambda: None)
+    monkeypatch.setattr(manifest_mod, "_tier4_digest", lambda: None)
+    monkeypatch.setattr(manifest_mod.os, "replace", _raise_disk_full)
+
+    with pytest.raises(OSError, match="disk full"):
+        manifest_mod.write_snapshot({"panel": {"content_hash": "abc"}}, path=target)
+
+    assert target.read_text() == "PRE-EXISTING SNAPSHOT", \
+        "a failed write must leave the previous SNAPSHOT unchanged"
+    assert sorted(p.name for p in tmp_path.glob("*.tmp")) == [], \
+        "a failed write must leave no temp file behind"
+
+
+def test_write_manifest_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
+    """A failed replace leaves the pre-existing MANIFEST and no temp file."""
+    from engine.data import manifest as manifest_mod
+
+    target = tmp_path / "MANIFEST.md"
+    target.write_text("PRE-EXISTING MANIFEST")
+    stats = {"panel": {"rows": 1, "years": "2020", "partitions": 1, "files": 1,
+                       "bytes": 1, "content_hash": "abc"}}
+    monkeypatch.setattr(manifest_mod, "snapshot_hash", lambda _stats: "deadbeef")
+    monkeypatch.setattr(manifest_mod, "_panel_digest", lambda: None)
+    monkeypatch.setattr(manifest_mod.os, "replace", _raise_disk_full)
+
+    with pytest.raises(OSError, match="disk full"):
+        manifest_mod.write_manifest(stats, path=target)
+
+    assert target.read_text() == "PRE-EXISTING MANIFEST", \
+        "a failed write must leave the previous MANIFEST unchanged"
+    assert sorted(p.name for p in tmp_path.glob("*.tmp")) == [], \
+        "a failed write must leave no temp file behind"
 
 
 # --------------------------------------------------------------------------

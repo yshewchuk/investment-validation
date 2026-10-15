@@ -840,13 +840,20 @@ def _tiers_degraded(report: NightlyReport, exc: Exception) -> None:
     the flag, and the run continues to score rather than leaving the board
     dark. Called from run_nightly's rebuild handler and from the gap-free
     finalize path of :func:`repair_tier4_gap_if_needed`.
+
+    The exception text reaches the published bundle, so it is scrubbed of any
+    absolute local path with ``model_evidence._sanitize_reason`` before either
+    field is built.
     """
+    from engine.dashboard.model_evidence import _sanitize_reason
+
+    reason = _sanitize_reason(str(exc))
     report.steps["tiers"] = {"degraded": True,
-                             "error": f"{type(exc).__name__}: {exc}"[:300]}
+                             "error": f"{type(exc).__name__}: {reason}"[:300]}
     report.flags.append({
         "kind": "tiers_degraded",
         "detail": ("Tier 3/Tier 4 not rebuilt — scoring from the stored panel and "
-                   f"forecasts, which may not cover recent prints. {type(exc).__name__}: {exc}")[:300],
+                   f"forecasts, which may not cover recent prints. {type(exc).__name__}: {reason}")[:300],
     })
 
 
@@ -1515,10 +1522,9 @@ def run_nightly(
             # (tier4_gap_partial), not a silent pass. The repair runs after
             # this try/except, so the result is kept for it.
         except Exception as exc:
-            # _tiers_degraded is the one definition of the degrade path: it
-            # writes report.steps["tiers"] and appends the "kind":
-            # "tiers_degraded" flag (the tiers_degraded marker), so the literal
-            # stays visible here in run_nightly's tiers block.
+            # _tiers_degraded is the one definition of the degrade path: the
+            # "kind": "tiers_degraded" literal lives there (not here); it also
+            # writes report.steps["tiers"].
             _tiers_degraded(report, exc)
 
         # A typed TIER4_* stop from the repair propagates (it is not the

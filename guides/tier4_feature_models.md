@@ -338,9 +338,10 @@ anti-join that is supposed to find it, so every night after the first would
 see a present (if empty) row and stop trying — a silent, permanent hole,
 indistinguishable from a healthy build without reading values column by
 column. Leaving the key absent means the **next** run's anti-join re-detects
-it and repeats the same bounded widening, night after night, until a full rebuild
-with no `--since` runs (the legacy nightly now triggers it automatically on
-a gap; `python3 -m engine.data.rebuild --table tier4` with no `--tier4-since` is the manual route) — which closes any gap
+it and repeats the same bounded widening, night after night, until a full
+rebuild with no `--since` runs (the legacy nightly now triggers it
+automatically on a gap; `python3 -m engine.data.rebuild --table tier4`
+with no `--tier4-since` is the manual route) — which closes any gap
 immediately, regardless of age, because a full rebuild has no prefix to carry
 and nothing to be missing from. The window is measured backward from `since`,
 so as the nightly cut keeps advancing an old gap only falls farther behind it
