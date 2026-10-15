@@ -1617,3 +1617,73 @@ def test_verify_objects_fstat_oserror_is_object_unverified(tmp_path, monkeypatch
         _run_carry(tmp_path, inventory, args)
     assert error.value.code == "OBJECT_UNVERIFIED"
     _assert_no_candidate(tmp_path)
+
+
+def _prior_payload_size():
+    return len(next(iter(_fixture("prior1")[2].values())))
+
+
+@pytest.mark.parametrize("delta, refused", [(0, False), (1, True)], ids=["at-cap", "over-cap"])
+def test_prior_payload_max_object_bytes_boundary(tmp_path, monkeypatch, delta, refused):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    monkeypatch.setattr(assembly, "MAX_OBJECT_BYTES", _prior_payload_size() - delta)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    if not refused:
+        assert _run_carry(tmp_path, inventory, args) == _candidate_path(tmp_path)
+        return
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "PRIOR_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+def _output_at_size(root, output, size):
+    content_hash, _ = phase5_release.write_object(root, b"q" * size)
+    return dataclasses.replace(output, content_hash=content_hash, payload_bytes=size)
+
+
+@pytest.mark.parametrize("delta, refused", [(0, False), (1, True)], ids=["at-cap", "over-cap"])
+def test_supplied_object_max_object_bytes_boundary(tmp_path, monkeypatch, delta, refused):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    size = _prior_payload_size()
+    monkeypatch.setattr(assembly, "MAX_OBJECT_BYTES", size)
+    target = assembly.POOL_MEMBER_IDS[0]
+    args["outputs"] = [_output_at_size(tmp_path, output, size + delta)
+                       if output.member_id == target else output for output in args["outputs"]]
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    if not refused:
+        assert _run_carry(tmp_path, inventory, args) == _candidate_path(tmp_path)
+        return
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "OBJECT_UNVERIFIED"
+    _assert_no_candidate(tmp_path)
+
+
+@pytest.mark.parametrize("bad", ["a/b", "a\x00b", ".hidden"])
+def test_unsafe_prior_release_id_is_prior_mismatch(tmp_path, bad):
+    inventory, prior_body = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    args["expected_prior_release_id"] = bad
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.derive_catalog(prior_body, **args)
+    assert error.value.code == "PRIOR_MISMATCH"
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        assembly.carry_forward_release(tmp_path, prior_release_id=bad, release_id="cand1",
+                                       inventory=inventory, **_carry_kwargs(args))
+    assert error.value.code == "PRIOR_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+def test_deeply_nested_prior_catalog_is_prior_mismatch(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").write_bytes(b"[" * 200000)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "PRIOR_MISMATCH"
+    _assert_no_candidate(tmp_path)

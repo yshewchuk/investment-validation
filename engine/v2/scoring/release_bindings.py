@@ -317,8 +317,8 @@ def _read_and_verify_manifest(dep_root: Path, release_id: str) -> "deployment.St
         raise ModelNotReady("model_release", "unsafe or invalid release id") from exc
     except (OSError, ValueError) as exc:
         # R1(e): manifest.json exists but will not parse (same ValueError
-        # family as R1(b) above), or a read races the is_file() check inside
-        # deployment._read_manifest and raises a bare OSError.
+        # family as R1(b) above), or deployment._read_manifest's lstat plus
+        # bounded no-follow read raises a bare OSError.
         raise ModelNotReady("manifest.json", "the staged manifest could not be read") from exc
     if manifest is None:
         # R1(d): no staged manifest for this release_id.

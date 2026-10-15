@@ -172,16 +172,17 @@ def derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_rel
                                outputs=outputs, chooser=chooser, cutoff=cutoff)
     except ReleaseAssemblyRefusal:
         raise
-    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+    except (KeyError, TypeError, AttributeError, ValueError, RecursionError) as exc:
         raise ReleaseAssemblyRefusal(
             "PRIOR_MISMATCH", "prior catalog rows or identity are malformed") from exc
 
 
 def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_release_id: str,
                     outputs: object, chooser: object, cutoff: str) -> dict:
-    if not isinstance(expected_prior_release_id, str) or not expected_prior_release_id:
-        raise ReleaseAssemblyRefusal(
-            "PRIOR_MISMATCH", "expected prior release id must be a non-empty string")
+    if (not isinstance(expected_prior_release_id, str) or not expected_prior_release_id
+            or expected_prior_release_id.startswith(".")
+            or any(char in expected_prior_release_id for char in _UNSAFE_ID_CHARS)):
+        raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release id is not a safe string")
     try:
         prior = validate_catalog(prior_catalog, expected_prior_release_id)
     except ReleaseLayoutError as exc:
@@ -355,7 +356,11 @@ def _publication_lock(store: Path):
 
 def carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
                           inventory, outputs, chooser: object, cutoff: str) -> Path:
-    """Verify, re-stage the prior model bindings and write the candidate catalog."""
+    """Verify, re-stage the prior model bindings and write the candidate catalog.
+
+    Lock or filesystem failures are ``PUBLICATION_FAILED``; a conflicting or
+    corrupt candidate is ``ID_CONFLICT``.
+    """
     try:
         return _carry_forward_release(release_root, prior_release_id=prior_release_id,
                                       release_id=release_id, inventory=inventory, outputs=outputs,
@@ -365,16 +370,17 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
     except OSError as exc:
         raise ReleaseAssemblyRefusal(
             "PUBLICATION_FAILED", "a filesystem error occurred while assembling the release") from exc
-    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+    except (KeyError, TypeError, AttributeError, ValueError, RecursionError) as exc:
         raise ReleaseAssemblyRefusal(
             "PRIOR_MISMATCH", "prior catalog rows or identity are malformed") from exc
 
 
 def _carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
                            inventory, outputs, chooser: object, cutoff: str) -> Path:
-    if not isinstance(prior_release_id, str) or not prior_release_id:
-        raise ReleaseAssemblyRefusal(
-            "PRIOR_MISMATCH", "expected prior release id must be a non-empty string")
+    if (not isinstance(prior_release_id, str) or not prior_release_id
+            or prior_release_id.startswith(".")
+            or any(char in prior_release_id for char in _UNSAFE_ID_CHARS)):
+        raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior release id is not a safe string")
     root = Path(release_root)
     store = deployment_root(root)
     prior_path = catalog_path(root, prior_release_id)

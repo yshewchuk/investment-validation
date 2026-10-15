@@ -45,6 +45,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 
 from engine.v2.foundation import (
@@ -57,8 +58,13 @@ from engine.v2.foundation import (
     to_document,
 )
 
-from .contracts import ArtifactMember, ModelRelease
-from .releases import ModelReleaseInventory, ReleaseIssue, require_complete_release
+from . import contracts, releases
+
+ArtifactMember = contracts.ArtifactMember
+ModelRelease = contracts.ModelRelease
+ModelReleaseInventory = releases.ModelReleaseInventory
+ReleaseIssue = releases.ReleaseIssue
+require_complete_release = releases.require_complete_release
 
 __all__ = [
     "DEPLOYMENT_REFUSAL",
@@ -344,10 +350,6 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
-#: ``stat.S_IFMT``/``stat.S_IFREG``, inlined rather than imported to keep this
-#: module's fan-out within budget.
-_S_IFMT = 0o170000
-_S_IFREG = 0o100000
 
 
 def _read_bounded_regular(path: Path, limit: int) -> bytes:
@@ -359,7 +361,7 @@ def _read_bounded_regular(path: Path, limit: int) -> bytes:
     except OSError as exc:
         raise ValueError("staged manifest is not a bounded regular file") from exc
     try:
-        if (os.fstat(fd).st_mode & _S_IFMT) != _S_IFREG:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError("staged manifest is not a bounded regular file")
         chunks: list[bytes] = []
         total = 0
@@ -632,10 +634,11 @@ def restage_semantic_hash(root: Path, release_id: str) -> StagedManifest:
     except (OSError, ValueError) as exc:
         # _read_manifest's decode can raise a bare json.JSONDecodeError or
         # engine.v2.foundation.typed.DocumentError (both ValueError
-        # subclasses), or a bare OSError racing the is_file() check --
-        # exactly the same failure family engine/v2/scoring/
-        # release_bindings.py's _read_and_verify_manifest already catches
-        # for the identical read. Never left to escape uncaught.
+        # subclasses), or a bare OSError from its lstat plus bounded
+        # no-follow read of the manifest -- exactly the same failure family
+        # engine/v2/scoring/release_bindings.py's _read_and_verify_manifest
+        # already catches for the identical read. Never left to escape
+        # uncaught.
         raise StagingRefused((ReleaseIssue(
             path=f"$.releases[{release_id}]", code="MANIFEST_UNREADABLE",
             detail="the existing staged manifest could not be read",

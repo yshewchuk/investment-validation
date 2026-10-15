@@ -126,8 +126,8 @@ so the helper sits beside it):
   touches `DEPLOYED`.
 
 Both refuse with a stable `ReleaseAssemblyRefusal.code`; no upstream exception
-escapes raw (stray `OSError`/`KeyError`/`TypeError`/`AttributeError` are
-translated at the boundary). No production caller exists yet.
+escapes raw (stray `OSError`/`KeyError`/`TypeError`/`AttributeError`/
+`RecursionError` are translated at the boundary). No production caller exists yet.
 
 | Condition | Code |
 |---|---|
@@ -141,9 +141,12 @@ translated at the boundary). No production caller exists yet.
 | Inventory missing, malformed, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
 | Filesystem error or lock timeout while publishing (inputs not at fault) | `PUBLICATION_FAILED` |
 
-Supplied objects, prior payloads, and the prior and candidate catalog and
-manifest files are opened without following links, must be regular files, and
-are read under a byte cap. Every call re-runs all validation, including when an
+Supplied objects, prior payloads, the lock file and staged manifests are opened
+without following links, must be regular files, and are read under a byte cap.
+Catalog files get an `lstat` check (symlink, non-regular or over 64 MiB refuse)
+before the shared reader's `read_bytes`. A missing, symlinked, non-regular or
+oversize prior refuses `PRIOR_MISMATCH`; the same candidate file refuses
+`ID_CONFLICT`. Every call re-runs all validation, including when an
 identical candidate catalog already exists. Staging and the catalog write run
 under one exclusive, bounded-wait `flock` on `deployment/.carry_forward.lock`,
 so of two conflicting concurrent calls the loser refuses `ID_CONFLICT`.
@@ -466,7 +469,7 @@ production scoring instead selects the release named by `DEPLOYED`.
 | Selected release-local catalog exists | It is authoritative; schema, self-hash and release identity must validate |
 | Cache | `checks.phase5_release.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
-| Local catalog corrupt or unreadable | Refuse; never fall back to a valid root copy |
+| Local catalog corrupt or unreadable, a symlink or non-regular file, or over 64 MiB | Refuse (`ReleaseLayoutError`); never fall back to a valid root copy |
 | Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs; incumbent validation is read-only and precedes copying |
 | Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee, except `carry_forward_release` calls, which serialize on `deployment/.carry_forward.lock` (§2.1) |
 | Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |

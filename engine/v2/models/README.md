@@ -133,9 +133,9 @@ from causal source rows. engine.v2.ops.cli imports the no-fit guard
 `checks/phase5_acceptance.py` publishes staging success after acceptance.
 `tools/phase5_prepare_release.py` invalidates prior success before re-preparation.
 `checks/phase5_release_assembly.py` re-stages a prior release under a new id
-(`deployment.stage_release`, `resolve_release`, `manifest_path`,
-`StagingRefused`, and `releases.ModelReleaseRefusal`) when carrying pool
-objects forward.
+(`deployment.stage_release`, `resolve_release`, `StagingRefused`, and
+`releases.ModelReleaseRefusal`) when carrying pool objects forward;
+`checks/phase5_release.py` reaches `manifest_path` for catalog layout checks.
 engine.v2.serving.operations (P6-4) imports the deployment pointer
 (`current_pointer`, `resolve_release`, plus the two refusal exception types)
 to serve the deployed model release read-only at `/models/release.json` --
