@@ -2113,9 +2113,9 @@ def test_prepare_default_plan_ignores_a_population_file_created_mid_run(tmp_path
 
 def test_prepare_default_plan_passes_the_override_keys_as_expected_population(tmp_path,
                                                                               monkeypatch):
-    # The override file is PRESENT and valid: _default_plan receives the override's
-    # own Path unchanged as expected_population -- the snapshot universe helper is
-    # never consulted (a hard _explode proves it).
+    # The override file is PRESENT and valid: _default_plan receives the validated
+    # KEYS from the override as expected_population -- the snapshot universe helper
+    # is never consulted (a hard _explode proves it).
     override_path = _write_population(
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
     captured = {}
@@ -2423,3 +2423,31 @@ def test_default_plan_without_decided_keys_refuses_a_dangling_symlink_override(
         nightly_trigger._default_plan(
             tmp_path, AS_OF, (), (), None, expected_shadow_snapshot_id="s")
     assert raised.value.code == "INVALID_REQUEST"
+
+
+def test_read_bounded_bytes_never_reads_more_than_the_cap_plus_one(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from engine.v2.ops.workflows import commands
+
+    path = tmp_path / "big.bin"
+    path.write_bytes(b"x" * 100000)
+    real_fstat = commands.os.fstat
+    real_read = commands.os.read
+
+    def fstat_wrapper(fd):
+        st = real_fstat(fd)
+        return SimpleNamespace(st_mode=st.st_mode, st_size=1)
+
+    monkeypatch.setattr(commands.os, "fstat", fstat_wrapper)
+    consumed = []
+
+    def counting_read(fd, n):
+        data = real_read(fd, n)
+        consumed.append(len(data))
+        return data
+
+    monkeypatch.setattr(commands.os, "read", counting_read)
+    with pytest.raises(ValueError, match="not a bounded regular file"):
+        commands.read_bounded_bytes(path, 70000)
+    assert sum(consumed) == 70001
