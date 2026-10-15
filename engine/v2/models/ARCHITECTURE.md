@@ -124,39 +124,28 @@ so the helper sits beside it):
   (`deployment.stage_release`), then writes the candidate catalog. It never
   touches `DEPLOYED`.
 
-Both refuse with `ReleaseAssemblyRefusal.code` (stable): `PRIOR_MISMATCH` (prior
-catalog malformed, wrong id, a pool/chooser row missing or not `STAGED`, or no
-`sources.pool_cutoff`), `POOL_SET_MISMATCH` (outputs do not cover exactly the
-six pool members, a member has a duplicate object name, or a malformed field/hash), `CUTOFF_MISMATCH` (an output or the
-chooser disagrees with `cutoff`), `CHOOSER_MISMATCH` (wrong member id),
-`CUTOFF_NOT_ADVANCED` (`cutoff` is not strictly after the prior's),
-`OBJECT_UNVERIFIED` (object missing or its bytes do not hash to the claim),
-`ID_CONFLICT` (candidate id empty, unsafe, equal to the prior's, or already
-exists with different content), `INVENTORY_MISMATCH` (inventory incomplete or
-incompatible with the prior bindings), `PUBLICATION_FAILED` (a filesystem or
-lock failure while publishing; the inputs are not at fault). A missing or
-corrupt prior model object, or malformed prior catalog rows, refuse
-`PRIOR_MISMATCH`; a corrupt or different existing candidate manifest refuses
-`ID_CONFLICT`. No upstream exception escapes raw: the public functions
-translate any stray `OSError`/`KeyError`/`TypeError`/`AttributeError` at the
-boundary. The helpers have no production caller yet.
+Both refuse with a stable `ReleaseAssemblyRefusal.code`; no upstream exception
+escapes raw (stray `OSError`/`KeyError`/`TypeError`/`AttributeError` are
+translated at the boundary). No production caller exists yet.
 
 | Condition | Code |
 |---|---|
-| Prior catalog `deployment_id` differs from its staged release's | `PRIOR_MISMATCH` |
-| Inventory `deployment_id` differs from the prior release's | `INVENTORY_MISMATCH` |
-| Inventory missing, no string `release_id`, or non-tuple `artifacts`/`bindings` | `INVENTORY_MISMATCH` |
-| `cutoff` (or the prior's `pool_cutoff`) is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` / `PRIOR_MISMATCH` |
+| Prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest or model payload missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
+| Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
+| Chooser empty, not `PoolOutput`, wrong member id or duplicate name | `CHOOSER_MISMATCH` |
+| An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
+| `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
+| Supplied object missing, not a regular file, longer than its claimed `payload_bytes`, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
+| Candidate id empty, unsafe or equal to the prior's; inventory `release_id` differs from it; candidate catalog or staged manifest exists with different or corrupt content | `ID_CONFLICT` |
+| Inventory missing, malformed, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
+| Filesystem error or lock timeout while publishing (inputs not at fault) | `PUBLICATION_FAILED` |
 
-Supplied objects and prior model payloads are opened once without following
-links, must be regular files, and are read under a byte cap (the claimed
-`payload_bytes` for supplied objects, `MAX_OBJECT_BYTES` for prior payloads).
-The existing catalog and manifest readers keep their own read behaviour.
-
-Every call re-runs all validation, including when an identical candidate
-catalog already exists; the staging and catalog write run under one exclusive
-`flock` on `deployment/.carry_forward.lock`, so of two conflicting concurrent
-calls the loser refuses `ID_CONFLICT`.
+Supplied objects, prior payloads, and the prior and candidate catalog and
+manifest files are opened without following links, must be regular files, and
+are read under a byte cap. Every call re-runs all validation, including when an
+identical candidate catalog already exists. Staging and the catalog write run
+under one exclusive, bounded-wait `flock` on `deployment/.carry_forward.lock`,
+so of two conflicting concurrent calls the loser refuses `ID_CONFLICT`.
 
 | Rule | Behaviour |
 |---|---|

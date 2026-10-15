@@ -13,6 +13,7 @@ import dataclasses
 import fcntl
 import os
 import stat
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -29,6 +30,7 @@ from checks.phase5_release import (
     object_relpath,
     read_catalog,
     sha256_bytes,
+    staged_manifest_path,
     validate_catalog,
     verify_staged,
     write_catalog,
@@ -54,6 +56,8 @@ _SPEC_BY_ID = {spec.member_id: spec for spec in STATE_SPECS}
 _HEX = frozenset("0123456789abcdef")
 _UNSAFE_ID_CHARS = ("/", "\\", "\0")
 MAX_OBJECT_BYTES = 512 * 1024 * 1024
+MAX_META_BYTES = 64 * 1024 * 1024
+LOCK_WAIT_S = 30.0
 
 
 class ReleaseAssemblyRefusal(ValueError):
@@ -137,7 +141,8 @@ def _outputs_by_member(outputs: object) -> dict[str, tuple[PoolOutput, ...]]:
         for output in member_outputs:
             if not _content_hash_valid(output.content_hash):
                 raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "an output hash is malformed")
-    return {member_id: tuple(member_outputs) for member_id, member_outputs in by_member.items()}
+    return {member_id: tuple(sorted(member_outputs, key=lambda output: output.name))
+            for member_id, member_outputs in by_member.items()}
 
 
 def _prior_pool_rows(members: object) -> None:
@@ -198,6 +203,7 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
         chooser, "CHOOSER_MISMATCH", "chooser is not a PoolOutput or a sequence")
     if not chooser_objects:
         raise ReleaseAssemblyRefusal("CHOOSER_MISMATCH", "chooser is empty")
+    chooser_objects = tuple(sorted(chooser_objects, key=lambda output: output.name))
     by_member = _outputs_by_member(outputs)
     chooser_names: set[str] = set()
     for output in chooser_objects:
@@ -253,6 +259,15 @@ def _read_regular(path: Path, limit: int, code: str, detail: str) -> bytes:
     return data
 
 
+def _probe_regular(path: Path, limit: int, code: str, detail: str) -> None:
+    """Refuse a symlink, non-regular or oversize metadata file; skip a missing one."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    _read_regular(path, limit, code, detail)
+
+
 def _verify_objects(store: Path, supplied: tuple[PoolOutput, ...]) -> None:
     for output in supplied:
         path = store / object_relpath(output.content_hash)
@@ -281,15 +296,33 @@ def _read_prior_payloads(store: Path, prior) -> dict[str, bytes]:
 def _publication_lock(store: Path):
     """Serialise the stage/verify/write publication block for one release store."""
     store.mkdir(parents=True, exist_ok=True)
-    handle = open(store / ".carry_forward.lock", "a")
+    path = store / ".carry_forward.lock"
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError as exc:
+        raise ReleaseAssemblyRefusal(
+            "PUBLICATION_FAILED", "publication lock could not be opened") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ReleaseAssemblyRefusal(
+                "PUBLICATION_FAILED", "publication lock is not a regular file")
+        deadline = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise ReleaseAssemblyRefusal(
+                        "PUBLICATION_FAILED",
+                        "timed out waiting for the publication lock") from exc
+                time.sleep(0.05)
         yield
     finally:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
-            handle.close()
+            os.close(fd)
 
 
 def carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
@@ -316,12 +349,17 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
             "PRIOR_MISMATCH", "expected prior release id must be a non-empty string")
     root = Path(release_root)
     store = deployment_root(root)
+    prior_path = catalog_path(root, prior_release_id)
+    _probe_regular(prior_path, MAX_META_BYTES, "PRIOR_MISMATCH",
+                   "prior catalog is missing or unreadable")
     try:
-        prior_catalog = read_catalog(catalog_path(root, prior_release_id), prior_release_id)
+        prior_catalog = read_catalog(prior_path, prior_release_id)
     except ReleaseLayoutError as exc:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior catalog could not be read or validated") from exc
     if prior_catalog is None:
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "no prior catalog exists for that release id")
+    _probe_regular(staged_manifest_path(store, prior_release_id), MAX_META_BYTES,
+                   "PRIOR_MISMATCH", "prior manifest is missing or unreadable")
     try:
         verify_staged(store, prior_release_id)
     except ReleaseLayoutError as exc:
@@ -371,20 +409,17 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
             raise ReleaseAssemblyRefusal(
                 "INVENTORY_MISMATCH",
                 "inventory is incomplete or incompatible with the prior release") from exc
-        except deployment.DeploymentError as exc:
-            raise ReleaseAssemblyRefusal(
-                "ID_CONFLICT", "candidate staged manifest is corrupt or conflicting") from exc
-        except (TypeError, AttributeError, KeyError) as exc:
-            raise ReleaseAssemblyRefusal(
-                "INVENTORY_MISMATCH",
-                "inventory is incomplete or incompatible with the prior release") from exc
 
+        _probe_regular(staged_manifest_path(store, release_id), MAX_META_BYTES,
+                       "ID_CONFLICT", "candidate manifest is missing or unreadable")
         try:
             verify_staged(store, release_id)
         except ReleaseLayoutError as exc:
             raise ReleaseAssemblyRefusal(
                 "ID_CONFLICT", "candidate staged release could not be verified") from exc
 
+        _probe_regular(candidate_path, MAX_META_BYTES, "ID_CONFLICT",
+                       "candidate catalog is missing or unreadable")
         try:
             existing = read_catalog(candidate_path, release_id)
         except ReleaseLayoutError as exc:
@@ -405,6 +440,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
 
 
 __all__ = [
-    "CHOOSER_MEMBER_ID", "MAX_OBJECT_BYTES", "POOL_MEMBER_IDS", "PoolOutput",
-    "ReleaseAssemblyRefusal", "carry_forward_release", "derive_catalog",
+    "CHOOSER_MEMBER_ID", "LOCK_WAIT_S", "MAX_META_BYTES", "MAX_OBJECT_BYTES",
+    "POOL_MEMBER_IDS", "PoolOutput", "ReleaseAssemblyRefusal", "carry_forward_release",
+    "derive_catalog",
 ]

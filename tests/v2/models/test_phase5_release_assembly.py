@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import fcntl
 import json
 import os
 import threading
@@ -669,6 +670,8 @@ def test_prior_mismatch_when_prior_staged_manifest_is_deleted(tmp_path):
         assembly.carry_forward_release(tmp_path, prior_release_id="prior1", release_id="cand1",
                                        inventory=inventory, **_carry_kwargs(args))
     assert error.value.code == "PRIOR_MISMATCH"
+    assert not _candidate_path(tmp_path).exists()
+    assert not phase5_release.staged_manifest_path(store, "cand1").exists()
 
 
 def _assert_prior_mismatch_on_retry(tmp_path, inventory, args, store):
@@ -1330,4 +1333,118 @@ def test_inventory_with_none_bindings_is_inventory_mismatch(tmp_path):
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
         _run_carry(tmp_path, inventory, args)
     assert error.value.code == "INVENTORY_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+def _oversize_prior(root, monkeypatch):
+    monkeypatch.setattr(assembly, "MAX_META_BYTES", 10)
+
+
+def _oversize_candidate(root, monkeypatch):
+    store = phase5_release.deployment_root(root)
+    limit = max(phase5_release.catalog_path(root, "prior1").stat().st_size,
+                phase5_release.staged_manifest_path(store, "prior1").stat().st_size)
+    monkeypatch.setattr(assembly, "MAX_META_BYTES", limit)
+    candidate = _candidate_path(root)
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"x" * (limit + 1))
+
+
+@pytest.mark.parametrize("setup, code", [(_oversize_prior, "PRIOR_MISMATCH"),
+                                         (_oversize_candidate, "ID_CONFLICT")],
+                         ids=["prior-catalog", "candidate-catalog"])
+def test_meta_oversize_catalog_refusal(tmp_path, monkeypatch, setup, code):
+    inventory, _ = _stage_prior(tmp_path)
+    setup(tmp_path, monkeypatch)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, dataclasses.replace(inventory, release_id="cand1"),
+                   _valid_derive_args(tmp_path))
+    assert error.value.code == code
+    if code == "PRIOR_MISMATCH":
+        _assert_no_candidate(tmp_path)
+
+
+def test_prior_catalog_symlink_is_prior_mismatch(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    prior_path = phase5_release.catalog_path(tmp_path, "prior1")
+    copy = tmp_path / "prior-catalog-copy.json"
+    copy.write_bytes(prior_path.read_bytes())
+    prior_path.unlink()
+    prior_path.symlink_to(copy)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "PRIOR_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+def _lock_held(root):
+    lock = phase5_release.deployment_root(root) / ".carry_forward.lock"
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _lock_symlinked(root):
+    lock = phase5_release.deployment_root(root) / ".carry_forward.lock"
+    target = root / "lock-target"
+    target.write_bytes(b"")
+    lock.symlink_to(target)
+    return None
+
+
+@pytest.mark.parametrize("setup, wait", [(_lock_held, 0.2), (_lock_symlinked, None)],
+                         ids=["held-timeout", "symlink"])
+def test_publication_lock_failure_is_publication_failed(tmp_path, monkeypatch, setup, wait):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    handle = setup(tmp_path)
+    if wait is not None:
+        monkeypatch.setattr(assembly, "LOCK_WAIT_S", wait)
+    try:
+        inventory = dataclasses.replace(inventory, release_id="cand1")
+        with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+            _run_carry(tmp_path, inventory, args)
+        assert error.value.code == "PUBLICATION_FAILED"
+        _assert_no_candidate(tmp_path)
+    finally:
+        if handle is not None:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            os.close(handle)
+
+
+def _reversed_object_order(args):
+    return {**args, "outputs": list(reversed(args["outputs"])),
+            "chooser": list(reversed(args["chooser"]))}
+
+
+def test_object_order_does_not_change_derived_catalog(tmp_path):
+    inventory, prior_body = _stage_prior_with_multi_objects(tmp_path)
+    args = _multi_objects_args(tmp_path)
+    first = assembly.derive_catalog(prior_body, **args)
+    assert first == assembly.derive_catalog(prior_body, **_reversed_object_order(args))
+    for member_id in (*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID):
+        names = [obj["name"] for obj in _prior_row(first, member_id)["objects"]]
+        assert names == sorted(names)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    path = _run_carry(tmp_path, inventory, args)
+    published = path.read_bytes()
+    again = _run_carry(tmp_path, inventory, _reversed_object_order(args))
+    assert again == path
+    assert again.read_bytes() == published
+
+
+def test_stage_release_type_error_is_not_inventory_mismatch(tmp_path, monkeypatch):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+
+    def boom(*a, **k):
+        raise TypeError("unexpected staging shape")
+
+    monkeypatch.setattr(assembly.deployment, "stage_release", boom)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "PRIOR_MISMATCH"
     _assert_no_candidate(tmp_path)

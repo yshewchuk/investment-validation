@@ -23,6 +23,9 @@ means the artifact type exists in this tree but the preparer produced no
 member. ``PENDING`` means the artifact type or builder has not landed in this
 tree yet. The gate fails on both, so a release cannot go green while a member
 is still waiting on other work.
+
+The public helpers for a staged release are ``catalog_path``, ``validate_catalog``,
+``read_catalog``, ``verify_staged``, ``write_catalog`` and ``staged_manifest_path``.
 """
 from __future__ import annotations
 
@@ -299,7 +302,7 @@ write_catalog = _write_catalog
 
 
 def staged_manifest_path(store, release_id):
-    return deployment._manifest_path(store, release_id)
+    return deployment.manifest_path(store, release_id)
 
 
 __all__ = [

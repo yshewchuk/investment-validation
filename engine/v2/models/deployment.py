@@ -79,6 +79,7 @@ __all__ = [
     "current_pointer",
     "current_release",
     "invalidate_staging_success",
+    "manifest_path",
     "mark_staging_succeeded",
     "pointer_history",
     "production_deployment_root",
@@ -294,6 +295,11 @@ def _release_dir(root: Path, release_id: str) -> Path:
 
 def _manifest_path(root: Path, release_id: str) -> Path:
     return _release_dir(root, release_id) / "manifest.json"
+
+
+def manifest_path(root: Path, release_id: str) -> Path:
+    """The staged manifest path for release_id (read-only accessor)."""
+    return _manifest_path(root, release_id)
 
 
 def _object_relpath(member_hash: str) -> str:
