@@ -150,7 +150,7 @@ baseline).
 The switch and rollback procedure is rehearsed on copies only, per
 [Phase 7 — Cutover](rearchitecture_phase7_cutover.md) P7-3: a
 scratch/private-target drill using the retained deployment, data/catalog
-backups, and pointer and writer-lease/fence changes — proving an interrupted
+backups, and pointer and authority-fence changes — proving an interrupted
 switch never leaves two official writers and that rollback reconciles new
 decisions instead of deleting history. P7-5 (switch and observe: stop/drain
 the old schedule, fence old authority, activate v2, verify exactly one writer)

@@ -26,13 +26,16 @@ official decisions or mutate research multiple-testing ledgers.
 |---|---|---|
 | P7-1 Candidate and authority manifest | Exact code/config, snapshots, model deployment, job graph, consumer inventory, scheduler/credential ownership and old deployment refs. | No implicit latest dependency; no unaccounted scheduled writer or background job. |
 | P7-2 Qualify completed sessions | Ten consecutive completed-session runs on the integrated cutover path under automatic resource admission. | Real dated evidence, full expected population, selfcheck/engineering/publication success; retries count once; missing sessions unknown; manual CPU placement disqualifies a run. |
-| P7-3 Rehearse switch and rollback | Scratch/private-target drill using retained deployment, data/catalog backups, pointer and writer-lease/fence changes. | Interrupted switch never leaves two official writers; rollback reconciles new decisions instead of deleting history. |
+| P7-3 Rehearse switch and rollback | Scratch/private-target drill using retained deployment, data/catalog backups, pointer and authority-fence changes. | Interrupted switch never leaves two official writers; rollback reconciles new decisions instead of deleting history. |
 | P7-4 Review concrete release | Candidate report and exact tested switch/backout commands, downtime expectation, snapshot/deployment refs and open dispositions. | All entry requirements and qualification records present; no untested placeholder command. |
 | P7-5 Switch and observe | Stop/drain old official schedule, verify no in-flight writer, fence old authority, activate v2 schedule/consumers, verify release and next completed session. | Exactly one official writer; native result/ledger/export reconciliation; user access and last-good recovery work. |
 
 Phase 6 can perform P7-1/P7-2 preparation and start the qualification window
 before its report is finalized. Keep the ten-session requirement; avoid adding
-another ten-session wait after a successful switch. Cosmetic/docs changes
+another ten-session qualification wait after a successful switch. The
+separate 10-completed-session rollback retention window after the switch
+(owner decision, #739) is not a qualification wait; see
+`guides/authority_fence_switch_rollback.md`. Cosmetic/docs changes
 need not reset a proven path. Any material change to data, model, score,
 publication, authority or resource behavior requires a documented impact
 decision and fresh qualification unless equivalence proves the path unchanged.
@@ -98,8 +101,8 @@ Cutover is complete after the controlled activation and a verified official
 completed-session run, with rollback still available. Record exact activation
 time, authority generation, released snapshot/deployment, ledger high-water
 marks, run results and rollback retention owner. Retain the old deployment
-for an explicit rollback window; its duration is set in the concrete release
-runbook before switching.
+for an explicit rollback window: 10 completed sessions after the switch
+(owner decision, #739; see `guides/authority_fence_switch_rollback.md`).
 
 Do not delete/rename code in the cutover change. Phase 8A handles it after the
 rollback window. No intraday entitlement purchase, live model qualification
