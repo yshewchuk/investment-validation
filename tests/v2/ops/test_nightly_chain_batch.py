@@ -365,3 +365,18 @@ def test_counting_errors_never_fail_a_scan(tmp_path):
     repository.read_counters._tables = _Boom()
     slices = scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
     assert len(slices["AAA"]) == 5
+
+
+@pytest.mark.parametrize("change", [
+    {"strike": None}, {"right": "X"}, {"right": None}, {"expiry": None}])
+def test_candidate_expiries_refuse_unusable_rows_on_both_paths(tmp_path, change):
+    row = dict(_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0), **change)
+    repository, snapshot = _snapshot(
+        tmp_path, price={"AAA": [_price_row("AAA", _SESSION)]}, chains=[row])
+    with pytest.raises(DataError) as per_key:
+        scan_candidate_expiries(repository, snapshot, _AAA, decision_session=_SESSION)
+    assert per_key.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as batched:
+        scan_candidate_expiries(repository, snapshot, _AAA, decision_session=_SESSION,
+                                chain_rows=[row])
+    assert batched.value.code == "CONTRACT_MISMATCH"
