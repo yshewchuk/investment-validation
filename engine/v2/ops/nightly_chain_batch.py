@@ -29,7 +29,13 @@ _RESULT_CAP = 2_000_000
 
 
 def _day(value: Any) -> str:
-    return value.date().isoformat() if hasattr(value, "date") else str(value)[:10]
+    try:
+        stamp = validated_as_of(value)
+    except NightlySourceBundleRefusal:
+        raise fail("INVALID_REQUEST", "chain rows carry an invalid obs_date") from None
+    if stamp != stamp.normalize():
+        raise fail("INVALID_REQUEST", "chain rows carry a non-midnight obs_date")
+    return stamp.date().isoformat()
 
 
 def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,

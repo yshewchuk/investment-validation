@@ -101,15 +101,14 @@ def test_per_key_path_decodes_far_more_rows_than_it_returns_and_batch_reads_once
     assert counters["scans"] == 4
     assert counters["fragments_opened"] == 4
     assert counters["rows_returned"] == 14
-    assert counters["rows_decoded"] >= 5 * counters["rows_returned"]
-    assert counters["bytes_read"] > 0
-    assert counters["seconds"] > 0
+    assert counters["rows_decoded"] == 4 * len(_rows())
     batched_repository, batched_snapshot = _snap(tmp_path / "batched")
     scan_chain_slices(batched_repository, batched_snapshot, ["AAA", "BBB"],
                       decision_session=_SESSION)
     batched = batched_repository.read_counters.snapshot()["option_chains"]
     assert batched["scans"] == 1
     assert batched["fragments_opened"] == 1
+    assert counters["bytes_read"] == 4 * batched["bytes_read"] > 0
 
 
 def test_missing_option_table_is_contract_mismatch(tmp_path):
@@ -213,3 +212,25 @@ def test_result_ceiling_fails_the_build_without_fallback(tmp_path, monkeypatch):
         scan_chain_slices(repository, snapshot, ["AAA", "BBB"], decision_session=_SESSION)
     assert exc.value.code == "RESULT_LIMIT_EXCEEDED"
     assert scans == ["option_chains"]
+
+
+def test_seconds_use_the_counter_clock(tmp_path, monkeypatch):
+    import itertools
+
+    from engine.v2.data import read_counters
+
+    repository, snapshot = _snap(tmp_path)
+    ticks = itertools.count()
+    monkeypatch.setattr(read_counters, "clock", lambda: next(ticks) * 0.5)
+    scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
+    assert repository.read_counters.snapshot()["option_chains"]["seconds"] == 1.0
+
+
+def test_obs_date_with_trailing_text_is_refused(tmp_path):
+    rows = [dict(_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0),
+                 obs_date="2024-01-05 10:00")]
+    repository, snapshot = _snap(tmp_path)
+    with pytest.raises(OpsError) as exc:
+        scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
+                        decision_session=_SESSION, chain_rows=rows)
+    assert exc.value.code == "INVALID_REQUEST"
