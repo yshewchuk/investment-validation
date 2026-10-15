@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -705,6 +706,25 @@ def test_finalize_writes_manifest_before_snapshot(monkeypatch):
 
     assert rebuilt.snapshot == "snap-1"
     assert [kind for kind, _ in writes] == ["manifest", "snapshot"]
+
+
+def test_finalize_current_store_writes_the_manifest_before_the_snapshot(monkeypatch):
+    """The degrade path's real finalize writes MANIFEST first, SNAPSHOT last."""
+    from engine.data import rebuild as rebuild_mod
+
+    order = []
+    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats", lambda: {"t": 1})
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest",
+                        lambda stats: order.append("manifest") or Path("m"))
+    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot",
+                        lambda stats: order.append("snapshot") or Path("s"))
+
+    result = rebuild_mod.finalize_current_store()
+
+    assert order == ["manifest", "snapshot"], \
+        "exactly one SNAPSHOT write, and it is the last write"
+    assert result.tables == {"t": 1}, "the collected stats become the result tables"
+    assert result.snapshot == Path("s")
 
 
 # --------------------------------------------------------------------------

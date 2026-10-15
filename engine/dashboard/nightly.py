@@ -1596,11 +1596,11 @@ def run_nightly(
                 "tier4_since": moves_since,
                 "elapsed_s": getattr(tier_result, "elapsed_s", None),
             }
-            # A bounded gap-fill (engine/data/features/tier4.py) can now close
-            # a hole in the carried prefix without raising at all — but a gap
-            # OLDER than its backfill window is a named, logged skip
-            # (tier4_gap_partial), not a silent pass. The repair runs after
-            # this try/except, so the result is kept for it.
+            # An out-of-window Tier-4 gap (tier4_gap_partial) is not skipped:
+            # repair_tier4_gap_if_needed (called after this try/except, which
+            # keeps tier_result for it) repairs it or raises a typed TIER4_*
+            # stop. A rebuild failure here goes to mark_tiers_degraded
+            # (tiers_degraded).
         except Exception as exc:
             # mark_tiers_degraded is the one definition of the degrade path: the
             # "kind": "tiers_degraded" literal lives there (not here); it also
