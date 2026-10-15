@@ -105,8 +105,8 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     ``INVALID_REQUEST``; a mismatch with ``expected_snapshot_id`` is ``INPUT_CHANGED``; a
     missing head, a missing/malformed events table, or an unreadable carried-set table is the
     reader's ``DataError`` as ``INPUT_CHANGED`` (``details.data_code``), as
-    ``pin_snapshot_inputs`` reports it; an unreadable head artifact (missing, integrity-failed,
-    undecodable) is also ``INPUT_CHANGED`` (``details.artifact_error`` and
+    ``pin_snapshot_inputs`` reports it; any ArtifactError (missing, integrity-failed, unsafe
+    path) or an undecodable artifact is also ``INPUT_CHANGED`` (``details.artifact_error`` and
     ``details.artifact_code``: the error's own code, e.g. ``MISSING`` vs ``INTEGRITY_FAILED``,
     so tamper and absence are distinguishable)."""
     if not tickers:
@@ -144,7 +144,7 @@ def _resolve_scope_head(conn, store, scope, *, clock, expected_snapshot_id=None)
     """Resolve ``scope``'s head once, load its ``SnapshotRef`` and refuse a moved head,
     returning the ``(head, snapshot)`` pair.
 
-    Shared by :func:`generated_population` and :func:`snapshot_event_tickers` (issue #471):
+    Shared by :func:`generated_population` and :func:`snapshot_event_tickers`:
     same head resolution, same ``SnapshotRef`` load, same ``INPUT_CHANGED`` refusal when
     ``expected_snapshot_id`` is given and differs, so both callers pin the plan to one snapshot.
     """
@@ -181,8 +181,8 @@ def snapshot_event_tickers(conn, store, scope, *, as_of, clock,
     35-day window, one scan within this call. No provider or network call; it resolves the head,
     which publishes and registers the head ref.
 
-    Failure semantics: an unreadable head ARTIFACT (missing, integrity-failed,
-    undecodable) and the reader's ``DataError`` are both ``INPUT_CHANGED``, differing only
+    Failure semantics: any ArtifactError (missing, integrity-failed, unsafe path) or an
+    undecodable artifact, and the reader's ``DataError``, are both ``INPUT_CHANGED``, differing only
     in details — ``artifact_error`` (the exception type name) and ``artifact_code`` (its own code)
     vs ``data_code`` — whereas a head that moved vs ``expected_snapshot_id``
     is ``INPUT_CHANGED`` with no ``details``; zero events in the
