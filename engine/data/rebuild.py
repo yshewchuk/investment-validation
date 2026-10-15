@@ -542,8 +542,8 @@ def finalize_current_store() -> RebuildResult:
     """Write the manifest and SNAPSHOT of the store as found.
 
     Called by ``engine.dashboard.nightly.mark_tiers_degraded`` on any tiers
-    degrade, including nights where refresh never ran; when refresh ran it also
-    covers the refresh rebuild's deferred snapshot. The refresh rebuild was told
+    degrade; when refresh ran it also covers the refresh rebuild's deferred
+    snapshot. The refresh rebuild was told
     ``finalize=False`` because the tiers step would finalize, and a degraded
     tiers step still scores the store as it is found (the refreshed store when
     refresh ran), so the SNAPSHOT of that store is written here.

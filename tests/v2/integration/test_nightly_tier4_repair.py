@@ -399,8 +399,14 @@ def test_repair_finalize_failure_stops_the_run_with_a_typed_code(monkeypatch):
 def test_gap_free_finalize_failure_degrades_the_tiers_step(monkeypatch):
     # The degrade path writes the deferred snapshot via finalize_current_store;
     # stub it so this unit test never writes the real SNAPSHOT/MANIFEST.
+    finalize_calls = []
+
+    def fake_finalize_current_store():
+        finalize_calls.append(True)
+        return SimpleNamespace(snapshot="snap-degraded")
+
     monkeypatch.setattr("engine.data.rebuild.finalize_current_store",
-                        lambda: SimpleNamespace(snapshot="snap-degraded"))
+                        fake_finalize_current_store)
     report = _report()
 
     def boom(result):
@@ -413,6 +419,7 @@ def test_gap_free_finalize_failure_degrades_the_tiers_step(monkeypatch):
     assert "RuntimeError: disk full" in report.steps["tiers"]["error"]
     degraded = [f for f in report.flags if f.get("kind") == "tiers_degraded"]
     assert len(degraded) == 1, "the gap-free finalize failure raises one flag"
+    assert len(finalize_calls) == 1, "the degrade path finalizes once"
 
 
 def test_tiers_degraded_scrubs_local_paths_from_both_fields(monkeypatch):
