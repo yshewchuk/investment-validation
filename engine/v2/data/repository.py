@@ -393,7 +393,11 @@ class Repository:
         streams = [self._fragment_rows(r, contract, needed, query, batch_cap)
                    for r in population.records]
         merged = heapq.merge(*streams, key=lambda item: item[0])
-        yield from self._yield_batches(merged, contract, query, batch_cap)
+        try:
+            yield from self._yield_batches(merged, contract, query, batch_cap)
+        finally:
+            for stream in streams:
+                stream.close()
         if query.deadline is not None:
             self._check_deadline(query.deadline)
 
