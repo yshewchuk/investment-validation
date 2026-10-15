@@ -2102,6 +2102,36 @@ def test_real_repo_scan_caches_kept_drops_other_repo_entries_on_exit(monkeypatch
         assert cache == [((real, ("a",), ()), "R")]
 
 
+def test_keep_real_repo_scan_caches_fixture_sweeps_on_teardown(monkeypatch, tmp_path):
+    monkeypatch.setattr(pilot, "_GRAPH_CACHE", [])
+    monkeypatch.setattr(pilot, "_UNRESOLVED_CACHE", [])
+    gen = _keep_real_repo_scan_caches.__wrapped__()
+    next(gen)  # fixture setup: pins the real repo path before any patching
+    real = str(Path(pilot.REPO).resolve())
+    for cache in (pilot._GRAPH_CACHE, pilot._UNRESOLVED_CACHE):
+        pilot._scan_cache_put(cache, (real, ("a",), ()), "R")
+        pilot._scan_cache_put(cache, (str(tmp_path), ("a",), ()), "T")
+    with pytest.raises(StopIteration):
+        next(gen)  # fixture teardown sweeps
+    for cache in (pilot._GRAPH_CACHE, pilot._UNRESOLVED_CACHE):
+        assert cache == [((real, ("a",), ()), "R")]
+
+
+def test_keep_real_repo_scan_caches_fixture_sweeps_when_the_test_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(pilot, "_GRAPH_CACHE", [])
+    monkeypatch.setattr(pilot, "_UNRESOLVED_CACHE", [])
+    gen = _keep_real_repo_scan_caches.__wrapped__()
+    next(gen)
+    real = str(Path(pilot.REPO).resolve())
+    for cache in (pilot._GRAPH_CACHE, pilot._UNRESOLVED_CACHE):
+        pilot._scan_cache_put(cache, (real, ("a",), ()), "R")
+        pilot._scan_cache_put(cache, (str(tmp_path), ("a",), ()), "T")
+    with pytest.raises(RuntimeError):
+        gen.throw(RuntimeError("boom"))  # teardown sweeps even on a raised test error
+    for cache in (pilot._GRAPH_CACHE, pilot._UNRESOLVED_CACHE):
+        assert cache == [((real, ("a",), ()), "R")]
+
+
 def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
     assert pilot.read_changed_files("") == []
     with pytest.raises(SystemExit):  # missing: an operator/workflow bug, not "no changes"
