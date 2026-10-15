@@ -738,6 +738,14 @@ change their arithmetic or imply that source receipt production is available.
   change lands in `engine/*`, `engine/dashboard/nightly.py` or the legacy
   ledger path to support v2 work. If legacy must change at all before
   cutover, that is itself a decision requiring sign-off, not a routine PR.
+- **At most one official writer, fenced by an authority generation**
+  (target behaviour; not yet enforced, see the design guide). At
+  any instant only one deployment (legacy or v2) may commit official
+  decisions, settlements, exports or consumer-visible releases. Authority
+  moves only fence-first: the current writer is fenced and verified, then
+  the other is granted; a crash between the two leaves no writer, never
+  two. Rollback reconciles committed v2 facts into legacy rather than
+  deleting them. Design: `guides/authority_fence_switch_rollback.md`.
 - **Every `ARCHITECTURE.md` stays under a growth ceiling.**
   `checks/architecture_doc_budgets.py` enforces a growth ceiling, not an
   absolute cap: below 1000 lines, one PR may add at most 50 net lines to

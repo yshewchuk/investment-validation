@@ -81,6 +81,8 @@ runbooks own tested commands.
   nightly, research, ledger/book, all current views and phone/offline access.
 - [Phase 7 — Cutover](rearchitecture_phase7_cutover.md): ten qualified sessions,
   controlled official-writer switch and tested rollback.
+- [Authority fence and switch/rollback](authority_fence_switch_rollback.md): P7-3
+  design for the one-official-writer fence and the tested switch and backout.
 - [Phase 8 — Post-cutover](rearchitecture_phase8_post_cutover.md): physical
   cleanup/rename, UI enhancements, efficiency/generalization and live shadow.
 - [Rearchitecture tech debt](rearchitecture_tech_debt.md): nice-to-haves
