@@ -463,13 +463,15 @@ class Repository:
                     row_matcher = query_mod.compile_row_matcher(contract, query)
             read_seconds = read_counters.clock() - read_at
             returned = 0
-            for row in self._decode_rows(batch, needed, present, missing):
-                if row_matcher is not None and not row_matcher(row):
-                    continue
-                returned += 1
-                yield query_mod.order_key(row, contract), row
-            self.read_counters.add(contract.table_name, rows_decoded=decoded,
-                                   rows_returned=returned, seconds=read_seconds)
+            try:
+                for row in self._decode_rows(batch, needed, present, missing):
+                    if row_matcher is not None and not row_matcher(row):
+                        continue
+                    returned += 1
+                    yield query_mod.order_key(row, contract), row
+            finally:
+                self.read_counters.add(contract.table_name, rows_decoded=decoded,
+                                       rows_returned=returned, seconds=read_seconds)
 
     def _filter_batch(self, batch: pa.RecordBatch, contract: TableContract, present: list[str],
                       query: DataQuery, batch_matcher) -> pa.RecordBatch:

@@ -367,6 +367,17 @@ def test_bad_quote_is_refused_by_the_quote_reader_only(tmp_path):
     assert exc.value.code == "CONTRACT_MISMATCH"
 
 
+def test_counters_record_decoded_rows_when_a_scan_fails_midway(tmp_path, monkeypatch):
+    import engine.v2.ops.nightly_chain_batch as batch
+
+    repository, snapshot = _snap(tmp_path)
+    monkeypatch.setattr(batch, "_RESULT_CAP", 1)
+    with pytest.raises(DataError) as exc:
+        scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
+    assert exc.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert repository.read_counters.snapshot()["option_chains"]["rows_decoded"] > 0
+
+
 def test_counting_errors_never_fail_a_scan(tmp_path):
     ReadCounters().add("t", scans="x")  # a bad amount is swallowed, not raised
 
