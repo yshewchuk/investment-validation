@@ -431,6 +431,38 @@ def test_main_json_report_is_written_atomically(tmp_path, monkeypatch):
         "the atomic write must leave no temp file behind"
 
 
+def test_main_json_report_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
+    """A failed ``--json`` replace keeps the previous file and no temp file.
+
+    Same atomicity contract as the SNAPSHOT/MANIFEST writes: the report lands
+    in a sibling temp file and is swapped in with ``os.replace``. When that
+    replace fails the pre-existing report at the destination must survive and
+    the temp file must be cleaned up.
+    """
+    from engine.data import manifest as manifest_mod
+    from engine.data import rebuild as rebuild_mod
+
+    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(rebuild_mod, "build_tier4_table",
+                        lambda since=None: {"rows": 3, "producers": {}})
+    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats",
+                        lambda: {"panel": "hash"})
+    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot", lambda stats: "snap-1")
+    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest", lambda stats: "manifest-1")
+
+    target = tmp_path / "r.json"
+    target.write_text("PRE-EXISTING REPORT")
+    monkeypatch.setattr(manifest_mod.os, "replace", _raise_disk_full)
+
+    with pytest.raises(OSError, match="disk full"):
+        rebuild_mod.main(["--table", "tier4", "--json", str(target)])
+
+    assert target.read_text() == "PRE-EXISTING REPORT", \
+        "a failed --json write must leave the previous report unchanged"
+    assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
+        "a failed --json write must leave no temp file behind"
+
+
 # --------------------------------------------------------------------------
 # rebuild()/finalize_rebuild(): the snapshot is deferred, not written early
 # --------------------------------------------------------------------------
@@ -994,13 +1026,15 @@ def test_run_nightly_degrades_when_the_incremental_rebuild_raises(monkeypatch, t
         "the degrade path still writes the deferred refresh snapshot"
 
 
-def test_run_nightly_survives_a_failing_finalize_current_store(monkeypatch, tmp_path):
-    """A failed degrade-path snapshot write is recorded, not raised.
+def test_run_nightly_stops_when_finalize_current_store_fails(monkeypatch, tmp_path):
+    """A failed degrade-path snapshot write stops the run with a typed code.
 
     The refresh rebuild deferred its snapshot to the tiers step; when the
     tiers step degrades, ``mark_tiers_degraded`` writes that snapshot. If the
-    write itself fails the run still scores: the failure is recorded as
-    ``steps.tiers.snapshot_error`` (type only) and swallowed.
+    write itself fails the scorer would read a digest that no longer describes
+    the store being scored, so the run stops with ``NightlyStop`` and the typed
+    ``TIERS_SNAPSHOT_FAILED`` code (exception type only; the failure is also
+    recorded as ``steps.tiers.snapshot_error``) instead of scoring.
     """
     finalize_calls = []
     nightly, _calls, captured, marker_writes = _patch_run_nightly(
@@ -1016,22 +1050,57 @@ def test_run_nightly_survives_a_failing_finalize_current_store(monkeypatch, tmp_
     monkeypatch.setattr("engine.data.rebuild.finalize_current_store", boom)
     sentinel = _ScorerSentinel()
 
-    with pytest.raises(_Scored):
+    with pytest.raises(NightlyStop) as caught:
         nightly.run_nightly(
             as_of="2026-10-13", tickers=[], refresh=True, tiers=True,
             publish=False, scorer=sentinel,
             bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
         )
 
+    assert caught.value.step == "tiers"
+    assert caught.value.detail.startswith("TIERS_SNAPSHOT_FAILED"), \
+        "the typed code must lead the detail"
+    assert caught.value.detail == "TIERS_SNAPSHOT_FAILED: RuntimeError", \
+        "only the exception type is published, no text"
+    assert not sentinel.touched, \
+        "a failed snapshot write must never reach the scorer"
     report = captured.get("report")
     assert report is not None, "run_nightly never constructed a report"
     assert report.steps["tiers"]["degraded"] is True
     assert report.steps["tiers"]["snapshot_error"] == "RuntimeError", \
         "only the exception type is recorded, no text"
     assert any(f.get("kind") == "tiers_degraded" for f in report.flags)
-    assert sentinel.touched, "the run still scored despite the failed snapshot write"
     assert marker_writes == []
     assert not _marker(tmp_path).exists(), "a failed snapshot write leaves no marker"
+
+
+def test_gap_free_finalize_failure_then_snapshot_failure_stops_the_run(monkeypatch):
+    """The gap-free finalize-failure path stops when its snapshot write fails.
+
+    A failed gap-free finalize degrades the tiers step, whose degrade path then
+    writes the deferred refresh snapshot. When THAT write also fails, the run
+    stops with ``TIERS_SNAPSHOT_FAILED`` (both failures recorded) rather than
+    scoring against a stale digest.
+    """
+    def boom_current_store():
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("engine.data.rebuild.finalize_current_store",
+                        boom_current_store)
+    report = _report()
+
+    def boom(result):
+        raise RuntimeError("disk full")
+
+    with pytest.raises(NightlyStop) as caught:
+        repair_tier4_gap_if_needed(report, _result({}), lambda *a, **k: _result({}),
+                                    finalize=boom)
+
+    assert caught.value.step == "tiers"
+    assert caught.value.detail == "TIERS_SNAPSHOT_FAILED: RuntimeError"
+    assert report.steps["tiers"]["degraded"] is True
+    assert report.steps["tiers"]["snapshot_error"] == "RuntimeError", \
+        "only the exception type is recorded, no text"
 
 
 # --------------------------------------------------------------------------

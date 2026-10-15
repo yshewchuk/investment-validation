@@ -435,9 +435,10 @@ Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
   the hole would never be revisited. If Tier 4 held only the rows it could
   predict *as a general rule*, a missing row would be ambiguous between "no
   forecast available" and "this table is stale" — the gap-fill case avoids
-  that ambiguity by being the only case, always reported (`out_of_window_gap`,
-  `tier4_gap_partial`), so an absent key means specifically "an unclosed gap",
-  never a silent unbuilt table.
+  that ambiguity by being the only case, always reported in the build report
+  (`out_of_window_gap`); the nightly repairs it with a full rebuild and flags
+  `tier4_gap_partial` only if the repair is refused, so an absent key means
+  specifically "an unclosed gap", never a silent unbuilt table.
 * **The carry-over is guarded three ways** (`_carried_prefix`): a cadence
   change and a different `model_id` refuse `--since` outright. The third —
   Tier-3 events appearing inside the retained prefix — widens `since`

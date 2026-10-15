@@ -846,8 +846,11 @@ def mark_tiers_degraded(report: NightlyReport, exc: Exception) -> None:
 
     A degraded tiers step still scores against the refreshed store, so the
     refresh rebuild's deferred snapshot is written here (the scorer reads the
-    SNAPSHOT digest). A failure to write it is recorded as
-    ``steps["tiers"]["snapshot_error"]`` and swallowed: the board stays up.
+    SNAPSHOT digest). If that write fails the digest would no longer describe
+    the store being scored, so the run does NOT continue: the failure is
+    recorded (type only) as ``steps["tiers"]["snapshot_error"]`` and the helper
+    raises ``NightlyStop`` with the typed ``TIERS_SNAPSHOT_FAILED`` code
+    (exception type only, no text) from the snapshot error.
 
     The exception text reaches the published bundle, so it is scrubbed of any
     absolute local path with ``model_evidence.sanitize_reason`` before either
@@ -869,6 +872,9 @@ def mark_tiers_degraded(report: NightlyReport, exc: Exception) -> None:
         finalized = finalize_current_store()
     except Exception as snap_exc:
         report.steps["tiers"]["snapshot_error"] = f"{type(snap_exc).__name__}"
+        raise NightlyStop(
+            "tiers", f"TIERS_SNAPSHOT_FAILED: {type(snap_exc).__name__}"
+        ) from snap_exc
     else:
         # The degrade path's finalize wrote the deferred SNAPSHOT; record its
         # hash. ``getattr`` tolerates a fake finalize that returns None.
