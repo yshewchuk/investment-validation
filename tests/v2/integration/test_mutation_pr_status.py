@@ -87,8 +87,8 @@ def test_cli_description_newline_cannot_inject_output(tmp_path):
                         ["engine/v2/a.py", "x\nstate=success.py"])
     assert ps.main(argv) == 0
     lines = out.read_text().splitlines()
-    assert [l for l in lines if l.startswith("state=")] == ["state=failure"]
-    assert all(l.startswith(("state=", "description=")) for l in lines)
+    assert [line for line in lines if line.startswith("state=")] == ["state=failure"]
+    assert all(line.startswith(("state=", "description=")) for line in lines)
 
 
 def test_integrity_comes_before_attribution():
