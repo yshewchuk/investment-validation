@@ -468,8 +468,11 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
             "INVENTORY_MISMATCH", "inventory deployment id does not match the prior release")
     payloads = _read_prior_payloads(store, prior)
     _verify_carried_rows(store, prior_catalog)
-    inventory_hashes = {member.content_hash for artifact in inventory.artifacts
-                        for member in artifact.members}
+    try:
+        inventory_hashes = {member.content_hash for artifact in inventory.artifacts
+                            for member in artifact.members}
+    except (TypeError, AttributeError) as exc:
+        raise ReleaseAssemblyRefusal("INVENTORY_MISMATCH", "inventory members are malformed") from exc
     if inventory_hashes != set(payloads):
         raise ReleaseAssemblyRefusal(
             "INVENTORY_MISMATCH", "inventory member hashes differ from the prior payloads")

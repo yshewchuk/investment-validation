@@ -140,9 +140,9 @@ size check. Existing callers omitting the ceiling retain their read contract.
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
   then writes the candidate catalog. It never touches `DEPLOYED`.
 
-Both refuse with a stable `ReleaseAssemblyRefusal.code`; stray `KeyError`, `TypeError`,
-`AttributeError`, `ValueError`, `RecursionError` map to `PRIOR_MISMATCH` (stage-time
-`TypeError`/`AttributeError`/`KeyError` to `INVENTORY_MISMATCH`, publish `OSError` to `PUBLICATION_FAILED`).
+Both refuse with a stable `ReleaseAssemblyRefusal.code`; stray `KeyError`, `TypeError`, `AttributeError`,
+`ValueError`, `RecursionError` map to `PRIOR_MISMATCH` (inventory or stage-time ones to `INVENTORY_MISMATCH`,
+publish `OSError` to `PUBLICATION_FAILED`).
 
 | Condition | Code |
 |---|---|
@@ -160,7 +160,7 @@ Supplied objects, prior payloads, both catalogs and staged manifests are
 opened without following links, must be regular files, and are read under a
 byte cap; the lock file is opened without following links and must be regular.
 A missing, symlinked, non-regular or oversize prior refuses `PRIOR_MISMATCH`;
-the same candidate file refuses `ID_CONFLICT`. Staging and the catalog write
+a corrupt, symlinked, non-regular or oversize existing candidate refuses `ID_CONFLICT`, an absent one is created. Staging and the catalog write
 run under one exclusive `flock` on `deployment/.carry_forward.lock`; a loser
 that waits out `LOCK_WAIT_S` refuses `PUBLICATION_FAILED`; otherwise identical
 content succeeds and different content refuses `ID_CONFLICT`.

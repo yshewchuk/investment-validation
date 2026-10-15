@@ -1854,3 +1854,61 @@ def test_shared_readers_accept_exact_cap_and_refuse_one_below(tmp_path, monkeypa
     monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", msize - 1)
     with pytest.raises(deployment.StagingRefused):
         deployment.resolve_release(store, "prior1")
+
+
+def test_inventory_members_malformed_is_inventory_mismatch(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    bad = dataclasses.replace(inventory.artifacts[0], members=None)
+    inventory = dataclasses.replace(inventory, release_id="cand1",
+                                    artifacts=(bad,) + inventory.artifacts[1:])
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, _valid_derive_args(tmp_path))
+    assert error.value.code == "INVENTORY_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+@pytest.mark.parametrize("target", ["catalog", "manifest"])
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_shared_readers_never_read_non_regular_files(tmp_path, monkeypatch, kind, target):
+    _stage_prior(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    if target == "catalog":
+        path = phase5_release.catalog_path(tmp_path, "prior1")
+        call, expected = (lambda: phase5_release.read_catalog(path, "prior1")), phase5_release.ReleaseLayoutError
+    else:
+        path = phase5_release.staged_manifest_path(store, "prior1")
+        call, expected = (lambda: deployment.resolve_release(store, "prior1")), deployment.StagingRefused
+    path.unlink()
+    holder = None
+    if kind == "directory":
+        path.mkdir()
+    else:
+        try:
+            os.mkfifo(path)
+        except (AttributeError, OSError):
+            pytest.skip("os.mkfifo is not supported on this platform")
+        holder = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    real = os.fdopen
+
+    def watch(fd, *args, **kwargs):
+        assert stat.S_ISREG(os.fstat(fd).st_mode), "non-regular file was read"
+        return real(fd, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", watch)
+    outcome = {}
+
+    def run():
+        try:
+            call()
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(5)
+    try:
+        assert not worker.is_alive()
+    finally:
+        if holder is not None:
+            os.close(holder)
+    assert isinstance(outcome.get("error"), expected)
