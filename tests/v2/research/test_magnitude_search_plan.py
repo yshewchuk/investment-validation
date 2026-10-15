@@ -308,11 +308,14 @@ def test_minimum_integer_leaf_count_has_exact_published_recipes(source, monkeypa
     ("inner_years", {"2024": ["2023", "2023"]}), ("inner_years", {"2024": ["2023", "2022"]}),
     ("inner_years", {"2024": [2023]}), ("inner_years", {"２０２４": ["2023"]}),
     ("inner_years", {"0001": ["0000"]}), ("inner_years", {"9999": ["9998"]}),
+    pytest.param("inner_years", {"2024": ["0001"]}, id="inner-year-below-minimum"),
 ])
 def test_invalid_request_refuses_before_artifact_access(field, value, monkeypatch):
     request = _request()
     request[field] = value
     monkeypatch.setattr(search, "verify_native_registration", _forbid)
+    monkeypatch.setattr(ArtifactStore, "read_verified", _forbid)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", _forbid)
     with pytest.raises(OpsError) as caught:
         search.seal_search_plan(object(), object(), object(), request)
     assert to_document(caught.value.problem) == _problem(

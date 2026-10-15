@@ -88,6 +88,7 @@ __all__ = [
     "restage_semantic_hash",
     "rollback",
     "rollback_target",
+    "semantic_release_hash",
     "stage_release",
 ]
 
@@ -422,7 +423,7 @@ def _compatibility_issues(
     return tuple(sorted(issues))
 
 
-def _release_hash(release: ModelRelease) -> str:
+def semantic_release_hash(release: ModelRelease) -> str:
     """Hash the complete inference meaning of a release, independent of storage paths.
 
     Member paths are rewritten when staged, so they describe storage layout
@@ -457,6 +458,11 @@ def _release_hash(release: ModelRelease) -> str:
         "schema_version": release.schema_version,
         "bindings": bindings,
     })
+
+
+def _release_hash(release: ModelRelease) -> str:
+    """Compatibility entry point for existing internal callers."""
+    return semantic_release_hash(release)
 
 
 def _legacy_release_hash(release: ModelRelease) -> str:
