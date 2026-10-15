@@ -151,7 +151,7 @@ def test_non_iso_decision_session_is_invalid_request(tmp_path, session):
     assert exc.value.code == "INVALID_REQUEST"
 
 
-@pytest.mark.parametrize("tickers", [[None], [""], ["AAA", 7], [["AAA"]], "AAA"])
+@pytest.mark.parametrize("tickers", [None, 5, [None], [""], ["AAA", 7], [["AAA"]], "AAA"])
 def test_bad_tickers_are_invalid_request(tmp_path, tickers):
     repository, snapshot = _snap(tmp_path)
     with pytest.raises(OpsError) as exc:
@@ -252,3 +252,49 @@ def test_one_ticker_with_two_keys_shares_its_slice(tmp_path):
         ) == scan_quote_rows(repository, snapshot, key, expiry=_EXPIRY,
                              decision_session=_SESSION)
     assert len(shared) == size == 5
+
+
+@pytest.mark.parametrize("rows", [None, 5, "AAA"])
+def test_non_collection_chain_rows_are_invalid_request(tmp_path, rows):
+    repository, snapshot = _snap(tmp_path)
+    with pytest.raises(OpsError) as exc:
+        scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
+                        decision_session=_SESSION, chain_rows=rows) if rows is not None else (
+            require_chain_rows(rows, "AAA", _SESSION))
+    assert exc.value.code == "INVALID_REQUEST"
+
+
+def test_calendar_reader_forwards_chain_rows_and_never_scans(tmp_path, monkeypatch):
+    from engine.v2.foundation.market_calendar import CalendarSessions
+    from engine.v2.ops import nightly_calendar_inputs as nci
+    from engine.v2.ops.nightly_raw_rows import CalendarRowInputs
+
+    repository, snapshot = _snap(tmp_path)
+
+    def fake_row(repo, snap, key, *, entry_date, exit_date, expiry, spot,
+                 calendar_observed_through):
+        return CalendarRowInputs(calendar_revision="rev",
+                                 calendar_row={"expiry": expiry, "spot": spot})
+
+    monkeypatch.setattr(nci, "scan_calendar_row", fake_row)
+    calendar = CalendarSessions(
+        days=("2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08", "2024-01-09",
+              "2024-01-10", "2024-01-11", "2024-01-12", "2024-01-16", "2024-01-17",
+              "2024-01-18", "2024-01-19"),
+        observed_through=_SESSION)
+    slices = scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
+    per_key = nci.scan_calendar_row_inputs(repository, snapshot, _AAA,
+                                           decision_session=_SESSION, calendar=calendar)
+    scans: list[str] = []
+    real = Repository.scan
+
+    def counting(self, query, *, table_name):
+        scans.append(table_name)
+        return real(self, query, table_name=table_name)
+
+    monkeypatch.setattr(Repository, "scan", counting)
+    batched = nci.scan_calendar_row_inputs(repository, snapshot, _AAA,
+                                           decision_session=_SESSION, calendar=calendar,
+                                           chain_rows=slices["AAA"])
+    assert batched == per_key
+    assert "option_chains" not in scans

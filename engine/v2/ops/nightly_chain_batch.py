@@ -42,6 +42,8 @@ def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,
                        session_day: str) -> list[Mapping[str, Any]]:
     """A materialised copy of ``rows`` after checking every row is ``ticker``'s
     at ``session_day``; any other row is ``INVALID_REQUEST`` (never echoed)."""
+    if isinstance(rows, (str, bytes)) or not isinstance(rows, Iterable):
+        raise fail("INVALID_REQUEST", "chain rows must be a collection of rows")
     staged = list(rows)
     for row in staged:
         if not isinstance(row, Mapping) or any(column not in row for column in CHAIN_COLUMNS):
@@ -62,7 +64,7 @@ def scan_chain_slices(repository: Repository, snapshot: SnapshotRef, tickers: It
     if day != day.normalize():
         raise fail("INVALID_REQUEST", "decision_session must be a midnight date")
     decision_session = day.date().isoformat()
-    if isinstance(tickers, str):
+    if isinstance(tickers, (str, bytes)) or not isinstance(tickers, Iterable):
         raise fail("INVALID_REQUEST", "tickers must be a collection of strings")
     listed = list(tickers)
     if any(not isinstance(ticker, str) or not ticker.strip() for ticker in listed):
