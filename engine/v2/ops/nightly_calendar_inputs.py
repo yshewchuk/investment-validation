@@ -230,6 +230,8 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
     _require_supported_domains(key)
     _calendar_day(key.event_date, "event_date")
     session_day = _calendar_day(decision_session, "decision_session")
+    if chain_rows is not None:
+        require_chain_rows(chain_rows, key.ticker, session_day)
     series = get_price_series(repository, PriceQuery(
         ticker=key.ticker, session_date=session_day, observation_ceiling=session_day,
         lookback_sessions=0), snapshot)

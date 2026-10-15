@@ -1,14 +1,14 @@
-"""Pinned ``option_chains`` quote-row staging for cutover PR-6.
+"""Pinned ``option_chains`` quote-row staging for the raw-row producer.
 
 Stages one exact ``(ticker, obs_date)`` chain slice -- read directly off the
 pinned snapshot, explicitly un-admitted -- into the plain quote rows the
-raw-row producer's assembler (cutover PR-6 slice 4, not built yet) passes
+raw-row producer's assembler passes
 to ``nightly_source_bundle``. The read is SHADOW-only and safe by namespace
 isolation, not by source admission: ``native_score_batch`` is registered
 ``namespaces=frozenset({"shadow", "smoke"})`` with no ``store_domains``, so
 it commits no legacy-store head and holds no read/write lease the legacy
-board depends on (the rationale written in ``ARCHITECTURE.md``'s "Cutover
-PR-6" section). Causality is by data dates only: ``obs_date`` must equal
+board depends on (the rationale written in ``ARCHITECTURE.md``'s "Raw-row
+producer" section). Causality is by data dates only: ``obs_date`` must equal
 the caller's resolved ``decision_session`` exactly -- never a
 latest-at-or-before lookback -- mirroring ``engine/v2/data/chains.py``'s
 ``get_chain`` convention rather than inventing a new policy.
@@ -128,10 +128,12 @@ def scan_quote_rows(
         raise fail("INVALID_REQUEST", "quote key requires non-empty identity fields")
     expiry_day = _calendar_day(expiry)
     session_day = _calendar_day(decision_session)
+    checked_rows = (None if chain_rows is None
+                    else require_chain_rows(chain_rows, key.ticker, session_day))
     if session_day > expiry_day:
         raise data_fail("QUERY_NOT_BOUNDED", "decision_session is after the contract expiry")
-    if chain_rows is not None:
-        rows = require_chain_rows(chain_rows, key.ticker, session_day)
+    if checked_rows is not None:
+        rows = checked_rows
     else:
         contract = repository.table_contract(snapshot, _QUOTE_TABLE)
         version = snapshot.table_versions[_QUOTE_TABLE]

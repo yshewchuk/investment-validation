@@ -44,9 +44,9 @@ board, and no production raw-row assembler calls it yet.
 `panel_row_inputs.scan_panel_row(repository, snapshot, key, *,
 decision_session, history_start)` composes `daily_state_inputs`/`panel_math`/
 `regime`/`runup_math` into one `BoardRequest` key's full-superset
-`panel_row_inputs.PanelRowInputs` (`panel_row`, `panel_anchor`). No production
-raw-row producer calls it yet (`engine/v2/ops/ARCHITECTURE.md` "Cutover
-PR-6").
+`panel_row_inputs.PanelRowInputs` (`panel_row`, `panel_anchor`).
+`nightly_raw_row_producer` calls it once per `(ticker, event_date, session)`
+(`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer").
 
 <!-- public-interface: recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, regime.add_regime_features, daily_state_inputs.DailyStateInputs, daily_state_inputs.scan_daily_state_inputs, panel_row_inputs.PanelRowInputs, panel_row_inputs.scan_panel_row -->
 
