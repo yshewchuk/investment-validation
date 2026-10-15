@@ -65,8 +65,8 @@ failure rather than a stale sentence.
 ## Usage
 
 The package includes pure regime calculation logic over explicit inputs.
-No production path calls the regime helper yet; source reads and forward
-panel assembly remain separate integration work.
+`panel_row_inputs.scan_panel_row` calls the regime helper, and
+`nightly_raw_row_producer` calls `scan_panel_row`.
 
 `panel_math.advance_history(last_row)` advances a caller-selected realized
 panel row into next-event history aggregates. It is pure arithmetic; callers
@@ -76,7 +76,7 @@ panel-row builder calls it yet.
 ## Testing
 
 `regime.add_regime_features` accepts explicit event and market frames, returning
-regime values with their actual observation dates. It has no production caller.
+regime values with their actual observation dates. `scan_panel_row` calls it.
 Its real captured-source parity test is marked `needs_corpus`; the payload stays
 private and can be selected with `V2_REGIME_CORPUS_CSV`; its sibling
 `manifest.json` records the source and verifies the captured file hash.

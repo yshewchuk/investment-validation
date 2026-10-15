@@ -324,11 +324,11 @@ uses no implicit clock, and owns no cache.
   (`engine/v2/scoring/application.py`).
 - `regime` uses `panel_math._anchor_index` plus NumPy/pandas; it has no
   filesystem/network access or legacy imports. `panel_row_inputs.scan_panel_row`
-  calls `regime.add_regime_features` (its one production-adjacent caller so
-  far; production forward-panel assembly itself is still absent); every
-  other caller is a test. Neither input frame is mutated.
+  calls `regime.add_regime_features`, and `nightly_raw_row_producer` calls
+  `scan_panel_row` in production; every other caller is a test. Neither input
+  frame is mutated.
 - `panel_math` supplies anchoring to `regime`; both have focused parity tests.
-  Neither has a production forward-panel caller.
+  Both are reached in production through `scan_panel_row`.
 
 ## External systems and libraries
 
