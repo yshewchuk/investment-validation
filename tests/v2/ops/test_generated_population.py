@@ -197,6 +197,23 @@ def test_an_empty_window_is_a_typed_refusal_not_an_empty_plan(env):
     assert "no eligible earnings events" in raised.value.problem.message
 
 
+def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(monkeypatch):
+    from engine.v2.foundation import ArtifactError
+
+    monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: "head")
+
+    class _Store:
+        def read_verified(self, head):
+            raise ArtifactError("ARTIFACT_MISSING", "gone")
+
+    with pytest.raises(OpsError) as raised:
+        planning.generated_population(object(), _Store(), "shadow", as_of=_AS_OF,
+                                      tickers=("AAA",), clock=object())
+
+    assert raised.value.code == "INPUT_CHANGED"
+    assert raised.value.problem.details["artifact_error"] == "ArtifactError"
+
+
 def test_no_planned_tickers_is_refused(env):
     with pytest.raises(OpsError) as raised:
         _generate(env, tickers=())

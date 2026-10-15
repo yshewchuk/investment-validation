@@ -402,6 +402,8 @@ def test_real_nightly_planner_pins_refreshed_capture_before_input_manifest(
     monkeypatch.setattr(nightly_trigger, "_ops_root", lambda root: case.root)
     monkeypatch.setattr(nightly_trigger, "_qualification_path",
                         lambda root, name: args.expected_population)
+    monkeypatch.setattr(nightly_trigger, "_qualification_location",
+                        lambda root, name: args.expected_population)
     monkeypatch.setattr(nightly_trigger, "_derive_years", lambda as_of: (2020, 2021))
     captured = []
 

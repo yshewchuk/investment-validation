@@ -1077,7 +1077,7 @@ def test_capture_input_manifest_refuses_a_selected_session_mismatch(tmp_path, mo
                 / "2026-01-15.input_manifest.json").exists()
 
 
-def test_snapshot_event_universe_is_the_real_wrapper_closing_its_catalog_connection(
+def test_snapshot_event_universe_forwards_to_the_helper_and_closes_its_catalog_connection(
         tmp_path, monkeypatch):
     # The real wrapper (not a stub): the ops catalog is opened with this call's clock, the
     # helper gets the pinned head / scope / horizon inputs, its tuple comes back unchanged,
@@ -1831,7 +1831,7 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
                         (_explode("wrong context") if tickers != ("AAA", "BBB")
                          or context != ("AAA", "BBB")
                          or expected_shadow_snapshot_id != refreshed
-                         or expected_population != override_path else "plan_override"))
+                         or expected_population != ("AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25") else "plan_override"))
 
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
@@ -1989,7 +1989,7 @@ def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(
                         (_explode("wrong wiring") if tickers != ("CCC", "DDD")
                          or context != ("CCC", "DDD", "EEE")
                          or expected_shadow_snapshot_id != refreshed
-                         or expected_population != population_path else "plan_explicit"))
+                         or expected_population != ("AAA|STR-THRU|2026-09-25",) else "plan_explicit"))
 
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, ("CCC", "DDD"), ("CCC", "DDD", "EEE"), FakeClock(IN_WINDOW),
@@ -2087,7 +2087,7 @@ def test_prepare_default_plan_ignores_a_population_file_created_mid_run(tmp_path
     assert captured["expected_population"] is None  # the file created mid-run is ignored
 
 
-def test_prepare_default_plan_passes_the_override_path_as_expected_population(tmp_path,
+def test_prepare_default_plan_passes_the_override_keys_as_expected_population(tmp_path,
                                                                               monkeypatch):
     # The override file is PRESENT and valid: _default_plan receives the override's
     # own Path unchanged as expected_population -- the snapshot universe helper is
@@ -2114,7 +2114,7 @@ def test_prepare_default_plan_passes_the_override_path_as_expected_population(tm
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
         expected_shadow_snapshot_id="snap_before") == "plan_override")
-    assert captured["expected_population"] == override_path
+    assert captured["expected_population"] == ("AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25")
 
 
 def test_full_population_refuses_a_symlink_override(tmp_path):
@@ -2159,3 +2159,77 @@ def test_main_records_the_symlink_refusal_when_the_override_is_a_symlink(
     assert "symlink" in document["detail"]
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.status == "error"
+
+
+def test_explicit_tickers_still_validate_the_override_symlink(tmp_path, monkeypatch):
+    # Explicit tickers win over the override for the UNIVERSE, but a present
+    # dangling symlink is still refused INVALID_REQUEST before anything reads it.
+    path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to("/nonexistent-target")
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._prepare_default_plan(
+            tmp_path, AS_OF, ("AAA",), (), FakeClock(IN_WINDOW),
+            expected_shadow_snapshot_id="s")
+    assert raised.value.code == "INVALID_REQUEST"
+
+
+def test_explicit_tickers_still_validate_a_symlink_to_a_valid_override(tmp_path, monkeypatch):
+    # Same refusal for a symlink pointing at a REAL file that holds a valid
+    # population list: the link itself is unusable, never read through.
+    target = tmp_path / "real_population.json"
+    target.write_text(json.dumps(["AAA|STR-THRU|2026-09-25"]))
+    path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(target)
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._prepare_default_plan(
+            tmp_path, AS_OF, ("AAA",), (), FakeClock(IN_WINDOW),
+            expected_shadow_snapshot_id="s")
+    assert raised.value.code == "INVALID_REQUEST"
+
+
+def test_explicit_tickers_still_validate_an_oversize_override(tmp_path, monkeypatch):
+    # An oversize regular file is also refused even when explicit tickers make
+    # the override irrelevant to universe derivation.
+    monkeypatch.setattr(nightly_trigger, "_MAX_POPULATION_BYTES", 8)
+    _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._prepare_default_plan(
+            tmp_path, AS_OF, ("AAA",), (), FakeClock(IN_WINDOW),
+            expected_shadow_snapshot_id="s")
+    assert raised.value.code == "INVALID_REQUEST"
+
+
+def test_read_document_rejects_a_file_that_grows_past_the_cap_after_fstat(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    path = tmp_path / "p.json"
+    path.write_text('[ "AAA|X|2026-09-25" ]')
+    assert len(path.read_text()) > 8
+    monkeypatch.setattr(nightly_trigger, "_MAX_POPULATION_BYTES", 8)
+    real_fstat = os.fstat
+
+    def fstat_wrapper(fd):
+        st = real_fstat(fd)
+        return SimpleNamespace(st_mode=st.st_mode, st_size=1)
+
+    monkeypatch.setattr(nightly_trigger.os, "fstat", fstat_wrapper)
+
+    assert nightly_trigger._read_document(path) is None

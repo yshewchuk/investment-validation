@@ -82,6 +82,9 @@ def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
 
 
 def _read_expected_population(args):
+    keys = getattr(args, "expected_population_keys", None)
+    if keys is not None:
+        return tuple(keys)
     if not args.expected_population:
         return ()
     if not args.expected_population.is_file() or args.expected_population.is_symlink():
@@ -111,7 +114,8 @@ def _planned_population(args, root, conn, clock, tickers):
     generates it (:func:`~engine.v2.ops.snapshot_planning.generated_population`) for the ``--tickers``
     watchlist and forwards the snapshot id it read plus the uncarried-ticker exclusions it built;
     any other mode has no snapshot and yields ``()`` and empty exclusions."""
-    if args.expected_population or args.input_mode != "snapshot":
+    if (args.expected_population or getattr(args, "expected_population_keys", None) is not None
+            or args.input_mode != "snapshot"):
         return _read_expected_population(args), None, ()
     if not args.snapshot_scope:
         raise fail("INVALID_REQUEST", "snapshot input mode needs --snapshot-scope")

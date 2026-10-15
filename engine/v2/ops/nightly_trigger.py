@@ -431,9 +431,10 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     later tick must not re-litigate the window (gate-round-5 fix,
     generalizing round 4's "timed_out"-only version, Cutover PR-7b-2).
 
-    ``tickers``/``context_tickers`` are the plan's watchlist and historical
-    evidence universe (``full_population`` derives both from the native
-    nightly plan's own population document in production). ``plan_fn``,
+    ``tickers``/``context_tickers`` are the plan's watchlist (the
+    ``full_population`` file's tickers when the override exists, otherwise
+    derived later from the shadow snapshot) and historical
+    evidence universe. ``plan_fn``,
     ``submit_fn``, ``serve_fn``, ``ensure_snapshot_fn`` and ``provider`` are
     injected seams; the production defaults are the real in-process
     plan/submit/serve and the native ORATS probe.
@@ -671,7 +672,7 @@ def _read_document(path: Path | None):
         if len(data) > _MAX_POPULATION_BYTES:
             return None
         return json.loads(data)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     finally:
         if fd is not None:
@@ -687,12 +688,16 @@ def _qualification_path(root: Path, name: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def _population_tickers(path: Path | None) -> tuple[str, ...]:
+def _population_keys(path) -> tuple[str, ...] | None:
     document = _read_document(path)
-    if not isinstance(document, list):
-        return ()
-    return tuple(sorted({str(key).split("|")[0] for key in document
-                         if isinstance(key, str) and "|" in key and key.split("|")[0]}))
+    if isinstance(document, list) and all(isinstance(item, str) for item in document):
+        return tuple(document)
+    return None
+
+
+def _population_tickers(path: Path | None) -> tuple[str, ...]:
+    return tuple(sorted({str(key).split("|")[0] for key in (_population_keys(path) or ())
+                         if "|" in key and key.split("|")[0]}))
 
 
 def full_population(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -812,6 +817,32 @@ def _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id):
         conn.close()
 
 
+def _validated_override(root) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+    """Validate ``expected_population.json``, returning ``(keys, override_tickers)``.
+
+    ``keys`` is ``None`` when the override is ABSENT; a PRESENT override that is
+    a symlink, is not a regular file, or yields no tickers is refused
+    ``INVALID_REQUEST`` without being read where applicable.
+    """
+    override = _qualification_location(root, QUALIFICATION_POPULATION)
+    if not (override.exists() or override.is_symlink()):
+        return None, ()
+    if override.is_symlink():
+        raise fail("INVALID_REQUEST",
+                   "expected_population.json is a symlink; fix or remove it")
+    if not override.is_file():
+        raise fail("INVALID_REQUEST",
+                   "expected_population.json is present but is not a regular file; "
+                   "fix or remove it")
+    keys = _population_keys(override)
+    override_tickers = _population_tickers(override) if keys is not None else ()
+    if keys is None or not override_tickers:
+        raise fail("INVALID_REQUEST",
+                   "expected_population.json is present but yields no tickers "
+                   "(unreadable, oversize, non-list or empty); fix or remove it")
+    return keys, override_tickers
+
+
 def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=None, *,
                           full_run=True, expected_shadow_snapshot_id=None):
     """The scheduled preparation uses the exact watchlist passed to planning.
@@ -831,28 +862,13 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
     not refused) before refresh or plan build.
     """
     clock = clock or SystemClock()
-    override = _qualification_location(root, QUALIFICATION_POPULATION)
-    override_present = override.exists() or override.is_symlink()
-    universe = tuple(tickers)
-    if universe:
-        population = _qualification_path(root, QUALIFICATION_POPULATION)
-    elif override_present:
-        if override.is_symlink():
-            raise fail("INVALID_REQUEST",
-                       "expected_population.json is a symlink; fix or remove it")
-        if not override.is_file():
-            raise fail("INVALID_REQUEST",
-                       "expected_population.json is present but is not a regular file; "
-                       "fix or remove it")
-        universe = _population_tickers(override)
-        if not universe:
-            raise fail("INVALID_REQUEST",
-                       "expected_population.json is present but yields no tickers "
-                       "(unreadable, oversize, non-list or empty); fix or remove it")
-        population = override
-    else:
-        population = None
-        universe = _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id)
+    keys, override_tickers = _validated_override(root)
+    override_present = keys is not None
+    population_keys = keys if override_present else None
+    universe = tuple(tickers) or (override_tickers if override_present else
+                                  _snapshot_event_universe(root, as_of, clock,
+                                                           expected_shadow_snapshot_id))
+    if not tickers and not override_present:
         # A day-level finality probe over the snapshot-derived universe, before any
         # price refresh or plan build; never probed on the override or explicit-tickers
         # branches above.
@@ -860,12 +876,11 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
         if not final:
             raise fail("SOURCE_NOT_FINAL", detail)
     context = tuple(context_tickers) or universe
-    if universe:
-        expected_shadow_snapshot_id = _refresh_plan_prices(
-            root, as_of, universe, clock, expected_shadow_snapshot_id)
+    expected_shadow_snapshot_id = _refresh_plan_prices(
+        root, as_of, universe, clock, expected_shadow_snapshot_id)
     return _default_plan(root, as_of, universe, context, clock, full_run=full_run,
                          expected_shadow_snapshot_id=expected_shadow_snapshot_id,
-                         expected_population=population)
+                         expected_population=population_keys)
 
 
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,
@@ -874,9 +889,8 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
                   expected_population=_UNSET) -> str:
     """The production plan: the real ``commands._plan_command``, in-process.
 
-    ``expected_population`` is the caller's already-decided population document
-    (``_UNSET`` decides it here): the caller's decided population is used, so
-    the file is not re-checked after the snapshot universe was chosen.
+    ``expected_population`` (unless ``_UNSET``) is the caller's already-decided
+    population KEYS passed through without re-reading the override file.
     ``full_run=True`` is the native nightly plan's full-population option and
     is always declared for a scheduled run, so the plan's effect scope is the
     global ``shadow`` scope, never a slice (a generated population with
@@ -915,9 +929,14 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     clock = clock or SystemClock()
     ops_root = _ops_root(root)
     ensure_directory(ops_root)
-    population = (_qualification_path(root, QUALIFICATION_POPULATION)
-                  if expected_population is _UNSET else expected_population)
-    universe = tuple(tickers) or _population_tickers(population)
+    if expected_population is _UNSET:
+        population_path = _qualification_path(root, QUALIFICATION_POPULATION)
+        population_keys = None
+    else:
+        population_path = None
+        population_keys = expected_population
+    universe = (tuple(tickers) or population_keys
+                or _population_tickers(population_path))
     context = tuple(context_tickers) or universe
     year_start, year_end = _derive_years(as_of)
     # issue #104: capture this call's own manifest only when there is a universe to capture
@@ -929,7 +948,8 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
         command="plan", kind="nightly", as_of=as_of, mode="shadow", spec=None,
         no_ledger=False,
         input_manifest=manifest_path,
-        expected_population=population,
+        expected_population=population_path,
+        expected_population_keys=population_keys,
         tickers=",".join(universe), context_tickers=",".join(context),
         full_run=bool(full_run), year_start=year_start, year_end=year_end,
         input_mode="snapshot", snapshot_scope="shadow", refresh_mode="legacy",
