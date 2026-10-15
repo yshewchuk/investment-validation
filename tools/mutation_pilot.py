@@ -1102,9 +1102,8 @@ def _scan_cache_put(entries: list, key: tuple, value) -> None:
 def retain_scan_caches_for(repo_root: str) -> None:
     """Drop every `_GRAPH_CACHE`/`_UNRESOLVED_CACHE` entry whose cache-key repo
     field (`key[0]`) differs from `repo_root`. Mutates the lists IN PLACE, so
-    every holder of the module attribute sees the sweep (an entry with a
-    shorter key, e.g. a cleared cache, is kept nowhere -- `""` retains
-    nothing)."""
+    every holder of the module attribute sees the sweep (Passing "" matches
+    no real root, so it empties both caches.)"""
     for entries in (_GRAPH_CACHE, _UNRESOLVED_CACHE):
         entries[:] = [e for e in entries if e[0][0] == repo_root]
 
