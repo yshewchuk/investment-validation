@@ -82,40 +82,65 @@ def test_planted_gap_runs_a_full_rebuild_and_records_the_repair():
     assert "degraded" not in report.steps["tiers"]
 
 
-def test_repair_raising_stops_the_run_with_a_typed_code():
+def test_repair_raising_stops_the_run_with_a_typed_code(monkeypatch):
+    from engine.dashboard import nightly
+
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
     finalized = []
 
     def boom(tables, **kwargs):
         raise RuntimeError("disk on fire")
 
+    report = _report()
     with pytest.raises(NightlyStop) as caught:
-        repair_tier4_gap(_report(), boom, finalize=finalized.append)
+        repair_tier4_gap(report, boom, finalize=finalized.append)
 
     assert caught.value.step == "tier4_repair"
     assert caught.value.detail.startswith(
         "TIER4_REPAIR_FAILED: RuntimeError: disk on fire")
     assert finalized == [], "a refused repair must not finalize anything"
+    assert report.stopped == "tier4_repair"
+    stops = [f for f in report.flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1, "a refusal appends exactly one tiers_stop flag"
+    assert "TIER4_REPAIR_FAILED" in stops[0]["detail"]
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
-def test_repair_that_still_leaves_the_gap_stops_the_run():
+def test_repair_that_still_leaves_the_gap_stops_the_run(monkeypatch):
+    from engine.dashboard import nightly
+
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
     finalized = []
 
     def fake_rebuild_tables(tables, **kwargs):
         return _result(_gapped())
 
+    report = _report()
     with pytest.raises(NightlyStop) as caught:
-        repair_tier4_gap(_report(), fake_rebuild_tables, finalize=finalized.append)
+        repair_tier4_gap(report, fake_rebuild_tables, finalize=finalized.append)
 
     assert caught.value.step == "tier4_repair"
     assert caught.value.detail.startswith("TIER4_GAP_REMAINS: ")
     assert "pred_abs_move" in caught.value.detail
     assert finalized == [], "a repair that still leaves the gap is not finalized"
+    assert report.stopped == "tier4_repair"
+    stops = [f for f in report.flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1, "a refusal appends exactly one tiers_stop flag"
+    assert "TIER4_GAP_REMAINS" in stops[0]["detail"]
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
 def test_repair_budget_reports_the_complete_detail_string(monkeypatch):
     from engine.dashboard import nightly
 
     monkeypatch.setattr(nightly, "TIER4_REPAIR_BUDGET_S", 100)
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
 
     def fake_rebuild_tables(tables, **kwargs):
         return _result({})
@@ -133,6 +158,11 @@ def test_repair_budget_reports_the_complete_detail_string(monkeypatch):
         "TIER4_REPAIR_BUDGET: full Tier-4 rebuild took 101.0s, over the 100s budget"
     )
     assert finalized == [], "an over-budget repair is refused before finalizing"
+    assert report.stopped == "tier4_repair"
+    stops = [f for f in report.flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1, "a refusal appends exactly one tiers_stop flag"
+    assert "TIER4_REPAIR_BUDGET" in stops[0]["detail"]
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
 def test_repair_at_exactly_the_budget_succeeds(monkeypatch):
@@ -162,6 +192,9 @@ def test_repair_just_over_the_budget_raises(monkeypatch):
     from engine.dashboard import nightly
 
     monkeypatch.setattr(nightly, "TIER4_REPAIR_BUDGET_S", 100)
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
 
     def fake_rebuild_tables(tables, **kwargs):
         return _result({})
@@ -178,6 +211,11 @@ def test_repair_just_over_the_budget_raises(monkeypatch):
     assert caught.value.detail.startswith("TIER4_REPAIR_BUDGET: ")
     assert finalized == [], "a just-over-budget repair is refused before finalizing"
     assert "tier4_repair" not in report.steps["tiers"]
+    assert report.stopped == "tier4_repair"
+    stops = [f for f in report.flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1, "a refusal appends exactly one tiers_stop flag"
+    assert "TIER4_REPAIR_BUDGET" in stops[0]["detail"]
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
 def test_the_helper_finalizes_a_gap_free_incremental_result_once():
@@ -224,7 +262,12 @@ def test_an_incremental_result_with_a_gap_runs_the_repair_and_finalizes_it():
     assert report.flags == []
 
 
-def test_a_refused_repair_never_finalizes_the_incremental_result():
+def test_a_refused_repair_never_finalizes_the_incremental_result(monkeypatch):
+    from engine.dashboard import nightly
+
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
     report = _report()
     finalized = []
 
@@ -237,6 +280,10 @@ def test_a_refused_repair_never_finalizes_the_incremental_result():
 
     assert caught.value.detail.startswith("TIER4_REPAIR_FAILED: ")
     assert finalized == [], "a refused repair must leave no snapshot to finalize"
+    assert report.stopped == "tier4_repair"
+    assert any(f.get("kind") == "tiers_stop" and "TIER4_REPAIR_FAILED" in f["detail"]
+               for f in report.flags)
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
 def test_rerunning_the_guard_after_a_repair_does_nothing():
@@ -261,7 +308,13 @@ def test_rerunning_the_guard_after_a_repair_does_nothing():
     assert report.steps["tiers"]["tier4_repair"]["ran"] is True
 
 
-def test_repair_finalize_failure_stops_the_run_with_a_typed_code():
+def test_repair_finalize_failure_stops_the_run_with_a_typed_code(monkeypatch):
+    from engine.dashboard import nightly
+
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
+
     def boom(result):
         raise RuntimeError("disk full")
 
@@ -278,6 +331,10 @@ def test_repair_finalize_failure_stops_the_run_with_a_typed_code():
         "TIER4_REPAIR_FAILED: RuntimeError: disk full")
     assert "tier4_repair" not in report.steps["tiers"], \
         "a refused finalize records no tier4_repair step"
+    assert report.stopped == "tier4_repair"
+    assert any(f.get("kind") == "tiers_stop" and "TIER4_REPAIR_FAILED" in f["detail"]
+               for f in report.flags)
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
 def test_gap_free_finalize_failure_degrades_the_tiers_step(monkeypatch):
@@ -318,11 +375,13 @@ def test_tiers_degraded_scrubs_local_paths_from_both_fields(monkeypatch):
 
     assert report.steps["tiers"]["degraded"] is True
     error = report.steps["tiers"]["error"]
-    assert "/root/secret/x" not in error, "the step error must not leak the path"
-    assert error.startswith("RuntimeError: "), "the exception type stays visible"
+    assert error == "RuntimeError: failed to read <local path>", \
+        "the step error redacts the host-local path to <local path>"
     degraded = [f for f in report.flags if f.get("kind") == "tiers_degraded"]
     assert len(degraded) == 1
     detail = degraded[0]["detail"]
+    assert "failed to read <local path>" in detail, \
+        "the flag detail redacts the host-local path to <local path>"
     assert "/root/secret/x" not in detail, "the flag detail must not leak the path"
     assert "RuntimeError: " in detail, "the exception type stays visible"
 
@@ -409,35 +468,13 @@ def test_write_manifest_lands_mode_0644(tmp_path, monkeypatch):
 
 
 def test_main_json_report_is_written_atomically(tmp_path, monkeypatch):
-    """``--json`` lands the run report in one atomic write, leaving no temp file."""
-    from engine.data import rebuild as rebuild_mod
+    """``--json`` goes through the atomic helper, not a plain ``write_text``.
 
-    monkeypatch.setattr(rebuild_mod.paths, "ensure_dirs", lambda: None)
-    monkeypatch.setattr(rebuild_mod, "build_tier4_table",
-                        lambda since=None: {"rows": 3, "producers": {}})
-    monkeypatch.setattr(rebuild_mod.manifest, "collect_stats",
-                        lambda: {"panel": "hash"})
-    monkeypatch.setattr(rebuild_mod.manifest, "write_snapshot", lambda stats: "snap-1")
-    monkeypatch.setattr(rebuild_mod.manifest, "write_manifest", lambda stats: "manifest-1")
-
-    target = tmp_path / "r.json"
-    rc = rebuild_mod.main(["--table", "tier4", "--json", str(target)])
-
-    assert rc == 0
-    payload = json.loads(target.read_text())
-    assert payload["snapshot"] == "snap-1"
-    assert payload["reports"]["tier4"]["rows"] == 3
-    assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
-        "the atomic write must leave no temp file behind"
-
-
-def test_main_json_report_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
-    """A failed ``--json`` replace keeps the previous file and no temp file.
-
-    Same atomicity contract as the SNAPSHOT/MANIFEST writes: the report lands
-    in a sibling temp file and is swapped in with ``os.replace``. When that
-    replace fails the pre-existing report at the destination must survive and
-    the temp file must be cleaned up.
+    Patching ``os.replace`` to fail (as the SNAPSHOT/MANIFEST atomicity tests
+    do) only affects an atomic write: a plain ``write_text`` never calls it, so
+    it would succeed and overwrite the file, failing the "previous report
+    survives" assertion. The pre-existing report at the destination must
+    survive and the sibling temp file must be cleaned up.
     """
     from engine.data import manifest as manifest_mod
     from engine.data import rebuild as rebuild_mod
@@ -712,6 +749,11 @@ def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_p
 
     monkeypatch.setattr(nightly, "NightlyReport", _RecordingReport)
 
+    flag_reports = []
+    captured["flag_reports"] = flag_reports
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: flag_reports.append(flags))
+
     return nightly, calls, captured, marker_writes
 
 
@@ -754,7 +796,7 @@ def test_run_nightly_repairs_a_gap_then_scores(monkeypatch, tmp_path):
 
 def test_run_nightly_stops_when_the_repair_raises(monkeypatch, tmp_path):
     finalize_calls = []
-    nightly, _calls, _captured, marker_writes = _patch_run_nightly(
+    nightly, _calls, captured, marker_writes = _patch_run_nightly(
         monkeypatch,
         rebuild_results=[_result(_gapped()), RuntimeError("disk on fire")],
         finalize_calls=finalize_calls,
@@ -775,11 +817,16 @@ def test_run_nightly_stops_when_the_repair_raises(monkeypatch, tmp_path):
     assert finalize_calls == [], "a refused repair must leave no snapshot"
     assert marker_writes == []
     assert not _marker(tmp_path).exists(), "a refused repair writes no snapshot marker"
+    assert captured["report"].stopped == "tier4_repair"
+    stops = [f for f in captured["report"].flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1 and "TIER4_REPAIR_FAILED" in stops[0]["detail"]
+    assert len(captured["flag_reports"]) == 1, \
+        "the refusal writes the flag report exactly once"
 
 
 def test_run_nightly_stops_when_the_repair_leaves_the_gap(monkeypatch, tmp_path):
     finalize_calls = []
-    nightly, _calls, _captured, marker_writes = _patch_run_nightly(
+    nightly, _calls, captured, marker_writes = _patch_run_nightly(
         monkeypatch,
         rebuild_results=[_result(_gapped()), _result(_gapped())],
         finalize_calls=finalize_calls,
@@ -798,6 +845,11 @@ def test_run_nightly_stops_when_the_repair_leaves_the_gap(monkeypatch, tmp_path)
     assert not sentinel.touched, "a remaining gap must never reach the scorer"
     assert finalize_calls == []
     assert not _marker(tmp_path).exists(), "a remaining gap leaves no snapshot marker"
+    assert captured["report"].stopped == "tier4_repair"
+    stops = [f for f in captured["report"].flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1 and "TIER4_GAP_REMAINS" in stops[0]["detail"]
+    assert len(captured["flag_reports"]) == 1, \
+        "the refusal writes the flag report exactly once"
 
 
 def test_run_nightly_leaves_no_snapshot_when_the_repair_exceeds_the_budget(
@@ -806,7 +858,7 @@ def test_run_nightly_leaves_no_snapshot_when_the_repair_exceeds_the_budget(
 
     monkeypatch.setattr(nightly_mod, "TIER4_REPAIR_BUDGET_S", -1)
     finalize_calls = []
-    nightly, _calls, _captured, marker_writes = _patch_run_nightly(
+    nightly, _calls, captured, marker_writes = _patch_run_nightly(
         monkeypatch,
         rebuild_results=[_result(_gapped()), _result({})],
         finalize_calls=finalize_calls,
@@ -827,6 +879,11 @@ def test_run_nightly_leaves_no_snapshot_when_the_repair_exceeds_the_budget(
     assert finalize_calls == []
     assert marker_writes == []
     assert not _marker(tmp_path).exists(), "an over-budget repair writes no snapshot"
+    assert captured["report"].stopped == "tier4_repair"
+    stops = [f for f in captured["report"].flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1 and "TIER4_REPAIR_BUDGET" in stops[0]["detail"]
+    assert len(captured["flag_reports"]) == 1, \
+        "the refusal writes the flag report exactly once"
 
 
 def test_run_nightly_finalizes_a_gap_free_incremental_result(monkeypatch, tmp_path):
@@ -1070,6 +1127,11 @@ def test_run_nightly_stops_when_finalize_current_store_fails(monkeypatch, tmp_pa
     assert report.steps["tiers"]["snapshot_error"] == "RuntimeError", \
         "only the exception type is recorded, no text"
     assert any(f.get("kind") == "tiers_degraded" for f in report.flags)
+    assert report.stopped == "tiers"
+    stops = [f for f in report.flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1 and "TIERS_SNAPSHOT_FAILED" in stops[0]["detail"]
+    assert len(captured["flag_reports"]) == 1, \
+        "the refusal writes the flag report exactly once"
     assert marker_writes == []
     assert not _marker(tmp_path).exists(), "a failed snapshot write leaves no marker"
 
@@ -1087,6 +1149,11 @@ def test_gap_free_finalize_failure_then_snapshot_failure_stops_the_run(monkeypat
 
     monkeypatch.setattr("engine.data.rebuild.finalize_current_store",
                         boom_current_store)
+    from engine.dashboard import nightly
+
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
     report = _report()
 
     def boom(result):
@@ -1101,6 +1168,10 @@ def test_gap_free_finalize_failure_then_snapshot_failure_stops_the_run(monkeypat
     assert report.steps["tiers"]["degraded"] is True
     assert report.steps["tiers"]["snapshot_error"] == "RuntimeError", \
         "only the exception type is recorded, no text"
+    assert report.stopped == "tiers"
+    assert any(f.get("kind") == "tiers_stop" and "TIERS_SNAPSHOT_FAILED" in f["detail"]
+               for f in report.flags)
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
 # --------------------------------------------------------------------------
@@ -1176,7 +1247,7 @@ def test_run_nightly_refused_repair_writes_no_snapshot_with_calendar_names(
     finalized, so nothing writes the marker.
     """
     finalize_calls = []
-    nightly, _calls, _captured, marker_writes = _patch_run_nightly(
+    nightly, _calls, captured, marker_writes = _patch_run_nightly(
         monkeypatch,
         rebuild_results=[_result(_gapped()), RuntimeError("disk on fire")],
         finalize_calls=finalize_calls,
@@ -1199,6 +1270,9 @@ def test_run_nightly_refused_repair_writes_no_snapshot_with_calendar_names(
     assert finalize_calls == [], "neither the refresh nor the tiers result finalizes"
     assert marker_writes == []
     assert not _marker(tmp_path).exists(), "a refused repair leaves no SNAPSHOT"
+    assert captured["report"].stopped == "tier4_repair"
+    assert len(captured["flag_reports"]) == 1, \
+        "the refusal writes the flag report exactly once"
 
 
 # --------------------------------------------------------------------------

@@ -114,7 +114,7 @@ def _run_worker(root: Path, mode: str, out: Path, cache_out: Path) -> None:
 def _worker(mode: str, report: Path, cache_report: Path) -> int:
     """One subprocess build, called exactly as the nightly calls it."""
     from engine import paths
-    from engine.data import rebuild
+    from engine.data import manifest, rebuild
 
     paths.ensure_dirs()
     built: list = []
@@ -133,8 +133,9 @@ def _worker(mode: str, report: Path, cache_report: Path) -> int:
         )
     finally:
         rebuild.InputCache = original
-    report.write_text(json.dumps(result.as_dict(), sort_keys=True, default=str, indent=1))
-    cache_report.write_text(json.dumps(
+    manifest.write_text_atomic(
+        report, json.dumps(result.as_dict(), sort_keys=True, default=str, indent=1))
+    manifest.write_text_atomic(cache_report, json.dumps(
         {cache.table: dict(cache.stats, full=cache.full) for cache in built},
         sort_keys=True, default=str, indent=1,
     ))

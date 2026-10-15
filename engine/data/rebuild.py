@@ -570,7 +570,9 @@ def main(argv: list[str] | None = None) -> int:
         help="reuse cached per-input parses for daily/chains (set "
         "INVESTING_PLAN_REBUILD_FULL=1 to force a full parse that rewrites the cache)",
     )
-    ap.add_argument("--json", default=None, help="write the run report to this path")
+    ap.add_argument("--json", default=None,
+                    help="write the run report to this path (written atomically; "
+                    "a failed write keeps the previous report)")
     ap.add_argument(
         "--tier4-since",
         default=None,

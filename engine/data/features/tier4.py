@@ -65,7 +65,7 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
-from engine.data import store
+from engine.data import manifest, store
 from engine.models import registry as registry_mod
 from engine.models.no_fit import forbid_fitting
 from engine.models.training import size_model
@@ -1412,7 +1412,7 @@ def main(argv: list[str] | None = None) -> int:
     report = build_table(since=args.since, out=args.out)
     print(json.dumps(report, indent=1), flush=True)
     if args.json:
-        Path(args.json).write_text(json.dumps(report, indent=1))
+        manifest.write_text_atomic(Path(args.json), json.dumps(report, indent=1))
     return 0
 
 

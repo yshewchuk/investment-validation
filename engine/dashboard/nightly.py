@@ -782,11 +782,31 @@ def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
 TIER4_REPAIR_BUDGET_S = 3600
 
 
-def _repair_failed(exc: Exception) -> NightlyStop:
+def _refuse(report: NightlyReport, step: str, detail: str) -> NightlyStop:
+    """Record a refusal on ``report`` and return the typed stop to raise.
+
+    Sets ``report.stopped``, appends a ``tiers_stop`` flag carrying the typed
+    code, and writes the run's flag report best-effort (a failed flag write
+    must never replace the typed stop being raised). Returns the ``NightlyStop``
+    so every refusal site reads ``raise _refuse(...)``.
+    """
+    report.stopped = step
+    report.flags.append({"kind": "tiers_stop", "detail": detail[:300]})
+    try:
+        _write_flag_report(report.as_of, report.flags, report.steps)
+    except Exception:  # noqa: BLE001 — a failed flag write must not mask the stop
+        pass
+    return NightlyStop(step, detail)
+
+
+def _repair_failed(report: NightlyReport, exc: Exception) -> NightlyStop:
     """The typed stop for a Tier-4 repair that raised or failed to finalize."""
-    return NightlyStop(
+    from engine.dashboard.model_evidence import sanitize_reason
+
+    return _refuse(
+        report,
         "tier4_repair",
-        f"TIER4_REPAIR_FAILED: {type(exc).__name__}: {str(exc)[:300]}",
+        f"TIER4_REPAIR_FAILED: {type(exc).__name__}: {sanitize_reason(str(exc))}"[:300],
     )
 
 
@@ -810,10 +830,11 @@ def repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
     try:
         result = rebuild_tables(("tier4",), tier4_since=None, finalize=False)
     except Exception as exc:
-        raise _repair_failed(exc) from exc
+        raise _repair_failed(report, exc) from exc
     elapsed = clock() - start
     if elapsed > TIER4_REPAIR_BUDGET_S:
-        raise NightlyStop(
+        raise _refuse(
+            report,
             "tier4_repair",
             (f"TIER4_REPAIR_BUDGET: full Tier-4 rebuild took {elapsed:.1f}s, "
              f"over the {TIER4_REPAIR_BUDGET_S}s budget")[:300],
@@ -821,11 +842,11 @@ def repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
     gap_fill = result.reports.get("tier4", {}).get("gap_fill", {})
     flag = _tier4_gap_partial_flag(gap_fill)
     if flag is not None:
-        raise NightlyStop("tier4_repair", "TIER4_GAP_REMAINS: " + flag["detail"])
+        raise _refuse(report, "tier4_repair", "TIER4_GAP_REMAINS: " + flag["detail"])
     try:
         finalized = finalize(result)
     except Exception as exc:
-        raise _repair_failed(exc) from exc
+        raise _repair_failed(report, exc) from exc
     # The night's SNAPSHOT hash belongs in the report: the repair's finalize is
     # the write that produced it. ``getattr`` tolerates a fake finalize (None).
     report.steps["tiers"]["snapshot"] = getattr(finalized, "snapshot", None)
@@ -853,9 +874,9 @@ def mark_tiers_degraded(report: NightlyReport, exc: Exception) -> None:
     raises ``NightlyStop`` with the typed ``TIERS_SNAPSHOT_FAILED`` code
     (exception type only, no text) from the snapshot error.
 
-    The exception text reaches the published bundle, so it is scrubbed of any
-    absolute local path with ``model_evidence.sanitize_reason`` before either
-    field is built.
+    The exception text reaches the published bundle, so it is scrubbed of
+    local paths under the roots ``model_evidence.sanitize_reason`` knows before
+    either field is built.
     """
     from engine.dashboard.model_evidence import sanitize_reason
 
@@ -873,8 +894,8 @@ def mark_tiers_degraded(report: NightlyReport, exc: Exception) -> None:
         finalized = finalize_current_store()
     except Exception as snap_exc:
         report.steps["tiers"]["snapshot_error"] = f"{type(snap_exc).__name__}"
-        raise NightlyStop(
-            "tiers", f"TIERS_SNAPSHOT_FAILED: {type(snap_exc).__name__}"
+        raise _refuse(
+            report, "tiers", f"TIERS_SNAPSHOT_FAILED: {type(snap_exc).__name__}"
         ) from snap_exc
     else:
         # The degrade path's finalize wrote the deferred SNAPSHOT; record its
@@ -1249,10 +1270,12 @@ def _upcoming_event_rows(events: pd.DataFrame) -> list[dict]:
 
 
 def _write_flag_report(as_of, flags: list[dict], steps: dict) -> Path:
+    from engine.data.manifest import write_text_atomic
+
     out = paths.assert_writable(paths.REPORTS / "phase3_flags")
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{pd.Timestamp(as_of).date()}.json"
-    path.write_text(json.dumps(
+    write_text_atomic(path, json.dumps(
         {"as_of": str(pd.Timestamp(as_of).date()),
          "generated_at": datetime.now(timezone.utc).isoformat(),
          "flags": flags, "steps": list(steps)},

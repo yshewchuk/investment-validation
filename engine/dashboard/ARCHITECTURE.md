@@ -135,23 +135,27 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Missing input / refresh failure** — degrades to cached data (staleness
   stays visible in `meta.json`) — except a rotated credential, which stops
   the run rather than burning retries against a dead key.
-- **Tier-4 gap repair** — at most one SNAPSHOT per night, written after the
-  Tier-4 gap check (manifest first, SNAPSHOT last; a failed write keeps the
-  previous file); `--no-tiers` keeps the refresh step's snapshot. The repair budget
-  (`TIER4_REPAIR_BUDGET_S`) is checked after the repair returns, not
-  enforced mid-run. A rerun with no gap skips the repair. A refused night
-  leaves the panel and Tier-4 tables rebuilt in the store while SNAPSHOT
-  keeps the previous digests; if the manifest was written but the SNAPSHOT
-  write failed, the manifest is ahead of SNAPSHOT. With tiers on,
-  `steps.refresh.rebuild.snapshot` is null (the tiers step owns the
-  SNAPSHOT, recorded in `steps.tiers.snapshot`), and `steps.tiers.elapsed_s`
-  covers the rebuild, not the snapshot write.
+- **Tier-4 gap repair** — with tiers on, at most one SNAPSHOT per night: on
+  the success path it is written after the Tier-4 gap check (manifest first,
+  SNAPSHOT last; a failed write keeps the previous file); the degrade path
+  writes its own (see table). `--no-tiers` keeps the refresh step's snapshot.
+  The repair budget (`TIER4_REPAIR_BUDGET_S`) is checked after the repair
+  returns, not enforced mid-run. A rerun with no gap skips the repair. A
+  refused night leaves the panel and Tier-4 tables rebuilt in the store while
+  SNAPSHOT keeps the previous digests (readers that tag rows by it, such as
+  the ledger and report, see the old digest until the next night writes one);
+  if the manifest was written but the SNAPSHOT write failed, the manifest is
+  ahead of SNAPSHOT. With tiers on, `steps.refresh.rebuild.snapshot` is null
+  (the tiers step owns the SNAPSHOT, recorded in `steps.tiers.snapshot`);
+  `steps.tiers.elapsed_s` is the incremental build only, and the repair's time
+  is `steps.tiers.tier4_repair.elapsed_s`. Every refusal sets `report.stopped`
+  and writes the flag report.
 
   | Condition | Outcome |
   | --- | --- |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); `steps.tiers.tier4_repair` records it, no gap flag |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no session for the night (`not_yet`) |
-  | Run stops between refresh and tiers (red validation, as-of finality stop) | Store refreshed, no new SNAPSHOT; the previous SNAPSHOT is kept |
+  | With tiers on, run stops between refresh and tiers (red validation, as-of finality stop) | Store refreshed, no new SNAPSHOT; the previous SNAPSHOT is kept (with `--no-tiers` the refresh step has already written one) |
   | Tier-3/4 rebuild raises | `tiers_degraded` (error text sanitised); the run continues and scores the store as found; the degrade step writes a SNAPSHOT of that store (the deferred refresh snapshot, when refresh ran) so the scorer's digest describes the store scored; if that write fails the run stops with `NightlyStop` `TIERS_SNAPSHOT_FAILED` (exception type only; also in `steps.tiers.snapshot_error`), nothing scored |
   | No gap, finalize fails | `tiers_degraded` as above |
   | Repaired, or no gap | SNAPSHOT written once |
