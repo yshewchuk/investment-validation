@@ -1888,13 +1888,27 @@ def test_shared_readers_never_read_non_regular_files(tmp_path, monkeypatch, kind
         except (AttributeError, OSError):
             pytest.skip("os.mkfifo is not supported on this platform")
         holder = os.open(path, os.O_RDWR | os.O_NONBLOCK)
-    real = os.fdopen
+    real_fdopen, real_read, real_open = os.fdopen, os.read, os.open
+    tracked = set()
 
-    def watch(fd, *args, **kwargs):
+    def watch_open(opened, *args, **kwargs):
+        fd = real_open(opened, *args, **kwargs)
+        if str(opened) == str(path):
+            tracked.add(fd)
+        return fd
+
+    def watch_fdopen(fd, *args, **kwargs):
         assert stat.S_ISREG(os.fstat(fd).st_mode), "non-regular file was read"
-        return real(fd, *args, **kwargs)
+        return real_fdopen(fd, *args, **kwargs)
 
-    monkeypatch.setattr(os, "fdopen", watch)
+    def watch_read(fd, *args, **kwargs):
+        if fd in tracked:
+            assert stat.S_ISREG(os.fstat(fd).st_mode), "non-regular file was read"
+        return real_read(fd, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", watch_open)
+    monkeypatch.setattr(os, "fdopen", watch_fdopen)
+    monkeypatch.setattr(os, "read", watch_read)
     outcome = {}
 
     def run():
