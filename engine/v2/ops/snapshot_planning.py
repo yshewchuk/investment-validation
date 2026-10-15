@@ -107,8 +107,8 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     reader's ``DataError`` as ``INPUT_CHANGED`` (``details.data_code``), as
     ``pin_snapshot_inputs`` reports it; an unreadable head artifact (missing, integrity-failed,
     undecodable) is also ``INPUT_CHANGED`` (``details.artifact_error`` and
-    ``details.artifact_code``: the error's own code, e.g. ``ARTIFACT_MISSING`` vs an integrity
-    code, so tamper and absence are distinguishable)."""
+    ``details.artifact_code``: the error's own code, e.g. ``MISSING`` vs ``INTEGRITY_FAILED``,
+    so tamper and absence are distinguishable)."""
     if not tickers:
         # The score stage scores the watchlist only: a population over any wider scope (the
         # context universe) could only fail at execution, so refuse at plan time instead.
@@ -183,8 +183,8 @@ def snapshot_event_tickers(conn, store, scope, *, as_of, clock,
 
     Failure semantics: an unreadable head ARTIFACT (missing, integrity-failed,
     undecodable) and the reader's ``DataError`` are both ``INPUT_CHANGED``, differing only
-    in details — ``artifact_error`` (the exception type name) vs ``data_code`` — whereas a
-    head that moved vs ``expected_snapshot_id``
+    in details — ``artifact_error`` (the exception type name) and ``artifact_code`` (its own code)
+    vs ``data_code`` — whereas a head that moved vs ``expected_snapshot_id``
     is ``INPUT_CHANGED`` with no ``details``; zero events in the
     window is ``INVALID_REQUEST`` with ``details`` ``as_of`` and ``horizon_days``. Does not
     filter by the carried set: the later ``generated_population`` call already filters

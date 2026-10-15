@@ -197,14 +197,15 @@ def test_an_empty_window_is_a_typed_refusal_not_an_empty_plan(env):
     assert "no eligible earnings events" in raised.value.problem.message
 
 
-def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(monkeypatch):
+@pytest.mark.parametrize("code", ["MISSING", "INTEGRITY_FAILED", "UNSAFE_PATH"])
+def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(monkeypatch, code):
     from engine.v2.foundation import ArtifactError
 
     monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: "head")
 
     class _Store:
         def read_verified(self, head):
-            raise ArtifactError("ARTIFACT_MISSING", "gone")
+            raise ArtifactError(code, "x")
 
     with pytest.raises(OpsError) as raised:
         planning.generated_population(object(), _Store(), "shadow", as_of=_AS_OF,
@@ -212,17 +213,18 @@ def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(mo
 
     assert raised.value.code == "INPUT_CHANGED"
     assert raised.value.problem.details["artifact_error"] == "ArtifactError"
-    assert raised.value.problem.details["artifact_code"] == "ARTIFACT_MISSING"
+    assert raised.value.problem.details["artifact_code"] == code
 
 
-def test_pin_snapshot_inputs_maps_an_unreadable_head_artifact_to_input_changed(monkeypatch):
+@pytest.mark.parametrize("code", ["MISSING", "INTEGRITY_FAILED", "UNSAFE_PATH"])
+def test_pin_snapshot_inputs_maps_an_unreadable_head_artifact_to_input_changed(monkeypatch, code):
     from engine.v2.foundation import ArtifactError
 
     monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: "head")
 
     class _Store:
         def read_verified(self, head):
-            raise ArtifactError("ARTIFACT_MISSING", "gone")
+            raise ArtifactError(code, "x")
 
     with pytest.raises(OpsError) as raised:
         planning.pin_snapshot_inputs(object(), _Store(), "shadow", tickers=("AAA",),
@@ -232,7 +234,7 @@ def test_pin_snapshot_inputs_maps_an_unreadable_head_artifact_to_input_changed(m
 
     assert raised.value.code == "INPUT_CHANGED"
     assert raised.value.problem.details["artifact_error"] == "ArtifactError"
-    assert raised.value.problem.details["artifact_code"] == "ARTIFACT_MISSING"
+    assert raised.value.problem.details["artifact_code"] == code
 
 
 def test_no_planned_tickers_is_refused(env):
