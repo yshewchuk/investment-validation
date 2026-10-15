@@ -428,7 +428,7 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     later tick must not re-litigate the window (gate-round-5 fix,
     generalizing round 4's "timed_out"-only version, Cutover PR-7b-2).
 
-    ``tickers``/``context_tickers`` are the plan watchlist and historical evidence universe; when empty, ``_prepare_default_plan`` derives them from the validated override or, absent that, from the shadow snapshot; explicit tickers set the universe while an present override is still validated. ``plan_fn``,
+    ``tickers``/``context_tickers`` are the plan watchlist and historical evidence universe; when empty, ``_prepare_default_plan`` derives them from the validated override or, absent that, from the shadow snapshot; explicit tickers set the universe while a present override is still validated. ``plan_fn``,
     ``submit_fn``, ``serve_fn``, ``ensure_snapshot_fn`` and ``provider`` are
     injected seams; the production defaults are the real in-process
     plan/submit/serve and the native ORATS probe.
@@ -862,7 +862,8 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     through ``commands._plan_command`` to ``pin_snapshot_inputs``; the scheduled
     caller has already refreshed and captured prices before this call.
     The decided ``expected_population`` is the operator's population document when present
-    (    ``_prepare_default_plan`` (via ``_validated_override``) derives the override tickers from the same file; it is the explicit override and wins over snapshot generation); absent,
+    (``_prepare_default_plan``, via ``_validated_override``, derived the override tickers from
+    the same file); it is the explicit override and wins over snapshot generation. When absent,
     ``_prepare_default_plan`` already derived ``universe``/``context`` (when
     no explicit caller tickers/context_tickers were supplied) from the shadow
     snapshot's own events via

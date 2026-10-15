@@ -138,8 +138,9 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     return population, snapshot.snapshot_id, evidence
 
 
-def _resolve_scope_snapshot(conn, store, scope, *, clock, expected_snapshot_id=None):
-    """Resolve ``scope``'s head once, load its ``SnapshotRef`` and refuse a moved head.
+def _resolve_scope_head(conn, store, scope, *, clock, expected_snapshot_id=None):
+    """Resolve ``scope``'s head once, load its ``SnapshotRef`` and refuse a moved head,
+    returning the ``(head, snapshot)`` pair.
 
     Shared by :func:`generated_population` and :func:`snapshot_event_tickers` (issue #471):
     same head resolution, same ``SnapshotRef`` load, same ``INPUT_CHANGED`` refusal when
@@ -150,7 +151,11 @@ def _resolve_scope_snapshot(conn, store, scope, *, clock, expected_snapshot_id=N
     if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
         raise fail("INPUT_CHANGED",
                    "the shadow snapshot head moved since it was verified for this session")
-    return snapshot
+    return head, snapshot
+
+
+def _resolve_scope_snapshot(conn, store, scope, *, clock, expected_snapshot_id=None):
+    return _resolve_scope_head(conn, store, scope, clock=clock, expected_snapshot_id=expected_snapshot_id)[1]
 
 
 def _load_snapshot_ref(store, head):
@@ -277,11 +282,8 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
         raise fail("INVALID_REQUEST",
                    "direct scope tickers are not covered by the evidence scope tickers")
     try:
-        head = resolve_snapshot_head(conn, store, scope, clock=clock)
-        snapshot = _load_snapshot_ref(store, head)
-        if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
-            raise fail("INPUT_CHANGED",
-                       "the shadow snapshot head moved since it was verified for this session")
+        head, snapshot = _resolve_scope_head(
+            conn, store, scope, clock=clock, expected_snapshot_id=expected_snapshot_id)
         # External review #5: resolve "latest committed receipt for this
         # snapshot" exactly once, here, and carry the receipt_id itself
         # forward in the returned dict -- nightly._stage_parameters stamps
