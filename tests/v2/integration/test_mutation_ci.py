@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # land: always-run
 import ast
+import contextlib
 import csv
 import io
 import json
@@ -2067,13 +2068,15 @@ def _empty_import_graph_for_synthetic_cfg(request, monkeypatch):
         monkeypatch.setattr(pilot, "build_import_graph", lambda *a, **k: {})
 
 
-def _sweep_scan_caches_to(real: str) -> None:
-    # Re-read the module attributes: a test may have replaced a cache object
-    # wholesale, and mutate in place because other code holds the lists by
-    # module attribute.
-    for name in ("_GRAPH_CACHE", "_UNRESOLVED_CACHE"):
-        cache = getattr(pilot, name)
-        cache[:] = [e for e in cache if e[0][0] == real]
+@contextlib.contextmanager
+def _real_repo_scan_caches_kept():
+    real = str(Path(pilot.REPO).resolve())
+    try:
+        yield real
+    finally:
+        for name in ("_GRAPH_CACHE", "_UNRESOLVED_CACHE"):
+            cache = getattr(pilot, name)  # re-read: a test may have rebound the attribute
+            cache[:] = [e for e in cache if e[0][0] == real]  # in place: callers hold the list via the module attribute
 
 
 @pytest.fixture(autouse=True)
@@ -2081,23 +2084,22 @@ def _keep_real_repo_scan_caches():
     """Tests that monkeypatch `pilot.REPO` to a tmp_path and call the default
     (tracked=None) `build_import_graph` path push tmp-repo entries into the
     `_SCAN_CACHE_LIMIT = 2` module caches, evicting the real repo's entry and
-    forcing the ~22 s real-repo graph to be rebuilt several times per process
+    forcing an expensive full real-repo graph rebuild several times per process
     (#747). Sweep the caches down to real-repo entries after each test; the
     setup side reads `pilot.REPO` before the test body can patch it."""
-    real = str(Path(pilot.REPO).resolve())
-    yield
-    _sweep_scan_caches_to(real)
+    with _real_repo_scan_caches_kept():
+        yield
 
 
-def test_sweep_scan_caches_keeps_only_real_repo_entries(monkeypatch):
+def test_real_repo_scan_caches_kept_drops_other_repo_entries_on_exit(monkeypatch, tmp_path):
     monkeypatch.setattr(pilot, "_GRAPH_CACHE", [])
     monkeypatch.setattr(pilot, "_UNRESOLVED_CACHE", [])
+    with _real_repo_scan_caches_kept() as real:
+        for cache in (pilot._GRAPH_CACHE, pilot._UNRESOLVED_CACHE):
+            pilot._scan_cache_put(cache, (real, ("a",), ()), "R")
+            pilot._scan_cache_put(cache, (str(tmp_path), ("a",), ()), "T")
     for cache in (pilot._GRAPH_CACHE, pilot._UNRESOLVED_CACHE):
-        pilot._scan_cache_put(cache, ("/real", ("a",), ()), "R")
-        pilot._scan_cache_put(cache, ("/tmp/x", ("a",), ()), "T")
-    _sweep_scan_caches_to("/real")
-    for cache in (pilot._GRAPH_CACHE, pilot._UNRESOLVED_CACHE):
-        assert cache == [(("/real", ("a",), ()), "R")]
+        assert cache == [((real, ("a",), ()), "R")]
 
 
 def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
