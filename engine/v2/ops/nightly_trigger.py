@@ -695,9 +695,13 @@ def _population_keys(path) -> tuple[str, ...] | None:
     return None
 
 
-def _population_tickers(path: Path | None) -> tuple[str, ...]:
-    return tuple(sorted({str(key).split("|")[0] for key in (_population_keys(path) or ())
+def _tickers_from_keys(keys) -> tuple[str, ...]:
+    return tuple(sorted({str(key).split("|")[0] for key in (keys or ())
                          if "|" in key and key.split("|")[0]}))
+
+
+def _population_tickers(path: Path | None) -> tuple[str, ...]:
+    return _tickers_from_keys(_population_keys(path) or ())
 
 
 def full_population(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -707,8 +711,8 @@ def full_population(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     (``reports/phase6/nightly_trigger/expected_population.json``, a JSON list
     of ``ticker|strategy|event_date`` keys) is the full default population when present:
     every distinct ticker in it is both the watchlist and the historical
-    evidence context, and the document is passed to the plan unchanged as
-    ``--expected-population`` (it is the explicit override and wins over snapshot
+    evidence context, and the decided keys are passed to the plan in-process
+    (it is the explicit override and wins over snapshot
     generation). The trigger takes no ticker-list argument, and the document is not
     required for the trigger to run: absent, this function still returns ``((), ())``
     (file-only read), while ``_prepare_default_plan`` derives the scheduled run's universe
@@ -835,7 +839,7 @@ def _validated_override(root) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
                    "expected_population.json is present but is not a regular file; "
                    "fix or remove it")
     keys = _population_keys(override)
-    override_tickers = _population_tickers(override) if keys is not None else ()
+    override_tickers = _tickers_from_keys(keys) if keys is not None else ()
     if keys is None or not override_tickers:
         raise fail("INVALID_REQUEST",
                    "expected_population.json is present but yields no tickers "
@@ -855,16 +859,15 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
     universe is ``snapshot_event_tickers`` on the pinned head ``expected_shadow_snapshot_id``
     names, also used as the context unless ``context_tickers`` were supplied. The override is
     NOT cross-checked against the snapshot; a planned key with no observed row is only
-    recorded as a ``PLANNED_ROW_MISSING`` finding by the serving bridge. The refresh and
-    ``_default_plan`` path is unchanged: with the file absent ``commands._planned_population``
-    generates the population from the same snapshot's events, then the snapshot-derived
-    universe gets a day-level finality probe over the universe (partial ticker coverage is
-    not refused) before refresh or plan build.
+    recorded as a ``PLANNED_ROW_MISSING`` finding by the serving bridge. The price
+    refresh receives the universe chosen here (snapshot-derived, override or explicit),
+    and the pre-refresh pin is used to derive it because price capture does not write
+    earnings_events.
     """
     clock = clock or SystemClock()
     keys, override_tickers = _validated_override(root)
     override_present = keys is not None
-    population_keys = keys if override_present else None
+    population_keys = keys
     universe = tuple(tickers) or (override_tickers if override_present else
                                   _snapshot_event_universe(root, as_of, clock,
                                                            expected_shadow_snapshot_id))

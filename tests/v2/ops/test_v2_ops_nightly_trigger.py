@@ -2233,3 +2233,81 @@ def test_read_document_rejects_a_file_that_grows_past_the_cap_after_fstat(
     monkeypatch.setattr(nightly_trigger.os, "fstat", fstat_wrapper)
 
     assert nightly_trigger._read_document(path) is None
+
+
+def test_read_document_rejects_a_padded_valid_list_by_the_post_read_cap(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    path = tmp_path / "padded.json"
+    path.write_text('["AAA|X|2026-09-25"]' + " " * 50)
+    monkeypatch.setattr(nightly_trigger, "_MAX_POPULATION_BYTES", 8)
+    # Control: the real fstat sees a size over the cap, so the fstat guard
+    # alone refuses the document before any bytes are read.
+    assert nightly_trigger._read_document(path) is None
+
+    real_fstat = os.fstat
+
+    def fstat_wrapper(fd):
+        st = real_fstat(fd)
+        return SimpleNamespace(st_mode=st.st_mode, st_size=1)
+
+    monkeypatch.setattr(nightly_trigger.os, "fstat", fstat_wrapper)
+    # The fstat guard now passes (st_size=1 <= 8), so only the post-read cap
+    # can refuse this still-valid JSON list padded past the cap.
+    assert nightly_trigger._read_document(path) is None
+
+
+def test_planned_population_uses_the_decided_keys_without_reading_or_generating(
+        tmp_path, monkeypatch):
+    import argparse
+
+    from engine.v2.ops import snapshot_planning
+    from engine.v2.ops.workflows import commands
+
+    monkeypatch.setattr(snapshot_planning, "generated_population", _explode)
+    args = argparse.Namespace(
+        expected_population=None,
+        expected_population_keys=("AAA|X|2026-09-25", "AAA|Y|2026-09-25"),
+        input_mode="snapshot", snapshot_scope="shadow", as_of=AS_OF, expected_snapshot_id=None)
+    result = commands._planned_population(args, tmp_path, _DummyConn(), FakeClock(IN_WINDOW),
+                                          ("AAA",))
+    assert result == (("AAA|X|2026-09-25", "AAA|Y|2026-09-25"), None, ())
+
+    monkeypatch.setattr(snapshot_planning, "generated_population",
+                        lambda *a, **k: (("G|X|2026-09-25",), "snap", ()))
+    generated_args = argparse.Namespace(
+        expected_population=None, expected_population_keys=None, input_mode="snapshot",
+        snapshot_scope="shadow", as_of=AS_OF, expected_snapshot_id=None)
+    assert commands._planned_population(generated_args, tmp_path, _DummyConn(),
+                                        FakeClock(IN_WINDOW), ("AAA",)) == (
+        ("G|X|2026-09-25",), "snap", ())
+
+
+def test_default_plan_passes_the_decided_keys_to_the_plan(tmp_path, monkeypatch):
+    captured = {}
+    from engine.v2.ops import bootstrap
+    from engine.v2.ops.workflows import commands
+
+    monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
+    manifest_path = tmp_path / "captured_manifest.json"
+    monkeypatch.setattr(nightly_trigger, "_capture_input_manifest",
+                        lambda *a, **k: manifest_path)
+
+    def fake_plan(args, root, conn, clock):
+        captured["args"] = args
+        return {"plan_ref": "plan_keys", "plan": {}}
+
+    monkeypatch.setattr(commands, "_plan_command", fake_plan)
+    plan_ref = nightly_trigger._default_plan(
+        tmp_path, AS_OF, ("AAA",), (), None,
+        expected_shadow_snapshot_id="s", expected_population=("AAA|X|2026-09-25",))
+    assert plan_ref == "plan_keys"
+    args = captured["args"]
+    assert args.expected_population is None
+    assert args.expected_population_keys == ("AAA|X|2026-09-25",)
+
+    nightly_trigger._default_plan(
+        tmp_path, AS_OF, ("AAA",), (), None,
+        expected_shadow_snapshot_id="s", expected_population=None)
+    args = captured["args"]
+    assert args.expected_population_keys is None
