@@ -6,7 +6,9 @@ catalog before decoding, so a declared-but-broken member refuses all-or-nothing
 with the exact member id and a path-free message.
 """
 import json
+import os
 import sys
+import threading
 import unittest.mock
 from pathlib import Path
 from types import MappingProxyType
@@ -375,3 +377,49 @@ def test_state_catalog_directory_or_symlink_refuses(tmp_path, kind):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "phase5_release.json"
+
+
+def test_state_catalog_fifo_refuses_without_hanging(tmp_path):
+    _stage_and_promote(tmp_path)
+    _write_catalog(tmp_path, rows=[])
+    path = tmp_path / "phase5_release.json"
+    path.unlink()
+    try:
+        os.mkfifo(path)
+    except (AttributeError, OSError):
+        pytest.skip("os.mkfifo unavailable")
+    holder = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    errors = []
+
+    def run():
+        try: resolve_release_binding(tmp_path)
+        except BaseException as exc: errors.append(exc)
+
+    try:
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(5)
+        assert not worker.is_alive()
+    finally:
+        os.close(holder)
+    assert isinstance(errors[0], ModelNotReady)
+    assert errors[0].member_id == "phase5_release.json"
+    assert errors[0].detail == "catalog is not a readable file"
+
+
+def test_state_catalog_over_cap_refuses(tmp_path, monkeypatch):
+    _stage_and_promote(tmp_path)
+    _write_catalog(tmp_path, rows=[])
+    size = (tmp_path / "phase5_release.json").stat().st_size
+
+    monkeypatch.setattr(release_bindings, "_MAX_CATALOG_BYTES", size - 1)
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "phase5_release.json"
+    assert error.value.detail == "catalog is not a readable file"
+
+    monkeypatch.setattr(release_bindings, "_MAX_CATALOG_BYTES", size)
+    try:
+        resolve_release_binding(tmp_path)
+    except ModelNotReady as exc:
+        assert exc.member_id != "phase5_release.json" or exc.detail != "catalog is not a readable file"

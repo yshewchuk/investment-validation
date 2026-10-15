@@ -431,7 +431,7 @@ def _read_state_catalog(release_root: Path, expected_release_id: str) -> Mapping
     """The ``phase5_release.json`` catalog: parsed, schema-checked,
     self-hash-verified, and checked against the live pointer's release_id --
     all before any of its rows are trusted."""
-    path = deployment._manifest_path(
+    path = deployment.manifest_path(
         release_root / _DEPLOYMENT_DIR, expected_release_id).with_name(_STATE_CATALOG_NAME)
     raw = _read_catalog_bytes(path, release_root / _STATE_CATALOG_NAME)
     try:

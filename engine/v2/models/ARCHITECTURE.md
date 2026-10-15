@@ -125,7 +125,7 @@ size check. Existing callers omitting the ceiling retain their read contract.
   touches `DEPLOYED`.
 
 Both refuse with a stable `ReleaseAssemblyRefusal.code` (stray `OSError`,
-`KeyError`, `TypeError`, `AttributeError`, `RecursionError` translated). No caller yet.
+`KeyError`, `TypeError`, `AttributeError`, `ValueError`, `RecursionError` map to `PRIOR_MISMATCH`). No caller yet.
 
 | Condition | Code |
 |---|---|
