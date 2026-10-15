@@ -303,15 +303,19 @@ def test_producer_routes_each_tickers_grouped_rows_to_both_readers(
         _event_row("BBB", _MIDNIGHT, "BMO", event_id="bbb-midnight"),
     ])
     rig = _ReaderRig(monkeypatch)
-    monkeypatch.setattr(
-        nrp, "scan_chain_slices",
-        lambda repo, snap, tickers, *, decision_session: {
-            ticker: [{"ticker": ticker, "marker": ticker}] for ticker in tickers})
+    slice_calls: list = []
+
+    def fake_slices(repo, snap, tickers, *, decision_session):
+        slice_calls.append(sorted(tickers))
+        return {ticker: [{"ticker": ticker, "marker": ticker}] for ticker in tickers}
+
+    monkeypatch.setattr(nrp, "scan_chain_slices", fake_slices)
 
     events_document, _ = nrp.build_native_score_batch_events(
         repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
 
     assert len(events_document) > 1
+    assert slice_calls == [["AAA", "BBB"]]
     assert len(rig.chain_rows_seen) == 2 * len(events_document)
     assert {row["marker"] for rows in rig.chain_rows_seen for row in rows} == {"AAA", "BBB"}
     assert all(len({row["ticker"] for row in rows}) == 1 for rows in rig.chain_rows_seen)

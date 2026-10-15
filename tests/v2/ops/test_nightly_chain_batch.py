@@ -100,9 +100,10 @@ def test_per_key_path_decodes_far_more_rows_than_it_returns_and_batch_reads_once
     counters = repository.read_counters.snapshot()["option_chains"]
     assert counters["scans"] == 4
     assert counters["fragments_opened"] == 4
-    assert counters["rows_returned"] > 0
+    assert counters["rows_returned"] == 14
     assert counters["rows_decoded"] >= 5 * counters["rows_returned"]
     assert counters["bytes_read"] > 0
+    assert counters["seconds"] > 0
     batched_repository, batched_snapshot = _snap(tmp_path / "batched")
     scan_chain_slices(batched_repository, batched_snapshot, ["AAA", "BBB"],
                       decision_session=_SESSION)
@@ -166,7 +167,23 @@ def test_chain_rows_for_another_ticker_or_session_are_refused(tmp_path):
         scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
                         decision_session=_SESSION, chain_rows=slices["BBB"])
     assert exc.value.code == "INVALID_REQUEST"
-    with pytest.raises(OpsError):
+    with pytest.raises(OpsError) as session_exc:
         scan_candidate_expiries(repository, snapshot, _AAA, decision_session="2024-01-04",
                                 chain_rows=slices["AAA"])
+    assert session_exc.value.code == "INVALID_REQUEST"
+    with pytest.raises(OpsError) as quote_session_exc:
+        scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
+                        decision_session="2024-01-04", chain_rows=slices["AAA"])
+    assert quote_session_exc.value.code == "INVALID_REQUEST"
     assert require_chain_rows(iter(slices["AAA"]), "AAA", _SESSION) == slices["AAA"]
+
+
+def test_readers_given_chain_rows_never_scan(tmp_path, monkeypatch):
+    repository, snapshot = _snap(tmp_path)
+    slices = scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
+    scans = _count_scans(monkeypatch)
+    scan_candidate_expiries(repository, snapshot, _AAA, decision_session=_SESSION,
+                            chain_rows=slices["AAA"])
+    scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY, decision_session=_SESSION,
+                    chain_rows=slices["AAA"])
+    assert scans == []

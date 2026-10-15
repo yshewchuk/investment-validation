@@ -12,12 +12,12 @@ falls back to per-key scans.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date
 from typing import Any
 
 from engine.v2.contracts import DataQuery, KeyPredicate, SnapshotRef
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import fail
+from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal, validated_as_of
 
 __all__ = ["CHAIN_COLUMNS", "require_chain_rows", "scan_chain_slices"]
 
@@ -46,13 +46,14 @@ def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,
 def scan_chain_slices(repository: Repository, snapshot: SnapshotRef, tickers: Iterable[str], *,
                       decision_session: str) -> dict[str, list[dict[str, Any]]]:
     """Every ``tickers`` entry's ``option_chains`` rows for ``decision_session``
-    (an ISO ``YYYY-MM-DD`` string), from a single ``Repository.scan``."""
-    if not isinstance(decision_session, str):
-        raise fail("INVALID_REQUEST", "decision_session must be an ISO date string")
+    (a naive midnight date), from a single ``Repository.scan``."""
     try:
-        date.fromisoformat(decision_session)
-    except ValueError:
-        raise fail("INVALID_REQUEST", "decision_session must be an ISO date string") from None
+        day = validated_as_of(decision_session)
+    except NightlySourceBundleRefusal:
+        raise fail("INVALID_REQUEST", "decision_session must be a valid naive date") from None
+    if day != day.normalize():
+        raise fail("INVALID_REQUEST", "decision_session must be a midnight date")
+    decision_session = day.date().isoformat()
     unique = set(tickers)
     if any(not isinstance(ticker, str) or not ticker.strip() for ticker in unique):
         raise fail("INVALID_REQUEST", "tickers must be non-empty strings")

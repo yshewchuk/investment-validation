@@ -83,10 +83,12 @@ returns `QuoteRowInputs` from a pinned `option_chains` snapshot for an exact
 ticker's rows from the batched read. `nightly_raw_row_producer` is its
 production caller; see the component architecture contract.
 
-`nightly_chain_batch.scan_chain_slices` and `CHAIN_COLUMNS` are the internal
-batched `option_chains` read: one scan per producer build, rows grouped by
-ticker, handed to the quote and calendar readers as `chain_rows`. The
-producer is the only caller.
+`nightly_chain_batch.scan_chain_slices`, `CHAIN_COLUMNS` and
+`require_chain_rows` are the internal batched `option_chains` read: one scan
+per producer build, rows grouped by ticker, handed to the quote and calendar
+readers as `chain_rows`. `nightly_raw_row_producer` calls `scan_chain_slices`;
+`nightly_quote_rows` and `nightly_calendar_inputs` call `require_chain_rows`
+to check the rows they are given.
 
 `nightly_calendar_inputs.scan_decision_calendar`,
 `nightly_calendar_inputs.scan_candidate_expiries`, and
