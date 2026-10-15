@@ -152,7 +152,7 @@ The registrar also consumes the history/fitted constructors and matching validat
 `experiments/magnitude_history_report.py` consumes both history/fitted validators,
 and the history admission bridge uses `errors.fail`.
 `experiments/magnitude_search_plan.py` consumes the fitted constructor/validator,
-`fingerprints.source_closure`/`environment_identity` and `errors.fail`; its CLI uses
+`fingerprints.source_closure`/`environment_identity` and `errors.OpsError`/`fail`; its CLI uses
 `catalog.connect`, `experiments.experiment_spec_from_document` and `errors.OpsError`/`fail`.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call

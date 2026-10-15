@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 42732)
+Total output lines: 1472
+
 # `engine/v2/ops` — architecture
 
 Layer 7.0 in the root `/ARCHITECTURE.md` layer table. Replaces the new supervisor/catalog design,
@@ -717,52 +720,7 @@ canonical-string-keyed schema, and the Opus gate on `#88` struck it —
 is 'not designed here'... choosing `records.json`'s own future output
 schema is a change to `native_score_batch.py`'s output contract... which
 belongs to whichever PR builds `native_parity`, reviewed on its own
-terms." `#88` names only the HAZARD (a refused row breaks positional
-`events.json`/`records.json` pairing) and points at the "starting
-material": `BoardRequest`'s own fields and
-`NativeScoreBatchRowRefusal.as_document()`'s existing `"key"` dict
-(`native_score_batch.py:56`, `:82-91`). This redo makes that choice:
-
-- **The key.** One canonical string per row,
-  `f"{ticker}|{strategy}|{event_date_identity}|{session}"`. The date
-  component is `YYYY-MM-DD` for a midnight event (preserving existing
-  wire/key identity) and canonical naive ISO datetime for an intraday event.
-  The same strict
-  formatter feeds refusal documents and joined keys; relative dates,
-  timezone-aware values and non-canonical wire forms are rejected. Thus the
-  JSON string key preserves all four `BoardRequest` identity fields without
-  normalizing intraday events onto a calendar day.
-  **The join character is validated out of every source field before
-  encoding, not merely tolerated after (CodeRabbit round 3, real
-  finding).** `event_date_identity` can never contain `"|"` (the strict
-  date/datetime formats contain no separator), but
-  `ticker`/`strategy`/`session` are free-text-shaped inputs this design does
-  not control at the source. A NEW per-row check,
-  `native_score_batch._board_request_key(key: BoardRequest) -> str`, raises
-  a `NativeScoreBatchRowRefusal` (new code `INVALID_KEY_FIELD`, the same
-  collected-never-raised per-row mechanism `UNSUPPORTED_STRATEGY` already
-  uses) the moment `"|"` appears in `key.ticker`, `key.strategy`, or
-  `key.session` — BEFORE that row is ever encoded into `records.json`'s
-  own keys (which route through this one function).
-  **This check runs FIRST among `_assemble_one_event`'s per-row checks,
-  before `_calendar_row_problem`/`CALENDAR_ROW_INVALID` and every other
-  existing check in the "R1, missing input — per row" list below (Opus
-  gate finding, real gap).** `_board_request_key` reads only `key`
-  (`BoardRequest`'s own `ticker`/`strategy`/`session` fields, fixed at row
-  construction, never the staged `calendar_row`/`panel_row`), so it needs
-  no staged input to evaluate and has no ordering dependency on anything
-  that check list resolves; placing it first means a row whose key is
-  unsafe to encode is ALWAYS refused `INVALID_KEY_FIELD`, never one of the
-  other codes, even when that same row would independently also fail a
-  later check (a malformed `calendar_row`, an unsupported strategy, and so
-  on) — a row can be refused only once, so the FIRST check that trips
-  decides its code, and this ordering guarantees that code is always
-  `INVALID_KEY_FIELD` whenever the key itself is unsafe. Every check AFTER
-  this one — `_calendar_row_problem` included — can therefore assume
-  `key.ticker`/`key.strategy`/`key.session` are already known "|"-free and
-  need not re-validate them before their own encoding or comparisons. This
-  makes the
-  `records.json` join a true bijection BY CONSTRUCTION for every row that
+terms." `#88` names only the HAZARD (a refused row b…732 tokens truncated…ry row that
   DOES get a canonical key (none of the four source values feeding it can
   ever contain the separator, so encoding and
   `_population_key_from_board_request_key`'s own decode are exact
@@ -1062,7 +1020,7 @@ already excludes both disabled strategies by construction, so no legacy read is 
 That unlayered caller also imports research's `_pricing.STRUCTURES`, `experiment_population.load_population` and `magnitude_folds.magnitude_window`/`plan_magnitude_folds`; these are caller dependencies, not ops-to-research edges.
 The shared verifier accepts magnitude v1.2/v1.3/v1.4/v1.5 only with closed request/plan envelopes, intact digests and matching snapshot/holdout/event/fold identities. v1.3 requires the exact `magnitude_execution_document` policy, canonical evaluation cutoff after every evaluation event, seed zero and empty economics; v1.4 additionally cross-links its exact history request, feature pin, producer context and fixed history policy. v1.5 adds the closed original-unit fitted recipe; malformed/hybrid schemas refuse `EXPERIMENT_IDENTITY_CONFLICT`.
 `magnitude_execution_document`, `magnitude_history_execution_document`, `magnitude_fitted_execution_document` and `magnitude_history_request` construct closed policies from canonical explicit inputs, refusing `INVALID_EXPERIMENT_SPEC`. `validate_magnitude_execution` checks v1.3; `validate_magnitude_history_execution` checks v1.4 and `validate_magnitude_fitted_execution` v1.5, refusing `EXPERIMENT_IDENTITY_CONFLICT`. These pure checks neither grant reads nor reconstruct plans; registration owns the recipe data without importing research, training or sklearn. The experiment caller passes the admitted recipe to guarded fitting. Old wire policies remain unchanged; source fingerprints still track changed implementation.
-`experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; artifact/CSV effects stay outside SQL. Prediction reporting consumes `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Magnitude admission/reporters and search planning consume matching policy constructors/validators and `errors.fail`; search planning also fingerprints installed sources/environment. The unlayered registrar consumes `magnitude_history_request` and both history/fitted execution constructors/validators. Other modules stay internal.
+`experiments/native_outcomes.py` consumes `catalog.transaction` and `errors.OpsError`/`fail`; artifact/CSV effects stay outside SQL. Prediction reporting consumes `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Magnitude admission/reporters and search planning consume matching policy constructors/validators and `errors.fail`; search planning also consumes `errors.OpsError` and fingerprints installed sources/environment. The unlayered registrar consumes `magnitude_history_request` and both history/fitted execution constructors/validators. Other modules stay internal.
 `experiments.native_gate_worker` also consumes public `stages.NativeGateParameters`, `executor.THREAD_VARIABLES` and `experiments.NATIVE_GATE_WORKER`/`NATIVE_GATE_ENTRYPOINT` for admission; its entrypoint consumes `worker.main(dispatcher=...)` without accepting arbitrary worker names. Required `economic_params.strategy` is independent of arm IDs. Resolver, registration and pricing share `NATIVE_GATE_RUNNERS`; worker admission accepts only `NATIVE_GATE_WORKER`. Other runners refuse strategy declarations before registration effects. `HOLDOUT_ACCESS_DENIED` preserves R5 through the supervisor pipe.
 
 ### Final-holdout authorization (#490)

@@ -275,7 +275,6 @@ canonical window; invalid requests refuse `CONTRACT_MISMATCH` without reads.
 
 `magnitude_folds.annual_fold(year, events)` is the public annual rule shared by
 the native planner and `experiments.magnitude_search_plan` for admitted metadata.
-Promoting this rule changes producer/runner source identities, not fold semantics.
 
 | Shared annual-rule condition | Outcome |
 |---|---|
