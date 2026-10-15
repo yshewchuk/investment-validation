@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # land: always-run
 import ast
+import contextlib
 import csv
 import io
 import json
@@ -2065,6 +2066,131 @@ def _empty_import_graph_for_synthetic_cfg(request, monkeypatch):
     graph."""
     if request.node.get_closest_marker("synthetic_cfg"):
         monkeypatch.setattr(pilot, "build_import_graph", lambda *a, **k: {})
+
+
+@contextlib.contextmanager
+def _real_repo_scan_caches_kept():
+    real = str(Path(pilot.REPO).resolve())
+    try:
+        yield real
+    finally:
+        pilot.retain_scan_caches_for(real)
+
+
+@pytest.fixture(autouse=True)
+def _keep_real_repo_scan_caches():
+    """Tests that monkeypatch `pilot.REPO` to a tmp_path and call the default
+    (tracked=None) `build_import_graph` path push tmp-repo entries into the
+    `_SCAN_CACHE_LIMIT = 2` module caches, evicting the real repo's entry and
+    forcing an expensive full real-repo graph rebuild several times per process
+    (#747). Sweep the caches down to real-repo entries after each test; the
+    setup side reads `pilot.REPO` before the test body can patch it."""
+    with _real_repo_scan_caches_kept():
+        yield
+
+
+def _seed_tmp_repo_graph_cache(monkeypatch, tmp_path):
+    """Push one entry into the graph cache only, for a tmp repo through the
+    real production path: a default (tracked=None) `build_import_graph()` over
+    a one-file temporary repo directory. The nested monkeypatch context
+    restores `REPO`/`_tracked` before returning."""
+    (tmp_path / "t.py").write_text("import os\n")
+    with monkeypatch.context() as m:
+        m.setattr(pilot, "REPO", tmp_path)
+        # `_tracked` patched like test_mutation_pilot_scan_cache.py `_redirect`
+        m.setattr(pilot, "_tracked", lambda paths: ["t.py"])
+        pilot.build_import_graph()
+
+
+def _seed_tmp_repo_unresolved_cache(monkeypatch, tmp_path):
+    """Push one entry into the unresolved cache only, for a tmp repo through
+    the real production path: an `unresolved_import_files([...])` call, which
+    takes its tracked list explicitly, so only `REPO` is redirected to a
+    one-file temporary repo directory. The nested monkeypatch context restores
+    it before returning."""
+    (tmp_path / "t.py").write_text("import os\n")
+    with monkeypatch.context() as m:
+        m.setattr(pilot, "REPO", tmp_path)
+        pilot.unresolved_import_files(["t.py"])
+
+
+def _seed_tmp_repo_cache(monkeypatch, tmp_path):
+    """Push one entry into each scan cache for a tmp repo through the real
+    production path: a default (tracked=None) `build_import_graph()` plus an
+    `unresolved_import_files([...])` call, `REPO`/`_tracked` redirected to a
+    one-file temporary repo directory exactly like
+    test_mutation_pilot_scan_cache.py does. The nested monkeypatch contexts
+    restore both attributes before returning."""
+    _seed_tmp_repo_graph_cache(monkeypatch, tmp_path)
+    _seed_tmp_repo_unresolved_cache(monkeypatch, tmp_path)
+
+
+def test_real_repo_scan_caches_kept_drops_other_repo_entries_on_exit(monkeypatch, tmp_path):
+    pilot.retain_scan_caches_for("")  # start clean: drop every entry
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    with monkeypatch.context() as m:
+        m.setattr(pilot, "REPO", real_dir)  # real_dir plays the "real repo" role
+        with _real_repo_scan_caches_kept() as real:
+            _seed_tmp_repo_cache(m, real_dir)
+            _seed_tmp_repo_cache(m, tmp_path)
+            assert real == str(real_dir.resolve())
+            assert pilot.scan_cache_repo_roots() == sorted(
+                [str(real_dir.resolve()), str(tmp_path.resolve())])
+        assert pilot.scan_cache_repo_roots() == [str(real_dir.resolve())]
+
+
+def test_scan_cache_repo_roots_unions_both_caches(monkeypatch, tmp_path):
+    pilot.retain_scan_caches_for("")  # start clean: drop every entry
+    graph_dir = tmp_path / "graph"
+    graph_dir.mkdir()
+    unresolved_dir = tmp_path / "unresolved"
+    unresolved_dir.mkdir()
+    _seed_tmp_repo_graph_cache(monkeypatch, graph_dir)
+    _seed_tmp_repo_unresolved_cache(monkeypatch, unresolved_dir)
+    assert pilot.scan_cache_repo_roots() == sorted(
+        [str(graph_dir.resolve()), str(unresolved_dir.resolve())])
+
+
+def _start_fixture_sweep(monkeypatch, tmp_path, gen):
+    """Shared setup for the fixture-generator tests: clear the caches, seed a
+    real_dir entry through the production path, run the generator's setup while
+    `REPO` still points at real_dir (pinning the sweep target there), then seed
+    a tmp_path entry the teardown must drop. Returns the two roots."""
+    pilot.retain_scan_caches_for("")
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    _seed_tmp_repo_cache(monkeypatch, real_dir)
+    with monkeypatch.context() as m:
+        m.setattr(pilot, "REPO", real_dir)
+        next(gen)  # fixture setup: pins the real repo path before any patching
+    _seed_tmp_repo_cache(monkeypatch, tmp_path)
+    return str(real_dir.resolve()), str(tmp_path.resolve())
+
+
+def test_keep_real_repo_scan_caches_fixture_sweeps_on_teardown(monkeypatch, tmp_path):
+    gen = _keep_real_repo_scan_caches.__wrapped__()
+    real_root, tmp_root = _start_fixture_sweep(monkeypatch, tmp_path, gen)
+    # Patch REPO AFTER setup: the sweep target was pinned at setup, so the
+    # teardown must still drop this tmp_path entry and keep real_root's.
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    assert pilot.scan_cache_repo_roots() == sorted([real_root, tmp_root])
+    with pytest.raises(StopIteration):
+        next(gen)  # fixture teardown sweeps
+    assert pilot.scan_cache_repo_roots() == [real_root]
+
+
+def test_keep_real_repo_scan_caches_fixture_sweeps_when_the_generator_is_thrown_into(monkeypatch, tmp_path):
+    gen = _keep_real_repo_scan_caches.__wrapped__()
+    real_root, tmp_root = _start_fixture_sweep(monkeypatch, tmp_path, gen)
+    assert pilot.scan_cache_repo_roots() == sorted([real_root, tmp_root])
+    with pytest.raises(RuntimeError, match="boom"):
+        gen.throw(RuntimeError("boom"))  # teardown sweeps even on a raised test error
+    assert pilot.scan_cache_repo_roots() == [real_root]
+
+
+def test_cache_sweep_fixture_is_autouse(request):
+    assert "_keep_real_repo_scan_caches" in request.fixturenames
 
 
 def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
