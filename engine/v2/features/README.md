@@ -39,14 +39,14 @@ shared streak and price-history inputs from caller-selected event/price frames.
 history_start, decision_session)` reads one ticker's bounded `daily_market` rows
 from a pinned snapshot and returns `daily_state_inputs.DailyStateInputs`. The
 result is session-only: it is not a complete forward panel or a qualified
-board, and no production raw-row assembler calls it yet.
+board.
 
 `panel_row_inputs.scan_panel_row(repository, snapshot, key, *,
 decision_session, history_start)` composes `daily_state_inputs`/`panel_math`/
 `regime`/`runup_math` into one `BoardRequest` key's full-superset
-`panel_row_inputs.PanelRowInputs` (`panel_row`, `panel_anchor`). No production
-raw-row producer calls it yet (`engine/v2/ops/ARCHITECTURE.md` "Cutover
-PR-6").
+`panel_row_inputs.PanelRowInputs` (`panel_row`, `panel_anchor`).
+`nightly_raw_row_producer` calls it once per `(ticker, event_date, session)`
+(`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer").
 
 <!-- public-interface: recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, regime.add_regime_features, daily_state_inputs.DailyStateInputs, daily_state_inputs.scan_daily_state_inputs, panel_row_inputs.PanelRowInputs, panel_row_inputs.scan_panel_row -->
 
@@ -65,8 +65,8 @@ failure rather than a stale sentence.
 ## Usage
 
 The package includes pure regime calculation logic over explicit inputs.
-No production path calls the regime helper yet; source reads and forward
-panel assembly remain separate integration work.
+`panel_row_inputs.scan_panel_row` calls the regime helper, and
+`nightly_raw_row_producer` calls `scan_panel_row`.
 
 `panel_math.advance_history(last_row)` advances a caller-selected realized
 panel row into next-event history aggregates. It is pure arithmetic; callers
@@ -76,7 +76,7 @@ panel-row builder calls it yet.
 ## Testing
 
 `regime.add_regime_features` accepts explicit event and market frames, returning
-regime values with their actual observation dates. It has no production caller.
+regime values with their actual observation dates. `scan_panel_row` calls it.
 Its real captured-source parity test is marked `needs_corpus`; the payload stays
 private and can be selected with `V2_REGIME_CORPUS_CSV`; its sibling
 `manifest.json` records the source and verifies the captured file hash.
