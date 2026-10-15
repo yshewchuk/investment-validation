@@ -3,7 +3,9 @@ import math
 
 import numpy as np
 
+from engine.models.no_fit import RuntimeFitForbidden as LegacyRuntimeFitForbidden
 from engine.v2.foundation import content_hash
+from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.training.magnitude import fit_magnitude_predictions
 from engine.v2.ops.errors import fail
 
@@ -35,6 +37,8 @@ def fitted_forecasts(indexed, train, fold, plan, execution):
             if (len(values) != len(test_ids) or any(isinstance(value, bool)
                     or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in values)):
                 raise ValueError
+        except (RuntimeFitForbidden, LegacyRuntimeFitForbidden):
+            raise
         except Exception:
             raise fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed") from None
         predictions.update({(event, horizon): float(value) for event, value in zip(test_ids, values)})

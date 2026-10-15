@@ -16,7 +16,7 @@ A **new job kind `serving_projection`** (not the existing render stage `projecti
 **Binding and swap (order matters).**
 1. `build_candidate` commits the projection release (objects first, then one index transaction).
 2. The job builds `projection_binding.json` from the committed row, runs `verify_projection_binding` on it against the live index, and registers it as an artifact.
-3. It submits a retained publication (`publication_submit.submit_retained_publication`: the succeeded publication's retained bindings plus `projection_binding.json`, `operation_id` derived from the source publication job id) targeting the serving pointer root. That fenced `publish_local` materializes the release directory, then moves `CURRENT` with one `os.replace`.
+3. Proposed (slice 4 confirms `submit_retained_publication` can target the serving pointer root; today `publication_effect` builds its target from the ops releases scope, so a target parameter may be needed): it submits a retained publication (`publication_submit.submit_retained_publication`: the succeeded publication's retained bindings plus `projection_binding.json`, `operation_id` derived from the source publication job id) targeting the serving pointer root. That fenced `publish_local` materializes the release directory, then moves `CURRENT` with one `os.replace`.
 4. The job re-reads `CURRENT` and the binding through the API's own resolver and `verify_projection_binding`; only then does it succeed.
 
 A reader sees the previous release or the new one, never a mix: the new release directory is complete before `CURRENT` moves, the pointer swap is atomic, and index rows are append-only (an old binding keeps verifying while the swap happens). Each API request resolves once, and `/releases/current` carries a new ETag only when the response document changes: the existing validator hashes the projection identity and response, not the pointer, so republishing the same projection keeps the ETag. No new validator is designed here.
@@ -65,8 +65,7 @@ new one, never a mix. Index rows are append-only, so the old binding verifies du
 | Condition | Read outcome |
 |---|---|
 | Nightly's `serving_projection` failed before the pointer swap, or has not run | `CURRENT` unchanged: the previous night's release is served |
-| Serving root has no `CURRENT` yet (first run, or no successful projection) | `NO_CURRENT_RELEASE` (503, retryable) |
-| Serving root missing (no `CURRENT`) | `NO_CURRENT_RELEASE` (503, retryable), as today |
+| Serving root missing, or it has no `CURRENT` yet (first run, or no successful projection) | `NO_CURRENT_RELEASE` (503, retryable), as today |
 | `serving.sqlite` fails to open, once `CURRENT` exists | Today the resolver opens the index outside its error translation. Translating open-time failures to `SERVING_INDEX_UNREADABLE` (503, retryable) is proposed work in slice 1, not current behavior |
 | Pointer names a release whose binding fails verification | `CURRENT_BINDING_INVALID` (500); no fallback to an older release |
 
