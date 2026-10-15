@@ -284,7 +284,12 @@ narrowed test selection, its result includes the configured
 the diff changes only an unrelated test file; full-suite results include all
 tests. The layout ratchet's regression test,
 `tests/v2/integration/test_mutation_ci.py::test_select_pr_tests_always_runs_ratchet_for_unrelated_test_only_diff`,
-covers that selection. The package-layout selector in `checks/test_selection.py`
+covers that selection. `tools/mutation_pilot.py` keeps two bounded in-process
+scan caches (the default full-repository import graph, and unresolved-import
+results per tracked-file list); its public helpers
+`retain_scan_caches_for(repo_root)` and `scan_cache_repo_roots()` let tests
+drop entries for other (temporary) repo roots and inspect what is held, and
+change no selection behaviour. The package-layout selector in `checks/test_selection.py`
 is separate from the active workflow; see [package test selection by
 layer](guides/test_selection_by_layer.md). The checked-in test-layout ratchet
 (`checks/test_layout_budget.py`) keeps root-level tests from growing while
@@ -733,6 +738,14 @@ change their arithmetic or imply that source receipt production is available.
   change lands in `engine/*`, `engine/dashboard/nightly.py` or the legacy
   ledger path to support v2 work. If legacy must change at all before
   cutover, that is itself a decision requiring sign-off, not a routine PR.
+- **At most one official writer, fenced by an authority generation**
+  (target behaviour; not yet enforced, see the design guide). At
+  any instant only one deployment (legacy or v2) may commit official
+  decisions, settlements, exports or consumer-visible releases. Authority
+  moves only fence-first: the current writer is fenced and verified, then
+  the other is granted; a crash between the two leaves no writer, never
+  two. Rollback reconciles committed v2 facts into legacy rather than
+  deleting them. Design: `guides/authority_fence_switch_rollback.md`.
 - **Every `ARCHITECTURE.md` stays under a growth ceiling.**
   `checks/architecture_doc_budgets.py` enforces a growth ceiling, not an
   absolute cap: below 1000 lines, one PR may add at most 50 net lines to

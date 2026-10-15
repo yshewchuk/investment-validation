@@ -146,6 +146,10 @@ interface section; this names only the load-bearing entry points.
   string-date observation values to the same timestamp form as query bounds.
   Invalid dates refuse `CONTRACT_MISMATCH`; pruning never drops a matching
   calendar day merely because its stored representation lacks a time suffix.
+- **Read counters** — `read_counters.ReadCounters`, one per `Repository`
+  instance (`Repository.read_counters`): per table scans, fragments opened,
+  rows decoded, rows returned, bytes and seconds. Observational only; an
+  error while counting is swallowed and never alters or fails a scan.
 - **Legacy-touching seam** — `legacy_adapter.py`, the package's only module
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);

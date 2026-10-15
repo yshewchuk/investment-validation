@@ -194,6 +194,7 @@ class _ReaderRig:
         self.calendar_row_calls: list = []
         self.panel_calls: list = []
         self.quote_calls: list = []
+        self.chain_rows_seen: list = []
         self.calendar_row_hook = None
         self.calendar_hook = None
         self.real_enumerate = nightly_raw_rows.scan_forward_board_requests
@@ -211,8 +212,10 @@ class _ReaderRig:
                 return self.calendar_hook(decision_session, event_through)
             return _calendar()
 
-        def calendar_row(repository, snapshot, key, *, decision_session, calendar):
+        def calendar_row(repository, snapshot, key, *, decision_session, calendar,
+                         chain_rows=None):
             self.calendar_row_calls.append(key)
+            self.chain_rows_seen.append(chain_rows)
             if self.calendar_row_hook is not None:
                 return self.calendar_row_hook(key)
             return _calendar_inputs(key)
@@ -222,8 +225,10 @@ class _ReaderRig:
             self.panel_calls.append(key)
             return _panel_inputs(key)
 
-        def quote_rows(repository, snapshot, key, *, expiry, decision_session):
+        def quote_rows(repository, snapshot, key, *, expiry, decision_session,
+                       chain_rows=None):
             self.quote_calls.append(key)
+            self.chain_rows_seen.append(chain_rows)
             return _quote_inputs(key, expiry=expiry)
 
         _patch_reader(monkeypatch, nightly_raw_rows, "scan_forward_board_requests",
@@ -289,6 +294,35 @@ def test_mixed_midnight_and_intraday_rows_keep_order_and_refuse_intraday(
     assert all(document["tier4_row"] == {} for document in events_document)
     assert json.dumps(events_document)
     assert json.dumps(refusals_document)
+
+
+def test_producer_routes_each_tickers_grouped_rows_to_both_readers(
+        tmp_path, monkeypatch):
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight"),
+        _event_row("BBB", _MIDNIGHT, "BMO", event_id="bbb-midnight"),
+    ])
+    rig = _ReaderRig(monkeypatch)
+    slice_calls: list = []
+
+    def fake_slices(repo, snap, tickers, *, decision_session):
+        slice_calls.append(sorted(tickers))
+        return {ticker: [{"ticker": ticker, "marker": ticker}] for ticker in tickers}
+
+    monkeypatch.setattr(nrp, "scan_chain_slices", fake_slices)
+
+    events_document, _ = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert len(events_document) > 1
+    assert slice_calls == [["AAA", "BBB"]]
+    assert len(rig.chain_rows_seen) == 2 * len(events_document)
+    assert {row["marker"] for rows in rig.chain_rows_seen for row in rows} == {"AAA", "BBB"}
+    assert all(len({row["ticker"] for row in rows}) == 1 for rows in rig.chain_rows_seen)
+    seen_tickers = [rows[0]["ticker"] for rows in rig.chain_rows_seen]
+    called_tickers = [key.ticker for pair in zip(rig.calendar_row_calls, rig.quote_calls)
+                      for key in pair]
+    assert seen_tickers == called_tickers
 
 
 def test_empty_enumeration_returns_empty_documents_before_context_readers(
@@ -401,7 +435,7 @@ def test_panel_reader_called_once_per_ticker(
             fixture._EVENT.date().isoformat(),)
         return CalendarSessions(days=days, observed_through=decision_session)
 
-    def calendar_row(repo, snap, key, *, decision_session, calendar):
+    def calendar_row(repo, snap, key, *, decision_session, calendar, chain_rows=None):
         day = key.event_date.date().isoformat()
         return CalendarRowInputs(calendar_revision="events-rev", calendar_row={
             "event_id": f"{key.ticker}-{key.strategy}", "ticker": key.ticker,
@@ -410,7 +444,7 @@ def test_panel_reader_called_once_per_ticker(
             "expiry": day, "spot": 10.0,
             "calendar_observed_through": decision_session})
 
-    def quote_rows(repo, snap, key, *, expiry, decision_session):
+    def quote_rows(repo, snap, key, *, expiry, decision_session, chain_rows=None):
         return QuoteRowInputs(quote_rows=({
             "ticker": key.ticker, "right": "C", "strike": 100.0,
             "expiry": expiry, "bid": 1.0, "ask": 1.2,
@@ -507,7 +541,7 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
             fixture._EVENT.date().isoformat(),)
         return CalendarSessions(days=days, observed_through=decision_session)
 
-    def calendar_row(repo, snap, key, *, decision_session, calendar):
+    def calendar_row(repo, snap, key, *, decision_session, calendar, chain_rows=None):
         day = key.event_date.date().isoformat()
         return CalendarRowInputs(calendar_revision="events-rev", calendar_row={
             "event_id": f"{key.ticker}-{key.strategy}", "ticker": key.ticker,
@@ -515,7 +549,7 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
             "exit_date": day, "expiry": day, "spot": 10.0,
             "calendar_observed_through": decision_session})
 
-    def quote_rows(repo, snap, key, *, expiry, decision_session):
+    def quote_rows(repo, snap, key, *, expiry, decision_session, chain_rows=None):
         return QuoteRowInputs(quote_rows=({
             "ticker": key.ticker, "right": "C", "strike": 100.0,
             "expiry": expiry, "bid": 1.0, "ask": 1.2,
@@ -941,7 +975,7 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
 
     calendar_row_calls: list = []
 
-    def calendar_row(repo, snap, key, *, decision_session, calendar):
+    def calendar_row(repo, snap, key, *, decision_session, calendar, chain_rows=None):
         calendar_row_calls.append(key)
         day = key.event_date.date().isoformat()
         observed = fixture._DECISION.date().isoformat()
@@ -951,7 +985,7 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
             "exit_date": day, "expiry": day, "spot": 10.0,
             "calendar_observed_through": observed})
 
-    def quote_rows(repo, snap, key, *, expiry, decision_session):
+    def quote_rows(repo, snap, key, *, expiry, decision_session, chain_rows=None):
         observed = fixture._DECISION.date().isoformat()
         return QuoteRowInputs(quote_rows=({
             "ticker": key.ticker, "right": "C", "strike": 100.0,
@@ -1016,7 +1050,7 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
     # _shared_panel_rows or panel reader.
     thin_batches = dict(batches)
     thin_batches[("daily_market", "SPY")] = fixture._spy_rows(periods=22)
-    thin_repository = IntervalAwareRepository(snapshot, fixture._contracts(),
+    thin_repository = IntervalAwareRepository(snapshot, contracts,
                                               thin_batches)
     calendar_calls_before_thin = len(calendar_row_calls)
 

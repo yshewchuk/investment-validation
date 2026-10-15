@@ -1279,7 +1279,7 @@ def test_trigger_real_cli_plan_checks_verified_snapshot(case, monkeypatch, move_
     monkeypatch.setattr(bootstrap, "open_catalog", lambda path, **kwargs:
                         open_catalog(case.tmp / "catalog.sqlite", **kwargs))
     monkeypatch.setattr(nightly_trigger, "_ops_root", lambda root: case.root)
-    monkeypatch.setattr(nightly_trigger, "_qualification_path",
+    monkeypatch.setattr(nightly_trigger, "_qualification_location",
                         lambda root, name: args.expected_population)
     monkeypatch.setattr(nightly_trigger, "_capture_input_manifest",
                         lambda *a, **k: args.input_manifest)

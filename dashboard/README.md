@@ -435,9 +435,9 @@ trading session strictly before today in America/New_York (weekends and US
 market holidays skipped). That session's retry window is 00:00–06:00 ET on the
 calendar day after it: a Friday as-of is retried Saturday 00:00–06:00 and
 MISSED at Saturday 06:00, and up to five minutes of grace keeps a 06:00 tick
-that fires seconds late inside. The tick probes ORATS once (the market-wide
-summaries/cores pair, never a refresh job); a not-final probe records
-`not_yet` and submits nothing.
+that fires seconds late inside. A fresh planning tick probes ORATS twice (the market-wide
+summaries/cores pair, then a day-level probe over the derived universe; never a
+refresh job); a not-final probe records `not_yet` and submits nothing.
 
 Before probing, the tick takes a NON-BLOCKING `flock` (LOCK_EX|LOCK_NB) on
 `reports/.nightly.lock` and holds it for the ENTIRE native run — probe, plan,
@@ -449,10 +449,11 @@ intended. The legacy cron time (21:30 weekdays) is unaffected: it ends well
 before 00:00 ET.
 
 The plan is the native nightly plan's full-population option (`--full-run`):
-the scheduled universe is the full default population — the tickers of
-`reports/phase6/nightly_trigger/expected_population.json` (a JSON list of
-`ticker|strategy|event_date` keys, passed to the plan unchanged as
-`--expected-population`) when the operator has captured it — never a
+the scheduled universe is the full default population: the shadow
+snapshot's events by default, or, as an explicit override when present, the
+tickers of `reports/phase6/nightly_trigger/expected_population.json` (a JSON list of
+`ticker|strategy|event_date` keys; the plan reads it once and passes the
+decided keys on in-process). The trigger takes no
 ticker-list argument and never a slice of the context. A crash between submit
 and the state write cannot double-submit: the trigger writes `submitting` with
 the plan_ref before calling submit, resubmits that SAME plan_ref on the next
@@ -465,12 +466,15 @@ nothing — only the first transition to `missed`/`failed`/`failed_setup` exits
 1. The receipt and `reports/phase6/nightly_trigger/<as-of>.json` are the P6-6
 evidence; one JSON `TriggerReceipt` line is printed per run. `--as-of
 YYYY-MM-DD` (default: the most recent completed trading session) and `--root .`
-are the only CLI options. To make a scheduled run submittable, place the
-population document, `reports/phase6/nightly_trigger/expected_population.json`;
-the input manifest is no longer a hand-placed file — when the resolved ticker
+are the only CLI options. A scheduled run needs no
+hand-placed population: with `reports/phase6/nightly_trigger/expected_population.json`
+absent, the universe is the shadow snapshot's earnings events for the as-of
+through +35 days and the plan generates the population. A present document is an
+explicit override and wins unchanged (an empty or unreadable one is refused
+`INVALID_REQUEST`); the input manifest is no longer a hand-placed file — when the resolved ticker
 universe is non-empty, the trigger captures its own manifest for the plan's
 own `as-of` automatically
 (`reports/phase6/nightly_trigger/<as-of>.input_manifest.json`) and never reads
-a static one. Without a population document (so no universe to capture
-against) `ops submit` refuses the plan and the receipt records that refusal
-as `error`; the trigger never bypasses the planned-population gate.
+a static one. If the snapshot has no events in that window (and no document
+is present) planning is refused `INVALID_REQUEST` and the receipt records
+that refusal as `error`; the trigger never bypasses the planned-population gate.

@@ -1,9 +1,9 @@
-"""Pinned calendar/expiry/spot staging for cutover PR-6 slice 4a.2.
+"""Pinned calendar/expiry/spot staging for the raw-row producer.
 
 Composition over three reads, none of which chooses a strike, prices a leg or
 touches a provider: the session calendar from the pinned SPY price series
 through the decision session, the strategy-eligible listed expiry set from one
-exact ``option_chains`` session, and the exact-session pinned raw-close spot.
+exact ``option_chains`` session (the producer's batched ``chain_rows``, or this module's own per-key scan when none is given), and the exact-session pinned raw-close spot.
 ``generation.resolve_expiry`` applies the native strategy policy to the
 candidate days; ``planned_exit_date`` fixes the session-based exit independently
 of that expiry; ``nightly_raw_rows.scan_calendar_row`` matches the pinned event
@@ -16,6 +16,7 @@ module never imports ``engine.score``/``engine.structures``/``engine.replay``/
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -36,6 +37,7 @@ from engine.v2.ops.native_score_batch_types import (
     PRICE_HISTORY_NOT_AVAILABLE_DETAIL,
     NativeScoreBatchRowRefusal,
 )
+from engine.v2.ops.nightly_chain_batch import CHAIN_TABLE, require_chain_rows, require_usable_fields
 from engine.v2.ops.nightly_raw_rows import CalendarRowInputs, scan_calendar_row
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
@@ -46,9 +48,7 @@ from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
 __all__ = ["scan_calendar_row_inputs", "scan_candidate_expiries", "scan_decision_calendar"]
 
 _CALENDAR_TICKER = CALENDAR_TICKER
-_CHAIN_TABLE = "option_chains"
 _CANDIDATE_COLUMNS = ("right", "strike", "expiry")
-_RIGHTS = frozenset({"C", "P"})
 #: STR-THRU/STR-RUNUP need a common call-and-put strike; every other native
 #: context (put menu, DYN-SV) is a listed put. Mirrors generation's own
 #: ``_select_listed_straddle`` (call ∩ put) vs ``_listed_put_expiries`` (put).
@@ -111,20 +111,35 @@ def _validated_candidate(row: dict) -> tuple[str, str, float]:
     outside C/P or a non-finite/unconvertible strike is malformed pinned input
     and refuses ``CONTRACT_MISMATCH`` -- for every row the scan returns,
     including one whose expiry the candidate filter would drop."""
-    for field in _CANDIDATE_COLUMNS:
-        if row[field] is None:
-            raise data_fail("CONTRACT_MISMATCH", f"option chain row has a null {field} column")
-    right = str(row["right"]).upper()
-    if right not in _RIGHTS:
-        raise data_fail("CONTRACT_MISMATCH", "option chain row has a right outside C/P")
-    try:
-        strike = float(row["strike"])
-    except (TypeError, ValueError):
-        raise data_fail("CONTRACT_MISMATCH",
-                        "option chain row has an unconvertible strike") from None
-    if not math.isfinite(strike):
-        raise data_fail("CONTRACT_MISMATCH", "option chain row has a non-finite strike")
-    return _date_string(row["expiry"]), right, strike
+    require_usable_fields(row, check_quotes=False)
+    return _date_string(row["expiry"]), str(row["right"]).upper(), float(row["strike"])
+
+
+def _scan_candidate_rows(repository: Repository, snapshot: SnapshotRef, key: BoardRequest,
+                         session_day: str):
+    """The per-key bounded scan of one ``(ticker, session)`` slice, projected to
+    ``_CANDIDATE_COLUMNS``; yields row dicts."""
+    contract = repository.table_contract(snapshot, CHAIN_TABLE)
+    version = snapshot.table_versions[CHAIN_TABLE]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
+                  KeyPredicate(column="obs_date", operator="eq", values=(session_day,)))
+    population_bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=CHAIN_TABLE,
+        table_contract_ref=version.table_contract_ref,
+        key_filter=key_filter, time_interval=None)
+    max_result_rows = min(_RESULT_CAP, population_bound)
+    max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_CAP, max_result_rows)
+                      if max_result_rows > 0
+                      else min(contract.maximum_batch_rows, _BATCH_CAP))
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
+        columns=_CANDIDATE_COLUMNS,
+        key_filter=key_filter,
+        order_by=tuple(contract.primary_key),
+        max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows)
+    for batch in repository.scan(query, table_name=CHAIN_TABLE):
+        yield from batch.to_pylist()
 
 
 def scan_decision_calendar(repository: Repository, snapshot: SnapshotRef, *,
@@ -144,7 +159,9 @@ def scan_decision_calendar(repository: Repository, snapshot: SnapshotRef, *,
 
 
 def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: BoardRequest, *,
-                            decision_session: Any) -> tuple[str, ...]:
+                            decision_session: Any,
+                            chain_rows: Sequence[Mapping[str, Any]] | None = None
+                            ) -> tuple[str, ...]:
     """One bounded ``option_chains`` scan of the exact ``(ticker, decision_session)``
     slice, projected to raw ``(right, strike, expiry)``: no other session, no
     quote-usability filter, no expiry before the decision session. Every
@@ -153,40 +170,25 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
     strategy and session domains are checked before any scan, so an unsupported
     nonempty value is ``INVALID_REQUEST`` rather than a masked empty expiry
     domain. The eligible domain follows the native strategy policy; the result
-    is the sorted distinct ISO tuple, empty only when the domain is empty."""
+    is the sorted distinct ISO tuple, empty only when the domain is empty.
+    ``chain_rows`` (that ticker's rows for the session, from one batched build
+    read) replaces the scan when given; ``None`` keeps the per-key scan."""
     _require_key(key)
     _require_supported_domains(key)
     session_day = _calendar_day(decision_session, "decision_session")
-    contract = repository.table_contract(snapshot, _CHAIN_TABLE)
-    version = snapshot.table_versions[_CHAIN_TABLE]
-    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
-                  KeyPredicate(column="obs_date", operator="eq", values=(session_day,)))
-    population_bound = repository.scan_population_bound(
-        snapshot.snapshot_id, table_name=_CHAIN_TABLE,
-        table_contract_ref=version.table_contract_ref,
-        key_filter=key_filter, time_interval=None)
-    max_result_rows = min(_RESULT_CAP, population_bound)
-    max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_CAP, max_result_rows)
-                      if max_result_rows > 0
-                      else min(contract.maximum_batch_rows, _BATCH_CAP))
-    query = DataQuery(
-        snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
-        columns=_CANDIDATE_COLUMNS,
-        key_filter=key_filter,
-        order_by=tuple(contract.primary_key),
-        max_batch_rows=max_batch_rows,
-        max_result_rows=max_result_rows)
+    rows = (_scan_candidate_rows(repository, snapshot, key, session_day)
+            if chain_rows is None
+            else require_chain_rows(chain_rows, key.ticker, session_day, check_quotes=False))
     calls: dict[str, set[float]] = {}
     puts: dict[str, set[float]] = {}
-    for batch in repository.scan(query, table_name=_CHAIN_TABLE):
-        for row in batch.to_pylist():
-            expiry_day, right, strike = _validated_candidate(row)
-            if expiry_day < session_day:
-                continue
-            if right == "C":
-                calls.setdefault(expiry_day, set()).add(strike)
-            else:
-                puts.setdefault(expiry_day, set()).add(strike)
+    for row in rows:
+        expiry_day, right, strike = _validated_candidate(row)
+        if expiry_day < session_day:
+            continue
+        if right == "C":
+            calls.setdefault(expiry_day, set()).add(strike)
+        else:
+            puts.setdefault(expiry_day, set()).add(strike)
     if key.strategy in _STRADDLE_DOMAIN:
         expiries = {day for day in calls if calls[day] & puts.get(day, set())}
     else:
@@ -195,7 +197,9 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
 
 
 def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key: BoardRequest, *,
-                             decision_session: Any, calendar: CalendarSessions) -> CalendarRowInputs:
+                             decision_session: Any, calendar: CalendarSessions,
+                             chain_rows: Sequence[Mapping[str, Any]] | None = None
+                             ) -> CalendarRowInputs:
     """One row's pinned spot, resolved strategy expiry and independent planned
     exit staged into ``scan_calendar_row``. A missing or unusable exact-session
     spot raises the per-key ``PRICE_HISTORY_NOT_AVAILABLE`` refusal; a
@@ -213,6 +217,8 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
     _require_supported_domains(key)
     _calendar_day(key.event_date, "event_date")
     session_day = _calendar_day(decision_session, "decision_session")
+    if chain_rows is not None:
+        chain_rows = require_chain_rows(chain_rows, key.ticker, session_day, check_quotes=False)
     series = get_price_series(repository, PriceQuery(
         ticker=key.ticker, session_date=session_day, observation_ceiling=session_day,
         lookback_sessions=0), snapshot)
@@ -224,7 +230,8 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
     if spot is None or not math.isfinite(spot) or spot <= 0:
         raise NativeScoreBatchRowRefusal(
             key, "PRICE_HISTORY_NOT_AVAILABLE", PRICE_HISTORY_NOT_AVAILABLE_DETAIL)
-    candidates = scan_candidate_expiries(repository, snapshot, key, decision_session=session_day)
+    candidates = scan_candidate_expiries(repository, snapshot, key, decision_session=session_day,
+                                         chain_rows=chain_rows)
     if not candidates:
         raise _no_resolvable(key)
     inputs = {"event_date": key.event_date, "session": key.session,

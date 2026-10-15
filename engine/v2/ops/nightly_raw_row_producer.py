@@ -1,12 +1,13 @@
-"""Read-only native raw-row composition for cutover PR-6 slice 4b.
+"""Read-only native raw-row composition.
 
 ``build_native_score_batch_events`` enumerates the forward board through
 ``nightly_raw_rows.scan_forward_board_requests`` -- the slice's only
 enumeration, so request order and each original ``BoardRequest`` timestamp
 identity survive -- classifies every intraday key before any context read, reads
 one build-scoped decision calendar plus one panel row/anchor per distinct
-``(ticker, event_date, session)``, then composes calendar and quote rows per
-request. The calendar helper still refuses an intraday event date, so this
+``(ticker, event_date, session)``, reads ``option_chains`` once for the whole
+build (``nightly_chain_batch.scan_chain_slices``), then composes calendar and
+quote rows per request from each ticker's rows. The calendar helper still refuses an intraday event date, so this
 producer is the admission boundary #243 requires: such a key is refused under
 its exact, never-normalized identity. Nothing scores, publishes or writes; a
 complete calendar-and-quote composition becomes an event, a typed per-key
@@ -43,6 +44,7 @@ from engine.v2.ops.nightly_calendar_inputs import (
     scan_calendar_row_inputs,
     scan_decision_calendar,
 )
+from engine.v2.ops.nightly_chain_batch import scan_chain_slices
 from engine.v2.ops.nightly_quote_rows import scan_quote_rows
 from engine.v2.ops.nightly_raw_rows import scan_forward_board_requests
 from engine.v2.scoring.nightly_source_bundle import validated_as_of
@@ -192,6 +194,7 @@ def _compose_event(
     decision_session: str,
     calendar: Any,
     panel: PanelRowInputs,
+    chain_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """One admitted request's event document, or its in-place refusal document."""
     if not _regime_history_available(panel):
@@ -199,10 +202,10 @@ def _compose_event(
     try:
         calendar_row = scan_calendar_row_inputs(
             repository, snapshot, key, decision_session=decision_session,
-            calendar=calendar).calendar_row
+            calendar=calendar, chain_rows=chain_rows).calendar_row
         quotes = scan_quote_rows(
             repository, snapshot, key, expiry=calendar_row["expiry"],
-            decision_session=decision_session)
+            decision_session=decision_session, chain_rows=chain_rows)
     except NativeScoreBatchRowRefusal as refusal:
         detail = _ROW_REFUSAL_DETAILS.get(refusal.code)
         if detail is None:
@@ -245,7 +248,9 @@ def build_native_score_batch_events(
     per-key refusals; other keys proceed. Malformed calendar/series data,
     missing source tables, repository failures, caller-input failures and other
     errors still fail the whole build. An absent ``option_chains`` table fails
-    before any non-intraday key is processed.
+    before any non-intraday key is processed. ``option_chains`` is read once per
+    build (``scan_chain_slices``); a repository error there fails the build and
+    never falls back to per-key scans.
     """
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
@@ -280,13 +285,17 @@ def build_native_score_batch_events(
     panels = _shared_panel_rows(repository, snapshot, [key for _, key in admitted],
                                 decision_session=decision_session,
                                 history_start=history_start)
+    # One option_chains read per build: grouped by ticker, shared by both scanners.
+    chains = scan_chain_slices(repository, snapshot, {key.ticker for _, key in admitted},
+                               decision_session=decision_session)
     events: list[dict[str, Any]] = []
     for done, (position, key) in enumerate(admitted, 1):
         # Live progress: one step per row, "done_of_total" in its name (no-op outside a worker).
         with worker_progress.step(f"compose_event_{done}_of_{len(admitted)}", units=1):
             event, refusal = _compose_event(
                 repository, snapshot, key, decision_session=decision_session,
-                calendar=calendar, panel=panels[_panel_marker(key)])
+                calendar=calendar, panel=panels[_panel_marker(key)],
+                chain_rows=chains[key.ticker])
         if refusal is None:
             events.append(event)
         else:

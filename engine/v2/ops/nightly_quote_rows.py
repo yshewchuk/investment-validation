@@ -1,14 +1,15 @@
-"""Pinned ``option_chains`` quote-row staging for cutover PR-6.
+"""Pinned ``option_chains`` quote-row staging for the raw-row producer.
 
-Stages one exact ``(ticker, obs_date)`` chain slice -- read directly off the
-pinned snapshot, explicitly un-admitted -- into the plain quote rows the
-raw-row producer's assembler (cutover PR-6 slice 4, not built yet) passes
+Stages one exact ``(ticker, obs_date)`` chain slice -- read off the pinned
+snapshot (once per build by ``nightly_chain_batch``, handed in as ``chain_rows``,
+or by its own per-key scan when none is given), explicitly un-admitted -- into the plain quote rows the
+raw-row producer's assembler passes
 to ``nightly_source_bundle``. The read is SHADOW-only and safe by namespace
 isolation, not by source admission: ``native_score_batch`` is registered
 ``namespaces=frozenset({"shadow", "smoke"})`` with no ``store_domains``, so
 it commits no legacy-store head and holds no read/write lease the legacy
-board depends on (the rationale written in ``ARCHITECTURE.md``'s "Cutover
-PR-6" section). Causality is by data dates only: ``obs_date`` must equal
+board depends on (the rationale written in ``ARCHITECTURE.md``'s "Raw-row
+producer" section). Causality is by data dates only: ``obs_date`` must equal
 the caller's resolved ``decision_session`` exactly -- never a
 latest-at-or-before lookback -- mirroring ``engine/v2/data/chains.py``'s
 ``get_chain`` convention rather than inventing a new policy.
@@ -21,13 +22,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from engine.v2.contracts import DataQuery, KeyPredicate, SnapshotRef
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_board_universe import BoardRequest
+from engine.v2.ops.nightly_chain_batch import CHAIN_COLUMNS, require_chain_rows
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
     validated_as_of,
@@ -36,7 +38,6 @@ from engine.v2.scoring.nightly_source_bundle import (
 __all__ = ["QuoteRowInputs", "scan_quote_rows"]
 
 _QUOTE_TABLE = "option_chains"
-_QUOTE_COLUMNS = ("ticker", "obs_date", "expiry", "strike", "right", "bid", "ask")
 _BATCH_CAP = 50_000
 _RESULT_CAP = 2_000_000
 
@@ -100,6 +101,7 @@ def scan_quote_rows(
     *,
     expiry: Any,
     decision_session: Any,
+    chain_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> QuoteRowInputs:
     """Stage one exact ``option_chains`` chain slice for a board key.
 
@@ -107,15 +109,19 @@ def scan_quote_rows(
     resolved ``decision_session`` must not be after the resolved ``expiry``
     (a quote as of a date past the contract's own expiry is never
     meaningful -- ``QUERY_NOT_BOUNDED``, mirroring ``ChainQuery``'s own
-    ceiling check). One bounded ``option_chains`` scan reads exactly
-    ``(key.ticker, decision_session)``; the requested ``expiry`` narrows the
+    ceiling check). When ``chain_rows`` is None, one bounded ``option_chains`` scan reads
+    exactly ``(key.ticker, decision_session)``; the requested ``expiry`` narrows the
     fetched rows in Python, because a chain's own expiry is data, not a key
     predicate. A slice with no surviving row returns an empty
     ``QuoteRowInputs`` with ``quote_status="empty"``, never a raise; a
     missing ``option_chains`` table raises ``CONTRACT_MISMATCH``
     (``Repository.table_contract``'s own typed refusal). Malformed
-    key/date inputs raise ``INVALID_REQUEST``; repository failures
-    propagate unchanged.
+    key/date inputs raise ``INVALID_REQUEST``; a row (scanned or given) with a
+    null expiry, strike or right, an unusable strike or right, or a non-numeric
+    bid or ask raises ``CONTRACT_MISMATCH``; repository failures
+    propagate unchanged. ``chain_rows`` (that ticker's rows for the session, from
+    one batched build read) replaces the scan when given; ``None`` keeps
+    the per-key scan.
     """
     if not isinstance(key, BoardRequest) or any(
         not isinstance(value, str) or not value.strip()
@@ -124,30 +130,36 @@ def scan_quote_rows(
         raise fail("INVALID_REQUEST", "quote key requires non-empty identity fields")
     expiry_day = _calendar_day(expiry)
     session_day = _calendar_day(decision_session)
+    checked_rows = (None if chain_rows is None
+                    else require_chain_rows(chain_rows, key.ticker, session_day))
     if session_day > expiry_day:
         raise data_fail("QUERY_NOT_BOUNDED", "decision_session is after the contract expiry")
-    contract = repository.table_contract(snapshot, _QUOTE_TABLE)
-    version = snapshot.table_versions[_QUOTE_TABLE]
-    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
-                  KeyPredicate(column="obs_date", operator="eq", values=(session_day,)))
-    population_bound = repository.scan_population_bound(
-        snapshot.snapshot_id, table_name=_QUOTE_TABLE,
-        table_contract_ref=version.table_contract_ref,
-        key_filter=key_filter, time_interval=None)
-    max_result_rows = min(_RESULT_CAP, population_bound)
-    max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_CAP, max_result_rows)
-                      if max_result_rows > 0
-                      else min(contract.maximum_batch_rows, _BATCH_CAP))
-    query = DataQuery(
-        snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
-        columns=_QUOTE_COLUMNS,
-        key_filter=key_filter,
-        order_by=tuple(contract.primary_key),
-        max_batch_rows=max_batch_rows,
-        max_result_rows=max_result_rows)
-    rows: list[dict] = []
-    for batch in repository.scan(query, table_name=_QUOTE_TABLE):
-        rows.extend(batch.to_pylist())
+    if checked_rows is not None:
+        rows = checked_rows
+    else:
+        contract = repository.table_contract(snapshot, _QUOTE_TABLE)
+        version = snapshot.table_versions[_QUOTE_TABLE]
+        key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
+                      KeyPredicate(column="obs_date", operator="eq", values=(session_day,)))
+        population_bound = repository.scan_population_bound(
+            snapshot.snapshot_id, table_name=_QUOTE_TABLE,
+            table_contract_ref=version.table_contract_ref,
+            key_filter=key_filter, time_interval=None)
+        max_result_rows = min(_RESULT_CAP, population_bound)
+        max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_CAP, max_result_rows)
+                          if max_result_rows > 0
+                          else min(contract.maximum_batch_rows, _BATCH_CAP))
+        query = DataQuery(
+            snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
+            columns=CHAIN_COLUMNS,
+            key_filter=key_filter,
+            order_by=tuple(contract.primary_key),
+            max_batch_rows=max_batch_rows,
+            max_result_rows=max_result_rows)
+        rows = []
+        for batch in repository.scan(query, table_name=_QUOTE_TABLE):
+            rows.extend(batch.to_pylist())
+        rows = require_chain_rows(rows, key.ticker, session_day)
     quote_rows = _matching_quote_rows(rows, expiry_day, session_day)
     if not quote_rows:
         return QuoteRowInputs(quote_rows=(), quote_status="empty")

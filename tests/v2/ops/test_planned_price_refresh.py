@@ -361,6 +361,7 @@ def test_production_submit_prepares_exact_watchlist_before_planning(
     """Scheduled preparation and planning receive one shared scoring universe."""
     state = shadow_root
     calls = install_fetcher(state.root)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe", lambda as_of, tickers: (True, ""))
     population_path = state.root.joinpath(*nightly_trigger.STATE_DIR,
                                           nightly_trigger.QUALIFICATION_POPULATION)
     population_path.parent.mkdir(parents=True)
@@ -372,10 +373,12 @@ def test_production_submit_prepares_exact_watchlist_before_planning(
     planned = []
 
     def final_plan(root, as_of, actual_tickers, actual_context, clock, *, full_run,
-                   expected_shadow_snapshot_id):
+                   expected_shadow_snapshot_id, expected_population=None):
         """Assert the final planner sees the completed capture and exact universe."""
         assert (root, as_of, actual_tickers, actual_context, clock, full_run) == (
             state.root, SESSION, expected, context or expected, state.clock, True)
+        assert expected_population == (
+            "ZZNEW|CALL|2026-09-18", "HEALTHY|CALL|2026-09-18", "ZZNEW|PUT|2026-09-18")
         report = _read_report(root)
         assert expected_shadow_snapshot_id == report["capture"]["result_snapshot_id"]
         assert expected_shadow_snapshot_id != state.base.snapshot_id

@@ -7,7 +7,8 @@ parallel shadow-mode qualification DAG that already exists (``ops plan nightly``
 
 * the as-of session is published at the provider -- a single lightweight ORATS
   market-wide probe (the summaries/cores pair legacy nightly step 1 already
-  makes), never a refresh job; and
+  makes; the plan step adds a day-level probe over its derived universe), never
+  a refresh job; and
 * no other heavy run holds ``<repo>/reports/.nightly.lock`` -- a NON-BLOCKING
   ``fcntl.flock`` (LOCK_EX|LOCK_NB) taken before the probe and held for the
   ENTIRE run (probe -> plan -> submit -> serve to terminal). A legacy nightly
@@ -50,11 +51,12 @@ from zoneinfo import ZoneInfo
 
 from engine.v2.foundation import SystemClock, format_timestamp
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.workflows.commands import MAX_EXPECTED_POPULATION_BYTES as _MAX_POPULATION_BYTES
+from engine.v2.ops.workflows.commands import read_bounded_json
 
 __all__ = [
     "TriggerReceipt",
     "default_as_of",
-    "full_population",
     "legacy_lock_path",
     "load_state",
     "main",
@@ -82,6 +84,9 @@ STATE_DIR = ("reports", "phase6", "nightly_trigger")
 #: Where the operator drops the native nightly's own qualification documents.
 QUALIFICATION_INPUT_MANIFEST = "input_manifest.json"
 QUALIFICATION_POPULATION = "expected_population.json"
+#: "the caller did not decide the population" -- distinguishes an explicit
+#: ``expected_population=None`` from an omitted argument.
+_UNSET = object()
 
 STATUSES = ("submitted", "not_yet", "snapshot_not_yet", "missed", "already_submitted",
             "busy_legacy", "error", "submitting", "completed", "failed", "failed_setup", "idle",
@@ -425,9 +430,7 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     later tick must not re-litigate the window (gate-round-5 fix,
     generalizing round 4's "timed_out"-only version, Cutover PR-7b-2).
 
-    ``tickers``/``context_tickers`` are the plan's watchlist and historical
-    evidence universe (``full_population`` derives both from the native
-    nightly plan's own population document in production). ``plan_fn``,
+    ``tickers``/``context_tickers`` are the plan watchlist and historical evidence universe; when empty, ``_prepare_default_plan`` derives them from the validated override or, absent that, from the shadow snapshot; explicit tickers set the universe while a present override is still validated. ``plan_fn``,
     ``submit_fn``, ``serve_fn``, ``ensure_snapshot_fn`` and ``provider`` are
     injected seams; the production defaults are the real in-process
     plan/submit/serve and the native ORATS probe.
@@ -534,7 +537,9 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
     failure, recorded by ``_failure``), and no plan is built. Otherwise
     ``plan_fn`` builds the plan and this function records the ``"submitting"``
     receipt naming the new ``plan_ref``, returning ``(plan_ref, None)`` so
-    ``_submit_plan`` can submit it.
+    ``_submit_plan`` can submit it. A ``SOURCE_NOT_FINAL`` refusal from
+    ``plan_fn`` is a ``not_yet``/``snapshot_not_yet`` receipt instead of a
+    setup failure, mirroring the readiness ``"not_yet"`` branch above.
 
     Accepted risk (issue #186): a crash landing between ``plan_fn`` returning
     and the ``_record(..., "submitting", ...)`` call a few lines below leaves
@@ -576,6 +581,12 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
         plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
                            full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
     except _HANDLED_FAILURES as exc:
+        if isinstance(exc, OpsError) and exc.code == "SOURCE_NOT_FINAL":
+            resuming = prior is not None and prior.status in RESUME_STATUSES
+            return None, _record(root, _receipt(
+                clock, as_of, "snapshot_not_yet" if resuming else "not_yet",
+                _problem_detail(exc),
+                snapshot_attempt=snapshot_attempt))
         if (isinstance(exc, OpsError) and exc.code == "RESOURCE_UNAVAILABLE"
                 and exc.problem.details.get("resource") == "supervisor.lock"):
             return None, _record(root, _receipt(
@@ -640,43 +651,25 @@ def _read_document(path: Path | None):
     if path is None:
         return None
     try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
+        return read_bounded_json(path, _MAX_POPULATION_BYTES)
+    except (OSError, ValueError, RecursionError):
         return None
 
 
-def _qualification_path(root: Path, name: str) -> Path | None:
-    path = Path(root).joinpath(*STATE_DIR, name)
-    return path if path.is_file() else None
+def _qualification_location(root: Path, name: str) -> Path:
+    return Path(root).joinpath(*STATE_DIR, name)
 
 
-def _population_tickers(path: Path | None) -> tuple[str, ...]:
+def _population_keys(path) -> tuple[str, ...] | None:
     document = _read_document(path)
-    if not isinstance(document, list):
-        return ()
-    return tuple(sorted({str(key).split("|")[0] for key in document
-                         if isinstance(key, str) and "|" in key and key.split("|")[0]}))
+    if isinstance(document, list) and all(isinstance(item, str) for item in document):
+        return tuple(document)
+    return None
 
 
-def full_population(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """The scheduled run's full default population ticker universe.
-
-    The native nightly plan's own population document
-    (``reports/phase6/nightly_trigger/expected_population.json``, a JSON list
-    of ``ticker|strategy|event_date`` keys) IS the full default population:
-    every distinct ticker in it is both the watchlist and the historical
-    evidence context, and the document is passed to the plan unchanged as
-    ``--expected-population``. The trigger takes no ticker-list argument, and
-    the document is not required for the trigger to run: without it the plan
-    still declares ``full_run=True``, and ``universe``/``context`` are both
-    empty, so ``commands._snapshot_inputs``/``pin_snapshot_inputs`` refuse at PLAN
-    time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
-    ``input_mode="snapshot"`` flip, this same absent-population case built a
-    plan successfully and the refusal was ``ops submit``'s to make instead)
-    rather than the trigger silently scoring nothing.
-    """
-    tickers = _population_tickers(_qualification_path(root, QUALIFICATION_POPULATION))
-    return tickers, tickers
+def _tickers_from_keys(keys) -> tuple[str, ...]:
+    return tuple(sorted({str(key).split("|")[0] for key in (keys or ())
+                         if "|" in key and key.split("|")[0]}))
 
 
 def _ops_root(root: Path) -> Path:
@@ -753,42 +746,129 @@ def _refresh_plan_prices(root, as_of, tickers, clock, expected_snapshot_id):
         conn.close()
 
 
+def _snapshot_event_universe(root, as_of, clock, expected_shadow_snapshot_id):
+    """The shadow snapshot's own event tickers, read once through the planning helper.
+
+    Opens the ops catalog, calls ``snapshot_event_tickers`` on the ``shadow`` scope's pinned
+    head (refusing ``INPUT_CHANGED`` if it moved vs ``expected_shadow_snapshot_id``), and
+    closes the connection in ``finally``. Empty-window refusals surface as the
+    helper's typed ``OpsError`` unchanged. The scheduled run's universe comes from
+    the snapshot, not from an operator file that may be absent.
+    """
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.snapshot_planning import snapshot_event_tickers
+
+    ops_root = _ops_root(root)
+    conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
+    try:
+        return snapshot_event_tickers(
+            conn, ArtifactStore(ops_root), "shadow", as_of=as_of, clock=clock,
+            expected_snapshot_id=expected_shadow_snapshot_id)
+    finally:
+        conn.close()
+
+
+def _validated_override(root) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+    """Validate ``expected_population.json``, returning ``(keys, override_tickers)``.
+
+    ``keys`` is ``None`` when the override is ABSENT; a PRESENT override that is
+    a symlink, is not a regular file, or yields no tickers is refused
+    ``INVALID_REQUEST`` without being read where applicable.
+    """
+    override = _qualification_location(root, QUALIFICATION_POPULATION)
+    if not (override.exists() or override.is_symlink()):
+        return None, ()
+    if override.is_symlink():
+        raise fail("INVALID_REQUEST",
+                   "expected_population.json is a symlink; fix or remove it")
+    if not override.is_file():
+        raise fail("INVALID_REQUEST",
+                   "expected_population.json is present but is not a regular file; "
+                   "fix or remove it")
+    keys = _population_keys(override)
+    override_tickers = _tickers_from_keys(keys) if keys is not None else ()
+    if keys is None or not override_tickers:
+        raise fail("INVALID_REQUEST",
+                   "expected_population.json is present but yields no tickers "
+                   "(unreadable, oversize, non-list or empty); fix or remove it")
+    return keys, override_tickers
+
+
 def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=None, *,
                           full_run=True, expected_shadow_snapshot_id=None):
-    """The scheduled preparation uses the exact watchlist passed to planning."""
+    """The scheduled preparation uses the exact watchlist passed to planning.
+
+    Universe derivation: explicit ``tickers`` set the universe (the override is still validated); otherwise: an
+    ``expected_population.json`` override that exists is PRESENT and wins; one that yields no
+    tickers (unreadable, too large, non-list, empty) is refused ``INVALID_REQUEST``, never
+    replaced by generation; a symlink or non-regular override (FIFO, directory, dangling
+    symlink) is refused ``INVALID_REQUEST`` without being read. An ABSENT override means the
+    universe is ``snapshot_event_tickers`` on the pinned head ``expected_shadow_snapshot_id``
+    names, also used as the context unless ``context_tickers`` were supplied. The override is
+    NOT cross-checked against the snapshot; a planned key with no observed row is refused
+    by the score stage (``VALIDATION_FAILED``, ``details.missing``). The price
+    refresh receives the universe chosen here (snapshot-derived, override or explicit),
+    and the pre-refresh pin is used to derive it because price capture does not write
+    earnings_events. Price capture carries every non-price table forward unchanged
+    (price_history_store.capture), so the pre-refresh pin yields the same events as the
+    refreshed one.
+    """
     clock = clock or SystemClock()
-    universe = tuple(tickers) or _population_tickers(
-        _qualification_path(root, QUALIFICATION_POPULATION))
+    keys, override_tickers = _validated_override(root)
+    override_present = keys is not None
+    population_keys = keys
+    universe = tuple(tickers) or (override_tickers if override_present else
+                                  _snapshot_event_universe(root, as_of, clock,
+                                                           expected_shadow_snapshot_id))
+    if not tickers:
+        # A day-level finality probe over the derived universe (snapshot events or the override's tickers), before any price refresh or plan build; explicit tickers are probed by _decide.
+        final, detail = _orats_probe(as_of, universe)
+        if not final:
+            raise fail("SOURCE_NOT_FINAL", detail)
     context = tuple(context_tickers) or universe
-    if universe:
-        expected_shadow_snapshot_id = _refresh_plan_prices(
-            root, as_of, universe, clock, expected_shadow_snapshot_id)
+    expected_shadow_snapshot_id = _refresh_plan_prices(
+        root, as_of, universe, clock, expected_shadow_snapshot_id)
     return _default_plan(root, as_of, universe, context, clock, full_run=full_run,
-                         expected_shadow_snapshot_id=expected_shadow_snapshot_id)
+                         expected_shadow_snapshot_id=expected_shadow_snapshot_id,
+                         expected_population=population_keys)
 
 
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,
                   full_run: bool = True,
-                  expected_shadow_snapshot_id: str | None = None) -> str:
+                  expected_shadow_snapshot_id: str | None = None,
+                  expected_population=_UNSET) -> str:
     """The production plan: the real ``commands._plan_command``, in-process.
 
+    ``expected_population`` (unless ``_UNSET``) is the caller's already-decided
+    population KEYS passed through without re-reading the override file.
     ``full_run=True`` is the native nightly plan's full-population option and
     is always declared for a scheduled run, so the plan's effect scope is the
-    global ``shadow`` scope, never a slice. ``input_mode`` is always
+    global ``shadow`` scope, never a slice (a generated population with
+    carried-set exclusions gets subset effects instead, see engine/v2/ops/nightly.py).
+    ``input_mode`` is always
     ``"snapshot"`` and ``snapshot_scope`` is always ``"shadow"`` (Cutover
     PR-7b): the shadow nightly's plan always reads a pinned snapshot of the
     ``shadow`` scope, never the legacy live store directly.
     ``expected_shadow_snapshot_id`` is the exact prepared snapshot passed
     through ``commands._plan_command`` to ``pin_snapshot_inputs``; the scheduled
     caller has already refreshed and captured prices before this call.
-    ``expected_population`` is the operator's population document when present
-    (``full_population`` derived
-    the universe from the same file); absent, ``universe``/``context`` are
-    both empty, and ``commands._snapshot_inputs``/``pin_snapshot_inputs`` now
-    refuse at PLAN time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
-    ``input_mode="snapshot"`` flip, this same absent-population case built a
-    plan successfully and the refusal was ``ops submit``'s to make instead).
-    ``input_manifest`` and ``year_start``/``year_end`` are derived fresh from
+    The decided ``expected_population`` is the operator's population document when present
+    (``_prepare_default_plan``, via ``_validated_override``, derived the override tickers from
+    the same file); it is the explicit override and wins over snapshot generation. When absent,
+    ``_prepare_default_plan`` already derived ``universe``/``context`` (when
+    no explicit caller tickers/context_tickers were supplied) from the shadow
+    snapshot's own events via
+    ``snapshot_event_tickers`` before this call, so when called
+    through ``_prepare_default_plan`` (the only scheduled caller) this path does
+    not see an empty universe just because the file is absent; a direct
+    call with no tickers and no file builds an empty universe, which the plan
+    refuses at plan time (``INVALID_REQUEST``, generated population needs the
+    watchlist); with the file absent and a non-empty universe,
+    ``expected_population`` stays ``None`` and
+    ``commands._planned_population`` generates the population from the same
+    snapshot's events. ``input_manifest`` and
+    ``year_start``/``year_end`` are derived fresh from
     ``as_of`` on every call (the manifest is captured and written per-``as_of``
     rather than read from one fixed filename, and the year span mirrors
     legacy's own scoring horizon) rather than being fixed constants.
@@ -800,8 +880,11 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     clock = clock or SystemClock()
     ops_root = _ops_root(root)
     ensure_directory(ops_root)
-    population = _qualification_path(root, QUALIFICATION_POPULATION)
-    universe = tuple(tickers) or _population_tickers(population)
+    if expected_population is _UNSET:
+        population_keys, _ = _validated_override(root)
+    else:
+        population_keys = expected_population
+    universe = tuple(tickers) or _tickers_from_keys(population_keys)
     context = tuple(context_tickers) or universe
     year_start, year_end = _derive_years(as_of)
     # issue #104: capture this call's own manifest only when there is a universe to capture
@@ -813,7 +896,8 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
         command="plan", kind="nightly", as_of=as_of, mode="shadow", spec=None,
         no_ledger=False,
         input_manifest=manifest_path,
-        expected_population=population,
+        expected_population=None,
+        expected_population_keys=population_keys,
         tickers=",".join(universe), context_tickers=",".join(context),
         full_run=bool(full_run), year_start=year_start, year_end=year_end,
         input_mode="snapshot", snapshot_scope="shadow", refresh_mode="legacy",
@@ -1166,9 +1250,9 @@ def main(argv: list[str] | None = None) -> int:
     clock = SystemClock()
     root = Path(args.root).resolve()
     as_of = args.as_of or default_as_of(clock)
-    tickers, context_tickers = full_population(root)
+    # _prepare_default_plan reads expected_population.json once; main passes no tickers.
     try:
-        receipt = run_trigger(root, as_of, tickers=tickers, context_tickers=context_tickers,
+        receipt = run_trigger(root, as_of, tickers=(), context_tickers=(),
                               deadline_et=DEFAULT_DEADLINE_ET,
                               window_start_et=DEFAULT_WINDOW_START_ET, clock=clock,
                               full_run=True)
