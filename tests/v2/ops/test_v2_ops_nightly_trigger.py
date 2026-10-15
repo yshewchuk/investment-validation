@@ -30,7 +30,6 @@ from engine.v2.ops.errors import OpsError, fail  # noqa: E402
 from engine.v2.ops.nightly_trigger import (  # noqa: E402
     TriggerReceipt,
     default_as_of,
-    full_population,
     load_state,
     probe_finality,
     run_trigger,
@@ -892,15 +891,6 @@ def _write_population(root: Path, keys) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(list(keys)))
     return path
-
-
-def test_full_population_is_the_operator_document(tmp_path):
-    document = _write_population(
-        tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25",
-                   "AAA|EXP-1|2026-09-25"])
-    assert full_population(tmp_path) == (("AAA", "BBB"), ("AAA", "BBB"))
-    assert document.is_file()
-    assert full_population(tmp_path / "absent") == ((), ())
 
 
 _CLOCK = object()
@@ -2117,17 +2107,21 @@ def test_prepare_default_plan_passes_the_override_keys_as_expected_population(tm
     assert captured["expected_population"] == ("AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25")
 
 
-def test_full_population_refuses_a_symlink_override(tmp_path):
-    # A symlink at the override path -- even to a real regular file holding a valid
-    # population list -- is refused: _read_document opens with O_NOFOLLOW, so the
-    # document never loads and full_population falls back to the empty-universe
-    # pair rather than reading through the link.
-    target = tmp_path / "real_population.json"
-    target.write_text(json.dumps(["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"]))
-    path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.symlink_to(target)
-    assert full_population(tmp_path) == ((), ())
+def test_main_passes_no_tickers_and_the_plan_step_reads_the_override_once(
+        tmp_path, monkeypatch):
+    """Wiring: main hands run_trigger empty tickers/context_tickers so the
+    plan step reads the population override file exactly once."""
+    captured = {}
+
+    def fake_run_trigger(root, as_of, **kwargs):
+        captured["kwargs"] = kwargs
+        return TriggerReceipt(as_of=as_of, status="not_yet", detail="stub")
+
+    monkeypatch.setattr(nightly_trigger, "run_trigger", fake_run_trigger)
+    _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
+    assert nightly_trigger.main(["--as-of", AS_OF, "--root", str(tmp_path)]) == 0
+    assert captured["kwargs"]["tickers"] == ()
+    assert captured["kwargs"]["context_tickers"] == ()
 
 
 def test_main_records_the_symlink_refusal_when_the_override_is_a_symlink(

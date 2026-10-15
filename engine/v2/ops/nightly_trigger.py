@@ -54,7 +54,6 @@ from engine.v2.ops.errors import OpsError, fail
 __all__ = [
     "TriggerReceipt",
     "default_as_of",
-    "full_population",
     "legacy_lock_path",
     "load_state",
     "main",
@@ -430,9 +429,9 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     later tick must not re-litigate the window (gate-round-5 fix,
     generalizing round 4's "timed_out"-only version, Cutover PR-7b-2).
 
-    ``tickers``/``context_tickers`` are the plan's watchlist (the
-    ``full_population`` file's tickers when the override exists, otherwise
-    derived later from the shadow snapshot) and historical
+    ``tickers``/``context_tickers`` are the plan's watchlist (the plan step
+    (``_validated_override``) derives the override tickers when it exists,
+    otherwise derived later from the shadow snapshot) and historical
     evidence universe. ``plan_fn``,
     ``submit_fn``, ``serve_fn``, ``ensure_snapshot_fn`` and ``provider`` are
     injected seams; the production defaults are the real in-process
@@ -685,26 +684,6 @@ def _population_tickers(path: Path | None) -> tuple[str, ...]:
     return _tickers_from_keys(_population_keys(path) or ())
 
 
-def full_population(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """The scheduled run's full default population ticker universe.
-
-    The native nightly plan's own population document
-    (``reports/phase6/nightly_trigger/expected_population.json``, a JSON list
-    of ``ticker|strategy|event_date`` keys) is the full default population when present:
-    every distinct ticker in it is both the watchlist and the historical
-    evidence context, and the decided keys are passed to the plan in-process
-    (it is the explicit override and wins over snapshot
-    generation). The trigger takes no ticker-list argument, and the document is not
-    required for the trigger to run: absent, this function still returns ``((), ())``
-    (file-only read), while ``_prepare_default_plan`` derives the scheduled run's universe
-    from the shadow snapshot's own events via ``snapshot_event_tickers`` (issue #471)
-    instead of a plan-time ``INVALID_REQUEST`` refusal.
-    ``main()`` is unchanged.
-    """
-    tickers = _population_tickers(_qualification_path(root, QUALIFICATION_POPULATION))
-    return tickers, tickers
-
-
 def _ops_root(root: Path) -> Path:
     return Path(root) / "data" / "operations"
 
@@ -887,8 +866,8 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     through ``commands._plan_command`` to ``pin_snapshot_inputs``; the scheduled
     caller has already refreshed and captured prices before this call.
     The decided ``expected_population`` is the operator's population document when present
-    (``full_population`` derived the universe from the same file; it is the
-    explicit override and wins over snapshot generation); absent,
+    (the plan step ``_validated_override`` derives the override tickers from the same
+    file; it is the explicit override and wins over snapshot generation); absent,
     ``_prepare_default_plan`` already derived ``universe``/``context`` (when
     no explicit caller tickers/context_tickers were supplied) from the shadow
     snapshot's own events via
@@ -1286,9 +1265,9 @@ def main(argv: list[str] | None = None) -> int:
     clock = SystemClock()
     root = Path(args.root).resolve()
     as_of = args.as_of or default_as_of(clock)
-    tickers, context_tickers = full_population(root)
+    # The plan step reads expected_population.json exactly once (_validated_override); main passes no tickers.
     try:
-        receipt = run_trigger(root, as_of, tickers=tickers, context_tickers=context_tickers,
+        receipt = run_trigger(root, as_of, tickers=(), context_tickers=(),
                               deadline_et=DEFAULT_DEADLINE_ET,
                               window_start_et=DEFAULT_WINDOW_START_ET, clock=clock,
                               full_run=True)
