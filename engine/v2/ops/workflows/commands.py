@@ -109,8 +109,10 @@ def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
         return None
     try:
         raw_bytes = read_bounded_bytes(args.input_manifest, MAX_INPUT_MANIFEST_BYTES)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         raise fail("INPUT_CHANGED", "input manifest is missing") from None
+    except (OSError, ValueError):
+        raise fail("INPUT_CHANGED", "input manifest is not a bounded regular file (symlink, non-regular or oversize) or is unreadable") from None
     if nightly:
         _check_nightly_manifest(raw_bytes)
     manifest = ArtifactStore(root).publish_bytes(

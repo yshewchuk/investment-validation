@@ -1802,11 +1802,14 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     # The override file is PRESENT, so it wins unchanged: snapshot_event_tickers
     # is never consulted (a hard _explode proves it), and the existing
     # refresh + _default_plan path continues with the file's own tickers. The
-    # day-level finality check is not run on this branch either.
+    # day-level finality check still runs on this branch, over the override's
+    # own tickers.
     override_path = _write_population(
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
-    monkeypatch.setattr(nightly_trigger, "_orats_probe", _explode)
+    probe_calls = []
+    monkeypatch.setattr(nightly_trigger, "_orats_probe",
+                        lambda as_of, tickers: (probe_calls.append((as_of, tickers)) or (True, "")))
     refreshed = "snap_from_override"
 
     def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
@@ -1826,6 +1829,7 @@ def test_prepare_default_plan_wins_with_the_operator_override_and_ignores_the_sn
     assert (nightly_trigger._prepare_default_plan(
         tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
         expected_shadow_snapshot_id="snap_before") == "plan_override")
+    assert probe_calls == [(AS_OF, ("AAA", "BBB"))]  # the override tickers
 
 
 @pytest.mark.parametrize("payload", [
@@ -1955,6 +1959,26 @@ def test_prepare_default_plan_raises_source_not_final_when_the_probe_refuses_the
             expected_shadow_snapshot_id="snap_before")
     assert raised.value.code == "SOURCE_NOT_FINAL"
     assert raised.value.problem.message == "partial"
+
+
+def test_prepare_default_plan_refuses_a_not_final_override_universe_before_refresh(
+        tmp_path, monkeypatch):
+    # The override file is PRESENT: its own tickers get the day-level finality
+    # check, and a non-final probe verdict refuses SOURCE_NOT_FINAL before the
+    # price refresh or the plan build ever run. The snapshot universe helper is
+    # never consulted on this branch.
+    _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
+    monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    monkeypatch.setattr(nightly_trigger, "_orats_probe",
+                        lambda as_of, tickers: (False, "not published"))
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", _explode)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", _explode)
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._prepare_default_plan(
+            tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+            expected_shadow_snapshot_id="s")
+    assert raised.value.code == "SOURCE_NOT_FINAL"
 
 
 def test_prepare_default_plan_forwards_the_callers_explicit_tickers_and_context(tmp_path,
@@ -2087,6 +2111,9 @@ def test_prepare_default_plan_passes_the_override_keys_as_expected_population(tm
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
     captured = {}
     monkeypatch.setattr(nightly_trigger, "_snapshot_event_universe", _explode)
+    probe_calls = []
+    monkeypatch.setattr(nightly_trigger, "_orats_probe",
+                        lambda as_of, tickers: (probe_calls.append((as_of, tickers)) or (True, "")))
 
     def fake_refresh_plan_prices(root, as_of, tickers, clock, expected):
         assert root == tmp_path  # the caller's own root, forwarded unchanged
@@ -2106,12 +2133,13 @@ def test_prepare_default_plan_passes_the_override_keys_as_expected_population(tm
         tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
         expected_shadow_snapshot_id="snap_before") == "plan_override")
     assert captured["expected_population"] == ("AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25")
+    assert probe_calls == [(AS_OF, ("AAA", "BBB"))]  # the override keys' tickers
 
 
-def test_main_passes_no_tickers_and_the_plan_step_reads_the_override_once(
+def test_main_passes_no_tickers_to_run_trigger(
         tmp_path, monkeypatch):
-    """Wiring: main hands run_trigger empty tickers/context_tickers so the
-    plan step reads the population override file exactly once."""
+    """Wiring: asserts only that main passes empty tickers/context to
+    run_trigger."""
     captured = {}
 
     def fake_run_trigger(root, as_of, **kwargs):
@@ -2234,7 +2262,7 @@ def test_read_document_rejects_a_padded_valid_list_by_the_post_read_cap(tmp_path
     from types import SimpleNamespace
 
     path = tmp_path / "padded.json"
-    path.write_text("[1,2]" + " " * 50)
+    path.write_text('["a"]' + " " * 50)
     monkeypatch.setattr(nightly_trigger, "_MAX_POPULATION_BYTES", 8)
     # Control: the real fstat sees a size over the cap, so the fstat guard
     # alone refuses the document before any bytes are read.
@@ -2248,8 +2276,8 @@ def test_read_document_rejects_a_padded_valid_list_by_the_post_read_cap(tmp_path
 
     monkeypatch.setattr(nightly_trigger.os, "fstat", fstat_wrapper)
     # The fstat guard now passes (st_size=1 <= 8) and the first cap+1 bytes
-    # ('[1,2]' plus padding) parse as JSON, so only the post-read cap refuses.
-    assert json.loads(path.read_bytes()[:9]) == [1, 2]
+    # ('["a"]' plus padding) parse as JSON, so only the post-read cap refuses.
+    assert json.loads(path.read_bytes()[:9]) == ["a"]
     assert nightly_trigger._read_document(path) is None
 
 
@@ -2307,3 +2335,47 @@ def test_default_plan_passes_the_decided_keys_to_the_plan(tmp_path, monkeypatch)
         expected_shadow_snapshot_id="s", expected_population=None)
     args = captured["args"]
     assert args.expected_population_keys is None
+
+
+def test_prepare_default_plan_uses_the_keys_validated_before_a_later_rewrite(tmp_path, monkeypatch):
+    _write_population(tmp_path, ["AAA|STR-THRU|2026-09-25"])
+    monkeypatch.setattr(nightly_trigger, "_orats_probe",
+                        lambda as_of, tickers: (True, ""))
+
+    def fake_refresh(root, as_of, tickers, clock, expected):
+        _write_population(tmp_path, ["ZZZ|STR-THRU|2026-09-25"])
+        return "snap"
+
+    captured = {}
+
+    def fake_default_plan(root, as_of, tickers, context, clock, *, full_run,
+                          expected_shadow_snapshot_id, expected_population):
+        captured["expected_population"] = expected_population
+        return "p"
+
+    monkeypatch.setattr(nightly_trigger, "_refresh_plan_prices", fake_refresh)
+    monkeypatch.setattr(nightly_trigger, "_default_plan", fake_default_plan)
+
+    assert (nightly_trigger._prepare_default_plan(
+        tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
+        expected_shadow_snapshot_id="s") == "p")
+    assert captured["expected_population"] == ("AAA|STR-THRU|2026-09-25",)
+
+
+def test_read_bounded_bytes_rejects_a_file_that_grows_past_the_cap_after_fstat(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from engine.v2.ops.workflows import commands
+
+    path = tmp_path / "g.bin"
+    path.write_bytes(b"x" * 50)
+    real_fstat = os.fstat
+
+    def fstat_wrapper(fd):
+        st = real_fstat(fd)
+        return SimpleNamespace(st_mode=st.st_mode, st_size=1)
+
+    monkeypatch.setattr(commands.os, "fstat", fstat_wrapper)
+    with pytest.raises(ValueError):
+        commands.read_bounded_bytes(path, 8)

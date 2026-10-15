@@ -830,10 +830,8 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
     universe = tuple(tickers) or (override_tickers if override_present else
                                   _snapshot_event_universe(root, as_of, clock,
                                                            expected_shadow_snapshot_id))
-    if not tickers and not override_present:
-        # A day-level finality probe over the snapshot-derived universe, before any
-        # price refresh or plan build; never probed on the override or explicit-tickers
-        # branches above.
+    if not tickers:
+        # A day-level finality probe over the derived universe (snapshot events or the override's tickers), before any price refresh or plan build; explicit tickers are probed by _decide.
         final, detail = _orats_probe(as_of, universe)
         if not final:
             raise fail("SOURCE_NOT_FINAL", detail)

@@ -88,7 +88,8 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     ``tickers``, each crossed with every ``STRATEGY_IDS`` member: the rows the legacy ``score``
     stage's ``score_calendar`` emits per event (disabled CAL-P/CND-P included). Never
     ``DYN-SV``: ``score_calendar`` appends that row only for events its chooser ranked, so no
-    plan can list it. Pure snapshot read: no provider or network call.
+    plan can list it. No provider or network call; it resolves the head, which publishes and
+    registers the head ref.
 
     Plan-time exclusion: after scanning, the carried set is resolved from the SAME repository
     and snapshot (:func:`engine.v2.ops.carried_set.resolve_carried_set`); exclusions are built
@@ -169,7 +170,8 @@ def snapshot_event_tickers(conn, store, scope, *, as_of, clock,
     head exactly once (same head resolution and ``SnapshotRef`` load as
     :func:`generated_population`) and calls
     ``scan_forward_board_requests(..., tickers=None)`` — the same single scan and the same
-    35-day window, one scan within this call. Pure snapshot read: no provider or network call.
+    35-day window, one scan within this call. No provider or network call; it resolves the head,
+    which publishes and registers the head ref.
 
     Failure semantics: an unreadable head ARTIFACT (missing, integrity-failed,
     undecodable) and the reader's ``DataError`` are both ``INPUT_CHANGED``, differing only
