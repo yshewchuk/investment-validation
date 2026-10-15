@@ -142,7 +142,10 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   enforced mid-run. A rerun with no gap skips the repair. A refused night
   leaves the panel and Tier-4 tables rebuilt in the store while SNAPSHOT
   keeps the previous digests; if the manifest was written but the SNAPSHOT
-  write failed, the manifest is ahead of SNAPSHOT.
+  write failed, the manifest is ahead of SNAPSHOT. With tiers on,
+  `steps.refresh.rebuild.snapshot` is null (the tiers step owns the
+  SNAPSHOT, recorded in `steps.tiers.snapshot`), and `steps.tiers.elapsed_s`
+  covers the rebuild, not the snapshot write.
 
   | Condition | Outcome |
   | --- | --- |

@@ -436,8 +436,8 @@ Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
   predict *as a general rule*, a missing row would be ambiguous between "no
   forecast available" and "this table is stale" — the gap-fill case avoids
   that ambiguity by being the only case, always reported in the build report
-  (`out_of_window_gap`); the nightly repairs it with a full rebuild and flags
-  `tier4_gap_partial` only if the repair is refused, so an absent key means
+  (`out_of_window_gap`); the nightly repairs it with a full rebuild, and a
+  refused repair stops the run with a typed `TIER4_*` code (no flag), so an absent key means
   specifically "an unclosed gap", never a silent unbuilt table.
 * **The carry-over is guarded three ways** (`_carried_prefix`): a cadence
   change and a different `model_id` refuse `--since` outright. The third —

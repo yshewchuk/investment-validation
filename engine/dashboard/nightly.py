@@ -844,9 +844,10 @@ def mark_tiers_degraded(report: NightlyReport, exc: Exception) -> None:
     dark. Called from run_nightly's rebuild handler and from the gap-free
     finalize path of :func:`repair_tier4_gap_if_needed`.
 
-    A degraded tiers step still scores against the refreshed store, so the
-    refresh rebuild's deferred snapshot is written here (the scorer reads the
-    SNAPSHOT digest). If that write fails the digest would no longer describe
+    A degraded tiers step still scores the store as found (the refreshed store
+    when refresh ran), and the SNAPSHOT of that store is written here (the
+    deferred refresh snapshot when refresh ran; the scorer reads the SNAPSHOT
+    digest). If that write fails the digest would no longer describe
     the store being scored, so the run does NOT continue: the failure is
     recorded (type only) as ``steps["tiers"]["snapshot_error"]`` and the helper
     raises ``NightlyStop`` with the typed ``TIERS_SNAPSHOT_FAILED`` code
