@@ -45,6 +45,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 
 from engine.v2.foundation import (
@@ -57,11 +58,18 @@ from engine.v2.foundation import (
     to_document,
 )
 
-from .contracts import ArtifactMember, ModelRelease
-from .releases import ModelReleaseInventory, ReleaseIssue, require_complete_release
+from . import contracts, releases
+
+# Module imports plus aliases keep this file within the layer fan-out budget (checks/layer_map.py).
+ArtifactMember = contracts.ArtifactMember
+ModelRelease = contracts.ModelRelease
+ModelReleaseInventory = releases.ModelReleaseInventory
+ReleaseIssue = releases.ReleaseIssue
+require_complete_release = releases.require_complete_release
 
 __all__ = [
     "DEPLOYMENT_REFUSAL",
+    "MAX_MANIFEST_BYTES",
     "MODEL_RELEASE_ROOT_ENV",
     "POINTER_STATE_V1",
     "STAGED_MANIFEST_V1",
@@ -79,6 +87,7 @@ __all__ = [
     "current_pointer",
     "current_release",
     "invalidate_staging_success",
+    "manifest_path",
     "mark_staging_succeeded",
     "pointer_history",
     "production_deployment_root",
@@ -297,6 +306,11 @@ def _manifest_path(root: Path, release_id: str) -> Path:
     return _release_dir(root, release_id) / "manifest.json"
 
 
+def manifest_path(root: Path, release_id: str) -> Path:
+    """The staged manifest path for release_id (read-only accessor)."""
+    return _manifest_path(root, release_id)
+
+
 def _object_relpath(member_hash: str) -> str:
     return "objects/" + member_hash.removeprefix("sha256:")
 
@@ -337,11 +351,43 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     fsync_directory(path.parent)
 
 
+MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+
+
+def _read_bounded_regular(path: Path, limit: int) -> bytes:
+    """Read at most ``limit`` bytes from a regular file, refusing symlinks and oversize input."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError("staged manifest is not a bounded regular file") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("staged manifest is not a bounded regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(fd, min(limit + 1 - total, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        raise ValueError("staged manifest is not a bounded regular file")
+    return data
+
+
 def _read_manifest(root: Path, release_id: str) -> StagedManifest | None:
     path = _manifest_path(root, release_id)
-    if not path.is_file():
+    try:
+        path.lstat()
+    except FileNotFoundError:
         return None
-    return _decode(StagedManifest, path.read_bytes())
+    return _decode(StagedManifest, _read_bounded_regular(path, MAX_MANIFEST_BYTES))
 
 
 # --------------------------------------------------------------------------
@@ -595,10 +641,11 @@ def restage_semantic_hash(root: Path, release_id: str) -> StagedManifest:
     except (OSError, ValueError) as exc:
         # _read_manifest's decode can raise a bare json.JSONDecodeError or
         # engine.v2.foundation.typed.DocumentError (both ValueError
-        # subclasses), or a bare OSError racing the is_file() check --
-        # exactly the same failure family engine/v2/scoring/
-        # release_bindings.py's _read_and_verify_manifest already catches
-        # for the identical read. Never left to escape uncaught.
+        # subclasses), or a bare OSError from its lstat plus bounded
+        # no-follow read of the manifest -- exactly the same failure family
+        # engine/v2/scoring/release_bindings.py's _read_and_verify_manifest
+        # already catches for the identical read. Never left to escape
+        # uncaught.
         raise StagingRefused((ReleaseIssue(
             path=f"$.releases[{release_id}]", code="MANIFEST_UNREADABLE",
             detail="the existing staged manifest could not be read",

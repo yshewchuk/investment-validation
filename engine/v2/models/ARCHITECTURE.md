@@ -56,7 +56,7 @@ caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
 An automated nightly append cycle for the pool/residual/cutoff artifacts:
-design only, not yet implemented — see #192.
+release assembly is §2.1; the rest is design only — see #192.
 
 ## 2. Primary contracts and public interfaces
 
@@ -121,8 +121,58 @@ size check. Existing callers omitting the ceiling retain their read contract.
 | Object at/below the ceiling | Existing byte-hash, canonical-hash and typed validation apply |
 | Cache, retry, transaction, partial write | Existing per-loader content-hash cache; no retries or writes; failure returns no partial state |
 
-`carry_forward_release`, `derive_catalog`: design only, not yet
-implemented — see #192.
+### 2.1 Pool release assembly
+
+`checks/phase5_release_assembly.py`, beside the catalog in `checks/phase5_release.py`:
+
+- `derive_catalog(prior_catalog, *, release_id, expected_prior_release_id, outputs, chooser, cutoff) -> dict`
+  — pure. Returns the candidate catalog body: the six pool members
+  (`driver_residual_pool:{size,implied_t1,runup_move}`, `paired_residual_pool`,
+  `trailing_pnl_cutoff`, `board_analog_matcher`) and `chooser_analog_pool` each
+  get the full set of supplied objects (`outputs` holds one or more
+  `PoolOutput` per pool member; `chooser` is one or more; object names are
+  unique within a member, and every object carries `cutoff`), replacing that
+  row's objects wholesale; every other member row is copied unchanged;
+  `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
+  the prior release id.
+- `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
+  — verifies the prior staged release, untouched rows and supplied objects on disk,
+  re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
+  then writes the candidate catalog. It never touches `DEPLOYED`.
+
+Both refuse with a stable `ReleaseAssemblyRefusal.code`; stray `KeyError`, `TypeError`, `AttributeError`,
+`ValueError`, `RecursionError` map to `PRIOR_MISMATCH` (inventory or stage-time ones to `INVENTORY_MISMATCH`,
+publish `OSError` to `PUBLICATION_FAILED`).
+
+| Condition | Code |
+|---|---|
+| Prior release id empty, not a string or unsafe (`/`, `\`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest, model payload or untouched STAGED row object missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
+| Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
+| Chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
+| An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
+| `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
+| Supplied object missing, unreadable, not a regular file, `payload_bytes` above `MAX_OBJECT_BYTES`, longer than its claim, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
+| Candidate id empty, unsafe or equal to the prior's; inventory `release_id` differs from it; candidate catalog or staged manifest exists with different or corrupt content | `ID_CONFLICT` |
+| Inventory missing, malformed, member hashes differ from the prior payloads, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
+| Filesystem error or lock timeout while publishing (inputs not at fault) | `PUBLICATION_FAILED` |
+
+Supplied objects, prior payloads, both catalogs and staged manifests are
+opened without following links, must be regular files, and are read under a
+byte cap; the lock file is opened without following links and must be regular.
+A missing, symlinked, non-regular or oversize prior refuses `PRIOR_MISMATCH`;
+a corrupt, symlinked, non-regular or oversize existing candidate refuses `ID_CONFLICT`, an absent one is created. Staging and the catalog write
+run under one exclusive `flock` on `deployment/.carry_forward.lock`; a loser
+that waits out `LOCK_WAIT_S` refuses `PUBLICATION_FAILED`; otherwise identical
+content succeeds and different content refuses `ID_CONFLICT`.
+
+| Rule | Behaviour |
+|---|---|
+| R1 verified input | Prior release, each output, chooser row, identities, hashes, cutoff, inventory identity and prior model payload hashes validated before any candidate artifact is written |
+| R2 cache | None; the prior catalog, staged manifest and objects are re-read each call |
+| R3 retry | Repeatable only with the same validated inputs; no fallback to old pools or live registries |
+| R4 transaction | Candidate artifacts are written only under the new candidate id (objects are content-addressed); the only other write is the `deployment/.carry_forward.lock` coordination file |
+| R5 partial failure | Orphaned objects or a staged manifest without a catalog may remain and a retry completes it; no catalog, nothing promoted |
+| R6 idempotency | Identical inputs give identical catalog bytes (no clock in the catalog); same id with different content refuses `ID_CONFLICT` |
 
 ## 3. Inputs
 
@@ -432,7 +482,7 @@ promotion and rollback refuse without matching staging success.
 | Condition | Outcome |
 |---|---|
 | Unstaged `release_id` | `resolve_release` refuses `ReleaseNotStaged` |
-| Staged manifest cannot be read or parsed | Both refuse `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error (issue #207) — `current_release` inherits this from its own call to `resolve_release` |
+| Staged manifest cannot be read or parsed, is a symlink or non-regular file, or exceeds 64 MiB | Both refuse `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error; a missing file is still "not staged" — `current_release` inherits this from its own call to `resolve_release` |
 | Release staged under a superseded hash version (legacy) | Still resolves — replay of a score already recorded against it must never become unreplayable. Only the write path (§7.2) enforces the current hash version |
 | No live pointer | `current_release` returns `None` |
 | Caching, retry, transaction, partial write | None of these apply: read-only, no cache, nothing to retry, no write |
@@ -476,9 +526,9 @@ production scoring instead selects the release named by `DEPLOYED`.
 | Selected release-local catalog exists | It is authoritative; schema, self-hash and release identity must validate |
 | Cache | `checks.phase5_release.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
-| Local catalog corrupt or unreadable | Refuse; never fall back to a valid root copy |
+| Local catalog corrupt or unreadable, a symlink or non-regular file, or over 64 MiB (`checks.phase5_release.read_manifest`; scoring `_read_state_catalog` likewise) | Refuse (`ReleaseLayoutError`, scoring `ModelNotReady`); never fall back to a valid root copy |
 | Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs; incumbent validation is read-only and precedes copying |
-| Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee |
+| Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee, except `carry_forward_release` calls, which serialize on `deployment/.carry_forward.lock` (§2.1) |
 | Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |
 | Historical catalog was already overwritten before migration | It cannot be recovered from a model manifest; rebuilding that catalog is required |
 

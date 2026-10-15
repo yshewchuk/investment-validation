@@ -459,7 +459,7 @@ rather than its own. `native_score_batch` goes through `score_one`, never
   | `DEPLOYED` pointer file corrupt/unparseable | `ModelNotReady("DEPLOYED", ...)` |
   | unsafe `release_id` (contains `/`, or is `.`/`..`) | `ModelNotReady("model_release", ...)` |
   | no staged manifest for that `release_id` | `ModelNotReady("model_release", "release not staged")` |
-  | `manifest.json` exists but will not parse | `ModelNotReady("manifest.json", ...)` |
+  | `manifest.json` exists but will not parse, is a symlink or non-regular file, or exceeds 64 MiB | `ModelNotReady("manifest.json", ...)` |
   | staged manifest's own hash disagrees (`_manifest_hash_matches`, checked before trusting `manifest.release`) | `ModelNotReady("model_release", "release_hash disagrees with manifest")` — accepts either hash version, since replay of an older-hashed release must keep resolving; `deployment.promote`/`rollback` enforce a stricter write-side rule this read path never applies |
   | `resolve_production_release_binding()` only: no/blank `MODEL_RELEASE_ROOT` | `ModelNotReady("release_root", "no production release root is configured")` |
   | once resolved, any member (model binding, payoff/recalibration/analog artifact) missing, wrong status, hash mismatch, or fails its typed load | `ModelNotReady(member_id, ...)`, naming the exact member (e.g. `"model:gate:STR-THRU"`) |
