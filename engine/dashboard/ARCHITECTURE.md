@@ -22,7 +22,8 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 ## Primary contracts and public interfaces
 
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
-  (root doc §4).
+  (root doc §4). Public helpers for the Tier-4 gap repair:
+  `repair_tier4_gap`, `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
 - `render.py` — `build_meta`, `build_health`, `build_strategies`,
   `compact_row`, `row_digest`, `freshness_summary`, `quota_state`,
   `size_model_mae_from_ledger`, `payoff_curve`: the board's row/meta/health
@@ -140,12 +141,11 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   tiers step writes its own (see table); a failed write keeps the previous
   file.
   A stop before the tiers step (after the store rebuild) leaves the previous
-  SNAPSHOT in place; a later stop (selfcheck, publish) keeps tonight's. The
-  repair budget (`TIER4_REPAIR_BUDGET_S`) is checked after the repair
-  returns. A rerun with no gap skips the repair. The flag report and
-  `rebuild --json` are written atomically (a failed write keeps the previous
-  file); the flag report written for a tiers refusal is best-effort. Public helpers: `repair_tier4_gap`,
-  `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
+  SNAPSHOT in place; a later stop (selfcheck) keeps tonight's. The retained
+  SNAPSHOT is the import gate, not a hash of the current working store: after
+  a refused repair the store can be ahead of it (user decision, fail-closed
+  readers tracked in #771). The flag report is written atomically (a failed
+  write keeps the previous file); for a tiers refusal it is best-effort.
 
   | Condition | Outcome |
   | --- | --- |
