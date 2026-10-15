@@ -16,6 +16,7 @@ def clock() -> float:
     """The monotonic clock the counters' ``seconds`` use."""
     return time.perf_counter()
 
+
 _FIELDS = ("scans", "fragments_opened", "rows_decoded", "rows_returned",
            "bytes_read", "seconds")
 

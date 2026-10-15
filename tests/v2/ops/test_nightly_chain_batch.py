@@ -12,9 +12,8 @@ from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.nightly_calendar_inputs import scan_candidate_expiries
-from engine.v2.ops.nightly_chain_batch import scan_chain_slices
+from engine.v2.ops.nightly_chain_batch import require_chain_rows, scan_chain_slices
 from engine.v2.ops.nightly_quote_rows import scan_quote_rows
-from engine.v2.ops.nightly_chain_batch import require_chain_rows
 from tests.v2.ops.chain_support import (
     CHAINS_NAME as _CHAINS_NAME,
     SESSION as _SESSION,
@@ -234,3 +233,21 @@ def test_obs_date_with_trailing_text_is_refused(tmp_path):
         scan_quote_rows(repository, snapshot, _AAA, expiry=_EXPIRY,
                         decision_session=_SESSION, chain_rows=rows)
     assert exc.value.code == "INVALID_REQUEST"
+
+
+def test_one_ticker_with_two_keys_shares_its_slice(tmp_path):
+    repository, snapshot = _snap(tmp_path)
+    second = BoardRequest("AAA", "BFLY-P", pd.Timestamp("2024-01-16"), "BMO")
+    slices = scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
+    shared = slices["AAA"]
+    size = len(shared)
+    for key in (_AAA, second):
+        assert scan_candidate_expiries(
+            repository, snapshot, key, decision_session=_SESSION, chain_rows=shared
+        ) == scan_candidate_expiries(repository, snapshot, key, decision_session=_SESSION)
+        assert scan_quote_rows(
+            repository, snapshot, key, expiry=_EXPIRY, decision_session=_SESSION,
+            chain_rows=shared
+        ) == scan_quote_rows(repository, snapshot, key, expiry=_EXPIRY,
+                             decision_session=_SESSION)
+    assert len(shared) == size == 5
