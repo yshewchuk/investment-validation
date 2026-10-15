@@ -65,6 +65,11 @@ The full list is `README.md`'s `<!-- public-interface: ... -->` directive
 
 - `deployment.stage_release(root, release, inventory, payloads, *, clock) -> StagedManifest`
   — validate, then durably stage. Never touches `DEPLOYED`.
+- `deployment.semantic_release_hash(release: ModelRelease) -> str` — pure
+  `sha256:` identity over the typed release's inference meaning. Binding/member
+  collection order and storage paths are ignored; feature/output order is not.
+  No I/O, cache, completeness validation or artifact verification; those remain
+  with staging/loaders. It does not rewrite stored manifest hashes or versions.
 - `deployment.promote(root, release_id, *, clock, expected_previous_release_id=None) -> PointerState` /
   `deployment.rollback(root, *, clock) -> PointerState` — the one atomic
   pointer swap, in either direction. Rollback selects the prior incumbent
@@ -122,7 +127,7 @@ implemented — see #192.
 ## 3. Inputs
 
 **Forward serving-fold contract.** Offline descriptor authoring is described
-below; verified loading is defined in 6d-2 below, while selection and scoring
+below; verified loading is defined below, while selection and scoring
 integration remain design only.
 Monthly folds
 are separate from the full-refit champion bindings. A `ServingFoldRef`
@@ -132,8 +137,8 @@ interval policy. Its held-out prediction/residual arrays belong to that same
 object. Offline release preparation records this metadata in the hashed state
 catalog; a read-only loader verifies it against bounded, hash-checked bytes.
 Existing catalogs without this declaration require offline restaging, not a
-nightly fit or a guessed interval policy. The initial contract covers size
-folds for STR-THRU gate features only, not other forecast families.
+nightly fit or a guessed interval policy. Verified loading covers size
+folds for STR-THRU gate features only; chooser authoring is separate below.
 
 Selection uses the exact earlier of the event month and decision month,
 the registered size model and feature order, and the pinned panel byte hash.
@@ -153,7 +158,7 @@ that binding through `FrozenInference`; no second prediction engine is added.
 | Corrupt, oversized, escaped-path or header/descriptor mismatch | `MODEL_NOT_READY` before inference; redact filesystem details |
 | Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
 
-**Offline descriptor authoring (6d-1).** `ServingFoldDescriptor` in
+**Offline descriptor authoring.** `ServingFoldDescriptor` in
 `serving_folds.py` is an immutable typed document under each size fold catalog
 object. It records parent release/model-manifest identity, model, ordered
 features, output/clock, exact month, full panel SHA-256, estimator member,
@@ -162,15 +167,58 @@ hash binds catalog identity without a self-reference inside the descriptor.
 `tools.phase5_prepare_release` obtains `SizeFoldPolicy` from the registered size
 producer; `tools.phase5_serving_folds` validates bounded cache bytes and emits
 metadata before catalog publication. No fitting or inference occurs here.
+Retained fold-parent checks reuse deployment's semantic release identity:
+binding/member collection order and storage paths may differ on retry;
+feature and output order, and every other identity field, remain significant.
+All Tier-4 collector roles and chooser/pinned-size destination reads admit
+regular files of at most 32 MiB with final-component `O_NOFOLLOW`; final symlinks
+refuse. Parent directories remain operator-trusted, not traversed no-follow.
+Absent directories/unmatched files remain empty. Reader/chooser mismatches are unprefixed;
+pinned COPY verification and size byte mismatches use `panel_copy_refused:`.
 
 | Offline authoring condition | Outcome |
 |---|---|
 | Explicit policy and coherent size cache | Emit descriptor covered by the catalog self-hash; repeat inputs yield identical metadata |
 | Header/model/features/full panel/month disagreement, missing or malformed pool, oversized bytes | Refuse publication; never infer metadata from a filename prefix alone |
 | No explicit policy in a programmatic legacy caller | Preserve the existing catalog shape; it cannot supply the future fold path |
-| Other fold roles | Keep existing opaque catalog objects; this descriptor contract covers size only |
-| Failed preparation | No deployment-pointer changes; ordinary staging may leave unreferenced files; retry is permitted |
+| Other fold roles without their own explicit policy | Keep existing opaque catalog objects; never reinterpret them as size descriptors |
+| Collector read or destination verification encounters unreadable bytes or a final symlink | Fixed read refusal with I/O cause; no new catalog or pointer; collector refuses before decode/output |
+| Collector read or destination verification encounters a special file | Fixed regular-file refusal before content reads; no new catalog or pointer |
+| Collector read or destination verification sees an initial size above 32 MiB | Fixed byte-limit refusal before content reads; no new catalog or pointer |
+| Collector read or destination verification detects growth beyond 32 MiB | Fixed byte-limit refusal after bounded read; no new catalog or pointer |
+| Pinned-size destination bytes differ from preflight | Role-specific mismatch refusal; never repair or relabel an existing regular object |
+| Retry with an unchanged corrupt address | Refuse again without changing the object, catalog or pointer |
+| Partial write | No pointer changes; staging may leave unreferenced files; no automatic store repair |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
+
+**Chooser producer fold authoring.** `ChooserFoldPolicy` and
+`ChooserServingFoldDescriptor` separately declare `implied_t1` and `runup_move`
+monthly caches under their exact `tier4_folds:<role>` members. The descriptor
+binds the parent release, full panel hash, ordered features, clock, whole-cache
+estimator object (not the champion member), pool count and decile/floor policy. It records
+both the champion binding output and raw D14 chooser column; runup output is
+never day-scaled here. Standard release preparation obtains each present role's
+policy from its registered producer and validates the cache against that role's
+unique wildcard champion. Size descriptors keep their existing schema.
+The chooser descriptor hash is `content_hash` of its canonical typed document, covering parent, role and estimator identity.
+Without pinned COPY context, the explicit panel digest is caller-asserted; preparation does not verify panel bytes.
+
+| Chooser fold authoring condition | Outcome |
+|---|---|
+| Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
+| Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
+| Construction/typed decoding: invalid panel digest, role/output pair or cache-object path/hash | `DocumentError`: `BAD_PANEL_HASH`, `CHOOSER_OUTPUT_MISMATCH` or `BAD_FOLD_OBJECT`; authoring wraps policy refusals |
+| Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
+| Registered chooser producer rejects recipe features/target | Fixed `PrepareRefused` with original cause; CLI exits 2 without a traceback |
+| Pinned COPY context | Full panel hash must match; preflight precedes output effects and destination bytes must retain the validated hash |
+| No policy on a programmatic caller | Preserve opaque catalog objects; no chooser fold declaration is invented |
+| Shared fold-reader failure or unchanged corrupt destination | Same refusal outcomes as the offline-authoring table above |
+| Destination bytes differ from preflight | Unprefixed chooser mismatch refusal; never repair or relabel an existing object |
+| Cache/partial write | Validate anew; no descriptor cache or pointer changes; staging may leave unreferenced files; no automatic store repair |
+
+Zero pool counts authorize no runtime selection or activation; COPY consistency does not prove training-source availability or finality.
+The Phase-5 shared object writer owns durable create-only publication and typed
+I/O failures ([contract](../../../checks/ARCHITECTURE.md)); fold consumers retain byte verification.
 
 **Pinned offline COPY authoring.** `tools.phase5_prepare_release` accepts an
 explicit committed snapshot/catalog and artifact-store context. Existing size
@@ -198,7 +246,7 @@ actual training reads. Complete preparation evidence requires independently
 verified producer/source-read/output causality; current imported caches lack it.
 Training frame-value, membership and label receipts do not supply that proof.
 
-**Verified serving-fold ownership (6d-2).** `load_serving_fold` validates one
+**Verified serving-fold ownership.** `load_serving_fold` validates one
 descriptor against a verified parent manifest and catalog identity, returning
 a `ServingFoldRef` with immutable metadata/pools, its shared `FrozenInference`
 owner and an ephemeral single-binding inference view. The view identity binds
@@ -296,8 +344,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 - `engine.v2.serving` — `engine/v2/serving/operations.py` reads the
   deployment pointer read-only (`current_pointer`, `resolve_release`) to
   serve `/models/release.json`; never promotes.
-- `tools/phase5_prepare_release.py`, `tools/phase5_inventory.py` (not v2
-  packages) — the release-preparation and inventory CLIs.
+- `tools/phase5_prepare_release.py`, `tools/phase5_inventory.py` and
+  `tools/phase5_serving_folds.py` — release preparation, inventory and fold metadata.
 
 ## 6. External systems and libraries
 
