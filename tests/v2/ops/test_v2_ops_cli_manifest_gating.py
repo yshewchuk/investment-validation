@@ -43,3 +43,33 @@ def test_training_plan_manifest_is_not_gated_on_nightly_barrier_families(tmp_pat
     manifest_ref = _read_input_manifest_ref(args, root, conn, clock, nightly=False)
     assert manifest_ref
     conn.close()
+
+
+def test_an_oversize_symlinked_or_missing_manifest_is_input_changed(tmp_path, monkeypatch):
+    root, conn, clock = _ops_root(tmp_path)
+    import engine.v2.ops.workflows.commands as commands
+
+    missing = tmp_path / "nope.json"
+    real = _incomplete_manifest_path(tmp_path)
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+
+    args = SimpleNamespace(input_manifest=missing)
+    with pytest.raises(OpsError) as excinfo:
+        _read_input_manifest_ref(args, root, conn, clock, nightly=False)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert "input manifest is missing" in str(excinfo.value)
+
+    args = SimpleNamespace(input_manifest=link)
+    with pytest.raises(OpsError) as excinfo:
+        _read_input_manifest_ref(args, root, conn, clock, nightly=False)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert "not a bounded regular file" in str(excinfo.value)
+
+    monkeypatch.setattr(commands, "MAX_INPUT_MANIFEST_BYTES", 4)
+    args = SimpleNamespace(input_manifest=real)
+    with pytest.raises(OpsError) as excinfo:
+        _read_input_manifest_ref(args, root, conn, clock, nightly=False)
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert "not a bounded regular file" in str(excinfo.value)
+    conn.close()

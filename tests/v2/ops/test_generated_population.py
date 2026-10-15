@@ -197,6 +197,46 @@ def test_an_empty_window_is_a_typed_refusal_not_an_empty_plan(env):
     assert "no eligible earnings events" in raised.value.problem.message
 
 
+@pytest.mark.parametrize("code", ["MISSING", "INTEGRITY_FAILED", "UNSAFE_PATH"])
+def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(monkeypatch, code):
+    from engine.v2.foundation import ArtifactError
+
+    monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: "head")
+
+    class _Store:
+        def read_verified(self, head):
+            raise ArtifactError(code, "x")
+
+    with pytest.raises(OpsError) as raised:
+        planning.generated_population(object(), _Store(), "shadow", as_of=_AS_OF,
+                                      tickers=("AAA",), clock=object())
+
+    assert raised.value.code == "INPUT_CHANGED"
+    assert raised.value.problem.details["artifact_error"] == "ArtifactError"
+    assert raised.value.problem.details["artifact_code"] == code
+
+
+@pytest.mark.parametrize("code", ["MISSING", "INTEGRITY_FAILED", "UNSAFE_PATH"])
+def test_pin_snapshot_inputs_maps_an_unreadable_head_artifact_to_input_changed(monkeypatch, code):
+    from engine.v2.foundation import ArtifactError
+
+    monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: "head")
+
+    class _Store:
+        def read_verified(self, head):
+            raise ArtifactError(code, "x")
+
+    with pytest.raises(OpsError) as raised:
+        planning.pin_snapshot_inputs(object(), _Store(), "shadow", tickers=("AAA",),
+                                     year_start=2026, year_end=2027,
+                                     expected_population=("AAA|STR-THRU|2026-12-20",),
+                                     session="2026-12-18", clock=object())
+
+    assert raised.value.code == "INPUT_CHANGED"
+    assert raised.value.problem.details["artifact_error"] == "ArtifactError"
+    assert raised.value.problem.details["artifact_code"] == code
+
+
 def test_no_planned_tickers_is_refused(env):
     with pytest.raises(OpsError) as raised:
         _generate(env, tickers=())
@@ -366,7 +406,7 @@ def test_a_supplied_file_overrides_generation(env, monkeypatch):
     assert pin.calls[0]["expected_snapshot_id"] is None  # nothing was generated or pre-resolved
 
 
-def test_a_symlinked_or_malformed_override_keeps_its_refusals(env, monkeypatch):
+def test_a_symlinked_or_malformed_override_is_invalid_request(env, monkeypatch):
     real = env[3] / "real.json"
     real.write_text(json.dumps(["AAA|STR-THRU|2026-12-20"]))
     link = env[3] / "link.json"
@@ -379,8 +419,25 @@ def test_a_symlinked_or_malformed_override_keeps_its_refusals(env, monkeypatch):
     with pytest.raises(OpsError) as malformed:
         _plan(env, monkeypatch, "--expected-population", str(bad))
 
-    assert symlinked.value.code == "INPUT_CHANGED"
+    assert symlinked.value.code == "INVALID_REQUEST"
     assert malformed.value.code == "INVALID_REQUEST"
+
+
+def test_an_oversize_or_non_json_override_is_invalid_request(env, monkeypatch):
+    big = env[3] / "big.json"
+    big.write_text(json.dumps(["AAA|STR-THRU|2026-12-20"]))
+    junk = env[3] / "junk.json"
+    junk.write_text("not json")
+
+    with monkeypatch.context() as cap:  # only the big file is capped; junk sees the real limit
+        cap.setattr(commands, "MAX_EXPECTED_POPULATION_BYTES", 8)
+        with pytest.raises(OpsError) as oversize:
+            _plan(env, monkeypatch, "--expected-population", str(big))
+    with pytest.raises(OpsError) as unparsable:
+        _plan(env, monkeypatch, "--expected-population", str(junk))
+
+    assert oversize.value.code == "INVALID_REQUEST"
+    assert unparsable.value.code == "INVALID_REQUEST"
 
 
 def test_a_supplied_empty_list_is_refused_by_the_pin_and_blocks_a_legacy_plan(env, monkeypatch):
@@ -522,3 +579,23 @@ def test_a_planned_chooser_key_must_still_be_observed(env, monkeypatch, tmp_path
         _score_stage(monkeypatch, tmp_path, [*population, "ZZZ|DYN-SV|2026-12-22"])
 
     assert raised.value.problem.details["missing"] == ["ZZZ|DYN-SV|2026-12-22"]
+
+
+def test_a_missing_override_file_is_input_changed(env, monkeypatch):
+    with pytest.raises(OpsError) as raised:
+        _plan(env, monkeypatch, "--expected-population", str(env[3] / "nope.json"))
+
+    assert raised.value.code == "INPUT_CHANGED"
+
+
+def test_non_string_decided_keys_are_invalid_request():
+    import argparse
+
+    from engine.v2.ops.workflows import commands
+
+    with pytest.raises(OpsError) as raised:
+        commands._read_expected_population(argparse.Namespace(
+            expected_population=None,
+            expected_population_keys=("AAA|X|2026-09-25", 3)))
+
+    assert raised.value.code == "INVALID_REQUEST"
