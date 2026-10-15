@@ -2423,18 +2423,3 @@ def test_default_plan_without_decided_keys_refuses_a_dangling_symlink_override(
         nightly_trigger._default_plan(
             tmp_path, AS_OF, (), (), None, expected_shadow_snapshot_id="s")
     assert raised.value.code == "INVALID_REQUEST"
-
-
-def test_default_plan_without_decided_keys_refuses_a_dangling_symlink_override(tmp_path, monkeypatch):
-    from engine.v2.ops import bootstrap
-    from engine.v2.ops.workflows import commands
-
-    path = tmp_path / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.symlink_to(tmp_path / "missing.json")
-    monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
-    monkeypatch.setattr(commands, "_plan_command", _explode)
-    with pytest.raises(OpsError) as raised:
-        nightly_trigger._default_plan(tmp_path, AS_OF, (), (), None,
-                                      expected_shadow_snapshot_id="s")
-    assert raised.value.code == "INVALID_REQUEST"

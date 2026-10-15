@@ -106,7 +106,9 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     missing head, a missing/malformed events table, or an unreadable carried-set table is the
     reader's ``DataError`` as ``INPUT_CHANGED`` (``details.data_code``), as
     ``pin_snapshot_inputs`` reports it; an unreadable head artifact (missing, integrity-failed,
-    undecodable) is also ``INPUT_CHANGED`` (``details.artifact_error``)."""
+    undecodable) is also ``INPUT_CHANGED`` (``details.artifact_error`` and
+    ``details.artifact_code``: the error's own code, e.g. ``ARTIFACT_MISSING`` vs an integrity
+    code, so tamper and absence are distinguishable)."""
     if not tickers:
         # The score stage scores the watchlist only: a population over any wider scope (the
         # context universe) could only fail at execution, so refuse at plan time instead.
@@ -164,7 +166,8 @@ def _load_snapshot_ref(store, head):
         return from_document(SnapshotRef, document)
     except (ArtifactError, DocumentError, ValueError, RecursionError) as exc:
         raise fail("INPUT_CHANGED", "the shadow snapshot head artifact cannot be read",
-                   details={"artifact_error": type(exc).__name__}) from None
+                   details={"artifact_error": type(exc).__name__,
+                            "artifact_code": getattr(exc, "code", None)}) from None
 
 
 def snapshot_event_tickers(conn, store, scope, *, as_of, clock,

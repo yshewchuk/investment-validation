@@ -212,6 +212,7 @@ def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(mo
 
     assert raised.value.code == "INPUT_CHANGED"
     assert raised.value.problem.details["artifact_error"] == "ArtifactError"
+    assert raised.value.problem.details["artifact_code"] == "ARTIFACT_MISSING"
 
 
 def test_pin_snapshot_inputs_maps_an_unreadable_head_artifact_to_input_changed(monkeypatch):
@@ -231,6 +232,7 @@ def test_pin_snapshot_inputs_maps_an_unreadable_head_artifact_to_input_changed(m
 
     assert raised.value.code == "INPUT_CHANGED"
     assert raised.value.problem.details["artifact_error"] == "ArtifactError"
+    assert raised.value.problem.details["artifact_code"] == "ARTIFACT_MISSING"
 
 
 def test_no_planned_tickers_is_refused(env):

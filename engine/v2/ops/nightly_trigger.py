@@ -52,6 +52,7 @@ from zoneinfo import ZoneInfo
 from engine.v2.foundation import SystemClock, format_timestamp
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.workflows.commands import MAX_EXPECTED_POPULATION_BYTES as _MAX_POPULATION_BYTES
+from engine.v2.ops.workflows.commands import read_bounded_json
 
 __all__ = [
     "TriggerReceipt",
@@ -649,7 +650,6 @@ def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, pla
 def _read_document(path: Path | None):
     if path is None:
         return None
-    from engine.v2.ops.workflows.commands import read_bounded_json
     try:
         return read_bounded_json(path, _MAX_POPULATION_BYTES)
     except (OSError, ValueError, RecursionError):
