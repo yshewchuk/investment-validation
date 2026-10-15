@@ -20,6 +20,8 @@ The orchestration cases drive ``run_nightly`` with every heavy step patched.
 
 from __future__ import annotations
 
+import contextlib
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -277,7 +279,11 @@ def test_repair_finalize_failure_stops_the_run_with_a_typed_code():
         "a refused finalize records no tier4_repair step"
 
 
-def test_gap_free_finalize_failure_degrades_the_tiers_step():
+def test_gap_free_finalize_failure_degrades_the_tiers_step(monkeypatch):
+    # The degrade path writes the deferred snapshot via finalize_current_store;
+    # stub it so this unit test never writes the real SNAPSHOT/MANIFEST.
+    monkeypatch.setattr("engine.data.rebuild.finalize_current_store",
+                        lambda: SimpleNamespace(snapshot="snap-degraded"))
     report = _report()
 
     def boom(result):
@@ -367,6 +373,38 @@ def test_write_manifest_is_atomic_when_the_replace_fails(tmp_path, monkeypatch):
         "a failed write must leave the previous MANIFEST unchanged"
     assert sorted(p.name for p in tmp_path.glob("*.tmp*")) == [], \
         "a failed write must leave no temp file behind"
+
+
+def test_write_snapshot_lands_mode_0644(tmp_path, monkeypatch):
+    """The atomic SNAPSHOT write keeps the 0644 that ``write_text`` gave.
+
+    ``tempfile.mkstemp`` creates its temp file 0600, so without an explicit
+    chmod the swap would publish a SNAPSHOT more restrictive than before.
+    """
+    from engine.data import manifest as manifest_mod
+
+    target = tmp_path / "SNAPSHOT"
+    monkeypatch.setattr(manifest_mod, "_panel_digest", lambda: None)
+    monkeypatch.setattr(manifest_mod, "_tier4_digest", lambda: None)
+
+    manifest_mod.write_snapshot({"panel": {"content_hash": "abc"}}, path=target)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_write_manifest_lands_mode_0644(tmp_path, monkeypatch):
+    """The atomic MANIFEST write keeps the 0644 that ``write_text`` gave."""
+    from engine.data import manifest as manifest_mod
+
+    target = tmp_path / "MANIFEST.md"
+    stats = {"panel": {"rows": 1, "years": "2020", "partitions": 1, "files": 1,
+                       "bytes": 1, "content_hash": "abc"}}
+    monkeypatch.setattr(manifest_mod, "snapshot_hash", lambda _stats: "deadbeef")
+    monkeypatch.setattr(manifest_mod, "_panel_digest", lambda: None)
+
+    manifest_mod.write_manifest(stats, path=target)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
 
 
 # --------------------------------------------------------------------------
@@ -754,6 +792,124 @@ def test_run_nightly_finalizes_a_gap_free_incremental_result(monkeypatch, tmp_pa
     assert sentinel.touched, "the run proceeded to the scorer"
 
 
+def _snap(value):
+    """A stand-in finalize result carrying the SNAPSHOT hash it produced."""
+    return SimpleNamespace(snapshot=value)
+
+
+def _run_once(nightly, tmp_path, sentinel):
+    with pytest.raises(_Scored):
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=[], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+
+def test_run_nightly_records_the_gap_free_finalize_snapshot(monkeypatch, tmp_path):
+    """A gap-free night records the SNAPSHOT its finalize returned."""
+    finalize_calls = []
+    nightly, _calls, captured, _marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[_result({})],
+        finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
+    )
+    snap = _snap("snap-gap-free")
+
+    def fake_finalize(result):
+        finalize_calls.append(result)
+        _marker(tmp_path).write_text("snapshot")
+        return snap
+
+    monkeypatch.setattr("engine.data.rebuild.finalize_rebuild", fake_finalize)
+    _run_once(nightly, tmp_path, _ScorerSentinel())
+
+    report = captured["report"]
+    assert report.steps["tiers"]["snapshot"] == "snap-gap-free", \
+        "the gap-free path records the snapshot its finalize returned"
+
+
+def test_run_nightly_records_the_repair_finalize_snapshot(monkeypatch, tmp_path):
+    """A gapped night records the SNAPSHOT the repair's finalize returned."""
+    finalize_calls = []
+    nightly, _calls, captured, _marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[_result(_gapped()), _result({})],
+        finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
+    )
+    snap = _snap("snap-repaired")
+
+    def fake_finalize(result):
+        finalize_calls.append(result)
+        _marker(tmp_path).write_text("snapshot")
+        return snap
+
+    monkeypatch.setattr("engine.data.rebuild.finalize_rebuild", fake_finalize)
+    _run_once(nightly, tmp_path, _ScorerSentinel())
+
+    report = captured["report"]
+    assert report.steps["tiers"]["tier4_repair"]["ran"] is True
+    assert report.steps["tiers"]["snapshot"] == "snap-repaired", \
+        "the repair path records the snapshot its finalize returned"
+
+
+def test_run_nightly_records_the_degraded_finalize_snapshot(monkeypatch, tmp_path):
+    """A degraded night records the SNAPSHOT its degrade-path finalize returned."""
+    finalize_calls = []
+    nightly, _calls, captured, _marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[RuntimeError("boom")],
+        finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
+    )
+    snap = _snap("snap-degraded")
+
+    def fake_finalize_current_store():
+        _marker(tmp_path).write_text("snapshot")
+        return snap
+
+    monkeypatch.setattr("engine.data.rebuild.finalize_current_store",
+                        fake_finalize_current_store)
+    _run_once(nightly, tmp_path, _ScorerSentinel())
+
+    report = captured["report"]
+    assert report.steps["tiers"]["degraded"] is True
+    assert report.steps["tiers"]["snapshot"] == "snap-degraded", \
+        "the degrade path records the snapshot its finalize returned"
+
+
+def test_run_nightly_is_idempotent_across_two_runs(monkeypatch, tmp_path):
+    """A rerun over a closed gap repairs nothing and finalizes its own result.
+
+    Run 1: the incremental build leaves the planted gap, so the repair runs and
+    finalizes. Run 2: the gap is closed, so the incremental build finalizes with
+    no repair. Three rebuild calls and two finalize calls in total, and neither
+    report carries a ``tier4_gap_partial`` flag.
+    """
+    finalize_calls = []
+    nightly, calls, captured, _marker_writes = _patch_run_nightly(
+        monkeypatch,
+        rebuild_results=[_result(_gapped()), _result({}), _result({})],
+        finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path),
+    )
+    sentinel = _ScorerSentinel()
+
+    reports = []
+    for _ in range(2):
+        _run_once(nightly, tmp_path, sentinel)
+        reports.append(captured["report"])
+
+    assert len(calls) == 3, \
+        "run 1 rebuilds incrementally then repairs; run 2 only rebuilds incrementally"
+    assert len(finalize_calls) == 2, "each run finalizes its own result exactly once"
+    for report in reports:
+        assert not any(f.get("kind") == "tier4_gap_partial" for f in report.flags), \
+            "a repaired or clean night carries no tier4_gap_partial"
+
+
 def test_run_nightly_degrades_when_a_gap_free_finalize_raises(monkeypatch, tmp_path):
     finalize_calls = []
     nightly, _calls, captured, marker_writes = _patch_run_nightly(
@@ -1019,3 +1175,29 @@ def test_real_refresh_calendar_data_forwards_finalize_to_the_rebuild(monkeypatch
     nightly.refresh_calendar_data(["AAA"], "2026-10-13", fetcher=fetcher)
 
     assert recorded == [False, True], "the default finalize=True reaches the rebuild"
+
+
+# --------------------------------------------------------------------------
+# the nightly CLI surfaces a typed stop as exit code 1
+# --------------------------------------------------------------------------
+
+
+def test_cli_returns_1_and_prints_the_code_when_run_nightly_stops(
+        monkeypatch, capsys):
+    from engine.dashboard import nightly
+
+    def boom(*args, **kwargs):
+        raise NightlyStop("tier4_repair", "TIER4_REPAIR_FAILED: x")
+
+    monkeypatch.setattr(nightly, "run_nightly", boom)
+    monkeypatch.setattr(nightly, "single_run_lock",
+                        lambda: contextlib.nullcontext())
+
+    result = nightly.main([
+        "--as-of", "2026-10-13",
+        "--no-refresh", "--no-tiers", "--no-publish", "--no-backfill",
+    ])
+
+    assert result == 1, "a typed NightlyStop is an exit-1 run"
+    assert "TIER4_REPAIR_FAILED: x" in capsys.readouterr().err, \
+        "the typed code must reach stderr"

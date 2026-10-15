@@ -53,6 +53,10 @@ def _write_text_atomic(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(text)
+        # mkstemp creates the temp file 0600, while the plain ``write_text`` this
+        # replaced gave 0644 under the default umask. Restore 0644 before the
+        # swap so the published SNAPSHOT/MANIFEST keep their expected mode.
+        os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):

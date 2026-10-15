@@ -823,9 +823,12 @@ def repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
     if flag is not None:
         raise NightlyStop("tier4_repair", "TIER4_GAP_REMAINS: " + flag["detail"])
     try:
-        finalize(result)
+        finalized = finalize(result)
     except Exception as exc:
         raise _repair_failed(exc) from exc
+    # The night's SNAPSHOT hash belongs in the report: the repair's finalize is
+    # the write that produced it. ``getattr`` tolerates a fake finalize (None).
+    report.steps["tiers"]["snapshot"] = getattr(finalized, "snapshot", None)
     report.steps["tiers"]["tier4_repair"] = {
         "ran": True,
         "elapsed_s": round(elapsed, 1),
@@ -863,9 +866,13 @@ def mark_tiers_degraded(report: NightlyReport, exc: Exception) -> None:
     from engine.data.rebuild import finalize_current_store
 
     try:
-        finalize_current_store()
+        finalized = finalize_current_store()
     except Exception as snap_exc:
         report.steps["tiers"]["snapshot_error"] = f"{type(snap_exc).__name__}"
+    else:
+        # The degrade path's finalize wrote the deferred SNAPSHOT; record its
+        # hash. ``getattr`` tolerates a fake finalize that returns None.
+        report.steps["tiers"]["snapshot"] = getattr(finalized, "snapshot", None)
 
 
 def repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
@@ -888,9 +895,13 @@ def repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
         # The nightly passes finalize=False to the incremental rebuild for
         # exactly this reason — a refused repair must leave no snapshot behind.
         try:
-            finalize(tier_result)
+            finalized = finalize(tier_result)
         except Exception as exc:
             mark_tiers_degraded(report, exc)
+        else:
+            # The finalize wrote the night's SNAPSHOT; record its hash. The
+            # ``getattr`` keeps a fake finalize returning None from crashing.
+            report.steps["tiers"]["snapshot"] = getattr(finalized, "snapshot", None)
 
 
 def _panel_staleness_flags(as_of) -> list[dict]:
