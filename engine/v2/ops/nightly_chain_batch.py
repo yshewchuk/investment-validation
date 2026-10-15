@@ -21,11 +21,13 @@ from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import fail
 from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal, validated_as_of
 
-__all__ = ["CHAIN_COLUMNS", "require_chain_rows", "scan_chain_slices"]
+__all__ = ["CHAIN_COLUMNS", "RIGHTS", "require_chain_rows", "require_usable_fields",
+           "scan_chain_slices"]
 
 CHAIN_TABLE = "option_chains"
 #: Union of the candidate-expiry columns and the quote-row columns.
 CHAIN_COLUMNS = ("ticker", "obs_date", "expiry", "strike", "right", "bid", "ask")
+RIGHTS = frozenset({"C", "P"})
 _BATCH_CAP = 50_000
 _RESULT_CAP = 2_000_000
 
@@ -50,12 +52,12 @@ def _number_or_missing(value: Any) -> bool:
     return True
 
 
-def _require_usable_fields(row: Mapping[str, Any], check_quotes: bool) -> None:
+def require_usable_fields(row: Mapping[str, Any], check_quotes: bool = True) -> None:
     """The candidate/quote field checks both readers rely on; malformed pinned
     input is ``CONTRACT_MISMATCH`` (the per-key candidate path's own code)."""
     if row["expiry"] is None or row["strike"] is None or row["right"] is None:
         raise data_fail("CONTRACT_MISMATCH", "option chain row has a null expiry, strike or right")
-    if str(row["right"]).upper() not in ("C", "P"):
+    if str(row["right"]).upper() not in RIGHTS:
         raise data_fail("CONTRACT_MISMATCH", "option chain row has a right outside C/P")
     try:
         strike = float(row["strike"])
@@ -82,7 +84,7 @@ def require_chain_rows(rows: Sequence[Mapping[str, Any]], ticker: str,
             raise fail("INVALID_REQUEST", "chain rows must carry every chain column")
         if row["ticker"] != ticker or _day(row["obs_date"]) != session_day:
             raise fail("INVALID_REQUEST", "chain rows do not match the key and session")
-        _require_usable_fields(row, check_quotes)
+        require_usable_fields(row, check_quotes)
     return staged
 
 

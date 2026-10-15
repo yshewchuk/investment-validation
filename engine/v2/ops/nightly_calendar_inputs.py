@@ -37,7 +37,7 @@ from engine.v2.ops.native_score_batch_types import (
     PRICE_HISTORY_NOT_AVAILABLE_DETAIL,
     NativeScoreBatchRowRefusal,
 )
-from engine.v2.ops.nightly_chain_batch import require_chain_rows
+from engine.v2.ops.nightly_chain_batch import require_chain_rows, require_usable_fields
 from engine.v2.ops.nightly_raw_rows import CalendarRowInputs, scan_calendar_row
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
@@ -50,7 +50,6 @@ __all__ = ["scan_calendar_row_inputs", "scan_candidate_expiries", "scan_decision
 _CALENDAR_TICKER = CALENDAR_TICKER
 _CHAIN_TABLE = "option_chains"
 _CANDIDATE_COLUMNS = ("right", "strike", "expiry")
-_RIGHTS = frozenset({"C", "P"})
 #: STR-THRU/STR-RUNUP need a common call-and-put strike; every other native
 #: context (put menu, DYN-SV) is a listed put. Mirrors generation's own
 #: ``_select_listed_straddle`` (call ∩ put) vs ``_listed_put_expiries`` (put).
@@ -113,20 +112,8 @@ def _validated_candidate(row: dict) -> tuple[str, str, float]:
     outside C/P or a non-finite/unconvertible strike is malformed pinned input
     and refuses ``CONTRACT_MISMATCH`` -- for every row the scan returns,
     including one whose expiry the candidate filter would drop."""
-    for field in _CANDIDATE_COLUMNS:
-        if row[field] is None:
-            raise data_fail("CONTRACT_MISMATCH", f"option chain row has a null {field} column")
-    right = str(row["right"]).upper()
-    if right not in _RIGHTS:
-        raise data_fail("CONTRACT_MISMATCH", "option chain row has a right outside C/P")
-    try:
-        strike = float(row["strike"])
-    except (TypeError, ValueError):
-        raise data_fail("CONTRACT_MISMATCH",
-                        "option chain row has an unconvertible strike") from None
-    if not math.isfinite(strike):
-        raise data_fail("CONTRACT_MISMATCH", "option chain row has a non-finite strike")
-    return _date_string(row["expiry"]), right, strike
+    require_usable_fields(row, check_quotes=False)
+    return _date_string(row["expiry"]), str(row["right"]).upper(), float(row["strike"])
 
 
 def _scan_candidate_rows(repository: Repository, snapshot: SnapshotRef, key: BoardRequest,
