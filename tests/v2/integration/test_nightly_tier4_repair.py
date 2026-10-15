@@ -193,6 +193,39 @@ def test_repair_that_still_leaves_the_gap_stops_the_run(monkeypatch):
     assert len(written) == 1, "the refusal writes the flag report exactly once"
 
 
+def test_gap_remains_counts_distinct_events_across_producers(monkeypatch):
+    from engine.dashboard import nightly
+
+    written = []
+    monkeypatch.setattr(nightly, "_write_flag_report",
+                        lambda as_of, flags, steps: written.append(flags))
+    finalized = []
+
+    gap_fill = {"pred_abs_move": {"out_of_window_gap": [
+                    {"ticker": "AAPL", "event_date": "2026-10-01"},
+                    {"ticker": "MSFT", "event_date": "2026-10-02"}]},
+                "pred_sd": {"out_of_window_gap": [
+                    {"ticker": "AAPL", "event_date": "2026-10-01"},
+                    {"ticker": "NVDA", "event_date": "2026-10-03"}]}}
+
+    def fake_rebuild_tables(tables, **kwargs):
+        return _result(gap_fill)
+
+    report = _report()
+    with pytest.raises(NightlyStop) as caught:
+        repair_tier4_gap(report, fake_rebuild_tables, finalize=finalized.append)
+
+    assert caught.value.step == "tier4_repair"
+    assert caught.value.detail == (
+        "TIER4_GAP_REMAINS: the full Tier-4 rebuild ran and still left "
+        "3 event(s) unfilled (absent from the table) in "
+        "['pred_abs_move', 'pred_sd']"
+    ), "overlapping producer lists count the shared event only once"
+    assert finalized == [], "a repair that still leaves the gap is not finalized"
+    assert report.stopped == "tier4_repair"
+    assert len(written) == 1, "the refusal writes the flag report exactly once"
+
+
 def test_repair_budget_reports_the_complete_detail_string(monkeypatch):
     from engine.dashboard import nightly
 
@@ -419,6 +452,11 @@ def test_gap_free_finalize_failure_degrades_the_tiers_step(monkeypatch):
     assert "RuntimeError: disk full" in report.steps["tiers"]["error"]
     degraded = [f for f in report.flags if f.get("kind") == "tiers_degraded"]
     assert len(degraded) == 1, "the gap-free finalize failure raises one flag"
+    assert degraded[0]["detail"] == (
+        "Tier 3/Tier 4 step incomplete (the rebuild or its snapshot "
+        "write failed) — scoring from the stored panel and forecasts, "
+        "which may not cover recent prints. RuntimeError: disk full"
+    ), "the degrade flag carries the exact contract detail"
     assert len(finalize_calls) == 1, "the degrade path finalizes once"
 
 
