@@ -7,6 +7,9 @@ import hashlib
 import io
 import json
 import os
+import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +31,217 @@ from tools import phase5_serving_folds as folds
 
 OUTPUTS = {"implied_t1": ("driver_prediction", "pred_im_t1_d14"),
            "runup_move": ("pred_runup_abs_move_d14", "pred_runup_abs_move_d14")}
+
+
+def test_shared_object_publication_orders_durability_and_preserves_retry(tmp_path, monkeypatch):
+    payload = b"synthetic non-model state"
+    digest = hashlib.sha256(payload).hexdigest()
+    store = tmp_path / "deployment"
+    dest = store / "objects" / digest
+    dest.parent.mkdir(parents=True)
+    old_temp = dest.with_suffix(".tmp")
+    old_temp.write_bytes(b"unrelated former temporary file")
+    events = []
+    real_sync, real_link, real_dir_sync = os.fsync, os.link, layout.fsync_directory
+
+    def sync(fd):
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            events.append(("file", os.fstat(fd).st_size))
+        real_sync(fd)
+
+    def link(source, target):
+        events.append(("link", Path(source)))
+        assert Path(source).parent.parent == store / "tmp"
+        real_link(source, target)
+
+    def sync_directory(path):
+        real_dir_sync(path)
+        events.append(("directory", path))
+
+    monkeypatch.setattr(layout.os, "fsync", sync)
+    monkeypatch.setattr(layout.os, "link", link)
+    monkeypatch.setattr(layout, "fsync_directory", sync_directory)
+    expected = ("sha256:" + digest, "objects/" + digest)
+    assert layout.write_object(tmp_path, payload) == expected
+    assert [event[0] for event in events] == ["file", "link", "directory", "directory"]
+    assert events[0][1] == len(payload)  # Flush precedes the file fsync.
+    assert events[-2:] == [("directory", dest.parent), ("directory", store)]
+    before = dest.stat()
+    assert dest.read_bytes() == payload
+    assert list((store / "tmp").iterdir()) == []
+    events.clear()
+    assert layout.write_object(tmp_path, payload) == expected
+    after = dest.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert events == [("directory", dest.parent), ("directory", store)]
+    assert old_temp.read_bytes() == b"unrelated former temporary file"
+
+
+@pytest.mark.parametrize("same_payload", [False, True])
+def test_shared_object_concurrent_publishers_use_unique_no_clobber_temps(tmp_path, monkeypatch, same_payload):
+    payloads = [b"first object", b"first object" if same_payload else b"second object"]
+    barrier, sources = threading.Barrier(2), []
+    real_link = os.link
+
+    def concurrent_link(source, dest):
+        sources.append(Path(source))
+        barrier.wait(timeout=5)
+        real_link(source, dest)
+
+    monkeypatch.setattr(layout.os, "link", concurrent_link)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda data: layout.write_object(tmp_path, data), payloads))
+    assert len(set(sources)) == 2
+    store = tmp_path / "deployment"
+    for data, result in zip(payloads, results):
+        digest = hashlib.sha256(data).hexdigest()
+        assert result == ("sha256:" + digest, "objects/" + digest)
+        assert (store / result[1]).read_bytes() == data
+    assert len(list((store / "objects").iterdir())) == (1 if same_payload else 2)
+    assert list((store / "tmp").iterdir()) == []
+
+
+@pytest.mark.parametrize("role", OUTPUTS)
+@pytest.mark.parametrize("failure", ["write", "flush", "file-sync", "link", "object-dir", "store-dir"])
+def test_object_publication_failure_never_publishes_catalog_and_retry_is_safe(
+        tmp_path, role, failure, monkeypatch):
+    cache, out = _cache(role), tmp_path / "release"
+    data = _bytes(cache)
+    dest = out / "deployment" / "objects" / hashlib.sha256(data).hexdigest()
+    error = OSError(errno.EXDEV if failure == "link" else errno.EIO, "synthetic publication failure")
+    handles = []
+    real_open, real_fsync, real_link = Path.open, os.fsync, os.link
+    real_dir_sync = layout.fsync_directory
+
+    class FileProbe:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def write(self, value):
+            if failure == "write":
+                raise error
+            return self.handle.write(value)
+
+        def flush(self):
+            if failure == "flush":
+                raise error
+            return self.handle.flush()
+
+        def fileno(self):
+            return self.handle.fileno()
+
+    def open_file(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if path.parent.name.startswith("phase5-object-"):
+            handles.append(handle)
+            return FileProbe(handle)
+        return handle
+
+    def sync(fd):
+        if failure == "file-sync" and any(not h.closed and h.fileno() == fd for h in handles):
+            raise error
+        real_fsync(fd)
+
+    def link(source, target):
+        if failure == "link":
+            raise error
+        real_link(source, target)
+
+    def sync_directory(path):
+        if path == (dest.parent if failure == "object-dir" else dest.parent.parent) and failure.endswith("dir"):
+            raise error
+        real_dir_sync(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", open_file)
+        patch.setattr(layout.os, "fsync", sync)
+        patch.setattr(layout.os, "link", link)
+        patch.setattr(layout, "fsync_directory", sync_directory)
+        with pytest.raises(layout.ReleaseLayoutError) as caught:
+            prep.write_release(out, *_inputs(role, cache), _states(role, cache))
+    assert type(caught.value) is layout.ReleaseLayoutError
+    assert str(caught.value) == "phase5 object could not be published"
+    assert caught.value.__cause__ is error
+    assert handles and all(handle.closed for handle in handles)
+    assert list((out / "deployment" / "tmp").iterdir()) == []
+    assert not (out / "phase5_release.json").exists()
+    assert not (out / "deployment" / "releases" / "r1" / "phase5_release.json").exists()
+    assert deployment.current_pointer(out / "deployment") is None
+    linked = failure in ("object-dir", "store-dir")
+    assert dest.exists() is linked
+    before = dest.stat() if linked else None
+    if linked:
+        assert dest.read_bytes() == data
+    synced = []
+
+    def retry_sync(path):
+        real_dir_sync(path)
+        synced.append(path)
+
+    monkeypatch.setattr(layout, "fsync_directory", retry_sync)
+    prep.write_release(out, *_inputs(role, cache), _states(role, cache))
+    _assert_published_descriptor(out, role, cache)
+    assert synced == [dest.parent, dest.parent.parent]
+    if linked:
+        after = dest.stat()
+        assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert list((out / "deployment" / "tmp").iterdir()) == []
+
+
+@pytest.mark.parametrize("role", OUTPUTS)
+@pytest.mark.parametrize("shape", ["wrong", "directory", "dangling", "fifo", "symlink"])
+def test_object_publication_never_clobbers_a_racing_destination(tmp_path, role, shape, monkeypatch):
+    cache, out = _cache(role), tmp_path / "release"
+    real_link, planted = os.link, []
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"independent target")
+
+    def collision(source, target):
+        target = Path(target)
+        if shape == "wrong":
+            target.write_bytes(b"wrong winner")
+        elif shape == "directory":
+            target.mkdir()
+        elif shape == "fifo":
+            os.mkfifo(target)
+        else:
+            target.symlink_to(outside if shape == "symlink" else tmp_path / "missing")
+        planted.append((target, target.lstat()))
+        real_link(source, target)
+
+    monkeypatch.setattr(layout.os, "link", collision)
+    expected = prep.PrepareRefused if shape in ("wrong", "symlink") else layout.ReleaseLayoutError
+    with pytest.raises(expected) as caught:
+        prep.write_release(out, *_inputs(role, cache), _states(role, cache))
+    assert type(caught.value) is expected
+    if shape == "wrong":
+        assert str(caught.value) == "chooser fold object bytes differ from preflight"
+        assert caught.value.__cause__ is None
+    elif shape == "symlink":
+        assert str(caught.value) == "serving fold cannot be read"
+        assert type(caught.value.__cause__) is OSError
+        assert caught.value.__cause__.errno == errno.ELOOP
+    else:
+        assert str(caught.value) == "phase5 object could not be published"
+        assert type(caught.value.__cause__) is FileExistsError
+    assert len(planted) == 1
+    target, before = planted[0]
+    after = target.lstat()
+    assert (after.st_ino, after.st_mtime_ns, after.st_mode) == (before.st_ino, before.st_mtime_ns, before.st_mode)
+    if shape == "wrong":
+        assert target.read_bytes() == b"wrong winner"
+    assert outside.read_bytes() == b"independent target"
+    assert list((out / "deployment" / "tmp").iterdir()) == []
+    assert not (out / "phase5_release.json").exists()
+    assert not (out / "deployment" / "releases" / "r1" / "phase5_release.json").exists()
+    assert deployment.current_pointer(out / "deployment") is None
 
 
 class NoInference:
@@ -529,7 +743,7 @@ def test_empty_and_thin_pools_keep_explicit_counts(role, count):
 @pytest.mark.parametrize("role", OUTPUTS)
 @pytest.mark.parametrize("defect", ["role", "model", "features", "clock-release", "output",
                                     "duplicate", "policy", "floor", "schema", "panel",
-                                    "month", "name", "estimator", "absent", "shape", "length", "nan"])
+                                    "month", "name", "estimator", "absent", "shape", "length", "nan", "decode"])
 def test_bad_inputs_refuse_before_output_creation(tmp_path, role, defect):
     cache = _cache(role)
     release, inv, payloads = _inputs(role, cache)
@@ -554,10 +768,11 @@ def test_bad_inputs_refuse_before_output_creation(tmp_path, role, defect):
         name = "wrong.joblib"
     elif defect in ("estimator", "absent"):
         cache.pop("estimator" if defect == "estimator" else "pool_res")
-    else:
+    elif defect != "decode":
         cache["pool_res"] = {"shape": [[1.0, 2.0]], "length": [1.0],
                              "nan": [float("nan"), 1.0]}[defect]
-    states = prep.build_states({f"tier4_folds:{role}": {name: _bytes(cache)}},
+    data = b"not a joblib artifact" if defect == "decode" else _bytes(cache)
+    states = prep.build_states({f"tier4_folds:{role}": {name: data}},
                                chooser_fold_policies={role: policy})
     out = tmp_path / "out"
     expected_type = deployment.StagingRefused if defect == "clock-release" else prep.PrepareRefused
@@ -581,11 +796,16 @@ def test_bad_inputs_refuse_before_output_creation(tmp_path, role, defect):
             diagnostic = "invalid serving fold month"
         elif defect == "name":
             diagnostic = "serving fold filename disagrees with header"
+        elif defect == "decode":
+            diagnostic = "serving fold cannot be decoded"
         else:
             diagnostic = "invalid serving fold held-out pool"
         assert str(error.value) == f"chooser fold refused: {diagnostic}"
         assert type(error.value.__cause__) is ValueError
         assert str(error.value.__cause__) == diagnostic
+        if defect == "decode":
+            assert type(error.value.__cause__.__cause__) is KeyError
+            assert error.value.__cause__.__cause__.args == (ord("n"),)
     if defect != "clock-release":  # Deployment, not the cache header, owns clock-inventory compatibility.
         assert not out.exists()
     assert not (out / "phase5_release.json").exists()
@@ -719,16 +939,22 @@ def test_real_cli_obtains_role_policy_without_fitting_or_data_reads(
     if pinned is not None:
         argv += ["--panel-catalog", str(pinned.catalog_path), "--panel-snapshot-id", pinned.snapshot_id,
                  "--panel-artifact-root", str(pinned.artifact_root)]
+    refusals = []
     if failure == "recipe":
-        args = SimpleNamespace(release_id="r1", tier4_dir=cache_dir, tier3_snapshot=requested_snapshot,
-                               fold_month=None, training_root=None, frozen_state=None)
-        with pytest.raises(prep.PrepareRefused) as error:
-            prep._real_inputs(args, pinned)
-        assert type(error.value) is prep.PrepareRefused
-        assert str(error.value) == f"chooser {role} producer disagrees with registered recipe"
-        assert error.value.__cause__ is recipe_error
+        initialize = prep.PrepareRefused.__init__
+
+        def record_refusal(error, *args):
+            initialize(error, *args)
+            refusals.append(error)
+
+        monkeypatch.setattr(prep.PrepareRefused, "__init__", record_refusal)
     assert prep.main(argv) == (2 if failure else 0)
-    assert calls == [role] * (0 if failure in ("oversize", "symlink") else 2 if failure == "recipe" else 1)
+    assert calls == [role] * (0 if failure in ("oversize", "symlink") else 1)
+    if failure == "recipe":
+        assert len(refusals) == 1
+        assert type(refusals[0]) is prep.PrepareRefused
+        assert str(refusals[0]) == f"chooser {role} producer disagrees with registered recipe"
+        assert refusals[0].__cause__ is recipe_error
     if failure:
         diagnostic = ("serving fold exceeds byte limit" if failure == "oversize" else
                       "serving fold cannot be read" if failure == "symlink" else

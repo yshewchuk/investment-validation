@@ -173,8 +173,8 @@ feature and output order, and every other identity field, remain significant.
 All Tier-4 collector roles and chooser/pinned-size destination reads admit
 regular files of at most 32 MiB with final-component `O_NOFOLLOW`; final symlinks
 refuse. Parent directories remain operator-trusted, not traversed no-follow.
-Absent directories/unmatched files remain empty. Reader `PrepareRefused` messages
-are unprefixed; pinned identity and byte-mismatch refusals keep `panel_copy_refused:`.
+Absent directories/unmatched files remain empty. Reader/chooser mismatches are unprefixed;
+pinned COPY verification and size byte mismatches use `panel_copy_refused:`.
 
 | Offline authoring condition | Outcome |
 |---|---|
@@ -187,7 +187,7 @@ are unprefixed; pinned identity and byte-mismatch refusals keep `panel_copy_refu
 | Collector read or destination verification sees an initial size above 32 MiB | Fixed byte-limit refusal before content reads; no new catalog or pointer |
 | Collector read or destination verification detects growth beyond 32 MiB | Fixed byte-limit refusal after bounded read; no new catalog or pointer |
 | Pinned-size destination bytes differ from preflight | Role-specific mismatch refusal; never repair or relabel an existing regular object |
-| Retry after failure | Corrected inputs may retry; an unchanged corrupt address remains refused; re-prepare into a fresh root without copying corrupt incumbent objects |
+| Retry with an unchanged corrupt address | Refuse again without changing the object, catalog or pointer |
 | Partial write | No pointer changes; staging may leave unreferenced files; no automatic store repair |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
@@ -212,15 +212,13 @@ Without pinned COPY context, the explicit panel digest is caller-asserted; prepa
 | Registered chooser producer rejects recipe features/target | Fixed `PrepareRefused` with original cause; CLI exits 2 without a traceback |
 | Pinned COPY context | Full panel hash must match; preflight precedes output effects and destination bytes must retain the validated hash |
 | No policy on a programmatic caller | Preserve opaque catalog objects; no chooser fold declaration is invented |
-| Collector read or destination verification encounters unreadable bytes or a final symlink | Fixed read refusal with I/O cause; no new catalog or pointer; collector refuses before decode/output |
-| Collector read or destination verification encounters a special file | Fixed regular-file refusal before content reads; no new catalog or pointer |
-| Collector read or destination verification sees an initial size above 32 MiB | Fixed byte-limit refusal before content reads; no new catalog or pointer |
-| Collector read or destination verification detects growth beyond 32 MiB | Fixed byte-limit refusal after bounded read; no new catalog or pointer |
-| Destination bytes differ from preflight | Role-specific mismatch refusal; never repair or relabel an existing regular object |
-| Retry after failure | Corrected inputs may retry; an unchanged corrupt address remains refused; re-prepare into a fresh root without copying corrupt incumbent objects |
+| Shared fold-reader failure or unchanged corrupt destination | Same refusal outcomes as the offline-authoring table above |
+| Destination bytes differ from preflight | Unprefixed chooser mismatch refusal; never repair or relabel an existing object |
 | Cache/partial write | Validate anew; no descriptor cache or pointer changes; staging may leave unreferenced files; no automatic store repair |
 
 Zero pool counts authorize no runtime selection or activation; COPY consistency does not prove training-source availability or finality.
+The Phase-5 shared object writer owns durable create-only publication and typed
+I/O failures ([contract](../../../checks/ARCHITECTURE.md)); fold consumers retain byte verification.
 
 **Pinned offline COPY authoring.** `tools.phase5_prepare_release` accepts an
 explicit committed snapshot/catalog and artifact-store context. Existing size
@@ -346,8 +344,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 - `engine.v2.serving` — `engine/v2/serving/operations.py` reads the
   deployment pointer read-only (`current_pointer`, `resolve_release`) to
   serve `/models/release.json`; never promotes.
-- `tools/phase5_prepare_release.py`, `tools/phase5_inventory.py` (not v2
-  packages) — the release-preparation and inventory CLIs.
+- `tools/phase5_prepare_release.py`, `tools/phase5_inventory.py` and
+  `tools/phase5_serving_folds.py` — release preparation, inventory and fold metadata.
 
 ## 6. External systems and libraries
 
