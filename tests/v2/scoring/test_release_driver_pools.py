@@ -423,3 +423,35 @@ def test_state_catalog_over_cap_refuses(tmp_path, monkeypatch):
         resolve_release_binding(tmp_path)
     except ModelNotReady as exc:
         assert exc.member_id != "phase5_release.json" or exc.detail != "catalog is not a readable file"
+
+
+def test_state_catalog_read_stops_at_its_cap(tmp_path, monkeypatch):
+    _stage_and_promote(tmp_path)
+    _write_catalog(tmp_path, rows=[])
+    cap = 64
+    (tmp_path / "phase5_release.json").write_bytes(b" " * (cap * 100))
+    monkeypatch.setattr(release_bindings, "_MAX_CATALOG_BYTES", cap)
+    log = []
+    real = os.fdopen
+
+    class Counting:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def read(self, size=-1):
+            data = self._handle.read(size)
+            log.append((size, len(data)))
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+
+    monkeypatch.setattr(os, "fdopen", lambda fd, *a, **k: Counting(real(fd, *a, **k)))
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "phase5_release.json"
+    assert log and all(0 <= size <= cap + 1 for size, _ in log)
+    assert sum(got for _, got in log) <= cap + 1

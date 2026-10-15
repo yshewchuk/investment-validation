@@ -276,7 +276,7 @@ def _read_regular(path: Path, limit: int, code: str, detail: str) -> bytes:
 
 
 def _load_catalog(path: Path, expected_id: str, code: str, detail: str) -> dict | None:
-    """Load and validate a catalog without a racy check-then-read."""
+    """Load and validate a catalog; the no-follow open below is what guards the read (the lstat only detects absence)."""
     try:
         os.lstat(path)
     except FileNotFoundError:

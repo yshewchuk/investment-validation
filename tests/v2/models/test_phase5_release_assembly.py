@@ -1926,3 +1926,161 @@ def test_shared_readers_never_read_non_regular_files(tmp_path, monkeypatch, kind
         if holder is not None:
             os.close(holder)
     assert isinstance(outcome.get("error"), expected)
+
+
+class _CountingFile:
+    """Records every read request and the bytes it returned."""
+
+    def __init__(self, handle, log):
+        self._handle, self._log = handle, log
+
+    def read(self, size=-1):
+        data = self._handle.read(size)
+        self._log.append((size, len(data)))
+        return data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._handle.close()
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+
+def test_catalog_reader_never_reads_past_its_cap(tmp_path, monkeypatch):
+    _stage_prior(tmp_path)
+    path = phase5_release.catalog_path(tmp_path, "prior1")
+    cap = 64
+    path.write_bytes(b" " * (cap * 100))
+    monkeypatch.setattr(phase5_release, "MAX_CATALOG_BYTES", cap)
+    log = []
+    real = os.fdopen
+    monkeypatch.setattr(os, "fdopen", lambda fd, *a, **k: _CountingFile(real(fd, *a, **k), log))
+    with pytest.raises(phase5_release.ReleaseLayoutError):
+        phase5_release.read_catalog(path, "prior1")
+    assert log and all(size <= cap + 1 for size, _ in log)
+    assert sum(got for _, got in log) <= cap + 1
+
+
+def test_manifest_reader_stops_at_its_budget_on_a_chunk_boundary(tmp_path, monkeypatch):
+    _stage_prior(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    manifest = phase5_release.staged_manifest_path(store, "prior1")
+    limit = 1024 * 1024
+    monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", limit)
+    base = manifest.read_bytes()
+    manifest.write_bytes(base + b" " * (limit - len(base)))
+    assert deployment.resolve_release(store, "prior1").release_id == "prior1"
+    manifest.write_bytes(base + b" " * (limit + 1 - len(base)))
+    with pytest.raises(deployment.StagingRefused) as error:
+        deployment.resolve_release(store, "prior1")
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
+    manifest.write_bytes(base + b" " * (5 * limit))
+    requested, got = [], []
+    real_read = os.read
+
+    def watch(fd, size):
+        data = real_read(fd, size)
+        requested.append(size)
+        got.append(len(data))
+        return data
+
+    monkeypatch.setattr(os, "read", watch)
+    with pytest.raises(deployment.StagingRefused):
+        deployment.resolve_release(store, "prior1")
+    assert max(requested) <= 1024 * 1024 and sum(got) <= limit + 1
+
+
+@pytest.mark.parametrize("exc", [TypeError, AttributeError, KeyError])
+def test_stage_time_stray_errors_are_inventory_mismatch(tmp_path, monkeypatch, exc):
+    inventory, _ = _stage_prior(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise exc("x")
+
+    monkeypatch.setattr(assembly.deployment, "stage_release", boom)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, dataclasses.replace(inventory, release_id="cand1"),
+                   _valid_derive_args(tmp_path))
+    assert error.value.code == "INVENTORY_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+@pytest.mark.parametrize("bad", ["members-none", "artifact-none", "hash-unhashable"])
+def test_malformed_inventory_members_are_inventory_mismatch(tmp_path, bad):
+    inventory, _ = _stage_prior(tmp_path)
+    artifact = inventory.artifacts[0]
+    if bad == "members-none":
+        artifacts = (dataclasses.replace(artifact, members=None),) + inventory.artifacts[1:]
+    elif bad == "artifact-none":
+        artifacts = (None,) + inventory.artifacts[1:]
+    else:
+        member = dataclasses.replace(artifact.members[0], content_hash=["x"])
+        artifacts = (dataclasses.replace(artifact, members=(member,) + artifact.members[1:]),
+                     ) + inventory.artifacts[1:]
+    inventory = dataclasses.replace(inventory, release_id="cand1", artifacts=artifacts)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, _valid_derive_args(tmp_path))
+    assert error.value.code == "INVENTORY_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+_DEEP = b"[" * 200_000 + b"]" * 200_000
+
+
+def test_deeply_nested_prior_catalog_is_prior_mismatch(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").write_bytes(_DEEP)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, dataclasses.replace(inventory, release_id="cand1"),
+                   _valid_derive_args(tmp_path))
+    assert error.value.code == "PRIOR_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+def test_deeply_nested_candidate_catalog_is_id_conflict(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    inventory = dataclasses.replace(inventory, release_id="cand1")
+    args = _valid_derive_args(tmp_path)
+    _run_carry(tmp_path, inventory, args)
+    _candidate_path(tmp_path).write_bytes(_DEEP)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, args)
+    assert error.value.code == "ID_CONFLICT"
+
+
+def test_deeply_nested_catalog_through_shared_reader_is_layout_error(tmp_path):
+    path = tmp_path / "deep.json"
+    path.write_bytes(_DEEP)
+    with pytest.raises(phase5_release.ReleaseLayoutError):
+        phase5_release.read_catalog(path, "prior1")
+
+
+def test_supplied_object_read_stops_at_its_claim(tmp_path, monkeypatch):
+    inventory, _ = _stage_prior(tmp_path)
+    args = _valid_derive_args(tmp_path)
+    target = args["outputs"][0]
+    path = _object_path(tmp_path, target)
+    path.write_bytes(path.read_bytes() + b"x" * 100_000)
+    log, tracked = [], set()
+    real_open, real_fdopen = os.open, os.fdopen
+
+    def watch_open(opened, *a, **k):
+        fd = real_open(opened, *a, **k)
+        if str(opened) == str(path):
+            tracked.add(fd)
+        return fd
+
+    def watch_fdopen(fd, *a, **k):
+        handle = real_fdopen(fd, *a, **k)
+        return _CountingFile(handle, log) if fd in tracked else handle
+
+    monkeypatch.setattr(os, "open", watch_open)
+    monkeypatch.setattr(os, "fdopen", watch_fdopen)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, dataclasses.replace(inventory, release_id="cand1"), args)
+    assert error.value.code == "OBJECT_UNVERIFIED"
+    assert log and all(0 <= size <= target.payload_bytes + 1 for size, _ in log)
+    assert sum(got for _, got in log) <= target.payload_bytes + 1
