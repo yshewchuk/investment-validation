@@ -2457,3 +2457,54 @@ def test_read_bounded_bytes_never_reads_more_than_the_cap_plus_one(tmp_path, mon
     with pytest.raises(ValueError, match="not a bounded regular file"):
         commands.read_bounded_bytes(path, 70000)
     assert sum(consumed) == 70001
+
+
+def test_read_bounded_bytes_opens_nonblocking_nofollow_and_always_closes_the_descriptor(
+        tmp_path, monkeypatch):
+    from engine.v2.ops.workflows import commands
+
+    real_open = commands.os.open
+    real_close = commands.os.close
+    real_read = commands.os.read
+    opened = []
+    closed = []
+    flags_seen = []
+
+    def spy_open(path, flags, *a, **k):
+        fd = real_open(path, flags, *a, **k)
+        opened.append(fd)
+        flags_seen.append(flags)
+        return fd
+
+    def spy_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(commands.os, "open", spy_open)
+    monkeypatch.setattr(commands.os, "close", spy_close)
+
+    small = tmp_path / "small.json"
+    small.write_bytes(b"[1]")
+    assert commands.read_bounded_bytes(small, 100) == b"[1]"
+
+    with pytest.raises((ValueError, OSError)):
+        commands.read_bounded_bytes(tmp_path, 100)
+
+    oversize = tmp_path / "oversize.bin"
+    oversize.write_bytes(b"x" * 50)
+    with pytest.raises(ValueError, match="not a bounded regular file"):
+        commands.read_bounded_bytes(oversize, 8)
+
+    def exploding_read(fd, n):
+        raise OSError("boom")
+
+    monkeypatch.setattr(commands.os, "read", exploding_read)
+    with pytest.raises(OSError, match="boom"):
+        commands.read_bounded_bytes(small, 100)
+    monkeypatch.setattr(commands.os, "read", real_read)
+
+    for flags in flags_seen:
+        assert flags & commands.os.O_NONBLOCK
+        assert flags & commands.os.O_NOFOLLOW
+    assert sorted(opened) == sorted(closed)
+    assert len(opened) >= 3
