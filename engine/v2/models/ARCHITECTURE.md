@@ -119,24 +119,24 @@ size check. Existing callers omitting the ceiling retain their read contract.
   `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
   the prior release id.
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
-  — verifies the prior staged release and every supplied object on disk, re-stages
-  the prior model bindings unchanged under the new `release_id`
-  (`deployment.stage_release`), then writes the candidate catalog. It never
-  touches `DEPLOYED`.
+  — verifies the prior staged release, untouched rows and supplied objects on disk,
+  re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
+  then writes the candidate catalog. It never touches `DEPLOYED`.
 
-Both refuse with a stable `ReleaseAssemblyRefusal.code` (stray `OSError`,
-`KeyError`, `TypeError`, `AttributeError`, `ValueError`, `RecursionError` map to `PRIOR_MISMATCH`). No caller yet.
+Both refuse with a stable `ReleaseAssemblyRefusal.code`; stray `KeyError`, `TypeError`,
+`AttributeError`, `ValueError`, `RecursionError` map to `PRIOR_MISMATCH` (stage-time
+`TypeError`/`AttributeError`/`KeyError` to `INVENTORY_MISMATCH`, publish `OSError` to `PUBLICATION_FAILED`).
 
 | Condition | Code |
 |---|---|
-| Prior release id empty, not a string or unsafe (`/`, `\`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest or model payload missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
+| Prior release id empty, not a string or unsafe (`/`, `\`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest, model payload or untouched STAGED row object missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
 | Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
 | Chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
 | An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
 | `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
 | Supplied object missing, unreadable, not a regular file, `payload_bytes` above `MAX_OBJECT_BYTES`, longer than its claim, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
 | Candidate id empty, unsafe or equal to the prior's; inventory `release_id` differs from it; candidate catalog or staged manifest exists with different or corrupt content | `ID_CONFLICT` |
-| Inventory missing, malformed, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
+| Inventory missing, malformed, member hashes differ from the prior payloads, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
 | Filesystem error or lock timeout while publishing (inputs not at fault) | `PUBLICATION_FAILED` |
 
 Supplied objects, prior payloads, both catalogs and staged manifests are

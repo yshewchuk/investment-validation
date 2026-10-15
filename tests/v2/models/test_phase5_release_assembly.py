@@ -1587,6 +1587,38 @@ def test_publication_lock_failure_is_publication_failed(tmp_path, monkeypatch, s
             os.close(handle)
 
 
+@pytest.mark.parametrize("mode", ("missing", "corrupt", "truncated"))
+def test_damaged_untouched_carried_object_is_prior_mismatch(tmp_path, mode):
+    inventory, body = _stage_prior(tmp_path)
+    row = next(r for r in body["members"] if r["member_id"] == UNRELATED_MEMBER_ID)
+    obj = row["objects"][0]
+    path = phase5_release.deployment_root(tmp_path) / obj["path"]
+    if mode == "missing":
+        path.unlink()
+    elif mode == "corrupt":
+        path.write_bytes(b"x" * obj["bytes"])
+    else:
+        path.write_bytes(b"x" * (obj["bytes"] - 1))
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, dataclasses.replace(inventory, release_id="cand1"),
+                   _valid_derive_args(tmp_path))
+    assert error.value.code == "PRIOR_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
+def test_inventory_hash_not_matching_prior_payload_is_inventory_mismatch(tmp_path):
+    inventory, _ = _stage_prior(tmp_path)
+    artifact = inventory.artifacts[0]
+    member = dataclasses.replace(artifact.members[0], content_hash="a" * 64)
+    artifact = dataclasses.replace(artifact, members=(member,) + artifact.members[1:])
+    inventory = dataclasses.replace(inventory, release_id="cand1",
+                                    artifacts=(artifact,) + inventory.artifacts[1:])
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as error:
+        _run_carry(tmp_path, inventory, _valid_derive_args(tmp_path))
+    assert error.value.code == "INVENTORY_MISMATCH"
+    _assert_no_candidate(tmp_path)
+
+
 def _reversed_object_order(args):
     return {**args, "outputs": list(reversed(args["outputs"])),
             "chooser": list(reversed(args["chooser"]))}

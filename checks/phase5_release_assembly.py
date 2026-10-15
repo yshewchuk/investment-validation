@@ -349,6 +349,23 @@ def _read_prior_payloads(store: Path, prior) -> dict[str, bytes]:
     return payloads
 
 
+def _verify_carried_rows(store: Path, prior_catalog: dict) -> None:
+    """Every untouched prior row that is STAGED must still have intact objects."""
+    replaced = set(_REQUIRED_MEMBER_IDS)
+    for row in prior_catalog["members"]:
+        if row.get("member_id") in replaced or row.get("status") != STAGED:
+            continue
+        for obj in row.get("objects", ()):
+            if not isinstance(obj, dict) or not _content_hash_valid(obj.get("content_hash")):
+                raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a carried row object is malformed")
+            content_hash = obj["content_hash"]
+            data = _read_regular(
+                store / object_relpath(content_hash), MAX_OBJECT_BYTES, "PRIOR_MISMATCH",
+                "a carried row object is missing or unreadable")
+            if sha256_bytes(data) != content_hash or len(data) != obj.get("bytes"):
+                raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a carried row object is corrupt")
+
+
 @contextmanager
 def _publication_lock(store: Path):
     """Serialise the stage/verify/write publication block for one release store."""
@@ -450,6 +467,12 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
         raise ReleaseAssemblyRefusal(
             "INVENTORY_MISMATCH", "inventory deployment id does not match the prior release")
     payloads = _read_prior_payloads(store, prior)
+    _verify_carried_rows(store, prior_catalog)
+    inventory_hashes = {member.content_hash for artifact in inventory.artifacts
+                        for member in artifact.members}
+    if inventory_hashes != set(payloads):
+        raise ReleaseAssemblyRefusal(
+            "INVENTORY_MISMATCH", "inventory member hashes differ from the prior payloads")
 
     candidate_path = catalog_path(root, release_id)
     candidate = dataclasses.replace(prior, release_id=release_id)
