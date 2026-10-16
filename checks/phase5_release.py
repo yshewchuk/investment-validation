@@ -41,6 +41,7 @@ from typing import Any, Mapping
 
 from engine.v2.foundation import content_hash, ensure_directory, fsync_directory
 from engine.v2.models import deployment
+from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 
 PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
 MANIFEST_NAME = "phase5_release.json"
@@ -145,6 +146,10 @@ class ReleaseLayoutError(ValueError):
     """The staged release root is malformed."""
 
 
+class ObjectVerificationError(ReleaseLayoutError):
+    """Existing or published object bytes failed bounded verification."""
+
+
 def modules_available(modules: tuple[str, ...]) -> tuple[bool, str]:
     """``(True, "")`` if every module imports, else ``(False, first missing)``."""
     for name in modules:
@@ -169,7 +174,7 @@ def deployment_root(release_root: Path) -> Path:
 
 
 def write_object(release_root: Path, payload: bytes) -> tuple[str, str]:
-    """Durably create, never replace; callers verify existing object bytes."""
+    """Durably create or verify exact bytes, never replace an existing object."""
     digest = sha256_bytes(payload)
     rel = object_relpath(digest)
     dest = deployment_root(release_root) / rel
@@ -189,6 +194,12 @@ def write_object(release_root: Path, payload: bytes) -> tuple[str, str]:
                 except FileExistsError:
                     if not dest.is_file():
                         raise
+        try:
+            actual = read_bounded_state(dest, len(payload), no_follow=True)
+        except (BoundedStateReadError, OSError) as exc:
+            raise ObjectVerificationError("phase5 object bytes could not be verified") from exc
+        if actual != payload:
+            raise ObjectVerificationError("phase5 object bytes differ from payload")
         fsync_directory(dest.parent)
         fsync_directory(dest.parent.parent)
     except OSError as exc:

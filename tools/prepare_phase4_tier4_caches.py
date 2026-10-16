@@ -490,7 +490,9 @@ def upgrade_one(
     )
     temporary = target.path.parent / ("." + target.path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
-        joblib.dump(candidate, temporary)
+        # A file handle prevents filename suffixes from enabling compression.
+        with temporary.open("wb") as handle:
+            joblib.dump(candidate, handle, compress=0)
         os.chmod(temporary, target.path.stat().st_mode & 0o7777)
         descriptor = os.open(temporary, os.O_RDONLY)
         try:
@@ -612,7 +614,9 @@ def build_one(
     directory.mkdir(parents=True, exist_ok=True)
     temporary = directory / ("." + path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
-        joblib.dump(candidate, temporary)
+        # A file handle prevents filename suffixes from enabling compression.
+        with temporary.open("wb") as handle:
+            joblib.dump(candidate, handle, compress=0)
         os.chmod(temporary, 0o644)
         descriptor = os.open(temporary, os.O_RDONLY)
         try:

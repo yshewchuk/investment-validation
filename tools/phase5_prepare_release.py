@@ -38,10 +38,8 @@ import argparse
 import dataclasses
 import hashlib
 import json
-import os
 import re
 import shutil
-import stat
 import sys
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -55,6 +53,7 @@ from checks.phase5_release import (  # noqa: E402
     PENDING,
     STAGED,
     STATE_SPECS,
+    ObjectVerificationError,
     StateSpec,
     deployment_root,
     manifest_body,
@@ -70,12 +69,23 @@ from checks.phase5_release import (  # noqa: E402
 from engine.v2.foundation import CONTENT_HASH_PREFIX, to_document  # noqa: E402
 from engine.v2.models import deployment  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease  # noqa: E402
+from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state  # noqa: E402
 from engine.v2.models.releases import ModelReleaseInventory  # noqa: E402
-from engine.v2.models.serving_folds import ChooserFoldPolicy, SizeFoldPolicy, chooser_fold_outputs  # noqa: E402
-from tools.phase5_pinned_panel import COPY_PREFIX, PinnedPanelContext, verify_panel_copy  # noqa: E402
+from engine.v2.models.serving_folds import (  # noqa: E402
+    ChooserFoldPolicy,
+    SizeFoldPolicy,
+    chooser_fold_outputs,
+)
+from tools.phase5_pinned_panel import (  # noqa: E402
+    COPY_PREFIX,
+    PinnedPanelContext,
+    verify_panel_copy,
+)
 from tools.phase5_serving_folds import (  # noqa: E402
-    MAX_FOLD_BYTES, describe_size_fold, descriptor_from_preflight,
-    preflight_chooser_fold, preflight_size_fold,
+    MAX_FOLD_BYTES,
+    descriptor_from_preflight,
+    preflight_chooser_fold,
+    preflight_size_fold,
 )
 
 JOBLIB_ADAPTER = "joblib-estimator.v1"
@@ -308,22 +318,11 @@ def tier4_fold_payloads(tier4_dir: Path, model_ids: Mapping[str, str], snapshot:
 
 def _read_fold_payload(path: Path) -> bytes:
     try:
-        with open(path, "rb", buffering=0,
-                  opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK | os.O_NOFOLLOW)) as handle:
-            info = os.fstat(handle.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                raise PrepareRefused("serving fold is not a regular file")
-            if info.st_size > MAX_FOLD_BYTES:
-                raise PrepareRefused("serving fold exceeds byte limit")
-            data = bytearray()
-            while len(data) <= MAX_FOLD_BYTES:
-                chunk = handle.read(MAX_FOLD_BYTES + 1 - len(data))
-                if not chunk:
-                    break
-                data.extend(chunk)
-            if len(data) > MAX_FOLD_BYTES:
-                raise PrepareRefused("serving fold exceeds byte limit")
-            return bytes(data)
+        return read_bounded_state(path, MAX_FOLD_BYTES, no_follow=True)
+    except BoundedStateReadError as exc:
+        message = ("serving fold is not a regular file" if exc.code == "NOT_REGULAR_FILE"
+                   else "serving fold exceeds byte limit")
+        raise PrepareRefused(message) from None
     except OSError as exc:
         raise PrepareRefused("serving fold cannot be read") from exc
 
@@ -407,6 +406,21 @@ def _destination_digest(path: Path) -> str:
     return hashlib.sha256(_read_fold_payload(path)).hexdigest()
 
 
+def _size_preflight(release, states):
+    validated = {}
+    for build in states:
+        if build.spec.member_id != "tier4_folds:size" or build.size_fold_policy is None:
+            continue
+        for name, data in sorted(build.payloads.items()):
+            if name in validated or not isinstance(data, bytes):
+                raise PrepareRefused("duplicate or non-byte size fold object")
+            try:
+                validated[name] = preflight_size_fold(data, name, build.size_fold_policy, release)
+            except ValueError as exc:
+                raise PrepareRefused(f"size fold refused: {exc}") from exc
+    return validated
+
+
 def _chooser_preflight(release, states, panel_identity=None):
     validated = {}
     for build in states:
@@ -437,7 +451,8 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     """Stage the model bindings, write the state objects, write the manifest."""
     if sources and any(str(key).startswith(COPY_PREFIX) for key in sources):
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
-    if pinned_panel is not None or any(build.chooser_fold_policy is not None for build in states):
+    if pinned_panel is not None or any(build.chooser_fold_policy is not None
+                                       or build.size_fold_policy is not None for build in states):
         states = [dataclasses.replace(build, payloads=dict(build.payloads)) for build in states]
         release = dataclasses.replace(release, bindings=tuple(
             dataclasses.replace(binding, members=tuple(dataclasses.replace(
@@ -446,6 +461,8 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     if pinned_panel is not None:
         identity, validated = _pinned_preflight(release, states, pinned_panel)
         sources = {**dict(sources or {}), **identity}
+    else:
+        validated = _size_preflight(release, states)
     chooser_validated = _chooser_preflight(release, states, None if pinned_panel is None else identity)
     out = Path(out)
     root = deployment_root(out)
@@ -458,16 +475,24 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     for build in states:
         objects = []
         for name, data in sorted(build.payloads.items()):
-            digest, rel = write_object(out, data)
+            try:
+                digest, rel = write_object(out, data)
+            except ObjectVerificationError as exc:
+                if build.chooser_fold_policy is None and build.size_fold_policy is None:
+                    raise
+                if isinstance(exc.__cause__, OSError):
+                    raise PrepareRefused("serving fold cannot be read") from exc.__cause__
+                prefix = f"{COPY_PREFIX}refused: " if pinned_panel is not None else ""
+                message = ("chooser fold object bytes differ from preflight" if build.chooser_fold_policy is not None
+                           else f"{prefix}size fold object bytes differ")
+                raise PrepareRefused(message) from None
             if pinned_panel is not None and build.spec.member_id == "tier4_folds:size":
                 if _destination_digest(deployment_root(out) / rel) != validated[name].digest:
                     raise PrepareRefused(f"{COPY_PREFIX}refused: size fold object bytes differ")
             objects.append({"name": name, "path": rel, "content_hash": digest,
                             "bytes": len(data)})
             if build.spec.member_id == "tier4_folds:size" and build.size_fold_policy is not None:
-                descriptor = (describe_size_fold(data, name, build.size_fold_policy, staged)
-                              if pinned_panel is None else descriptor_from_preflight(
-                                  validated[name], build.size_fold_policy, staged))
+                descriptor = descriptor_from_preflight(validated[name], build.size_fold_policy, staged)
                 objects[-1]["serving_fold"] = to_document(descriptor)
             if build.chooser_fold_policy is not None:
                 preflight = chooser_validated[build.spec.member_id, name]
@@ -597,12 +622,14 @@ def main(argv=None) -> int:
         _refuse_data_dir(args.out)
         release, inventory, payloads, states = _real_inputs(args, pinned)
         plan = _plan(release, states)
-        if args.plan_only and pinned is not None:
-            identity, _validated = _pinned_preflight(release, states, pinned)
+        if args.plan_only:
+            identity = None
+            if pinned is not None:
+                identity, _validated = _pinned_preflight(release, states, pinned)
+            else:
+                _size_preflight(release, states)
             _chooser_preflight(release, states, identity)
-        elif pinned is None:
-            _chooser_preflight(release, states)
-        manifest = (None if pinned is None or args.plan_only else write_release(
+        manifest = (None if args.plan_only else write_release(
             args.out, release, inventory, payloads, states, incumbent=args.incumbent,
             pinned_panel=pinned))
         args.out.mkdir(parents=True, exist_ok=True)
@@ -614,8 +641,6 @@ def main(argv=None) -> int:
         if args.plan_only:
             print(f"plan only: {args.out / 'plan.json'}")
             return 0
-        if manifest is None:
-            manifest = write_release(args.out, release, inventory, payloads, states, incumbent=args.incumbent)
         print(f"staged: {manifest}")
     except (PrepareRefused, deployment.DeploymentError, ValueError) as exc:
         print(f"refused: {type(exc).__name__}: {exc}", file=sys.stderr)
