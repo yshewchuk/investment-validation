@@ -26,9 +26,9 @@ finding (a typo must not silently disable a control). All identity strings
 ``/`` and ``:`` separators are normalized away first, so ``refs/heads/main/``
 is caught exactly like ``refs/heads/main``.
 
-Every referenced regular file larger than ``MAX_REF_BYTES`` (256 MiB) is
-refused with a ``P7_REF_MALFORMED`` finding before it is read; the size
-check uses ``stat``, so a FIFO or device node is not covered.
+Every referenced file is read at most ``MAX_REF_BYTES`` (256 MiB) plus one
+byte in a single call; a larger file is refused with a ``P7_REF_MALFORMED``
+finding. A FIFO or device node is still opened, so it is not covered.
 
 ``candidate``: ``{"commit": "<40- or 64-hex git sha>", "config": [{"name", "path",
 "sha256"}]}`` — at least one config identity; every referenced file must
@@ -280,11 +280,12 @@ def _read_verified(findings: _Findings, subject: str, path: Any, digest: Any,
     if target is None or want is None:
         return None
     try:
-        if target.stat().st_size > MAX_REF_BYTES:
+        with target.open("rb") as handle:
+            data = handle.read(MAX_REF_BYTES + 1)
+        if len(data) > MAX_REF_BYTES:
             findings.add(REF_MALFORMED, subject,
                          f"{target} exceeds the {MAX_REF_BYTES}-byte reference cap")
             return None
-        data = target.read_bytes()
     except OSError as exc:
         findings.add(REF_MISSING, subject, f"{target}: {type(exc).__name__}")
         return None

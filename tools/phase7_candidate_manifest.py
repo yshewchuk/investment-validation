@@ -47,20 +47,19 @@ class SpecError(Exception):
     """The operator spec (or a file it names) cannot be used."""
 
 
-def hash_ref(field: str, path) -> tuple[str, str]:
+def hash_ref(field: str, path) -> tuple[str, str, bytes]:
+    """Read the referenced file once (at most ``MAX_REF_BYTES`` + 1 bytes) and return
+    ``(resolved path, sha256, the bytes hashed)`` so callers parse what they hashed."""
     if not isinstance(path, (str, Path)):
         raise SpecError(f"{field}: path must be a string")
     target = Path(path).resolve()
     if not target.is_file():
         raise SpecError(f"{field}: referenced file does not exist: {target}")
-    digest, size = hashlib.sha256(), 0
     with target.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            size += len(chunk)
-            if size > MAX_REF_BYTES:
-                raise SpecError(f"{field}: file exceeds {MAX_REF_BYTES} bytes")
-            digest.update(chunk)
-    return str(target), digest.hexdigest()
+        data = handle.read(MAX_REF_BYTES + 1)
+    if len(data) > MAX_REF_BYTES:
+        raise SpecError(f"{field}: file exceeds {MAX_REF_BYTES} bytes")
+    return str(target), hashlib.sha256(data).hexdigest(), data
 
 
 def _obj(field: str, value) -> dict:
@@ -85,10 +84,10 @@ def _ref(field: str, row: dict, *keys: str, agree: tuple[str, ...] = ()) -> dict
     """Hash the referenced file; every key in ``agree`` must equal the value the
     (size-capped) document itself carries, so the manifest never records an
     identity or status the file does not hold."""
-    path, digest = hash_ref(field, row.get("path"))
+    path, digest, data = hash_ref(field, row.get("path"))
     if agree:
         try:
-            doc = json.loads(Path(path).read_bytes())
+            doc = json.loads(data)
         except ValueError as exc:
             raise SpecError(f"{field}: referenced file is not JSON ({exc})") from exc
         if not isinstance(doc, dict):

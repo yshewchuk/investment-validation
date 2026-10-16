@@ -375,3 +375,24 @@ def test_real_commit_check_runs_inside_assemble_and_main(spec, tmp_path, monkeyp
     path.write_text(json.dumps(spec))
     assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o")]) == 2
     assert not (tmp_path / "o").exists()
+
+
+def test_written_files_are_canonical_and_sorted(spec, tmp_path):
+    asm.assemble(spec, _out(tmp_path))
+    for name in ("manifest.json", "job_graph.json", "consumer_inventory.json"):
+        text = (_out(tmp_path) / name).read_text()
+        assert text == json.dumps(json.loads(text), indent=2, sort_keys=True) + "\n"
+    manifest = json.loads((_out(tmp_path) / "manifest.json").read_text())
+    ids = [j["id"] for j in manifest["job_graph"]["jobs"]]
+    assert ids == sorted(ids)
+    consumers = manifest["consumer_inventory"]["consumers"]
+    assert consumers == sorted(consumers) and len(consumers) > 1
+    inventory = json.loads((_out(tmp_path) / "consumer_inventory.json").read_text())
+    assert [c["id"] for c in inventory["consumers"]] == consumers
+
+
+def test_manifest_digests_match_the_files_as_written(spec, tmp_path):
+    manifest = asm.assemble(spec, _out(tmp_path))
+    for section in ("job_graph", "consumer_inventory"):
+        data = Path(manifest[section]["path"]).read_bytes()
+        assert manifest[section]["sha256"] == hashlib.sha256(data).hexdigest()
