@@ -174,7 +174,7 @@ the pure magnitude window and metadata-only planner to bind research registratio
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`
 to reconstruct outer metadata and plan nested folds with the same public rule.
 `experiments/magnitude_search_trials.py` consumes stored-history reads, target
-preflight, training qualification and complete target reads for recorded inner trials.
+preflight, training qualification, complete target reads and `magnitude_inputs.magnitude_recipe` for recorded inner trials and exact validation-receipt admission.
 `experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`.
 `experiments/magnitude_report.py` consumes that preflight, `load_magnitude_targets`
 and `qualify_magnitude_training_targets` for the admitted mean baseline.

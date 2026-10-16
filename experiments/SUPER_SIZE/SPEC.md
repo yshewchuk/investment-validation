@@ -92,7 +92,7 @@ forecasts. Explicitly seal one plan per anchor, start each attempt once, and rec
 complete three-horizon real forecasts or an explicit `EXPERIMENT_VARIANT_FAILED` fit failure. Numeric predictions and
 integral horizons are normalized to JSON float/int; Booleans refuse. Start returns admitted stored
 features and strictly qualified training labels; recording commits the forecasts
-before opening complete inner validation labels. Freeze refuses incomplete journals
+before opening complete inner validation labels. One immutable shared validation record binds native-derived targets and the full receipt to admitted preflight membership, cutoff and recipe before terminal publication; concurrent candidates must agree. Replay verifies terminal targets against that record without reopening labels. This consistency check does not authenticate wholesale fabrication of all journal evidence. Freeze refuses incomplete journals
 and excludes a candidate's entire score for an admitted explicit fit failure or local scoring failure.
 Every shared native-input/label admission failure leaves the attempt unfinished, regardless of its error code;
 infrastructure/resource/shared-identity failures also block selection. Exact replay of a
