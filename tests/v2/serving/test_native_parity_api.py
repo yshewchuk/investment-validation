@@ -10,7 +10,6 @@ helpers exactly like ``tests/v2/serving/test_v2_serving_publication_binding.py``
 """
 from __future__ import annotations
 
-import builtins
 import json
 import math
 import os
@@ -608,7 +607,7 @@ def test_current_pointer_io_failure_leaves_report_available(parity, tmp_path, mo
     """A real I/O failure reading the ops publisher's ``CURRENT`` is the same
     availability contract as the resolver's own ``ApiError`` above: the parity
     report stays available. The failure is injected only for that exact file
-    through ``builtins.open`` so the real ``_publication_resolver`` chain is
+    through ``os.open`` so the real ``_publication_resolver`` chain is
     exercised, never a mocked resolver or freshness check."""
     publication_root = tmp_path / "publication"
     publication_root.mkdir()
@@ -622,17 +621,15 @@ def test_current_pointer_io_failure_leaves_report_available(parity, tmp_path, mo
                      native_parity_report_path=str(parity.report_path))
     server, thread, base = _start(app)
     injected = []
-    real_open = builtins.open
+    real_open = os.open
 
-    def deny_current_candidate(file, *args, **kwargs):
-        if isinstance(file, int):
-            return real_open(file, *args, **kwargs)
+    def deny_current_candidate(file, flags, *args, **kwargs):
         if os.fspath(file) == str(current_path):
             injected.append(str(current_path))
             raise PermissionError(13, "Permission denied", str(current_path))
-        return real_open(file, *args, **kwargs)
+        return real_open(file, flags, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", deny_current_candidate)
+    monkeypatch.setattr(os, "open", deny_current_candidate)
     try:
         code, body, headers = _get(base, "/api/v1/native_parity", token=TOKEN)
         assert code == 200
@@ -723,13 +720,13 @@ def test_operational_index_failure_leaves_report_available(parity, tmp_path, mon
     """A sqlite3.OperationalError -- from the resolver, the serving-db open, or
     the release lookup -- is the same availability contract as the ApiError and
     real OSError cases above. Injected at the dependency boundary (resolver,
-    api._open, projections.get_release), never by mocking freshness itself."""
+    api.open_index_untranslated, projections.get_release), never by mocking freshness itself."""
     connections = []
     if phase == "open":
         def fail_open(serving_db):
             raise sqlite3.OperationalError("unable to open database file")
 
-        monkeypatch.setattr(api_module, "_open", fail_open)
+        monkeypatch.setattr(api_module, "open_index_untranslated", fail_open)
     elif phase == "get_release":
         def memory_open(serving_db):
             conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -739,7 +736,7 @@ def test_operational_index_failure_leaves_report_available(parity, tmp_path, mon
         def fail_get_release(conn, release_id):
             raise sqlite3.OperationalError("database disk image is malformed")
 
-        monkeypatch.setattr(api_module, "_open", memory_open)
+        monkeypatch.setattr(api_module, "open_index_untranslated", memory_open)
         monkeypatch.setattr(projections, "get_release", fail_get_release)
 
     app = create_app(serving_db=str(tmp_path / "serving.sqlite"),
@@ -759,6 +756,21 @@ def test_operational_index_failure_leaves_report_available(parity, tmp_path, mon
         for conn in connections:
             with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
                 conn.execute("SELECT 1")
+
+
+def test_unopenable_serving_db_leaves_report_available(parity, tmp_path):
+    """A serving_db that cannot be opened at all -- here the directory itself --
+    is the same availability contract as the mocked open failure above."""
+    app = create_app(serving_db=str(tmp_path),
+                     store_root=str(tmp_path / "objects"),
+                     serving_root=str(tmp_path / "serving"),
+                     token=TOKEN, resolver=lambda: _SAFE_RELEASE_ID,
+                     native_parity_report_path=str(parity.report_path))
+    server, thread, base = _start(app)
+    try:
+        _assert_available_report(base)
+    finally:
+        _stop(server, thread)
 
 
 def _integrity_error():
@@ -787,7 +799,7 @@ def test_index_integrity_errors_propagate_from_freshness(monkeypatch):
     def fail_get_release(conn, release_id):
         raise _integrity_error()
 
-    monkeypatch.setattr(api_module, "_open", memory_open)
+    monkeypatch.setattr(api_module, "open_index_untranslated", memory_open)
     monkeypatch.setattr(projections, "get_release", fail_get_release)
     with pytest.raises(projections.ServingIndexError):
         api_module._native_parity_freshness("unused", lambda: _SAFE_RELEASE_ID, AS_OF)
