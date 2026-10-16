@@ -589,3 +589,31 @@ def test_evidence_and_job_id_refusals(spec, tmp_path, mutate, match):
     mutate(spec, tmp_path)
     with pytest.raises(asm.SpecError, match=match):
         asm.assemble(spec, _out(tmp_path))
+
+
+def test_main_prints_summary_and_note(spec, tmp_path, capsys):
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec))
+    assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o")]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("MANIFEST_VALID: ")
+    assert " jobs, " in captured.out and " consumers, codes=[]" in captured.out
+    assert "models_promote/models_rollback" in captured.err and "#808" in captured.err
+
+
+def test_git_runs_with_no_optional_locks(monkeypatch):
+    seen = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        seen.append(list(cmd))
+        return real_run(cmd, *args, **kwargs)
+
+    head = real_run(["git", "-C", str(asm.ROOT), "rev-parse", "HEAD"], capture_output=True,
+                    text=True, check=True).stdout.strip()
+    monkeypatch.setattr(asm.subprocess, "run", spy)
+    try:
+        _REAL_COMMIT({"commit": head}, asm.ROOT)
+    except asm.SpecError:
+        pass  # a dirty checkout still ran every git call
+    assert seen and all(cmd[:2] == ["git", "--no-optional-locks"] for cmd in seen)
