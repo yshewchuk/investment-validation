@@ -4,9 +4,11 @@ from __future__ import annotations
 import os
 import select
 import signal
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,7 +94,7 @@ def test_real_subprocess_timeout_pins_exact_tail_boundary(separate_roots, tmp_pa
 def test_timeout_captures_real_subprocess_stderr_from_separate_store(
         separate_roots, tmp_path, monkeypatch):
     conn, service, claim = separate_roots
-    path = _stderr_path(service.store.root, claim.attempt_id)
+    path = _stderr_path(service.root, claim.attempt_id)
     path.parent.mkdir(parents=True)
     child = _write_worker(tmp_path)
     observed = []
@@ -162,6 +164,48 @@ def test_stderr_tail_is_latest_4096_bytes_replacement_decoded_and_sanitized(sepa
     assert tail == ('<diagnostic text redacted>\nTraceback (most recent call last):\n'
                     '  File "<path>", line 9, in stage\n<diagnostic text redacted>\n'
                     'ValueError: <message redacted>')
+
+
+@pytest.mark.parametrize("rootless", [False, True])
+@pytest.mark.parametrize("empty", [False, True])
+def test_short_or_empty_stderr_from_explicit_and_rootless_services(
+        separate_roots, tmp_path, rootless, empty):
+    conn, service, claim = separate_roots
+    root = tmp_path / "catalog" if rootless else service.root
+    path = _stderr_path(root, claim.attempt_id)
+    path.parent.mkdir(parents=True)
+    path.write_text("" if empty else
+                    'Traceback (most recent call last):\n'
+                    '  File "/private/stage.py", line 9, in stage\n'
+                    '    secret_source()\nValueError: private-message\n')
+    if rootless:
+        service = SimpleNamespace(tick=lambda: None)
+    with pytest.raises(ops_support.RunUntilTimeout) as raised:
+        ops_support.run_until(service, conn, claim.job_id, timeout=0)
+    tail = str(raised.value).split("worker stderr tail: ", 1)[1].split(
+        "; tracked process diagnostics:", 1)[0]
+    expected = ("" if empty else
+                'Traceback (most recent call last):\n'
+                '  File "<path>", line 9, in stage\n<diagnostic text redacted>\n'
+                'ValueError: <message redacted>')
+    assert tail == expected
+
+
+def test_rootless_service_without_database_path_reports_unavailable(separate_roots):
+    conn, _, claim = separate_roots
+    # Copy the admitted attempt into an in-memory catalog with no backing
+    # path, so the rootless double has no directory for its diagnostics.
+    memory = sqlite3.connect(":memory:")
+    try:
+        conn.backup(memory)
+        memory.row_factory = sqlite3.Row
+        service = SimpleNamespace(tick=lambda: None)
+        assert len(attempt_receipts(memory, claim.job_id)) == 1
+        with pytest.raises(ops_support.RunUntilTimeout) as raised:
+            ops_support.run_until(service, memory, claim.job_id, timeout=0)
+        assert "worker stderr tail: unavailable (no catalog database path);" in str(raised.value)
+    finally:
+        memory.close()
 
 
 @pytest.mark.parametrize("unreadable", ["missing", "directory"])
