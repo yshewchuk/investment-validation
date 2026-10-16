@@ -818,6 +818,11 @@ def test_non_path_code_root_is_a_typed_refusal(source, bad):
     assert raised.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
+def test_str_code_root_is_coerced_to_the_same_sealed_identity(source, tmp_path):
+    checkout = _checkout(tmp_path)
+    assert _call(source, code_root=str(checkout)) == _call(source, code_root=checkout)
+
+
 @pytest.mark.parametrize("action", [sweep.register_sweep, sweep.submit_sweep])
 def test_non_string_event_id_refuses_before_catalog_or_population(source, monkeypatch, action):
     before = list(source.conn.iterdump())
