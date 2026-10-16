@@ -10,6 +10,16 @@
 # Measured 2026-10-11 (CPU seconds over 3475 total, ~3.8x parallel on a 4-core
 # runner): ops ~1224, research ~902, checks ~474, rest ~876. Rebalance by
 # moving a pattern; keep every shard under ~10 minutes of wall time.
+# #791: runner speed varies ~2x, so the real-subprocess ops files and the
+# repo-wide integration tests each get their own shard (ops-sweep, integration).
+
+[[shard]]
+name = "ops-sweep"
+patterns = [
+  "tests/v2/ops/test_gate_sweep.py",
+  "tests/v2/ops/test_native_gate_worker.py",
+  "tests/v2/ops/test_computed_moves_bounded_retention.py",
+]
 
 [[shard]]
 name = "ops"
@@ -17,7 +27,11 @@ patterns = ["tests/v2/ops/*", "tests/test_v2_ops_*.py"]
 
 [[shard]]
 name = "research"
-patterns = ["tests/v2/research/*", "tests/v2/integration/*", "tests/test_v2_research_*.py"]
+patterns = ["tests/v2/research/*", "tests/test_v2_research_*.py"]
+
+[[shard]]
+name = "integration"
+patterns = ["tests/v2/integration/*"]
 
 [[shard]]
 name = "checks"
