@@ -145,8 +145,12 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
     owner = spec.get("registry_owner")
     if not isinstance(owner, str) or not owner:
         raise SpecError("registry_owner: required string")
-    jobs = registry_jobs(owner, _kind_list(spec, "official_registry_kinds"),
-                         _kind_list(spec, "non_official_registry_kinds"))
+    official_kinds = _kind_list(spec, "official_registry_kinds")
+    non_official_kinds = _kind_list(spec, "non_official_registry_kinds")
+    if official_kinds & non_official_kinds:
+        raise SpecError("official_registry_kinds and non_official_registry_kinds overlap: "
+                        f"{sorted(official_kinds & non_official_kinds)}")
+    jobs = registry_jobs(owner, official_kinds, non_official_kinds)
     seen = {j["id"] for j in jobs}
     for extra in _rows("extra_jobs", spec.get("extra_jobs", [])):
         jid = extra.get("id")

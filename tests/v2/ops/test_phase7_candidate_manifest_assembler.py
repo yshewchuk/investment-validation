@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import subprocess
 
 import pytest
@@ -187,12 +188,47 @@ def test_cap_is_inclusive_and_shared_with_the_checker(tmp_path, monkeypatch):
     with pytest.raises(asm.SpecError, match="exceeds"):
         asm._sha256("f", path)
     assert checker.MAX_REF_BYTES == 256 * 1024 * 1024
+    monkeypatch.undo()
+    assert asm.MAX_REF_BYTES == checker.MAX_REF_BYTES
+    assert asm.MAX_SPEC_BYTES == 1024 * 1024
 
 
-def test_checker_refuses_oversize_reference(spec, tmp_path, monkeypatch):
-    manifest = asm.assemble(spec, _out(tmp_path))
+def test_checker_reference_cap_boundary(tmp_path, monkeypatch):
+    path = tmp_path / "f.bin"
+    path.write_bytes(b"12345")
+    digest = hashlib.sha256(b"12345").hexdigest()
+    monkeypatch.setattr(checker, "MAX_REF_BYTES", 5)
+    ok = checker._Findings()
+    assert checker._read_verified(ok, "s", str(path), digest, tmp_path) == b"12345"
+    assert ok.sorted_rows() == []
     monkeypatch.setattr(checker, "MAX_REF_BYTES", 4)
-    assert checker.REF_MALFORMED in checker.validate(manifest, root=tmp_path)["finding_codes"]
+    over = checker._Findings()
+    assert checker._read_verified(over, "s", str(path), digest, tmp_path) is None
+    assert [r["code"] for r in over.sorted_rows()] == [checker.REF_MALFORMED]
+
+
+def test_spec_cap_boundary(tmp_path, monkeypatch):
+    path = tmp_path / "spec.json"
+    path.write_bytes(b'{"a":1}')
+    monkeypatch.setattr(asm, "MAX_SPEC_BYTES", 7)
+    assert asm._load_spec(path) == {"a": 1}
+    monkeypatch.setattr(asm, "MAX_SPEC_BYTES", 6)
+    with pytest.raises(asm.SpecError, match="spec exceeds"):
+        asm._load_spec(path)
+
+
+def test_overlapping_registry_kind_lists_are_refused(spec, tmp_path):
+    spec["official_registry_kinds"] = ["experiment"]
+    with pytest.raises(asm.SpecError, match="overlap"):
+        asm.assemble(spec, _out(tmp_path))
+
+
+def test_uncreatable_out_dir_exits_2(spec, tmp_path):
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec))
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    assert asm.main(["--spec", str(path), "--out-dir", str(blocker / "sub")]) == 2
 
 
 def _with_consumers(manifest, tmp_path, names):
@@ -213,8 +249,10 @@ def test_consumer_names_are_labels_but_not_blank(spec, tmp_path):
 
 
 def _git(repo, *args):
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo), *args],
-                   check=True, capture_output=True)
+                   check=True, capture_output=True, env=env)
 
 
 def test_dirty_tracked_tree_is_refused(tmp_path):

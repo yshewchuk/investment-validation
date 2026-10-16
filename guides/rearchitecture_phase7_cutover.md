@@ -56,7 +56,10 @@ sides' values cannot be swapped), with retained old deployment refs, and
 hash-verified 3B/4/5/6 phase evidence that must be JSON objects binding the
 exact candidate commit and, for Phase 5, the deployed release (missing
 bindings fail closed; 3A preview evidence cannot substitute). It rejects
-implicit latest refs, duplicate or unaccounted scheduled writers/background
+implicit latest refs in every pinned identity (commit, config, snapshot,
+release, retained deployment, ownership; consumer-inventory entries are
+labels of existing readers, e.g. `GET /release/current`, and are exempt),
+duplicate or unaccounted scheduled writers/background
 jobs, conflicting writer ownership, and stale or malformed evidence. It is
 read-only: it never writes authority, production pointers, credentials or
 release state. A green run validates manifest consistency only; it is not a

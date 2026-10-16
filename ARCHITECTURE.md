@@ -536,7 +536,7 @@ Only a tracked path absent from the worktree reads as empty.
   | Condition | Outcome |
   |---|---|
   | spec missing/oversize/not a JSON object, a section of the wrong shape, a duplicate or colliding extra-job id, missing `commit` or `registry_owner`, a referenced file missing or over the cap | exit 2, nothing written for that run beyond files already produced |
-  | spec file unreadable, not UTF-8/JSON, or an uncreatable `--out-dir` | exit 2 |
+  | spec file unreadable, not decodable JSON, or an uncreatable `--out-dir` | exit 2 |
   | spec `commit` differs from this checkout's `HEAD`, or tracked files are modified | exit 2 (registry and inventory would describe another commit) |
   | a registry kind that can run outside `shadow`/`smoke` (today `experiment`, in `primary`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
   | `--out-dir` inside the repository | exit 2 |
