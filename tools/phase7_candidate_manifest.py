@@ -12,6 +12,13 @@ and the consumer inventory both come from this checkout. A job kind added
 later (#726's ``serving_projection``) appears with no edit here. Exit 0 = the
 checker passes, 1 = findings, 2 = unusable spec.
 
+Spec keys: ``commit`` (required, must equal ``HEAD``), ``registry_owner``, ``config``
+[{name, path}], ``data_snapshot`` {snapshot_id, path}, ``model_deployment`` {release_id,
+path}, ``phase_evidence`` [{phase, schema_version, status, path}], ``authority``,
+``extra_jobs`` [{id, schedule, owner, kind, writes_official}] and the optional
+``official_registry_kinds`` / ``non_official_registry_kinds``. The spec is capped at
+``MAX_SPEC_BYTES`` (1 MiB) and each referenced file at ``MAX_REF_BYTES`` (256 MiB).
+
     python3 tools/phase7_candidate_manifest.py --spec SPEC.json --out-dir DIR
 """
 from __future__ import annotations

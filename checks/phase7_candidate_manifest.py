@@ -19,7 +19,7 @@ Input manifest schema ``phase7_candidate_manifest.v1.0``
 --------------------------------------------------------
 Every key listed is required; an unknown key at any strict level is a
 finding (a typo must not silently disable a control). All identity strings
-must be exact: an empty value, or one of ``latest``/``current``/``newest``/
+(except consumer names, which are labels) must be exact: an empty value, or one of ``latest``/``current``/``newest``/
 ``head``/``main``/``master``/``trunk``/``stable``/``prod``/``production``/
 ``live``/``default`` — alone, as a ``:``-suffix (``deploy:current``,
 ``image:stable``), or as the last path segment — is rejected; trailing
