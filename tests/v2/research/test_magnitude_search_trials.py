@@ -24,6 +24,7 @@ from engine.v2.foundation import (
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.research.magnitude_history_store import read_stored
 from experiments import magnitude_search_trials as trials
 from experiments import native_registration as native
 from experiments.magnitude_search_plan import seal_search_plan
@@ -147,9 +148,21 @@ def test_shared_training_cohort_and_forecasts_committed_before_validation(case, 
     one, two = case.recorder.start(*args), case.recorder.start(*other)
     assert one["inputs"] == two["inputs"]
     train = one["inputs"]["training_inputs"]
+    events = sorted(case.source.events, key=lambda event: (event["event_date"], event["event_id"]))
+    training_ids = [event["event_id"] for event in events
+                    if event["event_date"].date().isoformat() == "2022-06-02"]
+    participant_ids = {event["event_id"] for event in events
+                       if event["event_date"].date().isoformat() in
+                       ("2022-06-02", "2023-01-03", "2023-06-02")}
     assert train["labels_before"] == "2022-12-22"
-    assert len(train["qualified_event_ids"]) == 2
-    assert set(train["candidate_event_ids"]) == set(train["qualified_event_ids"])
+    assert train["qualified_event_ids"] == train["candidate_event_ids"] == training_ids
+    assert one["inputs"]["training"] == [
+        {"event_id": event_id, "absolute_move_pct": 2.0} for event_id in training_ids]
+    stored = read_stored(case.source.repository, case.source.feature_snapshot, case.source.build["context"])
+    expected_features = [row for row in stored["rows"] if row["event_id"] in participant_ids]
+    assert len(expected_features) == 18 < len(stored["rows"])
+    assert one["inputs"]["features"] == expected_features
+    assert one["inputs"]["stored_inputs_id"] == stored["inputs_id"]
     original = trials.load_magnitude_targets
     def labels(*a, **kw):
         committed = case.recorder._read("forecasts:" + one["trial_id"])

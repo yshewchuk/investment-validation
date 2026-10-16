@@ -219,6 +219,7 @@ class SearchTrials:
         if len(ordered) != len(events) or set(ordered) != events:
             raise ValueError
         recipe = magnitude_recipe()
+        # Explicit-ID native reads refuse future or held-out events, never return exclusions.
         receipt = {"schema_version": "research_magnitude_targets.v1",
             **{name: preflight[name] for name in ("snapshot_id", "holdout_as_of_month", "random_membership_version",
                 "rolling_membership_version", "population_use", "purpose", "computed_moves_version")},
@@ -244,7 +245,7 @@ class SearchTrials:
             if self._read("start:" + key) != expected:
                 raise ValueError
             admitted = self._read("inputs:" + key)
-            if admitted is None:
+            if admitted is None or set(admitted) != {"cohort", "inputs_id"}:
                 raise ValueError
             cohort = self._read("cohort:" + admitted["cohort"])
             if (admitted["cohort"] != content_hash([plan["plan_id"], outer_year, inner_year])
@@ -259,6 +260,8 @@ class SearchTrials:
                 validation = self._read("validation:" + admitted["cohort"])
                 self._validation(inner, admitted, cohort, validation)
             if record["status"] == "succeeded":
+                if set(record) != {"status", "inputs_id", "validation_id", "evaluation_inputs", "predictions", "metrics"}:
+                    raise ValueError
                 forecasts = [{name: row[name] for name in ("event_id", "horizon_sessions", "predicted_absolute_move_pct")}
                              for row in record["predictions"]]
                 if (submitted is None or record["inputs_id"] != admitted["inputs_id"] or forecasts != submitted

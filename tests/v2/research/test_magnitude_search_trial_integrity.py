@@ -110,6 +110,8 @@ def forge_complete(journal, mutation=None, *, validation_override=None):
             admitted["cohort"] = "missing"
         elif mutation == "cohort_digest":
             admitted["inputs_id"] = terminal["inputs_id"] = "wrong"
+        elif mutation == "inputs_extra":
+            admitted["unexpected"] = "field"
         elif mutation == "terminal_inputs":
             terminal["inputs_id"] = "wrong"
         elif mutation == "validation_link":
@@ -126,7 +128,7 @@ def forge_complete(journal, mutation=None, *, validation_override=None):
             terminal["metrics"]["rmse"] = 42
         elif mutation == "stored_forecast_shape":
             submitted[0]["predicted_absolute_move_pct"] = -1
-        elif mutation == "stored_metric_overflow":
+        elif mutation == "stored_target_mismatch":
             submitted = rows(1e308)
             terminal["predictions"] = [{**row, "absolute_move_pct": -1e308} for row in submitted]
         elif mutation == "terminal_forecast_huge_integer":
@@ -135,6 +137,8 @@ def forge_complete(journal, mutation=None, *, validation_override=None):
             predictions[0]["absolute_move_pct"] = 10 ** 400
         elif mutation == "status":
             terminal["status"] = "unknown"
+        elif mutation == "succeeded_extra":
+            terminal["unexpected"] = "field"
         elif mutation in ("failure_policy", "failure_unknown", "infrastructure_terminal", "refused_no_inputs",
                           "refused_no_forecasts", "failed_extra", "refused_extra", "refused_missing_validation"):
             problem = expected_problem("EXPERIMENT_VARIANT_FAILED")
@@ -154,9 +158,9 @@ def forge_complete(journal, mutation=None, *, validation_override=None):
             journal.recorder._append(prefix + ":" + key, body)
 
 
-@pytest.mark.parametrize("mutation", ["start", "missing_cohort", "cohort_link", "cohort_digest", "terminal_inputs",
+@pytest.mark.parametrize("mutation", ["start", "missing_cohort", "cohort_link", "cohort_digest", "inputs_extra", "terminal_inputs",
     "forecasts", "metrics", "status", "failure_policy", "failure_unknown", "infrastructure_terminal",
-    "refused_no_inputs", "refused_no_forecasts", "stored_forecast_shape", "stored_metric_overflow",
+    "refused_no_inputs", "refused_no_forecasts", "stored_forecast_shape", "stored_target_mismatch", "succeeded_extra",
     "terminal_forecast_huge_integer", "stored_target_huge_integer", "failed_extra", "refused_extra",
     "missing_validation", "validation_link", "terminal_receipt", "terminal_target", "refused_missing_validation"])
 def test_valid_hash_inconsistent_evidence_chain_refuses(journal, mutation):
@@ -423,7 +427,7 @@ def prepare_recording(journal, monkeypatch):
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: native_labels())
 
 
-@pytest.mark.parametrize("mutation", [None, "actuals", "receipt", "missing_receipt", "validation_id"])
+@pytest.mark.parametrize("mutation", [None, "actuals", "receipt", "missing_receipt", "validation_id", "extra_field"])
 def test_terminal_only_rewrites_cannot_change_the_true_winner(journal, monkeypatch, mutation):
     prepare_recording(journal, monkeypatch)
     append = journal.recorder._append
@@ -440,8 +444,10 @@ def test_terminal_only_rewrites_cannot_change_the_true_winner(journal, monkeypat
                 body["evaluation_inputs"]["labels_before"] = "2099-01-01"
             elif mutation == "missing_receipt":
                 del body["evaluation_inputs"]
-            else:
+            elif mutation == "validation_id":
                 body["validation_id"] = "wrong"
+            else:
+                body["unexpected"] = "field"
         return append(slot, body, **kwargs)
     monkeypatch.setattr(journal.recorder, "_append", publish)
     for candidate, value in (("z-last", 4), ("a-first", 7)):
@@ -586,6 +592,32 @@ def test_native_validation_drift_retains_unfinished_attempt(journal, monkeypatch
         journal.recorder.freeze()
     assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
     assert journal.recorder._read("selection") is None
+
+
+@pytest.mark.parametrize("field", ["excluded_future_events", "holdout_exclusions"])
+def test_native_loader_exclusions_refuse_before_validation_or_terminal_publication(journal, monkeypatch, field):
+    prepare_recording(journal, monkeypatch)
+    started = journal.recorder.start("2024", "2023", "z-last")
+    labels = native_labels()
+    labels.attrs[field] = (["event"] if field == "excluded_future_events" else
+                           [{"event_id": "event", "memberships": ["random"]}])
+    labels.attrs["inputs_id"] = content_hash({key: value for key, value in labels.attrs.items()
+                                             if key not in ("inputs_id", "holdout_exclusions")})
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: labels)
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search validation evidence differs").problem
+    assert journal.recorder._read("forecasts:" + started["trial_id"]) == rows()
+    assert journal.recorder._read("validation:" + content_hash(["plan", "2024", "2023"])) is None
+    assert journal.recorder._read("terminal:" + started["trial_id"]) is None
+    forge_complete_peer(journal)
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.freeze()
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
+    assert journal.recorder._read("selection") is None
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
 
 
 def test_crash_after_validation_commit_cannot_complete_or_restart_attempt(journal, monkeypatch):

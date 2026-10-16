@@ -274,3 +274,21 @@ def test_publication_failures_leave_no_journal_association(journal, artifact_cod
     assert journal.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == 0
     assert records.read_record(journal.conn, journal.store, RUN, SLOT) is None
     assert not journal.conn.in_transaction
+
+
+@pytest.mark.parametrize("replay,same_body", [(True, False), (False, True), (False, False), (True, True)])
+def test_transaction_rechecks_existing_slot_after_an_empty_optimistic_read(journal, monkeypatch, replay, same_body):
+    original = _wrapper()["body"]
+    records.append_record(journal.conn, journal.store, RUN, SLOT, original)
+    before = journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall()
+    read = records.read_record
+    monkeypatch.setattr(records, "read_record", lambda *args: None)
+    body = original if same_body else {"forecasts": [9, 8, 7]}
+    if replay and same_body:
+        assert records.append_record(journal.conn, journal.store, RUN, SLOT, body, replay=replay) == original
+    else:
+        with _problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
+            records.append_record(journal.conn, journal.store, RUN, SLOT, body, replay=replay)
+    assert journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall() == before
+    assert read(journal.conn, journal.store, RUN, SLOT) == original
+    assert not journal.conn.in_transaction
