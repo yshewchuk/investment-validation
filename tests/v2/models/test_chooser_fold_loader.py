@@ -201,7 +201,7 @@ def test_one_decode_raw_outputs_immutable_and_no_source_admission(setup, monkeyp
         ref.catalog_hash = "other"
     with pytest.raises(TypeError):
         ref.pool_res[0] = 1
-    with pytest.raises(loader.ServingFoldError):
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$"):
         loader.load_serving_fold(
             setup[0],
             ref.descriptor,
@@ -229,7 +229,7 @@ def test_parent_mismatch_even_under_rehashed_manifest(setup, change, monkeypatch
     catalog = copy.deepcopy(setup[3])
     catalog["members"][0]["objects"][0]["serving_fold"] = to_document(descriptor)
     monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("invalid parent decoded"))
-    with pytest.raises(loader.ServingFoldError):
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$"):
         _load(setup, parent=parent, descriptor=descriptor, catalog=_rehash(catalog))
 
 
@@ -250,6 +250,10 @@ def test_parent_mismatch_even_under_rehashed_manifest(setup, change, monkeypatch
         "object-hash",
         "name",
         "bytes",
+        "zero-bytes",
+        "negative-bytes",
+        "oversize-bytes",
+        "fractional-bytes",
         "opaque",
         "descriptor",
         "members",
@@ -285,8 +289,9 @@ def test_catalog_membership_refuses_before_decode(setup, defect, monkeypatch):
         obj["content_hash"] = content_hash("other")
     elif defect == "name":
         obj["name"] = "other.joblib"
-    elif defect == "bytes":
-        obj["bytes"] = True
+    elif defect in {"bytes", "zero-bytes", "negative-bytes", "oversize-bytes", "fractional-bytes"}:
+        obj["bytes"] = {"bytes": True, "zero-bytes": 0, "negative-bytes": -1,
+                        "oversize-bytes": loader.MAX_FOLD_BYTES + 1, "fractional-bytes": 1.5}[defect]
     elif defect == "opaque":
         del obj["serving_fold"]
     elif defect == "descriptor":
@@ -300,6 +305,8 @@ def test_catalog_membership_refuses_before_decode(setup, defect, monkeypatch):
     else:
         catalog["manifest_hash"] = content_hash("wrong")
     monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("invalid catalog decoded"))
+    monkeypatch.setattr(setup[0], "prepare_serving_fold",
+                        lambda *a, **k: pytest.fail("invalid catalog reached preparation"))
     with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
         _load(setup, catalog=catalog)
     assert caught.value.code == MODEL_NOT_READY
@@ -363,9 +370,9 @@ def test_cold_warm_bytes_refuse_and_no_stale_success(setup, warm, defect, monkey
         os.mkfifo(path)
     elif defect == "directory":
         path.mkdir()
-    with pytest.raises(loader.ServingFoldError):
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$"):
         _load(setup)
-    with pytest.raises(loader.ServingFoldError):
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$"):
         _load(setup)
     if ref is not None:
         result = _infer(ref)
@@ -378,7 +385,9 @@ def test_public_preparation_rejects_bad_limits_without_io(setup, limit, monkeypa
     monkeypatch.setattr(
         setup[0], "_load_artifact", lambda *a, **k: pytest.fail("invalid limit load")
     )
-    with pytest.raises(AdapterError) as caught:
+    with pytest.raises(AdapterError, match=(
+        "^artifact byte limit must be a positive integer below sys.maxsize$"
+    )) as caught:
         setup[0].prepare_serving_fold(setup[2].release.bindings[0], max_member_bytes=limit)
     assert type(caught.value) is AdapterError
     assert setup[0].cache_size == 0
@@ -394,13 +403,13 @@ def test_identity_catalog_and_policy_changes_share_only_decoded_cache(setup):
     third = _load(setup, descriptor=descriptor, catalog=_rehash(catalog))
     assert len({ref.release.release_id for ref in (first, other, third)}) == 3
     assert setup[0].cache_size == 1
-    with pytest.raises(loader.ServingFoldError):
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$"):
         _load(setup, parent=replace(setup[2], release_hash=content_hash("wrong")))
     parent = replace(
         setup[2], release=replace(setup[2].release, bindings=setup[2].release.bindings * 2)
     )
     parent = replace(parent, release_hash=semantic_release_hash(parent.release))
-    with pytest.raises(loader.ServingFoldError):
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$"):
         _load(setup, parent=parent)
 
 
@@ -494,7 +503,7 @@ def test_chooser_wrong_declared_size_refuses_before_decode_and_preserves_warm_ce
     catalog = copy.deepcopy(setup[3])
     catalog["members"][0]["objects"][0]["bytes"] += delta
     monkeypatch.setattr(loader, "MAX_FOLD_BYTES", loader.MAX_FOLD_BYTES // 2)
-    with pytest.raises(loader.ServingFoldError):
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$"):
         _load(setup, catalog=_rehash(catalog))
     if warm:
         assert cached.member_byte_limit == ceiling
@@ -508,7 +517,7 @@ def test_bad_expected_size_refuses_before_cache_access(setup, expected, monkeypa
     monkeypatch.setattr(
         setup[0], "_load_artifact", lambda *a, **k: pytest.fail("invalid size load")
     )
-    with pytest.raises(AdapterError) as caught:
+    with pytest.raises(AdapterError, match="^invalid serving fold declared byte count$") as caught:
         setup[0].prepare_serving_fold(
             setup[2].release.bindings[0],
             max_member_bytes=loader.MAX_FOLD_BYTES,
@@ -523,11 +532,11 @@ def test_public_metadata_refuses_non_fold_or_missing_adapter(setup, monkeypatch)
     monkeypatch.setattr(
         owner, "_load_artifact", lambda *a, **k: pytest.fail("unsupported adapter load")
     )
-    with pytest.raises(AdapterError) as caught:
+    with pytest.raises(AdapterError, match="^unsupported serving fold adapter$") as caught:
         owner.prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES)
     assert type(caught.value) is AdapterError
     owner._adapters.clear()
-    with pytest.raises(AdapterError) as caught:
+    with pytest.raises(AdapterError, match="^unsupported serving fold adapter$") as caught:
         owner.prepare_serving_fold(
             replace(binding, adapter="tier4-serving-fold.v1"),
             max_member_bytes=loader.MAX_FOLD_BYTES,

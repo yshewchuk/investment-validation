@@ -79,6 +79,7 @@ def _view(descriptor, parent, catalog_hash, *, role="size"):
 
 
 def _pools(metadata, descriptor):
+    # Recheck detached metadata defensively, including the adapter-checked feature order.
     policy = descriptor.policy
     if (metadata.model_id != policy.model_id or metadata.fold_start != descriptor.fold_start
             or metadata.panel_sha256 != policy.panel_sha256

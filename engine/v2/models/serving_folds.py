@@ -1,4 +1,4 @@
-"""Immutable role-specific serving-fold metadata; no runtime loading."""
+"""Immutable role-specific serving-fold metadata; no loader in this module."""
 from __future__ import annotations
 
 import math
