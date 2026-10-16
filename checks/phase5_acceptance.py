@@ -178,7 +178,7 @@ def _verify_object(release_root: Path, path: str, expected: str) -> str | None:
 def _load_model_release(release_root: Path, release_id: str, findings: _Findings):
     root = deployment_root(release_root)
     try:
-        manifest = deployment._read_manifest(root, release_id)
+        manifest = deployment.read_manifest(root, release_id)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         findings.add(MODEL_RELEASE_INVALID, release_id, type(exc).__name__)
         return None
@@ -187,7 +187,7 @@ def _load_model_release(release_root: Path, release_id: str, findings: _Findings
         return None
     # Verify the declared hash version. This accepts verified historical
     # member-only manifests while requiring semantic hashes for new releases.
-    if not deployment._manifest_hash_matches(manifest):
+    if not deployment.manifest_hash_matches(manifest):
         findings.add(MODEL_RELEASE_INVALID, release_id, "release_hash disagrees with manifest")
         return None
     return manifest.release

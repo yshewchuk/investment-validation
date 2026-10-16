@@ -168,7 +168,7 @@ before publication.
 `checks/phase5_release_assembly.py` re-stages a prior release under a new id
 (`deployment.stage_release`, `resolve_release`, `StagingRefused`, `DeploymentError`,
 `MAX_MANIFEST_BYTES`, and `releases.ModelReleaseRefusal`) when carrying pool objects forward;
-`release_layout.py` and `release_objects.py` (submodule imports: `STATE_SPECS`, `read_catalog`, `write_object`, `read_regular_file`, `ReleaseLayoutError`, `ObjectVerificationError`, `deployment_root`, `object_relpath`) are imported by `checks/phase5_*.py` and `tools/phase5_*.py`; `release_layout.py` reaches the public `manifest_path`, `read_manifest`, `manifest_hash_matches` and `atomic_write_bytes` for catalog layout checks.
+`release_layout.py` (which re-exports the `release_objects.py` names `write_object`, `ReleaseLayoutError`, `ObjectVerificationError`, `deployment_root` and `object_relpath`, alongside `STATE_SPECS` and `read_catalog`) is imported by `checks/phase5_*.py` and `tools/phase5_*.py`; `release_layout.py` reaches the public `manifest_path`, `read_manifest`, `manifest_hash_matches` and `atomic_write_bytes` for catalog layout checks.
 engine.v2.serving.operations (P6-4) imports the deployment pointer
 (`current_pointer`, `resolve_release`, plus the two refusal exception types)
 to serve the deployed model release read-only at `/models/release.json` --
