@@ -195,8 +195,9 @@ interval policy. Its held-out prediction/residual arrays belong to that same
 object. Offline release preparation records this metadata in the hashed state
 catalog; a read-only loader verifies it against bounded, hash-checked bytes.
 Existing catalogs without this declaration require offline restaging, not a
-nightly fit or a guessed interval policy. Verified loading covers size
-folds for STR-THRU gate features only; chooser authoring is separate below.
+nightly fit or a guessed interval policy. Verified loading covers size folds and
+the chooser producer artifacts below; this alone admits neither training sources
+nor a nightly chooser declaration.
 
 Selection uses the exact earlier of the event month and decision month,
 the registered size model and feature order, and the pinned panel byte hash.
@@ -306,10 +307,37 @@ descriptor against a verified parent manifest and catalog identity, returning
 a `ServingFoldRef` with immutable metadata/pools, its shared `FrozenInference`
 owner and an ephemeral single-binding inference view. The view identity binds
 parent, catalog and descriptor; it is never staged or promoted. Selection,
-catalog discovery and source-bundle wiring remain separate work.
+catalog discovery and source-bundle wiring remain separate work. Loaders are read-only:
+no writes/transactions/retries. Refused calls return no reference but may retain a
+hash-verified decoded artifact in the shared cache; each call still validates its
+metadata and descriptor. Identical verified inputs produce identical references.
 
-`FrozenInference` owns the only decoded-artifact cache. Its existing adapter
-retains fold metadata with the estimator, so validation and prediction share
+`load_chooser_serving_fold` prepares the separately typed implied-t1/runup-move
+artifact from its exact `tier4_folds:<role>` catalog member. It rechecks catalog
+schema/self-hash/release/deployment, unique membership, descriptor/object identity,
+and the matching wildcard parent binding before decoding. The returned immutable
+`ChooserServingFoldRef` preserves the raw D14 producer output and paired held-out
+interval arrays; these are not the chooser k-NN population or driver residual state.
+It makes no event-month selection or source-ready declaration. Genuine
+training-source completion/finality, coordinator publication and per-request causal
+bounds are required for admission. Artifact headers/descriptors alone do not
+provide that proof. Existing nightly refusals remain.
+
+`FrozenInference.prepare_serving_fold(binding, max_member_bytes=..., expected_bytes=None)`
+returns detached immutable `ServingFoldMetadata`, never cached estimator/header objects.
+Both fold loaders use it; chooser catalog size is checked against the already-read
+buffers, including warm calls. The required byte limit is positive. The resolved
+path is checked for containment; bounded reads open the original path with
+final-component no-follow through the shared regular-file reader. Parent directories
+remain operator-trusted. Missing, special, final-component symlinked, oversized or
+changed objects refuse before decode, cold and warm. Direct preparation normalizes bounded I/O and regular-file/size
+refusals to path-free `AdapterError`. During `infer()`, bindings without an established
+cache-entry byte ceiling, including legacy fold bindings and champions, retain unbounded
+verification; preparation always supplies a limit. An established ceiling applies to subsequent inference reads.
+
+`FrozenInference` owns the only decoded-artifact cache, retained for its owner
+lifetime without eviction. Its adapter retains fold metadata with the estimator,
+so validation and prediction share
 one decode. Each cache entry may also own a byte ceiling established by bounded
 preparation; subsequent cold/warm verification cannot relax that ceiling.
 Legacy entries without a ceiling retain their existing behavior. Prediction
@@ -317,9 +345,11 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 
 | Verified fold condition | Outcome |
 |---|---|
-| Parent/catalog/descriptor/header or embedded-pool disagreement | `MODEL_NOT_READY`; fixed path-free refusal, no inference or fallback |
-| Escaped path, missing/corrupt bytes or object above 32 MiB | Refuse before deserialization, including warm reads through the shared owner |
+| Parent/catalog/descriptor/header or embedded-pool disagreement | `MODEL_NOT_READY`; conditions share one fixed path-free refusal, no inference or fallback |
+| Escaped path, missing/corrupt bytes or object above 32 MiB during fold preparation or prepared inference | Refuse before deserialization, including warm reads; unprepared inference with no established byte ceiling retains legacy unbounded verification |
 | Repeated preparation and inference on the same owner/object | Reverify bytes; reuse the decoded artifact, never a second model cache |
+| Missing/duplicate chooser catalog membership, wrong role/output or opaque undeclared fold | Fixed `MODEL_NOT_READY`; no champion/size/other-fold substitution |
+| Source availability/finality or training-bound proof absent | No causal/source-ready claim; artifact preparation cannot bypass consuming admission |
 | Different current panel bytes or multi-fragment layout | No equivalence is inferred here; selector availability/provenance contract remains a prerequisite |
 
 - **`current_release_inventory` (`inventory.py`)**: the champion registry

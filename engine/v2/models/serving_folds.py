@@ -1,4 +1,4 @@
-"""Immutable role-specific serving-fold metadata; no runtime loading."""
+"""Immutable role-specific serving-fold metadata; no loader in this module."""
 from __future__ import annotations
 
 import math
@@ -94,7 +94,7 @@ class ChooserFoldPolicy:
 
 @dataclass(frozen=True, kw_only=True)
 class ChooserServingFoldDescriptor:
-    """Offline declaration only; not accepted by the existing size-fold loader."""
+    """Role-specific declaration; loaded only by the chooser artifact loader."""
 
     parent_release_id: str
     parent_release_hash: str

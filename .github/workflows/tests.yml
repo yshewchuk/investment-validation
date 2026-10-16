@@ -82,7 +82,7 @@ jobs:
     name: tests (${{ matrix.shard }})
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40  # temporary (#791): ops/research shards run 20-25+ min; restore 25 when #791 lands
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
