@@ -2228,3 +2228,34 @@ def test_carried_pool_object_with_a_changed_name_refuses(tmp_path):
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
         assembly.derive_catalog(body, **args)
     assert err.value.code == "POOL_SET_MISMATCH"
+
+
+def test_earlier_session_cutoff_with_carried_objects_is_not_advanced(tmp_path):
+    _stage_prior(tmp_path)
+    _cutoff, carried = assembly.prior_carry_set(tmp_path, "prior1")
+    args = _valid_derive_args(tmp_path, cutoff="2026-08-01")
+    by_key = {item.member_id: item for item in carried}
+    args["outputs"] = [by_key[o.member_id] if o.member_id == assembly.POOL_MEMBER_IDS[0] else o
+                       for o in args["outputs"]]
+    body = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "CUTOFF_NOT_ADVANCED"
+
+
+def _add_second_object(body):
+    row = next(r for r in body["members"] if r["member_id"] == assembly.POOL_MEMBER_IDS[0])
+    row["objects"].append({**row["objects"][0], "name": "second.bin"})
+
+
+def test_carried_object_matches_any_object_of_a_multi_object_prior_row(tmp_path):
+    _rewrite_prior(tmp_path, _add_second_object)
+    _cutoff, carried = assembly.prior_carry_set(tmp_path, "prior1")
+    member = assembly.POOL_MEMBER_IDS[0]
+    second = next(item for item in carried if item.member_id == member and item.name == "second.bin")
+    args = _valid_derive_args(tmp_path)
+    args["outputs"] = [second if o.member_id == member else o for o in args["outputs"]]
+    body = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
+    candidate = assembly.derive_catalog(body, **args)
+    row = next(r for r in candidate["members"] if r["member_id"] == member)
+    assert [o["name"] for o in row["objects"]] == ["second.bin"]

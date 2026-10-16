@@ -499,3 +499,52 @@ def test_registered_kind_validates_and_plan_hash_matches(tmp_path):
                             source_root=REPO_ROOT)
     assert plan["spec_hash"] == content_hash(plan["parameters"])
     assert plan["implementation_ref"] and plan["environment_ref"]
+
+
+def test_plan_hashes_pin_the_source_root_and_environment(tmp_path):
+    from engine.v2.foundation import content_hash
+    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+    from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
+
+    refs = {name: f"job_x#training/{name}" for name in _STATES}
+    plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
+                            release_id="cand1", cutoff="2026-10-01", state_refs=refs,
+                            source_root=REPO_ROOT)
+    profile = profile_named(DEFAULT_POLICY, "delivery")
+    assert plan["implementation_ref"] == content_hash(worker_source_manifest(REPO_ROOT))
+    assert plan["environment_ref"] == content_hash(
+        environment_identity(profile.thread_count or profile.cpu_count))
+
+
+def test_plan_refusal_publishes_the_exact_problems(tmp_path):
+    with pytest.raises(OpsError) as err:
+        state_stage_plan(release_root=str(tmp_path), prior_release_id="p", release_id="p",
+                         cutoff="2026-10-01", state_refs={"a.json": "j#o"}, source_root=REPO_ROOT)
+    assert err.value.problem.details == {"problems": ["release_id must differ from prior_release_id"]}
+
+
+def test_one_bad_file_among_good_ones_is_reported():
+    params = _params(state_files=("a.json", "x.txt"),
+                     input_bindings={"a.json": "j#o", "x.txt": "j#o"})
+    assert "state_files must be plain .json names, not summaries" in state_stage_parameter_problems(
+        None, params)
+
+
+def test_worker_refuses_a_missing_bound_file(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    (staging / "paired.json").unlink()
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert "could not be read" in str(err.value)
+
+
+def test_a_trailing_month_that_is_not_a_date_is_refused(tmp_path, monkeypatch):
+    states = dict(_STATES)
+    states["trailing.json"] = ("trailing_pnl_cutoff", "hist|abc")
+    parameters, staging = _wire(tmp_path, monkeypatch, states=states)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.details == {"months": ["hist|abc"]}
+    assert "not a date" in str(err.value)

@@ -244,13 +244,13 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
 
     cutoff_day = _parse_day(cutoff, "CUTOFF_MISMATCH", "cutoff is not an ISO date")
     prior_rows = {row["member_id"]: row for row in prior["members"]}
+    if cutoff_day <= prior_day:
+        raise ReleaseAssemblyRefusal("CUTOFF_NOT_ADVANCED", "cutoff is not after the prior pool_cutoff")
     for output in (*_all_outputs(by_member), *chooser_objects):
         if output.carried:
             _check_carried(output, cutoff_day, prior_rows)
         elif output.cutoff != cutoff:
             raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "an object cutoff disagrees with cutoff")
-    if cutoff_day <= prior_day:
-        raise ReleaseAssemblyRefusal("CUTOFF_NOT_ADVANCED", "cutoff is not after the prior pool_cutoff")
 
     all_by_member = {**by_member, CHOOSER_MEMBER_ID: chooser_objects}
     rows = copy.deepcopy(prior["members"])

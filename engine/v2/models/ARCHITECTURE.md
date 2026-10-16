@@ -144,7 +144,7 @@ size check. Existing callers omitting the ceiling retain their read contract.
   prior_release_id) -> (pool_cutoff, tuple[PoolOutput])` returns every prior
   pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
   (`PRIOR_MISMATCH` on a missing prior or structurally malformed rows, object keys or `pool_cutoff`;
-  wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`).
+  wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`, or `CHOOSER_MISMATCH` for the chooser).
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),

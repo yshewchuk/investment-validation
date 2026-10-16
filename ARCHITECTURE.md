@@ -99,6 +99,8 @@ evidence. See the models and data component contracts.
   owners (`engine.v2.ops.executor`, `engine.v2.ops.legacy_adapter`). A
   legacy module importing `checks/` or `tests/`, or shelling out from
   outside those two modules, is not enforced against by either rule.
+  Known exception: `engine.v2.ops.state_stage` reaches `checks/phase5_release*`
+  through `tools/phase5_state_stage_job.py` (no direct import) until #807 moves them.
 - **Operator CLIs and experiments.** These operator and research entrypoints
   may call into the legacy and v2 engines. They are not uniformly leaf-only:
   `engine.v2.ops.training` imports the `phase5_training_job` module while
