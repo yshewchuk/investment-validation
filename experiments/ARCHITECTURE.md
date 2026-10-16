@@ -222,25 +222,25 @@ both flag states publish/verify the same plan and never write a ledger.
 ## Recorded magnitude-search selection
 
 `magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads.
-`magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
+`magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE. `record` admits schema/plan/seal, resolves the planned trial and requires its start claim before validating exactly one submission and its failure/forecast content; only then does it check terminal replay or admitted-input binding. Later phase rows assume preceding guards passed.
 
 | Condition | Outcome |
 |---|---|
-| `seal(clock=...)` | Explicitly initialize the search-owned journal through ops migrations; bind one verified plan per anchor to the installed recorder sources. |
+| `seal(clock=...)` | Verify the plan and installed sources before explicitly initializing the search-owned journal through ops migrations; bind one plan per anchor to those recorder sources. |
 | `start`, `record` or `freeze` with missing/older, newer or checksum-mismatched journal migrations | `INTEGRITY_FAILED` with the migration reason before plan/evidence/native reads; no implicit migration. |
 | `start(outer_year, inner_year, candidate_id)` | Claim once before native reads, re-admit source/stored feature bindings, preflight inner participants, and qualify training labels strictly before the sealed inner-fit cutoff. The immutable cohort binds stored feature rows and qualified targets; every candidate in a fold must share it exactly. |
 | Trial outside the sealed plan; `record` before `start` | `INVALID_EXPERIMENT_SPEC` for an unplanned trial; `EXPERIMENT_IDENTITY_CONFLICT` for a missing start; no native reads. |
-| `record` receives both or neither of `forecasts`/`failure` | `INVALID_EXPERIMENT_SPEC` before input/label reads or any record publication. |
+| An admitted, started trial receives both or neither of `forecasts`/`failure` | `INVALID_EXPERIMENT_SPEC` before native input/label reads or any record publication; a missing start takes precedence as `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Complete nonnegative finite real forecasts and integral horizons | Normalize to JSON float/int and associate forecasts with the attempt in a short catalog transaction before complete inner validation labels open; labels must precede the sealed outer-fit cutoff. |
 | Non-JSON request; Boolean, malformed or incomplete forecasts; caller scores | `INVALID_EXPERIMENT_SPEC` before any validation-label read. |
 | Explicit `EXPERIMENT_VARIANT_FAILED` fit failure after input admission; local scoring failure | Record a candidate terminal. Initial local scoring refusal raises its original error; a failed terminal write is chained as its cause, leaving an unfinished claim. No other stage creates automatic candidate refusals. |
 | `record(failure=...)` receives a registered non-candidate Problem | Raise its sanitized registered policy without a terminal; retain the unfinished claim. Unregistered/non-Problem values refuse `INVALID_EXPERIMENT_SPEC`. |
 | Any shared native-input/label admission failure | Preserve the unfinished attempt and block selection regardless of error code; grant no retry. |
-| Durable journal write | Publish the artifact before the catalog commit; a failed commit may leave an unreferenced object, never admitted evidence. Records are capped at 16 MiB and cannot be updated, deleted or replaced. |
+| Durable journal write; raw SQLite error in migration checks, reference reads or transactions | Publish artifacts before catalog commits; a failed commit may leave an unreferenced object, never admitted evidence. Raw `sqlite3.Error` propagates unchanged, except as the chained cause of a refusal-persistence failure; failed transactions roll back. SQLite failure never becomes a candidate terminal. Records are capped at 16 MiB and cannot be updated, deleted or replaced. |
 | `freeze()` with every planned candidate/inner-fold attempt terminal | Exclude a candidate's entire outer score after any failed/refused inner fold; pool all successful event/horizon errors, break exact RMSE ties by candidate ID, and freeze every outer choice plus the latest-outer prospective candidate. |
 | Missing/started-only attempt or outer fold without a successful candidate | Refuse `EXPERIMENT_VARIANT_FAILED`; publish no selection. |
 | Exact terminal/freeze replay | Return the verified original result idempotently. A refused-submission replay returns its durable envelope without reopening native inputs/labels or rerunning refused scoring; the initial scoring error is not raised again. |
-| Missing seal/admitted-input binding, repeated start, changed submission, another plan for the anchor, source drift or corrupt evidence | Refuse `EXPERIMENT_IDENTITY_CONFLICT`; fit retries remain zero. |
+| Missing seal, valid submission/evidence without admitted inputs, repeated start, changed submission, another plan for the anchor, source drift or corrupt evidence | Refuse `EXPERIMENT_IDENTITY_CONFLICT`; fit retries remain zero. |
 | Unavailable artifact | Refuse `RESOURCE_UNAVAILABLE`. |
 | Unsafe journal artifact path/reference | Refuse `EXPERIMENT_IDENTITY_CONFLICT`; never follow the unsafe path. |
 | Journal payload exceeds 16 MiB | Refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record; incomplete attempts remain unfinished and block selection. |
