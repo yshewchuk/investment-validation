@@ -541,14 +541,13 @@ Only a tracked path absent from the worktree reads as empty.
   pools (which do not themselves grow with new events — see the models doc
   finding), and produces a new, gated, auto-promoted release that carries
   every model binding over unchanged.
-  Retraining the champion/gate/chooser models themselves, monthly, inside the
-  nightly, is cutover PR-13b (design:
+  Retraining the champion/gate/chooser models themselves, monthly, is
+  cutover PR-13b (design:
   `guides/monthly_retrain_refresh_design.md`, #805); a native producer for the
-  Tier-4 forecasts table native
-  currently only imports from a legacy snapshot is cutover PR-13c. Forward
-  inference instead uses the design in `engine/v2/scoring/ARCHITECTURE.md`;
-  it needs no stored forward row. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
-  pool/residual refresh", `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
+  Tier-4 forecasts table native currently only imports from a legacy snapshot
+  is cutover PR-13c. Forward inference instead uses the design in
+  `engine/v2/scoring/ARCHITECTURE.md`; it needs no stored forward row. See
+  this bullet, `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
   issue #192 for the full design.
 - **Captured native comparison export (tools, read-only inputs).**
   `tools/captured_native_comparison.py` exports one explicitly selected,
