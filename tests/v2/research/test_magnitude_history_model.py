@@ -41,9 +41,13 @@ from tests.v2.research.magnitude_trial_support import (
     poison_outcomes,
     register_history,
 )
-from tests.v2.research.test_magnitude_baseline import _evidence, _result_from_report
-from tests.v2.research.test_native_outcomes import _clock, _document, _rows
-from tests.v2.research.test_native_registration import _objects
+from tests.v2.research.test_magnitude_baseline import baseline_evidence, result_from_report
+from tests.v2.research.test_native_outcomes import (
+    read_ledger_rows,
+    read_outcome_document,
+    set_outcome_clock,
+)
+from tests.v2.research.test_native_registration import artifact_object_bytes
 
 
 @pytest.fixture
@@ -60,7 +64,7 @@ def _fallback_source(tmp_path):
         moves=[outcome_move(event, value) for event, value in zip(events, (0., 8., 10., 6.))], folds=("2024",))
 
 
-def _args(source, action, *extra):
+def history_model_args(source, action, *extra):
     return [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
         "--store-root", str(source.store.root), "--as-of-month", MONTH, "--target", "absolute_move",
         "--magnitude-training-start", START, "--magnitude-labels-before", CUTOFF,
@@ -69,13 +73,13 @@ def _args(source, action, *extra):
 
 
 def _invoke(source, capsys, action, *extra, status=0):
-    assert cli.main(_args(source, action, *extra)) == status
+    assert cli.main(history_model_args(source, action, *extra)) == status
     captured = capsys.readouterr()
     assert not captured.err and "Traceback" not in captured.out
     return json.loads(captured.out)
 
 
-def _metadata_only(monkeypatch):
+def forbid_history_model_payloads(monkeypatch):
     original = Repository.scan
 
     def scan(repository, query, *, table_name):
@@ -102,7 +106,7 @@ def _expected(source):
         for horizon, predicted in zip((5, 3, 1), forecasts)}
 
 
-def _metrics(pairs):
+def expected_history_metrics(pairs):
     # Independent elementary arithmetic, never the production metric implementation.
     errors = [abs(actual - predicted) for actual, predicted in pairs]
     return dict(count=len(errors), rmse=math.sqrt(sum(error * error for error in errors) / len(errors)),
@@ -116,10 +120,10 @@ def _assert_fold_metrics(source, result):
     for fold, year, count in zip(result["folds"], (2024, 2025), (12, 6)):
         pairs = [pair for (event_id, _), pair in expected.items() if event_years[event_id] == year]
         assert len(pairs) == count and fold["test_count"] == count // 3
-        assert fold["metrics"] == pytest.approx(_metrics(pairs)), "fold metrics must use only that fold's pairs"
+        assert fold["metrics"] == pytest.approx(expected_history_metrics(pairs)), "fold metrics must use only that fold's pairs"
 
 
-def _event_ids(source, dates):
+def history_event_ids(source, dates):
     return [event["event_id"] for event in sorted(source.events,
         key=lambda event: (event["event_date"], event["event_id"]))
         if event["event_date"].date().isoformat() in dates]
@@ -129,7 +133,7 @@ def test_real_stored_rows_produce_issuer_and_horizon_specific_read_only_forecast
     forbid_history_rebuild(monkeypatch)
     # Pre-window history is needed by the stored model, but must never be decoded again.
     poison_outcomes(monkeypatch, source.repository, source.snapshot, ("2022-06-02", "2023-04-03", "2025-12-03"))
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     result = model.prediction_result(source.repository, source.registration)
     assert result == model.prediction_result(source.repository, source.registration)
     assert result["schema_version"] == "native_magnitude_history_result.v1"
@@ -160,22 +164,22 @@ def test_real_stored_rows_produce_issuer_and_horizon_specific_read_only_forecast
         assert row["fold"] == sealed[key[0]]["event_date"][:4]
         assert row["forecast"] == next(clock for clock in sealed[key[0]]["forecasts"]
                                       if clock["horizon_sessions"] == key[1])
-    assert result["metrics"] == pytest.approx(_metrics(expected.values()))
+    assert result["metrics"] == pytest.approx(expected_history_metrics(expected.values()))
     for horizon in result["per_horizon"]:
         assert {key: value for key, value in horizon.items() if key != "horizon_sessions"} == pytest.approx(
-            _metrics(pair for (_, count), pair in expected.items() if count == horizon["horizon_sessions"]))
+            expected_history_metrics(pair for (_, count), pair in expected.items() if count == horizon["horizon_sessions"]))
     assert {row["horizon_sessions"] for row in result["per_horizon"]} == {5, 3, 1}
     _assert_fold_metrics(source, result)
     for fold, count, dates, mean in zip(result["folds"], (4, 8), (
         ("2023-01-03", "2023-06-02"),
         ("2023-01-03", "2023-06-02", "2024-06-12", "2024-06-17")), (7.5, 9.)):
         assert fold["train_count"] == count
-        assert fold["train_event_ids"] == _event_ids(source, dates)
+        assert fold["train_event_ids"] == history_event_ids(source, dates)
         assert fold["mean_absolute_move_pct"] == mean
     assert result["metrics"]["rmse"] != pytest.approx(sum(fold["metrics"]["rmse"] for fold in result["folds"]) / 2)
     assert result["result_id"] == content_hash({key: value for key, value in result.items() if key != "result_id"})
     assert json.loads(json.dumps(result, allow_nan=False)) == result
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_fold_oracle_rejects_cumulative_later_fold_diagnostics(source):
@@ -184,7 +188,7 @@ def test_fold_oracle_rejects_cumulative_later_fold_diagnostics(source):
     # Exact counterfactual to _metrics(predictions) instead of _metrics(scored):
     # the second fold would score all 18 forecasts rather than its own six.
     cumulative = json.loads(json.dumps(result))
-    cumulative["folds"][1]["metrics"] = _metrics(_expected(source).values())
+    cumulative["folds"][1]["metrics"] = expected_history_metrics(_expected(source).values())
     with pytest.raises(AssertionError, match="fold metrics must use only that fold's pairs"):
         _assert_fold_metrics(source, cumulative)
 
@@ -196,13 +200,13 @@ def test_direct_reporter_preflights_later_label_before_feature_or_label_payloads
     moves.append(outcome_move(history_event("2025-01-08", ticker="SYNTH_A"), None))
     source = magnitude_source(tmp_path, events=events, moves=moves, mixed_days=("2025-01-07", "2025-01-08"))
     try:
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
         for name in ("read_stored", "qualify_magnitude_training_targets", "load_magnitude_targets"):
             monkeypatch.setattr(model, name, support.forbid_access)
         with support.refuses(DataError, "HOLDOUT_ACCESS_DENIED"):
             model.prediction_result(source.repository, source.registration)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
         # Without run-wide label preflight, the forbidden feature read is reached.
         monkeypatch.setattr(model, "preflight_magnitude_targets", lambda *args, **kwargs: {})
         with pytest.raises(AssertionError, match="forbidden access"):
@@ -418,9 +422,9 @@ def test_two_fold_empty_histories_use_distinct_absolute_qualified_means_and_comp
 def test_history_binding_is_exact_metadata_only_and_registers_one_attempt(tmp_path, monkeypatch):
     source = magnitude_source(tmp_path, register=False)
     try:
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         with monkeypatch.context() as patch:
-            _metadata_only(patch)
+            forbid_history_model_payloads(patch)
             poison_outcomes(patch, source.repository, source.snapshot, (), all_outcomes=True)
             registration = register_history(source)
             assert register_history(source) == registration
@@ -447,10 +451,10 @@ def test_history_binding_is_exact_metadata_only_and_registers_one_attempt(tmp_pa
             "weighting": "equal_event_and_horizon"}
         assert {"experiments/v2_prediction.py", "experiments/magnitude_history_report.py"} <= binding["source_closure"].keys()
         assert registration.binding_json == canonical_json(binding).encode()
-        evidence = _evidence(source)
+        evidence = baseline_evidence(source)
         assert evidence["planned_variants"] == 1 and evidence["variant_id"] == registration.variant_id
         assert not {"native_smoke", "native_outcome", "attempted_variants"} & evidence.keys()
-        after = catalog_rows(source.conn), _objects(source.store)
+        after = catalog_rows(source.conn), artifact_object_bytes(source.store)
         assert {table for table in before[0] if before[0][table] != after[0][table]} == {"hypotheses", "experiment_runs"}
         assert [after[1][path] for path in after[1].keys() - before[1].keys()] == [registration.binding_json]
     finally:
@@ -462,14 +466,14 @@ def test_history_binding_is_exact_metadata_only_and_registers_one_attempt(tmp_pa
     {"magnitude_feature_snapshot_id": None, "magnitude_history_start": None}, {"as_of_month": "2026-02"},
 ])
 def test_request_drift_refuses_before_metadata_or_feature_payload(source, monkeypatch, changes):
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     monkeypatch.setattr(stored, "read_stored", support.forbid_access)
     for operation in (native.require_native_registration, inputs.admit_magnitude_inputs):
         with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
             operation(source.conn, source.store, source.repository, source.spec,
                       **{**history_binding(source), **changes})
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("kind", ["absent", "wrong-scope", "wrong-snapshot"])
@@ -487,13 +491,13 @@ def test_absent_or_colliding_original_receipt_refuses_without_payloads(tmp_path,
                 objects=parent.objects, records=parent.records, manifests=tuple(parent.table_manifests.values()),
                 snapshot=parent.snapshot, fence_check=lambda conn: None, clock=SystemClock(),
                 store=source.store, audit_partitions=False)
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
         monkeypatch.setattr(source.repository, "scan", support.forbid_access)
         for operation in (admit_stored, stored.read_stored):
             with support.refuses(DataError, "IDENTITY_CONFLICT"):
                 operation(source.repository, source.snapshot, context)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
 
@@ -523,7 +527,7 @@ def test_real_native_feature_contract_and_fragment_isolation_precede_payloads(tm
             assert ref.object_id not in forbidden, "admission opened a feature object"
             return original_verify(store, ref)
 
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         monkeypatch.setattr(objects, "verify_object_path", verify)
         poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
         for operation in (admit_stored, stored.read_stored):
@@ -532,7 +536,7 @@ def test_real_native_feature_contract_and_fragment_isolation_precede_payloads(tm
         with support.refuses(OpsError if kind == "old-contract" else DataError,
                       "EXPERIMENT_IDENTITY_CONFLICT" if kind == "old-contract" else code):
             register_history(source)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
 
@@ -614,12 +618,12 @@ def test_changed_execution_source_refuses_before_metadata_or_feature_payload(sou
     def changed(*args, **kwargs):
         return {**original(*args, **kwargs), "experiments/magnitude_history_report.py": "sha256:" + "f" * 64}
 
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(native, "source_closure", changed)
     monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         inputs.admit_magnitude_inputs(source.conn, source.store, source.repository, source.spec, **history_binding(source))
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_changed_producer_environment_refuses_without_feature_or_label_payload(source, monkeypatch):
@@ -627,12 +631,12 @@ def test_changed_producer_environment_refuses_without_feature_or_label_payload(s
     monkeypatch.setattr(history, "environment_identity", lambda _: environment)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
     monkeypatch.setattr(model, "read_stored", support.forbid_access)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.prediction_result(source.repository, source.registration)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         inputs.admit_magnitude_inputs(source.conn, source.store, source.repository, source.spec, **history_binding(source))
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_direct_reporter_rederives_self_rehashed_calendar_context_before_payloads(source, monkeypatch):
@@ -653,13 +657,13 @@ def test_direct_reporter_rederives_self_rehashed_calendar_context_before_payload
     document["magnitude_history_request"]["feature_snapshot_id"] = feature.snapshot_id
     validate_magnitude_history_execution(document)  # Integrity alone is insufficient admission.
     invalid = native.NativeRegistration(source.registration.run_id, canonical_json(document).encode())
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
     monkeypatch.setattr(model, "read_stored", support.forbid_access)
     monkeypatch.setattr(stored, "_scan", support.forbid_access)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.prediction_result(source.repository, invalid)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_fake_runner_closure_cannot_publish_invalid_first_registration(tmp_path, monkeypatch):
@@ -668,24 +672,24 @@ def test_fake_runner_closure_cannot_publish_invalid_first_registration(tmp_path,
         code = tmp_path / "fake-code"
         (code / "experiments").mkdir(parents=True)
         (code / "experiments" / "v2_prediction.py").write_text("pass\n")
-        before = catalog_rows(source.conn), _objects(source.store)
-        _metadata_only(monkeypatch)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
+        forbid_history_model_payloads(monkeypatch)
         with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
             native.register_native(source.conn, source.store, source.repository, source.spec,
                                    **{**history_binding(source), "code_root": code})
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
-        assert not _evidence(source)
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
+        assert not baseline_evidence(source)
     finally:
         source.conn.close()
 
 
 def test_history_registration_cannot_prepare_final_holdout_authority(source, monkeypatch):
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         native.prepare_final_holdout_request(source.conn, source.store, source.registration)
     assert source.conn.execute("SELECT COUNT(*) FROM final_holdout_authorizations").fetchone()[0] == 0
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("field", ["variant_id", "run_id", "provenance", "result_id", "schema_version"])
@@ -708,7 +712,7 @@ def test_renderer_refuses_identity_and_digest_drift(source, field):
 
 def test_report_is_deterministic_and_binds_stored_snapshot_clocks_and_limits(source):
     result = model.prediction_result(source.repository, source.registration)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     for no_ledger in (False, True):
         report = model.render_prediction_report(source.registration, result, spec=source.spec, no_ledger=no_ledger)
         assert report == model.render_prediction_report(source.registration, result, spec=source.spec, no_ledger=no_ledger)
@@ -721,7 +725,7 @@ def test_report_is_deterministic_and_binds_stored_snapshot_clocks_and_limits(sou
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.render_prediction_report(source.registration, result,
             spec=replace(source.spec, hypothesis="Another hypothesis"), no_ledger=True)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("kind", ["late-evaluation", "nonfinite-evaluation", "empty-training"])
@@ -737,11 +741,11 @@ def test_bad_later_label_or_empty_training_refuses_without_partial_result(tmp_pa
                    else {"realized_move_pct": float("nan")})
     source = magnitude_source(tmp_path, events=events, moves=moves)
     try:
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         forbid_history_rebuild(monkeypatch)
         with support.refuses(DataError, "POPULATION_COLLAPSED" if kind == "empty-training" else "EXPERIMENT_VARIANT_FAILED"):
             model.prediction_result(source.repository, source.registration)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
         assert not list(tmp_path.rglob("REPORT.md")) and not list(tmp_path.rglob("*.csv"))
     finally:
         source.conn.close()
@@ -751,9 +755,9 @@ def test_native_build_cli_register_smoke_record_and_replay_without_rebuilding(tm
     source = magnitude_source(tmp_path, register=False)
     try:
         with monkeypatch.context() as patch:
-            _metadata_only(patch)
+            forbid_history_model_payloads(patch)
             registered = _invoke(source, capsys, "register")
-        assert registered["registered"] == _evidence(source)["variant_id"]
+        assert registered["registered"] == baseline_evidence(source)["variant_id"]
         forbid_history_rebuild(monkeypatch)
         poison_outcomes(monkeypatch, source.repository, source.snapshot, ("2022-06-02", "2023-04-03", "2025-12-03"))
         poison = tmp_path / "do-not-touch" / "ledger.csv"
@@ -769,35 +773,35 @@ def test_native_build_cli_register_smoke_record_and_replay_without_rebuilding(tm
                 patch.setattr(Path, name, protect(getattr(Path, name)))
             patch.setattr(outcomes, "ledger_append", support.forbid_access)
             smoke = _invoke(source, capsys, "run", "--no-ledger", "--ledger", poison)
-        result = _result_from_report(smoke["report"])
-        assert result["metrics"] == pytest.approx(_metrics(_expected(source).values()))
+        result = result_from_report(smoke["report"])
+        assert result["metrics"] == pytest.approx(expected_history_metrics(_expected(source).values()))
         assert result["event_count"] == 6 and result["forecast_count"] == 18
         assert smoke["recording_mode"] == "smoke"
-        evidence = _evidence(source)
-        smoke_outcome = _document(source, evidence["native_smoke"])
+        evidence = baseline_evidence(source)
+        smoke_outcome = read_outcome_document(source, evidence["native_smoke"])
         assert smoke_outcome["failure_code"] is None and smoke_outcome["ledger_destination"] is None
-        assert _document(source, evidence["native_smoke_receipt"])["ledger_row_hash"] is None
+        assert read_outcome_document(source, evidence["native_smoke_receipt"])["ledger_row_hash"] is None
         assert "native_outcome" not in evidence and not poison.parent.exists()
         assert not list(tmp_path.rglob("*.csv"))
         ledger = tmp_path / "recorded" / "ledger.csv"
-        _clock(monkeypatch, "2026-01-02")
+        set_outcome_clock(monkeypatch, "2026-01-02")
         recorded = _invoke(source, capsys, "run", "--ledger", ledger)
         assert recorded["recording_mode"] == "recorded" and recorded["report"] != smoke["report"]
-        assert _result_from_report(recorded["report"]) == result
-        evidence = _evidence(source)
-        outcome = _document(source, evidence["native_outcome"])
-        completion = _document(source, evidence["native_outcome_receipt"])
+        assert result_from_report(recorded["report"]) == result
+        evidence = baseline_evidence(source)
+        outcome = read_outcome_document(source, evidence["native_outcome"])
+        completion = read_outcome_document(source, evidence["native_outcome_receipt"])
         assert outcome["attempted_variants"] == 1 and outcome["failure_code"] is None
         assert completion["ledger_row_hash"] == content_hash(outcome["ledger_row"])
-        assert _rows(ledger) == [outcome["ledger_row"]]
-        assert _rows(ledger)[0]["date"] == "2026-01-02"
-        assert _rows(ledger)[0]["stage"] == "ran" and _rows(ledger)[0]["promoted"] == "False"
-        before = catalog_rows(source.conn), _objects(source.store), ledger.read_bytes()
-        _clock(monkeypatch, "2026-02-10")
-        _metadata_only(monkeypatch)
+        assert read_ledger_rows(ledger) == [outcome["ledger_row"]]
+        assert read_ledger_rows(ledger)[0]["date"] == "2026-01-02"
+        assert read_ledger_rows(ledger)[0]["stage"] == "ran" and read_ledger_rows(ledger)[0]["promoted"] == "False"
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()
+        set_outcome_clock(monkeypatch, "2026-02-10")
+        forbid_history_model_payloads(monkeypatch)
         assert _invoke(source, capsys, "run", "--no-ledger") == smoke
         assert _invoke(source, capsys, "run", "--ledger", ledger) == recorded
-        assert (catalog_rows(source.conn), _objects(source.store), ledger.read_bytes()) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()) == before
     finally:
         source.conn.close()
 
@@ -805,15 +809,15 @@ def test_native_build_cli_register_smoke_record_and_replay_without_rebuilding(tm
 def test_omitted_and_explicit_pooled_model_keep_identical_v13_registration(tmp_path, capsys):
     source = magnitude_source(tmp_path, register=False)
     try:
-        arguments = _args(source, "register")
+        arguments = history_model_args(source, "register")
         arguments = arguments[:arguments.index("--magnitude-model")]
         assert cli.main(arguments) == 0
         original = json.loads(capsys.readouterr().out)
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         assert cli.main([*arguments, "--magnitude-model", "pooled_mean"]) == 0
         assert json.loads(capsys.readouterr().out) == original
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
-        binding = _document(source, _evidence(source)["native_registration"])
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
+        binding = read_outcome_document(source, baseline_evidence(source)["native_registration"])
         assert binding["schema_version"] == "native_experiment_registration.v1.3"
         assert "magnitude_history_request" not in binding and "magnitude_history" not in binding
     finally:
@@ -823,19 +827,19 @@ def test_omitted_and_explicit_pooled_model_keep_identical_v13_registration(tmp_p
 def test_cli_history_drift_is_r6_before_attempt_and_never_uses_smoke_or_ledger_slot(source, monkeypatch, capsys):
     _, changed_feature = build_history(source, evaluation_years=list(source.spec.folds), history_start="2022-02-01")
     assert changed_feature != source.feature_snapshot
-    before_catalog, before_objects = catalog_rows(source.conn), _objects(source.store)
-    _metadata_only(monkeypatch)
+    before_catalog, before_objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    forbid_history_model_payloads(monkeypatch)
     monkeypatch.setattr(outcomes, "ledger_append", support.forbid_access)
     ledger = source.root / "must-not-exist" / "ledger.csv"
     response = _invoke(source, capsys, "run", "--no-ledger", "--ledger", ledger,
                        "--magnitude-history-start", "2022-02-01", "--magnitude-feature-snapshot-id",
                        changed_feature.snapshot_id, status=2)
     assert response["refused"] == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert _document(source, response["refusal_ref"])["failure_code"] == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert read_outcome_document(source, response["refusal_ref"])["failure_code"] == "EXPERIMENT_IDENTITY_CONFLICT"
     assert catalog_rows(source.conn) == before_catalog
-    assert not {"native_smoke", "native_outcome", "attempted_variants"} & _evidence(source).keys()
+    assert not {"native_smoke", "native_outcome", "attempted_variants"} & baseline_evidence(source).keys()
     assert not ledger.parent.exists() and not list(source.root.rglob("REPORT.md"))
-    assert {path: _objects(source.store)[path] for path in before_objects} == before_objects
+    assert {path: artifact_object_bytes(source.store)[path] for path in before_objects} == before_objects
 
 
 @pytest.mark.parametrize("extra", [
@@ -910,7 +914,7 @@ def _forbid_native_history_effects(monkeypatch, source):
 
 
 def _assert_history_request_before_access(source, monkeypatch, changes, message, *, spec=None):
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(native, "source_closure", support.forbid_access)
     for name in ("resolve_pinned", "resolve", "scan"):
         monkeypatch.setattr(source.repository, name, support.forbid_access)
@@ -920,7 +924,7 @@ def _assert_history_request_before_access(source, monkeypatch, changes, message,
             operation(source.conn, source.store, source.repository, spec or source.spec,
                       **_fresh_history_arguments(**changes))
         _assert_history_problem(caught.value, "INVALID_EXPERIMENT_SPEC", message)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("changes", [
@@ -953,7 +957,7 @@ def test_history_fresh_missing_pin_translates_real_resolution_before_effects(fre
     with pytest.raises(DataError) as caught:
         source.repository.resolve(missing)
     _assert_history_problem(caught.value, "SNAPSHOT_NOT_FOUND", "unknown snapshot id")
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     resolve, resolved = source.repository.resolve, []
 
     def track_resolve(snapshot_id):
@@ -961,7 +965,7 @@ def test_history_fresh_missing_pin_translates_real_resolution_before_effects(fre
         return resolve(snapshot_id)
 
     monkeypatch.setattr(source.repository, "resolve", track_resolve)
-    _metadata_only(monkeypatch)
+    forbid_history_model_payloads(monkeypatch)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
     _forbid_native_history_effects(monkeypatch, source)
     monkeypatch.setattr(stored, "read_stored", support.forbid_access)
@@ -973,12 +977,12 @@ def test_history_fresh_missing_pin_translates_real_resolution_before_effects(fre
                             "stored history identity could not be admitted")
     assert resolved[-1] == missing and resolved.count(missing) == 1
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))
 
 
 def test_history_reader_identity_translation_is_reached_after_real_admission(source, monkeypatch):
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     forbid_history_rebuild(monkeypatch)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
     feature_objects = {r.object_ref.object_id
@@ -1009,5 +1013,5 @@ def test_history_reader_identity_translation_is_reached_after_real_admission(sou
     _assert_history_problem(caught.value, "EXPERIMENT_IDENTITY_CONFLICT",
                             "stored feature identity changed after admission")
     assert calls == [(source.feature_snapshot, source.build["context"])]
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))

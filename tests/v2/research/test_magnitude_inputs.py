@@ -15,7 +15,7 @@ from tests.v2.research.magnitude_trial_support import (
     outcome_move,
     poison_outcomes,
 )
-from tests.v2.research.test_event_history import _commit
+from tests.v2.research.test_event_history import commit_event_history
 
 MONTH = "2025-01"
 CUTOFF = "2024-07-01"
@@ -111,7 +111,7 @@ def test_real_reader_excludes_union_aliases_and_future_objects_before_magnitude_
     events = [*eligible, *protected, sibling]
     moves = [outcome_move(event, value) for event, value in zip(eligible, [-2.5, 0.0, 125.0])]
     moves += [outcome_move(event, None) for event in protected]
-    conn, repository, snapshot = _commit(tmp_path, events, moves)
+    conn, repository, snapshot = commit_event_history(tmp_path, events, moves)
     try:
         poison_outcomes(monkeypatch, repository, snapshot, [e["event_date"].date().isoformat() for e in protected])
         before = conn.total_changes
@@ -155,7 +155,7 @@ def test_explicit_inadmissible_id_refuses_before_any_outcome(tmp_path, monkeypat
     events = [target]
     if kind == "alias":
         events.append({**target, "event_id": "alias", "session": "BMO"})
-    conn, repository, snapshot = _commit(tmp_path, events, [outcome_move(target)])
+    conn, repository, snapshot = commit_event_history(tmp_path, events, [outcome_move(target)])
     try:
         poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         key = "unknown" if kind == "unknown" else target["event_id"]
@@ -170,7 +170,7 @@ def test_explicit_inadmissible_id_refuses_before_any_outcome(tmp_path, monkeypat
 def test_all_objects_preflight_before_first_safe_target_or_mixed_sibling_opens(tmp_path, monkeypatch, missing):
     first, later, protected = history_event("2024-01-04"), history_event("2024-03-05"), history_event("2024-04-05", protected=True)
     moves = [outcome_move(first), outcome_move(protected)] + ([] if missing else [outcome_move(later)])
-    conn, repository, snapshot = _commit(tmp_path, [first, later, protected], moves,
+    conn, repository, snapshot = commit_event_history(tmp_path, [first, later, protected], moves,
                                         mixed_days=("2024-03-05", "2024-04-05"))
     try:
         poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
@@ -189,7 +189,7 @@ def test_all_objects_preflight_before_first_safe_target_or_mixed_sibling_opens(t
 ])
 def test_invalid_or_not_strictly_available_label_refuses_whole_read(tmp_path, value, changes):
     target = history_event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [target], [outcome_move(target, value, **changes)])
+    conn, repository, snapshot = commit_event_history(tmp_path, [target], [outcome_move(target, value, **changes)])
     try:
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             _load(repository, snapshot)
@@ -199,7 +199,7 @@ def test_invalid_or_not_strictly_available_label_refuses_whole_read(tmp_path, va
 
 def test_availability_boundary_is_strict_and_precedes_numeric_validation(tmp_path, monkeypatch):
     target = history_event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [target], [outcome_move(target, None, available_as_of_date=CUTOFF)])
+    conn, repository, snapshot = commit_event_history(tmp_path, [target], [outcome_move(target, None, available_as_of_date=CUTOFF)])
     def forbidden(*args):
         pytest.fail("unavailable numeric label must not be parsed")
     monkeypatch.setattr(magnitude_inputs, "_parse_target", forbidden)
@@ -219,7 +219,7 @@ def test_non_numeric_and_boolean_values_are_not_coerced(value):
 
 def test_last_day_before_label_cutoff_is_admitted_and_recipe_is_not_shared_mutable_state(tmp_path):
     target = history_event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [target], [outcome_move(target, -3.0, available_as_of_date="2024-06-30")])
+    conn, repository, snapshot = commit_event_history(tmp_path, [target], [outcome_move(target, -3.0, available_as_of_date="2024-06-30")])
     try:
         result = _load(repository, snapshot)
         assert result.absolute_move_pct.tolist() == [3.0]
@@ -237,7 +237,7 @@ def test_last_day_before_label_cutoff_is_admitted_and_recipe_is_not_shared_mutab
 ])
 def test_invalid_context_refuses_before_outcomes(tmp_path, monkeypatch, changes, code):
     target = history_event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [target], [outcome_move(target)])
+    conn, repository, snapshot = commit_event_history(tmp_path, [target], [outcome_move(target)])
     try:
         poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         with pytest.raises(DataError, match=code):
@@ -248,7 +248,7 @@ def test_invalid_context_refuses_before_outcomes(tmp_path, monkeypatch, changes,
 
 def test_wrong_snapshot_and_late_repository_failure_never_return_partial_or_retry(tmp_path, monkeypatch):
     first, second = history_event("2024-01-04"), history_event("2024-03-05")
-    conn, repository, snapshot = _commit(tmp_path, [first, second], [outcome_move(first), outcome_move(second)])
+    conn, repository, snapshot = commit_event_history(tmp_path, [first, second], [outcome_move(first), outcome_move(second)])
     try:
         with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
             _load(repository, replace(snapshot, calendar_version="wrong-calendar"))

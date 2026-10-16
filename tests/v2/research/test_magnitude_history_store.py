@@ -38,7 +38,7 @@ from tests.v2.research.magnitude_trial_support import (
     outcome_move,
     poison_outcomes,
 )
-from tests.v2.research.test_native_registration import _objects
+from tests.v2.research.test_native_registration import artifact_object_bytes
 
 
 def _source(tmp_path, *, mixed_days=(), overrides=None, recent_day="2024-06-12"):
@@ -134,7 +134,7 @@ def test_native_roundtrip_math_lineage_units_identity_and_replay(source, monkeyp
         "libraries": libraries, "numerical_threads": 1}
     assert context["feature_recipe"]["features"] == [
         {"name": name, "on_missing": "zero_count" if name == "n_prior" else "null"} for name in FEATURES]
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(magnitude_features, "load_magnitude_history", _forbid)
     monkeypatch.setattr(event_history, "load_event_history", _forbid)
     monkeypatch.setattr(stored, "_preflight_source", _forbid)
@@ -143,7 +143,7 @@ def test_native_roundtrip_math_lineage_units_identity_and_replay(source, monkeyp
     assert first["context"] == context and first["feature_snapshot"] == to_document(committed)
     assert first == _read(source, output)  # Two separate calls pin stored-read determinism.
     assert build_history(source) == (build, output)  # Metadata admission, then artifact-only replay.
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert first["inputs_id"] == content_hash({"context": context,
         "feature_snapshot": to_document(committed), "rows": first["rows"]})
     assert len(first["rows"]) == 12
@@ -230,7 +230,7 @@ def test_two_issuers_with_overlapping_dates_keep_exact_stored_features_and_linea
         _, output = build_history(source, event_ids=selected)
         poison_outcomes(monkeypatch, repository, snapshot, [], all_outcomes=True)
         monkeypatch.setattr(stored, "_prepare_history", _forbid)
-        before = catalog_rows(conn), _objects(source.store)
+        before = catalog_rows(conn), artifact_object_bytes(source.store)
         rows = _read(source, output, event_ids=selected)["rows"]
         assert {(row["event_id"], row["horizon_sessions"]) for row in rows} == {
             (event_id, horizon) for event_id in selected for horizon in (1, 3, 5)}
@@ -256,7 +256,7 @@ def test_two_issuers_with_overlapping_dates_keep_exact_stored_features_and_linea
                 history.append({**identity, "event_date": move["event_date"],
                                 "target_available_on": move["available_as_of_date"]})
             assert lineage["history"] == history and lineage["read_inputs"] == inputs
-        assert (catalog_rows(conn), _objects(source.store)) == before
+        assert (catalog_rows(conn), artifact_object_bytes(source.store)) == before
     finally:
         conn.close()
 
@@ -279,7 +279,7 @@ def test_eight_and_twelve_event_histories_store_independent_emas(tmp_path, monke
         _, output = build_history(source)
         poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
         monkeypatch.setattr(stored, "_prepare_history", _forbid)
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         rows = [row for row in _read(source, output)["rows"] if row["event_id"] == target["event_id"]]
         assert [row["horizon_sessions"] for row in rows] == [1, 3, 5]
         for row in rows:
@@ -296,7 +296,7 @@ def test_eight_and_twelve_event_histories_store_independent_emas(tmp_path, monke
                 else:
                     assert row[f"ema{span}_prior_move"] is None
                     assert row[f"ema{span}_prior_abs_move"] is None
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
 
@@ -305,10 +305,10 @@ def test_later_mixed_candidate_refuses_before_even_first_safe_outcome(tmp_path, 
     source = _source(tmp_path, mixed_days=("2023-06-02", "2024-06-12"))
     try:
         poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
             build_history(source)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
 
@@ -325,10 +325,10 @@ def test_non_native_computed_moves_contract_refuses_before_outcome_objects(tmp_p
         assert stored.COMPUTED_MOVES_CONTRACT != foreign
         assert source.repository.resolve(source.snapshot.snapshot_id) == source.snapshot
         poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
             build_history(source)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
 
@@ -366,11 +366,11 @@ def test_environment_only_drift_changes_context_and_refuses_old_feature_snapshot
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
     monkeypatch.setattr(stored, "_scan", _forbid)
     monkeypatch.setattr(stored, "_prepare_history", _forbid)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         _read(source, output)
     assert calls == [1, 1]
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("path", ["engine/v2/features/panel_math.py",
@@ -399,11 +399,11 @@ def test_source_only_drift_changes_context_and_refuses_old_feature_snapshot(sour
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
     monkeypatch.setattr(stored, "_scan", _forbid)
     monkeypatch.setattr(stored, "_prepare_history", _forbid)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         _read(source, output)
     assert calls == [1, 1]
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("changes,code", [
@@ -414,10 +414,10 @@ def test_source_only_drift_changes_context_and_refuses_old_feature_snapshot(sour
 def test_empty_folds_and_late_history_start_refuse_before_build_payloads(source, monkeypatch, changes, code):
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
     monkeypatch.setattr(stored, "_prepare_history", _forbid)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match=code):
         build_history(source, **changes)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_source_or_output_reference_drift_refuses_before_feature_payload(source, monkeypatch):
@@ -454,10 +454,10 @@ def test_colliding_native_success_receipt_refuses_before_outcomes(source, monkey
         fence_check=lambda conn: None, clock=SystemClock(), store=source.store, audit_partitions=False)
     catalog.commit_snapshot(source.conn, **{**request, field: value})
     monkeypatch.setattr(stored, "_preflight_source", _forbid)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         build_history(source)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("status", ["failed", "conflict"])
@@ -480,10 +480,10 @@ def test_noncommitted_matching_receipt_refuses_before_result_resolution(source, 
         return resolve(snapshot_id)
 
     monkeypatch.setattr(source.repository, "resolve", guarded)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         build_history(source) if action == "build" else _read(source, source.snapshot)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_all_metadata_is_admitted_before_any_feature_column_decode(source, monkeypatch):
@@ -549,10 +549,10 @@ def test_real_stored_bad_feature_or_missingness_refuses_without_partial_return(s
 
     monkeypatch.setattr(stored, "_event_rows", malformed)
     _, output = build_history(source)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def _observe_long_target_validation(source, monkeypatch, field):
@@ -591,12 +591,12 @@ def test_sufficient_history_stored_null_and_negative_emas_refuse(long_source, mo
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
     monkeypatch.setattr(stored, "_prepare_history", _forbid)
     observed = _observe_long_target_validation(source, monkeypatch, field)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH") as failure:
         _read(source, output)
     assert failure.value.problem.message == "stored history feature or missingness is invalid"
     assert observed == [value]
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("field", ["ema8_prior_move", "ema8_prior_abs_move",
@@ -622,13 +622,13 @@ def test_sufficient_history_nonfinite_emas_refuse_after_real_feature_scan(long_s
 
     monkeypatch.setattr(stored, "_scan", malformed)
     observed = _observe_long_target_validation(source, monkeypatch, field)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH") as failure:
         _read(source, output)
     assert failure.value.problem.message == "stored history feature or missingness is invalid"
     assert len(observed) == 1 and observed[0] is value
     assert seen == [tuple(stored.METADATA), (*stored.METADATA, *FEATURES)] and changed == [field]
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("value", [float("inf"), float("-inf")])
@@ -708,10 +708,10 @@ def test_replay_after_head_moves_returns_original_artifact_without_head_effect(s
     scope, _ = stored._names(built["context"])
     source.conn.execute("UPDATE data_snapshot_heads SET snapshot_id=?, generation=generation+1 WHERE scope=?",
                         (source.snapshot.snapshot_id, scope))
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(magnitude_features, "load_magnitude_history", _forbid)
     assert build_history(source) == (built, output)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_replay_reverifies_tampered_stored_artifact_without_rebuild_or_publication(source, monkeypatch):
@@ -725,10 +725,10 @@ def test_replay_reverifies_tampered_stored_artifact_without_rebuild_or_publicati
     monkeypatch.setattr(stored, "_prepare_history", _forbid)
     monkeypatch.setattr(source.store, "publish_bytes", _forbid)
     monkeypatch.setattr(catalog, "commit_snapshot", _forbid)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="OBJECT_CORRUPT"):
         build_history(source)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def _cli_args(source):
@@ -792,11 +792,11 @@ def test_cli_native_typed_errors_preserve_complete_envelope_and_close_catalog(
 
     monkeypatch.setattr(bootstrap, "connect", track)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     assert entry.main([action, *args]) == 2
     captured = capsys.readouterr()
     assert json.loads(captured.out) == expected and captured.err == ""
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert len(opened) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         opened[0].execute("SELECT 1")
@@ -833,7 +833,7 @@ def test_cli_unknown_option_refuses_before_execution_and_bootstrap(source, monke
     args = _cli_args(source)
     if action == "read":
         args += ["--feature-snapshot-id", "unused"]
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(entry, "open_catalog", _forbid)
     monkeypatch.setattr(entry, "_execute", _forbid)
     with pytest.raises(SystemExit) as error:
@@ -841,7 +841,7 @@ def test_cli_unknown_option_refuses_before_execution_and_bootstrap(source, monke
     assert error.value.code == 2
     captured = capsys.readouterr()
     assert "--caller-features" in captured.err and captured.out == ""
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
@@ -870,14 +870,14 @@ def test_cli_event_subset_build_and_read_keep_full_eligible_history(source, monk
     assert entry.main(["build", *args]) == 0
     built = json.loads(capsys.readouterr().out)
     assert [e["event_id"] for e in built["context"]["temporal_plan"]["events"]] == selected
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     assert entry.main(["read", *args, "--feature-snapshot-id", built["feature_snapshot"]["snapshot_id"]]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["context"] == built["context"]
     assert {r["event_id"] for r in result["rows"]} == set(selected) and len(result["rows"]) == 6
     latest = {r["horizon_sessions"]: r for r in result["rows"] if r["event_id"] == selected[-1]}
     assert {h: r["mean_prior_abs_move"] for h, r in latest.items()} == {1: 5.5, 3: 4., 5: 4.}
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
@@ -896,7 +896,7 @@ def test_cli_invalid_store_root_refuses_before_bootstrap_or_store_construction(
     monkeypatch.setattr(entry, "_execute", _forbid)
     monkeypatch.setattr(entry, "open_catalog", _forbid)
     monkeypatch.setattr(entry, "ArtifactStore", _forbid)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     assert entry.main([action, *args]) == 2
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"refused": "UNSAFE_PATH"} and captured.err == ""
@@ -905,7 +905,7 @@ def test_cli_invalid_store_root_refuses_before_bootstrap_or_store_construction(
         assert not root.parent.exists()
     if kind == "file":
         assert root.read_text() == "synthetic non-directory store path"
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
@@ -917,14 +917,14 @@ def test_cli_existing_empty_store_reaches_native_object_admission(source, capsys
     args[3] = str(root)
     if action == "read":
         args += ["--feature-snapshot-id", output.snapshot_id]
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     assert entry.main([action, *args]) == 2
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"refused": "OBJECT_CORRUPT",
         "message": "OBJECT_CORRUPT: published object bytes do not match its recorded hash"}
     assert captured.err == ""
     assert list(root.iterdir()) == []
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("action", ["build", "read"])
@@ -964,12 +964,12 @@ def test_cli_raw_local_failures_are_redacted_and_close_open_catalogs(source, mon
     else:
         monkeypatch.setattr(entry, "open_catalog", track)
         monkeypatch.setattr(entry, "ArtifactStore", fail)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     assert entry.main([action, *args]) == 2
     captured = capsys.readouterr()
     expected = "UNSAFE_PATH" if fault == "store_artifact" else "INPUT_CHANGED"
     assert json.loads(captured.out) == {"refused": expected} and captured.err == ""
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert len(opened) == (1 if fault in ("store_os", "store_artifact") else 0)
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
@@ -999,12 +999,12 @@ def test_recipe_and_physical_contract_are_closed():
 def test_context_or_source_mismatch_refuses_before_any_source_or_feature_payload(source, monkeypatch):
     binding = entry.context(source.repository, source.snapshot, **HISTORY_REQUEST)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         stored.materialize(source.repository, source.snapshot, {**binding, "history_start": "2022-02-01"})
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         stored.materialize(source.repository, replace(source.snapshot, calendar_version="different"), binding)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("action", ["materialize", "read_stored"])
@@ -1022,10 +1022,10 @@ def test_missing_direct_context_identity_has_a_typed_refusal_before_payloads(sou
         if missing != "context_id":
             binding["context_id"] = content_hash({k: v for k, v in binding.items() if k != "context_id"})
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         getattr(stored, action)(source.repository, source.snapshot, binding)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("scope,name,value", [
@@ -1053,11 +1053,11 @@ def test_rehashed_direct_context_guards_all_targets_before_outcomes(source, monk
     plan["plan_id"] = content_hash({k: v for k, v in plan.items() if k != "plan_id"})
     binding["context_id"] = content_hash({k: v for k, v in binding.items() if k != "context_id"})
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     code = "HOLDOUT_ACCESS_DENIED" if name == "event_id" else "CONTRACT_MISMATCH"
     with pytest.raises(DataError, match=code):
         stored.materialize(source.repository, source.snapshot, binding)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_direct_engine_accepts_rehashed_calendar_metadata_but_public_read_rederives_context(source, monkeypatch):
@@ -1077,7 +1077,7 @@ def test_direct_engine_accepts_rehashed_calendar_metadata_but_public_read_rederi
     output = stored.materialize(source.repository, source.snapshot, binding)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
     monkeypatch.setattr(stored, "_prepare_history", _forbid)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     result = stored.read_stored(source.repository, output, binding)
     assert result["context"] == binding and result["feature_snapshot"] == to_document(output)
     assert len(result["rows"]) == 12
@@ -1087,7 +1087,7 @@ def test_direct_engine_accepts_rehashed_calendar_metadata_but_public_read_rederi
     monkeypatch.setattr(stored, "_scan", _forbid)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT: feature snapshot is not the committed context output"):
         _read(source, output)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_equal_feature_values_under_new_context_have_distinct_physical_objects(source):
@@ -1103,10 +1103,10 @@ def test_equal_feature_values_under_new_context_have_distinct_physical_objects(s
 
 def test_explicit_protected_population_fails_before_any_outcome_or_publication(source, monkeypatch):
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
         build_history(source, event_ids=[source.forbidden[0]["event_id"]])
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("name,value", [
@@ -1248,13 +1248,13 @@ def test_lazy_cache_preserves_invalid_label_order_without_catalog_or_receipt_eff
                 [e["event_date"].date().isoformat() for e in source.events[invalid_index + 1:] + source.forbidden])
         context = entry.context(source.repository, source.snapshot, **HISTORY_REQUEST)
         scope, receipt = stored._names(context)
-        before, existing_objects = catalog_rows(source.conn), _objects(source.store)
+        before, existing_objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             build_history(source)
         assert catalog_rows(source.conn) == before
         assert source.conn.execute("SELECT 1 FROM data_import_receipts WHERE receipt_id=?", (receipt,)).fetchone() is None
         assert source.conn.execute("SELECT 1 FROM data_snapshot_heads WHERE scope=?", (scope,)).fetchone() is None
-        after = _objects(source.store)
+        after = artifact_object_bytes(source.store)
         assert {key: after[key] for key in existing_objects} == existing_objects
         if invalid_index == 2:
             assert len(after) == len(existing_objects) + 2  # Earlier complete objects are unreferenced.

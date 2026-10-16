@@ -17,7 +17,7 @@ from tests.v2.research.magnitude_trial_support import (
     outcome_move,
     poison_outcomes,
 )
-from tests.v2.research.test_event_history import _commit, _read
+from tests.v2.research.test_event_history import commit_event_history, read_event_history
 
 DAY = "2023-03-02"
 TICKER = "SYNTH"
@@ -26,7 +26,7 @@ TICKER = "SYNTH"
 @pytest.fixture
 def committed(tmp_path):
     event = history_event(DAY)
-    conn, repository, snapshot = _commit(tmp_path, [event], [outcome_move(event)])
+    conn, repository, snapshot = commit_event_history(tmp_path, [event], [outcome_move(event)])
     try:
         record, = repository.fragment_records(snapshot, "computed_moves")
         yield repository, snapshot, record
@@ -69,7 +69,7 @@ def test_native_two_issuer_index_preserves_exact_admitted_membership_without_out
     first, second = "2023-01-02", DAY
     events = [history_event(day, ticker=ticker) for ticker in (TICKER, "SYNTH_B")
               for day in (first, second)]
-    conn, repository, snapshot = _commit(tmp_path, events[::-1], [outcome_move(e) for e in events])
+    conn, repository, snapshot = commit_event_history(tmp_path, events[::-1], [outcome_move(e) for e in events])
     try:
         records = tuple(repository.fragment_records(snapshot, "computed_moves"))
         by_key = {record.primary_key_min: record for record in records}
@@ -332,7 +332,7 @@ def test_late_competing_native_range_refuses_before_opening_earlier_safe_object(
     first, second, target = history_event("2023-01-02"), history_event(DAY), history_event("2024-06-20")
     competing_days = (f"{DAY}T12:00:00", f"{DAY}T15:00:00")
     moves = [outcome_move(first), outcome_move(second), *[outcome_move(second, event_date=day) for day in competing_days]]
-    conn, repository, snapshot = _commit(tmp_path, [first, second, target], moves,
+    conn, repository, snapshot = commit_event_history(tmp_path, [first, second, target], moves,
         mixed_days=competing_days)
     try:
         records = repository.fragment_records(snapshot, "computed_moves")
@@ -342,7 +342,7 @@ def test_late_competing_native_range_refuses_before_opening_earlier_safe_object(
         assert late_population.row_count == 3 and len(late_population.records) == 2
         opened = poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         with pytest.raises(DataError) as failure:
-            _read(repository, snapshot, target)
+            read_event_history(repository, snapshot, target)
         assert failure.value.problem == fail("HOLDOUT_ACCESS_DENIED",
             "research requires event-isolated outcome fragments").problem
         assert all(name == "earnings_events" for name, _ in repository.scans)

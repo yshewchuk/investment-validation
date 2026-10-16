@@ -48,7 +48,7 @@ from tests.v2.research.magnitude_trial_support import (
     magnitude_source,
     outcome_move,
 )
-from tests.v2.research.test_native_registration import _objects
+from tests.v2.research.test_native_registration import artifact_object_bytes
 
 
 def _sha(value):
@@ -229,7 +229,7 @@ def test_shared_population_refusal_is_normalized_at_outer_reconstruction(source,
 
 def test_real_seal_verify_is_complete_metadata_only_idempotent_and_preserves_anchor(source, monkeypatch):
     opened = _metadata_only(monkeypatch, source)
-    catalog, objects, anchor = catalog_rows(source.conn), _objects(source.store), source.registration.binding_json
+    catalog, objects, anchor = catalog_rows(source.conn), artifact_object_bytes(source.store), source.registration.binding_json
     request = _request()
     sealed = search.seal_search_plan(source.conn, source.store, source.registration, request)
     plan, ref = sealed["plan"], from_document(ArtifactRef, sealed["plan_ref"])
@@ -261,7 +261,7 @@ def test_real_seal_verify_is_complete_metadata_only_idempotent_and_preserves_anc
     assert search.read_search_plan(source.conn, source.store, source.registration, _request(), ref) == plan
     assert search.seal_search_plan(source.conn, source.store, source.registration, request) == sealed
     assert catalog_rows(source.conn) == catalog and source.registration.binding_json == anchor
-    after = _objects(source.store)
+    after = artifact_object_bytes(source.store)
     assert all(after[key] == value for key, value in objects.items())
     assert set(after) - set(objects) <= {ref.storage_key}
     assert opened and all(item.schema_ref in (search.SCHEMA, "native_experiment_registration.v1.5") for item in opened)
@@ -403,14 +403,14 @@ def test_intact_catalog_owned_v14_anchor_refuses_before_nested_planning_or_publi
     assert registration.document["schema_version"] == "native_experiment_registration.v1.4"
     validate_magnitude_history_execution(registration.document)
     assert native.read_native_registration(source.conn, source.store, spec).binding_json == registration.binding_json
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(search, "_nested", forbid_access)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", forbid_access)
     with pytest.raises(OpsError) as caught:
         search.seal_search_plan(source.conn, source.store, registration, _request())
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "fitted magnitude execution requires a sealed v1.5 plan")
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("field", ["training_labels_before", "training_candidate_event_ids"])
@@ -519,7 +519,7 @@ def test_alternate_inner_map_has_exact_fits_and_adjacent_cap_refuses_before_publ
     assert plan["candidate_count"] == 6 and plan["planned_fit_count"] == 42
     assert search.read_search_plan(source.conn, source.store, source.registration, request,
         from_document(ArtifactRef, sealed["plan_ref"])) == plan
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     request["max_fits"] = 41
     monkeypatch.setattr(search.itertools, "product", forbid_access)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", forbid_access)
@@ -527,7 +527,7 @@ def test_alternate_inner_map_has_exact_fits_and_adjacent_cap_refuses_before_publ
         search.seal_search_plan(source.conn, source.store, source.registration, request)
     assert to_document(caught.value.problem) == _problem(
         "INVALID_EXPERIMENT_SPEC", "planned search fits exceed the explicit cap")
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_single_outer_anchor_has_exact_refit_budget_and_adjacent_cap_refusal(source, monkeypatch):
@@ -554,7 +554,7 @@ def test_single_outer_anchor_has_exact_refit_budget_and_adjacent_cap_refusal(sou
     assert search.read_search_plan(source.conn, source.store, registration, request,
         from_document(ArtifactRef, sealed["plan_ref"])) == plan
     assert catalog_rows(source.conn) == catalog
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     request["max_fits"] = 20
     monkeypatch.setattr(search.itertools, "product", forbid_access)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", forbid_access)
@@ -562,7 +562,7 @@ def test_single_outer_anchor_has_exact_refit_budget_and_adjacent_cap_refusal(sou
         search.seal_search_plan(source.conn, source.store, registration, request)
     assert to_document(caught.value.problem) == _problem(
         "INVALID_EXPERIMENT_SPEC", "planned search fits exceed the explicit cap")
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_declared_candidate_ceiling_is_admitted_without_expanding_or_executing(monkeypatch):
@@ -610,12 +610,12 @@ def test_rehashed_plan_drift_refuses_complete_reconstruction(source, field):
         plan["extra"] = "unbound"
     plan["plan_id"] = _sha({key: value for key, value in plan.items() if key != "plan_id"})
     ref = source.store.publish_bytes(canonical_json(plan).encode(), schema_ref="magnitude_search_plan.v1")
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(OpsError) as caught:
         search.read_search_plan(source.conn, source.store, source.registration, _request(), ref)
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("drift", ["anchor_source", "fold_source", "planner_source", "environment"])
@@ -643,7 +643,7 @@ def test_installed_identity_drift_refuses_without_publication(source, monkeypatc
 @pytest.mark.parametrize("drift", ["anchor_source", "fold_source", "environment"])
 def test_prepare_rejects_installed_anchor_drift_before_publication(source, monkeypatch, drift):
     _metadata_only(monkeypatch, source)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     if drift == "environment":
         monkeypatch.setattr(search, "environment_identity", lambda _: {"changed": True})
     else:
@@ -659,7 +659,7 @@ def test_prepare_rejects_installed_anchor_drift_before_publication(source, monke
         search.seal_search_plan(source.conn, source.store, source.registration, _request())
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "search anchor sources or environment differ from this installation")
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_wrong_reference_schema_refuses_before_open(source, monkeypatch):
@@ -674,7 +674,7 @@ def test_wrong_reference_schema_refuses_before_open(source, monkeypatch):
 @pytest.mark.parametrize("kind", ["none", "document"])
 def test_nonreference_values_refuse_before_preparation_or_artifacts(source, monkeypatch, kind):
     ref = None if kind == "none" else to_document(artifact_reference(b"metadata", search.SCHEMA))
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(search, "_prepare", forbid_access)
     monkeypatch.setattr(ArtifactStore, "read_verified", forbid_access)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", forbid_access)
@@ -682,7 +682,7 @@ def test_nonreference_values_refuse_before_preparation_or_artifacts(source, monk
         search.read_search_plan(source.conn, source.store, source.registration, _request(), ref)
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("field", ["artifact_id", "storage_key", "byte_size", "schema_version"])
@@ -702,12 +702,12 @@ def test_same_hash_reference_metadata_drift_refuses_before_plan_open(source, mon
         return original(store, candidate)
     monkeypatch.setattr(ArtifactStore, "read_verified", read)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", forbid_access)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(OpsError) as caught:
         search.read_search_plan(source.conn, source.store, source.registration, _request(), changed)
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
-    assert opened and (catalog_rows(source.conn), _objects(source.store)) == before
+    assert opened and (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert (source.store.root / ref.storage_key).read_bytes() == payload
 
 
@@ -730,7 +730,7 @@ def test_forged_metadata_schema_cannot_open_arbitrary_payload(source, monkeypatc
     OSError("unreadable source"), ArtifactError("UNSAFE_PATH", "invalid source path"), ValueError("invalid source")])
 def test_unverifiable_installed_source_is_identity_refusal(source, monkeypatch, failure):
     _metadata_only(monkeypatch, source)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     def broken(*args):
         raise failure
     monkeypatch.setattr(search, "source_closure", broken)
@@ -739,7 +739,7 @@ def test_unverifiable_installed_source_is_identity_refusal(source, monkeypatch, 
         search.seal_search_plan(source.conn, source.store, source.registration, _request())
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "search implementation sources cannot be verified")
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def _problem(code, message, *, details=None):
@@ -783,7 +783,7 @@ def test_missing_plan_object_has_exact_resource_problem_without_publication(sour
     store = ArtifactStore(tmp_path / "registration-only")
     store.publish_bytes(source.registration.binding_json, schema_ref="native_experiment_registration.v1.5")
     assert not (store.root / ref.storage_key).exists()
-    before = catalog_rows(source.conn), _objects(store)
+    before = catalog_rows(source.conn), artifact_object_bytes(store)
     request, reference = tmp_path / "request.json", tmp_path / "reference.json"
     request.write_text(json.dumps(_request()))
     reference.write_text(json.dumps(sealed["plan_ref"]))
@@ -798,12 +798,12 @@ def test_missing_plan_object_has_exact_resource_problem_without_publication(sour
     assert cli.main(args) == 2
     captured = capsys.readouterr()
     assert not captured.err and json.loads(captured.out) == {"refused": expected}
-    assert (catalog_rows(source.conn), _objects(store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(store)) == before
 
 
 @pytest.mark.parametrize("code", ["MISSING", "NOT_A_REGULAR_FILE", "UNSAFE_PATH"])
 def test_other_publication_artifact_failures_have_exact_resource_problem(source, monkeypatch, code):
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     def broken(*args, **kwargs):
         raise ArtifactError(code, "synthetic private detail")
     monkeypatch.setattr(ArtifactStore, "publish_bytes", broken)
@@ -812,7 +812,7 @@ def test_other_publication_artifact_failures_have_exact_resource_problem(source,
     expected = _problem("RESOURCE_UNAVAILABLE", "search planning request could not be completed")
     expected.update(category="resource", retryable=True)
     assert to_document(caught.value.problem) == expected
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_changed_catalog_anchor_refuses_before_plan_publication(source, monkeypatch):
@@ -873,20 +873,20 @@ def test_real_cli_prepare_verify_preserves_catalog_and_no_trial_state(source, tm
     output = json.loads(capsys.readouterr().out)
     assert set(output) == {"plan_ref", "plan_id", "candidate_count", "planned_fit_count"}
     assert output["candidate_count"] == 6 and output["planned_fit_count"] == 60
-    after_prepare = _objects(source.store)
+    after_prepare = artifact_object_bytes(source.store)
     paths_after = {str(path.relative_to(source.store.root)) for path in source.store.root.rglob("*") if path.is_file()}
     assert paths_after - paths_before <= {output["plan_ref"]["storage_key"]}
     reference.write_text(json.dumps(output["plan_ref"]))
     assert cli.main(_args(source, "verify", request, reference)) == 0
     assert json.loads(capsys.readouterr().out) == {"verified": output["plan_id"]}
     assert catalog_rows(source.conn) == before
-    assert _objects(source.store) == after_prepare
+    assert artifact_object_bytes(source.store) == after_prepare
     assert {str(path.relative_to(source.store.root)) for path in source.store.root.rglob("*") if path.is_file()} == paths_after
     assert cli.main([*_args(source, "prepare", request), "--no-ledger"]) == 0
     assert json.loads(capsys.readouterr().out) == output
     assert cli.main([*_args(source, "verify", request, reference), "--no-ledger"]) == 0
     assert json.loads(capsys.readouterr().out) == {"verified": output["plan_id"]}
-    assert catalog_rows(source.conn) == before and _objects(source.store) == after_prepare
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == after_prepare
     assert {str(path.relative_to(source.store.root)) for path in source.store.root.rglob("*") if path.is_file()} == paths_after
 
 
@@ -946,11 +946,11 @@ def test_cli_malformed_or_missing_inputs_have_exact_envelopes_and_no_effects(sou
     expected = _problem(code, message)
     if code == "RESOURCE_UNAVAILABLE":
         expected.update(category="resource", retryable=True)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     assert cli.main(args) == 2
     captured = capsys.readouterr()
     assert not captured.err and json.loads(captured.out) == {"refused": expected}
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert not (tmp_path / "missing").exists()
 
 
@@ -993,22 +993,22 @@ def test_cli_bounds_each_external_document_before_catalog(
     args = _args(source, "verify", request, reference)
     args[args.index(option) + 1] = str(bad)
     monkeypatch.setattr(cli, "connect", forbid_access)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     assert cli.main(args) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": _problem("INVALID_EXPERIMENT_SPEC", message)}
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_cli_fifo_refuses_without_blocking(source, tmp_path):
     path = tmp_path / "fifo"
     os.mkfifo(path)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     result = subprocess.run([sys.executable, "-m", "experiments.v2_magnitude_search",
         *_args(source, "prepare", path)], cwd=ROOT, capture_output=True, text=True, timeout=15)
     assert result.returncode == 2 and not result.stderr
     assert json.loads(result.stdout) == {"refused": _problem(
         "INVALID_EXPERIMENT_SPEC", "search metadata requires bounded regular files")}
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_bounded_reader_accepts_exact_limit_and_closes_descriptor(tmp_path, monkeypatch):
@@ -1091,11 +1091,11 @@ def test_cli_does_not_misclassify_unexpected_builtins(source, tmp_path, monkeypa
         raise error
     monkeypatch.setattr(cli, "connect", connect)
     monkeypatch.setattr(cli, stage, broken)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(error_type) as caught:
         cli.main(_args(source, "prepare", request))
     assert caught.value is error and not capsys.readouterr().out
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     for conn in connections:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             conn.execute("SELECT 1")
@@ -1132,12 +1132,12 @@ def test_cli_unopenable_socket_is_resource_failure_before_catalog(source, tmp_pa
         return original(candidate, flags, *args, **kwargs)
     monkeypatch.setattr(cli.os, "open", open_error)
     monkeypatch.setattr(cli, "connect", forbid_access)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     assert cli.main(_args(source, "prepare", path)) == 2
     expected = _problem("RESOURCE_UNAVAILABLE", "search planning request could not be completed")
     expected.update(category="resource", retryable=True)
     assert json.loads(capsys.readouterr().out) == {"refused": expected}
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("kind,code,message,details", [
@@ -1160,10 +1160,10 @@ def test_cli_preserves_native_spec_conversion_refusals(
     args = _args(source, "prepare", tmp_path / "never-read-request")
     args[args.index("--spec") + 1] = str(path)
     monkeypatch.setattr(cli, "connect", forbid_access)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     assert cli.main(args) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": _problem(code, message, details=details)}
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_bounded_reader_accumulates_short_unbuffered_reads(tmp_path, monkeypatch):

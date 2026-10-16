@@ -36,15 +36,19 @@ from tests.v2.research.magnitude_trial_support import (
     poison_outcomes,
     refuses,
 )
-from tests.v2.research.test_magnitude_baseline import _evidence, _result_from_report
+from tests.v2.research.test_magnitude_baseline import baseline_evidence, result_from_report
 from tests.v2.research.test_magnitude_history_model import (
-    _args,
-    _event_ids,
-    _metadata_only,
-    _metrics,
+    expected_history_metrics,
+    forbid_history_model_payloads,
+    history_event_ids,
+    history_model_args,
 )
-from tests.v2.research.test_native_outcomes import _clock, _document, _rows
-from tests.v2.research.test_native_registration import _objects
+from tests.v2.research.test_native_outcomes import (
+    read_ledger_rows,
+    read_outcome_document,
+    set_outcome_clock,
+)
+from tests.v2.research.test_native_registration import artifact_object_bytes
 
 FEATURES = ["n_prior", "mean_prior_move", "mean_prior_abs_move", "ema2_prior_move",
     "ema2_prior_abs_move", "ema4_prior_move", "ema4_prior_abs_move", "ema8_prior_move",
@@ -90,7 +94,7 @@ def source(tmp_path):
 
 def _fixture_rows(source, dates, horizon):
     events = {event["event_id"]: event for event in source.events}
-    ids = _event_ids(source, dates)
+    ids = history_event_ids(source, dates)
     rows, labels = [], []
     for key in ids:
         event = events[key]
@@ -147,7 +151,7 @@ def test_real_native_ridge_six_fits_match_independent_features_normal_equations_
     forbid_history_rebuild(monkeypatch)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, ("2022-06-02", "2023-04-03", "2025-12-03"))
     calls = _fit_spy(monkeypatch)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     stored = model.read_stored(source.repository, source.feature_snapshot, source.build["context"])
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in stored["rows"]}
     result = model.prediction_result(source.repository, source.registration)
@@ -191,9 +195,9 @@ def test_real_native_ridge_six_fits_match_independent_features_normal_equations_
         assert rows[key]["predicted_absolute_move_pct"] == pytest.approx(forecast, abs=1e-11)
         assert rows[key]["source"] == "history_ridge"
         assert rows[key]["forecast"]["horizon_sessions"] == key[1]
-    assert result["metrics"] == pytest.approx(_metrics((a, p) for _, a, p in expected.values()))
+    assert result["metrics"] == pytest.approx(expected_history_metrics((a, p) for _, a, p in expected.values()))
     for fold in result["folds"]:
-        assert fold["metrics"] == pytest.approx(_metrics((a, p) for year, a, p in expected.values()
+        assert fold["metrics"] == pytest.approx(expected_history_metrics((a, p) for year, a, p in expected.values()
                                                          if year == fold["year"]))
         assert "mean_absolute_move_pct" not in fold, "fitted candidates must never silently fall back"
         assert fold["fits"] == expected_fits[fold["year"]]
@@ -203,7 +207,7 @@ def test_real_native_ridge_six_fits_match_independent_features_normal_equations_
                    for field in ("training_matrix_id", "prediction_matrix_id"))
     for horizon in result["per_horizon"]:
         assert {k: v for k, v in horizon.items() if k != "horizon_sessions"} == pytest.approx(
-            _metrics((a, p) for (_, h), (_, a, p) in expected.items() if h == horizon["horizon_sessions"]))
+            expected_history_metrics((a, p) for (_, h), (_, a, p) in expected.items() if h == horizon["horizon_sessions"]))
     assert result["result_id"] == _sha({k: v for k, v in result.items() if k != "result_id"})
     assert result["stored_inputs"] == {"inputs_id": stored["inputs_id"],
         "feature_snapshot": to_document(source.feature_snapshot), "columns": [
@@ -216,7 +220,7 @@ def test_real_native_ridge_six_fits_match_independent_features_normal_equations_
                 source.feature_snapshot, "research_magnitude_history")]}
     assert result["fit_recipe"] == source.registration.document["magnitude_execution"]["fit_recipe"]
     assert len(result["result_id"]) == 71 and json.loads(json.dumps(result, allow_nan=False)) == result
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_sufficient_history_consumes_all_ema_columns_for_both_issuers(tmp_path, monkeypatch):
@@ -251,8 +255,8 @@ def test_sufficient_history_consumes_all_ema_columns_for_both_issuers(tmp_path, 
         forbid_history_rebuild(monkeypatch)
         calls = _fit_spy(monkeypatch)
         result = model.prediction_result(source.repository, source.registration)
-        train_ids = _event_ids(source, DATES[:2])
-        test_ids = _event_ids(source, DATES[2:4])
+        train_ids = history_event_ids(source, DATES[:2])
+        test_ids = history_event_ids(source, DATES[2:4])
         expected = {}
         for call, horizon in zip(calls, HORIZONS):
             train = [row_for(key, horizon) for key in train_ids]
@@ -316,7 +320,7 @@ def test_forecasts_are_detached_before_any_evaluation_label_opens(tmp_path, monk
 def test_evaluation_feature_extremes_cannot_enter_training_matrices_or_preprocessing(source, monkeypatch):
     baseline = model.prediction_result(source.repository, source.registration)
     original = model.read_stored
-    final_ids = _event_ids(source, DATES[4:])
+    final_ids = history_event_ids(source, DATES[4:])
     def extreme(*args, **kwargs):
         value = original(*args, **kwargs)
         for row in value["rows"]:
@@ -374,14 +378,14 @@ def test_protected_later_physical_object_refuses_before_features_labels_and_fits
                      mixed_days=("2025-01-07", "2025-01-08"))
     try:
         _register(source)
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
         for name in ("read_stored", "qualify_magnitude_training_targets", "load_magnitude_targets"):
             monkeypatch.setattr(model, name, forbid_access)
         monkeypatch.setattr(fitted, "fit_magnitude_predictions", forbid_access)
         with refuses(DataError, "HOLDOUT_ACCESS_DENIED"):
             model.prediction_result(source.repository, source.registration)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
         monkeypatch.setattr(model, "preflight_magnitude_targets", lambda *args, **kwargs: {})
         with pytest.raises(AssertionError, match="forbidden access"):
             model.prediction_result(source.repository, source.registration)
@@ -390,7 +394,7 @@ def test_protected_later_physical_object_refuses_before_features_labels_and_fits
 
 
 def _invoke(source, kind, capsys, action, *extra):
-    arguments = _args(source, action, *extra)
+    arguments = history_model_args(source, action, *extra)
     arguments[arguments.index("--magnitude-model") + 1] = kind
     assert cli.main(arguments) == 0
     captured = capsys.readouterr()
@@ -404,25 +408,25 @@ def test_cli_register_smoke_record_and_replay_never_refits_or_duplicates_ledger(
     source = magnitude_source(tmp_path, register=False)
     try:
         with monkeypatch.context() as patch:
-            _metadata_only(patch)
+            forbid_history_model_payloads(patch)
             patch.setattr(fitted, "fit_magnitude_predictions", forbid_access)
             patch.setattr(training, "fit_magnitude_predictions", forbid_access)
             poison_outcomes(patch, source.repository, source.snapshot, (), all_outcomes=True)
             registered = _invoke(source, kind, capsys, "register")
             assert _invoke(source, kind, capsys, "register") == registered
-        binding = _document(source, _evidence(source)["native_registration"])
+        binding = read_outcome_document(source, baseline_evidence(source)["native_registration"])
         assert binding["schema_version"] == "native_experiment_registration.v1.5"
         assert binding["magnitude_execution"]["features"] == FEATURES
         assert binding["magnitude_execution"]["fit_recipe"]["model"] == kind
         assert registered["registered"] == _sha(binding)
         assert {"experiments/magnitude_fitted.py", "engine/v2/models/training/magnitude.py"} <= binding["source_closure"].keys()
-        assert not {"native_smoke", "native_outcome", "attempted_variants"} & _evidence(source).keys()
+        assert not {"native_smoke", "native_outcome", "attempted_variants"} & baseline_evidence(source).keys()
         forbid_history_rebuild(monkeypatch)
         poison_outcomes(monkeypatch, source.repository, source.snapshot, ("2022-06-02", "2023-04-03", "2025-12-03"))
         with monkeypatch.context() as patch:
             patch.setattr(outcomes, "ledger_append", forbid_access)
             smoke = _invoke(source, kind, capsys, "run", "--no-ledger")
-        result = _result_from_report(smoke["report"])
+        result = result_from_report(smoke["report"])
         assert result["schema_version"] == "native_magnitude_fitted_result.v1"
         assert result["model"] == kind and result["forecast_count"] == 18
         expected = {}
@@ -432,30 +436,30 @@ def test_cli_register_smoke_record_and_replay_never_refits_or_duplicates_ledger(
                          else [sum(labels) / len(labels)] * len(ids))
             expected.update({(key, horizon): (observed, forecast)
                              for key, observed, forecast in zip(ids, actual, forecasts)})
-        assert result["metrics"] == pytest.approx(_metrics(expected.values()))
+        assert result["metrics"] == pytest.approx(expected_history_metrics(expected.values()))
         for row in result["predictions"]:
             assert row["predicted_absolute_move_pct"] == pytest.approx(
                 expected[row["event_id"], row["horizon_sessions"]][1])
         assert smoke["recording_mode"] == "smoke" and not list(tmp_path.rglob("*.csv"))
-        assert _document(source, _evidence(source)["native_smoke"])["ledger_destination"] is None
+        assert read_outcome_document(source, baseline_evidence(source)["native_smoke"])["ledger_destination"] is None
         ledger = tmp_path / "ledger.csv"
-        _clock(monkeypatch, "2026-01-02")
+        set_outcome_clock(monkeypatch, "2026-01-02")
         recorded = _invoke(source, kind, capsys, "run", "--ledger", ledger)
-        assert _result_from_report(recorded["report"]) == result
-        evidence = _evidence(source)
-        outcome = _document(source, evidence["native_outcome"])
-        assert _rows(ledger) == [outcome["ledger_row"]]
+        assert result_from_report(recorded["report"]) == result
+        evidence = baseline_evidence(source)
+        outcome = read_outcome_document(source, evidence["native_outcome"])
+        assert read_ledger_rows(ledger) == [outcome["ledger_row"]]
         assert outcome["attempted_variants"] == 1 and outcome["failure_code"] is None
-        assert _rows(ledger)[0]["date"] == "2026-01-02" and _rows(ledger)[0]["stage"] == "ran"
-        assert _document(source, evidence["native_outcome_receipt"])["ledger_row_hash"] == _sha(outcome["ledger_row"])
-        before = catalog_rows(source.conn), _objects(source.store), ledger.read_bytes()
-        _metadata_only(monkeypatch)
+        assert read_ledger_rows(ledger)[0]["date"] == "2026-01-02" and read_ledger_rows(ledger)[0]["stage"] == "ran"
+        assert read_outcome_document(source, evidence["native_outcome_receipt"])["ledger_row_hash"] == _sha(outcome["ledger_row"])
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()
+        forbid_history_model_payloads(monkeypatch)
         monkeypatch.setattr(fitted, "fit_magnitude_predictions", forbid_access)
         monkeypatch.setattr(training, "fit_magnitude_predictions", forbid_access)
-        _clock(monkeypatch, "2026-02-10")
+        set_outcome_clock(monkeypatch, "2026-02-10")
         assert _invoke(source, kind, capsys, "run", "--no-ledger") == smoke
         assert _invoke(source, kind, capsys, "run", "--ledger", ledger) == recorded
-        assert (catalog_rows(source.conn), _objects(source.store), ledger.read_bytes()) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()) == before
     finally:
         source.conn.close()
 
@@ -465,20 +469,20 @@ def test_cli_register_smoke_record_and_replay_never_refits_or_duplicates_ledger(
     {"magnitude_feature_snapshot_id": "other-feature"}, {"magnitude_history_start": "2022-02-01"},
 ])
 def test_request_drift_refuses_before_scans_fitting_and_effects(source, monkeypatch, changes):
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(source.repository, "scan", forbid_access)
     monkeypatch.setattr(fitted, "fit_magnitude_predictions", forbid_access)
     for operation in (native.require_native_registration, inputs.admit_magnitude_inputs):
         with refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
             operation(source.conn, source.store, source.repository, source.spec,
                 **{**history_binding(source, magnitude_fit_model="history_ridge"), **changes})
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("field", ["source", "alpha", "boolean-alpha", "boolean-threads",
     "extra", "preprocessing", "features", "schema"])
 def test_changed_recipe_source_and_closed_schema_refuse_before_payloads(source, monkeypatch, field):
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(source.repository, "scan", forbid_access)
     monkeypatch.setattr(fitted, "fit_magnitude_predictions", forbid_access)
     if field == "source":
@@ -509,7 +513,7 @@ def test_changed_recipe_source_and_closed_schema_refuse_before_payloads(source, 
         changed = native.NativeRegistration(source.registration.run_id, canonical_json(document).encode())
         with refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
             model.prediction_result(source.repository, changed)
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("kind", ["history_ridge", "history_hgb"])
@@ -598,7 +602,7 @@ def test_malformed_registration_is_typed_before_report_reads_or_fitting(source, 
     else:
         document["schema_version"] = {"unknown-schema": "unknown", "null-schema": None, "list-schema": []}[defect]
     malformed = native.NativeRegistration(source.registration.run_id, canonical_json(document).encode())
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(source.repository, "scan", forbid_access)
     monkeypatch.setattr(fitted, "fit_magnitude_predictions", forbid_access)
     for name in ("history_binding", "read_stored", "preflight_magnitude_targets",
@@ -615,17 +619,17 @@ def test_malformed_registration_is_typed_before_report_reads_or_fitting(source, 
         "code": "EXPERIMENT_IDENTITY_CONFLICT", "category": "validation", "retryable": False,
         "message": message, "stage": None, "trace_id": None, "dependency_refs": [],
         "retry_after_seconds": None, "diagnostic_ref": None, "details": {}, "schema_version": "problem.v1.0"}
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 def test_catalog_backed_fitted_registration_has_no_final_holdout_authority(source, monkeypatch):
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(source.repository, "scan", forbid_access)
     monkeypatch.setattr(fitted, "fit_magnitude_predictions", forbid_access)
     with refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         native.prepare_final_holdout_request(source.conn, source.store, source.registration)
     assert source.conn.execute("SELECT COUNT(*) FROM final_holdout_authorizations").fetchone()[0] == 0
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("failure", ["exception", "wrong-shape", "nonfinite", "negative"])
@@ -639,12 +643,12 @@ def test_failed_fit_never_falls_back_or_returns_partial_success(source, monkeypa
         if failure == "exception":
             raise ValueError("synthetic estimator failure")
         return [] if failure == "wrong-shape" else [math.nan if failure == "nonfinite" else -1.] * len(test)
-    before = catalog_rows(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     monkeypatch.setattr(fitted, "fit_magnitude_predictions", broken)
     with refuses(OpsError, "EXPERIMENT_VARIANT_FAILED"):
         model.prediction_result(source.repository, source.registration)
     assert len(calls) == 2
-    assert (catalog_rows(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))
 
 
@@ -673,12 +677,12 @@ def test_invalid_targets_refuse_whole_fitted_assessment(tmp_path, monkeypatch, k
     source = magnitude_source(tmp_path, register=False, events=events, moves=moves)
     try:
         _register(source)
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         calls = _fit_spy(monkeypatch)
         with refuses(DataError, "POPULATION_COLLAPSED" if kind == "empty-training" else "EXPERIMENT_VARIANT_FAILED"):
             model.prediction_result(source.repository, source.registration)
         assert len(calls) == (0 if kind == "empty-training" else 6)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
         assert not list(tmp_path.rglob("REPORT.md")) and not list(tmp_path.rglob("*.csv"))
     finally:
         source.conn.close()
@@ -687,15 +691,15 @@ def test_invalid_targets_refuse_whole_fitted_assessment(tmp_path, monkeypatch, k
 def test_omitted_fit_model_preserves_exact_v14_registration_and_admission(tmp_path, monkeypatch):
     source = magnitude_source(tmp_path)
     try:
-        before = catalog_rows(source.conn), _objects(source.store)
-        _metadata_only(monkeypatch)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
+        forbid_history_model_payloads(monkeypatch)
         monkeypatch.setattr(fitted, "fit_magnitude_predictions", forbid_access)
         for operation in (native.register_native, native.require_native_registration):
             unchanged = operation(source.conn, source.store, source.repository, source.spec,
                 **history_binding(source, magnitude_fit_model=None))
             assert unchanged == source.registration
             assert unchanged.document["schema_version"] == "native_experiment_registration.v1.4"
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
 
@@ -712,7 +716,7 @@ def test_library_invalid_fitted_request_refuses_before_repository_admission(tmp_
             "magnitude_fit_model": "history_ridge", "magnitude_training_start": START,
             "magnitude_labels_before": CUTOFF, "magnitude_feature_snapshot_id": "unused",
             "magnitude_history_start": HISTORY, **changes}
-        before = catalog_rows(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         monkeypatch.setattr(native, "source_closure", forbid_access)
         for name in ("resolve_pinned", "resolve", "scan"):
             monkeypatch.setattr(source.repository, name, forbid_access)
@@ -720,6 +724,6 @@ def test_library_invalid_fitted_request_refuses_before_repository_admission(tmp_
         for operation in (native.register_native, native.require_native_registration):
             with refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
                 operation(source.conn, source.store, source.repository, source.spec, **arguments)
-        assert (catalog_rows(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()

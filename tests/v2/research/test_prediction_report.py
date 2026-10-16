@@ -24,15 +24,19 @@ from tests.v2.research.magnitude_trial_support import (
     outcome_move,
     prediction_spec,
 )
-from tests.v2.research.test_prediction_inputs import MONTH, _commit, _event
+from tests.v2.research.test_prediction_inputs import (
+    MONTH,
+    commit_prediction_inputs,
+    prediction_event,
+)
 
 
-def _dataset():
+def prediction_dataset():
     dates = ["2022-02-01", "2022-03-01", "2022-04-01", "2022-12-01",
              "2023-02-01", "2023-03-01", "2023-04-01", "2023-05-01",
              "2024-02-01", "2024-03-01"]
-    events = [_event(day) for day in dates]
-    events += [_event("2023-06-01", random=True), _event("2024-12-02")]
+    events = [prediction_event(day) for day in dates]
+    events += [prediction_event("2023-06-01", random=True), prediction_event("2024-12-02")]
     labels = [-1, 1, 1, -1, -1, 1, 1, 1, -1, 1, float("nan"), float("nan")]
     moves = [outcome_move(event, label) for event, label in zip(events, labels)]
     moves[3]["available_as_of_date"] = "2024-01-01"
@@ -57,8 +61,8 @@ class Source:
 
 def _source(tmp_path, *, events=None, moves=None, spec=None, event_ids=None):
     if events is None:
-        events, moves = _dataset()
-    conn, repository, snapshot = _commit(tmp_path, events, moves)
+        events, moves = prediction_dataset()
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, events, moves)
     root = tmp_path / "code"
     runner = root / prediction.RUNNER
     runner.parent.mkdir(parents=True)
@@ -216,7 +220,7 @@ def test_registration_declarations_refuse_before_any_reads(source, changes):
 
 @pytest.mark.parametrize("kind", ["empty_train", "empty_test", "single_class"])
 def test_unsuitable_fold_refuses_without_artifacts(tmp_path, kind):
-    events, moves = _dataset()
+    events, moves = prediction_dataset()
     spec = prediction_spec(folds={"empty_train": ("2022",), "empty_test": ("2025",),
                        "single_class": ("2023",)}[kind])
     if kind == "single_class":
@@ -244,7 +248,7 @@ def test_late_fold_failure_never_returns_partial_result(source):
 @pytest.mark.parametrize("mutated_indices", [[3], [4, 5, 6, 7], [8, 9]])
 def test_future_or_not_yet_available_labels_do_not_change_earlier_fit(tmp_path, mutated_indices):
     baseline = _source(tmp_path / "baseline")
-    events, moves = _dataset()
+    events, moves = prediction_dataset()
     for index in mutated_indices:
         moves[index]["realized_move_pct"] *= -1
     changed = _source(tmp_path / "changed", events=events, moves=moves)
@@ -349,7 +353,7 @@ def test_renderer_refuses_results_from_other_registration(source, field):
 
 
 def test_explicit_registered_subset_is_the_only_target_read(tmp_path):
-    events, moves = _dataset()
+    events, moves = prediction_dataset()
     ids = [event["event_id"] for event in events[:3] + events[4:8]]
     # A nonregistered eligible outcome is poisoned; loading all eligible outcomes would fail.
     moves[8]["realized_move_pct"] = float("nan")
@@ -366,7 +370,7 @@ def test_explicit_registered_subset_is_the_only_target_read(tmp_path):
 
 
 def test_availability_strict_boundary_changes_only_next_eligible_training_fold(tmp_path):
-    events, moves = _dataset()
+    events, moves = prediction_dataset()
     moves[3]["available_as_of_date"] = "2023-12-31"
     source = _source(tmp_path, events=events, moves=moves)
     try:

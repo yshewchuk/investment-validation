@@ -37,7 +37,7 @@ def _identity(day, *, random=False, prefix="T"):
     raise AssertionError("deterministic fixture identity unavailable")
 
 
-def _event(day, *, random=False, prefix="T", **overrides):
+def prediction_event(day, *, random=False, prefix="T", **overrides):
     key, ticker = _identity(day, random=random, prefix=prefix)
     return dict(event_id=key, ticker=ticker, event_date=pd.Timestamp(day),
                 year=int(day[:4]), session="AMC", session_src="orats", src_orats=True,
@@ -45,7 +45,7 @@ def _event(day, *, random=False, prefix="T", **overrides):
                 date_agree=True, date_conflict=False, **overrides)
 
 
-def _commit(tmp_path, events, moves=None, *, include_targets=True):
+def commit_prediction_inputs(tmp_path, events, moves=None, *, include_targets=True):
     tmp_path.mkdir(parents=True, exist_ok=True)
     conn, clock, store = catalog_and_store(tmp_path)
     contracts = {"earnings_events": contract_for("earnings_events")}
@@ -71,10 +71,10 @@ def _targets(repository, snapshot, **kwargs):
 
 
 def test_real_snapshot_targets_exclude_union_before_outcome_scans(tmp_path):
-    eligible = _event("2024-05-02")
-    random = _event("2024-05-03", random=True)
-    rolling = _event("2024-12-03")
-    conn, repository, snapshot = _commit(tmp_path, [eligible, random, rolling], [
+    eligible = prediction_event("2024-05-02")
+    random = prediction_event("2024-05-03", random=True)
+    rolling = prediction_event("2024-12-03")
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [eligible, random, rolling], [
         outcome_move(eligible, -2.5), outcome_move(random, float("nan")), outcome_move(rolling, float("nan")),
     ])
     try:
@@ -105,11 +105,11 @@ def test_real_snapshot_targets_exclude_union_before_outcome_scans(tmp_path):
 
 @pytest.mark.parametrize("kind", ["random", "rolling", "missing", "empty", "ambiguous"])
 def test_explicit_population_refuses_before_any_target_scan(tmp_path, kind):
-    event = _event("2024-12-03" if kind == "rolling" else "2024-05-02",
+    event = prediction_event("2024-12-03" if kind == "rolling" else "2024-05-02",
                    random=kind == "random")
     if kind == "ambiguous":
         event["date_conflict"] = True
-    conn, repository, snapshot = _commit(tmp_path, [event])
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event])
     ids = [] if kind == "empty" else ["absent" if kind == "missing" else event["event_id"]]
     try:
         with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
@@ -124,7 +124,7 @@ def test_explicit_population_refuses_before_any_target_scan(tmp_path, kind):
     {"purpose": "final"}, {"purpose": "holdout"}, {"event_ids": "bad"},
 ])
 def test_context_refuses_without_scanning(tmp_path, kwargs):
-    conn, repository, snapshot = _commit(tmp_path, [_event("2024-05-02")])
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [prediction_event("2024-05-02")])
     try:
         with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
             load_prediction_targets(repository, snapshot, **{"as_of_month": MONTH, **kwargs})
@@ -135,7 +135,7 @@ def test_context_refuses_without_scanning(tmp_path, kwargs):
 
 @pytest.mark.parametrize("kind", ["missing", "mismatched", "wrong_type"])
 def test_unresolved_snapshot_is_typed_without_fallback(tmp_path, kind):
-    conn, repository, snapshot = _commit(tmp_path, [_event("2024-05-02")])
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [prediction_event("2024-05-02")])
     changed = {"missing": replace(snapshot, snapshot_id="absent"),
                "mismatched": replace(snapshot, calendar_version="other"), "wrong_type": None}[kind]
     try:
@@ -155,8 +155,8 @@ def test_unresolved_snapshot_is_typed_without_fallback(tmp_path, kind):
     {"available_as_of_date": "20240504"},
 ])
 def test_invalid_target_or_availability_refuses_whole_population(tmp_path, mutation):
-    first, later = _event("2024-05-01"), _event("2024-05-02")
-    conn, repository, snapshot = _commit(tmp_path, [first, later], [outcome_move(first), outcome_move(later, **mutation)])
+    first, later = prediction_event("2024-05-01"), prediction_event("2024-05-02")
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [first, later], [outcome_move(first), outcome_move(later, **mutation)])
     try:
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             _targets(repository, snapshot)
@@ -166,9 +166,9 @@ def test_invalid_target_or_availability_refuses_whole_population(tmp_path, mutat
 
 
 def test_missing_target_and_missing_table_remain_distinct(tmp_path):
-    event = _event("2024-05-02")
+    event = prediction_event("2024-05-02")
     for with_table, code in [(True, "EXPERIMENT_VARIANT_FAILED"), (False, "CONTRACT_MISMATCH")]:
-        conn, repository, snapshot = _commit(tmp_path / str(with_table), [event], [],
+        conn, repository, snapshot = commit_prediction_inputs(tmp_path / str(with_table), [event], [],
                                              include_targets=with_table)
         try:
             with pytest.raises(DataError, match=code):
@@ -178,8 +178,8 @@ def test_missing_target_and_missing_table_remain_distinct(tmp_path):
 
 
 def test_shared_population_needs_no_target_table(tmp_path):
-    event = _event("2024-05-02")
-    conn, repository, snapshot = _commit(tmp_path, [event], include_targets=False)
+    event = prediction_event("2024-05-02")
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event], include_targets=False)
     try:
         rows = load_population(repository, snapshot, as_of_month=MONTH, purpose="sweep")
         assert rows["session"].tolist() == ["AMC"]
@@ -191,10 +191,10 @@ def test_shared_population_needs_no_target_table(tmp_path):
 
 
 def test_target_availability_can_feed_existing_fold_helper(tmp_path):
-    events = [_event(day) for day in ["2023-01-02", "2023-04-03", "2023-10-02", "2024-01-02"]]
+    events = [prediction_event(day) for day in ["2023-01-02", "2023-04-03", "2023-10-02", "2024-01-02"]]
     moves = [outcome_move(event, value) for event, value in zip(events, [-2, 2, -1, 1])]
     moves[2]["available_as_of_date"] = "2024-02-01"  # An older event whose label is not yet known.
-    conn, repository, snapshot = _commit(tmp_path, events, moves)
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, events, moves)
     try:
         rows = _targets(repository, snapshot).sort_values("event_date")
         cutoff = date(2024, 1, 1)
@@ -214,9 +214,9 @@ def test_target_availability_can_feed_existing_fold_helper(tmp_path):
 
 @pytest.mark.parametrize("explicit", [True, False])
 def test_shared_outcome_key_with_excluded_sibling_never_scans_targets(tmp_path, explicit):
-    event = _event("2024-05-02")
+    event = prediction_event("2024-05-02")
     sibling = {**event, "event_id": _identity("2024-05-02", random=True)[0], "session": "BMO"}
-    conn, repository, snapshot = _commit(tmp_path, [event, sibling], [outcome_move(event)])
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event, sibling], [outcome_move(event)])
     try:
         with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED") as refusal:
             _targets(repository, snapshot, event_ids=[event["event_id"]] if explicit else None)
@@ -227,8 +227,8 @@ def test_shared_outcome_key_with_excluded_sibling_never_scans_targets(tmp_path, 
 
 
 def test_late_target_scan_failure_returns_no_partial_frame(tmp_path, monkeypatch):
-    first, second = _event("2024-05-01"), _event("2024-05-02")
-    conn, repository, snapshot = _commit(tmp_path, [first, second])
+    first, second = prediction_event("2024-05-01"), prediction_event("2024-05-02")
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [first, second])
     original = repository.scan
     calls = 0
 
@@ -253,7 +253,7 @@ def test_late_target_scan_failure_returns_no_partial_frame(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("invalid_id", [[], None, "", " "])
 def test_malformed_snapshot_id_is_typed(tmp_path, invalid_id):
-    conn, repository, snapshot = _commit(tmp_path, [_event("2024-05-02")])
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [prediction_event("2024-05-02")])
     try:
         with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
             _targets(repository, replace(snapshot, snapshot_id=invalid_id))
@@ -264,7 +264,7 @@ def test_malformed_snapshot_id_is_typed(tmp_path, invalid_id):
 
 @pytest.mark.parametrize("evidence", ["{}", "not-json", "[]", "null"])
 def test_corrupt_catalog_evidence_is_typed_without_scan(tmp_path, evidence):
-    conn, repository, snapshot = _commit(tmp_path, [_event("2024-05-02")])
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [prediction_event("2024-05-02")])
     try:
         conn.execute("DROP TRIGGER data_dataset_versions_no_update")
         conn.execute("PRAGMA ignore_check_constraints=ON")  # Simulate corrupt bytes in this test-only catalog.
@@ -277,8 +277,8 @@ def test_corrupt_catalog_evidence_is_typed_without_scan(tmp_path, evidence):
 
 
 def test_non_date_outcome_key_is_never_coerced_to_canonical_event(tmp_path):
-    event = _event("2024-05-02")
-    conn, repository, snapshot = _commit(tmp_path, [event], [
+    event = prediction_event("2024-05-02")
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event], [
         outcome_move(event, event_date="2024-05-02T13:00:00")])
     try:
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
@@ -288,7 +288,7 @@ def test_non_date_outcome_key_is_never_coerced_to_canonical_event(tmp_path):
 
 
 def test_empty_bulk_calendar_is_not_a_success(tmp_path):
-    conn, repository, snapshot = _commit(tmp_path, [], [], include_targets=False)
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [], [], include_targets=False)
     try:
         with pytest.raises(DataError, match="POPULATION_COLLAPSED"):
             _targets(repository, snapshot)

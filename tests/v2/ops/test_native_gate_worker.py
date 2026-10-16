@@ -43,7 +43,7 @@ from tests.v2.research.magnitude_trial_support import (
 )
 from tests.v2.research.test_gate_variant import _document
 from tests.v2.research.test_gate_variant import source as source
-from tests.v2.research.test_native_registration import _objects
+from tests.v2.research.test_native_registration import artifact_object_bytes
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -474,7 +474,7 @@ def test_each_launch_thread_variable_refuses_drift_before_pricing(
 @pytest.mark.parametrize("runner", ["experiments/v2_gate_variant.py", "experiments/v2_prediction.py"])
 def test_non_gate_runner_cannot_register_unused_strategy(source, monkeypatch, runner):
     """The real registration path refuses before pinning, scanning or writing."""
-    before, objects = catalog_rows(source[0]), _objects(source[2])
+    before, objects = catalog_rows(source[0]), artifact_object_bytes(source[2])
 
     def forbidden(*args, **kwargs):
         pytest.fail("unused economics reached snapshot reads")
@@ -487,7 +487,7 @@ def test_non_gate_runner_cannot_register_unused_strategy(source, monkeypatch, ru
     assert error.value.problem.details == {"keys": ["strategy"]}
     assert error.value.problem.retryable is False
     assert catalog_rows(source[0]) == before
-    assert _objects(source[2]) == objects
+    assert artifact_object_bytes(source[2]) == objects
 
 
 @pytest.mark.parametrize("economics", [{"fill": 0.0}, *(
@@ -495,7 +495,7 @@ def test_non_gate_runner_cannot_register_unused_strategy(source, monkeypatch, ru
     for strategy in [None, True, 1, [], {}, "", " ", "unsupported-native-structure"])])
 def test_invalid_strategy_cannot_reserve_native_identity(source, monkeypatch, economics):
     """Real registration refuses before any read/effect; the corrected arm remains usable."""
-    before, objects = catalog_rows(source[0]), _objects(source[2])
+    before, objects = catalog_rows(source[0]), artifact_object_bytes(source[2])
 
     def forbidden(*args, **kwargs):
         pytest.fail("invalid strategy reached snapshot reads")
@@ -515,7 +515,7 @@ def test_invalid_strategy_cannot_reserve_native_identity(source, monkeypatch, ec
     assert error.value.problem.message == expected
     assert error.value.problem.retryable is False
     assert catalog_rows(source[0]) == before
-    assert _objects(source[2]) == objects
+    assert artifact_object_bytes(source[2]) == objects
     _, registration, _ = _registered(source)
     assert registration.document["execution_plan"]["economic_params"]["strategy"] == "STR-THRU"
     assert _registered(source)[1].variant_id == registration.variant_id
