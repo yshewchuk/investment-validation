@@ -9,6 +9,7 @@ The owning modules expose these helpers to native experiment callers; no compati
 
 | Owner and public function | Inputs, result and effects |
 | --- | --- |
+| `magnitude_search_trials.SearchTrials` | Verified plan/anchor, catalog/store and native repository; `seal(clock=...)`, `start(outer_year, inner_year, candidate_id)`, `record(..., forecasts=... or failure=Problem)` and `freeze()` persist immutable all-attempt evidence and selections from submitted forecasts. Estimator execution is unverified; no fitting, outer evaluation or final authority. |
 | `native_registration.prepare_native_registration` | A validated spec, repository, source root and holdout context produce `(NativeRegistration, normalized_spec)`; resolves one scope pin or verifies an explicit `SnapshotRef`, reads eligible metadata only, and writes nothing. |
 | `native_registration.native_registration_exists` | An expected `NativeRegistration` gives false when absent, true for exact verified catalog/object evidence, or `EXPERIMENT_IDENTITY_CONFLICT`; read-only. |
 | `native_registration.reserve_native_registration` | Accepts the matching prepared registration/spec pair from the preparer; publishes complete binding bytes and reserves catalog rows, obeying any sweep seal. Exact replay is idempotent; conflicts refuse R6. Publication may leave an unreferenced complete object if reservation fails. |

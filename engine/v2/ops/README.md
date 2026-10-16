@@ -62,6 +62,8 @@ Native sweep coordination also exposes `submission.submit_graph`/`submission.Nam
 `stages.registry`, `checkpoints.register_artifact`, `migrations.require_current`,
 `schema.OWNER`/`schema.MIGRATIONS`, and `fingerprints.worker_source_manifest`
 for current-schema admission, artifact registration, source binding and atomic job submission.
+Search recording exposes `migrations.Migration` and `migrations.migrate` for its
+separate owner sequence; it does not add or reinterpret ops migration versions.
 
 `native.input_decoding._load_native_score_inputs` is an internal decoder shared
 by the CLI, worker and dashboard projection tool, separate from the versioned
@@ -132,7 +134,7 @@ either required table. Their current consumer is
 
 `nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package and used by completion persistence in `supervisor.Service`; tests include `tests/v2/ops/test_nightly_session.py` and `tests/v2/ops/test_nightly_completion.py`. `nightly_completion` (run-scoped reports, #564 slice 7; exports `Disposition`, `SCHEMA`, `build_completion_report`, `record_completion`) is internal and consumed through `supervisor.Service`; `tests/v2/ops/test_nightly_completion.py` covers its report contract and persistence. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is imported by the production modules `nightly_chain`, `nightly_history`, and `nightly_repair`; `nightly_trigger` does not call it yet. `tests/v2/ops/test_nightly_receipts.py` covers its contract. `nightly_readiness` (legacy run-report readiness for a session, #564 slice 3; exports `LegacyReadiness`, `check_legacy_report`) is internal and uncalled by `nightly_trigger`; `tests/v2/ops/test_nightly_readiness.py` covers its contract. `nightly_chain` (snapshot import/refresh/moves/capture step chain over step receipts, #564 slice 4; exports `ChainResult`, `ChainStep`, `run_snapshot_chain`) is imported by production module `nightly_history`; `nightly_trigger` does not call it directly. `tests/v2/ops/test_nightly_chain.py` covers its contract.
 
-<!-- public-interface: magnitude_fitted_execution_document, validate_magnitude_fitted_execution, registered_artifact, register_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, magnitude_history_request, magnitude_history_execution_document, validate_magnitude_history_execution, environment_identity, source_closure, worker_source_manifest, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main, submit_graph, NamespacePolicy, registry, require_current, OWNER, MIGRATIONS -->
+<!-- public-interface: Migration, migrate, magnitude_fitted_execution_document, validate_magnitude_fitted_execution, registered_artifact, register_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, magnitude_history_request, magnitude_history_execution_document, validate_magnitude_history_execution, environment_identity, source_closure, worker_source_manifest, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main, submit_graph, NamespacePolicy, registry, require_current, OWNER, MIGRATIONS -->
 
 ## Consumers
 
@@ -176,6 +178,9 @@ and the history admission bridge uses `errors.fail`.
 `experiments/magnitude_search_plan.py` consumes the fitted constructor/validator,
 `fingerprints.source_closure`/`environment_identity` and `errors.OpsError`/`fail`; its CLI uses
 `catalog.connect`, `experiments.experiment_spec_from_document` and `errors.OpsError`/`fail`.
+`experiments/magnitude_search_trials.py` and `magnitude_search_records.py` consume
+`migrations.Migration`/`migrate`/`require_current`, `catalog.transaction`, source
+fingerprinting and typed failures for a separate search-owned immutable journal.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection

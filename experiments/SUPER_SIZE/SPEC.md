@@ -84,5 +84,16 @@ The frozen policy selects by pooled inner RMSE, breaks exact ties by candidate I
 and reserves outer evaluation for the selected candidate. Latest-outer selection
 defines the prospective frozen winner; no winner exists until recorded execution.
 Every planned candidate must be attempted and failures recorded before selection.
-This command neither reads outcomes nor runs the search. Trial recording, actual
-selection and local resource-capped execution are subsequent implementation slices.
+This command neither reads outcomes nor runs the search.
+
+The library-only `experiments.magnitude_search_trials.SearchTrials` boundary now
+records every candidate/inner-fold attempt and freezes selections from submitted
+forecasts. Explicitly seal one plan per anchor, start each attempt once, and record
+complete three-horizon forecasts or a typed failure. Start returns admitted stored
+features and strictly qualified training labels; recording commits the forecasts
+before opening complete inner validation labels. Freeze refuses incomplete journals
+and excludes a candidate's entire score if any inner fold failed. Exact replay of a
+terminal submission or freeze is idempotent; another start is a forbidden retry.
+The submitted forecasts do not prove that an estimator ran. Frozen selections grant
+no outer-evaluation, deployment or final-read authority. A resource-capped executor,
+interrupted-attempt reconciliation, outer evaluation and reporting remain unimplemented.
