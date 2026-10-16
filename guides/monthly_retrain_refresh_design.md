@@ -21,17 +21,21 @@ separate manual job.
 | Chooser row | Carried | Regenerated with the chooser pool |
 
 The monthly refresh is one more reconcile in `Service.tick()`, the same shape
-as `_reconcile_pool_nightly_refresh` (never a `GRAPH`/`_DAG_STAGES` node). It
-publishes through the existing `phase5_state_stage` job: the retrained objects
+as the existing `_reconcile_computed_moves_refresh` and the planned
+`_reconcile_pool_nightly_refresh` (#192 slice 4; never a `GRAPH`/`_DAG_STAGES`
+node). It publishes through the planned `phase5_state_stage` job (#806, #192
+slice 3; today only `run_state_job` in `tools/phase5_training_job.py` exists):
+the retrained objects
 arrive as non-carried `PoolOutput`s, everything else is carried or advanced as
 on any night. There is no second release-assembly path.
 
 ## 2. Trigger rule and idempotency
 
-**Target month.** For a refresh session dated `s`, the target month `M` is the
-calendar month before `s`'s month. Its **retrain cutoff** is the last calendar
-day of `M` (`M_end`), a data date, fixed by `M` alone and independent of the
-night the job happens to run.
+**Due set.** For a refresh session dated `s`, the *completed* months are all
+calendar months before `s`'s month. Evaluate every completed month with no
+durable record (retrain or `superseded`); the **target** is the latest due one,
+`M`. Its **retrain cutoff** is the last calendar day of `M` (`M_end`), a data
+date, fixed by `M` alone and independent of the night the job runs.
 
 **Due.** Month `M` is due when all hold: (a) no retrain record exists for `M`
 in any state; (b) the nightly's settled-event cutoff is on or after `M_end`
@@ -49,13 +53,14 @@ is `retrain-stage:{M}:{incumbent_release_id}` and the reconcile submits it when
 the retrain job succeeded and no stage key exists for that incumbent.
 
 **Retry.** A hard failure is terminal for `retrain:{M}`. No automatic
-replacement key. Recovery is operator-driven (#154), as for the nightly phases.
+replacement key. Recovery is operator-driven; the missing replacement-key path is the open gap
+#154, which this design does not close.
 Nothing else stalls: the ordinary nightly advance and carry continue on the
 incumbent, so a failed retrain costs stale driver pools/models, not a stale
 board.
 
 **Missed month.** Training is cumulative to its cutoff, so a missed month is
-subsumed by the next one. If months `M1 < M2` are both due (the system was down,
+subsumed by the next one. If months `M1 < M2` are both in the due set (the system was down,
 or a retrain failed and was left), only the latest, `M2`, is retrained; earlier
 due months get a durable `superseded:{M1}` marker naming `M2`, written once, so
 they are not re-evaluated every tick. A failed `M1` followed by a due `M2`
@@ -100,7 +105,7 @@ new releases meanwhile. The stage job therefore takes its base from the
 **incumbent at stage time**, not from the release at retrain start, and carries
 the nightly-advanced members from that incumbent. Retrained objects depend only
 on the incumbent's model payload identity at retrain start; if the incumbent's
-champion/gate bindings changed in between (only another retrain can do that),
+champion/gate bindings changed in between (only a retrain or an operator promote can do that),
 stage refuses `PRIOR_MISMATCH` and the retrain is wasted, not applied.
 
 ## 4. Promotion, gating and rollback
@@ -115,9 +120,13 @@ needs the full staging gate before it can be promoted:
 1. `phase5_acceptance` release-scope acceptance passes and
    `mark_staging_succeeded` records it (a failed or missing record refuses
    promotion, models doc §7.2).
-2. A non-regression comparison of the candidate against the incumbent on the
-   retrained month `M`, scored for events dated within `M` but excluded from
-   training (a holdout by data date). The check is **consistency of ranks and
+2. A non-regression comparison of the candidate against the incumbent on month
+   `M`. For this comparison only, a **check candidate** is fit with training
+   cutoff `M_start − 1` (the day before `M` begins) and scores events whose data
+   dates fall within `M`; rows are split by data date, so no scored row was
+   trained on. The comparison uses the same recipe as the release candidate,
+   which is fit to `M_end`; the incumbent is scored on the same `M` events. The
+   extra fit is part of the heavy-job budget (§6). The check is **consistency of ranks and
    paired differences with the incumbent's, not a magnitude cutoff**; the
    measures and the pass rule are written into the slice that builds them and
    are labelled there as design judgement.
@@ -160,17 +169,19 @@ Reconcile-level rows:
 
 ## 6. Resource budget
 
-The retrain is a **heavy job**: it runs only under the executor's existing
-exclusive heavy-job admission (one at a time, bounded memory and cores, a
-wall-clock deadline), and never concurrently with the required nightly graph or
-another heavy job. It is submitted only after the session's required graph and
-the nightly pool refresh finished, never from agent sessions or CI. The first
+The retrain is a **heavy job**: it runs only under the existing exclusive heavy
+profile (`engine/v2/contracts/operations.py`; `tools/bounded_run.py --heavy`:
+one at a time, bounded memory and cores, a wall-clock deadline), so it never
+overlaps another heavy job. It is submitted only when the session's required
+graph and the nightly pool refresh have finished and no heavy job runs, never
+from agent sessions or CI. If the next session starts while it still runs, that
+session's heavy steps (including its required-graph heavy steps) wait for
+admission until the retrain ends or hits its deadline; non-heavy steps proceed.
+This is accepted because a month-long cadence makes overlap rare; the deadline
+comes from the measured receipt. The first
 slice records the measured peak memory and wall time as a receipt; budgets in the
 job spec come from that measurement, not from this document. Admission denied
-means "try next tick", never queue-jumping or an unbounded wait. A run that would
-overlap the next session's start is allowed to finish; the nightly's own heavy
-phases wait on the same admission, so a long retrain delays the next night's
-sidecar jobs but not its required graph.
+means "try next tick", never queue-jumping or an unbounded wait.
 
 ## 7. Parity and qualification
 
@@ -234,7 +245,9 @@ Sizes are non-test code / test / doc lines, estimated.
    `retrain-stage` job (retrained members non-carried), with the §2 crash and
    race rules. 140-180 / 150-200 / 35-50. Depends on 1-3 and #192 slice 4.
 5. **Champion/gate retrain** (D1 b). Retrain kind, acceptance gate wiring, the
-   non-regression check and receipt. Own sub-design if it exceeds one PR.
+   non-regression check and receipt. Split: 5a retrain kind and check-candidate
+   fit, 150-190 / 130-170 / 30-40; 5b acceptance wiring and the non-regression
+   check with receipt, 120-160 / 120-160 / 30-40.
 6. **Promotion and rollback path** (D2, D3). Guarded promotion of a
    model-changing candidate and the forward-rollback plan. 100-140 / 100-140 / 25-35.
 7. **Parity marker** (§7). `release_changed` on the first session of a new

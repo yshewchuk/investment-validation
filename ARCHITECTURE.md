@@ -542,8 +542,9 @@ Only a tracked path absent from the worktree reads as empty.
   finding), and produces a new, gated, auto-promoted release that carries
   every model binding over unchanged.
   Retraining the champion/gate/chooser models themselves, monthly, inside the
-  nightly on the first run after a month completes (design:
-  `guides/monthly_retrain_refresh_design.md`, #805), is cutover PR-13b; a native producer for the Tier-4 forecasts table native
+  nightly, is cutover PR-13b (design:
+  `guides/monthly_retrain_refresh_design.md`, #805); a native producer for the
+  Tier-4 forecasts table native
   currently only imports from a legacy snapshot is cutover PR-13c. Forward
   inference instead uses the design in `engine/v2/scoring/ARCHITECTURE.md`;
   it needs no stored forward row. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
