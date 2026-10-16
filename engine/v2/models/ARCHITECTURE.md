@@ -143,7 +143,8 @@ size check. Existing callers omitting the ceiling retain their read contract.
   non-carried object must carry `cutoff` exactly. `prior_carry_set(release_root,
   prior_release_id) -> (pool_cutoff, tuple[PoolOutput])` returns every prior
   pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
-  (`PRIOR_MISMATCH` on any malformed or missing prior).
+  (`PRIOR_MISMATCH` on a missing prior, malformed rows or `pool_cutoff`; malformed object
+  fields surface later as `POOL_SET_MISMATCH`).
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
@@ -186,9 +187,8 @@ content succeeds and different content refuses `ID_CONFLICT`.
 ### 2.2 `phase5_state_stage` job (nightly pool staging)
 
 An ops job kind (`engine/v2/ops/state_stage.py`; logic in `tools/phase5_state_stage_job.py`
-because the assembly helpers still live in `checks/` (the tools hop is a known
-exception to the no-`checks/` rule for production code, moving them is #807); `delivery` class, write lease on
-`deployment_pointer`; `state_stage_plan` builds the plan, submission is #192 slice 4). It
+because the assembly helpers live in `checks/`; `delivery` class, write lease on
+`deployment_pointer`; `state_stage_plan` builds the plan, nothing submits it yet). It
 stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
 
 - Parameters: `release_root` (the store's parent; empty resolves the production root at
@@ -201,8 +201,8 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 - Every other prior pool/chooser object, and every prior object of an advancing member not
   re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
   driver pools and the chooser keep their hash until a retrain re-supplies them.
-- The worker writes new objects (`write_object`), takes the inventory from
-  `current_release_inventory()` under the new id (any drift refuses), calls
+- The worker takes the inventory from `current_release_inventory()` under the new id
+  (any drift refuses), then writes new objects (`write_object`), calls
   `carry_forward_release`, re-reads the catalog and staged manifest (`validate_catalog`,
   `verify_staged`, `pool_cutoff`, `carried_from`, new hashes), then writes `stage_result.json`.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
@@ -213,7 +213,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 | R1 verified input | Bound files are bounded regular files, re-classified by schema and member (self-consistency only: the loader hashes the bytes it read, no recorded hash is compared); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
 | R2 cache | None; bound files, prior catalog and inventory are re-read each call |
 | R3 retry | One attempt (`RetryPolicy("none", 1)`); a failed job is not retried |
-| R4 transaction | Objects, staged manifest and catalog are written under the new id only; `stage_result.json` follows the light checks |
+| R4 transaction | New objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `stage_result.json` follows the light checks |
 | R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
 | R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
 

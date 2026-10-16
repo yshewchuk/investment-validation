@@ -2192,6 +2192,8 @@ def test_carried_object_cutoff_equal_to_session_cutoff_is_accepted(tmp_path):
 def _rewrite_prior(tmp_path, mutate):
     _inventory, body = _stage_prior(tmp_path)
     mutate(body)
+    body = phase5_release.manifest_body(
+        body["release_id"], body["deployment_id"], body["members"], body["sources"])
     phase5_release.write_catalog(phase5_release.catalog_path(tmp_path, "prior1"), body)
 
 
@@ -2208,7 +2210,7 @@ def _drop_object_bytes(body):
 
 
 def _drop_members(body):
-    body["members"] = "not-a-list"
+    body["members"] = []
 
 
 @pytest.mark.parametrize(

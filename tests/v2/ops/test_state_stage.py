@@ -173,6 +173,9 @@ def test_worker_stages_candidate_carrying_the_unadvanced_members(tmp_path, monke
                                   "schema": "phase5_state_stage_result.v1.0"}]
     summary = json.loads((staging / "stage_result.json").read_text())
     assert summary["n_new"] == 3 and summary["n_carried"] == 7
+    assert summary["release_id"] == "cand1" and summary["prior_release_id"] == "prior1"
+    assert summary["cutoff"] == "2026-10-01"
+    assert summary["schema_version"] == "phase5_state_stage_result.v1.0"
     body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
     assert body["sources"]["pool_cutoff"] == "2026-10-01"
     assert body["sources"]["carried_from"] == "prior1"
@@ -363,3 +366,35 @@ def test_worker_refuses_an_inventory_that_cannot_be_built(tmp_path, monkeypatch)
         run_state_stage_worker(parameters, staging)
     assert "inventory could not be built" in str(err.value)
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+def _corrupt_staged_manifest(monkeypatch):
+    from checks import phase5_release_assembly as assembly_module
+
+    real = assembly_module.carry_forward_release
+
+    def wrapped(root, **kwargs):
+        path = real(root, **kwargs)
+        manifest = phase5_release.staged_manifest_path(
+            phase5_release.deployment_root(root), kwargs["release_id"])
+        manifest.write_text("{}")
+        return path
+
+    monkeypatch.setattr(assembly_module, "carry_forward_release", wrapped)
+
+
+def test_light_checks_refuse_a_corrupted_staged_manifest(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    _corrupt_staged_manifest(monkeypatch)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert "light checks" in str(err.value)
+
+
+def test_light_checks_refuse_a_catalog_with_a_bad_schema(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    _tamper_catalog(monkeypatch, lambda body: body.__setitem__("members", []))
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert "light checks" in str(err.value)
