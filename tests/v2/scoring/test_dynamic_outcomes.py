@@ -167,7 +167,8 @@ def test_refusal_request_identity_may_be_absent_but_cannot_overlap_a_record():
     assert validate_dynamic_menu(identity(), outcomes) == outcomes
     wrong = replace(outcomes[0], request_hash=outcomes[1].request_hash)
     assert_invalid(lambda: validate_dynamic_menu(identity(), (wrong, *outcomes[1:])))
-    assert validate_dynamic_menu(identity(), (replace(outcomes[0], request_hash="prebuilt"), *outcomes[1:]))
+    prebuilt = (replace(outcomes[0], request_hash="prebuilt"), *outcomes[1:])
+    assert validate_dynamic_menu(identity(), prebuilt) == prebuilt
 
 
 def test_all_refused_and_mixed_menus_are_complete_without_selecting():
