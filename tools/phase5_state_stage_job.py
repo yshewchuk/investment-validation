@@ -8,7 +8,6 @@ Never touches ``DEPLOYED``.
 from __future__ import annotations
 
 import dataclasses
-import json
 import stat
 from datetime import date
 from pathlib import Path
@@ -89,8 +88,9 @@ def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
     try:
         _require_regular(rel.catalog_path(release_root, release_id), rel.MAX_CATALOG_BYTES,
                          "the candidate catalog")
-        body = json.loads(rel.catalog_path(release_root, release_id).read_bytes())
-        rel.validate_catalog(body, release_id)
+        body = rel.read_catalog(rel.catalog_path(release_root, release_id), release_id)
+        if body is None:
+            raise StageRefused("candidate release failed the light checks")
         rel.verify_staged(rel.deployment_root(release_root), release_id)
         sources = body["sources"]
         present = {item["content_hash"] for row in body["members"]
