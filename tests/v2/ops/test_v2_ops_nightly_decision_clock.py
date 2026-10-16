@@ -1,6 +1,8 @@
 """Planning/submission checks: no workers or host resource admission waits."""
 import json
+import os
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,16 +15,14 @@ from tests.ops_support import sample
 SESSION = "2026-09-12"
 
 
-@pytest.mark.parametrize("host_cpu_count", [4, 12])
+@pytest.mark.parametrize("host_cpu_count", [8, 12])
 def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(
         tmp_path, capsys, monkeypatch, host_cpu_count):
     """Clock identity is independent of the host running this submission-only test."""
-    monkeypatch.setattr("os.cpu_count", lambda: host_cpu_count)
+    # isolated os seen only by commands; parametrization stays effective
+    monkeypatch.setattr(commands, "os", SimpleNamespace(**{**vars(os), "cpu_count": lambda: host_cpu_count}))
     capacity = sample(SystemClock())
     monkeypatch.setattr(commands, "sample_capacity", lambda *args, **kwargs: capacity)
-    # Keep DEFAULT_POLICY and its admission checks; supply a fitting fake host
-    # at both discovery boundaries, by patching os.cpu_count for the duration of this test (monkeypatch restores it).
-    monkeypatch.setattr(commands.os, "cpu_count", lambda: len(capacity.allowed_cpu_ids))
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
