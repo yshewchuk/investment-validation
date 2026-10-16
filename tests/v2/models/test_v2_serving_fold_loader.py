@@ -9,7 +9,13 @@ import pytest
 
 from engine.data.features.tier4 import ServingModel
 from engine.v2.foundation import content_hash
-from engine.v2.models import MODEL_NOT_READY, FrozenInference, InferenceRequest, deployment
+from engine.v2.models import (
+    MODEL_NOT_READY,
+    AdapterError,
+    FrozenInference,
+    InferenceRequest,
+    deployment,
+)
 from engine.v2.models import serving_fold_loader as loader
 from engine.v2.models.serving_folds import SizeFoldPolicy
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
@@ -105,8 +111,9 @@ def test_warm_legacy_entry_reused_and_limit_never_relaxes(setup, monkeypatch):
     assert entry.member_byte_limit == ceiling
     assert _infer(ref).status == "READY"
     assert calls == [1]
-    with pytest.raises(ValueError):
+    with pytest.raises(AdapterError, match="^bounded artifact verification failed$") as caught:
         inference._load_artifact(binding, max_member_bytes=1)
+    assert type(caught.value) is AdapterError
     assert entry.member_byte_limit == ceiling
 
 

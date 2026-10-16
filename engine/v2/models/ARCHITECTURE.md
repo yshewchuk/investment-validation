@@ -318,10 +318,11 @@ provide that proof. Existing nightly refusals remain.
 `FrozenInference.prepare_serving_fold(binding, max_member_bytes=..., expected_bytes=None)`
 returns detached immutable `ServingFoldMetadata`, never cached estimator/header objects.
 Both fold loaders use it; chooser catalog size is checked against the already-read
-buffers, including warm calls. The required byte limit is positive. Bounded reads
-use the shared regular-file reader with final-component no-follow; parent directories remain operator-trusted. Missing,
-special, symlinked, oversized or changed objects refuse before decode on cold and
-warm calls. Direct preparation normalizes bounded I/O and regular-file/size
+buffers, including warm calls. The required byte limit is positive. The resolved
+path is checked for containment; bounded reads open the original path with
+final-component no-follow through the shared regular-file reader. Parent directories
+remain operator-trusted. Missing, special, final-component symlinked, oversized or
+changed objects refuse before decode, cold and warm. Direct preparation normalizes bounded I/O and regular-file/size
 refusals to path-free `AdapterError`. Any binding without an established cache-entry
 byte ceiling, including legacy fold bindings and champions, retains unbounded
 verification. An established ceiling applies to every subsequent inference read.

@@ -234,6 +234,32 @@ def test_parent_mismatch_even_under_rehashed_manifest(setup, change, monkeypatch
     assert caught.value.code == MODEL_NOT_READY
 
 
+@pytest.mark.parametrize("field,value", [
+    ("parent_release_id", "other-parent"),
+    ("parent_release_hash", content_hash("other-parent")),
+])
+def test_descriptor_parent_identity_refuses_with_matching_catalog(setup, field, value, monkeypatch):
+    descriptor = replace(setup[1], **{field: value})
+    catalog = copy.deepcopy(setup[3])
+    catalog["members"][0]["objects"][0]["serving_fold"] = to_document(descriptor)
+    monkeypatch.setattr(setup[0], "prepare_serving_fold",
+                        lambda *a, **k: pytest.fail("wrong descriptor parent reached preparation"))
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
+        _load(setup, descriptor=descriptor, catalog=_rehash(catalog))
+    assert caught.value.code == MODEL_NOT_READY
+    assert setup[0].cache_size == 0
+
+
+def test_descriptor_pool_count_refuses_with_matching_catalog(setup):
+    descriptor = replace(setup[1], pool_count=setup[1].pool_count + 1)
+    catalog = copy.deepcopy(setup[3])
+    catalog["members"][0]["objects"][0]["serving_fold"] = to_document(descriptor)
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
+        _load(setup, descriptor=descriptor, catalog=_rehash(catalog))
+    assert caught.value.code == MODEL_NOT_READY
+    assert setup[0].cache_size == 1  # Valid bytes decoded; descriptor agreement refused.
+
+
 @pytest.mark.parametrize(
     "defect",
     [
@@ -325,6 +351,7 @@ def test_catalog_membership_refuses_before_decode(setup, defect, monkeypatch):
         ("pool_res", [1]),
         ("pool_pred", [1]),
         ("pool_res", [[1, 2]]),
+        ("pool_res", [[1], [2]]),
         ("pool_res", [True, False]),
         ("pool_res", ["1", "2"]),
         ("pool_res", None),
@@ -438,6 +465,8 @@ def test_no_fit_network_write_or_source_ready_claim(setup, monkeypatch):
             ref.release.bindings[0], max_member_bytes=loader.MAX_FOLD_BYTES
         )
         assert not any(hasattr(metadata, key) for key in ("fit", "estimator", "header"))
+        assert not any(hasattr(value, key) for value in (ref, metadata)
+                       for key in ("source_ready", "admission", "ready"))
     assert tree() == before  # Include sidecars and directories anywhere under the root.
     assert setup[3] == catalog_before  # Artifact loading adds no source evidence.
 
@@ -653,6 +682,34 @@ def test_chooser_passes_exact_limit_and_no_follow_to_shared_reader(setup, monkey
     _load(setup)
     _infer(ref)
     assert reads == [(setup[4], loader.MAX_FOLD_BYTES, True)] * 3
+
+
+def test_public_prepare_and_infer_cannot_widen_cold_byte_ceiling(setup, monkeypatch):
+    from engine.v2.models import loader as inference_loader
+
+    owner, descriptor, parent, _, path, _ = setup
+    binding = replace(parent.release.bindings[0], adapter="tier4-serving-fold.v1",
+                      members=(descriptor.estimator,))
+    release = replace(parent.release, bindings=(binding,))
+    ceiling = path.stat().st_size
+    assert ceiling < loader.MAX_FOLD_BYTES
+    original, reads = inference_loader.read_bounded_state, []
+
+    def read(path, limit, *, no_follow=False):
+        reads.append((path, limit, no_follow))
+        return original(path, limit, no_follow=no_follow)
+
+    monkeypatch.setattr(inference_loader, "read_bounded_state", read)
+    metadata = owner.prepare_serving_fold(binding, max_member_bytes=ceiling)
+    monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("warm artifact decoded"))
+    assert owner.prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES) == metadata
+    result = owner.infer(release, InferenceRequest(
+        release_id=release.release_id, binding_id=binding.binding_id,
+        feature_order=("x", "y"), rows=((2.0, 3.0),),
+    ))
+    assert result.status == "READY" and result.predictions == ((0.05,),)
+    assert reads == [(path, ceiling, True)] * 3
+    assert owner.cache_size == 1
 
 
 @pytest.mark.parametrize("reverse", [False, True])
