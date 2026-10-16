@@ -31,6 +31,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Deliberately this checkout, not engine.paths.ROOT / INVESTING_PLAN_ROOT: the registry is
+# imported from this tree and the spec commit is checked against this tree's HEAD, so the
+# job graph, the consumer inventory and the commit all describe the same checkout.
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

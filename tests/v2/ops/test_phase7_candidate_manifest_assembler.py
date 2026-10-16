@@ -373,9 +373,29 @@ def test_git_timeout_is_a_spec_error(monkeypatch):
         _REAL_COMMIT({"commit": "a" * 40}, asm.ROOT)
 
 
-def test_write_is_atomic_and_leaves_no_temp_file(spec, tmp_path):
+def test_write_is_atomic_and_manifest_is_replaced_last(spec, tmp_path, monkeypatch):
+    calls = []
+    real_replace = asm.os.replace
+
+    def spy(src, dst):
+        calls.append((Path(src).name, Path(dst).name))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(asm.os, "replace", spy)
     asm.assemble(spec, _out(tmp_path))
+    assert calls == [("job_graph.json.tmp", "job_graph.json"),
+                     ("consumer_inventory.json.tmp", "consumer_inventory.json"),
+                     ("manifest.json.tmp", "manifest.json")]
     assert not [p for p in _out(tmp_path).iterdir() if p.name.endswith(".tmp")]
+
+
+def test_duplicate_consumer_name_is_a_finding(spec, tmp_path):
+    manifest = asm.assemble(spec, _out(tmp_path))
+    name = manifest["consumer_inventory"]["consumers"][0]
+    manifest["consumer_inventory"]["consumers"] = [name, name]
+    result = checker.validate(manifest, root=tmp_path)
+    assert any(r["code"] == checker.DUPLICATE and r["subject"] == f"consumer:{name}"
+               for r in result["findings"])
 
 
 def test_load_manifest_cap(tmp_path, monkeypatch):

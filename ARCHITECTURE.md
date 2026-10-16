@@ -525,13 +525,17 @@ Only a tracked path absent from the worktree reads as empty.
   rule (the dashboard reads the moving current-release pointer); and a kind
   holding a store `write` lease (`models_promote`, `models_rollback`) is an
   operator action of its side, not an official scheduled writer, allowed only
-  while it can touch the shadow/non-official pointer (namespaces within
-  `shadow`/`smoke`) and refused otherwise unless listed official.
+  while its registry namespaces are within `shadow`/`smoke` and refused
+  otherwise unless listed official. That is the registry's declaration, not an
+  enforced guarantee: the plan builders still default an omitted release root
+  to the production root (issue #808), so a caller must pass a non-production
+  root.
 
   | Condition | Outcome |
   |---|---|
   | spec missing/oversize/not a JSON object, a section of the wrong shape, a duplicate or colliding extra-job id, missing `commit` or `registry_owner`, a referenced file missing or over the cap | exit 2, nothing written for that run beyond files already produced |
   | spec file unreadable, not decodable JSON, or an uncreatable `--out-dir` | exit 2 |
+  | `git` times out, is missing or fails during the commit check | exit 2 |
   | spec `commit` differs from this checkout's `HEAD`, or tracked files are modified | exit 2 (registry and inventory would describe another commit) |
   | a registry kind that can run outside `shadow`/`smoke`/`official` (today `experiment`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
   | a store-write-lease kind that can run outside `shadow`/`smoke` is not in `official_registry_kinds`, or a shadow-only one is | exit 2 |
