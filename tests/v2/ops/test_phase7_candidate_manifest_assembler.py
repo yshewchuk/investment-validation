@@ -128,8 +128,14 @@ def test_planted_unaccounted_job_fails(spec, tmp_path):
 
 @pytest.mark.parametrize("mutate, match", [
     (lambda s, t: s["config"][0].update(path=str(t / "nope.json")), r"config\[0\]"),
-    (lambda s, t: s.update(commit=5), "required"),
-    (lambda s, t: s.pop("commit"), "required"),
+    (lambda s, t: s.update(commit=5), r"commit: required in the spec"),
+    (lambda s, t: s.pop("commit"), r"commit: required in the spec"),
+    (lambda s, t: s["extra_jobs"].append({"id": "k1", "schedule": "s", "owner": "o",
+                                          "kind": "scheduled-writer", "writes_official": False}),
+     r"extra_jobs\[k1\]\.kind: must be one of"),
+    (lambda s, t: s["authority"].update(old="x"), r"authority\.old: must be a JSON object"),
+    (lambda s, t: s["authority"].pop("retained_old_deployment"),
+     r"authority\.retained_old_deployment: must be a JSON object"),
     (lambda s, t: s["extra_jobs"].append({"id": "z1", "schedule": "", "owner": "o",
                                           "kind": "reader", "writes_official": False}),
      r"extra_jobs\[z1\]\.schedule"),

@@ -181,6 +181,8 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
                             "(duplicate or registry collision)")
         seen.add(jid)
         _strings(f"extra_jobs[{jid}]", extra, "schedule", "owner", "kind")
+        if extra["kind"] not in checker.JOB_KINDS:
+            raise SpecError(f"extra_jobs[{jid}].kind: must be one of {checker.JOB_KINDS}")
         if not isinstance(extra.get("writes_official"), bool):
             raise SpecError(f"extra_jobs[{jid}].writes_official: must be a JSON boolean")
         jobs.append({k: extra.get(k) for k in _JOB_FIELDS})
@@ -195,7 +197,9 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
         _strings(f"phase_evidence[{i}]", row, "phase", "schema_version", "status")
     _strings("data_snapshot", snapshot, "snapshot_id")
     _strings("model_deployment", deployment, "release_id")
-    _obj("authority", spec.get("authority"))
+    authority = _obj("authority", spec.get("authority"))
+    for side in ("old", "proposed", "retained_old_deployment"):
+        _obj(f"authority.{side}", authority.get(side))
     manifest = {
         "schema_version": checker.MANIFEST_SCHEMA,
         "candidate": {"commit": commit,
