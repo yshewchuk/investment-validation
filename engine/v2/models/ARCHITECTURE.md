@@ -205,7 +205,9 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
   inventory comes from the legacy champion registry under the new id; drift refuses before any write.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
   `ReleaseAssemblyRefusal`, `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
-  carries `problems`). A trailing object's month may not start after `cutoff`. One attempt only.
+  carries `problems`). A trailing object's month may not start after `cutoff`. An unreadable prior
+  refuses "prior release could not be read"; an inventory artifact or registry that is a symlink,
+  not a regular file, or over its size cap refuses "release inventory could not be built". One attempt only.
 
 | Rule | Behaviour |
 |---|---|

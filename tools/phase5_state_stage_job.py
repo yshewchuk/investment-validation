@@ -126,13 +126,19 @@ def stage_candidate(parameters, root: Path) -> dict:
     check_trailing_months(new, cutoff)
     try:
         _, carried = prior_carry_set(release_root, parameters["prior_release_id"])
-        try:
-            inventory, drift = current_release_inventory()
-        except (OSError, ValueError, KeyError, TypeError, ArtifactError, DeploymentError) as exc:
-            raise StageRefused("release inventory could not be built") from exc
-        if drift:
-            raise StageRefused("release inventory drifted", {"issues": len(drift)})
-        inventory = dataclasses.replace(inventory, release_id=parameters["release_id"])
+    except ReleaseAssemblyRefusal as exc:
+        raise StageRefused("prior release could not be read", {"code": exc.code}) from exc
+    try:
+        inventory, drift = current_release_inventory()
+    except StageRefused:
+        raise
+    except (OSError, ValueError, KeyError, TypeError, ArtifactError, DeploymentError,
+            rel.ReleaseLayoutError) as exc:
+        raise StageRefused("release inventory could not be built") from exc
+    if drift:
+        raise StageRefused("release inventory drifted", {"issues": len(drift)})
+    inventory = dataclasses.replace(inventory, release_id=parameters["release_id"])
+    try:
         outputs = []
         for member, objects in new.items():
             for name, data in sorted(objects.items()):
@@ -145,7 +151,10 @@ def stage_candidate(parameters, root: Path) -> dict:
         outputs += [item for item in carried if item.member_id != CHOOSER_MEMBER_ID
                     and (item.member_id, item.name) not in supplied]
         chooser = [item for item in carried if item.member_id == CHOOSER_MEMBER_ID]
-    except (rel.ReleaseLayoutError, OSError) as exc:
+    except StageRefused:
+        raise
+    except (OSError, ValueError, KeyError, TypeError, ArtifactError, DeploymentError,
+            rel.ReleaseLayoutError) as exc:
         raise StageRefused("candidate objects could not be written") from exc
     try:
         carry_forward_release(

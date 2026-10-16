@@ -474,7 +474,7 @@ tests = [
     "tests/test_v2_models_admissible_table.py",
     "tests/test_v2_models_deployment.py",
     "tests/test_v2_models_inference.py",
-    "tests/test_v2_models_inventory.py",
+    "tests/v2/models/test_inventory.py",
     "tests/test_v2_models_lineage.py",
     "tests/v2/models/test_v2_models_no_fit.py",
     "tests/test_v2_models_no_fit_native.py",
@@ -509,7 +509,7 @@ mutate = [
 ]
 tests = [
     "tests/test_v2_models_board_analog.py",
-    "tests/test_v2_models_inventory.py",
+    "tests/v2/models/test_inventory.py",
 ]
 
 [modules.chooser]

@@ -46,7 +46,6 @@ packages (system rearchitecture §4.1/§4.2) and neither may import the other.
 """
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +53,7 @@ from pathlib import Path
 from engine import paths
 from engine.models import registry as legacy_registry
 
+from .frozen_state_io import hash_bounded_file
 from .releases import (
     ArtifactInventoryMember,
     ModelArtifactInventory,
@@ -83,7 +83,7 @@ __all__ = [
 KNOWN_CLOCK_IDS = ("legacy.entry_close.v1",)
 
 #: Matches ``engine.v2.registry.strategies.default_registry()``'s
-#: ``deployment_id`` exactly (checked by ``tests/test_v2_models_inventory.py``
+#: ``deployment_id`` exactly (checked by ``tests/v2/models/test_inventory.py``
 #: against a parsed copy of that module's source, so the two cannot drift
 #: silently).
 DEPLOYMENT_ID = "legacy-phase4-deployment.v1"
@@ -111,26 +111,13 @@ def _relative(path: Path) -> str:
         return str(path)
 
 
-def _hash_bytes(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
-def _require_size(path: Path, limit: int, message: str) -> None:
-    """Refuse a file larger than ``limit`` before it is read."""
-    if path.lstat().st_size > limit:
-        raise ValueError(message)
-
-
 def _hash_file(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    if path.lstat().st_size > MAX_ARTIFACT_BYTES:
-        raise ValueError("file exceeds size cap")
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return hash_bounded_file(path, MAX_ARTIFACT_BYTES, "file exceeds size cap")
+
+
+def _hash_registry() -> str | None:
+    return hash_bounded_file(legacy_registry.REGISTRY_PATH, MAX_REGISTRY_BYTES,
+                             "registry exceeds size cap")
 
 
 def _required_kinds(role: str) -> tuple[str, ...]:
@@ -208,9 +195,7 @@ def _champion_members(entry: "legacy_registry.RegistryEntry") -> _MemberBuild:
             artifact_ref=_relative(path), content_hash=file_hash,
         ))
     if entry.role == "gate" and entry.threshold is not None:
-        _require_size(legacy_registry.REGISTRY_PATH, MAX_REGISTRY_BYTES,
-                      "registry exceeds size cap")
-        manifest_hash = _hash_file(legacy_registry.REGISTRY_PATH)
+        manifest_hash = _hash_registry()
         if manifest_hash is not None:
             members.append(ArtifactInventoryMember(
                 member_id=f"{entry.id}:threshold", kind="threshold",
@@ -253,8 +238,7 @@ def current_release_inventory(
     on the object this returns.
     """
     if reg is None:
-        _require_size(legacy_registry.REGISTRY_PATH, MAX_REGISTRY_BYTES,
-                      "registry exceeds size cap")
+        manifest_hash = _hash_registry()
     reg = legacy_registry.load_registry() if reg is None else reg
     artifacts: list[ModelArtifactInventory] = []
     bindings: list[ReleaseBinding] = []
@@ -287,9 +271,7 @@ def current_release_inventory(
             role=entry.role, strategy_id=entry.strategy, clock_id=KNOWN_CLOCK_IDS[0],
         ))
 
-    _require_size(legacy_registry.REGISTRY_PATH, MAX_REGISTRY_BYTES,
-                  "registry exceeds size cap")
-    manifest_hash = _hash_file(legacy_registry.REGISTRY_PATH)
+    manifest_hash = _hash_registry()
     evidence = paths.FEATURES / "model_evidence.json"
     release = ModelReleaseInventory(
         release_id=RELEASE_ID,

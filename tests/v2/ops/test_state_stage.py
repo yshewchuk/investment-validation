@@ -715,6 +715,29 @@ def test_light_checks_refuse_a_vanished_catalog_with_the_exact_message(tmp_path,
     assert str(err.value) == "VALIDATION_FAILED: the candidate catalog could not be read"
 
 
+def test_worker_refuses_a_missing_prior_release(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: prior release could not be read"
+    assert err.value.problem.details == {"code": "PRIOR_MISMATCH"}
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+def test_worker_refuses_a_malformed_prior_catalog(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    path = phase5_release.catalog_path(tmp_path, "prior1")
+    body = json.loads(path.read_bytes())
+    body["members"] = []
+    path.write_text(json.dumps(body))
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: prior release could not be read"
+    assert err.value.problem.details == {"code": "PRIOR_MISMATCH"}
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
 def test_object_write_failure_is_a_typed_refusal(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch)
 

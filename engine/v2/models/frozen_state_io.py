@@ -1,4 +1,5 @@
 """Shared bounded regular-file admission for frozen state and offline publication."""
+import hashlib
 import os
 import stat
 import sys
@@ -39,3 +40,16 @@ def read_bounded_state(path: Path, limit: int, *, no_follow: bool = False) -> by
     if len(raw) > limit:
         raise BoundedStateReadError("SIZE_LIMIT", "frozen state exceeds byte limit")
     return bytes(raw)
+
+
+def hash_bounded_file(path: Path, limit: int, too_big: str) -> str | None:
+    """sha256 of a regular, non-symlink file of at most `limit` bytes; None when absent."""
+    try:
+        data = read_bounded_state(path, limit, no_follow=True)
+    except FileNotFoundError:
+        return None
+    except BoundedStateReadError as exc:
+        raise ValueError(too_big if exc.code == "SIZE_LIMIT" else "not a regular file") from None
+    except OSError:
+        raise ValueError("not a regular file") from None
+    return "sha256:" + hashlib.sha256(data).hexdigest()

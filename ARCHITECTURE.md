@@ -100,7 +100,9 @@ evidence. See the models and data component contracts.
   legacy module importing `checks/` or `tests/`, or shelling out from
   outside those two modules, is not enforced against by either rule.
   Known exception: `engine.v2.ops.state_stage` reaches `checks/phase5_release*`
-  through `tools/phase5_state_stage_job.py` (no direct import).
+  through `tools/phase5_state_stage_job.py` (no direct import). User sign-off 2026-10-16
+  (#806), following the `training.py` tools hop; #807 moves the helpers into `engine/v2/models`
+  and this exception goes away with it.
 - **Operator CLIs and experiments.** These operator and research entrypoints
   may call into the legacy and v2 engines. They are not uniformly leaf-only:
   `engine.v2.ops.training` imports the `phase5_training_job` module while

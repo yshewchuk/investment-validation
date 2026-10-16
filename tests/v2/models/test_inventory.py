@@ -213,6 +213,35 @@ def test_non_model_state_reports_presence_against_a_root(tmp_path):
 # --------------------------------------------------------------------------
 
 
+def test_a_symlink_to_an_artifact_is_refused_without_reading_it(tmp_path):
+    from engine.v2.models import inventory
+
+    target = tmp_path / "real.joblib"
+    target.write_bytes(b"payload")
+    link = tmp_path / "alias.joblib"
+    link.symlink_to(target)
+    with pytest.raises(ValueError) as error:
+        inventory._hash_file(link)
+    assert str(error.value) == "not a regular file"
+
+
+def test_a_symlinked_registry_is_refused_without_reading_it(tmp_path, monkeypatch):
+    from engine.v2.models import inventory
+
+    target = tmp_path / "registry.json"
+    target.write_text("{}")
+    link = tmp_path / "alias.json"
+    link.symlink_to(target)
+    monkeypatch.setattr(legacy_registry, "REGISTRY_PATH", link)
+    monkeypatch.setattr(
+        legacy_registry, "load_registry",
+        lambda *args, **kwargs: pytest.fail("the symlinked registry was read"),
+    )
+    with pytest.raises(ValueError) as error:
+        inventory.current_release_inventory()
+    assert str(error.value) == "not a regular file"
+
+
 def test_a_file_one_byte_over_the_artifact_cap_is_refused(tmp_path, monkeypatch):
     from engine.v2.models import inventory
 
@@ -237,6 +266,10 @@ def test_an_oversize_registry_is_refused_before_it_is_read(monkeypatch):
     from engine.v2.models import inventory
 
     monkeypatch.setattr(inventory, "MAX_REGISTRY_BYTES", 0)
+    monkeypatch.setattr(
+        legacy_registry, "load_registry",
+        lambda *args, **kwargs: pytest.fail("the oversize registry was read"),
+    )
     with pytest.raises(ValueError) as error:
         inventory.current_release_inventory()
     assert str(error.value) == "registry exceeds size cap"
