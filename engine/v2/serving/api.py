@@ -265,7 +265,7 @@ def _read_projection_binding(release_root, ops_release_id: str) -> dict | None:
         return None
     try:
         document = json.loads(text)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return document if isinstance(document, dict) else None
 
@@ -478,7 +478,7 @@ def _read_operations_status(publication_root) -> dict | None:
         return None
     try:
         document = json.loads(text)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(document, dict) or document.get("schema_version") != _OPERATIONS_STATUS_SCHEMA:
         return None
@@ -817,10 +817,15 @@ def _ops_native_parity_report_source(ops_root):
     return source
 
 
+def _open_raw(serving_db):
+    """Open the serving index untranslated, so a failed re-open reads as "available"."""
+    return projections.connect(str(serving_db))
+
+
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
     """Classify report freshness; an ApiError/OSError resolver means unknown current."""
     return native_parity_projection.native_parity_freshness(
-        serving_db, resolve_current, as_of, _open, projections.get_release,
+        serving_db, resolve_current, as_of, _open_raw, projections.get_release,
         (ApiError, OSError))
 
 

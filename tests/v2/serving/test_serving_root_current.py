@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -31,8 +32,10 @@ def _start(app):
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+    deadline = time.monotonic() + 10
     while not server.started:
-        pass
+        if time.monotonic() > deadline:
+            raise RuntimeError("server did not start")
     port = server.servers[0].sockets[0].getsockname()[1]
     return server, thread, f"http://127.0.0.1:{port}"
 
@@ -399,6 +402,46 @@ def test_binding_non_utf8_is_absent(tmp_path):
     serving_conn, release_a, _, root, pub = _setup(tmp_path)
     _point(serving_conn, pub, release_a)
     (pub / "releases" / "ops1" / "projection_binding.json").write_bytes(b"\xff\xfe")
+    client, h = _client(root, pub)
+    _expect_no_current(client, h)
+
+
+def test_fifo_current_refused_by_fstat_alone(tmp_path, monkeypatch):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    _bypass_prechecks(monkeypatch)
+    current = pub / "CURRENT"
+    current.unlink()
+    os.mkfifo(current)
+
+    def _write_pointer():
+        fd = os.open(current, os.O_WRONLY)
+        try:
+            os.write(fd, b"ops1")
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    writer = threading.Thread(target=_write_pointer, daemon=True)
+    writer.start()
+    try:
+        client, h = _client(root, pub)
+        _expect_no_current(client, h)
+    finally:
+        fd = os.open(current, os.O_RDONLY | os.O_NONBLOCK)
+        os.close(fd)
+        writer.join(5)
+
+
+def test_non_utf8_current_refused_by_strict_decode(tmp_path):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    binding = projections.projection_binding(serving_conn, release_a.release_id)
+    lossy = pub / "releases" / "ops1\ufffd"
+    lossy.mkdir(parents=True, exist_ok=True)
+    (lossy / "projection_binding.json").write_text(json.dumps(binding))
+    (pub / "CURRENT").write_bytes(b"ops1\xff")
     client, h = _client(root, pub)
     _expect_no_current(client, h)
 
