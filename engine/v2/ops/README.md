@@ -180,7 +180,7 @@ and the history admission bridge uses `errors.fail`.
 `catalog.connect`, `experiments.experiment_spec_from_document` and `errors.OpsError`/`fail`.
 `experiments/magnitude_search_trials.py` consumes `migrations.migrate`/`require_current`,
 `fingerprints.source_closure` and typed failures; `magnitude_search_records.py` consumes
-`migrations.Migration`, `catalog.transaction` and typed failures for the search-owned immutable journal.
+`migrations.Migration`, `catalog.transaction` and typed failures for the search-owned immutable journal. `experiments/magnitude_search_errors.py` consumes `errors.OpsError`/`fail` for shared artifact-failure classification.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection
