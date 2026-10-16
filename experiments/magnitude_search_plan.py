@@ -20,6 +20,7 @@ from engine.v2.ops.native_registration import (
     validate_magnitude_fitted_execution,
 )
 from engine.v2.research import magnitude_folds
+from experiments.magnitude_search_errors import artifact_failure
 from experiments.native_registration import verify_native_registration
 
 SCHEMA = "magnitude_search_plan.v1"
@@ -179,6 +180,5 @@ def read_search_plan(conn, store, registration, request, ref):
 
 def _artifact_failure(error):
     """Share the publication/read integrity distinction without leaking paths."""
-    if error.code == "INTEGRITY_FAILED":
-        return fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed integrity verification")
-    return fail("RESOURCE_UNAVAILABLE", "search planning request could not be completed")
+    return artifact_failure(error, integrity_message="stored search plan failed integrity verification",
+                            resource_message="search planning request could not be completed")

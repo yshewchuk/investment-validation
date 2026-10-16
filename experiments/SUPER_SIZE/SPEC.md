@@ -84,5 +84,20 @@ The frozen policy selects by pooled inner RMSE, breaks exact ties by candidate I
 and reserves outer evaluation for the selected candidate. Latest-outer selection
 defines the prospective frozen winner; no winner exists until recorded execution.
 Every planned candidate must be attempted and failures recorded before selection.
-This command neither reads outcomes nor runs the search. Trial recording, actual
-selection and local resource-capped execution are subsequent implementation slices.
+This command neither reads outcomes nor runs the search.
+
+The library-only `experiments.magnitude_search_trials.SearchTrials` boundary
+records every candidate/inner-fold attempt and freezes selections from submitted
+forecasts. Explicitly seal one plan per anchor, start each attempt once, and record
+complete three-horizon real forecasts or an explicit `EXPERIMENT_VARIANT_FAILED` fit failure. Numeric predictions and
+integral horizons are normalized to JSON float/int; Booleans refuse. Start returns admitted stored
+features and strictly qualified training labels; recording commits the forecasts
+before opening complete inner validation labels. One immutable shared validation record binds native-derived targets and the full receipt to admitted preflight membership, cutoff and recipe before terminal publication; concurrent candidates must agree. Replay verifies terminal targets against that record without reopening labels. This consistency check does not authenticate wholesale fabrication of all journal evidence. Freeze refuses incomplete journals
+and excludes a candidate's entire score for an admitted explicit fit failure or local scoring failure.
+Every shared native-input/label admission failure leaves the attempt unfinished, regardless of its error code;
+infrastructure/resource/shared-identity failures also block selection. Exact replay of a
+terminal submission or freeze is idempotent; another start is a forbidden retry.
+Journal writes above 16 MiB refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record.
+The submitted forecasts do not prove that an estimator ran. Frozen selections grant
+no outer-evaluation, deployment or final-read authority. A resource-capped executor,
+interrupted-attempt reconciliation, outer evaluation and reporting remain unimplemented.

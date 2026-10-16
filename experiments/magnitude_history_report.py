@@ -20,7 +20,7 @@ from engine.v2.research.magnitude_inputs import (
 )
 from experiments.magnitude_fitted import fitted_forecasts
 from experiments.magnitude_history_inputs import history_binding
-from experiments.magnitude_report import _metrics, validate_prediction_spec
+from experiments.magnitude_report import magnitude_metrics, validate_prediction_spec
 from experiments.prediction_report import _years
 
 
@@ -89,7 +89,7 @@ def prediction_result(repository, registration):
         folds.append({**fold, "train_count": len(train), "test_count": len(test),
             "train_event_ids": train.event_id.tolist(), "test_event_ids": test.event_id.tolist(),
             **fit_details, "training_inputs": dict(train.attrs),
-            "evaluation_inputs": dict(test.attrs), "metrics": _metrics(scored)})
+            "evaluation_inputs": dict(test.attrs), "metrics": magnitude_metrics(scored)})
     consumed = {"inputs_id": stored["inputs_id"], "feature_snapshot": history["feature_snapshot"],
         "columns": list((*METADATA, *FEATURES)), "row_keys": [
             [row[key] for key in ("event_id", "context_id", "horizon_sessions")] for row in stored["rows"]],
@@ -102,8 +102,8 @@ def prediction_result(repository, registration):
         "preflight": preflight, "stored_inputs": consumed, "registered_population_count": len(binding["event_ids"]),
         "population_labels": sorted({row["population_use"] for row in predictions}),
         "event_count": sum(fold["test_count"] for fold in folds), "forecast_count": len(predictions),
-        "weighting": execution["weighting"], "metrics": _metrics(predictions),
-        "per_horizon": [{"horizon_sessions": horizon, **_metrics([
+        "weighting": execution["weighting"], "metrics": magnitude_metrics(predictions),
+        "per_horizon": [{"horizon_sessions": horizon, **magnitude_metrics([
             row for row in predictions if row["horizon_sessions"] == horizon])} for horizon in plan["horizons"]],
         "holdout_results": {"random": "excluded; not evaluated", "rolling": "excluded; not evaluated"},
         "quantile_calibration": "not_implemented", "folds": folds, "predictions": predictions}
