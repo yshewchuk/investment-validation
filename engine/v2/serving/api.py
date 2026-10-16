@@ -280,14 +280,14 @@ def _publication_resolver(release_root, serving_db):
     Files (plus one bounded ``serving.sqlite`` connection) only -- keeps
     serving/ops layering intact. ``None`` when there is genuinely no
     publication yet (absent/malformed pointer or binding -- ordinary "no
-    current release" 503). Raises :class:`ApiError` -- typed, non-
-    retryable, distinct from "no current release" -- only when a binding
-  names a release id that fails to verify: not committed, or its
-  manifest/index hash no longer matches (a tampered doc or changed index row).
-  Both retryable ``SERVING_INDEX_UNREADABLE`` 503 branches are here: an
-  open-time ``sqlite3.Error`` from ``projections.connect`` and a post-open
-  ``sqlite3.Error``/``json.JSONDecodeError`` while reverifying; the connection
-  closes either way."""
+    current release" 503). Raises :class:`ApiError` in two branches:
+    non-retryable ``CURRENT_BINDING_INVALID`` (500) when a binding names a
+    release id that fails to verify: not committed, or its manifest/index
+    hash no longer matches (a tampered doc or changed index row); and
+    retryable ``SERVING_INDEX_UNREADABLE`` (503) on an open-time
+    ``sqlite3.Error`` from ``projections.connect`` or a post-open
+    ``sqlite3.Error``/``json.JSONDecodeError`` while reverifying; the
+    connection closes either way."""
 
 
     def resolve_pair() -> tuple[str | None, str | None]:
