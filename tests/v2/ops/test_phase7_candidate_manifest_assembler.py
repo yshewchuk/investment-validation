@@ -276,12 +276,18 @@ def test_dirty_tracked_tree_is_refused(tmp_path):
         _REAL_COMMIT({"commit": "b" * 40}, repo)
     (repo / "untracked.txt").write_text("u")
     assert _REAL_COMMIT({"commit": head}, repo) == head
-    (repo / "engine").mkdir()
-    (repo / "engine" / "new.py").write_text("x = 1")
-    with pytest.raises(asm.SpecError, match="untracked files under the scanned trees"):
-        _REAL_COMMIT({"commit": head}, repo)
-    (repo / "engine" / "new.py").unlink()
-    (repo / "engine").rmdir()
+    for tree in ("engine", "tools", "dashboard", "checks"):
+        (repo / tree).mkdir()
+        (repo / tree / "new.py").write_text("x = 1")
+        with pytest.raises(asm.SpecError, match="untracked files under the scanned trees"):
+            _REAL_COMMIT({"commit": head}, repo)
+        (repo / tree / "new.py").unlink()
+        (repo / tree).rmdir()
+    (repo / "notes").mkdir()
+    (repo / "notes" / "x.txt").write_text("x")
+    assert _REAL_COMMIT({"commit": head}, repo) == head
+    (repo / "notes" / "x.txt").unlink()
+    (repo / "notes").rmdir()
     (repo / "a.txt").write_text("2")
     with pytest.raises(asm.SpecError, match="uncommitted"):
         _REAL_COMMIT({"commit": head}, repo)
@@ -520,17 +526,17 @@ def test_discovery_failure_is_exit_2_and_creates_nothing(spec, tmp_path, monkeyp
     assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o")]) == 2
 
 
-def test_graph_file_carries_kind_and_owner_and_checker_compares_them(spec, tmp_path):
+@pytest.mark.parametrize("field", ["kind", "owner"])
+def test_graph_file_carries_kind_and_owner_and_checker_compares_them(spec, tmp_path, field):
     manifest = asm.assemble(spec, _out(tmp_path))
     graph = _out(tmp_path) / "job_graph.json"
     doc = json.loads(graph.read_text())
     assert all({"kind", "owner"} <= set(row) for row in doc["jobs"])
-    doc["jobs"][0]["kind"] = "scheduled_writer" if doc["jobs"][0]["kind"] != "scheduled_writer" \
-        else "reader"
+    doc["jobs"][0][field] = doc["jobs"][0][field] + "-edited"
     graph.write_text(json.dumps(doc))
     manifest["job_graph"]["sha256"] = hashlib.sha256(graph.read_bytes()).hexdigest()
     result = checker.validate(manifest, root=tmp_path)
-    assert any(r["code"] == checker.REF_MISMATCH and "graph kind" in r["detail"]
+    assert any(r["code"] == checker.REF_MISMATCH and f"graph {field}" in r["detail"]
                for r in result["findings"])
 
 

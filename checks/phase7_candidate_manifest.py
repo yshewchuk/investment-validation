@@ -55,6 +55,10 @@ carries a string ``id``, a string ``schedule`` and a real JSON boolean
 are findings, never silently converted. The two job sets must agree exactly
 (id and schedule per id), so a scheduled job that exists but is not
 accounted for, or an accounted job the graph does not run, both fail.
+A graph row may also carry ``kind`` and ``owner`` (the assembler always writes
+them); when present they must equal the accounted job's, otherwise
+``P7_REF_MISMATCH``. They are optional because the v1.0 graph document schema
+is {id, schedule, writes_official}.
 
 ``consumer_inventory``: ``{"path", "sha256", "consumers": ["<name>", ...]}``
 — a non-empty list of name strings; a dict, list or other nonstring entry
