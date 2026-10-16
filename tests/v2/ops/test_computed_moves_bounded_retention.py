@@ -304,9 +304,9 @@ def test_no_frame_is_alive_while_the_next_chunk_loads(tmp_path, monkeypatch):
     assert alive_at_load == [0] * len(alive_at_load)
 
 
-@pytest.mark.parametrize("bulk", [0, 10, 30])
+@pytest.mark.parametrize("bulk", [0, 8, 16])
 def test_retained_input_rows_do_not_grow_with_total_history(tmp_path, monkeypatch, bulk):
-    """(c) Total history grows ~7x across the cases; the rows retained at once never
+    """(c) Total history grows ~4x across the cases (cost is quadratic in tickers, one ticker per chunk); the rows retained at once never
     exceed the guard, and past the guard they are a small fraction of the history.
     Two instruments: ONE shared live-row account (its peak is the chunk frames plus
     the in-flight lease) and a ``gc`` count of rows alive in DataFrames at every
