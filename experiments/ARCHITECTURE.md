@@ -223,23 +223,23 @@ both flag states publish/verify the same plan and never write a ledger.
 
 `magnitude_search_trials.SearchTrials` is a library-only begin/record/freeze boundary; it has no CLI or production
 caller. `seal(clock=...)` explicitly initializes the search-owned journal through ops migrations and binds one verified
-plan per anchor to the installed recorder sources. Existing fixed registrations and source closures are unchanged.
-Standard SQLite transactions and foundation artifacts own durability; `magnitude_report._metrics` owns pooled RMSE/MAE.
+plan per anchor to the installed recorder sources. Public metric naming updates reporter source fingerprints.
+SQLite/foundation own durability; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE; `magnitude_search_errors` tags artifact failures.
+`engine.v2.data.errors`, `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own typed failures/native/plan admission.
 No fitting or outer evaluation occurs.
-
 `start(outer_year, inner_year, candidate_id)` re-admits the native source and stored feature binding, preflights inner
 participants, and qualifies training labels strictly before the inner fit boundary. Its immutable cohort binds stored
 feature rows and qualified training targets. All candidates in a fold must share that exact cohort. `record` accepts
 complete nonnegative finite forecasts or a typed failure, never scores. Submitted forecasts are associated with the
 attempt in a short catalog transaction before complete inner validation labels may open, strictly before outer fitting.
-The journal records failures and refusals as well as successes; durable records are never updated, deleted or replaced.
+Only candidate-owned nonretryable validation/variant failures become terminals; infrastructure/shared-identity failures leave attempts
+unfinished and block selection, without authorizing retries. Durable records are never updated, deleted or replaced.
 Artifact publication precedes the catalog commit; a failed commit may leave an unreferenced object, not admitted
 evidence.
-
 `freeze()` requires every planned candidate/inner-fold attempt to be terminal. It excludes an entire candidate within an
 outer fold after any failed/refused inner fold, pools all successful event/horizon errors, breaks exact RMSE ties by
 candidate ID, and freezes all outer selections plus the latest-outer prospective candidate. Missing/started-only records
-or an outer fold with no successful candidate refuse; identical terminal/freeze replay returns the original evidence.
+or an outer fold with no successful candidate refuse `EXPERIMENT_VARIANT_FAILED`; exact terminal/freeze replay is idempotent.
 Repeated starts, changed submissions, another plan for the anchor, source drift and corrupt evidence refuse
 `EXPERIMENT_IDENTITY_CONFLICT`. Zero fit retries remain the plan's policy. Invalid forecast shape refuses
 `INVALID_EXPERIMENT_SPEC` without reading labels; artifact unavailability is `RESOURCE_UNAVAILABLE`. Records are bounded

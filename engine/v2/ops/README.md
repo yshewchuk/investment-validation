@@ -62,7 +62,7 @@ Native sweep coordination also exposes `submission.submit_graph`/`submission.Nam
 `stages.registry`, `checkpoints.register_artifact`, `migrations.require_current`,
 `schema.OWNER`/`schema.MIGRATIONS`, and `fingerprints.worker_source_manifest`
 for current-schema admission, artifact registration, source binding and atomic job submission.
-Search recording exposes `migrations.Migration` and `migrations.migrate` for its
+Ops exposes `migrations.Migration` and `migrations.migrate` to search recording for its
 separate owner sequence; it does not add or reinterpret ops migration versions.
 
 `native.input_decoding._load_native_score_inputs` is an internal decoder shared

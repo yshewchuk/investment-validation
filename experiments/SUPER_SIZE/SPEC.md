@@ -92,7 +92,8 @@ forecasts. Explicitly seal one plan per anchor, start each attempt once, and rec
 complete three-horizon forecasts or a typed failure. Start returns admitted stored
 features and strictly qualified training labels; recording commits the forecasts
 before opening complete inner validation labels. Freeze refuses incomplete journals
-and excludes a candidate's entire score if any inner fold failed. Exact replay of a
+and excludes a candidate's entire score if an inner fold has a nonretryable validation/variant failure.
+Infrastructure/resource/shared-identity failures leave attempts unfinished and block selection. Exact replay of a
 terminal submission or freeze is idempotent; another start is a forbidden retry.
 The submitted forecasts do not prove that an estimator ran. Frozen selections grant
 no outer-evaluation, deployment or final-read authority. A resource-capped executor,
