@@ -31,3 +31,40 @@ def test_cache_is_cleared_at_the_limit_and_names_stay_correct(monkeypatch):
         assert fingerprints._import_names(f"import {name}\n", []) == (name,)
     assert len(fingerprints._IMPORT_NAMES) == 1
     assert fingerprints._import_names("import a\n", []) == ("a",)
+
+
+def test_default_bound_is_twenty_thousand_entries():
+    assert fingerprints._IMPORT_NAMES_LIMIT == 20000
+
+
+def test_import_free_source_is_cached_too(monkeypatch):
+    fingerprints._IMPORT_NAMES.clear()
+    calls = []
+    real = ast.parse
+    monkeypatch.setattr(fingerprints.ast, "parse", lambda *a, **k: calls.append(1) or real(*a, **k))
+    assert fingerprints._import_names("x = 1\n", []) == ()
+    assert fingerprints._import_names("x = 1\n", []) == ()
+    assert len(calls) == 1
+
+
+def test_cache_stores_a_digest_key_not_the_source_text():
+    fingerprints._IMPORT_NAMES.clear()
+    fingerprints._import_names("import os\n", ["p"])
+    (digest, package), names = next(iter(fingerprints._IMPORT_NAMES.items()))
+    assert isinstance(digest, bytes) and len(digest) == 32
+    assert package == ("p",) and names == ("os",)
+
+
+def test_source_closure_derives_the_package_from_the_file_path(tmp_path):
+    for rel, text in {
+        "pkg/__init__.py": "",
+        "pkg/sub/__init__.py": "",
+        "pkg/sub/mod.py": "from . import sibling\nfrom .. import top\n",
+        "pkg/sub/sibling.py": "",
+        "pkg/top.py": "",
+    }.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    closure = fingerprints.source_closure(tmp_path, ["pkg/sub/mod.py"])
+    assert {"pkg/sub/mod.py", "pkg/sub/sibling.py", "pkg/top.py"} <= set(closure)
