@@ -46,7 +46,7 @@ def _event_plan(event, calendar, clocks):
             "session": event.session, "population_use": event.population_use, "forecasts": forecasts}
 
 
-def _fold(year, events):
+def annual_fold(year, events):
     """Use one conservative fit boundary for every horizon of an annual fold."""
     test = [event for event in events if event["event_date"][:4] == year]
     if not test:
@@ -77,7 +77,7 @@ def plan_magnitude_folds(repository, snapshot, *, as_of_month, evaluation_years,
     calendar, source = _calendar_input(repository, snapshot)
     clocks = {}
     events = [_event_plan(event, calendar, clocks) for event in selected.itertuples(index=False)]
-    folds = [_fold(year, events) for year in evaluation_years]
+    folds = [annual_fold(year, events) for year in evaluation_years]
     records = repository.fragment_records(snapshot, "earnings_events")
     context = {name: selected.iloc[0][name] for name in (
         "snapshot_id", "holdout_as_of_month", "random_membership_version", "rolling_membership_version")}

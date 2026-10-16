@@ -56,7 +56,7 @@ caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
 An automated nightly append cycle for the pool/residual/cutoff artifacts:
-design only, not yet implemented — see #192.
+release assembly is §2.1; the rest is design only — see #192.
 
 ## 2. Primary contracts and public interfaces
 
@@ -121,8 +121,58 @@ size check. Existing callers omitting the ceiling retain their read contract.
 | Object at/below the ceiling | Existing byte-hash, canonical-hash and typed validation apply |
 | Cache, retry, transaction, partial write | Existing per-loader content-hash cache; no retries or writes; failure returns no partial state |
 
-`carry_forward_release`, `derive_catalog`: design only, not yet
-implemented — see #192.
+### 2.1 Pool release assembly
+
+`checks/phase5_release_assembly.py`, beside the catalog in `checks/phase5_release.py`:
+
+- `derive_catalog(prior_catalog, *, release_id, expected_prior_release_id, outputs, chooser, cutoff) -> dict`
+  — pure. Returns the candidate catalog body: the six pool members
+  (`driver_residual_pool:{size,implied_t1,runup_move}`, `paired_residual_pool`,
+  `trailing_pnl_cutoff`, `board_analog_matcher`) and `chooser_analog_pool` each
+  get the full set of supplied objects (`outputs` holds one or more
+  `PoolOutput` per pool member; `chooser` is one or more; object names are
+  unique within a member, and every object carries `cutoff`), replacing that
+  row's objects wholesale; every other member row is copied unchanged;
+  `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
+  the prior release id.
+- `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
+  — verifies the prior staged release, untouched rows and supplied objects on disk,
+  re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
+  then writes the candidate catalog. It never touches `DEPLOYED`.
+
+Both refuse with a stable `ReleaseAssemblyRefusal.code`; stray `KeyError`, `TypeError`, `AttributeError`,
+`ValueError`, `RecursionError` map to `PRIOR_MISMATCH` (inventory or stage-time ones to `INVENTORY_MISMATCH`,
+publish `OSError` to `PUBLICATION_FAILED`).
+
+| Condition | Code |
+|---|---|
+| Prior release id empty, not a string or unsafe (`/`, `\`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest, model payload or untouched STAGED row object missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
+| Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
+| Chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
+| An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
+| `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
+| Supplied object missing, unreadable, not a regular file, `payload_bytes` above `MAX_OBJECT_BYTES`, longer than its claim, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
+| Candidate id empty, unsafe or equal to the prior's; inventory `release_id` differs from it; candidate catalog or staged manifest exists with different or corrupt content | `ID_CONFLICT` |
+| Inventory missing, malformed, member hashes differ from the prior payloads, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
+| Filesystem error or lock timeout while publishing (inputs not at fault) | `PUBLICATION_FAILED` |
+
+Supplied objects, prior payloads, both catalogs and staged manifests are
+opened without following links, must be regular files, and are read under a
+byte cap; the lock file is opened without following links and must be regular.
+A missing, symlinked, non-regular or oversize prior refuses `PRIOR_MISMATCH`;
+a corrupt, symlinked, non-regular or oversize existing candidate refuses `ID_CONFLICT`, an absent one is created. Staging and the catalog write
+run under one exclusive `flock` on `deployment/.carry_forward.lock`; a loser
+that waits out `LOCK_WAIT_S` refuses `PUBLICATION_FAILED`; otherwise identical
+content succeeds and different content refuses `ID_CONFLICT`.
+
+| Rule | Behaviour |
+|---|---|
+| R1 verified input | Prior release, each output, chooser row, identities, hashes, cutoff, inventory identity and prior model payload hashes validated before any candidate artifact is written |
+| R2 cache | None; the prior catalog, staged manifest and objects are re-read each call |
+| R3 retry | Repeatable only with the same validated inputs; no fallback to old pools or live registries |
+| R4 transaction | Candidate artifacts are written only under the new candidate id (objects are content-addressed); the only other write is the `deployment/.carry_forward.lock` coordination file |
+| R5 partial failure | Orphaned objects or a staged manifest without a catalog may remain and a retry completes it; no catalog, nothing promoted |
+| R6 idempotency | Identical inputs give identical catalog bytes (no clock in the catalog); same id with different content refuses `ID_CONFLICT` |
 
 ## 3. Inputs
 
@@ -158,56 +208,52 @@ that binding through `FrozenInference`; no second prediction engine is added.
 | Corrupt, oversized, escaped-path or header/descriptor mismatch | `MODEL_NOT_READY` before inference; redact filesystem details |
 | Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
 
-**Offline descriptor authoring.** `ServingFoldDescriptor` in
-`serving_folds.py` is an immutable typed document under each size fold catalog
-object. It records parent release/model-manifest identity, model, ordered
-features, output/clock, exact month, full panel SHA-256, estimator member,
-embedded pool fields/count and explicit interval policy. The enclosing catalog
-hash binds catalog identity without a self-reference inside the descriptor.
-`tools.phase5_prepare_release` obtains `SizeFoldPolicy` from the registered size
-producer; `tools.phase5_serving_folds` validates bounded cache bytes and emits
-metadata before catalog publication. No fitting or inference occurs here.
+**Offline descriptor authoring.** Immutable `serving_folds.ServingFoldDescriptor`
+records parent release/model-manifest identity, model, ordered features, output/clock,
+exact month, full panel SHA-256, estimator member, embedded pool fields/count and
+explicit interval policy. The enclosing catalog hash binds catalog identity
+without a self-reference inside the descriptor.
+`tools.phase5_prepare_release` obtains the registered producer's `SizeFoldPolicy`;
+`tools.phase5_serving_folds` validates cache bytes before catalog publication, without fitting/inference.
+Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary handles and explicit `compress=0`; filename suffixes cannot enable compression.
+Release preparation (`--tier4-dir` and raw-byte APIs) requires trusted uncompressed inputs from supported writers; it does not refuse arbitrary compressed inputs before decoding.
+Hashes verify bytes, not provenance. The serialized byte cap is not a decoded-memory bound.
+Champion registry artifacts retain their separate `compress=3` format.
 Retained fold-parent checks reuse deployment's semantic release identity:
 binding/member collection order and storage paths may differ on retry;
 feature and output order, and every other identity field, remain significant.
 All Tier-4 collector roles and chooser/pinned-size destination reads admit
 regular files of at most 32 MiB with final-component `O_NOFOLLOW`; final symlinks
 refuse. Parent directories remain operator-trusted, not traversed no-follow.
+`read_bounded_state(path, limit, no_follow=False)` preserves frozen-loader defaults;
+fold/publication callers opt in. It admits nonnegative limits below `sys.maxsize`;
+invalid limits/nonregular/oversize raise coded `BoundedStateReadError`; I/O errors propagate.
 Absent directories/unmatched files remain empty. Reader/chooser mismatches are unprefixed;
-pinned COPY verification and size byte mismatches use `panel_copy_refused:`.
+pinned COPY verification and pinned-size byte mismatches use `panel_copy_refused:`.
 
 | Offline authoring condition | Outcome |
 |---|---|
 | Explicit policy and coherent size cache | Emit descriptor covered by the catalog self-hash; repeat inputs yield identical metadata |
-| Header/model/features/full panel/month disagreement, missing or malformed pool, oversized bytes | Refuse publication; never infer metadata from a filename prefix alone |
+| Header/model/features/full panel/month disagreement, malformed pool or oversized bytes | Refuse publication (before decode for oversize); never infer metadata from a filename prefix |
 | No explicit policy in a programmatic legacy caller | Preserve the existing catalog shape; it cannot supply the future fold path |
 | Other fold roles without their own explicit policy | Keep existing opaque catalog objects; never reinterpret them as size descriptors |
-| Collector read or destination verification encounters unreadable bytes or a final symlink | Fixed read refusal with I/O cause; no new catalog or pointer; collector refuses before decode/output |
-| Collector read or destination verification encounters a special file | Fixed regular-file refusal before content reads; no new catalog or pointer |
-| Collector read or destination verification sees an initial size above 32 MiB | Fixed byte-limit refusal before content reads; no new catalog or pointer |
-| Collector read or destination verification detects growth beyond 32 MiB | Fixed byte-limit refusal after bounded read; no new catalog or pointer |
-| Pinned-size destination bytes differ from preflight | Role-specific mismatch refusal; never repair or relabel an existing regular object |
+| Collector or post-write fold recheck encounters unreadable bytes/final symlink | Fixed read refusal with I/O cause; no new catalog/pointer; collector refuses before decode/output |
+| Collector or post-write fold recheck encounters a special file | Fixed regular-file refusal before content reads; no new catalog/pointer |
+| Collector or post-write fold recheck exceeds 32 MiB, initially or through growth | Fixed byte-limit refusal, before content reads if initially oversized; no new catalog/pointer |
+| Shared writer finds retained bytes different from, or longer than, supplied payload | Verification refusal (role-specific mismatch for declared folds); never repair/relabel; no new catalog/pointer |
 | Retry with an unchanged corrupt address | Refuse again without changing the object, catalog or pointer |
 | Partial write | No pointer changes; staging may leave unreferenced files; no automatic store repair |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
-**Chooser producer fold authoring.** `ChooserFoldPolicy` and
-`ChooserServingFoldDescriptor` separately declare `implied_t1` and `runup_move`
-monthly caches under their exact `tier4_folds:<role>` members. The descriptor
-binds the parent release, full panel hash, ordered features, clock, whole-cache
-estimator object (not the champion member), pool count and decile/floor policy. It records
-both the champion binding output and raw D14 chooser column; runup output is
-never day-scaled here. Standard release preparation obtains each present role's
-policy from its registered producer and validates the cache against that role's
-unique wildcard champion. Size descriptors keep their existing schema.
-The chooser descriptor hash is `content_hash` of its canonical typed document, covering parent, role and estimator identity.
-Without pinned COPY context, the explicit panel digest is caller-asserted; preparation does not verify panel bytes.
+**Chooser producer fold authoring.** `ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema.
+The descriptor hash covers its canonical typed document, including parent, role and estimator identity.
+Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
 
 | Chooser fold authoring condition | Outcome |
 |---|---|
 | Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
 | Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
-| Construction/typed decoding: invalid panel digest, role/output pair or cache-object path/hash | `DocumentError`: `BAD_PANEL_HASH`, `CHOOSER_OUTPUT_MISMATCH` or `BAD_FOLD_OBJECT`; authoring wraps policy refusals |
+| Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks) | Typed `DocumentError`; decode preserves nested paths |
 | Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
 | Registered chooser producer rejects recipe features/target | Fixed `PrepareRefused` with original cause; CLI exits 2 without a traceback |
 | Pinned COPY context | Full panel hash must match; preflight precedes output effects and destination bytes must retain the validated hash |
@@ -216,6 +262,7 @@ Without pinned COPY context, the explicit panel digest is caller-asserted; prepa
 | Destination bytes differ from preflight | Unprefixed chooser mismatch refusal; never repair or relabel an existing object |
 | Cache/partial write | Validate anew; no descriptor cache or pointer changes; staging may leave unreferenced files; no automatic store repair |
 
+Typed decoding may refuse earlier with `BAD_ENUM` for invalid role literals or `BAD_TYPE` for invalid field types.
 Zero pool counts authorize no runtime selection or activation; COPY consistency does not prove training-source availability or finality.
 The Phase-5 shared object writer owns durable create-only publication and typed
 I/O failures ([contract](../../../checks/ARCHITECTURE.md)); fold consumers retain byte verification.
@@ -432,7 +479,7 @@ promotion and rollback refuse without matching staging success.
 | Condition | Outcome |
 |---|---|
 | Unstaged `release_id` | `resolve_release` refuses `ReleaseNotStaged` |
-| Staged manifest cannot be read or parsed | Both refuse `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error (issue #207) — `current_release` inherits this from its own call to `resolve_release` |
+| Staged manifest cannot be read or parsed, is a symlink or non-regular file, or exceeds 64 MiB | Both refuse `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error; a missing file is still "not staged" — `current_release` inherits this from its own call to `resolve_release` |
 | Release staged under a superseded hash version (legacy) | Still resolves — replay of a score already recorded against it must never become unreplayable. Only the write path (§7.2) enforces the current hash version |
 | No live pointer | `current_release` returns `None` |
 | Caching, retry, transaction, partial write | None of these apply: read-only, no cache, nothing to retry, no write |
@@ -476,9 +523,9 @@ production scoring instead selects the release named by `DEPLOYED`.
 | Selected release-local catalog exists | It is authoritative; schema, self-hash and release identity must validate |
 | Cache | `checks.phase5_release.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
-| Local catalog corrupt or unreadable | Refuse; never fall back to a valid root copy |
+| Local catalog corrupt or unreadable, a symlink or non-regular file, or over 64 MiB (`checks.phase5_release.read_manifest`; scoring `_read_state_catalog` likewise) | Refuse (`ReleaseLayoutError`, scoring `ModelNotReady`); never fall back to a valid root copy |
 | Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs; incumbent validation is read-only and precedes copying |
-| Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee |
+| Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee, except `carry_forward_release` calls, which serialize on `deployment/.carry_forward.lock` (§2.1) |
 | Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |
 | Historical catalog was already overwritten before migration | It cannot be recovered from a model manifest; rebuilding that catalog is required |
 

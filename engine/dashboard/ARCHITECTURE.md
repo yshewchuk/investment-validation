@@ -22,7 +22,8 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 ## Primary contracts and public interfaces
 
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
-  (root doc §4).
+  (root doc §4). Public helpers for the Tier-4 gap repair:
+  `repair_tier4_gap`, `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
 - `render.py` — `build_meta`, `build_health`, `build_strategies`,
   `compact_row`, `row_digest`, `freshness_summary`, `quota_state`,
   `size_model_mae_from_ledger`, `payoff_curve`: the board's row/meta/health
@@ -41,8 +42,8 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   `scrub_mismatches`: re-scores board rows directly through the engine and
   stops the publish on a mismatch.
 - `model_evidence.py` — `load_model_evidence`, `evidence_path`,
-  `_sanitize_reason`: the model-evidence page and its own free-text
-  sanitizer (see Invariants).
+  `sanitize_reason`: the model-evidence page and its free-text
+  sanitizer (see Invariants), also used by `nightly.py`.
 - `publish.py` — `publish_bundle`, `LocalPublisher` (atomic
   release-symlink flip, the default target), `CommandPublisher` (a shell
   command target; see Failure semantics for what "atomic" does and does
@@ -65,10 +66,9 @@ drift, quota below reserve) and a backup sync.
 
 ## Dependencies
 
-Imports observed in this package, top-level and lazy (mechanically walked
-by `.oc_logs/import_scan.py`, an `ast` walk over every `.py` file that
-reports every `engine.*` import at any depth, including inside function
-bodies) — 24 distinct legacy `engine.*` modules in total, not 3:
+Imports observed in this package, top-level and lazy (an `ast` walk over
+every `.py` file reporting every `engine.*` import at any depth, including
+inside function bodies):
 
 - Top-level: `engine.paths` (all four of `model_evidence.py`/`nightly.py`/
   `publish.py`/`render.py`), `engine.data.throttle` (quota guard, also
@@ -85,7 +85,9 @@ bodies) — 24 distinct legacy `engine.*` modules in total, not 3:
   (`nightly.py::run_nightly`); `engine.data.pulls`
   (`nightly.py::run_nightly`); `engine.data.pulls.forward_calendar`
   (`nightly.py::refresh_calendar_data`); `engine.data.rebuild`
-  (`nightly.py::refresh_calendar_data`/`run_nightly`); `engine.data.schemas`
+  (`nightly.py::refresh_calendar_data`/`run_nightly`/`mark_tiers_degraded`);
+  `engine.data.manifest` (`nightly.py::_write_flag_report`);
+  `engine.data.schemas`
   (`model_evidence.py::_replay_trades`); `engine.entry_rules`
   (`render.py::build_strategies`); `engine.features`
   (`model_evidence.py::_champion_block_impl`/`_dataset_for`,
@@ -134,6 +136,26 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Missing input / refresh failure** — degrades to cached data (staleness
   stays visible in `meta.json`) — except a rotated credential, which stops
   the run rather than burning retries against a dead key.
+- **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per run:
+  on the repair path it is written after the Tier-4 gap check; a degraded
+  tiers step writes its own (see table); a failed write keeps the previous
+  file.
+  A stop before the tiers step (after the store rebuild) leaves the previous
+  SNAPSHOT in place; a later stop (selfcheck) keeps tonight's. The retained
+  SNAPSHOT is the import gate, not a hash of the current working store: after
+  a refused repair the store can be ahead of it (user decision, fail-closed
+  readers tracked in #771). The flag report is written atomically (a failed
+  write keeps the previous file); for a tiers refusal it is best-effort.
+
+  | Condition | Outcome |
+  | --- | --- |
+  | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
+  | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |
+  | With tiers on, run stops between refresh and tiers (red validation, as-of finality stop) | Store refreshed, no new SNAPSHOT; the previous SNAPSHOT is kept (with `--no-tiers` the refresh step has already written one) |
+  | Tier-3/4 rebuild raises | `tiers_degraded` (error text sanitised); the run continues and scores the store as found; the degrade step writes a SNAPSHOT of that store (the deferred refresh snapshot, when refresh ran) so the scorer's digest describes the store scored; if that write fails the run stops with `NightlyStop` `TIERS_SNAPSHOT_FAILED` (exception type only), nothing scored |
+  | No gap, finalize fails | `tiers_degraded` as above |
+  | Repaired, or no gap | SNAPSHOT written once |
+
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.
 - **Selfcheck mismatch** — stops the publish; the nightly records raw
@@ -166,7 +188,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   (root doc §5, "legacy board, nightly and ledger stay unchanged until
   cutover").
 - Free-text fields that reach the bundle are sanitised before publish, not
-  passed through raw: `model_evidence.py::_sanitize_reason` and
+  passed through raw: `model_evidence.py::sanitize_reason` and
   `selfcheck.py::scrub_mismatches` are the existing enforcement points for
   this package; a new free-text field added anywhere in this package
   (a new `degraded_reason`, a new flag detail, a caught exception's

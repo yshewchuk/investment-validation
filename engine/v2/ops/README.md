@@ -55,8 +55,13 @@ reservation; the caller owns the transaction around the reservation helper.
 The registration verifier reads only catalog-owned binding evidence and grants no final-read authority; internal `final_holdout.authorize_final_holdout` has only synthetic tests as consumers and no production entrypoint or read capability.
 Native prediction and reconstructed gate reporting consume the public fold-local
 `experiment_folds.TrainFoldRule` and `experiment_folds.fit_walk_forward_fold`.
-The fixed native gate child consumes `worker.main(dispatcher=...)` for the unchanged launch/result protocol; ops never imports its pricing adapter. Prediction and gate CLIs consume `catalog.connect` and `experiments.experiment_spec_from_document`
+The fixed native gate child consumes `worker.main(dispatcher=...)` for the unchanged launch/result protocol; ops never imports its pricing or evaluation adapters. Prediction and gate CLIs consume `catalog.connect` and `experiments.experiment_spec_from_document`
 to open an existing catalog and decode the same strict experiment specification.
+
+Native sweep coordination also exposes `submission.submit_graph`/`submission.NamespacePolicy`,
+`stages.registry`, `checkpoints.register_artifact`, `migrations.require_current`,
+`schema.OWNER`/`schema.MIGRATIONS`, and `fingerprints.worker_source_manifest`
+for current-schema admission, artifact registration, source binding and atomic job submission.
 
 `native.input_decoding._load_native_score_inputs` is an internal decoder shared
 by the CLI, worker and dashboard projection tool, separate from the versioned
@@ -127,7 +132,7 @@ either required table. Their current consumer is
 
 `nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package and used by completion persistence in `supervisor.Service`; tests include `tests/v2/ops/test_nightly_session.py` and `tests/v2/ops/test_nightly_completion.py`. `nightly_completion` (run-scoped reports, #564 slice 7; exports `Disposition`, `SCHEMA`, `build_completion_report`, `record_completion`) is internal and consumed through `supervisor.Service`; `tests/v2/ops/test_nightly_completion.py` covers its report contract and persistence. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is imported by the production modules `nightly_chain`, `nightly_history`, and `nightly_repair`; `nightly_trigger` does not call it yet. `tests/v2/ops/test_nightly_receipts.py` covers its contract. `nightly_readiness` (legacy run-report readiness for a session, #564 slice 3; exports `LegacyReadiness`, `check_legacy_report`) is internal and uncalled by `nightly_trigger`; `tests/v2/ops/test_nightly_readiness.py` covers its contract. `nightly_chain` (snapshot import/refresh/moves/capture step chain over step receipts, #564 slice 4; exports `ChainResult`, `ChainStep`, `run_snapshot_chain`) is imported by production module `nightly_history`; `nightly_trigger` does not call it directly. `tests/v2/ops/test_nightly_chain.py` covers its contract.
 
-<!-- public-interface: magnitude_fitted_execution_document, validate_magnitude_fitted_execution, registered_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, magnitude_history_request, magnitude_history_execution_document, validate_magnitude_history_execution, environment_identity, source_closure, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main -->
+<!-- public-interface: magnitude_fitted_execution_document, validate_magnitude_fitted_execution, registered_artifact, register_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, magnitude_history_request, magnitude_history_execution_document, validate_magnitude_history_execution, environment_identity, source_closure, worker_source_manifest, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main, submit_graph, NamespacePolicy, registry, require_current, OWNER, MIGRATIONS -->
 
 ## Consumers
 
@@ -136,7 +141,13 @@ a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
 `experiments/native_gate_worker.py` consumes `stages.NativeGateParameters`, `executor.THREAD_VARIABLES`, `experiments.experiment_spec_from_document`/`resolve_experiment_plan`, `fingerprints.environment_identity`/`source_closure` and `errors.OpsError`/`fail` for admission.
-`experiments/native_gate_entrypoint.py` consumes `worker.main` and injects only its fixed pricing callback.
+`experiments/native_gate_entrypoint.py` consumes `worker.main` and injects only fixed pricing/evaluation callbacks.
+`experiments/native_gate_evaluation.py` consumes `stages.NativeGateParameters` and `errors.fail`; its admission/receipt helpers are owned by unlayered `experiments.native_gate_worker`, not ops.
+`experiments/v2_gate_sweep.py` consumes `submission.submit_graph`/`NamespacePolicy`,
+`stages.registry`, `checkpoints.register_artifact`, `catalog.connect`/`transaction`,
+`migrations.require_current`, `schema.OWNER`/`MIGRATIONS`, `experiments.experiment_spec_from_document`, `errors.OpsError`/`fail` and `fingerprints.environment_identity`/`source_closure`/`worker_source_manifest`
+to submit an immutable common-snapshot roster atomically. Child artifacts are
+unrecorded evaluation evidence; operations success is not scientific sweep completion.
 
 No other production package imports ops. The CLI starts the coordinator, and
 serving reads a versioned health artifact without a peer-layer import. The one
@@ -162,6 +173,9 @@ and `errors.fail` before computing/reporting the admitted mean baseline.
 The registrar also consumes the history/fitted constructors and matching validators;
 `experiments/magnitude_history_report.py` consumes both history/fitted validators,
 and the history admission bridge uses `errors.fail`.
+`experiments/magnitude_search_plan.py` consumes the fitted constructor/validator,
+`fingerprints.source_closure`/`environment_identity` and `errors.OpsError`/`fail`; its CLI uses
+`catalog.connect`, `experiments.experiment_spec_from_document` and `errors.OpsError`/`fail`.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection

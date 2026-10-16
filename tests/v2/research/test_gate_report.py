@@ -35,14 +35,14 @@ REPO = Path(__file__).resolve().parents[3]
 MONTH = "2025-01"
 
 
-def _spec(alpha=0.0, arm="candidate", **changes):
+def build_gate_spec(alpha=0.0, arm="candidate", **changes):
     return ExperimentSpec(**dict(experiment_id="synthetic-reconstructed-gate", hypothesis="Synthetic gate check",
         primary_arm_id=arm, arms=(arm,), seed=0, folds=("2023", "2024"),
         economic_params={"fill": alpha, "strategy": "STR-THRU"}, price_source="option_chains",
         runner=gate.RUNNER, **changes))
 
 
-def _source(tmp_path, *, delayed=None, missing_quotes=False, calendar_start="2020-12-01",
+def build_gate_source(tmp_path, *, delayed=None, missing_quotes=False, calendar_start="2020-12-01",
             runup=False, test_quote_shift=0.0, rejected=False, early_january=False,
             feature_driver=None, break_even=False):
     conn, clock, store = catalog_and_store(tmp_path)
@@ -130,13 +130,13 @@ def _source(tmp_path, *, delayed=None, missing_quotes=False, calendar_start="202
 
 @pytest.fixture
 def source(tmp_path):
-    value = _source(tmp_path)
+    value = build_gate_source(tmp_path)
     yield value
     value.conn.close()
 
 
 def _register(source, spec=None, **kwargs):
-    spec = spec or _spec()
+    spec = spec or build_gate_spec()
     registered = native_registration.register_native(source.conn, source.store, source.repository,
         spec, code_root=REPO, as_of_month=MONTH, **kwargs)
     return spec, registered
@@ -144,7 +144,7 @@ def _register(source, spec=None, **kwargs):
 
 def _invoke(source, capsys, action, spec=None, *extra, status=0):
     path = source.root / "spec.json"
-    path.write_text(json.dumps(asdict(spec or _spec())))
+    path.write_text(json.dumps(asdict(spec or build_gate_spec())))
     arguments = [action, "--spec", str(path), "--catalog", str(source.root / "catalog.sqlite"),
                  "--store-root", str(source.store.root), "--as-of-month", MONTH, *map(str, extra)]
     assert cli.main(arguments) == status
@@ -203,10 +203,10 @@ def test_real_history_fold_features_scores_and_provenance(source):
     ("n_prior", [0, 0, 1, 1]), ("mean_prior_abs_move", [0, 1, 0, 1]),
 ])
 def test_real_multiticker_histories_require_each_fitted_feature(tmp_path, feature, expected):
-    source = _source(tmp_path, feature_driver=feature)
+    source = build_gate_source(tmp_path, feature_driver=feature)
     try:
         # Historical events supply features but are not enrolled training trades.
-        spec, registered = _register(source, replace(_spec(), folds=("2023",)),
+        spec, registered = _register(source, replace(build_gate_spec(), folds=("2023",)),
             event_ids=[event["event_id"] for event in source.events])
         result = gate.gate_result(source.repository, registered, spec)
         fold = result["folds"][0]
@@ -224,9 +224,9 @@ def test_real_multiticker_histories_require_each_fitted_feature(tmp_path, featur
 
 
 def test_break_even_training_trade_is_negative_and_keeps_fold_probabilities(tmp_path):
-    source = _source(tmp_path, break_even=True)
+    source = build_gate_source(tmp_path, break_even=True)
     try:
-        spec, registered = _register(source, replace(_spec(), folds=("2023",)))
+        spec, registered = _register(source, replace(build_gate_spec(), folds=("2023",)))
         result = gate.gate_result(source.repository, registered, spec)
         fold = result["folds"][0]
         assert fold["training_cashflows"][1] == {"event_id": source.events[1]["event_id"],
@@ -242,7 +242,7 @@ def test_break_even_training_trade_is_negative_and_keeps_fold_probabilities(tmp_
 
 def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, capsys, monkeypatch):
     ledger, results, outputs = source.root / "ledger.csv", [], []
-    for spec in (_spec(), _spec(1.0, "control")):
+    for spec in (build_gate_spec(), build_gate_spec(1.0, "control")):
         _invoke(source, capsys, "register", spec)
         output = _invoke(source, capsys, "run", spec, "--ledger", ledger)
         outputs.append(output)
@@ -261,7 +261,7 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     assert {row["spec_hash"] for row in rows} == {result["variant_id"] for result in results}
     before = ledger.read_bytes()
     monkeypatch.setattr(gate, "gate_result", _forbid)
-    for spec, output in zip((_spec(), _spec(1.0, "control")), outputs, strict=True):
+    for spec, output in zip((build_gate_spec(), build_gate_spec(1.0, "control")), outputs, strict=True):
         assert _invoke(source, capsys, "run", spec, "--ledger", ledger) == output
     assert ledger.read_bytes() == before
 
@@ -275,7 +275,7 @@ def test_smoke_never_accesses_ledger_and_changed_identity_refuses_before_evaluat
     assert "no-ledger smoke; not recorded" in Path(output["report"]).read_text()
     assert not poison.parent.exists() and not list(source.root.rglob("*.csv"))
     monkeypatch.setattr(gate, "gate_result", _forbid)
-    changed = _invoke(source, capsys, "run", _spec(1.0), "--no-ledger", status=2)
+    changed = _invoke(source, capsys, "run", build_gate_spec(1.0), "--no-ledger", status=2)
     assert changed["refused"] == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
@@ -286,7 +286,7 @@ def test_smoke_never_accesses_ledger_and_changed_identity_refuses_before_evaluat
 ])
 def test_unused_or_invalid_declarations_refuse_before_registration(source, capsys, monkeypatch, changes):
     monkeypatch.setattr(Repository, "resolve_pinned", _forbid)
-    document = asdict(_spec())
+    document = asdict(build_gate_spec())
     document.update(changes)
     spec = ExperimentSpec(**document)
     response = _invoke(source, capsys, "register", spec, status=2)
@@ -346,7 +346,7 @@ def test_fit_freezes_scores_before_test_quotes_and_protected_history_is_never_op
 
 
 def test_late_history_label_is_omitted_not_backdated(tmp_path):
-    source = _source(tmp_path, delayed=(3, "2023-02-02"))
+    source = build_gate_source(tmp_path, delayed=(3, "2023-02-02"))
     try:
         spec, registered = _register(source)
         result = gate.gate_result(source.repository, registered, spec)
@@ -359,7 +359,7 @@ def test_late_history_label_is_omitted_not_backdated(tmp_path):
 
 
 def test_missing_evaluation_quotes_records_one_failed_attempt_and_replay_does_not_refit(tmp_path, capsys, monkeypatch):
-    source = _source(tmp_path, missing_quotes=True)
+    source = build_gate_source(tmp_path, missing_quotes=True)
     try:
         ledger = source.root / "ledger.csv"
         _invoke(source, capsys, "register")
@@ -381,9 +381,9 @@ def test_missing_evaluation_quotes_records_one_failed_attempt_and_replay_does_no
 
 
 def test_january_event_with_december_entry_is_not_a_closed_training_label(tmp_path):
-    source = _source(tmp_path, runup=True)
+    source = build_gate_source(tmp_path, runup=True)
     try:
-        spec = replace(_spec(), economic_params={"fill": 0.0, "strategy": "STR-RUNUP"})
+        spec = replace(build_gate_spec(), economic_params={"fill": 0.0, "strategy": "STR-RUNUP"})
         spec, registered = _register(source, spec)
         result = gate.gate_result(source.repository, registered, spec)
         first, second = result["folds"]
@@ -409,7 +409,7 @@ def test_changing_evaluation_quotes_cannot_change_that_folds_fitted_scores(tmp_p
         for index in range(2):
             path = tmp_path / str(index)
             path.mkdir()
-            sources.append(_source(path, test_quote_shift=-1.5 * index))
+            sources.append(build_gate_source(path, test_quote_shift=-1.5 * index))
         results = [gate.gate_result(source.repository, registered, spec)
                    for source in sources for spec, registered in [_register(source)]]
         first = [[row for row in result["predictions"] if row["fold"] == "2023"] for result in results]
@@ -425,7 +425,7 @@ def test_changing_evaluation_quotes_cannot_change_that_folds_fitted_scores(tmp_p
 
 
 def test_missing_prior_calendar_session_refuses_before_features_or_quotes(tmp_path, monkeypatch):
-    source = _source(tmp_path, calendar_start="2021-02-02")
+    source = build_gate_source(tmp_path, calendar_start="2021-02-02")
     try:
         spec, registered = _register(source)
         monkeypatch.setattr(gate, "load_event_history", _forbid)
@@ -484,9 +484,9 @@ def test_report_rejects_each_identity_mismatch_with_valid_control(source, field)
 @pytest.mark.parametrize("alpha,selected_mean,all_mean", [(0.0, 1.2, 3.2), (1.0, 2.8, 4.8)])
 def test_real_gate_rejects_low_score_candidate_and_counts_only_selected_cashflows(
         tmp_path, alpha, selected_mean, all_mean):
-    source = _source(tmp_path, rejected=True)
+    source = build_gate_source(tmp_path, rejected=True)
     try:
-        spec, registered = _register(source, _spec(alpha))
+        spec, registered = _register(source, build_gate_spec(alpha))
         result = gate.gate_result(source.repository, registered, spec)
         fold = result["folds"][0]
         predicted = [row for row in result["predictions"] if row["fold"] == "2023"]
@@ -516,9 +516,9 @@ def test_real_gate_rejects_low_score_candidate_and_counts_only_selected_cashflow
 
 
 def test_real_gate_empty_selected_group_has_no_mean(tmp_path):
-    source = _source(tmp_path, rejected=True)
+    source = build_gate_source(tmp_path, rejected=True)
     try:
-        spec = replace(_spec(), folds=("2023",))
+        spec = replace(build_gate_spec(), folds=("2023",))
         # Train on four earlier SYNTH events, evaluate only the unseen NEW ticker.
         spec, registered = _register(source, spec,
             event_ids=[event["event_id"] for event in source.events[:4] + source.events[-1:]])
@@ -535,9 +535,9 @@ def test_real_gate_empty_selected_group_has_no_mean(tmp_path):
 
 
 def test_early_january_training_exits_must_precede_prior_year_feature_ceiling(tmp_path):
-    source = _source(tmp_path, early_january=True)
+    source = build_gate_source(tmp_path, early_january=True)
     try:
-        spec, registered = _register(source, replace(_spec(), folds=("2023",)))
+        spec, registered = _register(source, replace(build_gate_spec(), folds=("2023",)))
         rows, _ = gate._metadata(source.repository, source.snapshot, registered.document, "STR-THRU")
         planned = rows.set_index("event_id")
         at_ceiling, after_ceiling, evaluation = [event["event_id"] for event in source.events[3:6]]
@@ -562,11 +562,11 @@ def test_early_january_training_exits_must_precede_prior_year_feature_ceiling(tm
 ])
 def test_plan_and_fold_failures_record_one_failed_attempt_without_partial_report(
         tmp_path, capsys, monkeypatch, kind, message):
-    source = _source(tmp_path, calendar_start="2021-03-01" if kind == "incomplete_plan" else "2020-12-01")
+    source = build_gate_source(tmp_path, calendar_start="2021-03-01" if kind == "incomplete_plan" else "2020-12-01")
     try:
         # The second empty evaluation fold fails after the first fold has really completed.
         years = ("2023", "2025") if kind == "empty_evaluation" else ("2021", "2023") if kind == "empty_training" else ("2023", "2024")
-        spec, ledger = replace(_spec(), folds=years), source.root / "ledger.csv"
+        spec, ledger = replace(build_gate_spec(), folds=years), source.root / "ledger.csv"
         _invoke(source, capsys, "register", spec)
         real_result, failures = gate.gate_result, []
         def result(*args, **kwargs):

@@ -11,8 +11,11 @@ later: *was this produced from the same data?*
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,7 +23,8 @@ from engine import paths
 from engine.data import store
 from engine.data.schemas import CONVENTIONS, SCHEMAS, SOURCE_PRIORITY
 
-__all__ = ["snapshot_hash", "collect_stats", "write_manifest", "write_snapshot", "read_snapshot"]
+__all__ = ["snapshot_hash", "collect_stats", "write_manifest", "write_snapshot", "read_snapshot",
+           "write_text_atomic"]
 
 
 def collect_stats() -> dict:
@@ -30,6 +34,36 @@ def collect_stats() -> dict:
 
 def _panel_digest() -> str | None:
     return store.file_sha256(paths.PANEL) if paths.PANEL.exists() else None
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically via a unique sibling temp file.
+
+    A reader must never observe a half-written SNAPSHOT or MANIFEST — the
+    native import reads the former directly — so the content lands in a
+    uniquely named sibling temp file first (``tempfile.mkstemp`` in the same
+    directory, so ``os.replace`` stays atomic on one filesystem) and is
+    swapped in with ``os.replace``. A failed write removes the temp file and
+    leaves the previous content untouched. The unique name keeps two writers
+    from clobbering each other's temp file. This is the shared atomic text
+    writer used by the SNAPSHOT, MANIFEST, flag-report, nightly-report and
+    ``--json`` writers.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".",
+                                    suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        # mkstemp creates the temp file 0600, while the plain ``write_text`` this
+        # replaced gave 0644 under the default umask. Restore 0644 before the
+        # swap so the published SNAPSHOT/MANIFEST keep their expected mode.
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _tier4_digest() -> str | None:
@@ -61,7 +95,8 @@ def write_snapshot(stats: dict | None = None, path: Path | None = None) -> str:
     digest = snapshot_hash(stats)
     path = paths.assert_writable(path or paths.SNAPSHOT_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    write_text_atomic(
+        path,
         json.dumps(
             {
                 "snapshot": digest,
@@ -73,7 +108,7 @@ def write_snapshot(stats: dict | None = None, path: Path | None = None) -> str:
             },
             indent=1,
             sort_keys=True,
-        )
+        ),
     )
     return digest
 
@@ -185,5 +220,5 @@ def write_manifest(
     for title, body in (extra_sections or {}).items():
         sections += [f"## {title}", "", body, ""]
 
-    path.write_text("\n".join(sections))
+    write_text_atomic(path, "\n".join(sections))
     return path

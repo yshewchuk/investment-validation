@@ -110,8 +110,8 @@ ambiguity logic; neither source dates nor ticker names substitute for event IDs.
 Multiple IDs on one ticker/day are ambiguous even when their sessions differ:
 the prediction outcome table cannot distinguish those event identities.
 `experiments.v2_gate_variant` consumes this population in sweep mode before
-fresh native replay, directly or through the smoke-only `native_gate_pricing`
-worker. Its no-report/no-ledger contract lives in `experiments/ARCHITECTURE.md`.
+fresh native replay, directly or through the smoke-only pricing/evaluation
+workers. Their no-report/no-ledger contracts live in `experiments/ARCHITECTURE.md`.
 `experiments.gate_report` separately composes population, observed calendar sessions,
 protected `event_history` and fresh replay for each fold's training/evaluation rows;
 its reconstructed date-ceiling and native publication contracts live in that same doc.
@@ -272,6 +272,14 @@ annual evaluation folds from one admitted snapshot and its pinned calendar.
 `magnitude_folds.magnitude_window(evaluation_years, training_start)` exposes the
 same pure request validation to native preregistration and returns a detached
 canonical window; invalid requests refuse `CONTRACT_MISMATCH` without reads.
+
+`magnitude_folds.annual_fold(year, events)` is the public annual rule shared by
+the native planner and `experiments.magnitude_search_plan` for admitted metadata.
+
+| Shared annual-rule condition | Outcome |
+|---|---|
+| Admitted event metadata has evaluation events and strictly earlier candidates | Return detached year, conservative fit cutoff and training/evaluation IDs in input order; no I/O or label qualification. |
+| No evaluation events or earlier candidates | Preserve the native `POPULATION_COLLAPSED` `DataError`; callers own boundary-specific translation. |
 
 - Exact snapshot and random/rolling/ambiguous-union admission precede calendar
   reads. Bulk membership includes `training_start` and excludes January 1
@@ -549,6 +557,7 @@ Callers: no `engine/` modules import this package (checked by `checks/import_lay
 `load_magnitude_targets` and `qualify_magnitude_training_targets`.
 `experiments/native_registration.py` consumes
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
+`experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`.
 `experiments/magnitude_history_store.py` consumes the stored-history context, build and read APIs.
 Other consumers include `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
 trade, calendar, and chain inputs from pinned v2 data. The archived

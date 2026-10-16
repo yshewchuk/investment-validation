@@ -2669,8 +2669,10 @@ def test_scoring_stages_change_no_longer_selects_every_enabled_module():
     # ops_final_holdout/research reach scoring through fitted tests and history
     # report imports: training.__init__ -> job -> calibration -> payoff ->
     # scoring.__init__ and its application/stages imports (no DYNAMIC cascade).
+    # ops_experiment_folds also runs the real sweep supervisor test, whose
+    # Service imports reach scoring; this is an explicit consumer edge.
     assert set(selected) == set(names) - {
-        "canonical", "no_fit", "ops_experiment_folds",
+        "canonical", "no_fit",
     }, (
         "selection drifted from the exact expected set -- re-check whether "
         "this is a narrowing regression (e.g. back toward all 33) or a "
@@ -4230,6 +4232,8 @@ def test_replay_change_selects_its_transitive_worker_consumers():
     names = pilot.enabled_modules(CFG)
     assert set(pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"])) == {
         "ops_cli", "ops_runtime", "ops_nightly", "ops_experiment_folds", "research",
+        # Sweep roster migration/submission tests execute independent replay children.
+        "ops_catalog_store", "ops_catalog_submit",
     }
 
 
