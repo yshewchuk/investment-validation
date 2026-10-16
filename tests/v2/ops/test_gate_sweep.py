@@ -820,7 +820,9 @@ def test_non_path_code_root_is_a_typed_refusal(source, bad):
 
 def test_str_code_root_is_coerced_to_the_same_sealed_identity(source, tmp_path):
     checkout = _checkout(tmp_path)
-    assert _call(source, code_root=str(checkout)) == _call(source, code_root=checkout)
+    identity = _call(source, code_root=str(checkout))
+    assert identity == content_hash(_row(source))
+    assert identity == _call(source, code_root=checkout)
 
 
 @pytest.mark.parametrize("action", [sweep.register_sweep, sweep.submit_sweep])
