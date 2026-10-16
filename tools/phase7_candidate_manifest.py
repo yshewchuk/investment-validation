@@ -136,11 +136,22 @@ def check_commit(spec: dict, root: Path) -> str:
     if done.stdout.strip() != commit:
         raise SpecError("commit: does not equal this checkout's HEAD, so the registry and "
                         "inventory would describe a different commit")
-    dirty = _git(root, "status", "--porcelain", "--untracked-files=normal")
+    # -z gives NUL-separated, unquoted records, so a path with a space or non-ASCII byte
+    # cannot slip past the scanned-tree prefix check; a rename/copy record is followed by
+    # its origin path as a separate record.
+    dirty = _git(root, "status", "--porcelain", "-z", "--untracked-files=normal")
     if dirty.returncode != 0:
         raise SpecError(f"commit: git status failed (exit {dirty.returncode})")
-    changed = [line for line in dirty.stdout.splitlines()
-               if not line.startswith("?? ") or line[3:].startswith(_SCANNED_TREES)]
+    records, changed, i = dirty.stdout.split("\0"), [], 0
+    while i < len(records):
+        record = records[i]
+        i += 1
+        if not record:
+            continue
+        if record[0] in "RC" or record[1] in "RC":
+            i += 1  # skip the origin path of a rename/copy
+        if not record.startswith("?? ") or record[3:].startswith(_SCANNED_TREES):
+            changed.append(record)
     if changed:
         raise SpecError("commit: the checkout has uncommitted tracked changes or untracked "
                         "files under the scanned trees, so the registry and inventory would "

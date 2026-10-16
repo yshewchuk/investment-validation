@@ -283,6 +283,12 @@ def test_dirty_tracked_tree_is_refused(tmp_path):
             _REAL_COMMIT({"commit": head}, repo)
         (repo / tree / "new.py").unlink()
         (repo / tree).rmdir()
+    (repo / "engine").mkdir()
+    (repo / "engine" / "new mod é.py").write_text("x = 1")
+    with pytest.raises(asm.SpecError, match="untracked files under the scanned trees"):
+        _REAL_COMMIT({"commit": head}, repo)
+    (repo / "engine" / "new mod é.py").unlink()
+    (repo / "engine").rmdir()
     (repo / "notes").mkdir()
     (repo / "notes" / "x.txt").write_text("x")
     assert _REAL_COMMIT({"commit": head}, repo) == head
