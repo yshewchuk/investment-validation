@@ -106,7 +106,7 @@ from engine.v2.foundation import (
 
 from . import native_parity_projection, projections
 
-__all__ = ["ApiError", "create_app", "main"]
+__all__ = ["ApiError", "create_app", "main", "open_index_untranslated"]
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 _OPERATIONS_STATUS_SCHEMA = "operations_status.v1.0"
