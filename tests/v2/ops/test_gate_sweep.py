@@ -453,6 +453,17 @@ def test_real_child_dependency_read_preserves_exact_code(source, tmp_path, phase
 @pytest.mark.parametrize("exception", ["ValueError", "TypeError", "RecursionError"])
 def test_supervised_receipt_serialization_failures_are_variant_failures(source, tmp_path, exception):
     checkout = _checkout(tmp_path)
+    # Real folds/pricing are covered by the two-arm integration test above.
+    # Both children keep real admission, serialization and supervisor handling;
+    # repeating fitting here only delays the boundary this test exercises.
+    evaluation = checkout / "experiments/native_gate_evaluation.py"
+    evaluation_text = evaluation.read_text()
+    calculation = "            result = gate_result(Repository(conn, store), registration, spec)"
+    assert evaluation_text.count(calculation) == 1
+    synthetic_result = ('            result = {"schema_version": "native_gate_result.v1.0", '
+                        '"run_id": registration.run_id, "variant_id": registration.variant_id, '
+                        '"attempted_variants": 1, "provenance": registration.document}')
+    _replace_source(evaluation, evaluation_text.replace(calculation, synthetic_result))
     path = checkout / "experiments/native_gate_worker.py"
     text = path.read_text()
     marker = "    directory = Path(mkdtemp(prefix=\".native-gate-\", dir=path.parent))"
@@ -470,6 +481,9 @@ def test_supervised_receipt_serialization_failures_are_variant_failures(source, 
     diagnostic = artifact(source.conn, source.store, failed["diagnostic_ref"])
     assert json.loads(source.store.read_verified(diagnostic)) == {"data_failure_code": exception}
     assert sibling["schema_version"] == "native_gate_result.v1.0" and _scientific(source) == before
+    control = _row(source)["registrations"][1]
+    assert (sibling["run_id"], sibling["variant_id"]) == (control["run_id"], content_hash(control["binding"]))
+    assert sibling["provenance"] == control["binding"] and sibling["attempted_variants"] == 1
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))
 
 
