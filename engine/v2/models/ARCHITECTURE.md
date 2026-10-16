@@ -323,9 +323,9 @@ path is checked for containment; bounded reads open the original path with
 final-component no-follow through the shared regular-file reader. Parent directories
 remain operator-trusted. Missing, special, final-component symlinked, oversized or
 changed objects refuse before decode, cold and warm. Direct preparation normalizes bounded I/O and regular-file/size
-refusals to path-free `AdapterError`. Any binding without an established cache-entry
-byte ceiling, including legacy fold bindings and champions, retains unbounded
-verification. An established ceiling applies to every subsequent inference read.
+refusals to path-free `AdapterError`. During `infer()`, bindings without an established
+cache-entry byte ceiling, including legacy fold bindings and champions, retain unbounded
+verification; preparation always supplies a limit. An established ceiling applies to subsequent inference reads.
 
 `FrozenInference` owns the only decoded-artifact cache, retained for its owner
 lifetime without eviction. Its adapter retains fold metadata with the estimator,
@@ -337,8 +337,8 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 
 | Verified fold condition | Outcome |
 |---|---|
-| Parent/catalog/descriptor/header or embedded-pool disagreement | `MODEL_NOT_READY`; fixed path-free refusal, no inference or fallback |
-| Escaped path, missing/corrupt bytes or object above 32 MiB during fold preparation or prepared inference | Refuse before deserialization, including warm reads; entries with no established byte ceiling retain legacy unbounded verification |
+| Parent/catalog/descriptor/header or embedded-pool disagreement | `MODEL_NOT_READY`; conditions share one fixed path-free refusal, no inference or fallback |
+| Escaped path, missing/corrupt bytes or object above 32 MiB during fold preparation or prepared inference | Refuse before deserialization, including warm reads; unprepared inference with no established byte ceiling retains legacy unbounded verification |
 | Repeated preparation and inference on the same owner/object | Reverify bytes; reuse the decoded artifact, never a second model cache |
 | Missing/duplicate chooser catalog membership, wrong role/output or opaque undeclared fold | Fixed `MODEL_NOT_READY`; no champion/size/other-fold substitution |
 | Source availability/finality or training-bound proof absent | No causal/source-ready claim; artifact preparation cannot bypass consuming admission |

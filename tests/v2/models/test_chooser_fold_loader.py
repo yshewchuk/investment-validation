@@ -31,11 +31,7 @@ from engine.v2.models.deployment import (
     semantic_release_hash,
 )
 from engine.v2.models.serving_folds import ChooserFoldPolicy, ChooserServingFoldDescriptor
-
-OUTPUTS = {
-    "implied_t1": ("driver_prediction", "pred_im_t1_d14"),
-    "runup_move": ("pred_runup_abs_move_d14", "pred_runup_abs_move_d14"),
-}
+from tests.v2.models.serving_fold_support import OUTPUTS
 
 
 class Predictor:
@@ -270,6 +266,7 @@ def test_descriptor_pool_count_refuses_with_matching_catalog(setup):
         "missing",
         "row-duplicate",
         "object-duplicate",
+        "descriptor-duplicate",
         "name-duplicate",
         "status",
         "wrong-role",
@@ -302,6 +299,10 @@ def test_catalog_membership_refuses_before_decode(setup, defect, monkeypatch):
         catalog["members"].append(copy.deepcopy(row))
     elif defect == "object-duplicate":
         row["objects"].append(copy.deepcopy(obj))
+    elif defect == "descriptor-duplicate":
+        other = copy.deepcopy(obj)
+        other["name"] += ".duplicate"
+        row["objects"].append(other)
     elif defect == "name-duplicate":
         other = copy.deepcopy(obj)
         other["serving_fold"]["policy"]["interval_floor"] = 1.0
@@ -464,6 +465,12 @@ def test_no_fit_network_write_or_source_ready_claim(setup, monkeypatch):
         metadata = ref.inference.prepare_serving_fold(
             ref.release.bindings[0], max_member_bytes=loader.MAX_FOLD_BYTES
         )
+        assert {field.name for field in fields(ref)} == {
+            "descriptor", "catalog_hash", "pool_pred", "pool_res", "inference", "release"
+        }
+        assert {field.name for field in fields(metadata)} == {
+            "model_id", "fold_start", "panel_sha256", "feature_order", "pool_pred", "pool_res"
+        }
         assert not any(hasattr(metadata, key) for key in ("fit", "estimator", "header"))
         assert not any(hasattr(value, key) for value in (ref, metadata)
                        for key in ("source_ready", "admission", "ready"))
