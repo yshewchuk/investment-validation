@@ -3,6 +3,7 @@ import json
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import ArtifactError, canonical_json, from_document, to_document
+from engine.v2.foundation.artifacts import safe_relative_path
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import fail
 from engine.v2.ops.migrations import Migration
@@ -26,11 +27,12 @@ MIGRATIONS = (Migration(version=1, name="immutable_trial_records", statements=(
 )),)
 
 
-def _artifact_failure(error, action):
+def _artifact_failure(error, action, *, unsafe_is_conflict=True):
     message = "search journal artifact could not be " + action
     if isinstance(error, OSError):
         error = ArtifactError("IO_ERROR", message)
-    return artifact_failure(error, integrity_message=message, resource_message=message, unsafe_is_conflict=True)
+    return artifact_failure(error, integrity_message=message, resource_message=message,
+                            unsafe_is_conflict=unsafe_is_conflict)
 
 
 def _reference(conn, run_id, slot):
@@ -42,8 +44,9 @@ def _reference(conn, run_id, slot):
         ref = from_document(ArtifactRef, json.loads(row[0]))
         if ref.schema_ref != SCHEMA or not 0 < ref.byte_size <= MAX_BYTES:
             raise ValueError
+        safe_relative_path(ref.storage_key)
         return ref
-    except (ValueError, TypeError, RecursionError):
+    except (ArtifactError, ValueError, TypeError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal reference is invalid") from None
 
 
@@ -54,7 +57,7 @@ def read_record(conn, store, run_id, slot):
     try:
         payload = store.read_verified(ref)
     except (ArtifactError, OSError) as error:
-        raise _artifact_failure(error, "verified") from None
+        raise _artifact_failure(error, "verified", unsafe_is_conflict=False) from None
     try:
         record = json.loads(payload)
         if (set(record) != {"schema_version", "run_id", "slot", "body"}

@@ -90,9 +90,9 @@ def refuses(error_type, code):
 def history_event(day, *, protected=False, ticker="SYNTH", **overrides):
     event_id = next(f"{ticker}:{day}:{index}" for index in range(1000)
         if ExperimentHoldouts.random_membership(f"{ticker}:{day}:{index}") == protected)
-    return dict(event_id=event_id, ticker=ticker, event_date=pd.Timestamp(day), year=int(day[:4]),
+    return {**dict(event_id=event_id, ticker=ticker, event_date=pd.Timestamp(day), year=int(day[:4]),
         session="AMC", session_src="orats", src_orats=True, src_oquants=False, src_nasdaq=False,
-        src_yfinance=False, date_agree=True, date_conflict=False, **overrides)
+        src_yfinance=False, date_agree=True, date_conflict=False), **overrides}
 
 
 def poison_outcomes(monkeypatch, repository, snapshot, protected_days, *, all_outcomes=False):

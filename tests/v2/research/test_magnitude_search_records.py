@@ -228,6 +228,31 @@ def test_invalid_references_have_exact_redacted_problem(journal, monkeypatch, mu
         records.read_record(journal.conn, journal.store, RUN, SLOT)
 
 
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("storage_key", [
+    "", "/private/credential", "../private/credential", "objects//credential",
+    "./private/credential", "objects/./credential", "objects/../credential",
+    "objects\\private\\credential", "objects/\x00credential", "objects/credential/",
+])
+def test_unsafe_reference_syntax_is_rejected_before_artifact_read(
+    journal, monkeypatch, replay, storage_key,
+):
+    body = _wrapper()["body"]
+    ref = artifact_reference(canonical_json(_wrapper()).encode(), records.SCHEMA)
+    _insert(journal, canonical_json(to_document(replace(ref, storage_key=storage_key))))
+    before = _journal_state(journal)
+    with monkeypatch.context() as patch:
+        patch.setattr(journal.store, "read_verified", lambda *a: pytest.fail("invalid reference read"))
+        patch.setattr(artifact_store.os, "open", lambda *a, **kw: pytest.fail("invalid reference opened"))
+        with _problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal reference is invalid"):
+            if replay:
+                records.append_record(journal.conn, journal.store, RUN, SLOT, body)
+            else:
+                records.read_record(journal.conn, journal.store, RUN, SLOT)
+    assert _journal_state(journal) == before
+    assert not journal.conn.in_transaction
+
+
 @pytest.mark.parametrize("mutation", [
     "schema_version", "run_id", "slot", "extra_field", "missing_schema_version",
     "missing_run_id", "missing_slot", "missing_body", "malformed_json", "null",
@@ -250,13 +275,16 @@ def test_wrapper_requires_exact_schema_run_slot_and_fields(journal, mutation):
         records.read_record(journal.conn, journal.store, RUN, SLOT)
 
 
-@pytest.mark.parametrize("failure, code", [
-    ("missing", "RESOURCE_UNAVAILABLE"),
-    ("wrong_size", "EXPERIMENT_IDENTITY_CONFLICT"),
-    ("corrupt_bytes", "EXPERIMENT_IDENTITY_CONFLICT"),
-    ("unsafe_path", "EXPERIMENT_IDENTITY_CONFLICT"),
+@pytest.mark.parametrize("failure, code, message", [
+    ("missing", "RESOURCE_UNAVAILABLE", "search journal artifact could not be verified"),
+    ("wrong_size", "EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified"),
+    ("corrupt_bytes", "EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified"),
+    ("unsafe_path", "EXPERIMENT_IDENTITY_CONFLICT", "search journal reference is invalid"),
+    ("nonobject_key", "EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified"),
+    ("wrong_shard", "EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified"),
+    ("nonregular_object", "EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified"),
 ])
-def test_artifact_read_failures_preserve_classification_and_redact_paths(journal, monkeypatch, failure, code):
+def test_artifact_read_failures_preserve_classification_and_redact_paths(journal, monkeypatch, failure, code, message):
     payload = canonical_json(_wrapper()).encode()
     ref = artifact_reference(payload, records.SCHEMA)
     if failure != "missing":
@@ -269,14 +297,97 @@ def test_artifact_read_failures_preserve_classification_and_redact_paths(journal
         path.write_bytes(b"x" * len(payload))
     elif failure == "unsafe_path":
         ref = replace(ref, storage_key="../private/credential")
+    elif failure == "nonobject_key":
+        ref = replace(ref, storage_key="attempts/private/credential")
+    elif failure == "wrong_shard":
+        parts = ref.storage_key.split("/")
+        ref = replace(ref, storage_key=f"objects/{parts[1]}x/{parts[2]}")
+    elif failure == "nonregular_object":
+        path = journal.store.root / ref.storage_key
+        path.rename(path.with_suffix(".original"))
+        path.mkdir()
     _insert(journal, canonical_json(to_document(ref)))
     before = _journal_state(journal)
     with monkeypatch.context() as guard:
         if failure == "unsafe_path":
             guard.setattr(artifact_store.os, "open", lambda *a, **k: pytest.fail("unsafe reference attempted a filesystem open"))
-        with _problem(code, "search journal artifact could not be verified"):
+        with _problem(code, message):
             records.read_record(journal.conn, journal.store, RUN, SLOT)
     assert _journal_state(journal) == before
+
+
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("number", [errno.EACCES, errno.EMFILE, errno.EIO])
+@pytest.mark.parametrize("point", ["base", "objects", "shard", "object"])
+def test_read_open_failures_are_retryable_after_reference_admission(
+    journal, monkeypatch, replay, number, point,
+):
+    body = _wrapper()["body"]
+    ref = _publish(journal, canonical_json(_wrapper()).encode())
+    before = _journal_state(journal)
+    parts = ref.storage_key.split("/")
+    paths = [journal.store.root, *parts]
+    index = ["base", "objects", "shard", "object"].index(point)
+    real_open = artifact_store.os.open
+    calls = []
+
+    def fault(path, flags, *args, **kwargs):
+        assert not journal.conn.in_transaction
+        calls.append(path)
+        if path == paths[index]:
+            raise OSError(number, "token=secret", "/private/credential")
+        return real_open(path, flags, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(artifact_store.os, "open", fault)
+        patch.setattr(artifact_store.os, "read", lambda *a: pytest.fail("failed open read bytes"))
+        patch.setattr(journal.store, "publish_bytes", lambda *a, **kw: pytest.fail("failed replay published"))
+        with _problem("RESOURCE_UNAVAILABLE", "search journal artifact could not be verified") as caught:
+            if replay:
+                records.append_record(journal.conn, journal.store, RUN, SLOT, body)
+            else:
+                records.read_record(journal.conn, journal.store, RUN, SLOT)
+    _assert_redacted_artifact_error(caught.value)
+    assert calls == paths[:index + 1]
+    assert _journal_state(journal) == before
+    assert records.read_record(journal.conn, journal.store, RUN, SLOT) == body
+    assert records.append_record(journal.conn, journal.store, RUN, SLOT, body) == body
+    assert _journal_state(journal) == before
+    assert not journal.conn.in_transaction
+
+
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("point", ["base", "intermediate", "object"])
+def test_real_symlink_is_retryable_without_reading_its_target(
+    journal, monkeypatch, tmp_path, replay, point,
+):
+    body = _wrapper()["body"]
+    ref = _publish(journal, canonical_json(_wrapper()).encode())
+    before = _journal_state(journal)
+    path = {"base": journal.store.root, "intermediate": journal.store.root / "objects",
+            "object": journal.store.root / ref.storage_key}[point]
+    target = tmp_path / "private-credential-token=secret"
+    path.rename(target)
+    path.symlink_to(target, target_is_directory=point != "object")
+    with monkeypatch.context() as patch:
+        patch.setattr(artifact_store.os, "read", lambda *a: pytest.fail("symlink target payload read"))
+        patch.setattr(journal.store, "publish_bytes", lambda *a, **kw: pytest.fail("failed replay published"))
+        with pytest.raises(ArtifactError) as foundation_error:
+            journal.store.read_verified(ref)
+        assert foundation_error.value.code == "UNSAFE_PATH"
+        with _problem("RESOURCE_UNAVAILABLE", "search journal artifact could not be verified") as caught:
+            if replay:
+                records.append_record(journal.conn, journal.store, RUN, SLOT, body)
+            else:
+                records.read_record(journal.conn, journal.store, RUN, SLOT)
+    _assert_redacted_artifact_error(caught.value)
+    assert _journal_state(journal) == before
+    path.unlink()
+    target.rename(path)
+    assert records.read_record(journal.conn, journal.store, RUN, SLOT) == body
+    assert records.append_record(journal.conn, journal.store, RUN, SLOT, body) == body
+    assert _journal_state(journal) == before
+    assert not journal.conn.in_transaction
 
 
 @pytest.mark.parametrize("artifact_code, code", [

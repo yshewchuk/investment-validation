@@ -29,6 +29,18 @@ DECISION = "2024-06-19"
 START = "2023-01-01"
 
 
+@pytest.mark.parametrize("protected", [False, True])
+def test_history_event_overrides_defaults_without_changing_other_fields(protected):
+    original = history_event("2024-01-02", protected=protected, ticker="OVERRIDE")
+    overrides = {"session": "BMO", "src_orats": False, "date_conflict": True, "extra": "retained"}
+    changed = history_event("2024-01-02", protected=protected, ticker="OVERRIDE", **overrides)
+    assert changed == {**original, **overrides}
+    assert original["session"] == "AMC"
+    assert original["src_orats"] is True
+    assert original["date_conflict"] is False
+    assert ExperimentHoldouts.random_membership(changed["event_id"]) is protected
+
+
 def commit_event_history(tmp_path, events, moves, *, mixed_days=()):
     conn, clock, store = catalog_and_store(tmp_path)
     contracts = {"earnings_events": contract_for("earnings_events"),
