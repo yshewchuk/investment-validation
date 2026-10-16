@@ -281,7 +281,8 @@ __all__ = [
     "RECALIBRATION_MODULES", "STAGED", "STATE_SPECS", "TIER4_ROLES",
     "TRAILING_CUTOFF_MODULES", "ReleaseLayoutError", "StateSpec", "catalog_path",
     "deployment_root", "manifest_body", "member_row", "object_relpath",
-    "preserve_legacy_manifest", "read_catalog", "read_manifest", "sha256_bytes",
+    "preserve_legacy_manifest", "read_catalog", "read_manifest", "read_regular_file",
+    "sha256_bytes",
     "staged_manifest_path", "validate_catalog", "validate_legacy_manifest", "verify_staged",
     "write_catalog", "write_manifest", "write_object",
 ]

@@ -184,6 +184,17 @@ def test_directory_or_symlink_local_catalog_is_not_absence(tmp_path):
         layout.read_manifest(tmp_path)
 
 
+def test_catalog_size_bound_is_exact(tmp_path, monkeypatch):
+    _stage(tmp_path)
+    size = _local(tmp_path).stat().st_size
+    monkeypatch.setattr(layout, "MAX_CATALOG_BYTES", size)
+    body = layout.read_catalog(_local(tmp_path))
+    assert body["release_id"] == "A"
+    monkeypatch.setattr(layout, "MAX_CATALOG_BYTES", size - 1)
+    with pytest.raises(layout.ReleaseLayoutError):
+        layout.read_catalog(_local(tmp_path))
+
+
 def test_legacy_fallback_requires_matching_id_and_local_needs_no_root(tmp_path):
     _stage(tmp_path)
     deployment.promote(layout.deployment_root(tmp_path), "A")
@@ -242,13 +253,13 @@ def test_copy_preflight_is_read_only_and_failed_destination_is_retryable(tmp_pat
     assert not destination.exists()
     _root(source).write_bytes(legacy)
     before = {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()}
-    real_write = deployment._atomic_write_bytes
+    real_write = deployment.atomic_write_bytes
 
     def forbid_source_write(path, data):
         assert source not in path.parents
         return real_write(path, data)
 
-    monkeypatch.setattr(deployment, "_atomic_write_bytes", forbid_source_write)
+    monkeypatch.setattr(deployment, "atomic_write_bytes", forbid_source_write)
     prep._copy_incumbent(store, destination)
     assert _local(destination.parent).read_bytes() == legacy
     assert {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
