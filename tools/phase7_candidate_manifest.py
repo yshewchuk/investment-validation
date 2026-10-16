@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """P7-1 assembler: build the candidate/authority manifest the checker validates.
 
-Read-only except for three JSON files written into ``--out-dir``. One operator
-spec file (kept outside the repository: it holds the legacy scheduler entry,
-credential owners and local evidence paths) names the commit, config,
-snapshot, release, phase evidence, ``authority`` and any extra jobs the
-registry cannot know. The job-graph rows come from the live
-``stages.registry()``, so a job kind added later (``serving_projection``,
-#726) appears with no edit here. Exit 0 = the checker passes, 1 = findings,
-2 = unusable spec.
+Operator-run only (no production caller). Writes three JSON files into
+``--out-dir`` (refused when it is inside the repository) and nothing else.
+One operator spec file (kept outside the repository: it holds the legacy
+scheduler entry, credential owners and local evidence paths) names the
+commit, config, snapshot, release, phase evidence, ``authority`` and any
+extra jobs the registry cannot know. The commit is required and must equal
+this checkout's ``HEAD``, because the job graph (live ``stages.registry()``)
+and the consumer inventory both come from this checkout. A job kind added
+later (#726's ``serving_projection``) appears with no edit here. Exit 0 = the
+checker passes, 1 = findings, 2 = unusable spec.
 
     python3 tools/phase7_candidate_manifest.py --spec SPEC.json --out-dir DIR
 """
@@ -29,16 +31,41 @@ from checks import phase7_candidate_manifest as checker  # noqa: E402
 from engine.v2.ops import stages  # noqa: E402
 from tools.phase6_inventory import discover_entrypoints  # noqa: E402
 
+MAX_REF_BYTES = 256 * 1024 * 1024
+MAX_SPEC_BYTES = 1024 * 1024
+_JOB_FIELDS = ("id", "schedule", "owner", "kind", "writes_official")
+
 
 class SpecError(Exception):
     """The operator spec (or a file it names) cannot be used."""
 
 
 def _sha256(field: str, path) -> tuple[str, str]:
-    target = Path(str(path)).resolve()
+    if not isinstance(path, (str, Path)):
+        raise SpecError(f"{field}: path must be a string")
+    target = Path(path).resolve()
     if not target.is_file():
         raise SpecError(f"{field}: referenced file does not exist: {target}")
-    return str(target), hashlib.sha256(target.read_bytes()).hexdigest()
+    digest, size = hashlib.sha256(), 0
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            size += len(chunk)
+            if size > MAX_REF_BYTES:
+                raise SpecError(f"{field}: file exceeds {MAX_REF_BYTES} bytes")
+            digest.update(chunk)
+    return str(target), digest.hexdigest()
+
+
+def _obj(field: str, value) -> dict:
+    if not isinstance(value, dict):
+        raise SpecError(f"{field}: must be a JSON object")
+    return value
+
+
+def _rows(field: str, value) -> list[dict]:
+    if not isinstance(value, list):
+        raise SpecError(f"{field}: must be a list")
+    return [_obj(f"{field}[{i}]", row) for i, row in enumerate(value)]
 
 
 def _ref(field: str, row: dict, *keys: str) -> dict:
@@ -53,22 +80,26 @@ def _write(path: Path, doc: dict) -> None:
 
 
 def _commit(spec: dict, root: Path) -> str:
-    if spec.get("commit"):
-        return spec["commit"]
-    done = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
-                          capture_output=True, text=True, check=False)
-    if done.returncode != 0:
-        raise SpecError("commit: not in the spec and git rev-parse HEAD failed")
-    return done.stdout.strip()
+    commit = spec.get("commit")
+    if not isinstance(commit, str) or not commit:
+        raise SpecError("commit: required in the spec")
+    done = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=False, timeout=30)
+    if done.returncode != 0 or done.stdout.strip() != commit:
+        raise SpecError("commit: does not equal this checkout's HEAD, so the registry and "
+                        "inventory would describe a different commit")
+    return commit
 
 
-def registry_jobs(owner: str) -> list[dict]:
-    """One row per job kind in the live registry; never an official writer unless
-    the kind itself is registered for the ``official`` namespace."""
+def registry_jobs(owner: str, official_kinds=()) -> list[dict]:
+    """One row per job kind in the live registry. A kind is an official writer when
+    its namespaces include ``official`` or the operator lists it in
+    ``official_registry_kinds`` (the registry does not yet declare official-write
+    effects per kind)."""
     reg, rows = stages.registry(), []
     for name in reg.names():
         kind = reg.get(name)
-        official = "official" in kind.namespaces
+        official = "official" in kind.namespaces or name in official_kinds
         rows.append({"id": name, "schedule": f"native:{name}", "owner": owner,
                      "kind": ("scheduled_writer" if official
                               else "background" if kind.effects else "reader"),
@@ -77,56 +108,73 @@ def registry_jobs(owner: str) -> list[dict]:
 
 
 def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    jobs = registry_jobs(str(spec.get("registry_owner") or ""))
+    spec = _obj("spec", spec)
+    out_dir = Path(out_dir).resolve()
+    if out_dir.is_relative_to(root.resolve()):
+        raise SpecError("out-dir: must be outside the repository")
+    commit = _commit(spec, root)
+    owner = spec.get("registry_owner")
+    if not isinstance(owner, str) or not owner:
+        raise SpecError("registry_owner: required string")
+    jobs = registry_jobs(owner, set(spec.get("official_registry_kinds", [])))
     seen = {j["id"] for j in jobs}
-    for extra in spec.get("extra_jobs", []):
-        if extra.get("id") in seen:
-            raise SpecError(f"extra_jobs: id {extra.get('id')!r} collides with a registry job")
-        seen.add(extra.get("id"))
-        jobs.append({k: extra.get(k) for k in ("id", "schedule", "owner", "kind",
-                                               "writes_official")})
-    jobs.sort(key=lambda j: str(j["id"]))
-    graph_path = out_dir / "job_graph.json"
-    _write(graph_path, {"jobs": [{"id": j["id"], "schedule": j["schedule"],
-                                  "writes_official": j["writes_official"]} for j in jobs]})
-    found = discover_entrypoints(root)
-    inventory_path = out_dir / "consumer_inventory.json"
-    _write(inventory_path, {"consumers": [{"id": i, "kind": m["kind"], "source": m["source"]}
-                                          for i, m in sorted(found.items())]})
+    for extra in _rows("extra_jobs", spec.get("extra_jobs", [])):
+        jid = extra.get("id")
+        if not isinstance(jid, str) or jid in seen:
+            raise SpecError(f"extra_jobs: id {jid!r} is not a unique string "
+                            "(duplicate or registry collision)")
+        seen.add(jid)
+        jobs.append({k: extra.get(k) for k in _JOB_FIELDS})
+    jobs.sort(key=lambda j: j["id"])
+    config = _rows("config", spec.get("config", []))
+    evidence = _rows("phase_evidence", spec.get("phase_evidence", []))
+    snapshot = _obj("data_snapshot", spec.get("data_snapshot"))
+    deployment = _obj("model_deployment", spec.get("model_deployment"))
     manifest = {
         "schema_version": checker.MANIFEST_SCHEMA,
-        "candidate": {"commit": _commit(spec, root),
-                      "config": [_ref(f"config[{i}]", r, "name")
-                                 for i, r in enumerate(spec.get("config", []))]},
-        "data_snapshot": _ref("data_snapshot", spec.get("data_snapshot", {}), "snapshot_id"),
-        "model_deployment": _ref("model_deployment", spec.get("model_deployment", {}),
-                                 "release_id"),
-        "job_graph": {**_ref("job_graph", {"path": graph_path}),
-                      "jobs": [{k: j[k] for k in ("id", "schedule", "kind", "owner")}
-                               for j in jobs]},
-        "consumer_inventory": {**_ref("consumer_inventory", {"path": inventory_path}),
-                               "consumers": sorted(found)},
-        "authority": spec.get("authority", {}),
+        "candidate": {"commit": commit,
+                      "config": [_ref(f"config[{i}]", r, "name") for i, r in enumerate(config)]},
+        "data_snapshot": _ref("data_snapshot", snapshot, "snapshot_id"),
+        "model_deployment": _ref("model_deployment", deployment, "release_id"),
+        "authority": _obj("authority", spec.get("authority")),
         "phase_evidence": [_ref(f"phase_evidence[{i}]", r, "phase", "schema_version", "status")
-                           for i, r in enumerate(spec.get("phase_evidence", []))],
+                           for i, r in enumerate(evidence)],
     }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    graph_path, inventory_path = out_dir / "job_graph.json", out_dir / "consumer_inventory.json"
+    found = discover_entrypoints(root)
+    _write(graph_path, {"jobs": [{"id": j["id"], "schedule": j["schedule"],
+                                  "writes_official": j["writes_official"]} for j in jobs]})
+    _write(inventory_path, {"consumers": [{"id": i, "kind": m["kind"], "source": m["source"]}
+                                          for i, m in sorted(found.items())]})
+    manifest["job_graph"] = {**_ref("job_graph", {"path": graph_path}),
+                             "jobs": [{k: j[k] for k in ("id", "schedule", "kind", "owner")}
+                                      for j in jobs]}
+    manifest["consumer_inventory"] = {**_ref("consumer_inventory", {"path": inventory_path}),
+                                      "consumers": sorted(found)}
     _write(out_dir / "manifest.json", manifest)
     return manifest
+
+
+def _load_spec(path: Path) -> dict:
+    with path.open("rb") as handle:
+        data = handle.read(MAX_SPEC_BYTES + 1)
+    if len(data) > MAX_SPEC_BYTES:
+        raise SpecError(f"spec exceeds {MAX_SPEC_BYTES} bytes")
+    return json.loads(data)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--root", type=Path, default=ROOT)
     args = parser.parse_args(argv)
     try:
-        manifest = assemble(json.loads(args.spec.read_text()), args.out_dir, args.root)
+        manifest = assemble(_load_spec(args.spec), args.out_dir)
     except (SpecError, OSError, ValueError) as exc:
         print(f"spec unusable: {exc}", file=sys.stderr)
         return 2
-    result = checker.validate(manifest, root=args.root)
+    result = checker.validate(manifest, root=ROOT)
     print(f"{result['status']}: {len(manifest['job_graph']['jobs'])} jobs, "
           f"{len(manifest['consumer_inventory']['consumers'])} consumers, "
           f"codes={result['finding_codes']}")

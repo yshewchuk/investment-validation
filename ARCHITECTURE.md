@@ -508,21 +508,35 @@ Only a tracked path absent from the worktree reads as empty.
   calling `nightly.submit_native_parity_if_ready`, submits
   `native_parity` the identical way.
 - **Assembling the P7-1 manifest.** `tools/phase7_candidate_manifest.py` is a
-  read-only assembler for `checks/phase7_candidate_manifest.py`. It takes one
-  operator spec file (path passed on the command line; kept outside the
-  repository) holding the candidate commit, config/snapshot/release/phase
-  evidence paths, `authority` values (legacy scheduler entry, credential
-  owners, retained old deployment) and any extra jobs the registry cannot
-  know (the legacy nightly, the proposed official writer). It hashes every
-  referenced file, derives the job-graph document from the live
-  `stages.registry()` (so a new job kind such as `serving_projection`
-  appears with no edit here) and the consumer inventory from
-  `phase6_inventory.discover_entrypoints`, writes both plus the manifest
-  into `--out-dir`, and never writes authority, pointers or credentials.
-  Local paths, credentials and scheduler details live only in the private
-  spec, never in the repo. Registry jobs are `reader` (no effects) or
-  `background`, never official writers (`writes_official` is true only for
-  a kind whose namespaces include `official`).
+  operator-run assembler (no production caller) for
+  `checks/phase7_candidate_manifest.py`. It takes one operator spec file
+  (path on the command line, at most 1 MiB, kept outside the repository)
+  holding the required candidate commit, config/snapshot/release/phase
+  evidence paths (each at most 256 MiB, hashed by streaming), `authority`
+  values (legacy scheduler entry, credential owners, retained old
+  deployment), `registry_owner`, any extra jobs the registry cannot know (the
+  legacy nightly, the proposed official writer) and optional
+  `official_registry_kinds`. The job-graph document comes from the live
+  `stages.registry()` (a future kind such as `serving_projection` appears
+  with no edit here) and the consumer inventory from
+  `phase6_inventory.discover_entrypoints`, both of this checkout. It writes
+  both plus `manifest.json` into `--out-dir` and nothing else. The manifest
+  echoes the spec's `authority` block and absolute resolved paths, so it is
+  a private artifact like the spec. A registry kind is `scheduled_writer`
+  with `writes_official` true when its namespaces include `official` or the
+  operator lists it in `official_registry_kinds` (the registry does not yet
+  declare official-write effects per kind; `publication` and `backup`
+  currently need that listing); otherwise it is `background` (has effects)
+  or `reader`.
+
+  | Condition | Outcome |
+  |---|---|
+  | spec missing/oversize/not a JSON object, a section of the wrong shape, a duplicate or colliding extra-job id, missing `commit` or `registry_owner`, a referenced file missing or over the cap | exit 2, nothing written for that run beyond files already produced |
+  | spec `commit` differs from this checkout's `HEAD` | exit 2 (registry and inventory would describe another commit) |
+  | `--out-dir` inside the repository | exit 2 |
+  | the checker reports findings | exit 1, manifest still written |
+  | the checker passes | exit 0 |
+
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
