@@ -4,21 +4,14 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
-from engine.v2.data import objects
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research.event_history import load_event_history
 from engine.v2.research.prediction_inputs import _target_query, load_prediction_targets
-from tests.data_scan_support import (
-    catalog_and_store,
-    commit_tables,
-    contract_for,
-    contract_ref_for,
-    publish_and_inspect,
-)
 from tests.v2.research.magnitude_trial_support import (
     TrackingRepository,
+    commit_history_inputs,
     history_event,
     outcome_move,
     poison_outcomes,
@@ -42,32 +35,7 @@ def test_history_event_overrides_defaults_without_changing_other_fields(protecte
 
 
 def commit_event_history(tmp_path, events, moves, *, mixed_days=()):
-    conn, clock, store = catalog_and_store(tmp_path)
-    contracts = {"earnings_events": contract_for("earnings_events"),
-                 "computed_moves": COMPUTED_MOVES_CONTRACT}
-    tables, hashes = {}, {}
-    for name, rows in (("earnings_events", events), ("computed_moves", moves)):
-        contract = contracts[name]
-        ref = contract_ref_for(contract)
-        groups = {}
-        for row in rows:
-            partition = str(row[contract.partition_columns[0]])
-            piece = "metadata" if name == "earnings_events" else (
-                "mixed" if row["event_date"] in mixed_days else row["event_date"])
-            groups.setdefault((partition, piece), []).append(row)
-        records = [publish_and_inspect(store, contract, ref,
-            sorted(group, key=lambda r: tuple(r[k] for k in contract.primary_key)), partition)
-            for (partition, _), group in groups.items()]
-        tables[name] = sorted(records, key=lambda r: (r.partition_key, r.primary_key_min))
-        partitions = {}
-        for record in tables[name]:
-            partitions.setdefault(record.partition_key, []).append(record)
-        hashes[name] = {key: objects.partition_logical_hash(
-            store, [r.object_ref for r in group], contract, ref, key)
-            for key, group in partitions.items() if len(group) > 1}
-    snapshot = commit_tables(conn, clock, tables, contracts,
-                             partition_logical_hashes=hashes, store=store)
-    return conn, TrackingRepository(conn, store), snapshot
+    return commit_history_inputs(tmp_path, events, moves, mixed_days=mixed_days, include_calendar=False)
 
 
 def read_event_history(repository, snapshot, target, **kwargs):
