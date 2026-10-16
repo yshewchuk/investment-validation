@@ -160,7 +160,7 @@ publish `OSError` to `PUBLICATION_FAILED`).
 | Outputs do not cover exactly the six pool members; a carried object absent from the prior row of its member; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
 | A carried chooser object absent from the prior chooser row; chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
 | A non-carried object's `cutoff` differs from `cutoff`; a carried object's cutoff is not an extended date or is after `cutoff`; `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
-| `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
+| `cutoff` is not strictly after the prior's (checked before any per-object `CUTOFF_MISMATCH`) | `CUTOFF_NOT_ADVANCED` |
 | Supplied object missing, unreadable, not a regular file, `payload_bytes` above `MAX_OBJECT_BYTES`, longer than its claim, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
 | Candidate id empty, unsafe or equal to the prior's; inventory `release_id` differs from it; candidate catalog or staged manifest exists with different or corrupt content | `ID_CONFLICT` |
 | Inventory missing, malformed, member hashes differ from the prior payloads, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
@@ -201,10 +201,9 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 - Every other prior pool/chooser object, and every prior object of an advancing member not
   re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
   driver pools and the chooser keep their hash until a retrain re-supplies them.
-- The worker takes the inventory from `current_release_inventory()` under the new id
-  (any drift refuses), then writes new objects (`write_object`), calls
-  `carry_forward_release`, re-reads the catalog and staged manifest (`validate_catalog`,
-  `verify_staged`, `pool_cutoff`, `carried_from`, new hashes), then writes `stage_result.json`.
+- The worker builds the inventory from the legacy champion registry via
+  `current_release_inventory()` under the new id (drift refuses), writes new objects, calls
+  `carry_forward_release`, re-reads the candidate (`read_catalog`, `verify_staged`), then writes `stage_result.json`.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
   `ReleaseAssemblyRefusal`, `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
   carries `problems`). A trailing object's month may not start after `cutoff`. One attempt only.

@@ -210,6 +210,20 @@ def test_worker_refuses_a_missing_advancing_member(tmp_path, monkeypatch):
     assert err.value.problem.details == {"members": ["paired_residual_pool"]}
 
 
+def test_worker_refuses_a_state_file_beyond_the_advancing_members(tmp_path, monkeypatch):
+    states = {**_STATES, "pool.json": ("driver_residual_pool:size", "prior|2026-10-01")}
+    parameters, staging = _wire(tmp_path, monkeypatch, states=states)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert not (staging / "stage_result.json").exists()
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+    assert err.value.problem.details == {"members": ["board_analog_matcher",
+                                                     "driver_residual_pool:size",
+                                                     "paired_residual_pool",
+                                                     "trailing_pnl_cutoff"]}
+
+
 def test_worker_refuses_inventory_drift_before_any_candidate(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch, drift=("MISSING_ARTIFACT_FILE",))
     store = phase5_release.deployment_root(tmp_path) / "objects"
@@ -556,19 +570,43 @@ def test_registered_kind_validates_and_plan_hash_matches(tmp_path):
     assert plan["implementation_ref"] and plan["environment_ref"]
 
 
-def test_plan_hashes_pin_the_source_root_and_environment(tmp_path):
+def test_plan_hashes_pin_the_source_root_and_environment(tmp_path, monkeypatch):
+    from dataclasses import replace
+
     from engine.v2.foundation import content_hash
+    from engine.v2.ops import state_stage
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
     from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
+    delivery = replace(profile_named(DEFAULT_POLICY, "delivery"), thread_count=3)
+    monkeypatch.setattr(state_stage, "DEFAULT_POLICY", replace(
+        DEFAULT_POLICY, profiles=tuple(delivery if profile.name == "delivery" else profile
+                                       for profile in DEFAULT_POLICY.profiles)))
     refs = {name: f"job_x#training/{name}" for name in _STATES}
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
                             release_id="cand1", cutoff="2026-10-01", state_refs=refs,
                             source_root=REPO_ROOT)
-    profile = profile_named(DEFAULT_POLICY, "delivery")
     assert plan["implementation_ref"] == content_hash(worker_source_manifest(REPO_ROOT))
-    assert plan["environment_ref"] == content_hash(
-        environment_identity(profile.thread_count or profile.cpu_count))
+    assert plan["environment_ref"] == content_hash(environment_identity(3))
+
+
+def test_plan_environment_ref_falls_back_to_the_pinned_profile_cpu_count(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from engine.v2.foundation import content_hash
+    from engine.v2.ops import state_stage
+    from engine.v2.ops.fingerprints import environment_identity
+    from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
+
+    delivery = replace(profile_named(DEFAULT_POLICY, "delivery"), thread_count=0, cpu_count=5)
+    monkeypatch.setattr(state_stage, "DEFAULT_POLICY", replace(
+        DEFAULT_POLICY, profiles=tuple(delivery if profile.name == "delivery" else profile
+                                       for profile in DEFAULT_POLICY.profiles)))
+    refs = {name: f"job_x#training/{name}" for name in _STATES}
+    plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
+                            release_id="cand1", cutoff="2026-10-01", state_refs=refs,
+                            source_root=REPO_ROOT)
+    assert plan["environment_ref"] == content_hash(environment_identity(5))
 
 
 def test_plan_refusal_publishes_the_exact_problems(tmp_path):
