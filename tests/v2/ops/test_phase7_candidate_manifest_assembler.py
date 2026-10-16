@@ -376,8 +376,28 @@ def test_git_failure_is_a_spec_error(monkeypatch, failure):
         _REAL_COMMIT({"commit": "a" * 40}, asm.ROOT)
 
 
-@pytest.mark.parametrize("failing_arg", ["rev-parse", "status"])
-def test_git_nonzero_return_is_a_spec_error(monkeypatch, failing_arg):
+def test_git_calls_pass_a_timeout(monkeypatch):
+    seen = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    head = real_run(["git", "-C", str(asm.ROOT), "rev-parse", "HEAD"], capture_output=True,
+                    text=True, check=True).stdout.strip()
+    monkeypatch.setattr(asm.subprocess, "run", spy)
+    try:
+        _REAL_COMMIT({"commit": head}, asm.ROOT)
+    except asm.SpecError:
+        pass  # a dirty checkout still made both git calls
+    assert seen and all(t == 30 for t in seen)
+
+
+@pytest.mark.parametrize("failing_arg, message", [
+    ("rev-parse", r"git rev-parse HEAD failed \(exit 1\)"),
+    ("status", r"git status failed \(exit 1\)")])
+def test_git_nonzero_return_is_a_spec_error(monkeypatch, failing_arg, message):
     real_run = subprocess.run
 
     def fake(cmd, *args, **kwargs):
@@ -388,7 +408,7 @@ def test_git_nonzero_return_is_a_spec_error(monkeypatch, failing_arg):
     head = real_run(["git", "-C", str(asm.ROOT), "rev-parse", "HEAD"], capture_output=True,
                     text=True, check=True).stdout.strip()
     monkeypatch.setattr(asm.subprocess, "run", fake)
-    with pytest.raises(asm.SpecError, match="commit:"):
+    with pytest.raises(asm.SpecError, match=message):
         _REAL_COMMIT({"commit": head}, asm.ROOT)
 
 

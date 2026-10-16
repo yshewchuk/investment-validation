@@ -125,11 +125,15 @@ def check_commit(spec: dict, root: Path) -> str:
     if not isinstance(commit, str) or not commit:
         raise SpecError("commit: required in the spec")
     done = _git(root, "rev-parse", "HEAD")
-    if done.returncode != 0 or done.stdout.strip() != commit:
+    if done.returncode != 0:
+        raise SpecError(f"commit: git rev-parse HEAD failed (exit {done.returncode})")
+    if done.stdout.strip() != commit:
         raise SpecError("commit: does not equal this checkout's HEAD, so the registry and "
                         "inventory would describe a different commit")
     dirty = _git(root, "status", "--porcelain", "--untracked-files=no")
-    if dirty.returncode != 0 or dirty.stdout.strip():
+    if dirty.returncode != 0:
+        raise SpecError(f"commit: git status failed (exit {dirty.returncode})")
+    if dirty.stdout.strip():
         raise SpecError("commit: the checkout has uncommitted tracked changes, so the registry "
                         "and inventory would not describe that commit")
     return commit
@@ -281,6 +285,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{result['status']}: {len(manifest['job_graph']['jobs'])} jobs, "
           f"{len(manifest['consumer_inventory']['consumers'])} consumers, "
           f"codes={result['finding_codes']}")
+    print("note: models_promote/models_rollback are recorded as non-official operator "
+          "actions on the shadow pointer; a caller that omits --release-root still reaches "
+          "the production root (issue #808)", file=sys.stderr)
     return 0 if result["ok"] else 1
 
 
