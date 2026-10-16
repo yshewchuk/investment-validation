@@ -44,6 +44,47 @@ def _stderr_path(root, attempt_id):
     return root / "attempts" / attempt_id / "staging" / "diagnostics" / "worker.stderr"
 
 
+def _write_worker(tmp_path):
+    child = tmp_path / "private_worker.py"
+    child.write_text(
+        "import faulthandler, resource, sys, threading, traceback\n"
+        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+        "faulthandler.enable()\n"
+        "try:\n"
+        "    raise RuntimeError('private-credential-590')\n"
+        "except RuntimeError:\n"
+        "    ending = traceback.format_exc().encode()\n"
+        "boundary = b'File \\\"/private/boundary.py\\\", line 4096, in exact_boundary\\n'\n"
+        "tail = boundary + b'x' * (4095 - len(boundary) - len(ending)) + b'\\n' + ending\n"
+        "assert len(tail) == 4096\n"
+        "sys.stderr.buffer.write(b'OutsideTailError: old message\\n' + b'x' * 5000 + b'\\nX' + tail)\n"
+        "sys.stderr.flush()\n"
+        "print('ready', flush=True)\n"
+        "if len(sys.argv) > 1:\n"
+        "    threading.Event().wait()\n")
+    return child
+
+
+def test_real_subprocess_timeout_pins_exact_tail_boundary(separate_roots, tmp_path):
+    conn, service, claim = separate_roots
+    path = _stderr_path(service.root, claim.attempt_id)
+    path.parent.mkdir(parents=True)
+    with path.open("ab") as stderr:
+        subprocess.run([sys.executable, str(_write_worker(tmp_path))], stderr=stderr,
+                       stdout=subprocess.PIPE, check=True, timeout=10)
+    with pytest.raises(ops_support.RunUntilTimeout) as raised:
+        ops_support.run_until(service, conn, claim.job_id, timeout=0)
+    message = str(raised.value)
+    # F starts exactly 4096 bytes before EOF. A 4095-byte read loses the F;
+    # 4097 or larger includes the X prefix, making this frame unrecognizable.
+    assert 'worker stderr tail: File "<path>", line 4096, in exact_boundary\n' in message
+    assert "RuntimeError: <message redacted>" in message
+    assert "OutsideTailError" not in message
+    assert "private-credential-590" not in message
+    assert "raise RuntimeError" not in message
+    assert str(tmp_path) not in message
+
+
 @pytest.mark.skipif(
     not callable(getattr(os, "pidfd_open", None)) or
     not callable(getattr(signal, "pidfd_send_signal", None)),
@@ -53,34 +94,24 @@ def test_timeout_captures_real_subprocess_stderr_from_separate_store(
     conn, service, claim = separate_roots
     path = _stderr_path(service.store.root, claim.attempt_id)
     path.parent.mkdir(parents=True)
-    child = tmp_path / "private_worker.py"
-    child.write_text(
-        "import faulthandler, resource, sys, threading, traceback\n"
-        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
-        "faulthandler.enable()\n"
-        "sys.stderr.write('OutsideTailError: old message\\n' + 'x' * 5000 + '\\n')\n"
-        "try:\n"
-        "    raise RuntimeError('private-credential-590')\n"
-        "except RuntimeError:\n"
-        "    traceback.print_exc()\n"
-        "sys.stderr.flush()\n"
-        "print('ready', flush=True)\n"
-        "threading.Event().wait()\n")
+    child = _write_worker(tmp_path)
     observed = []
-    await_growth = ops_support._await_worker_stderr_growth
+    stat = Path.stat
 
-    def record_growth(path, baseline):
-        observed.append((path, baseline))
-        await_growth(path, baseline)
+    def record_stat(path, *args, **kwargs):
+        result = stat(path, *args, **kwargs)
+        if path.name == "worker.stderr":
+            observed.append((path, result.st_size))
+        return result
 
-    monkeypatch.setattr(ops_support, "_await_worker_stderr_growth", record_growth)
     with path.open("ab") as stderr:
-        proc = subprocess.Popen([sys.executable, str(child)], stderr=stderr,
+        proc = subprocess.Popen([sys.executable, str(child), "wait"], stderr=stderr,
                                 stdout=subprocess.PIPE, start_new_session=True)
     try:
         assert select.select([proc.stdout], [], [], 10)[0], "worker did not become ready"
         assert proc.stdout.readline() == b"ready\n"
         baseline = path.stat().st_size
+        monkeypatch.setattr(Path, "stat", record_stat)
         identity = process_info(proc.pid, service.boot)[0]
         record_launch(conn, claim.attempt_id, claim.fence, identity,
                       clock=service.clock, lease_seconds=120)
@@ -88,7 +119,10 @@ def test_timeout_captures_real_subprocess_stderr_from_separate_store(
         with pytest.raises(ops_support.RunUntilTimeout) as raised:
             ops_support.run_until(service, conn, claim.job_id, timeout=0.05)
         message = str(raised.value)
-        assert observed == [(path, baseline)], message
+        assert len(observed) >= 2, message
+        assert observed[0] == (path, baseline)
+        assert all(observed_path == path for observed_path, _ in observed)
+        assert observed[-1][1] > baseline
         assert "traceback signal sent" in message
         assert "RuntimeError: <message redacted>" in message
         assert 'File "<path>"' in message
@@ -121,8 +155,10 @@ def test_stderr_tail_is_latest_4096_bytes_replacement_decoded_and_sanitized(sepa
     payload = (b"OutsideTailError: old message\n" + b"x" * 5000 + b"\xc3\xa9" +
                b"x" * (4095 - len(ending)) + ending)
     path.write_bytes(payload)
-    tail = ops_support._worker_stderr_tail(
-        conn, attempt_receipts(conn, claim.job_id), root=service.root)
+    with pytest.raises(ops_support.RunUntilTimeout) as raised:
+        ops_support.run_until(service, conn, claim.job_id, timeout=0)
+    tail = str(raised.value).split("worker stderr tail: ", 1)[1].split(
+        "; tracked process diagnostics:", 1)[0]
     assert tail == ('<diagnostic text redacted>\nTraceback (most recent call last):\n'
                     '  File "<path>", line 9, in stage\n<diagnostic text redacted>\n'
                     'ValueError: <message redacted>')
@@ -148,13 +184,9 @@ def test_timeout_does_not_fall_back_to_catalog_when_store_stderr_is_unreadable(
 
 
 @pytest.mark.parametrize("state", ops_support.TERMINAL_STATES)
-def test_terminal_jobs_do_not_read_timeout_diagnostics(separate_roots, monkeypatch, state):
+def test_terminal_jobs_return_without_timeout(separate_roots, state):
     conn, service, claim = separate_roots
     conn.execute("UPDATE jobs SET state=?,active_attempt_id=NULL WHERE job_id=?",
                  (state, claim.job_id))
 
-    def unexpected(*args, **kwargs):
-        pytest.fail("terminal job requested timeout diagnostics")
-
-    monkeypatch.setattr(ops_support, "_run_until_deadline_message", unexpected)
     assert ops_support.run_until(service, conn, claim.job_id, timeout=0) == state

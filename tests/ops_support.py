@@ -345,8 +345,8 @@ def _worker_stderr_tail(conn, attempts, *, root=None) -> str:
     """Bounded tail (latest 4096 bytes, replacement-decoded) of the latest
     attempt's ``worker.stderr``, sanitized to safe traceback structure only
     (:func:`_sanitize_worker_stderr_tail`), the path never printed;
-    ``unavailable (...)`` for an absent attempt, database path, file or read
-    error. Never raises."""
+    ``unavailable (...)`` for an absent attempt, file or read error, or a
+    missing catalog path when no service root was supplied. Never raises."""
     try:
         if attempts is None or not len(attempts) or attempts[-1] is None:
             return "unavailable (no attempt recorded)"
@@ -380,7 +380,6 @@ def _worker_stderr_path(conn, job_id, *, root=None):
         return _attempt_stderr_path(conn, attempt_id, root=root)
     except Exception:
         return None
-    return None
 
 
 def _file_size(path):

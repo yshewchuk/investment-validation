@@ -106,18 +106,18 @@ Nothing in the suite waits unboundedly any more:
 | Ops job polling (`ops_support.run_until`) | Polling has an overall deadline shorter than the per-test timeout. If a job has not reached a terminal state by then, the test fails with the job id, last state, admission/retry/execution status, attempts, and the latest worker heartbeat and log tail available from the ops query helpers; the diagnostics expose the attempt lease's `heartbeat_at` stamp and exact worker process-family liveness separately from the latest progress event/step — a latest progress row of `kind="heartbeat"` is a throttled observation/progress event, not lease renewal. A real-`Service` job left queued on a host-resource reason still fails with `RESOURCE WAIT (environment, not a code failure): ...`; `PROFILE_EXCEEDS_CAPACITY` fails at once and `MEMORY_HEADROOM`, `CPU_UNAVAILABLE`, `DISK_SPACE` and `RESERVATION_BUDGET` fail after 60 s continuously queued. Reasons from the test's own catalog (dependencies, heavy slot, store lease) remain subject to the overall polling deadline. | env `OPS_TEST_ADMISSION_WAIT_S` |
 | `ui/.npm-ci.lock` | Waits for another process's `npm ci` for at most 660 s, then fails, naming the lock. | none |
 
-Timeout stderr lookup and post-signal growth polling use the Service's artifact
-root, even when the catalog is elsewhere. The tail still reads only the latest
-4096 bytes and redacts paths, source lines and messages; unreadable diagnostics
-remain best-effort failures. Rootless test doubles retain the colocated-catalog
-convention. Regression coverage lives in `tests/v2/ops/test_timeout_diagnostic_root.py`.
-
 These are failures, not skips, on purpose: the check did not run, and a
 skip is easy to miss when the rest of the summary is green. To separate
 environment from code, `grep -E "RESOURCE WAIT|TIMEOUT:"` the output and rerun
 those files alone on a quieter box. `TEST_POLICY` caps every profile at
 256 MiB, so a memory `RESOURCE WAIT` means MemAvailable was below about
 0.75 GiB for a whole minute.
+
+Timeout stderr lookup and post-signal growth polling use the Service's artifact
+root, even when the catalog is elsewhere. The tail still reads only the latest
+4096 bytes and redacts paths, source lines and messages; unreadable diagnostics
+remain best-effort failures. Rootless test doubles retain the colocated-catalog
+convention. Regression coverage lives in `tests/v2/ops/test_timeout_diagnostic_root.py`.
 
 ### Sharing the box: `bounded_run` test slots and the heavy reservation
 
