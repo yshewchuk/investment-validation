@@ -720,13 +720,13 @@ def test_operational_index_failure_leaves_report_available(parity, tmp_path, mon
     """A sqlite3.OperationalError -- from the resolver, the serving-db open, or
     the release lookup -- is the same availability contract as the ApiError and
     real OSError cases above. Injected at the dependency boundary (resolver,
-    api._open_raw, projections.get_release), never by mocking freshness itself."""
+    api.open_index_untranslated, projections.get_release), never by mocking freshness itself."""
     connections = []
     if phase == "open":
         def fail_open(serving_db):
             raise sqlite3.OperationalError("unable to open database file")
 
-        monkeypatch.setattr(api_module, "_open_raw", fail_open)
+        monkeypatch.setattr(api_module, "open_index_untranslated", fail_open)
     elif phase == "get_release":
         def memory_open(serving_db):
             conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -736,7 +736,7 @@ def test_operational_index_failure_leaves_report_available(parity, tmp_path, mon
         def fail_get_release(conn, release_id):
             raise sqlite3.OperationalError("database disk image is malformed")
 
-        monkeypatch.setattr(api_module, "_open_raw", memory_open)
+        monkeypatch.setattr(api_module, "open_index_untranslated", memory_open)
         monkeypatch.setattr(projections, "get_release", fail_get_release)
 
     app = create_app(serving_db=str(tmp_path / "serving.sqlite"),
@@ -799,7 +799,7 @@ def test_index_integrity_errors_propagate_from_freshness(monkeypatch):
     def fail_get_release(conn, release_id):
         raise _integrity_error()
 
-    monkeypatch.setattr(api_module, "_open_raw", memory_open)
+    monkeypatch.setattr(api_module, "open_index_untranslated", memory_open)
     monkeypatch.setattr(projections, "get_release", fail_get_release)
     with pytest.raises(projections.ServingIndexError):
         api_module._native_parity_freshness("unused", lambda: _SAFE_RELEASE_ID, AS_OF)

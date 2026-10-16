@@ -215,9 +215,9 @@ def _read_small_text(path: str, cap: int = 1 << 20) -> str | None:
     except OSError:
         return None
     try:
-        # ``stat.S_ISREG`` would read better but ``import stat`` is a ninth
-        # distinct-module edge (§4.3 fan-out budget is exactly spent); the
-        # literal S_IFMT/S_IFREG test stays instead.
+        # ``stat.S_ISREG`` would read better, but ``import stat`` would be a
+        # ninth distinct imported module and the §4.3 fan-out budget is 8, so
+        # the literal S_IFMT/S_IFREG test stays (tools/oc_check code_budgets).
         if (os.fstat(fd).st_mode & 0o170000) != 0o100000:
             return None
         raw = b""
@@ -820,7 +820,7 @@ def _ops_native_parity_report_source(ops_root):
     return source
 
 
-def _open_raw(serving_db):
+def open_index_untranslated(serving_db):
     """Open the serving index untranslated, so a failed re-open reads as "available"."""
     return projections.connect(str(serving_db))
 
@@ -828,7 +828,7 @@ def _open_raw(serving_db):
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
     """Classify report freshness; an ApiError/OSError resolver means unknown current."""
     return native_parity_projection.native_parity_freshness(
-        serving_db, resolve_current, as_of, _open_raw, projections.get_release,
+        serving_db, resolve_current, as_of, open_index_untranslated, projections.get_release,
         (ApiError, OSError))
 
 
