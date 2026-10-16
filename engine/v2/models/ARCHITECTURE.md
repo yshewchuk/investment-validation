@@ -182,6 +182,39 @@ content succeeds and different content refuses `ID_CONFLICT`.
 | R5 partial failure | Orphaned objects or a staged manifest without a catalog may remain and a retry completes it; no catalog, nothing promoted |
 | R6 idempotency | Identical inputs give identical catalog bytes (no clock in the catalog); same id with different content refuses `ID_CONFLICT` |
 
+### 2.2 `phase5_state_stage` job (nightly pool staging)
+
+An ops job kind (`engine/v2/ops/state_stage.py`; logic in `tools/phase5_state_stage_job.py`
+because production code may not import `checks/`; `delivery` class, write lease on
+`deployment_pointer`; `state_stage_plan` builds the plan, submission is #192 slice 4). It
+stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
+
+- Parameters: `release_root` (the store's parent; empty resolves the production root at
+  plan time), `prior_release_id`, `release_id`, `cutoff` (extended ISO), `state_files` and
+  `input_bindings` (file name -> succeeded `training` output, equal key sets).
+- The bound files must cover exactly the advancing members `paired_residual_pool`,
+  `board_analog_matcher`, `trailing_pnl_cutoff`. Paired and board objects carry `cutoff` as
+  the last name segment; trailing objects are stamped with `cutoff`.
+- Every other prior pool/chooser object, and every prior object of an advancing member not
+  re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
+  driver pools and the chooser keep their hash until the monthly retrain (cutover PR-13b:
+  first nightly after a month ends, covering that month).
+- The worker writes new objects (`write_object`), takes the inventory from
+  `current_release_inventory()` under the new id (any drift refuses), calls
+  `carry_forward_release`, re-reads the catalog and staged manifest (`validate_catalog`,
+  `verify_staged`, `pool_cutoff`, `carried_from`, new hashes), then writes `stage_result.json`.
+- Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
+  `ReleaseAssemblyRefusal`, `members`, `issues`); the retry policy is a single attempt.
+
+| Rule | Behaviour |
+|---|---|
+| R1 verified input | Bound files re-classified by schema and member (hash-verified by `FrozenStateLoader`); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
+| R2 cache | None; bound files, prior catalog and inventory are re-read each call |
+| R3 retry | One attempt; a failed stage is terminal for its key, and no caller re-stages a key in any state |
+| R4 transaction | Objects, staged manifest and catalog are written under the new id only; `stage_result.json` follows the light checks |
+| R5 partial failure | Orphan objects or a manifest may remain; no success output, no promotion, the deployed release is unchanged |
+| R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
+
 ## 3. Inputs
 
 **Forward serving-fold contract.** Offline descriptor authoring is described
