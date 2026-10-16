@@ -102,7 +102,10 @@ def stage_candidate(parameters, root: Path) -> dict:
     new = classify(Path(root), parameters["state_files"])
     try:
         _, carried = prior_carry_set(release_root, parameters["prior_release_id"])
-        inventory, drift = current_release_inventory()
+        try:
+            inventory, drift = current_release_inventory()
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StageRefused("release inventory could not be built") from exc
         if drift:
             raise StageRefused("release inventory drifted", {"issues": len(drift)})
         inventory = dataclasses.replace(inventory, release_id=parameters["release_id"])

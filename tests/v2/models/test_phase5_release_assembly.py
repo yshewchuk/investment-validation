@@ -2118,7 +2118,7 @@ def test_prior_carry_set_refuses_unknown_or_unsafe_prior(tmp_path, release_id):
     assert err.value.code == "PRIOR_MISMATCH"
 
 
-def test_carried_objects_keep_their_hash_and_old_cutoff(tmp_path):
+def test_carried_objects_keep_their_prior_rows(tmp_path):
     body, args = _carry_args(
         tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:3], chooser_carried=True)
     candidate = assembly.derive_catalog(body, **args)
@@ -2165,11 +2165,12 @@ def test_non_carried_object_with_old_cutoff_still_refuses(tmp_path):
 
 
 def test_carried_flag_must_be_a_bool(tmp_path):
-    body, args = _carry_args(tmp_path)
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
     args["outputs"][0] = dataclasses.replace(args["outputs"][0], carried="yes")
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
         assembly.derive_catalog(body, **args)
     assert err.value.code == "POOL_SET_MISMATCH"
+    assert "carried flag" in str(err.value)
 
 
 def test_carried_object_with_wrong_payload_bytes_refuses(tmp_path):

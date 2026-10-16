@@ -112,8 +112,12 @@ def test_invalid_parameters_are_reported(changes):
 
 def test_kind_is_registered_and_leases_the_pointer():
     kind = stages.registry().get("phase5_state_stage")
-    assert kind is not None and kind.worker == "phase5_state_stage"
-    assert state_stage_job_kind().store_domains == (("deployment_pointer", "write"),)
+    assert kind.worker == "phase5_state_stage"
+    assert kind.resource_classes == frozenset({"delivery"})
+    assert kind.effects == ("staged",)
+    assert kind.checkpoint_contract == "phase5_state_stage_result.v1.0"
+    assert kind.namespaces == frozenset({"shadow", "smoke"})
+    assert kind.store_domains == (("deployment_pointer", "write"),)
     assert state_stage_job_kind().retry.max_attempts == 1
 
 
@@ -125,6 +129,10 @@ def test_plan_pins_files_refs_and_absolute_root(tmp_path):
     assert plan["parameters"]["release_root"] == str(tmp_path.resolve())
     assert plan["input_refs"] == sorted(refs.values())
     assert plan["parameters"]["state_files"] == tuple(sorted(refs))
+    assert plan["mode"] == "shadow" and plan["effects"] == ["staged"]
+    assert plan["resource_class"] == "delivery"
+    assert plan["schema_version"] == "operations_plan.v1.0"
+    assert plan["blocked_prerequisites"] == []
 
 
 def test_plan_refuses_invalid_request(tmp_path):
@@ -160,6 +168,9 @@ def test_worker_stages_candidate_carrying_the_unadvanced_members(tmp_path, monke
     parameters, staging = _wire(tmp_path, monkeypatch)
     result = run_state_stage_worker(parameters, staging)
     assert result["completed_ids"] == ["phase5_state_stage"]
+    assert result["no_work"] is False
+    assert result["outputs"] == [{"name": "stage_result", "path": "stage_result.json",
+                                  "schema": "phase5_state_stage_result.v1.0"}]
     summary = json.loads((staging / "stage_result.json").read_text())
     assert summary["n_new"] == 3 and summary["n_carried"] == 7
     body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
@@ -240,6 +251,8 @@ def _tamper_catalog(monkeypatch, mutate):
         path = real(root, **kwargs)
         body = json.loads(path.read_bytes())
         mutate(body)
+        body = phase5_release.manifest_body(
+            body["release_id"], body["deployment_id"], body["members"], body["sources"])
         path.write_text(json.dumps(body))
         return path
 
@@ -269,3 +282,84 @@ def test_light_checks_refuse_a_candidate_that_does_not_match(tmp_path, monkeypat
     assert err.value.code == "VALIDATION_FAILED"
     assert "light checks" in str(err.value)
     assert not (staging / "stage_result.json").exists()
+
+
+def test_plan_resolves_the_production_release_root(tmp_path, monkeypatch):
+    from engine.v2.models import deployment
+
+    monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path)
+    plan = state_stage_plan(release_root="", prior_release_id="prior1", release_id="cand1",
+                            cutoff="2026-10-01", state_refs={"a.json": "j#o"})
+    assert plan["parameters"]["release_root"] == str(tmp_path.resolve())
+
+
+def test_plan_without_any_release_root_is_an_invalid_request(monkeypatch):
+    from engine.v2.models import deployment
+
+    def missing():
+        raise deployment.MissingReleaseRoot()
+
+    monkeypatch.setattr(deployment, "production_release_root", missing)
+    with pytest.raises(OpsError) as err:
+        state_stage_plan(release_root="", prior_release_id="prior1", release_id="cand1",
+                         cutoff="2026-10-01", state_refs={"a.json": "j#o"})
+    assert err.value.code == "INVALID_REQUEST"
+
+
+def test_worker_refuses_a_symlinked_state_file(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    target = staging / "paired.json"
+    real = tmp_path / "real.json"
+    real.write_bytes(target.read_bytes())
+    target.unlink()
+    target.symlink_to(real)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert "bounded regular file" in str(err.value)
+
+
+def test_worker_refuses_an_oversize_state_file(tmp_path, monkeypatch):
+    from tools import phase5_state_stage_job
+
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    monkeypatch.setattr(phase5_state_stage_job, "MAX_STATE_BYTES", 1)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert "bounded regular file" in str(err.value)
+
+
+def test_worker_refuses_a_duplicate_state_object(tmp_path, monkeypatch):
+    states = dict(_STATES)
+    states["board.json"] = _STATES["paired.json"]
+    parameters, staging = _wire(tmp_path, monkeypatch, states=states)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert "appears twice" in str(err.value)
+
+
+def test_worker_refuses_a_corrupt_state_file(tmp_path, monkeypatch):
+    from engine.v2.models.frozen_state import FrozenStateError
+
+    parameters, staging = _wire(tmp_path, monkeypatch)
+
+    def corrupt(paths):
+        raise FrozenStateError("bad")
+
+    monkeypatch.setattr(phase5_prepare_release, "frozen_state_payloads", corrupt)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert "could not be loaded" in str(err.value)
+
+
+def test_worker_refuses_an_inventory_that_cannot_be_built(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+
+    def broken(*args, **kwargs):
+        raise ValueError("corrupt registry")
+
+    monkeypatch.setattr(inventory_module, "current_release_inventory", broken)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert "inventory could not be built" in str(err.value)
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()

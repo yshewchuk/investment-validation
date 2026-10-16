@@ -136,8 +136,9 @@ size check. Existing callers omitting the ceiling retain their read contract.
   `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
   the prior release id. A `PoolOutput` may be `carried=True` (default
   `False`): an object that only changes on a retrain (driver residual pools,
-  chooser row) is re-supplied unchanged. It keeps its own recorded `cutoff`
-  (an extended ISO date not after `cutoff`) and must equal an object of the
+  chooser row) is re-supplied unchanged. It carries a
+  caller-supplied `cutoff` (an extended ISO date not after `cutoff`; catalog rows
+  record none, `prior_carry_set` supplies the prior `pool_cutoff`) and must equal an object of the
   same member in the prior row (name, `content_hash`, `payload_bytes`). Every
   non-carried object must carry `cutoff` exactly. `prior_carry_set(release_root,
   prior_release_id) -> (pool_cutoff, tuple[PoolOutput])` returns every prior
@@ -185,20 +186,21 @@ content succeeds and different content refuses `ID_CONFLICT`.
 ### 2.2 `phase5_state_stage` job (nightly pool staging)
 
 An ops job kind (`engine/v2/ops/state_stage.py`; logic in `tools/phase5_state_stage_job.py`
-because production code may not import `checks/`; `delivery` class, write lease on
+because the assembly helpers still live in `checks/` (the tools hop is a known
+exception to the no-`checks/` rule for production code, moving them is #807); `delivery` class, write lease on
 `deployment_pointer`; `state_stage_plan` builds the plan, submission is #192 slice 4). It
 stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
 
 - Parameters: `release_root` (the store's parent; empty resolves the production root at
   plan time), `prior_release_id`, `release_id`, `cutoff` (extended ISO), `state_files` and
-  `input_bindings` (file name -> succeeded `training` output, equal key sets).
+  `input_bindings` (file name -> `training` output id, equal key sets; the job framework requires
+  the producing job to have succeeded).
 - The bound files must cover exactly the advancing members `paired_residual_pool`,
   `board_analog_matcher`, `trailing_pnl_cutoff`. Paired and board objects carry `cutoff` as
   the last name segment; trailing objects are stamped with `cutoff`.
 - Every other prior pool/chooser object, and every prior object of an advancing member not
   re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
-  driver pools and the chooser keep their hash until the monthly retrain (cutover PR-13b:
-  first nightly after a month ends, covering that month).
+  driver pools and the chooser keep their hash until a retrain re-supplies them.
 - The worker writes new objects (`write_object`), takes the inventory from
   `current_release_inventory()` under the new id (any drift refuses), calls
   `carry_forward_release`, re-reads the catalog and staged manifest (`validate_catalog`,
@@ -210,7 +212,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 |---|---|
 | R1 verified input | Bound files are bounded regular files, re-classified by schema and member (self-consistency only: the loader hashes the bytes it read, no recorded hash is compared); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
 | R2 cache | None; bound files, prior catalog and inventory are re-read each call |
-| R3 retry | One attempt; a failed stage is terminal for its key, and no caller re-stages a key in any state |
+| R3 retry | One attempt (`RetryPolicy("none", 1)`); a failed job is not retried |
 | R4 transaction | Objects, staged manifest and catalog are written under the new id only; `stage_result.json` follows the light checks |
 | R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
 | R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
