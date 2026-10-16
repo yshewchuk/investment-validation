@@ -1,5 +1,6 @@
 """The import-name memo in ``fingerprints._import_names``: key, hit path and bound (#791)."""
 import ast
+import hashlib
 
 from engine.v2.ops import fingerprints
 
@@ -51,7 +52,7 @@ def test_cache_stores_a_digest_key_not_the_source_text():
     fingerprints._IMPORT_NAMES.clear()
     fingerprints._import_names("import os\n", ["p"])
     (digest, package), names = next(iter(fingerprints._IMPORT_NAMES.items()))
-    assert isinstance(digest, bytes) and len(digest) == 32
+    assert digest == hashlib.sha256(b"import os\n").digest()
     assert package == ("p",) and names == ("os",)
 
 
