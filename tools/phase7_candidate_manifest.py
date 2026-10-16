@@ -9,7 +9,8 @@ commit, config, snapshot, release, phase evidence, ``authority`` and any
 extra jobs the registry cannot know. The commit is required and must equal
 this checkout's ``HEAD``, because the job graph (live ``stages.registry()``)
 and the consumer inventory both come from this checkout. A job kind added
-later (#726's ``serving_projection``) appears with no edit here. Exit 0 = the
+later (#726's ``serving_projection``) appears with no edit here unless it can run outside
+``shadow``/``smoke``, in which case the spec must decide it. Exit 0 = the
 checker passes, 1 = findings, 2 = unusable spec.
 
 Spec keys: ``commit`` (required, must equal ``HEAD``), ``registry_owner``, ``config``
@@ -112,6 +113,11 @@ def _write(path: Path, doc: dict) -> None:
     os.replace(tmp, path)
 
 
+#: Trees whose files shape the registry import and the consumer inventory; an untracked file
+#: there would enter the manifest of a commit that does not contain it.
+_SCANNED_TREES = ("engine/", "tools/", "dashboard/", "checks/")
+
+
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
@@ -130,12 +136,15 @@ def check_commit(spec: dict, root: Path) -> str:
     if done.stdout.strip() != commit:
         raise SpecError("commit: does not equal this checkout's HEAD, so the registry and "
                         "inventory would describe a different commit")
-    dirty = _git(root, "status", "--porcelain", "--untracked-files=no")
+    dirty = _git(root, "status", "--porcelain", "--untracked-files=normal")
     if dirty.returncode != 0:
         raise SpecError(f"commit: git status failed (exit {dirty.returncode})")
-    if dirty.stdout.strip():
-        raise SpecError("commit: the checkout has uncommitted tracked changes, so the registry "
-                        "and inventory would not describe that commit")
+    changed = [line for line in dirty.stdout.splitlines()
+               if not line.startswith("?? ") or line[3:].startswith(_SCANNED_TREES)]
+    if changed:
+        raise SpecError("commit: the checkout has uncommitted tracked changes or untracked "
+                        "files under the scanned trees, so the registry and inventory would "
+                        "not describe that commit")
     return commit
 
 
@@ -149,7 +158,8 @@ def registry_jobs(owner: str, official_kinds=(), non_official_kinds=()) -> list[
     ``official_registry_kinds``. A kind that can run in any other namespace (today
     ``experiment`` in ``primary``) must be decided explicitly in
     ``official_registry_kinds`` or ``non_official_registry_kinds``; an undecided one is
-    refused (fail closed).
+    refused (fail closed). Listing a kind non-official records ``writes_official`` false by
+    the operator's declaration, even for a ``primary`` kind.
 
     User decision (2026-10-16): a kind holding a store ``write`` lease (today
     ``models_promote`` and ``models_rollback`` on ``deployment_pointer``) is an operator
@@ -250,8 +260,8 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
                         f"{type(exc).__name__}: {exc}") from exc
     out_dir.mkdir(parents=True, exist_ok=True)
     graph_path, inventory_path = out_dir / "job_graph.json", out_dir / "consumer_inventory.json"
-    _write(graph_path, {"jobs": [{"id": j["id"], "schedule": j["schedule"],
-                                  "writes_official": j["writes_official"]} for j in jobs]})
+    _write(graph_path, {"jobs": [{k: j[k] for k in ("id", "schedule", "kind", "owner",
+                                                     "writes_official")} for j in jobs]})
     _write(inventory_path, {"consumers": [{"id": i, "kind": m["kind"], "source": m["source"]}
                                           for i, m in sorted(found.items())]})
     manifest["job_graph"] = {**_ref("job_graph", {"path": graph_path}),
@@ -286,8 +296,8 @@ def main(argv: list[str] | None = None) -> int:
           f"{len(manifest['consumer_inventory']['consumers'])} consumers, "
           f"codes={result['finding_codes']}")
     print("note: models_promote/models_rollback are recorded as non-official operator "
-          "actions on the shadow pointer; a caller that omits --release-root still reaches "
-          "the production root (issue #808)", file=sys.stderr)
+          "actions on the shadow pointer (issue #808 tracks the plan builders' production "
+          "default)", file=sys.stderr)
     return 0 if result["ok"] else 1
 
 

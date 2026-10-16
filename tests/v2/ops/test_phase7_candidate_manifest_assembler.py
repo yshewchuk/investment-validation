@@ -276,6 +276,12 @@ def test_dirty_tracked_tree_is_refused(tmp_path):
         _REAL_COMMIT({"commit": "b" * 40}, repo)
     (repo / "untracked.txt").write_text("u")
     assert _REAL_COMMIT({"commit": head}, repo) == head
+    (repo / "engine").mkdir()
+    (repo / "engine" / "new.py").write_text("x = 1")
+    with pytest.raises(asm.SpecError, match="untracked files under the scanned trees"):
+        _REAL_COMMIT({"commit": head}, repo)
+    (repo / "engine" / "new.py").unlink()
+    (repo / "engine").rmdir()
     (repo / "a.txt").write_text("2")
     with pytest.raises(asm.SpecError, match="uncommitted"):
         _REAL_COMMIT({"commit": head}, repo)
@@ -512,3 +518,28 @@ def test_discovery_failure_is_exit_2_and_creates_nothing(spec, tmp_path, monkeyp
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(spec))
     assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o")]) == 2
+
+
+def test_graph_file_carries_kind_and_owner_and_checker_compares_them(spec, tmp_path):
+    manifest = asm.assemble(spec, _out(tmp_path))
+    graph = _out(tmp_path) / "job_graph.json"
+    doc = json.loads(graph.read_text())
+    assert all({"kind", "owner"} <= set(row) for row in doc["jobs"])
+    doc["jobs"][0]["kind"] = "scheduled_writer" if doc["jobs"][0]["kind"] != "scheduled_writer" \
+        else "reader"
+    graph.write_text(json.dumps(doc))
+    manifest["job_graph"]["sha256"] = hashlib.sha256(graph.read_bytes()).hexdigest()
+    result = checker.validate(manifest, root=tmp_path)
+    assert any(r["code"] == checker.REF_MISMATCH and "graph kind" in r["detail"]
+               for r in result["findings"])
+
+
+def test_read_lease_does_not_count_as_write(monkeypatch):
+    real = stages.registry()
+    base = real.get(real.names()[0])
+    reader = dataclasses.replace(base, name="ptr_reader", namespaces=frozenset({"shadow"}),
+                                 store_domains=(("deployment_pointer", "read"),),
+                                 effects=("staged",))
+    monkeypatch.setattr(stages, "registry", lambda: submission.KindRegistry([reader]))
+    assert asm.registry_jobs("o", ("ptr_reader",))[0]["kind"] == "scheduled_writer"
+    assert asm.registry_jobs("o")[0]["kind"] == "background"

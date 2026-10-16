@@ -461,6 +461,10 @@ def _check_job_graph(graph: Mapping, findings: _Findings, root: Path) -> list[di
         if row.get("schedule") != job.get("schedule"):
             findings.add(REF_MISMATCH, f"job:{jid}", f"graph schedule {row.get('schedule')!r} "
                                                      f"!= accounted {job.get('schedule')!r}")
+        for field in ("kind", "owner"):
+            if field in row and row[field] != job.get(field):
+                findings.add(REF_MISMATCH, f"job:{jid}",
+                             f"graph {field} {row[field]!r} != accounted {job.get(field)!r}")
         official = row.get("writes_official")
         kind = job.get("kind")
         if official is True and kind != "scheduled_writer":
