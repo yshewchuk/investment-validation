@@ -34,6 +34,7 @@ def _start(app):
     while not server.started:
         if time.monotonic() > deadline:
             raise RuntimeError("server did not start")
+        time.sleep(0.01)
     port = server.servers[0].sockets[0].getsockname()[1]
     return server, thread, f"http://127.0.0.1:{port}"
 

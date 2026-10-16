@@ -176,10 +176,11 @@ the pointer), `null` when the binding has none or a non-string. `verify_projecti
 checks only index-derived fields, so it does not cover `scope`: scope is publication metadata,
 not projection content, and the binding file is bound as an ops artifact when published.
 `scope` is `null` until a producer writes it. The API routes read `CURRENT`, the binding and
-`operations_status.json` without following a symlink at the final path component (the
-`releases/<id>/` directory is followed), only as regular files and at most
-1 MiB (the operations listener's reads and the native-parity report load are not bounded); a symlinked, non-regular, oversize or non-UTF-8 file, or a binding or status document nested deeply enough to raise `RecursionError`, reads as absent (`NO_CURRENT_RELEASE`
-for the pointer chain, `OPERATIONS_UNAVAILABLE` for the status document).
+`operations_status.json` as UTF-8 regular files, at most 1 MiB, without following a symlink at
+the final path component (the `releases/<id>/` directory is followed). Unsafe or invalid input
+reads as absent (`NO_CURRENT_RELEASE` for the pointer chain, `OPERATIONS_UNAVAILABLE` for the
+status document). The operations listener's reads and the native-parity report load are not
+bounded.
 `/operations` serves `<publication_root>/operations_status.json` only; it is the publication-time
 status document, never a serving-projection status sidecar, so under the
 serving `publisher/` it answers `OPERATIONS_UNAVAILABLE` (503) until a producer writes that file.
