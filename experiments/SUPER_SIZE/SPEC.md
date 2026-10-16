@@ -86,7 +86,7 @@ defines the prospective frozen winner; no winner exists until recorded execution
 Every planned candidate must be attempted and failures recorded before selection.
 This command neither reads outcomes nor runs the search.
 
-The library-only `experiments.magnitude_search_trials.SearchTrials` boundary now
+The library-only `experiments.magnitude_search_trials.SearchTrials` boundary
 records every candidate/inner-fold attempt and freezes selections from submitted
 forecasts. Explicitly seal one plan per anchor, start each attempt once, and record
 complete three-horizon real forecasts or an explicit `EXPERIMENT_VARIANT_FAILED` fit failure. Numeric predictions and

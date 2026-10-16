@@ -178,9 +178,9 @@ and the history admission bridge uses `errors.fail`.
 `experiments/magnitude_search_plan.py` consumes the fitted constructor/validator,
 `fingerprints.source_closure`/`environment_identity` and `errors.OpsError`/`fail`; its CLI uses
 `catalog.connect`, `experiments.experiment_spec_from_document` and `errors.OpsError`/`fail`.
-`experiments/magnitude_search_trials.py` and `magnitude_search_records.py` consume
-`migrations.Migration`/`migrate`/`require_current`, `catalog.transaction`, source
-fingerprinting and typed failures for a separate search-owned immutable journal.
+`experiments/magnitude_search_trials.py` consumes `migrations.migrate`/`require_current`,
+`fingerprints.source_closure` and typed failures; `magnitude_search_records.py` consumes
+`migrations.Migration`, `catalog.transaction` and typed failures for the search-owned immutable journal.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection
