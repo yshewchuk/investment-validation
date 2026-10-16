@@ -527,16 +527,18 @@ Only a tracked path absent from the worktree reads as empty.
   a private artifact like the spec. A registry kind is `scheduled_writer`
   with `writes_official` true when its namespaces include `official` or the
   operator lists it in `official_registry_kinds` (a list of registry kind
-  names; today no kind can run in the official namespace, so the list is
-  normally empty and exists for kinds that become official-capable);
-  otherwise it is `background` (has effects) or `reader`. Registry rows get a
+  names). Any kind that can run outside `shadow`/`smoke` must be decided
+  explicitly there or in `non_official_registry_kinds` (today only
+  `experiment`, which appends the research ledger in `primary`; whether that
+  counts as official is the operator's call, not the tool's); otherwise it is `background` (has effects) or `reader`. Registry rows get a
   synthetic `native:<kind>` schedule.
 
   | Condition | Outcome |
   |---|---|
   | spec missing/oversize/not a JSON object, a section of the wrong shape, a duplicate or colliding extra-job id, missing `commit` or `registry_owner`, a referenced file missing or over the cap | exit 2, nothing written for that run beyond files already produced |
   | spec file unreadable, not UTF-8/JSON, or an uncreatable `--out-dir` | exit 2 |
-  | spec `commit` differs from this checkout's `HEAD` | exit 2 (registry and inventory would describe another commit) |
+  | spec `commit` differs from this checkout's `HEAD`, or tracked files are modified | exit 2 (registry and inventory would describe another commit) |
+  | a registry kind that can run outside `shadow`/`smoke` (today `experiment`, in `primary`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
   | `--out-dir` inside the repository | exit 2 |
   | the checker reports findings | exit 1, manifest still written |
   | the checker passes | exit 0 |

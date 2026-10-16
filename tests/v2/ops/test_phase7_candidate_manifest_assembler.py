@@ -13,8 +13,16 @@ from checks import phase7_candidate_manifest as checker
 from engine.v2.ops import stages, submission
 from tools import phase7_candidate_manifest as asm
 
-COMMIT = subprocess.run(["git", "-C", str(asm.ROOT), "rev-parse", "HEAD"], capture_output=True,
-                        text=True, check=True).stdout.strip()
+COMMIT = "a" * 40
+_REAL_COMMIT = asm._commit
+
+
+@pytest.fixture(autouse=True)
+def _stub_commit(monkeypatch):
+    """Bind the spec commit without consulting the (possibly dirty) checkout."""
+    monkeypatch.setattr(asm, "_commit", lambda spec, root: spec["commit"]
+                        if isinstance(spec.get("commit"), str) and spec["commit"]
+                        else _REAL_COMMIT(spec, root))
 
 
 def _write(path, doc):
@@ -118,8 +126,8 @@ def test_planted_unaccounted_job_fails(spec, tmp_path):
 
 @pytest.mark.parametrize("mutate, match", [
     (lambda s, t: s["config"][0].update(path=str(t / "nope.json")), r"config\[0\]"),
-    (lambda s, t: s.pop("commit"), "required"),
     (lambda s, t: s.update(commit=5), "required"),
+    (lambda s, t: s.pop("commit"), "required"),
     (lambda s, t: s["extra_jobs"].append({"id": "z1", "schedule": "", "owner": "o",
                                           "kind": "reader", "writes_official": False}),
      r"extra_jobs\[z1\]\.schedule"),
@@ -145,7 +153,7 @@ def test_planted_unaccounted_job_fails(spec, tmp_path):
     (lambda s, t: s["model_deployment"].update(release_id=""), "release_id"),
     (lambda s, t: s.update(authority=[]), "authority"),
     (lambda s, t: s["config"][0].update(path=5), "path must be a string"),
-    (lambda s, t: s.update(commit="b" * 40), "HEAD"),
+
     (lambda s, t: s.update(config={"name": "x"}), "config"),
     (lambda s, t: s.update(extra_jobs=["x"]), r"extra_jobs\[0\]"),
     (lambda s, t: s.update(data_snapshot=None), "data_snapshot"),
@@ -178,7 +186,7 @@ def test_cap_is_inclusive_and_shared_with_the_checker(tmp_path, monkeypatch):
     monkeypatch.setattr(asm, "MAX_REF_BYTES", 4)
     with pytest.raises(asm.SpecError, match="exceeds"):
         asm._sha256("f", path)
-    assert asm.MAX_REF_BYTES != 4 and checker.MAX_REF_BYTES == 256 * 1024 * 1024
+    assert checker.MAX_REF_BYTES == 256 * 1024 * 1024
 
 
 def test_checker_refuses_oversize_reference(spec, tmp_path, monkeypatch):
@@ -218,12 +226,14 @@ def test_dirty_tracked_tree_is_refused(tmp_path):
     _git(repo, "commit", "-q", "-m", "x")
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
                           text=True, check=True).stdout.strip()
-    assert asm._commit({"commit": head}, repo) == head
+    assert _REAL_COMMIT({"commit": head}, repo) == head
+    with pytest.raises(asm.SpecError, match="HEAD"):
+        _REAL_COMMIT({"commit": "b" * 40}, repo)
     (repo / "untracked.txt").write_text("u")
-    assert asm._commit({"commit": head}, repo) == head
+    assert _REAL_COMMIT({"commit": head}, repo) == head
     (repo / "a.txt").write_text("2")
     with pytest.raises(asm.SpecError, match="uncommitted"):
-        asm._commit({"commit": head}, repo)
+        _REAL_COMMIT({"commit": head}, repo)
 
 
 def test_undecided_primary_kind_is_refused():
