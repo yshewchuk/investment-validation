@@ -19,16 +19,10 @@ import pytest
 from checks import phase5_release as layout
 from engine.v2.foundation import DocumentError, content_hash, from_document, to_document
 from engine.v2.models import (
-    ArtifactInventoryMember,
     ArtifactMember,
     FrozenInference,
     InferenceRequest,
-    ModelArtifactInventory,
-    ModelBinding,
     ModelRelease,
-    ModelReleaseInventory,
-    ReleaseBinding,
-    ReleaseRequirement,
     deployment,
     frozen_state_io,
 )
@@ -39,6 +33,15 @@ from engine.v2.models.serving_folds import (
     SizeFoldPolicy,
 )
 from tests.test_phase5_pinned_panel import ALL_ONE, build_pinned
+from tests.v2.models.serving_fold_support import (
+    catalog_object,
+    chooser_policy,
+    fold_bytes,
+    fold_name,
+    fold_states,
+    published_manifest,
+    release_inputs,
+)
 from tools import phase5_prepare_release as prep
 from tools import phase5_serving_folds as folds
 
@@ -119,7 +122,7 @@ def test_shared_object_concurrent_publishers_use_unique_no_clobber_temps(tmp_pat
 def test_object_publication_failure_never_publishes_catalog_and_retry_is_safe(
         tmp_path, role, failure, monkeypatch):
     cache, out = _cache(role), tmp_path / "release"
-    data = _bytes(cache)
+    data = fold_bytes(cache)
     dest = out / "deployment" / "objects" / hashlib.sha256(data).hexdigest()
     error = OSError(errno.EXDEV if failure == "link" else errno.EIO, "synthetic publication failure")
     handles = []
@@ -178,7 +181,7 @@ def test_object_publication_failure_never_publishes_catalog_and_retry_is_safe(
         patch.setattr(layout.os, "link", link)
         patch.setattr(layout, "fsync_directory", sync_directory)
         with pytest.raises(layout.ReleaseLayoutError) as caught:
-            prep.write_release(out, *_inputs(role, cache), _states(role, cache))
+            prep.write_release(out, *release_inputs(role, cache), fold_states(role, cache))
     assert type(caught.value) is layout.ReleaseLayoutError
     assert str(caught.value) == "phase5 object could not be published"
     assert caught.value.__cause__ is error
@@ -199,7 +202,7 @@ def test_object_publication_failure_never_publishes_catalog_and_retry_is_safe(
         synced.append(path)
 
     monkeypatch.setattr(layout, "fsync_directory", retry_sync)
-    prep.write_release(out, *_inputs(role, cache), _states(role, cache))
+    prep.write_release(out, *release_inputs(role, cache), fold_states(role, cache))
     _assert_published_descriptor(out, role, cache)
     assert synced == [dest.parent, dest.parent.parent]
     if linked:
@@ -232,7 +235,7 @@ def test_object_publication_never_clobbers_a_racing_destination(tmp_path, role, 
     monkeypatch.setattr(layout.os, "link", collision)
     expected = prep.PrepareRefused if shape in ("wrong", "symlink") else layout.ReleaseLayoutError
     with pytest.raises(expected) as caught:
-        prep.write_release(out, *_inputs(role, cache), _states(role, cache))
+        prep.write_release(out, *release_inputs(role, cache), fold_states(role, cache))
     assert type(caught.value) is expected
     if shape == "wrong":
         assert str(caught.value) == "chooser fold object bytes differ from preflight"
@@ -271,51 +274,8 @@ def _cache(role, panel="a" * 64):
             "pool_pred": [1.0, 3.0], "pool_res": [-0.5, 0.25]}
 
 
-def _bytes(cache, **dump_options):
-    stream = io.BytesIO()
-    joblib.dump(cache, stream, **dump_options)
-    return stream.getvalue()
-
-
-def _name(cache):
-    month = cache["fold_start"].replace("-", "")[:6]
-    return f"{cache['model_id']}_{month}_{cache['tier3_snapshot'][:12]}.joblib"
-
-
-def _policy(role, cache, *, floor=0.0):
-    return ChooserFoldPolicy(role=role, model_id=cache["model_id"],
-                             feature_order=cache["features"], panel_sha256=cache["tier3_snapshot"],
-                             interval_floor=floor)
-
-
-def _inputs(role, cache, *, output=None, clock="entry-close", release_id="r1"):
-    features, model_id = tuple(cache["features"]), cache["model_id"]
-    output = OUTPUTS[role][0] if output is None else output
-    outputs = (output,) if isinstance(output, str) else tuple(output)
-    raw = json.dumps({"schema_version": "linear_estimator.v1.0", "feature_order": features,
-                      "outputs": [{"name": name, "intercept": 0,
-                                   "coefficients": [0] * len(features)} for name in outputs]}).encode()
-    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-    binding = ModelBinding(binding_id=f"{role}:*", model_id=model_id, role=role, strategy_id="*",
-                           decision_clock_id=clock, adapter="json-linear.v1",
-                           feature_order=features, output_names=outputs, members=(ArtifactMember(
-                               name="estimator", path="source", content_hash=digest),))
-    inventory = ModelReleaseInventory(
-        release_id=release_id, deployment_id="d1", known_clock_ids=(clock,),
-        artifacts=(ModelArtifactInventory(
-            artifact_id=model_id, role=role, strategy_ids=("*",), compatible_clock_ids=(clock,),
-            target_contract_ref="synthetic.v1", ordered_features=features,
-            members=(ArtifactInventoryMember(member_id=f"{role}:estimator", kind="estimator",
-                                              artifact_ref="source", content_hash=digest),)),),
-        bindings=(ReleaseBinding(role=role, strategy_id="*", clock_id=clock, artifact_id=model_id,
-                                 ordered_features=features, required_member_kinds=("estimator",)),),
-        requirements=(ReleaseRequirement(role=role, strategy_id="*", clock_id=clock),),
-        artifact_manifest_ref="synthetic", evidence_refs=("synthetic",))
-    return ModelRelease(release_id=release_id, deployment_id="d1", bindings=(binding,)), inventory, {digest: raw}
-
-
 def _retry_inputs(role, cache):
-    parts = [_inputs(role, cache), _inputs("auxiliary", _cache("auxiliary"), output=("left", "right"))]
+    parts = [release_inputs(role, cache), release_inputs("auxiliary", _cache("auxiliary"), output=("left", "right"))]
     bindings = tuple(dataclasses.replace(part[0].bindings[0], members=(
         part[0].bindings[0].members[0], dataclasses.replace(part[0].bindings[0].members[0], name="metadata")))
         for part in parts)
@@ -326,37 +286,12 @@ def _retry_inputs(role, cache):
     return release, inventory, {key: value for part in parts for key, value in part[2].items()}
 
 
-def _states(role, cache, *, explicit=True, data=None):
-    found = {f"tier4_folds:{role}": {_name(cache): _bytes(cache) if data is None else data}}
-    if role == "size":
-        policy = SizeFoldPolicy(model_id=cache["model_id"], feature_order=cache["features"],
-                                panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)
-        return prep.build_states(found, size_fold_policy=policy if explicit else None)
-    return prep.build_states(found,
-                             chooser_fold_policies={role: _policy(role, cache)} if explicit else None)
-
-
-def _object(root, role, *, name=None):
-    body = layout.read_manifest(root)
-    row = next(row for row in body["members"] if row["member_id"] == f"tier4_folds:{role}")
-    assert row["status"] == "STAGED"
-    objects = row["objects"] if name is None else [obj for obj in row["objects"] if obj["name"] == name]
-    assert len(objects) == 1
-    return body, objects[0]
-
-
-def _published_manifest(root, release_id="r1"):
-    # Read our synthetic artifact through the public typed-document boundary.
-    return from_document(deployment.StagedManifest, json.loads(
-        (root / "releases" / release_id / "manifest.json").read_text()))
-
-
 def _assert_published_descriptor(root, role, cache, *, release_id="r1", clock="entry-close", floor=0.0, count=2,
                                  data=None):
-    body, obj = _object(root, role, name=_name(cache))
-    data = _bytes(cache) if data is None else data
+    body, obj = catalog_object(root, role, name=fold_name(cache))
+    data = fold_bytes(cache) if data is None else data
     digest = hashlib.sha256(data).hexdigest()
-    parent = _published_manifest(root / "deployment", release_id)
+    parent = published_manifest(root / "deployment", release_id)
     expected = {
         "schema_version": "chooser_serving_fold_descriptor.v1.0",
         "parent_release_id": release_id, "parent_release_hash": parent.release_hash,
@@ -384,7 +319,7 @@ def _assert_published_descriptor(root, role, cache, *, release_id="r1", clock="e
     assert descriptor.descriptor_hash == content_hash(descriptor if role == "size" else expected)
     assert obj["path"] == f"objects/{digest}"
     assert obj["content_hash"] == f"sha256:{digest}"
-    assert obj["name"] == _name(cache)
+    assert obj["name"] == fold_name(cache)
     assert obj["bytes"] == len(data)
     return body, obj
 
@@ -400,9 +335,9 @@ def test_real_authoring_preserves_exact_role_identity_and_metadata(
     cache = _cache(role)
     cache.update(model_id=f"{release_id}-{role}", fold_start=month, features=features,
                  pool_pred=[1.0] * count, pool_res=[-0.5] * count)
-    args = _inputs(role, cache, clock=clock, release_id=release_id)
-    states = prep.build_states({f"tier4_folds:{role}": {_name(cache): _bytes(cache)}},
-                               chooser_fold_policies={role: _policy(role, cache, floor=floor)})
+    args = release_inputs(role, cache, clock=clock, release_id=release_id)
+    states = prep.build_states({f"tier4_folds:{role}": {fold_name(cache): fold_bytes(cache)}},
+                               chooser_fold_policies={role: chooser_policy(role, cache, floor=floor)})
     prep.write_release(tmp_path, *args, states)
     body, obj = _assert_published_descriptor(tmp_path, role, cache, release_id=release_id,
                                             clock=clock, floor=floor, count=count)
@@ -428,7 +363,7 @@ def test_real_authoring_preserves_exact_role_identity_and_metadata(
 @pytest.mark.parametrize("identity", ["parent_release_id", "parent_release_hash", "role", "estimator"])
 def test_descriptor_hash_binds_parent_role_and_estimator_identity(tmp_path, identity):
     role, cache = "implied_t1", _cache("implied_t1")
-    prep.write_release(tmp_path, *_inputs(role, cache), _states(role, cache))
+    prep.write_release(tmp_path, *release_inputs(role, cache), fold_states(role, cache))
     _body, obj = _assert_published_descriptor(tmp_path, role, cache)
     expected = json.loads(json.dumps(obj["serving_fold"]))
     original = from_document(ChooserServingFoldDescriptor, expected)
@@ -455,7 +390,7 @@ def test_descriptor_hash_binds_parent_role_and_estimator_identity(tmp_path, iden
 @pytest.mark.parametrize("bad_panel", ["", "a" * 63, "a" * 65, "A" * 64, "g" * 64,
                                        "sha256:" + "a" * 64, "a" * 64 + "\n"])
 def test_chooser_policy_refuses_noncanonical_panel_digest(role, via_document, bad_panel):
-    valid = _policy(role, _cache(role))
+    valid = chooser_policy(role, _cache(role))
     with pytest.raises(DocumentError) as error:
         if via_document:
             from_document(ChooserFoldPolicy, {**to_document(valid), "panel_sha256": bad_panel})
@@ -474,7 +409,7 @@ def test_chooser_policy_refuses_noncanonical_panel_digest(role, via_document, ba
                                     "prefix", "short", "nonhex", "absolute", "traversal", "panel"])
 def test_chooser_descriptor_refuses_inconsistent_identity(tmp_path, role, via_document, defect):
     cache = _cache(role)
-    prep.write_release(tmp_path, *_inputs(role, cache), _states(role, cache))
+    prep.write_release(tmp_path, *release_inputs(role, cache), fold_states(role, cache))
     _body, obj = _assert_published_descriptor(tmp_path, role, cache)
     document = obj["serving_fold"]
     if defect in ("output", "producer", "both"):
@@ -520,8 +455,8 @@ def test_chooser_descriptor_refuses_inconsistent_identity(tmp_path, role, via_do
 @pytest.mark.parametrize("role", OUTPUTS)
 def test_policy_absence_keeps_opaque_catalog_compatibility(tmp_path, role):
     cache = _cache(role)
-    prep.write_release(tmp_path, *_inputs(role, cache), _states(role, cache, explicit=False))
-    _body, obj = _object(tmp_path, role)
+    prep.write_release(tmp_path, *release_inputs(role, cache), fold_states(role, cache, explicit=False))
+    _body, obj = catalog_object(tmp_path, role)
     assert "serving_fold" not in obj
 
 
@@ -541,11 +476,11 @@ def test_every_month_is_preflighted_and_published_before_catalog(
     later.update(fold_start="2026-03-01", pool_pred=[4.5],
                  pool_res=[float("nan") if bad_later_month else -1.25])
     # Insert later first so successful ordering cannot rely on mapping insertion order.
-    payloads = {_name(later): _bytes(later), _name(first): _bytes(first)}
+    payloads = {fold_name(later): fold_bytes(later), fold_name(first): fold_bytes(first)}
     states = prep.build_states({f"tier4_folds:{role}": payloads},
-                               chooser_fold_policies={role: _policy(role, first)})
+                               chooser_fold_policies={role: chooser_policy(role, first)})
     out = tmp_path / "out"
-    args = _inputs(role, first)
+    args = release_inputs(role, first)
     if bad_later_month:
         with pytest.raises(prep.PrepareRefused) as error:
             prep.write_release(out, *args, states, pinned_panel=pinned)
@@ -559,7 +494,7 @@ def test_every_month_is_preflighted_and_published_before_catalog(
     prep.write_release(out, *args, states, pinned_panel=pinned)
     body = layout.read_manifest(out)
     row = next(row for row in body["members"] if row["member_id"] == f"tier4_folds:{role}")
-    assert [obj["name"] for obj in row["objects"]] == [_name(first), _name(later)]
+    assert [obj["name"] for obj in row["objects"]] == [fold_name(first), fold_name(later)]
     first_obj = _assert_published_descriptor(out, role, first, count=2)[1]
     later_obj = _assert_published_descriptor(out, role, later, count=1)[1]
     assert first_obj["content_hash"] != later_obj["content_hash"]
@@ -574,27 +509,27 @@ def test_every_month_is_preflighted_and_published_before_catalog(
 
 def test_size_and_both_chooser_roles_coexist_without_relabeling(tmp_path):
     caches = {role: _cache(role) for role in OUTPUTS}
-    parts = [_inputs(role, cache) for role, cache in caches.items()]
+    parts = [release_inputs(role, cache) for role, cache in caches.items()]
     size = _cache("size")
-    parts.append(_inputs("size", size, output="forecast_abs_move"))
+    parts.append(release_inputs("size", size, output="forecast_abs_move"))
     release = dataclasses.replace(parts[0][0], bindings=tuple(p[0].bindings[0] for p in parts))
     inventory = dataclasses.replace(parts[0][1], **{
         field: tuple(getattr(p[1], field)[0] for p in parts)
         for field in ("artifacts", "bindings", "requirements")})
     payloads = {key: value for p in parts for key, value in p[2].items()}
     states = prep.build_states(
-        {"tier4_folds:size": {_name(size): _bytes(size)},
-         **{f"tier4_folds:{role}": {_name(cache): _bytes(cache)} for role, cache in caches.items()}},
+        {"tier4_folds:size": {fold_name(size): fold_bytes(size)},
+         **{f"tier4_folds:{role}": {fold_name(cache): fold_bytes(cache)} for role, cache in caches.items()}},
         size_fold_policy=SizeFoldPolicy(model_id=size["model_id"], feature_order=("x", "y"),
                                        panel_sha256="a" * 64, interval_floor=0.0),
-        chooser_fold_policies={role: _policy(role, cache) for role, cache in caches.items()})
+        chooser_fold_policies={role: chooser_policy(role, cache) for role, cache in caches.items()})
     prep.write_release(tmp_path, release, inventory, payloads, states)
     descriptors = [_assert_published_descriptor(tmp_path, role, caches[role])[1]["serving_fold"]
                    for role in OUTPUTS]
     assert [d["policy"]["role"] for d in descriptors] == ["implied_t1", "runup_move"]
     assert [d["producer_output"] for d in descriptors] == ["pred_im_t1_d14", "pred_runup_abs_move_d14"]
     assert len({d["estimator"]["content_hash"] for d in descriptors}) == 2
-    size_descriptor = _object(tmp_path, "size")[1]["serving_fold"]
+    size_descriptor = catalog_object(tmp_path, "size")[1]["serving_fold"]
     assert size_descriptor["schema_version"] == "serving_fold_descriptor.v1.0"
     assert size_descriptor["role"] == "size"
     assert size_descriptor["output_name"] == "forecast_abs_move"
@@ -615,10 +550,10 @@ def test_semantically_identical_reordered_retries_keep_original_manifest_and_cat
         panel_hash = hashlib.sha256(data).hexdigest()
     cache = _cache(role, panel_hash)
     release, inventory, payloads = _retry_inputs(role, cache)
-    states, out = _states(role, cache), tmp_path / "out"
+    states, out = fold_states(role, cache), tmp_path / "out"
     prep.write_release(out, release, inventory, payloads, states, pinned_panel=pinned)
     catalog, _obj = _assert_published_descriptor(out, role, cache)
-    manifest = _published_manifest(out / "deployment")
+    manifest = published_manifest(out / "deployment")
     bindings = release.bindings
     if reorder in ("members", "both"):
         bindings = tuple(dataclasses.replace(binding, members=tuple(reversed(binding.members)))
@@ -628,7 +563,7 @@ def test_semantically_identical_reordered_retries_keep_original_manifest_and_cat
     reordered = dataclasses.replace(release, bindings=bindings)
     assert reordered != release
     prep.write_release(out, reordered, inventory, payloads, states, pinned_panel=pinned)
-    assert _published_manifest(out / "deployment") == manifest
+    assert published_manifest(out / "deployment") == manifest
     assert _assert_published_descriptor(out, role, cache)[0] == catalog
     assert deployment.current_pointer(out / "deployment") is None
 
@@ -669,11 +604,11 @@ def test_public_semantic_release_hash_accepts_incomplete_release_without_io(monk
 @pytest.mark.parametrize("role", OUTPUTS)
 def test_descriptor_parent_calls_public_release_identity(tmp_path, role, monkeypatch):
     cache = _cache(role)
-    prep.write_release(tmp_path, *_retry_inputs(role, cache), _states(role, cache))
+    prep.write_release(tmp_path, *_retry_inputs(role, cache), fold_states(role, cache))
     _body, obj = _assert_published_descriptor(tmp_path, role, cache)
-    manifest = _published_manifest(tmp_path / "deployment")
-    policy = _policy(role, cache)
-    validated = folds.preflight_chooser_fold(_bytes(cache), _name(cache), policy, manifest.release)
+    manifest = published_manifest(tmp_path / "deployment")
+    policy = chooser_policy(role, cache)
+    validated = folds.preflight_chooser_fold(fold_bytes(cache), fold_name(cache), policy, manifest.release)
     calls = []
 
     def public_hash(release):
@@ -691,9 +626,9 @@ def test_descriptor_parent_calls_public_release_identity(tmp_path, role, monkeyp
 def test_parent_storage_paths_do_not_change_semantics_or_manifest_hash_ownership(tmp_path, role, legacy_hash):
     cache = _cache(role)
     inputs = _retry_inputs(role, cache)
-    prep.write_release(tmp_path, *inputs, _states(role, cache))
+    prep.write_release(tmp_path, *inputs, fold_states(role, cache))
     _body, obj = _assert_published_descriptor(tmp_path, role, cache)
-    manifest = _published_manifest(tmp_path / "deployment")
+    manifest = published_manifest(tmp_path / "deployment")
     if legacy_hash:
         historical_hashes = {
             "implied_t1": "sha256:f26c05ef8b88b7503efdc86001c94bdb746a813e6b167accbfa046e285038494",
@@ -710,8 +645,8 @@ def test_parent_storage_paths_do_not_change_semantics_or_manifest_hash_ownership
         binding, members=tuple(dataclasses.replace(member, path=f"relocated/{member.name}")
                                for member in binding.members)) for binding in manifest.release.bindings))
     assert relocated != manifest.release
-    policy = _policy(role, cache)
-    validated = folds.preflight_chooser_fold(_bytes(cache), _name(cache), policy, relocated)
+    policy = chooser_policy(role, cache)
+    validated = folds.preflight_chooser_fold(fold_bytes(cache), fold_name(cache), policy, relocated)
     descriptor = folds.descriptor_from_preflight(validated, policy, manifest)
     expected = {**obj["serving_fold"], "parent_release_hash": manifest.release_hash}
     assert to_document(descriptor) == expected
@@ -723,10 +658,10 @@ def test_parent_storage_paths_do_not_change_semantics_or_manifest_hash_ownership
 @pytest.mark.parametrize("identity", ["release_id", "deployment_id", "model_id", "adapter", "clock",
                                      "feature_order", "output_order", "member_hash", "member_name"])
 def test_retained_parent_guard_rejects_actual_identity_changes(tmp_path, role, identity, binding_index):
-    cache, policy = _cache(role), _policy(role, _cache(role))
-    prep.write_release(tmp_path, *_retry_inputs(role, cache), _states(role, cache))
-    manifest = _published_manifest(tmp_path / "deployment")
-    validated = folds.preflight_chooser_fold(_bytes(cache), _name(cache), policy, manifest.release)
+    cache, policy = _cache(role), chooser_policy(role, _cache(role))
+    prep.write_release(tmp_path, *_retry_inputs(role, cache), fold_states(role, cache))
+    manifest = published_manifest(tmp_path / "deployment")
+    validated = folds.preflight_chooser_fold(fold_bytes(cache), fold_name(cache), policy, manifest.release)
     release, selected = manifest.release, manifest.release.bindings[binding_index]
     if identity in ("release_id", "deployment_id"):
         release = dataclasses.replace(release, **{identity: "different"})
@@ -750,7 +685,7 @@ def test_retained_parent_guard_rejects_actual_identity_changes(tmp_path, role, i
     assert type(error.value) is ValueError
     assert str(error.value) == "staged release disagrees with validated fold"
     assert error.value.__cause__ is None
-    assert _published_manifest(tmp_path / "deployment") == manifest
+    assert published_manifest(tmp_path / "deployment") == manifest
 
 
 @pytest.mark.parametrize("role", OUTPUTS)
@@ -758,8 +693,8 @@ def test_retained_parent_guard_rejects_actual_identity_changes(tmp_path, role, i
 def test_empty_and_thin_pools_keep_explicit_counts(role, count):
     cache = _cache(role)
     cache.update(pool_pred=[1.0] * count, pool_res=[-0.5] * count)
-    data, policy, release = _bytes(cache), _policy(role, cache), _inputs(role, cache)[0]
-    validated = folds.preflight_chooser_fold(data, _name(cache), policy, release)
+    data, policy, release = fold_bytes(cache), chooser_policy(role, cache), release_inputs(role, cache)[0]
+    validated = folds.preflight_chooser_fold(data, fold_name(cache), policy, release)
     expected = {"fold_start": "2026-02-01", "decision_clock_id": "entry-close",
                 "digest": hashlib.sha256(data).hexdigest(), "pool_count": count,
                 "policy": policy, "release": release}
@@ -775,8 +710,8 @@ def test_empty_and_thin_pools_keep_explicit_counts(role, count):
                                     "month", "name", "estimator", "absent", "shape", "length", "nan", "decode"])
 def test_bad_inputs_refuse_before_output_creation(tmp_path, role, defect):
     cache = _cache(role)
-    release, inv, payloads = _inputs(role, cache)
-    policy, name = _policy(role, cache), _name(cache)
+    release, inv, payloads = release_inputs(role, cache)
+    policy, name = chooser_policy(role, cache), fold_name(cache)
     if defect in ("role", "model", "features", "output", "clock-release", "duplicate"):
         binding = release.bindings[0]
         changes = {"role": {"role": "size"}, "model": {"model_id": "wrong"},
@@ -798,7 +733,7 @@ def test_bad_inputs_refuse_before_output_creation(tmp_path, role, defect):
     elif defect != "decode":
         cache["pool_res"] = {"shape": [[1.0, 2.0]], "length": [1.0],
                              "nan": [float("nan"), 1.0]}[defect]
-    data = b"not a joblib artifact" if defect == "decode" else _bytes(cache)
+    data = b"not a joblib artifact" if defect == "decode" else fold_bytes(cache)
     states = prep.build_states({f"tier4_folds:{role}": {name: data}},
                                chooser_fold_policies={role: policy})
     out = tmp_path / "out"
@@ -839,20 +774,20 @@ def test_bad_inputs_refuse_before_output_creation(tmp_path, role, defect):
 @pytest.mark.parametrize("role", OUTPUTS)
 def test_bound_precedes_decode_and_each_authoring_decodes_once(tmp_path, role, monkeypatch):
     cache = _cache(role)
-    data, name, policy = _bytes(cache), _name(cache), _policy(role, cache)
+    data, name, policy = fold_bytes(cache), fold_name(cache), chooser_policy(role, cache)
     calls, real = [], joblib.load
     monkeypatch.setattr(joblib, "load", lambda *a, **k: calls.append(1) or real(*a, **k))
     monkeypatch.setattr(folds, "MAX_FOLD_BYTES", len(data) - 1)
     with pytest.raises(ValueError) as error:
-        folds.preflight_chooser_fold(data, name, policy, _inputs(role, cache)[0])
+        folds.preflight_chooser_fold(data, name, policy, release_inputs(role, cache)[0])
     assert type(error.value) is ValueError
     assert str(error.value) == "serving fold exceeds byte limit"
     assert error.value.__cause__ is None
     assert calls == []
     monkeypatch.setattr(folds, "MAX_FOLD_BYTES", len(data))
-    prep.write_release(tmp_path, *_inputs(role, cache), _states(role, cache))
+    prep.write_release(tmp_path, *release_inputs(role, cache), fold_states(role, cache))
     assert calls == [1]
-    prep.write_release(tmp_path, *_inputs(role, cache), _states(role, cache))
+    prep.write_release(tmp_path, *release_inputs(role, cache), fold_states(role, cache))
     assert calls == [1, 1]
 
 
@@ -871,9 +806,9 @@ def test_uncompressed_protocols_preserve_complete_published_fold_identity(
         panel_hash = hashlib.sha256(panel).hexdigest()
     cache = _cache(role, panel_hash)
     cache.update(pool_pred=np.array(cache["pool_pred"]), pool_res=np.array(cache["pool_res"]))
-    raw = _bytes(cache, compress=0, protocol=protocol)
-    inputs = _inputs(role, cache, output="forecast_abs_move" if role == "size" else None)
-    states = _states(role, cache, data=raw)
+    raw = fold_bytes(cache, compress=0, protocol=protocol)
+    inputs = release_inputs(role, cache, output="forecast_abs_move" if role == "size" else None)
+    states = fold_states(role, cache, data=raw)
     loads, real_load = [], joblib.load
 
     def load(stream, *args, **kwargs):
@@ -911,9 +846,9 @@ def test_compressed_champion_remains_supported_by_real_preparation_and_loader(
     from engine.data.features import tier4
 
     cache = _cache(role)
-    _release, inventory, _payloads = _inputs(
+    _release, inventory, _payloads = release_inputs(
         role, cache, output="forecast_abs_move" if role == "size" else None)
-    champion = _bytes(SimpleNamespace(features=tuple(cache["features"]), model=ConstantChampion()),
+    champion = fold_bytes(SimpleNamespace(features=tuple(cache["features"]), model=ConstantChampion()),
                       compress=(codec, 3))
     champion_hash = "sha256:" + hashlib.sha256(champion).hexdigest()
     source = tmp_path / "champion.joblib"
@@ -931,9 +866,9 @@ def test_compressed_champion_remains_supported_by_real_preparation_and_loader(
     monkeypatch.setattr(tier4, "serving_model", never)
     release, payloads = prep.model_release(inventory)
     out = tmp_path / "out"
-    prep.write_release(out, release, inventory, payloads, _states(role, cache))
+    prep.write_release(out, release, inventory, payloads, fold_states(role, cache))
     _assert_published_descriptor(out, role, cache)
-    staged = _published_manifest(out / "deployment")
+    staged = published_manifest(out / "deployment")
     binding = staged.release.bindings[0]
     assert binding.adapter == "joblib-estimator.v1"
     assert binding.members[0].content_hash == champion_hash
@@ -954,14 +889,14 @@ def test_pinned_authoring_requires_full_panel_hash_and_retained_destination(tmp_
     panel_hash = hashlib.sha256(data).hexdigest()
     cache = _cache(role, panel_hash)
     out = tmp_path / "good"
-    prep.write_release(out, *_inputs(role, cache), _states(role, cache), pinned_panel=pinned)
-    body, obj = _object(out, role)
+    prep.write_release(out, *release_inputs(role, cache), fold_states(role, cache), pinned_panel=pinned)
+    body, obj = catalog_object(out, role)
     assert body["sources"]["panel_copy_sha256"] == panel_hash
     assert obj["serving_fold"]["policy"]["panel_sha256"] == panel_hash
     bad = _cache(role, panel_hash[:12] + "0" * 52)
     refused = tmp_path / "bad-panel"
     with pytest.raises(prep.PrepareRefused) as error:
-        prep.write_release(refused, *_inputs(role, bad), _states(role, bad), pinned_panel=pinned)
+        prep.write_release(refused, *release_inputs(role, bad), fold_states(role, bad), pinned_panel=pinned)
     assert type(error.value) is prep.PrepareRefused
     assert str(error.value) == "chooser fold policy does not match the pinned panel"
     assert error.value.__cause__ is None
@@ -976,7 +911,7 @@ def test_pinned_authoring_requires_full_panel_hash_and_retained_destination(tmp_
     monkeypatch.setattr(prep, "write_object", wrong_destination)
     refused = tmp_path / "bad-destination"
     with pytest.raises(prep.PrepareRefused) as error:
-        prep.write_release(refused, *_inputs(role, cache), _states(role, cache), pinned_panel=pinned)
+        prep.write_release(refused, *release_inputs(role, cache), fold_states(role, cache), pinned_panel=pinned)
     assert type(error.value) is prep.PrepareRefused
     assert str(error.value) == "chooser fold object bytes differ from preflight"
     assert error.value.__cause__ is None
@@ -1013,7 +948,7 @@ def test_real_cli_obtains_role_policy_without_fitting_or_data_reads(
     cache["features"] = list(features)
     if failure == "cache":
         cache["pool_res"] = [float("nan"), 0.0]
-    release, inv, payloads = _inputs(role, cache)
+    release, inv, payloads = release_inputs(role, cache)
     monkeypatch.setattr(inventory, "current_release_inventory", lambda: (inv, ()))
     monkeypatch.setattr(prep, "model_release", lambda *a, **k: (release, payloads))
     monkeypatch.setattr(prep, "modules_available", lambda *a: (False, "unused"))
@@ -1040,13 +975,13 @@ def test_real_cli_obtains_role_policy_without_fitting_or_data_reads(
     monkeypatch.setattr(tier4.store, "file_sha256", never)
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    (cache_dir / _name(cache)).write_bytes(_bytes(cache, compress=0))
+    (cache_dir / fold_name(cache)).write_bytes(fold_bytes(cache, compress=0))
     if failure == "symlink":
         target = tmp_path / "outside-cache"
-        (cache_dir / _name(cache)).rename(target)
-        (cache_dir / _name(cache)).symlink_to(target)
+        (cache_dir / fold_name(cache)).rename(target)
+        (cache_dir / fold_name(cache)).symlink_to(target)
     if failure == "oversize":
-        monkeypatch.setattr(prep, "MAX_FOLD_BYTES", len(_bytes(cache)) - 1)
+        monkeypatch.setattr(prep, "MAX_FOLD_BYTES", len(fold_bytes(cache)) - 1)
         monkeypatch.setattr(joblib, "load", never)
     out = tmp_path / "out"
     argv = ["--release-id", "r1", "--out", str(out), "--tier4-dir", str(cache_dir),
@@ -1094,7 +1029,7 @@ def test_real_cli_obtains_role_policy_without_fitting_or_data_reads(
 def test_pinned_plan_only_refuses_chooser_panel_mismatch_before_plan(tmp_path, role, monkeypatch, capsys):
     pinned, _store, _snapshot, _records, _data = build_pinned(tmp_path, ALL_ONE)
     cache = _cache(role)
-    monkeypatch.setattr(prep, "_real_inputs", lambda *a: (*_inputs(role, cache), _states(role, cache)))
+    monkeypatch.setattr(prep, "_real_inputs", lambda *a: (*release_inputs(role, cache), fold_states(role, cache)))
     out = tmp_path / "out"
     assert prep.main(["--release-id", "r1", "--out", str(out), "--plan-only",
                       "--panel-catalog", str(pinned.catalog_path),
@@ -1106,7 +1041,7 @@ def test_pinned_plan_only_refuses_chooser_panel_mismatch_before_plan(tmp_path, r
 
 @pytest.mark.parametrize("role", ["size", "unsupported", "runup_move"])
 def test_explicit_policy_mapping_cannot_relabel_role(role):
-    policy = _policy("implied_t1", _cache("implied_t1"))
+    policy = chooser_policy("implied_t1", _cache("implied_t1"))
     with pytest.raises(prep.PrepareRefused) as error:
         prep.build_states({}, chooser_fold_policies={role: policy})
     assert type(error.value) is prep.PrepareRefused
@@ -1123,12 +1058,12 @@ def test_explicit_policy_mapping_cannot_relabel_role(role):
 @pytest.mark.parametrize("kind", ["none", "mapping", "duck-policy", "size-policy"])
 def test_policy_mapping_requires_exact_chooser_policy_type(role, kind):
     cache = _cache(role)
-    fields = dataclasses.asdict(_policy(role, cache))
+    fields = dataclasses.asdict(chooser_policy(role, cache))
     invalid = {"none": None, "mapping": fields, "duck-policy": SimpleNamespace(**fields),
                "size-policy": SizeFoldPolicy(model_id=cache["model_id"], feature_order=("x", "y"),
                                              panel_sha256="a" * 64, interval_floor=0.0)}[kind]
     with pytest.raises(prep.PrepareRefused) as error:
-        prep.build_states({f"tier4_folds:{role}": {_name(cache): _bytes(cache)}},
+        prep.build_states({f"tier4_folds:{role}": {fold_name(cache): fold_bytes(cache)}},
                           chooser_fold_policies={role: invalid})
     assert type(error.value) is prep.PrepareRefused
     assert str(error.value) == "invalid chooser fold policy type"
@@ -1139,7 +1074,7 @@ def test_policy_mapping_requires_exact_chooser_policy_type(role, kind):
 @pytest.mark.parametrize("defect", ["policy-type", "member", "duplicate", "bytearray", "memoryview"])
 def test_direct_state_guards_refuse_before_any_publication(tmp_path, role, defect):
     cache = _cache(role)
-    states = _states(role, cache)
+    states = fold_states(role, cache)
     build = next(row for row in states if row.spec.member_id == f"tier4_folds:{role}")
     if defect in ("policy-type", "member"):
         # Empty state isolates the boundary guard from deeper cache/binding validation.
@@ -1153,10 +1088,10 @@ def test_direct_state_guards_refuse_before_any_publication(tmp_path, role, defec
         states.append(dataclasses.replace(build, payloads=dict(build.payloads)))
     else:
         convert = bytearray if defect == "bytearray" else memoryview
-        build.payloads = {_name(cache): convert(_bytes(cache))}
+        build.payloads = {fold_name(cache): convert(fold_bytes(cache))}
     out = tmp_path / "out"
     with pytest.raises(prep.PrepareRefused) as error:
-        prep.write_release(out, *_inputs(role, cache), states)
+        prep.write_release(out, *release_inputs(role, cache), states)
     assert type(error.value) is prep.PrepareRefused
     expected = {"policy-type": "invalid chooser fold policy type",
                 "member": "chooser fold policy role disagrees with member"}
@@ -1194,7 +1129,7 @@ def test_ordinary_destination_substitution_refuses_before_catalog(tmp_path, role
 
     monkeypatch.setattr(prep, "write_object", wrong_destination)
     with pytest.raises(prep.PrepareRefused) as error:
-        prep.write_release(tmp_path, *_inputs(role, cache), _states(role, cache))
+        prep.write_release(tmp_path, *release_inputs(role, cache), fold_states(role, cache))
     assert type(error.value) is prep.PrepareRefused
     assert str(error.value) == "chooser fold object bytes differ from preflight"
     assert not (tmp_path / "phase5_release.json").exists()
@@ -1215,15 +1150,15 @@ def test_corrupt_immutable_address_stays_refused_and_fresh_preparation_succeeds(
         pinned, _store, _snapshot, _records, panel = build_pinned(source, ALL_ONE)
         panel_hash = hashlib.sha256(panel).hexdigest()
     cache = _cache(role, panel_hash)
-    raw = _bytes(cache)
+    raw = fold_bytes(cache)
     digest = hashlib.sha256(raw).hexdigest()
     if role == "size":
-        inputs = _inputs(role, cache, output="forecast_abs_move")
+        inputs = release_inputs(role, cache, output="forecast_abs_move")
         policy = SizeFoldPolicy(model_id=cache["model_id"], feature_order=cache["features"],
                                 panel_sha256=panel_hash, interval_floor=0.0)
-        states = prep.build_states({"tier4_folds:size": {_name(cache): raw}}, size_fold_policy=policy)
+        states = prep.build_states({"tier4_folds:size": {fold_name(cache): raw}}, size_fold_policy=policy)
     else:
-        inputs, states = _inputs(role, cache), _states(role, cache)
+        inputs, states = release_inputs(role, cache), fold_states(role, cache)
     corrupt, fresh = tmp_path / "corrupt-root", tmp_path / "fresh-root"
     address = corrupt / "deployment" / "objects" / digest
     address.parent.mkdir(parents=True)
@@ -1256,14 +1191,14 @@ def test_corrupt_immutable_address_stays_refused_and_fresh_preparation_succeeds(
         assert not (corrupt / "deployment" / "releases" / "r1" / "phase5_release.json").exists()
         assert deployment.current_pointer(corrupt / "deployment") is None
     prep.write_release(fresh, *inputs, states, pinned_panel=pinned)
-    body, obj = _object(fresh, role)
+    body, obj = catalog_object(fresh, role)
     assert (fresh / "deployment" / "objects" / digest).read_bytes() == raw
     assert obj["content_hash"] == "sha256:" + digest
     assert obj["path"] == "objects/" + digest and obj["bytes"] == len(raw)
     if role in OUTPUTS:
         _assert_published_descriptor(fresh, role, cache)
     else:
-        parent = _published_manifest(fresh / "deployment")
+        parent = published_manifest(fresh / "deployment")
         assert obj["serving_fold"] == {
             "schema_version": "serving_fold_descriptor.v1.0", "role": "size",
             "parent_release_id": "r1", "parent_release_hash": parent.release_hash,
@@ -1288,7 +1223,7 @@ def test_corrupt_immutable_address_stays_refused_and_fresh_preparation_succeeds(
 def test_ordinary_plan_only_refuses_malformed_cache_before_plan(tmp_path, role, monkeypatch, capsys):
     cache = _cache(role)
     cache["pool_res"] = [float("nan"), 0.0]
-    monkeypatch.setattr(prep, "_real_inputs", lambda *a: (*_inputs(role, cache), _states(role, cache)))
+    monkeypatch.setattr(prep, "_real_inputs", lambda *a: (*release_inputs(role, cache), fold_states(role, cache)))
     out = tmp_path / "out"
     assert prep.main(["--release-id", "r1", "--out", str(out), "--plan-only"]) == 2
     assert capsys.readouterr().err == (
@@ -1299,7 +1234,7 @@ def test_ordinary_plan_only_refuses_malformed_cache_before_plan(tmp_path, role, 
 @pytest.mark.parametrize("role", OUTPUTS)
 def test_ordinary_authoring_snapshots_caller_payloads_before_staging(tmp_path, role, monkeypatch):
     cache = _cache(role)
-    states, real = _states(role, cache), deployment.stage_release
+    states, real = fold_states(role, cache), deployment.stage_release
     original = next(build for build in states if build.spec.member_id == f"tier4_folds:{role}")
 
     def mutate_caller(*args, **kwargs):
@@ -1307,7 +1242,7 @@ def test_ordinary_authoring_snapshots_caller_payloads_before_staging(tmp_path, r
         return real(*args, **kwargs)
 
     monkeypatch.setattr(deployment, "stage_release", mutate_caller)
-    prep.write_release(tmp_path, *_inputs(role, cache), states)
+    prep.write_release(tmp_path, *release_inputs(role, cache), states)
     _assert_published_descriptor(tmp_path, role, cache)
 
 
@@ -1349,7 +1284,7 @@ def _watch_fold_reads(monkeypatch, *, chunk_size=None, when=None):
 def test_opaque_state_retry_verifies_address_and_preserves_existing_catalog(tmp_path, replacement):
     raw, name = b"synthetic opaque state", "opaque.json"
     cache = _cache("implied_t1")
-    inputs = _inputs("implied_t1", cache)
+    inputs = release_inputs("implied_t1", cache)
     states = prep.build_states({"admissible_table:dyn_sv": {name: raw}})
     out, fresh = tmp_path / "retained", tmp_path / "fresh"
     prep.write_release(out, *inputs, states)
@@ -1442,14 +1377,14 @@ def test_retained_oversize_fold_refuses_at_exact_payload_bound_before_any_read(
         pinned, _store, _snapshot, _records, panel = build_pinned(source, ALL_ONE)
         panel_hash = hashlib.sha256(panel).hexdigest()
     cache = _cache(role, panel_hash)
-    raw = _bytes(cache)
+    raw = fold_bytes(cache)
     if role == "size":
-        inputs = _inputs(role, cache, output="forecast_abs_move")
+        inputs = release_inputs(role, cache, output="forecast_abs_move")
         policy = SizeFoldPolicy(model_id=cache["model_id"], feature_order=cache["features"],
                                 panel_sha256=panel_hash, interval_floor=0.0)
-        states = prep.build_states({"tier4_folds:size": {_name(cache): raw}}, size_fold_policy=policy)
+        states = prep.build_states({"tier4_folds:size": {fold_name(cache): raw}}, size_fold_policy=policy)
     else:
-        inputs, states = _inputs(role, cache), _states(role, cache)
+        inputs, states = release_inputs(role, cache), fold_states(role, cache)
     out = tmp_path / "out"
     dest = out / "deployment" / "objects" / hashlib.sha256(raw).hexdigest()
     dest.parent.mkdir(parents=True)
@@ -1475,17 +1410,17 @@ def test_retained_oversize_fold_refuses_at_exact_payload_bound_before_any_read(
 @pytest.mark.parametrize("defect", ["pool", "duplicate", "nonbytes"])
 def test_unpinned_size_preflight_refuses_before_any_output(tmp_path, monkeypatch, capsys, entry, defect):
     cache = _cache("size")
-    inputs = _inputs("size", cache, output="forecast_abs_move")
+    inputs = release_inputs("size", cache, output="forecast_abs_move")
     if defect == "pool":
         cache["pool_res"] = [float("nan"), 0.0]
     policy = SizeFoldPolicy(model_id=cache["model_id"], feature_order=cache["features"],
                             panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)
-    states = prep.build_states({"tier4_folds:size": {_name(cache): _bytes(cache)}}, size_fold_policy=policy)
+    states = prep.build_states({"tier4_folds:size": {fold_name(cache): fold_bytes(cache)}}, size_fold_policy=policy)
     build = next(build for build in states if build.spec.member_id == "tier4_folds:size")
     if defect == "duplicate":
         states.append(build)
     elif defect == "nonbytes":
-        build.payloads[_name(cache)] = bytearray(_bytes(cache))
+        build.payloads[fold_name(cache)] = bytearray(fold_bytes(cache))
     out = tmp_path / "out"
     diagnostic = ("size fold refused: invalid serving fold held-out pool" if defect == "pool"
                   else "duplicate or non-byte size fold object")
@@ -1517,12 +1452,12 @@ def test_fold_collector_never_opens_final_symlink_target(tmp_path, monkeypatch, 
     source.mkdir()
     target = tmp_path / "outside-cache"
     if target_kind == "regular":
-        target.write_bytes(_bytes(cache))
+        target.write_bytes(fold_bytes(cache))
     elif target_kind == "directory":
         target.mkdir()
     elif target_kind == "fifo":
         os.mkfifo(target)
-    (source / _name(cache)).symlink_to(target)
+    (source / fold_name(cache)).symlink_to(target)
     reads, handles = _watch_fold_reads(monkeypatch)
     real_open, seen = os.open, []
 
@@ -1541,14 +1476,14 @@ def test_fold_collector_never_opens_final_symlink_target(tmp_path, monkeypatch, 
     assert reads == handles == []
     assert len(seen) == 1 and seen[0] & os.O_NOFOLLOW
     if target_kind == "regular":
-        assert target.read_bytes() == _bytes(cache)
+        assert target.read_bytes() == fold_bytes(cache)
 
 
 @pytest.mark.parametrize("role", ["size", *OUTPUTS, "iv_crush"])
 @pytest.mark.parametrize("slack,chunk_size", [(0, None), (8, 17)])
 def test_fold_collector_preserves_bounded_regular_file_bytes(tmp_path, monkeypatch, role, slack, chunk_size):
     cache = _cache(role)
-    raw, name = _bytes(cache), _name(cache)
+    raw, name = fold_bytes(cache), fold_name(cache)
     target = tmp_path / name
     target.write_bytes(raw)
     limit = len(raw) + slack
@@ -1570,9 +1505,9 @@ def test_fold_collector_preserves_bounded_regular_file_bytes(tmp_path, monkeypat
 @pytest.mark.parametrize("growth", [False, True])
 def test_fold_collector_refuses_oversize_before_decode_and_bounds_growth(tmp_path, monkeypatch, role, growth):
     cache = _cache(role)
-    path = tmp_path / _name(cache)
-    path.write_bytes(_bytes(cache))
-    limit = len(_bytes(cache)) if growth else folds.MAX_FOLD_BYTES
+    path = tmp_path / fold_name(cache)
+    path.write_bytes(fold_bytes(cache))
+    limit = len(fold_bytes(cache)) if growth else folds.MAX_FOLD_BYTES
     assert folds.MAX_FOLD_BYTES == 32 * 1024 * 1024
     monkeypatch.setattr(prep, "MAX_FOLD_BYTES", limit)
     if growth:
@@ -1603,10 +1538,10 @@ def test_fold_collector_refuses_oversize_before_decode_and_bounds_growth(tmp_pat
 @pytest.mark.parametrize("symlink", [False, True])
 def test_fold_collector_refuses_fifo_without_blocking_or_reading(tmp_path, monkeypatch, role, symlink):
     cache = _cache(role)
-    fifo = tmp_path / ("fifo" if symlink else _name(cache))
+    fifo = tmp_path / ("fifo" if symlink else fold_name(cache))
     os.mkfifo(fifo)
     if symlink:
-        (tmp_path / _name(cache)).symlink_to(fifo)
+        (tmp_path / fold_name(cache)).symlink_to(fifo)
     reads, handles = _watch_fold_reads(monkeypatch)
     real_open, flags_seen = os.open, []
 
@@ -1633,7 +1568,7 @@ def test_fold_collector_refuses_fifo_without_blocking_or_reading(tmp_path, monke
 @pytest.mark.parametrize("role", OUTPUTS)
 def test_fold_collector_refuses_unreadable_match_and_filters_before_open(tmp_path, monkeypatch, role):
     cache = _cache(role)
-    path = tmp_path / _name(cache)
+    path = tmp_path / fold_name(cache)
     path.symlink_to(tmp_path / "missing-target")
     with pytest.raises(prep.PrepareRefused) as error:
         prep.tier4_fold_payloads(tmp_path, {role: cache["model_id"]}, "a" * 64, "202602")
@@ -1665,17 +1600,17 @@ def test_destination_reverification_is_bounded_on_every_writer_path(
         pinned, _store, _snapshot, _records, panel = build_pinned(source, ALL_ONE)
         panel_hash = hashlib.sha256(panel).hexdigest()
     cache = _cache(role, panel_hash)
-    raw = _bytes(cache)
+    raw = fold_bytes(cache)
     limit = folds.MAX_FOLD_BYTES if replacement == "oversize" else len(raw)
     assert prep.MAX_FOLD_BYTES == folds.MAX_FOLD_BYTES == 32 * 1024 * 1024
     monkeypatch.setattr(prep, "MAX_FOLD_BYTES", limit)
     if role == "size":
-        inputs = _inputs(role, cache, output="forecast_abs_move")
+        inputs = release_inputs(role, cache, output="forecast_abs_move")
         policy = SizeFoldPolicy(model_id=cache["model_id"], feature_order=cache["features"],
                                 panel_sha256=panel_hash, interval_floor=0.0)
-        states = prep.build_states({"tier4_folds:size": {_name(cache): raw}}, size_fold_policy=policy)
+        states = prep.build_states({"tier4_folds:size": {fold_name(cache): raw}}, size_fold_policy=policy)
     else:
-        inputs, states = _inputs(role, cache), _states(role, cache)
+        inputs, states = release_inputs(role, cache), fold_states(role, cache)
     out, destinations = tmp_path / "out", []
     real_write, real_open, real_path_open, real_fstat = prep.write_object, os.open, Path.open, os.fstat
     reads, handles = _watch_fold_reads(monkeypatch, chunk_size=17 if replacement == "short-reads" else None,
@@ -1730,7 +1665,7 @@ def test_destination_reverification_is_bounded_on_every_writer_path(
         prep.write_release(out, *inputs, states, pinned_panel=pinned)
         if role in OUTPUTS:
             _assert_published_descriptor(out, role, cache)
-        body, obj = _object(out, role)
+        body, obj = catalog_object(out, role)
         assert obj["content_hash"] == "sha256:" + hashlib.sha256(raw).hexdigest()
         assert obj["bytes"] == len(raw)
         assert obj["serving_fold"]["pool_count"] == 2

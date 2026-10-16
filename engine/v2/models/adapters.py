@@ -131,6 +131,18 @@ class JoblibEstimatorAdapter:
         return [tuple(float(item) for item in value) for value in values]
 
 
+@dataclass(frozen=True, kw_only=True)
+class ServingFoldMetadata:
+    """Detached immutable header/pools, with no access to the cached estimator."""
+
+    model_id: str
+    fold_start: str
+    panel_sha256: str
+    feature_order: tuple[str, ...]
+    pool_pred: tuple[float, ...]
+    pool_res: tuple[float, ...]
+
+
 @dataclass(frozen=True)
 class _ServingFold:
     estimator: ReadOnlyArtifact
@@ -138,6 +150,26 @@ class _ServingFold:
 
     def predict(self, rows):
         return self.estimator.predict(rows)
+
+    def metadata(self) -> ServingFoldMetadata:
+        import numpy as np
+
+        header = self.header
+        if (not callable(getattr(self.estimator, "predict", None))
+                or any(not isinstance(header.get(key), str)
+                       for key in ("model_id", "fold_start", "tier3_snapshot"))
+                or not isinstance(header.get("features"), (tuple, list))
+                or any(not isinstance(key, str) for key in header["features"])):
+            raise AdapterError("invalid serving fold header")
+        pools = [np.asarray(header[key]) for key in ("pool_pred", "pool_res")]
+        if any(pool.ndim != 1 or pool.dtype.kind not in "fiu"
+               or not np.isfinite(np.asarray(pool, dtype=float)).all() for pool in pools):
+            raise AdapterError("invalid serving fold pool")
+        pred, res = (tuple(float(value) for value in pool) for pool in pools)
+        return ServingFoldMetadata(model_id=str(header["model_id"]), fold_start=str(header["fold_start"]),
+                                   panel_sha256=str(header["tier3_snapshot"]),
+                                   feature_order=tuple(str(key) for key in header["features"]),
+                                   pool_pred=pred, pool_res=res)
 
 
 class Tier4ServingFoldAdapter:
