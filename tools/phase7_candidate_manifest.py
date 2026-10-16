@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -102,21 +103,29 @@ def _ref(field: str, row: dict, *keys: str, agree: tuple[str, ...] = ()) -> dict
 
 
 def _write(path: Path, doc: dict) -> None:
-    path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    """Write via a temp file in the same directory, then ``os.replace``."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                              check=False, timeout=30)
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise SpecError(f"commit: git {args[0]} failed ({type(exc).__name__})") from exc
 
 
 def check_commit(spec: dict, root: Path) -> str:
     commit = spec.get("commit")
     if not isinstance(commit, str) or not commit:
         raise SpecError("commit: required in the spec")
-    done = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,
-                          text=True, check=False, timeout=30)
+    done = _git(root, "rev-parse", "HEAD")
     if done.returncode != 0 or done.stdout.strip() != commit:
         raise SpecError("commit: does not equal this checkout's HEAD, so the registry and "
                         "inventory would describe a different commit")
-    dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain",
-                            "--untracked-files=no"], capture_output=True, text=True,
-                           check=False, timeout=30)
+    dirty = _git(root, "status", "--porcelain", "--untracked-files=no")
     if dirty.returncode != 0 or dirty.stdout.strip():
         raise SpecError("commit: the checkout has uncommitted tracked changes, so the registry "
                         "and inventory would not describe that commit")

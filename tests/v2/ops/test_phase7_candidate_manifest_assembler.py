@@ -365,6 +365,28 @@ def test_spec_over_cap_is_refused_with_its_message(spec, tmp_path, monkeypatch, 
     assert "spec exceeds" in capsys.readouterr().err
 
 
+def test_git_timeout_is_a_spec_error(monkeypatch):
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired("git", 30)
+    monkeypatch.setattr(asm.subprocess, "run", hang)
+    with pytest.raises(asm.SpecError, match="git rev-parse failed"):
+        _REAL_COMMIT({"commit": "a" * 40}, asm.ROOT)
+
+
+def test_write_is_atomic_and_leaves_no_temp_file(spec, tmp_path):
+    asm.assemble(spec, _out(tmp_path))
+    assert not [p for p in _out(tmp_path).iterdir() if p.name.endswith(".tmp")]
+
+
+def test_load_manifest_cap(tmp_path, monkeypatch):
+    path = tmp_path / "m.json"
+    path.write_text('{"a": 1}')
+    assert checker.load_manifest(path) == {"a": 1}
+    monkeypatch.setattr(checker, "MAX_REF_BYTES", 4)
+    with pytest.raises(checker.ManifestUnreadable, match="exceeds"):
+        checker.load_manifest(path)
+
+
 def test_nested_out_dir_and_rerun(spec, tmp_path):
     out = tmp_path / "a" / "b" / "out"
     asm.assemble(spec, out)

@@ -697,7 +697,11 @@ def validate(manifest: Any, root: Path | str = ROOT) -> dict:
 
 def load_manifest(path: Path | str) -> Any:
     try:
-        return json.loads(Path(path).read_text())
+        with Path(path).open("rb") as handle:
+            data = handle.read(MAX_REF_BYTES + 1)
+        if len(data) > MAX_REF_BYTES:
+            raise ValueError(f"manifest exceeds {MAX_REF_BYTES} bytes")
+        return json.loads(data)
     except (OSError, ValueError) as exc:
         raise ManifestUnreadable(f"{path}: {exc}") from exc
 

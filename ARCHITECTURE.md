@@ -519,7 +519,7 @@ Only a tracked path absent from the worktree reads as empty.
   the two documents plus `manifest.json` into `--out-dir` (created with its
   parents) and nothing else; the manifest echoes `authority` and absolute
   paths, so it is private like the spec. A kind that can run outside
-  `shadow`/`smoke` (today `experiment`) is refused until the spec lists it in
+  `shadow`/`smoke`/`official` (today `experiment`) is refused until the spec lists it in
   `official_registry_kinds` or `non_official_registry_kinds`. User sign-offs
   (2026-10-16): consumer-inventory rows are exempt from the implicit-latest
   rule (the dashboard reads the moving current-release pointer); and a kind
