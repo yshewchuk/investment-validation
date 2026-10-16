@@ -39,10 +39,8 @@ from tests.data_scan_support import (
     publish_and_inspect,
 )
 from tests.ops_support import FakeClock
-from tests.v2.research import magnitude_trial_support as support
-from tests.v2.research.test_prediction_inputs import MONTH, TrackingRepository, _commit, _event
-
-_catalog = support.catalog_rows
+from tests.v2.research.magnitude_trial_support import TrackingRepository, catalog_rows
+from tests.v2.research.test_prediction_inputs import MONTH, _commit, _event
 
 
 def _spec(**changes):
@@ -155,7 +153,7 @@ def _forbid(*_args, **_kwargs):
 
 def test_register_binds_complete_plan_and_only_eligible_metadata(source):
     """Bind the complete declared identity while excluding both holdout populations."""
-    before = _catalog(source.conn)
+    before = catalog_rows(source.conn)
     result = _call(source)
     document = result.document
     assert result.run_id.startswith("native_")
@@ -195,7 +193,7 @@ def test_register_binds_complete_plan_and_only_eligible_metadata(source):
     assert ref.schema_ref == document["schema_version"]
     assert source.store.read_verified(ref) == result.binding_json
     assert source.store.verify(ref).stat().st_mode & 0o222 == 0
-    after = _catalog(source.conn)
+    after = catalog_rows(source.conn)
     assert {key: value for key, value in after.items() if key not in {"hypotheses", "experiment_runs"}} == {
         key: value for key, value in before.items() if key not in {"hypotheses", "experiment_runs"}}
 
@@ -219,12 +217,12 @@ def test_result_is_frozen_and_document_copies_cannot_change_identity(source):
 def test_repeated_registration_and_admission_are_read_only(source, monkeypatch):
     """Canonical population order permits identical retries with all writes disabled."""
     result = _call(source, event_ids=list(reversed([e["event_id"] for e in source.events[:2]])))
-    before, objects, changes = _catalog(source.conn), _objects(source.store), source.conn.total_changes
+    before, objects, changes = catalog_rows(source.conn), _objects(source.store), source.conn.total_changes
     monkeypatch.setattr(source.store, "publish_bytes", _forbid)
     source.conn.execute("PRAGMA query_only=ON")
     assert _call(source) == result
     assert _call(source, admit=True) == result
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert _objects(source.store) == objects
     assert source.conn.total_changes == changes
     assert source.repository.pins == ["shadow"] * 3
@@ -286,12 +284,12 @@ def test_distinct_experiment_or_primary_arm_has_a_distinct_registration(source, 
 
 def test_missing_registration_is_read_only_refusal(source, monkeypatch):
     """Admission cannot turn an absent registration into an implicit reservation."""
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     source.conn.execute("PRAGMA query_only=ON")
     monkeypatch.setattr(source.store, "publish_bytes", _forbid)
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
         _call(source, admit=True)
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert _objects(source.store) == objects
 
 
@@ -305,33 +303,33 @@ def test_invalid_spec_refuses_before_head_or_files(source, changes):
     """Invalid plans and external inputs cannot reach snapshot pinning or scans."""
     if changes.get("runner") == "<absolute-runner>":
         changes = {"runner": str(source.code_root / "run.py")}
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
         _call(source, spec=_spec(**changes))
     assert source.repository.pins == source.repository.scans == []
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert _objects(source.store) == objects
 
 
 def test_missing_python_source_has_no_registration_effect(source):
     """Missing runner bytes refuse before reading canonical metadata or publishing."""
     (source.code_root / "experiment/run.py").unlink()
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
         _call(source)
     assert source.repository.pins == source.repository.scans == []
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert _objects(source.store) == objects
 
 
 def test_missing_scope_head_refuses_without_fallback_or_scan(source):
     """An unresolved scope must never fall back to another committed head."""
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with pytest.raises(OpsError, match="SNAPSHOT_UNRESOLVED"):
         _call(source, scope="never-committed")
     assert source.repository.pins == ["never-committed"]
     assert source.repository.scans == []
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert _objects(source.store) == objects
 
 
@@ -345,13 +343,13 @@ def test_holdout_refuses_before_any_target_access_or_write(source, kind, admit):
     }[kind]}
     if kind == "invalid-month":
         kwargs["as_of_month"] = "2025-13"
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
         _call(source, admit=admit, **kwargs)
     assert all(table == "earnings_events" for table, _ in source.repository.scans)
     if kind == "invalid-month":
         assert source.repository.scans == []
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert _objects(source.store) == objects
 
 
@@ -395,12 +393,12 @@ def test_every_binding_dimension_conflicts_without_changing_registered_evidence(
     else:
         monkeypatch.setattr(ExperimentHoldouts, "random_version" if dimension == "random-version"
                             else "rolling_version", "changed-membership.v2")
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     for admit in (False, True):
         with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT") as caught:
             _call(source, admit=admit, spec=spec, **kwargs)
         assert not caught.value.problem.retryable
-        assert _catalog(source.conn) == before
+        assert catalog_rows(source.conn) == before
         assert _objects(source.store) == objects
         assert source.store.read_verified(_ref(source, original)) == original.binding_json
 
@@ -479,22 +477,22 @@ def test_tampered_catalog_reference_or_artifact_is_never_admitted_or_repaired(so
                             "ref-unknown": ("unknown_field", "unexpected")}[kind]
             evidence["native_registration"][field] = value
         source.conn.execute("UPDATE experiment_runs SET evidence_json=?", (json.dumps(evidence),))
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     for admit in (True, False):
         with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT") as caught:
             _call(source, admit=admit)
         assert not caught.value.problem.retryable
-        assert _catalog(source.conn) == before
+        assert catalog_rows(source.conn) == before
         assert _objects(source.store) == objects
 
 
 def test_existing_nonnative_primary_reservation_cannot_be_adopted(source):
     """A legacy primary reservation cannot silently become native preregistration."""
     register_hypothesis(source.conn, _spec(), content_hash("other-input"), mode="primary")
-    before = _catalog(source.conn)
+    before = catalog_rows(source.conn)
     with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source)
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
         _call(source, admit=True)
 
@@ -510,11 +508,11 @@ def test_publication_failure_leaves_no_partial_registration_or_implicit_retry(so
             raise OSError("synthetic publication failure")
 
     source.store = ArtifactStore(source.store.root, fault=fault)
-    before = _catalog(source.conn)
+    before = catalog_rows(source.conn)
     with pytest.raises(OSError, match="synthetic publication failure"):
         _call(source)
     assert calls.count(point) == 1
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert not source.conn.in_transaction
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
         _call(source, admit=True)
@@ -531,11 +529,11 @@ def test_commit_failure_rolls_back_both_rows_and_leaves_only_complete_orphan(sou
                 raise sqlite3.OperationalError("synthetic commit failure")
             return source.conn.execute(statement, *args)
 
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with pytest.raises(sqlite3.OperationalError, match="synthetic commit failure"):
         native.register_native(FailCommit(), source.store, source.repository, _spec(),
                                code_root=source.code_root, as_of_month=MONTH)
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert not source.conn.in_transaction
     orphans = {key: value for key, value in _objects(source.store).items() if key not in objects}
     assert len(orphans) == 1
@@ -633,11 +631,11 @@ def test_symlinked_source_closure_is_refused_before_metadata_or_registration(sou
     path = source.code_root / "experiment" / leaf
     path.unlink()
     path.symlink_to(target)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
         _call(source)
     assert source.repository.pins == source.repository.scans == []
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert _objects(source.store) == objects
 
 
@@ -657,11 +655,11 @@ def test_malformed_direct_spec_is_typed_and_has_no_reads(source, change):
 @pytest.mark.parametrize("admit", [False, True])
 def test_invalid_scope_shape_refuses_before_any_pin_scan_or_write(source, scope, admit):
     """Malformed scopes cannot escape as SQLite binding errors or trigger fallback."""
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with pytest.raises(OpsError, match="SNAPSHOT_UNRESOLVED"):
         _call(source, admit=admit, scope=scope)
     assert source.repository.pins == source.repository.scans == []
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert _objects(source.store) == objects
 
 

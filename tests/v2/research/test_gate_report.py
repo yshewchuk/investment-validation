@@ -28,8 +28,10 @@ from tests.data_scan_support import (
     publish_and_inspect,
 )
 from tests.test_v2_research_replay import _chain
-from tests.v2.research.test_event_history import _event
-from tests.v2.research.test_prediction_inputs import _move
+from tests.v2.research.magnitude_trial_support import (
+    history_event,
+    outcome_move,
+)
 
 REPO = Path(__file__).resolve().parents[3]
 MONTH = "2025-01"
@@ -53,26 +55,26 @@ def build_gate_source(tmp_path, *, delayed=None, missing_quotes=False, calendar_
         days[5] = "2024-01-01"
     if early_january:
         days[3:6] = ["2022-12-29", "2022-12-30", "2023-01-02"]
-    eligible = [_event(day) for day in days]
+    eligible = [history_event(day) for day in days]
     if early_january:
         # A separate ticker keeps its Jan 2 exit quote distinct from the test entry.
-        eligible[4] = _event(days[4], ticker="AFTER")
+        eligible[4] = history_event(days[4], ticker="AFTER")
     if rejected:
-        eligible.append(_event("2023-06-01", ticker="NEW"))
+        eligible.append(history_event("2023-06-01", ticker="NEW"))
     history = []
     if feature_driver:
-        eligible = [_event((pd.Timestamp(f"{2022 + i // 4}-02-02") + pd.offsets.BDay(i % 4)).date().isoformat(),
+        eligible = [history_event((pd.Timestamp(f"{2022 + i // 4}-02-02") + pd.offsets.BDay(i % 4)).date().isoformat(),
                            ticker=f"T{i}") for i in range(8)]
         # Independent quadrants: equal counts with different means, and vice versa.
         counts, means = [1, 1, 2, 2] * 2, [2.0, 8.0, 2.0, 8.0] * 2
-        history = [(_event(day, ticker=event["ticker"]), mean)
+        history = [(history_event(day, ticker=event["ticker"]), mean)
                    for event, count, mean in zip(eligible, counts, means, strict=True)
                    for day in ("2021-02-02", "2021-05-04")[:count]]
-    protected = [_event("2022-03-02", protected=True), _event("2024-12-02")]
+    protected = [history_event("2022-03-02", protected=True), history_event("2024-12-02")]
     events = eligible + [event for event, _ in history] + protected
-    moves = [_move(event, 2.0 * (index + 1)) for index, event in enumerate(eligible)]
-    moves += [_move(event, mean) for event, mean in history]
-    moves += [_move(event, None) for event in protected]
+    moves = [outcome_move(event, 2.0 * (index + 1)) for index, event in enumerate(eligible)]
+    moves += [outcome_move(event, mean) for event, mean in history]
+    moves += [outcome_move(event, None) for event in protected]
     if delayed:
         moves[delayed[0]]["available_as_of_date"] = delayed[1]
     chains = []

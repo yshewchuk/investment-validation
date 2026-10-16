@@ -20,10 +20,11 @@ from engine.v2.ops.experiment_folds import TrainFoldRule
 from engine.v2.ops.experiments import ExperimentSpec
 from experiments import prediction_report as prediction
 from experiments.native_registration import NativeRegistration, register_native
-from tests.v2.research import magnitude_trial_support as support
-from tests.v2.research.test_prediction_inputs import MONTH, _commit, _event, _move
-
-_spec = support.prediction_spec
+from tests.v2.research.magnitude_trial_support import (
+    outcome_move,
+    prediction_spec,
+)
+from tests.v2.research.test_prediction_inputs import MONTH, _commit, _event
 
 
 def _dataset():
@@ -33,7 +34,7 @@ def _dataset():
     events = [_event(day) for day in dates]
     events += [_event("2023-06-01", random=True), _event("2024-12-02")]
     labels = [-1, 1, 1, -1, -1, 1, 1, 1, -1, 1, float("nan"), float("nan")]
-    moves = [_move(event, label) for event, label in zip(events, labels)]
+    moves = [outcome_move(event, label) for event, label in zip(events, labels)]
     moves[3]["available_as_of_date"] = "2024-01-01"
     return events, moves
 
@@ -62,7 +63,7 @@ def _source(tmp_path, *, events=None, moves=None, spec=None, event_ids=None):
     runner = root / prediction.RUNNER
     runner.parent.mkdir(parents=True)
     runner.write_text("# Synthetic source-only registration; never executed.\n")
-    spec = spec or _spec()
+    spec = spec or prediction_spec()
     registration = register_native(conn, ArtifactStore(tmp_path / "store"),
         RegistrationRepository(conn, ArtifactStore(tmp_path / "store")), spec,
         code_root=root, as_of_month=MONTH, event_ids=event_ids)
@@ -184,11 +185,11 @@ def test_threadpools_restore_on_fitting_failure(source, monkeypatch):
 ])
 def test_public_spec_validator_refuses_unused_or_invalid_declarations(changes):
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
-        prediction.validate_prediction_spec(_spec(**changes))
+        prediction.validate_prediction_spec(prediction_spec(**changes))
 
 
 def test_public_spec_validator_accepts_exact_fixed_arm_and_rejects_wrong_type():
-    plan = prediction.validate_prediction_spec(_spec())
+    plan = prediction.validate_prediction_spec(prediction_spec())
     assert plan.folds == ("2023", "2024")
     assert plan.runner == prediction.RUNNER
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
@@ -216,7 +217,7 @@ def test_registration_declarations_refuse_before_any_reads(source, changes):
 @pytest.mark.parametrize("kind", ["empty_train", "empty_test", "single_class"])
 def test_unsuitable_fold_refuses_without_artifacts(tmp_path, kind):
     events, moves = _dataset()
-    spec = _spec(folds={"empty_train": ("2022",), "empty_test": ("2025",),
+    spec = prediction_spec(folds={"empty_train": ("2022",), "empty_test": ("2025",),
                        "single_class": ("2023",)}[kind])
     if kind == "single_class":
         for move in moves[:3]:
@@ -352,7 +353,7 @@ def test_explicit_registered_subset_is_the_only_target_read(tmp_path):
     ids = [event["event_id"] for event in events[:3] + events[4:8]]
     # A nonregistered eligible outcome is poisoned; loading all eligible outcomes would fail.
     moves[8]["realized_move_pct"] = float("nan")
-    source = _source(tmp_path, events=events, moves=moves, spec=_spec(folds=("2023",)), event_ids=ids)
+    source = _source(tmp_path, events=events, moves=moves, spec=prediction_spec(folds=("2023",)), event_ids=ids)
     try:
         result = prediction.prediction_result(source.repository, source.registration)
         assert result["registered_population_count"] == 7

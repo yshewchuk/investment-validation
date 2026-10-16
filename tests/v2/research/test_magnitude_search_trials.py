@@ -193,6 +193,21 @@ def test_incomplete_attempts_refuse_freeze_without_partial_selection(case, monke
             case.recorder.start(*args)
 
 
+def test_empty_outer_folds_refuse_freeze_before_native_payloads_or_selection(case, monkeypatch):
+    request = copy.deepcopy(case.request)
+    request["inner_years"] = {}
+    recorder = trials.SearchTrials(case.source.conn, case.source.store, case.source.repository,
+        case.source.registration, request, case.recorder.plan_ref)
+    before = _slots(case)
+    monkeypatch.setattr(recorder, "_inputs", lambda *a: pytest.fail("native inputs opened"))
+    monkeypatch.setattr(case.source.store, "read_verified", lambda *a, **k: pytest.fail("artifact opened"))
+    with _assert_error("INVALID_EXPERIMENT_SPEC",
+                       "search requires explicit valid axes, inner years and count caps"):
+        recorder.freeze()
+    assert _slots(case) == before
+    assert all(slot != "selection" for slot, _ in before)
+
+
 def test_failure_excludes_entire_candidate_and_redacts_diagnostics(case):
     first = case.plan["candidates"][0]["candidate_id"]
     failed = ("2025", "2024", first)

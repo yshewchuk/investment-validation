@@ -9,19 +9,22 @@ from engine.v2.foundation import content_hash
 from engine.v2.research import magnitude_folds
 from tests.data_scan_support import commit_tables
 from tests.ops_support import FakeClock
-from tests.v2.research.test_event_history import _event, _poison
-from tests.v2.research.test_magnitude_features import _commit
-from tests.v2.research.test_magnitude_inputs import _calendar
-from tests.v2.research.test_prediction_inputs import _move
+from tests.v2.research.magnitude_trial_support import (
+    calendar_sessions,
+    commit_history_inputs,
+    history_event,
+    outcome_move,
+    poison_outcomes,
+)
 
 
 def _fixture(tmp_path, events=None, **changes):
     """Commit actual native metadata and deliberately unusable outcome payloads."""
     events = events if events is not None else [
-        _event("2023-12-12"), {**_event("2024-01-03"), "session": "BMO"}, _event("2024-01-04")]
+        history_event("2023-12-12"), {**history_event("2024-01-03"), "session": "BMO"}, history_event("2024-01-04")]
     unique = {(event["ticker"], event["event_date"]): event for event in events}
-    return _commit(tmp_path, events, [_move(event, None) for event in unique.values()],
-                   **{"days": _calendar("2023-12-01", "2025-01-10").days, **changes})
+    return commit_history_inputs(tmp_path, events, [outcome_move(event, None) for event in unique.values()],
+                   **{"days": calendar_sessions("2023-12-01", "2025-01-10").days, **changes})
 
 
 def _plan(repository, snapshot, **changes):
@@ -33,7 +36,7 @@ def _plan(repository, snapshot, **changes):
 
 def _metadata_only(monkeypatch, repository, snapshot):
     """Poison physical outcome verification and even outcome-table planning."""
-    opened = _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+    opened = poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
     for name in ("fragment_records", "table_contract"):
         original = getattr(repository, name)
         def guarded(snap, table_name, *args, original=original, **kwargs):
@@ -44,13 +47,13 @@ def _metadata_only(monkeypatch, repository, snapshot):
 
 
 def test_plan_groups_all_horizons_and_removes_january_training_leak(tmp_path, monkeypatch):
-    train, on_boundary, late = (_event(day) for day in ("2023-12-12", "2023-12-22", "2023-12-26"))
-    first, second = {**_event("2024-01-03"), "session": "BMO"}, _event("2024-06-12")
-    next_year = {**_event("2025-01-07"), "session": "BMO"}
-    random, rolling = _event("2023-12-13", protected=True), _event("2025-12-03")
-    alias = _event("2024-01-04")
+    train, on_boundary, late = (history_event(day) for day in ("2023-12-12", "2023-12-22", "2023-12-26"))
+    first, second = {**history_event("2024-01-03"), "session": "BMO"}, history_event("2024-06-12")
+    next_year = {**history_event("2025-01-07"), "session": "BMO"}
+    random, rolling = history_event("2023-12-13", protected=True), history_event("2025-12-03")
+    alias = history_event("2024-01-04")
     sibling = {**alias, "event_id": "conflicting-identity", "session": "BMO"}
-    before, future = _event("2023-11-01"), _event("2026-02-02")
+    before, future = history_event("2023-11-01"), history_event("2026-02-02")
     events = [train, on_boundary, late, first, second, next_year, random, rolling, alias, before, future]
     conn, repository, snapshot = _fixture(tmp_path, [*events, sibling],
         mixed_days=("2023-12-12", "2023-12-13"))
@@ -111,8 +114,8 @@ def test_plan_groups_all_horizons_and_removes_january_training_leak(tmp_path, mo
 
 
 def test_midyear_evaluation_keeps_january_fit_boundary_and_candidate_is_not_a_label(tmp_path, monkeypatch):
-    train, late = _event("2023-12-12"), _event("2023-12-29")
-    test = _event("2024-06-12")
+    train, late = history_event("2023-12-12"), history_event("2023-12-29")
+    test = history_event("2024-06-12")
     conn, repository, snapshot = _fixture(tmp_path, [train, late, test])
     try:
         _metadata_only(monkeypatch, repository, snapshot)
@@ -138,8 +141,8 @@ def test_malformed_declarations_refuse_before_repository_access(changes):
 
 @pytest.mark.parametrize("kind", ["random", "rolling", "alias", "unknown", "snapshot", "window"])
 def test_admission_and_explicit_window_refuse_before_calendar(tmp_path, monkeypatch, kind):
-    target = _event("2025-12-03" if kind == "rolling" else "2024-01-03", protected=kind == "random")
-    events = [_event("2023-12-12"), target]
+    target = history_event("2025-12-03" if kind == "rolling" else "2024-01-03", protected=kind == "random")
+    events = [history_event("2023-12-12"), target]
     if kind == "alias":
         events.append({**target, "event_id": "alias", "session": "BMO"})
     conn, repository, snapshot = _fixture(tmp_path, events)
@@ -166,7 +169,7 @@ def test_admission_and_explicit_window_refuse_before_calendar(tmp_path, monkeypa
 
 @pytest.mark.parametrize("kind", ["empty_window", "no_train", "no_test", "missing_calendar", "calendar_gap"])
 def test_empty_or_unprovable_fold_refuses_without_any_outcome_access(tmp_path, monkeypatch, kind):
-    events = [_event("2023-12-12"), _event("2024-01-03")]
+    events = [history_event("2023-12-12"), history_event("2024-01-03")]
     changes, commit = {}, {}
     if kind == "empty_window":
         changes = {"training_start": "2025-01-01", "evaluation_years": ["2026"]}
@@ -177,7 +180,7 @@ def test_empty_or_unprovable_fold_refuses_without_any_outcome_access(tmp_path, m
     elif kind == "missing_calendar":
         commit = {"include_calendar": False}
     else:
-        commit = {"days": tuple(day for day in _calendar("2023-12-01", "2025-01-10").days
+        commit = {"days": tuple(day for day in calendar_sessions("2023-12-01", "2025-01-10").days
                                 if day != "2023-12-29")}
     conn, repository, snapshot = _fixture(tmp_path, events, **commit)
     try:
@@ -222,11 +225,11 @@ def test_late_calendar_scan_failure_propagates_without_retry_or_partial_plan(tmp
 
 
 def test_equivalent_explicit_population_order_and_call_local_clock_reuse(tmp_path, monkeypatch):
-    train = _event("2023-12-12")
+    train = history_event("2023-12-12")
     # Native announcement dates may be non-session days; this lies between the two deadlines.
-    between = _event("2023-12-25")
-    first, second = _event("2024-01-03", ticker="A"), _event("2024-01-03", ticker="B")
-    third = {**_event("2024-01-03", ticker="C"), "session": "BMO"}
+    between = history_event("2023-12-25")
+    first, second = history_event("2024-01-03", ticker="A"), history_event("2024-01-03", ticker="B")
+    third = {**history_event("2024-01-03", ticker="C"), "session": "BMO"}
     conn, repository, snapshot = _fixture(tmp_path, [third, second, train, first, between])
     original, calls = magnitude_folds.forecast_cutoff, []
     def clock(*args):
@@ -251,7 +254,7 @@ def test_equivalent_explicit_population_order_and_call_local_clock_reuse(tmp_pat
              "population_use": "post-release selection"}
             for event in (train, between, first, second, third)]
         a, b, c = bulk["events"][2:]
-        calendar = _calendar("2023-12-01", "2025-01-10")
+        calendar = calendar_sessions("2023-12-01", "2025-01-10")
         calendar_id = content_hash({"days": list(calendar.days), "observed_through": calendar.days[-1]})
         expected_forecasts = {}
         for session, anchor, ceilings in (
@@ -289,9 +292,9 @@ def test_outcome_table_is_not_required_for_a_metadata_plan(tmp_path, monkeypatch
 
 
 def test_nonconsecutive_evaluation_years_do_not_drop_intervening_training_history(tmp_path, monkeypatch):
-    events = [_event(day) for day in ("2023-12-12", "2024-06-12", "2025-01-07", "2026-01-07")]
+    events = [history_event(day) for day in ("2023-12-12", "2024-06-12", "2025-01-07", "2026-01-07")]
     conn, repository, snapshot = _fixture(tmp_path, events,
-        days=_calendar("2023-12-01", "2026-01-08").days)
+        days=calendar_sessions("2023-12-01", "2026-01-08").days)
     try:
         _metadata_only(monkeypatch, repository, snapshot)
         result = _plan(repository, snapshot, as_of_month="2026-10", evaluation_years=["2024", "2026"])
@@ -304,7 +307,7 @@ def test_nonconsecutive_evaluation_years_do_not_drop_intervening_training_histor
 
 @pytest.mark.parametrize("session", ["AMC", "BMO"])
 def test_non_session_announcement_preserves_native_date_and_anchor(tmp_path, session):
-    events = [_event("2023-12-12"), {**_event("2024-01-01"), "session": session}]
+    events = [history_event("2023-12-12"), {**history_event("2024-01-01"), "session": session}]
     conn, repository, snapshot = _fixture(tmp_path, events)
     try:
         event = _plan(repository, snapshot)["events"][-1]
@@ -317,7 +320,7 @@ def test_non_session_announcement_preserves_native_date_and_anchor(tmp_path, ses
 
 def test_request_window_includes_start_excludes_end_and_refuses_explicit_end_before_calendar(tmp_path, monkeypatch):
     """Both exact endpoints are admitted metadata, so membership follows the window alone."""
-    start, test, end = [_event(day) for day in ("2023-12-12", "2024-06-12", "2025-01-01")]
+    start, test, end = [history_event(day) for day in ("2023-12-12", "2024-06-12", "2025-01-01")]
     conn, repository, snapshot = _fixture(tmp_path, [start, test, end])
     try:
         _metadata_only(monkeypatch, repository, snapshot)

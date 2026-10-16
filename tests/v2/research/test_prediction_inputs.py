@@ -20,10 +20,10 @@ from tests.data_scan_support import (
     contract_ref_for,
     publish_and_inspect,
 )
-from tests.v2.research import magnitude_trial_support as support
-
-TrackingRepository = support.TrackingRepository
-_move = support.outcome_move
+from tests.v2.research.magnitude_trial_support import (
+    TrackingRepository,
+    outcome_move,
+)
 
 MONTH = "2025-01"
 
@@ -52,7 +52,7 @@ def _commit(tmp_path, events, moves=None, *, include_targets=True):
     input_rows = {"earnings_events": events}
     if include_targets:
         contracts["computed_moves"] = COMPUTED_MOVES_CONTRACT
-        input_rows["computed_moves"] = moves if moves is not None else [_move(e) for e in events]
+        input_rows["computed_moves"] = moves if moves is not None else [outcome_move(e) for e in events]
     tables = {}
     for table, contract in contracts.items():
         grouped = {}
@@ -75,7 +75,7 @@ def test_real_snapshot_targets_exclude_union_before_outcome_scans(tmp_path):
     random = _event("2024-05-03", random=True)
     rolling = _event("2024-12-03")
     conn, repository, snapshot = _commit(tmp_path, [eligible, random, rolling], [
-        _move(eligible, -2.5), _move(random, float("nan")), _move(rolling, float("nan")),
+        outcome_move(eligible, -2.5), outcome_move(random, float("nan")), outcome_move(rolling, float("nan")),
     ])
     try:
         before = conn.total_changes
@@ -156,7 +156,7 @@ def test_unresolved_snapshot_is_typed_without_fallback(tmp_path, kind):
 ])
 def test_invalid_target_or_availability_refuses_whole_population(tmp_path, mutation):
     first, later = _event("2024-05-01"), _event("2024-05-02")
-    conn, repository, snapshot = _commit(tmp_path, [first, later], [_move(first), _move(later, **mutation)])
+    conn, repository, snapshot = _commit(tmp_path, [first, later], [outcome_move(first), outcome_move(later, **mutation)])
     try:
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             _targets(repository, snapshot)
@@ -192,7 +192,7 @@ def test_shared_population_needs_no_target_table(tmp_path):
 
 def test_target_availability_can_feed_existing_fold_helper(tmp_path):
     events = [_event(day) for day in ["2023-01-02", "2023-04-03", "2023-10-02", "2024-01-02"]]
-    moves = [_move(event, value) for event, value in zip(events, [-2, 2, -1, 1])]
+    moves = [outcome_move(event, value) for event, value in zip(events, [-2, 2, -1, 1])]
     moves[2]["available_as_of_date"] = "2024-02-01"  # An older event whose label is not yet known.
     conn, repository, snapshot = _commit(tmp_path, events, moves)
     try:
@@ -216,7 +216,7 @@ def test_target_availability_can_feed_existing_fold_helper(tmp_path):
 def test_shared_outcome_key_with_excluded_sibling_never_scans_targets(tmp_path, explicit):
     event = _event("2024-05-02")
     sibling = {**event, "event_id": _identity("2024-05-02", random=True)[0], "session": "BMO"}
-    conn, repository, snapshot = _commit(tmp_path, [event, sibling], [_move(event)])
+    conn, repository, snapshot = _commit(tmp_path, [event, sibling], [outcome_move(event)])
     try:
         with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED") as refusal:
             _targets(repository, snapshot, event_ids=[event["event_id"]] if explicit else None)
@@ -279,7 +279,7 @@ def test_corrupt_catalog_evidence_is_typed_without_scan(tmp_path, evidence):
 def test_non_date_outcome_key_is_never_coerced_to_canonical_event(tmp_path):
     event = _event("2024-05-02")
     conn, repository, snapshot = _commit(tmp_path, [event], [
-        _move(event, event_date="2024-05-02T13:00:00")])
+        outcome_move(event, event_date="2024-05-02T13:00:00")])
     try:
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             _targets(repository, snapshot)

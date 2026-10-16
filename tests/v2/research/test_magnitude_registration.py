@@ -20,22 +20,22 @@ from experiments import native_registration as native
 from tests.data_scan_support import commit_tables
 from tests.ops_support import FakeClock
 from tests.v2.research import magnitude_trial_support as support
-from tests.v2.research.test_event_history import _event
+from tests.v2.research.magnitude_trial_support import (
+    PlanRepository,
+    catalog_rows,
+    history_event,
+)
 from tests.v2.research.test_magnitude_folds import _fixture, _metadata_only, _plan
-from tests.v2.research.test_native_registration import _catalog, _objects, _spec
-
-PlanRepository = support.PlanRepository
-_forbid = support.forbid_access
-_refuses = support.refuses
+from tests.v2.research.test_native_registration import _objects, _spec
 
 
 @pytest.fixture
 def source(tmp_path, monkeypatch, request):
     """Commit protected, ambiguous and out-of-window siblings with poisoned labels."""
-    train, test = _event("2023-12-12"), {**_event("2024-01-03"), "session": "BMO"}
-    before, future = _event("2023-11-01"), _event("2025-01-02")
-    random, rolling = _event("2023-12-13", protected=True), _event("2025-12-03")
-    alias = _event("2024-01-05")
+    train, test = history_event("2023-12-12"), {**history_event("2024-01-03"), "session": "BMO"}
+    before, future = history_event("2023-11-01"), history_event("2025-01-02")
+    random, rolling = history_event("2023-12-13", protected=True), history_event("2025-12-03")
+    alias = history_event("2024-01-05")
     events = [train, test, before, future, random, rolling, alias,
               {**alias, "event_id": "ambiguous-sibling", "session": "BMO"}]
     events.extend(getattr(request, "param", ()))
@@ -118,14 +118,14 @@ def test_full_plan_is_sealed_and_idempotently_admitted(source, monkeypatch):
         assert plan[field] == expected
     assert source.repository.pins == ["shadow"]
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
     source.conn.execute("PRAGMA query_only=ON")
     assert _call(source, event_ids=list(reversed(document["event_ids"]))) == registered
     assert _call(source, admit=True) == registered
     assert _call(source, admit=True, expected=registered) == registered
     assert native.read_native_registration(source.conn, source.store, source.spec) == registered
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
     document["magnitude_request"]["evaluation_years"].clear()
     assert registered.document["magnitude_request"]["evaluation_years"] == ["2024"]
     with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
@@ -158,11 +158,11 @@ def test_bad_declarations_refuse_before_any_repository_access(source, monkeypatc
     if changes.pop("valid_final_read", False):
         changes["final_read"] = _declaration()
     spec = replace(source.spec, **changes.pop("spec_changes", {}))
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "resolve_pinned", support.forbid_access)
     with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         _call(source, spec=spec, admit=admit, **changes)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 @pytest.mark.parametrize("change", ["start", "years", "month", "scope", "snapshot", "source", "environment", "omitted", "expected"])
@@ -196,11 +196,11 @@ def test_identity_drift_refuses_before_metadata_scan(source, monkeypatch, change
         kwargs["magnitude_training_start"] = None
     else:
         kwargs["expected"] = replace(registered, binding_json=b"{}")
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True, **kwargs)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 def test_missing_reservation_refuses_before_metadata_scan(source, monkeypatch):
@@ -229,11 +229,11 @@ def test_late_calendar_failure_never_publishes_or_retries(source, monkeypatch):
             raise fail("OBJECT_CORRUPT", "synthetic calendar failure")
         yield from original(query, table_name=table_name)
     monkeypatch.setattr(source.repository, "scan", scan)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with support.refuses(DataError, "OBJECT_CORRUPT"):
         _call(source)
     assert calls.count("daily_market") == 1 and "earnings_events" in calls
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 @pytest.mark.parametrize("index,code", [(2, "CONTRACT_MISMATCH"), (4, "HOLDOUT_ACCESS_DENIED"),
@@ -245,10 +245,10 @@ def test_protected_or_outside_explicit_population_refuses_before_calendar(source
         assert table_name == "earnings_events"
         yield from original(query, table_name=table_name)
     monkeypatch.setattr(source.repository, "scan", scan)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with support.refuses(DataError, code):
         _call(source, event_ids=[source.events[index]["event_id"]])
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 def _rewrite(source, registered, document):
@@ -333,13 +333,13 @@ def test_rehashed_malformed_or_cross_context_plans_refuse_without_reads(source, 
         plan["events"] = None if kind == "events-none" else []
     plan["plan_id"] = "changed" if kind == "plan-hash" else content_hash({k: v for k, v in plan.items() if k != "plan_id"})
     forged = _rewrite(source, registered, doc)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 def test_stored_integrity_does_not_replace_fresh_semantic_admission(source):
@@ -352,11 +352,11 @@ def test_stored_integrity_does_not_replace_fresh_semantic_admission(source):
     forged = _rewrite(source, registered, doc)
     native.verify_native_registration(source.conn, source.store, forged)
     source.repository.scans.clear()
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 _DESCRIPTORS = ("target_recipe", "fold_policy", "population_input", "calendar_input", "availability")
@@ -420,13 +420,13 @@ def test_rehashed_nested_wire_schema_refuses_before_metadata_scan(source, monkey
             clock["cutoff_id"] = content_hash({key: item for key, item in clock.items() if key != "cutoff_id"})
     plan["plan_id"] = content_hash({key: item for key, item in plan.items() if key != "plan_id"})
     forged = _rewrite(source, registered, doc)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 def _declaration():
@@ -482,7 +482,7 @@ def test_multiple_spec_years_define_the_complete_registered_fold_list(source):
     assert _call(source, spec=spec, admit=True) == registered
 
 
-@pytest.mark.parametrize("source", [[_event(day, ticker="AAA") for day in
+@pytest.mark.parametrize("source", [[history_event(day, ticker="AAA") for day in
     ("2023-12-12", "2023-12-14", "2024-01-03", "2024-01-04")]], indirect=True)
 @pytest.mark.parametrize("kind", ["events", "event-tie", "train", "train-tie", "test", "test-tie"])
 def test_rehashed_membership_permutations_refuse_before_scans(source, monkeypatch, kind):
@@ -511,13 +511,13 @@ def test_rehashed_membership_permutations_refuse_before_scans(source, monkeypatc
         changed.reverse()
     plan["plan_id"] = content_hash({key: value for key, value in plan.items() if key != "plan_id"})
     forged = _rewrite(source, registered, doc)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 def _rehash_clocks_and_plan(doc):
@@ -533,13 +533,13 @@ def _assert_forged_refusal(source, registered, doc, monkeypatch, *, spec=None):
     """Exercise public stored verification first, before fresh admission can mask a guard."""
     _rehash_clocks_and_plan(doc)
     forged = _rewrite(source, registered, doc)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True, spec=spec)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 @pytest.mark.parametrize("link", ["events", "years", "snapshot", "holdout_as_of_month",
@@ -632,11 +632,11 @@ def test_no_caller_supplied_plan_parameter(source, monkeypatch, admit):
     parameters = inspect.signature(method).parameters
     assert "magnitude_plan" not in parameters
     assert all(parameter.kind != inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.repository, "resolve_pinned", support.forbid_access)
     with pytest.raises(TypeError):
         _call(source, admit=admit, magnitude_plan=registered.document["magnitude_plan"])
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 def test_prediction_cli_rejects_magnitude_clock_for_default_target(monkeypatch, capsys):
@@ -660,16 +660,16 @@ def test_registration_effects_are_only_its_binding_and_reservation(source, monke
             (panel_math, "history_features"), (event_history, "history_features"),
             (event_history, "load_event_history"), (magnitude_features, "load_event_history")):
         monkeypatch.setattr(module, name, support.forbid_access)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     registered = _call(source)
-    after, published = _catalog(source.conn), _objects(source.store)
+    after, published = catalog_rows(source.conn), _objects(source.store)
     changed = {table for table in before.keys() | after.keys() if before.get(table) != after.get(table)}
     assert changed == {"hypotheses", "experiment_runs"}
     assert all(len(after[table]) == len(before[table]) + 1 for table in changed)
     assert all(published[path] == data for path, data in objects.items())
     assert [published[path] for path in published.keys() - objects.keys()] == [registered.binding_json]
     assert _call(source, admit=True) == registered
-    assert _catalog(source.conn) == after and _objects(source.store) == published
+    assert catalog_rows(source.conn) == after and _objects(source.store) == published
 
 
 def test_cross_year_event_permutation_is_not_masked_by_fold_membership(source, monkeypatch):
@@ -686,7 +686,7 @@ def test_cross_year_event_permutation_is_not_masked_by_fold_membership(source, m
     _assert_forged_refusal(source, registered, doc, monkeypatch, spec=spec)
 
 
-@pytest.mark.parametrize("source", [[_event("2023-12-14")]], indirect=True)
+@pytest.mark.parametrize("source", [[history_event("2023-12-14")]], indirect=True)
 @pytest.mark.parametrize("change", ["start", "years", "month", "events"])
 def test_changed_register_request_cannot_overwrite_its_reservation(source, monkeypatch, change):
     """Otherwise-valid altered requests refuse before publication on the register path."""
@@ -696,23 +696,23 @@ def test_changed_register_request_cannot_overwrite_its_reservation(source, monke
         "years": {"spec": replace(source.spec, folds=("2024", "2025"))},
         "month": {"as_of_month": "2026-02"},
         "events": {"event_ids": [event["event_id"] for event in source.events[:2]]}}[change]
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, **changes)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 @pytest.mark.parametrize("years,start", [(("2024", "2026"), "2023-12-10"), (("2024",), "2023-12-30")])
 def test_empty_evaluation_or_training_fold_never_publishes(source, monkeypatch, years, start):
     """Propagate the planner's exact nonretryable refusal without reserving a partial run."""
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
     with support.refuses(DataError, "POPULATION_COLLAPSED"):
         _call(source, spec=replace(source.spec, folds=years), magnitude_training_start=start)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and _objects(source.store) == objects
 
 
 @pytest.mark.parametrize("kind", ["horizon-value", "calendar-digest", "schedule-availability"])
@@ -745,7 +745,7 @@ def test_magnitude_outcome_paths_refuse_before_result_access(source, monkeypatch
     registered = _call(source)
     assert native.read_native_registration(source.conn, source.store, source.spec) == registered
     assert _call(source, admit=True) == registered
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), _objects(source.store)
     ledger = tmp_path / "unused" / "ledger.csv"
     refusal = canonical_json({"schema_version": "native_experiment_refusal.v1.0",
         "failure_code": "EXPERIMENT_IDENTITY_CONFLICT", "request": {"run_id": registered.run_id},
@@ -769,7 +769,7 @@ def test_magnitude_outcome_paths_refuse_before_result_access(source, monkeypatch
     assert caught.value.problem.retryable is False
     assert caught.value.problem.details == {"refusal_ref": to_document(ref)}
     assert source.store.read_verified(ref) == refusal
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert _objects(source.store) == {**objects, ref.storage_key: refusal}
     assert not ledger.parent.exists() and not (source.store.root / "native_reports").exists()
 
@@ -789,7 +789,7 @@ def test_older_registration_schemas_keep_complete_outcome_cycle(source, tmp_path
     assert options["ledger_path"].exists() is not no_ledger
 
 
-@pytest.mark.parametrize("source", [[_event("2024-01-04")]], indirect=True)
+@pytest.mark.parametrize("source", [[history_event("2024-01-04")]], indirect=True)
 @pytest.mark.parametrize("kind", ["one-anchor", "one-calendar", "missing-evaluation"])
 def test_cross_clock_and_fold_consistency_guards_are_independent(source, monkeypatch, kind):
     """Valid dates/digests and nonempty subsequences cannot mask agreement or coverage."""

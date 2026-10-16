@@ -17,11 +17,12 @@ from tests.data_scan_support import (
     contract_ref_for,
     publish_and_inspect,
 )
-from tests.v2.research import magnitude_trial_support as support
-from tests.v2.research.test_prediction_inputs import TrackingRepository, _move
-
-_event = support.history_event
-_poison = support.poison_outcomes
+from tests.v2.research.magnitude_trial_support import (
+    TrackingRepository,
+    history_event,
+    outcome_move,
+    poison_outcomes,
+)
 
 MONTH = "2025-01"
 DECISION = "2024-06-19"
@@ -63,24 +64,24 @@ def _read(repository, snapshot, target, **kwargs):
 
 
 def test_multiple_histories_union_alias_cutoff_provenance_and_determinism(tmp_path, monkeypatch):
-    prior = [_event(day) for day in ("2023-01-02", "2023-06-02", "2023-12-04")]
-    random = _event("2023-02-02", protected=True)
-    alias = _event("2023-03-02")
-    sibling = {**alias, "event_id": _event("2023-03-02", protected=True)["event_id"], "session": "BMO"}
-    skipped, delayed = _event("2023-04-03"), _event("2023-05-02")
-    same_day, future = _event(DECISION), _event("2024-06-21")
-    rolling, target = _event("2024-12-03"), _event("2024-06-20")
+    prior = [history_event(day) for day in ("2023-01-02", "2023-06-02", "2023-12-04")]
+    random = history_event("2023-02-02", protected=True)
+    alias = history_event("2023-03-02")
+    sibling = {**alias, "event_id": history_event("2023-03-02", protected=True)["event_id"], "session": "BMO"}
+    skipped, delayed = history_event("2023-04-03"), history_event("2023-05-02")
+    same_day, future = history_event(DECISION), history_event("2024-06-21")
+    rolling, target = history_event("2024-12-03"), history_event("2024-06-20")
     events = [*prior, random, alias, sibling, skipped, delayed, same_day, future, rolling, target]
-    moves = [_move(event, value) for event, value in zip(prior, [-2, 4, 6])]
-    moves += [_move(event, None) for event in (random, alias, same_day, future, rolling, target)]
-    moves += [_move(skipped, None, skipped=True, available_as_of_date=None),
-              _move(delayed, None, available_as_of_date="2024-06-21")]
+    moves = [outcome_move(event, value) for event, value in zip(prior, [-2, 4, 6])]
+    moves += [outcome_move(event, None) for event in (random, alias, same_day, future, rolling, target)]
+    moves += [outcome_move(skipped, None, skipped=True, available_as_of_date=None),
+              outcome_move(delayed, None, available_as_of_date="2024-06-21")]
     # Inclusive availability: this oldest label becomes known exactly on the cutoff.
     moves[0]["available_as_of_date"] = DECISION
     conn, repository, snapshot = _commit(tmp_path, events, moves)
     try:
         protected_days = [e["event_date"].date().isoformat() for e in (random, alias, same_day, future, rolling, target)]
-        _poison(monkeypatch, repository, snapshot, protected_days)
+        poison_outcomes(monkeypatch, repository, snapshot, protected_days)
         before = conn.total_changes
         result = _read(repository, snapshot, target)
         assert result == _read(repository, snapshot, target)
@@ -122,10 +123,10 @@ def test_multiple_histories_union_alias_cutoff_provenance_and_determinism(tmp_pa
 
 
 def test_changed_cutoff_or_window_changes_consumed_history_and_digest(tmp_path):
-    target = _event("2024-06-20")
-    first, second = _event("2023-01-02"), _event("2023-02-02")
+    target = history_event("2024-06-20")
+    first, second = history_event("2023-01-02"), history_event("2023-02-02")
     conn, repository, snapshot = _commit(tmp_path, [target, first, second], [
-        _move(first, -2), _move(second, 8, available_as_of_date=DECISION)])
+        outcome_move(first, -2), outcome_move(second, 8, available_as_of_date=DECISION)])
     try:
         full = _read(repository, snapshot, target)
         earlier = load_event_history(repository, snapshot, event_id=target["event_id"],
@@ -140,14 +141,14 @@ def test_changed_cutoff_or_window_changes_consumed_history_and_digest(tmp_path):
 
 @pytest.mark.parametrize("kind", ["random", "rolling", "alias", "unknown"])
 def test_explicit_protected_target_refuses_before_outcome_access(tmp_path, monkeypatch, kind):
-    target = _event("2024-12-03" if kind == "rolling" else "2024-06-20", protected=kind == "random")
-    prior = _event("2023-01-02")
+    target = history_event("2024-12-03" if kind == "rolling" else "2024-06-20", protected=kind == "random")
+    prior = history_event("2023-01-02")
     events = [prior, target]
     if kind == "alias":
         events.append({**target, "event_id": "conflicting-sibling", "session": "BMO"})
-    conn, repository, snapshot = _commit(tmp_path, events, [_move(prior), _move(target)])
+    conn, repository, snapshot = _commit(tmp_path, events, [outcome_move(prior), outcome_move(target)])
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         if kind == "unknown":
             target = {**target, "event_id": "missing"}
         with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
@@ -159,16 +160,16 @@ def test_explicit_protected_target_refuses_before_outcome_access(tmp_path, monke
 
 @pytest.mark.parametrize("kind", ["mixed", "missing", "noncanonical_key"])
 def test_every_fragment_is_preflighted_before_even_an_earlier_safe_scan(tmp_path, monkeypatch, kind):
-    first, second, protected, target = (_event("2023-01-02"), _event("2023-03-02"),
-        _event("2023-04-03", protected=True), _event("2024-06-20"))
-    moves = [_move(first)]
+    first, second, protected, target = (history_event("2023-01-02"), history_event("2023-03-02"),
+        history_event("2023-04-03", protected=True), history_event("2024-06-20"))
+    moves = [outcome_move(first)]
     if kind != "missing":
-        moves.append(_move(second, event_date="2023-03-02T13:00:00" if kind == "noncanonical_key" else "2023-03-02"))
-    moves.append(_move(protected))
+        moves.append(outcome_move(second, event_date="2023-03-02T13:00:00" if kind == "noncanonical_key" else "2023-03-02"))
+    moves.append(outcome_move(protected))
     conn, repository, snapshot = _commit(tmp_path, [first, second, protected, target], moves,
         mixed_days=("2023-03-02", "2023-04-03") if kind == "mixed" else ())
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
             _read(repository, snapshot, target)
         assert all(name == "earnings_events" for name, _ in repository.scans)
@@ -178,12 +179,12 @@ def test_every_fragment_is_preflighted_before_even_an_earlier_safe_scan(tmp_path
 
 @pytest.mark.parametrize("kind", ["no_prior", "protected_only", "skipped", "null_availability", "delayed"])
 def test_empty_or_unavailable_history_is_truthful_not_zero_imputed(tmp_path, kind):
-    target, prior = _event("2024-06-20"), _event("2023-01-02", protected=kind == "protected_only")
+    target, prior = history_event("2024-06-20"), history_event("2023-01-02", protected=kind == "protected_only")
     mutation = {"skipped": dict(skipped=True, available_as_of_date=None),
                 "null_availability": dict(available_as_of_date=None),
                 "delayed": dict(available_as_of_date="2024-06-21")}.get(kind, {})
     events = [target] if kind == "no_prior" else [target, prior]
-    moves = [] if kind == "no_prior" else [_move(prior, None, **mutation)]
+    moves = [] if kind == "no_prior" else [outcome_move(prior, None, **mutation)]
     conn, repository, snapshot = _commit(tmp_path, events, moves)
     try:
         result = _read(repository, snapshot, target)
@@ -198,8 +199,8 @@ def test_empty_or_unavailable_history_is_truthful_not_zero_imputed(tmp_path, kin
 
 @pytest.mark.parametrize("availability", ["bad", "20230104", "2023-01-02", "2023-01-01", "2023-01-04T00:00:00Z"])
 def test_malformed_availability_refuses_without_a_partial_result(tmp_path, availability):
-    target, prior = _event("2024-06-20"), _event("2023-01-02")
-    conn, repository, snapshot = _commit(tmp_path, [target, prior], [_move(prior, available_as_of_date=availability)])
+    target, prior = history_event("2024-06-20"), history_event("2023-01-02")
+    conn, repository, snapshot = _commit(tmp_path, [target, prior], [outcome_move(prior, available_as_of_date=availability)])
     try:
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             _read(repository, snapshot, target)
@@ -208,8 +209,8 @@ def test_malformed_availability_refuses_without_a_partial_result(tmp_path, avail
 
 
 def test_unusable_available_numeric_target_refuses(tmp_path):
-    target, prior = _event("2024-06-20"), _event("2023-01-02")
-    conn, repository, snapshot = _commit(tmp_path, [target, prior], [_move(prior, None)])
+    target, prior = history_event("2024-06-20"), history_event("2023-01-02")
+    conn, repository, snapshot = _commit(tmp_path, [target, prior], [outcome_move(prior, None)])
     try:
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             _read(repository, snapshot, target)
@@ -226,10 +227,10 @@ def test_unusable_available_numeric_target_refuses(tmp_path):
     ({"history_start": None}, "CONTRACT_MISMATCH"),
 ])
 def test_invalid_context_refuses_before_outcome_access(tmp_path, monkeypatch, changes, code):
-    target, prior = _event("2024-06-20"), _event("2023-01-02")
-    conn, repository, snapshot = _commit(tmp_path, [target, prior], [_move(prior)])
+    target, prior = history_event("2024-06-20"), history_event("2023-01-02")
+    conn, repository, snapshot = _commit(tmp_path, [target, prior], [outcome_move(prior)])
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         args = dict(event_id=target["event_id"], as_of_month=MONTH,
                     history_start=START, decision_session=DECISION)
         with pytest.raises(DataError, match=code):
@@ -240,8 +241,8 @@ def test_invalid_context_refuses_before_outcome_access(tmp_path, monkeypatch, ch
 
 
 def test_exact_snapshot_is_required_and_late_failure_is_not_retried(tmp_path, monkeypatch):
-    first, second, target = _event("2023-01-02"), _event("2023-02-02"), _event("2024-06-20")
-    conn, repository, snapshot = _commit(tmp_path, [first, second, target], [_move(first), _move(second)])
+    first, second, target = history_event("2023-01-02"), history_event("2023-02-02"), history_event("2024-06-20")
+    conn, repository, snapshot = _commit(tmp_path, [first, second, target], [outcome_move(first), outcome_move(second)])
     try:
         with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
             _read(repository, replace(snapshot, calendar_version="uncommitted"), target)
@@ -266,8 +267,8 @@ def test_exact_snapshot_is_required_and_late_failure_is_not_retried(tmp_path, mo
 
 @pytest.mark.parametrize("reader", ["history", "prediction"])
 def test_history_reuses_preflight_bound_and_prediction_keeps_lookup(tmp_path, monkeypatch, reader):
-    first, second, target = _event("2023-01-02"), _event("2023-02-02"), _event("2024-06-20")
-    conn, repository, snapshot = _commit(tmp_path, [first, second, target], [_move(first), _move(second)])
+    first, second, target = history_event("2023-01-02"), history_event("2023-02-02"), history_event("2024-06-20")
+    conn, repository, snapshot = _commit(tmp_path, [first, second, target], [outcome_move(first), outcome_move(second)])
     bounds, metadata = [], []
     original_bound, original_records = repository.scan_population_bound, repository.fragment_records
 
@@ -299,8 +300,8 @@ def test_history_reuses_preflight_bound_and_prediction_keeps_lookup(tmp_path, mo
 
 @pytest.mark.parametrize("bound", [0, 1, 3])
 def test_supplied_target_bound_preserves_query_limits_without_lookup(tmp_path, monkeypatch, bound):
-    target = _event("2024-06-20")
-    conn, repository, snapshot = _commit(tmp_path, [target], [_move(target)])
+    target = history_event("2024-06-20")
+    conn, repository, snapshot = _commit(tmp_path, [target], [outcome_move(target)])
 
     def forbidden_lookup(*args, **kwargs):
         pytest.fail("supplied population bound must not trigger another lookup")
