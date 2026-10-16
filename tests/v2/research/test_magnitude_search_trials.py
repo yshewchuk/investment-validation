@@ -328,7 +328,7 @@ def test_native_history_binding_drift_refuses_exactly_before_readmission(case, m
 
 def test_corrupt_any_link_blocks_freeze(case):
     _all(case)
-    for slot_prefix in ("start", "inputs", "cohort", "forecasts", "terminal"):
+    for slot_prefix in ("start", "inputs", "cohort", "forecasts", "validation", "terminal"):
         slot, document = next(item for item in _slots(case) if item[0].startswith(slot_prefix + ":"))
         ref = from_document(ArtifactRef, json.loads(document))
         path = case.source.store.root / ref.storage_key

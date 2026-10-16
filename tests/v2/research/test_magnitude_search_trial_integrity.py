@@ -134,7 +134,9 @@ def forge_complete(journal, mutation=None, *, validation_override=None):
         elif mutation == "metrics":
             terminal["metrics"]["rmse"] = 42
         elif mutation == "stored_forecast_shape":
-            submitted[0]["predicted_absolute_move_pct"] = -1
+            submitted = rows(-1)
+            terminal["predictions"] = [{**row, "absolute_move_pct": 4.0} for row in submitted]
+            terminal["metrics"] = magnitude_metrics(terminal["predictions"])
         elif mutation == "stored_target_mismatch":
             submitted = rows(1e308)
             terminal["predictions"] = [{**row, "absolute_move_pct": -1e308} for row in submitted]
@@ -176,6 +178,45 @@ def test_valid_hash_inconsistent_evidence_chain_refuses(journal, mutation):
         journal.recorder.freeze()
     assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs").problem
     assert journal.recorder._read("selection") is None
+
+
+@pytest.mark.parametrize("mutation", [None, "stored_forecast_shape"], ids=["valid", "self-consistent-negative"])
+def test_self_consistent_stored_forecasts_require_valid_values(journal, monkeypatch, mutation):
+    forge_complete(journal, mutation)
+    key = content_hash(["plan", "2024", "2023", "z-last"])
+    cohort = content_hash(["plan", "2024", "2023"])
+    submitted = journal.recorder._read("forecasts:" + key)
+    terminal = journal.recorder._read("terminal:" + key)
+    assert submitted == rows(-1 if mutation else 7)
+    assert terminal["predictions"] == [{**row, "absolute_move_pct": 4.0} for row in submitted]
+    assert terminal["metrics"] == magnitude_metrics(terminal["predictions"])
+    assert journal.recorder._read("cohort:" + cohort) == native_inputs()
+    assert journal.recorder._read("validation:" + cohort) == validation_evidence()
+    monkeypatch.setattr(journal.recorder, "_inputs", lambda *a: pytest.fail("native inputs reopened"))
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("labels reopened"))
+    before = durable_evidence(journal)
+    if mutation:
+        # A valid public resubmission reaches the immutable-terminal guard; negative
+        # resubmissions are rejected earlier by ordinary forecast admission.
+        for operation, message in (
+            (journal.recorder.freeze, "search trial evidence chain differs"),
+            (lambda: journal.recorder.record("2024", "2023", "z-last", forecasts=rows()),
+             "terminal trial cannot accept another submission"),
+        ):
+            with pytest.raises(OpsError) as caught:
+                operation()
+            assert type(caught.value) is OpsError
+            assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
+            assert journal.recorder._read("selection") is None
+            assert durable_evidence(journal) == before
+    else:
+        assert journal.recorder.record("2024", "2023", "z-last", forecasts=rows()) == terminal
+        assert durable_evidence(journal) == before
+        frozen = journal.recorder.freeze()
+        assert frozen["prospective_candidate_id"] == "a-first"
+        before = durable_evidence(journal)
+        assert journal.recorder.freeze() == frozen
+        assert durable_evidence(journal) == before
 
 
 def test_equal_metrics_choose_lowest_id_even_when_candidates_are_reversed(journal):
