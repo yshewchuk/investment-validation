@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from engine.v2.contracts import FAILURE_CODES, ArtifactRef
+from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import (
     ArtifactError,
     ArtifactStore,
@@ -20,6 +20,7 @@ from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.migrations import migrate
 from experiments import magnitude_search_records as records
+from experiments.magnitude_search_errors import SearchArtifactError, artifact_failure
 
 RUN = "run-search"
 SLOT = "start:trial"
@@ -59,10 +60,12 @@ def _publish(journal, payload):
 def _problem(code, message):
     with pytest.raises(OpsError) as caught:
         yield
+    category, retryable = {"RESOURCE_LIMIT_EXCEEDED": ("resource", False),
+        "RESOURCE_UNAVAILABLE": ("resource", True), "EXPERIMENT_IDENTITY_CONFLICT": ("validation", False)}[code]
     assert to_document(caught.value.problem) == {
         "code": code,
-        "category": FAILURE_CODES[code][0],
-        "retryable": FAILURE_CODES[code][1],
+        "category": category,
+        "retryable": retryable,
         "message": message,
         "stage": None,
         "trace_id": None,
@@ -76,6 +79,53 @@ def _problem(code, message):
 
 def test_journal_default_limit_is_sixteen_mebibytes():
     assert records.MAX_BYTES == 16 * 1024 * 1024
+
+
+@pytest.mark.parametrize("artifact_code, unsafe_is_conflict, code, category, retryable, message", [
+    ("MISSING", False, "RESOURCE_UNAVAILABLE", "resource", True,
+     "caller resource failure"),
+    ("MISSING", True, "RESOURCE_UNAVAILABLE", "resource", True,
+     "caller resource failure"),
+    ("IO_ERROR", False, "RESOURCE_UNAVAILABLE", "resource", True,
+     "caller resource failure"),
+    ("IO_ERROR", True, "RESOURCE_UNAVAILABLE", "resource", True,
+     "caller resource failure"),
+    ("INTEGRITY_FAILED", False, "EXPERIMENT_IDENTITY_CONFLICT", "validation", False,
+     "caller integrity failure"),
+    ("INTEGRITY_FAILED", True, "EXPERIMENT_IDENTITY_CONFLICT", "validation", False,
+     "caller integrity failure"),
+    ("UNSAFE_PATH", False, "RESOURCE_UNAVAILABLE", "resource", True,
+     "caller resource failure"),
+    ("UNSAFE_PATH", True, "EXPERIMENT_IDENTITY_CONFLICT", "validation", False,
+     "caller integrity failure"),
+])
+def test_artifact_failure_policy_has_exact_sanitized_problem(
+    artifact_code, unsafe_is_conflict, code, category, retryable, message,
+):
+    error = ArtifactError(artifact_code, "/private/credential: token=secret")
+    failure = artifact_failure(
+        error,
+        integrity_message="caller integrity failure",
+        resource_message="caller resource failure",
+        unsafe_is_conflict=unsafe_is_conflict,
+    )
+
+    assert type(failure) is SearchArtifactError
+    assert isinstance(failure, OpsError)
+    assert str(failure) == f"{code}: {message}"
+    assert to_document(failure.problem) == {
+        "code": code,
+        "category": category,
+        "retryable": retryable,
+        "message": message,
+        "stage": None,
+        "trace_id": None,
+        "dependency_refs": [],
+        "retry_after_seconds": None,
+        "diagnostic_ref": None,
+        "details": {},
+        "schema_version": "problem.v1.0",
+    }
 
 
 @pytest.mark.parametrize("size", [255, 256, 257])

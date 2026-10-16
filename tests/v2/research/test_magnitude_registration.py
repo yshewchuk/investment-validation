@@ -1,7 +1,6 @@
 """Native magnitude preregistration over real synthetic metadata, never outcomes."""
 import inspect
 import json
-from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -27,6 +26,7 @@ from tests.v2.research.test_native_registration import _catalog, _objects, _spec
 
 PlanRepository = support.PlanRepository
 _forbid = support.forbid_access
+_refuses = support.refuses
 
 
 @pytest.fixture
@@ -60,15 +60,6 @@ def _call(source, *, admit=False, spec=None, **changes):
            "magnitude_training_start": "2023-12-10", **changes})
 
 
-@contextmanager
-def _refuses(error_type, code):
-    """Assert the exact documented nonretryable envelope, never exception text."""
-    with pytest.raises(error_type) as caught:
-        yield
-    assert caught.value.code == code
-    assert caught.value.problem.retryable is False
-
-
 @pytest.mark.parametrize("factory,code,other", [
     (ops_fail, "INVALID_EXPERIMENT_SPEC", "EXPERIMENT_IDENTITY_CONFLICT"),
     (data_fail, "CONTRACT_MISMATCH", "OBJECT_CORRUPT"),
@@ -83,7 +74,7 @@ def test_refusal_oracle_rejects_wrong_code_or_retryability(factory, code, other,
     if wrong_field == "retryability":
         error = type(error)(replace(error.problem, retryable=True))
     with pytest.raises(AssertionError):
-        with _refuses(type(error), code):
+        with support.refuses(type(error), code):
             raise error
 
 
@@ -128,7 +119,7 @@ def test_full_plan_is_sealed_and_idempotently_admitted(source, monkeypatch):
     assert source.repository.pins == ["shadow"]
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
+    monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
     source.conn.execute("PRAGMA query_only=ON")
     assert _call(source, event_ids=list(reversed(document["event_ids"]))) == registered
     assert _call(source, admit=True) == registered
@@ -137,7 +128,7 @@ def test_full_plan_is_sealed_and_idempotently_admitted(source, monkeypatch):
     assert _catalog(source.conn) == before and _objects(source.store) == objects
     document["magnitude_request"]["evaluation_years"].clear()
     assert registered.document["magnitude_request"]["evaluation_years"] == ["2024"]
-    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
+    with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         native.prepare_final_holdout_request(source.conn, source.store, registered)
 
 
@@ -168,8 +159,8 @@ def test_bad_declarations_refuse_before_any_repository_access(source, monkeypatc
         changes["final_read"] = _declaration()
     spec = replace(source.spec, **changes.pop("spec_changes", {}))
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "resolve_pinned", _forbid)
-    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
+    monkeypatch.setattr(source.repository, "resolve_pinned", support.forbid_access)
+    with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         _call(source, spec=spec, admit=admit, **changes)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -206,16 +197,16 @@ def test_identity_drift_refuses_before_metadata_scan(source, monkeypatch, change
     else:
         kwargs["expected"] = replace(registered, binding_json=b"{}")
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True, **kwargs)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
 
 def test_missing_reservation_refuses_before_metadata_scan(source, monkeypatch):
     """Admission never substitutes fresh registration for a missing reservation."""
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         _call(source, admit=True)
 
 
@@ -223,8 +214,8 @@ def test_missing_reservation_refuses_before_metadata_scan(source, monkeypatch):
 def test_adding_magnitude_mode_to_an_old_registration_refuses_before_scan(source, monkeypatch, declared):
     """An old immutable reservation cannot acquire a new research plan implicitly."""
     _call(source, magnitude_training_start=None, final_read=_declaration() if declared else None)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
 
 
@@ -239,7 +230,7 @@ def test_late_calendar_failure_never_publishes_or_retries(source, monkeypatch):
         yield from original(query, table_name=table_name)
     monkeypatch.setattr(source.repository, "scan", scan)
     before, objects = _catalog(source.conn), _objects(source.store)
-    with _refuses(DataError, "OBJECT_CORRUPT"):
+    with support.refuses(DataError, "OBJECT_CORRUPT"):
         _call(source)
     assert calls.count("daily_market") == 1 and "earnings_events" in calls
     assert _catalog(source.conn) == before and _objects(source.store) == objects
@@ -255,7 +246,7 @@ def test_protected_or_outside_explicit_population_refuses_before_calendar(source
         yield from original(query, table_name=table_name)
     monkeypatch.setattr(source.repository, "scan", scan)
     before, objects = _catalog(source.conn), _objects(source.store)
-    with _refuses(DataError, code):
+    with support.refuses(DataError, code):
         _call(source, event_ids=[source.events[index]["event_id"]])
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -343,10 +334,10 @@ def test_rehashed_malformed_or_cross_context_plans_refuse_without_reads(source, 
     plan["plan_id"] = "changed" if kind == "plan-hash" else content_hash({k: v for k, v in plan.items() if k != "plan_id"})
     forged = _rewrite(source, registered, doc)
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -362,7 +353,7 @@ def test_stored_integrity_does_not_replace_fresh_semantic_admission(source):
     native.verify_native_registration(source.conn, source.store, forged)
     source.repository.scans.clear()
     before, objects = _catalog(source.conn), _objects(source.store)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
     assert _catalog(source.conn) == before and _objects(source.store) == objects
@@ -430,10 +421,10 @@ def test_rehashed_nested_wire_schema_refuses_before_metadata_scan(source, monkey
     plan["plan_id"] = content_hash({key: item for key, item in plan.items() if key != "plan_id"})
     forged = _rewrite(source, registered, doc)
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -477,7 +468,7 @@ def test_public_window_is_detached_and_rejects_invalid_requests(invalid_years, i
     result = magnitude_window(years, "2023-12-10")
     years.append("2025")
     assert result == {"training_start": "2023-12-10", "evaluation_years": ["2024"]}
-    with _refuses(DataError, "CONTRACT_MISMATCH"):
+    with support.refuses(DataError, "CONTRACT_MISMATCH"):
         magnitude_window(invalid_years, invalid_start)
 
 
@@ -521,10 +512,10 @@ def test_rehashed_membership_permutations_refuse_before_scans(source, monkeypatc
     plan["plan_id"] = content_hash({key: value for key, value in plan.items() if key != "plan_id"})
     forged = _rewrite(source, registered, doc)
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -543,10 +534,10 @@ def _assert_forged_refusal(source, registered, doc, monkeypatch, *, spec=None):
     _rehash_clocks_and_plan(doc)
     forged = _rewrite(source, registered, doc)
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, admit=True, spec=spec)
     assert _catalog(source.conn) == before and _objects(source.store) == objects
 
@@ -642,7 +633,7 @@ def test_no_caller_supplied_plan_parameter(source, monkeypatch, admit):
     assert "magnitude_plan" not in parameters
     assert all(parameter.kind != inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "resolve_pinned", _forbid)
+    monkeypatch.setattr(source.repository, "resolve_pinned", support.forbid_access)
     with pytest.raises(TypeError):
         _call(source, admit=admit, magnitude_plan=registered.document["magnitude_plan"])
     assert _catalog(source.conn) == before and _objects(source.store) == objects
@@ -651,7 +642,7 @@ def test_no_caller_supplied_plan_parameter(source, monkeypatch, admit):
 def test_prediction_cli_rejects_magnitude_clock_for_default_target(monkeypatch, capsys):
     """Magnitude clocks cannot silently change the default target before store access."""
     from experiments import v2_prediction as cli
-    monkeypatch.setattr(cli.foundation, "ArtifactStore", _forbid)
+    monkeypatch.setattr(cli.foundation, "ArtifactStore", support.forbid_access)
     with pytest.raises(SystemExit) as caught:
         cli.main(["register", "--spec", "unused", "--catalog", "unused", "--store-root", "unused",
                   "--as-of-month", "2026-01", "--magnitude-training-start", "2023-12-10"])
@@ -668,7 +659,7 @@ def test_registration_effects_are_only_its_binding_and_reservation(source, monke
     for module, name in ((experiment_folds, "fit_walk_forward_fold"), (prediction_report, "fit_walk_forward_fold"),
             (panel_math, "history_features"), (event_history, "history_features"),
             (event_history, "load_event_history"), (magnitude_features, "load_event_history")):
-        monkeypatch.setattr(module, name, _forbid)
+        monkeypatch.setattr(module, name, support.forbid_access)
     before, objects = _catalog(source.conn), _objects(source.store)
     registered = _call(source)
     after, published = _catalog(source.conn), _objects(source.store)
@@ -706,8 +697,8 @@ def test_changed_register_request_cannot_overwrite_its_reservation(source, monke
         "month": {"as_of_month": "2026-02"},
         "events": {"event_ids": [event["event_id"] for event in source.events[:2]]}}[change]
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         _call(source, **changes)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
     assert _catalog(source.conn) == before and _objects(source.store) == objects
@@ -717,8 +708,8 @@ def test_changed_register_request_cannot_overwrite_its_reservation(source, monke
 def test_empty_evaluation_or_training_fold_never_publishes(source, monkeypatch, years, start):
     """Propagate the planner's exact nonretryable refusal without reserving a partial run."""
     before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
-    with _refuses(DataError, "POPULATION_COLLAPSED"):
+    monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
+    with support.refuses(DataError, "POPULATION_COLLAPSED"):
         _call(source, spec=replace(source.spec, folds=years), magnitude_training_start=start)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
     assert _catalog(source.conn) == before and _objects(source.store) == objects
@@ -765,9 +756,9 @@ def test_magnitude_outcome_paths_refuse_before_result_access(source, monkeypatch
         assert payload == refusal and schema_ref == ref.schema_ref
         return publish(payload, schema_ref=schema_ref)
     monkeypatch.setattr(source.store, "publish_bytes", private_only)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     for name in ("_evidence", "_reconcile", "_report_path", "ledger_append"):
-        monkeypatch.setattr(outcomes, name, _forbid)
+        monkeypatch.setattr(outcomes, name, support.forbid_access)
     method = {"publish": outcomes.publish_native_outcome, "refusal": outcomes.publish_native_outcome,
               "replay": outcomes.replay_native_outcome, "export": outcomes.export_native_report}[operation]
     options = ({"report": "Synthetic result must not publish", "attempted": True} if operation == "publish"
@@ -822,7 +813,7 @@ def test_v12_reference_is_invalid_final_request_metadata_before_catalog_access(s
     request = native.prepare_final_holdout_request(source.conn, source.store, registered)
     ref = artifact_reference(registered.binding_json, "native_experiment_registration.v1.2")
     forged = replace(request, registration_ref=ref, variant_id=ref.content_hash)
-    monkeypatch.setattr(source.store, "read_verified", _forbid)
+    monkeypatch.setattr(source.store, "read_verified", support.forbid_access)
     with pytest.raises(ValueError, match="^invalid final-read artifact reference$"):
         request_from_document(to_document(forged))
     assert source.conn.execute("SELECT COUNT(*) FROM final_holdout_authorizations").fetchone()[0] == 0

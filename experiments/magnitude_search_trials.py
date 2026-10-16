@@ -19,6 +19,7 @@ from engine.v2.ops.migrations import migrate, require_current
 from engine.v2.research.magnitude_history_store import read_stored
 from engine.v2.research.magnitude_inputs import (
     load_magnitude_targets,
+    magnitude_recipe,
     preflight_magnitude_targets,
     qualify_magnitude_training_targets,
 )
@@ -50,6 +51,8 @@ class SearchTrials:
         self.registration, self.plan_ref = registration, plan_ref
         try:
             self.request = json.loads(json.dumps(request, allow_nan=False))
+            if self.request != request:
+                raise ValueError
         except (TypeError, ValueError, RecursionError):
             raise fail("INVALID_EXPERIMENT_SPEC", "search request must be canonical JSON") from None
 
@@ -184,15 +187,52 @@ class SearchTrials:
         labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
             as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=inner["evaluation_labels_before"],
             event_ids=inner["evaluation_event_ids"])
-        targets = dict(zip(labels.event_id, labels.absolute_move_pct))
-        scored = [{**row, "absolute_move_pct": float(targets[row["event_id"]])} for row in submitted]
+        validation = {"inputs_id": admitted["inputs_id"], "evaluation_inputs": dict(labels.attrs),
+                      "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
+        try:
+            self._validation(inner, admitted, self._read("cohort:" + admitted["cohort"]), validation)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search validation evidence differs") from None
+        validation = self._append("validation:" + admitted["cohort"], validation)
+        targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
+        scored = [{**row, "absolute_move_pct": targets[row["event_id"]]} for row in submitted]
         try:
             terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
-                        "evaluation_inputs": dict(labels.attrs), "predictions": scored, "metrics": magnitude_metrics(scored)}
+                        "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
+                        "predictions": scored, "metrics": magnitude_metrics(scored)}
         except OpsError as error:
             self._refused(key, error)
             raise
         return self._append("terminal:" + key, terminal)
+
+    @staticmethod
+    def _validation(inner, admitted, cohort, validation):
+        """Check a native-derived shared target authority against the admitted preflight."""
+        if (cohort is None or content_hash(cohort) != admitted["inputs_id"]
+                or set(validation) != {"inputs_id", "evaluation_inputs", "targets"}
+                or validation["inputs_id"] != admitted["inputs_id"]):
+            raise ValueError
+        preflight = cohort["preflight"]
+        events = set(inner["evaluation_event_ids"])
+        consumed = [row for row in preflight["planned_inputs"] if row["event_id"] in events]
+        ordered = [row["event_id"] for row in consumed]
+        if len(ordered) != len(events) or set(ordered) != events:
+            raise ValueError
+        recipe = magnitude_recipe()
+        receipt = {"schema_version": "research_magnitude_targets.v1",
+            **{name: preflight[name] for name in ("snapshot_id", "holdout_as_of_month", "random_membership_version",
+                "rolling_membership_version", "population_use", "purpose", "computed_moves_version")},
+            "labels_before": inner["evaluation_labels_before"], "target_recipe": recipe,
+            "target_recipe_id": content_hash(recipe), "consumed_inputs": consumed, "excluded_future_events": []}
+        if validation["evaluation_inputs"] != {**receipt, "inputs_id": content_hash(receipt), "holdout_exclusions": []}:
+            raise ValueError
+        if [row["event_id"] for row in validation["targets"]] != ordered:
+            raise ValueError
+        for row in validation["targets"]:
+            value = row["absolute_move_pct"]
+            if (set(row) != {"event_id", "absolute_move_pct"} or isinstance(value, bool)
+                    or not isinstance(value, Real) or value < 0 or not math.isfinite(value)):
+                raise ValueError
 
     def _terminal(self, plan, outer_year, inner_year, candidate_id):
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
@@ -216,10 +256,18 @@ class SearchTrials:
                     submitted = self._forecasts(submitted, inner, plan["horizons"])
                 except OpsError:
                     raise ValueError from None
+                validation = self._read("validation:" + admitted["cohort"])
+                self._validation(inner, admitted, cohort, validation)
             if record["status"] == "succeeded":
                 forecasts = [{name: row[name] for name in ("event_id", "horizon_sessions", "predicted_absolute_move_pct")}
                              for row in record["predictions"]]
-                if record["inputs_id"] != admitted["inputs_id"] or forecasts != submitted:
+                if (submitted is None or record["inputs_id"] != admitted["inputs_id"] or forecasts != submitted
+                        or record["validation_id"] != content_hash(validation)
+                        or record["evaluation_inputs"] != validation["evaluation_inputs"]):
+                    raise ValueError
+                targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
+                expected_rows = [{**row, "absolute_move_pct": targets[row["event_id"]]} for row in submitted]
+                if canonical_json(record["predictions"]) != canonical_json(expected_rows):
                     raise ValueError
                 try:
                     metrics = magnitude_metrics(record["predictions"])
@@ -238,7 +286,7 @@ class SearchTrials:
                         or not _candidate_failure(normalized)
                         or (record["status"] == "failed") != (submitted is None)):
                     raise ValueError
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs") from None
         return key, record
 

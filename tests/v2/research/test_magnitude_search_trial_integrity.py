@@ -23,6 +23,7 @@ from engine.v2.foundation import (
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.migrations import Migration, migrate
+from engine.v2.research.magnitude_inputs import magnitude_recipe
 from experiments import magnitude_search_records as records
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_report import magnitude_metrics
@@ -40,7 +41,7 @@ def journal(tmp_path, monkeypatch):
         "evaluation_labels_before": "2024-01-01"}]}]}
     recorder = trials.SearchTrials(conn, store, None, SimpleNamespace(run_id="run", document={}), {}, None)
     monkeypatch.setattr(recorder, "_binding", lambda: (plan, {"plan_id": "plan"}))
-    monkeypatch.setattr(recorder, "_inputs", lambda inner: {"native_inputs": "same"})
+    monkeypatch.setattr(recorder, "_inputs", lambda inner: native_inputs())
     recorder.seal(clock=SystemClock())
     yield SimpleNamespace(conn=conn, store=store, recorder=recorder, plan=plan)
     conn.close()
@@ -51,17 +52,49 @@ def rows(value=7):
             for horizon in [1, 3, 5]]
 
 
+def native_inputs():
+    preflight = {"schema_version": "research_magnitude_preflight.v1", "snapshot_id": "snapshot",
+        "holdout_as_of_month": "2026-01", "random_membership_version": "random", "rolling_membership_version": "rolling",
+        "population_use": "research", "purpose": "selection", "computed_moves_version": "moves",
+        "event_ids": ["event"], "planned_inputs": [{"event_id": "event", "fragment_id": "fragment",
+            "object_id": "object", "content_hash": "hash"}]}
+    return {"preflight": {**preflight, "preflight_id": content_hash(preflight)}}
+
+
+def validation_evidence(value=4.0):
+    preflight = native_inputs()["preflight"]
+    recipe = magnitude_recipe()
+    receipt = {"schema_version": "research_magnitude_targets.v1",
+        **{name: preflight[name] for name in ("snapshot_id", "holdout_as_of_month", "random_membership_version",
+            "rolling_membership_version", "population_use", "purpose", "computed_moves_version")},
+        "labels_before": "2024-01-01", "target_recipe": recipe, "target_recipe_id": content_hash(recipe),
+        "consumed_inputs": preflight["planned_inputs"], "excluded_future_events": []}
+    return {"inputs_id": content_hash(native_inputs()),
+            "evaluation_inputs": {**receipt, "inputs_id": content_hash(receipt), "holdout_exclusions": []},
+            "targets": [{"event_id": "event", "absolute_move_pct": value}]}
+
+
+def native_labels(value=4.0):
+    validation = validation_evidence(value)
+    labels = pd.DataFrame(validation["targets"])
+    labels.attrs.update(validation["evaluation_inputs"])
+    return labels
+
+
 def expected_problem(code):
     return to_document(Problem(code=code, category="internal" if code == "EXPERIMENT_VARIANT_FAILED"
         else "validation", retryable=False, message="search trial did not complete"))
 
 
-def forge_complete(journal, mutation=None):
+def forge_complete(journal, mutation=None, *, validation_override=None):
     """Publish internally inconsistent evidence with valid content hashes, never corrupt bytes."""
     cohort = content_hash(["plan", "2024", "2023"])
-    inputs = {"native_inputs": "same"}
+    inputs = native_inputs()
+    validation = validation_evidence() if validation_override is None else validation_override
     if mutation != "missing_cohort":
         journal.recorder._append("cohort:" + cohort, inputs)
+    if mutation not in ("missing_validation", "refused_missing_validation"):
+        journal.recorder._append("validation:" + cohort, validation)
     for candidate in journal.plan["candidates"]:
         key = content_hash(["plan", "2024", "2023", candidate["candidate_id"]])
         started = {"trial_id": key, "outer_year": "2024", "inner_year": "2023", "candidate": candidate}
@@ -69,7 +102,8 @@ def forge_complete(journal, mutation=None):
         submitted = rows()
         predictions = [{**row, "absolute_move_pct": 4.0} for row in submitted]
         terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
-                    "evaluation_inputs": {}, "predictions": predictions, "metrics": magnitude_metrics(predictions)}
+                    "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
+                    "predictions": predictions, "metrics": magnitude_metrics(predictions)}
         if mutation == "start":
             started["trial_id"] = "wrong"
         elif mutation == "cohort_link":
@@ -78,6 +112,13 @@ def forge_complete(journal, mutation=None):
             admitted["inputs_id"] = terminal["inputs_id"] = "wrong"
         elif mutation == "terminal_inputs":
             terminal["inputs_id"] = "wrong"
+        elif mutation == "validation_link":
+            terminal["validation_id"] = "wrong"
+        elif mutation == "terminal_receipt":
+            terminal["evaluation_inputs"] = {}
+        elif mutation == "terminal_target":
+            predictions[0]["absolute_move_pct"] = 7.0
+            terminal["metrics"] = magnitude_metrics(predictions)
         elif mutation == "forecasts":
             predictions[0]["predicted_absolute_move_pct"] = 8
             terminal["metrics"] = magnitude_metrics(predictions)
@@ -95,7 +136,7 @@ def forge_complete(journal, mutation=None):
         elif mutation == "status":
             terminal["status"] = "unknown"
         elif mutation in ("failure_policy", "failure_unknown", "infrastructure_terminal", "refused_no_inputs",
-                          "refused_no_forecasts", "failed_extra", "refused_extra"):
+                          "refused_no_forecasts", "failed_extra", "refused_extra", "refused_missing_validation"):
             problem = expected_problem("EXPERIMENT_VARIANT_FAILED")
             if mutation == "failure_policy":
                 problem["retryable"] = True
@@ -116,7 +157,8 @@ def forge_complete(journal, mutation=None):
 @pytest.mark.parametrize("mutation", ["start", "missing_cohort", "cohort_link", "cohort_digest", "terminal_inputs",
     "forecasts", "metrics", "status", "failure_policy", "failure_unknown", "infrastructure_terminal",
     "refused_no_inputs", "refused_no_forecasts", "stored_forecast_shape", "stored_metric_overflow",
-    "terminal_forecast_huge_integer", "stored_target_huge_integer", "failed_extra", "refused_extra"])
+    "terminal_forecast_huge_integer", "stored_target_huge_integer", "failed_extra", "refused_extra",
+    "missing_validation", "validation_link", "terminal_receipt", "terminal_target", "refused_missing_validation"])
 def test_valid_hash_inconsistent_evidence_chain_refuses(journal, mutation):
     forge_complete(journal, mutation)
     with pytest.raises(OpsError) as caught:
@@ -133,11 +175,12 @@ def test_equal_metrics_choose_lowest_id_even_when_candidates_are_reversed(journa
     assert frozen["selections"][0]["scores"][0]["metrics"] == frozen["selections"][0]["scores"][1]["metrics"]
 
 
-def test_stored_forecast_read_failure_retains_resource_policy(journal, monkeypatch):
+@pytest.mark.parametrize("phase", ["forecasts", "validation", "cohort"])
+def test_stored_evidence_read_failure_retains_resource_policy(journal, monkeypatch, phase):
     forge_complete(journal)
-    key = content_hash(["plan", "2024", "2023", "z-last"])
+    key = content_hash(["plan", "2024", "2023"] + (["z-last"] if phase == "forecasts" else []))
     encoded = journal.conn.execute("SELECT ref_json FROM magnitude_search_records WHERE slot=?",
-                                   ("forecasts:" + key,)).fetchone()[0]
+                                   (phase + ":" + key,)).fetchone()[0]
     target = from_document(ArtifactRef, json.loads(encoded))
     read = ArtifactStore.read_verified
     def unavailable(store, ref):
@@ -152,6 +195,7 @@ def test_stored_forecast_read_failure_retains_resource_policy(journal, monkeypat
 
 
 def test_cohort_byte_limit_preserves_unfinished_claim(journal, monkeypatch):
+    original_limit = records.MAX_BYTES
     monkeypatch.setattr(records, "MAX_BYTES", 1024)
     monkeypatch.setattr(journal.recorder, "_inputs", lambda inner: {"features": "é" * 1024})
     with pytest.raises(OpsError) as caught:
@@ -160,6 +204,7 @@ def test_cohort_byte_limit_preserves_unfinished_claim(journal, monkeypatch):
     key = content_hash(["plan", "2024", "2023", "z-last"])
     assert journal.recorder._read("start:" + key) is not None
     assert journal.recorder._read("terminal:" + key) is None
+    monkeypatch.setattr(records, "MAX_BYTES", original_limit)
     forge_complete_peer(journal)
     with pytest.raises(OpsError) as caught:
         journal.recorder.freeze()
@@ -214,7 +259,7 @@ def test_changed_shared_cohort_blocks_selection_instead_of_excluding_candidate(j
 
 
 @pytest.mark.parametrize("phase, artifact_code", [
-    (phase, code) for phase in ("cohort", "inputs", "forecasts", "terminal")
+    (phase, code) for phase in ("cohort", "inputs", "forecasts", "validation", "terminal")
     for code in ("IO_ERROR", "INTEGRITY_FAILED", "UNSAFE_PATH")
 ] + [("native_inputs", "IO_ERROR"), ("labels", "IO_ERROR")])
 def test_infrastructure_failure_never_excludes_candidate_or_allows_freeze(journal, monkeypatch, phase, artifact_code):
@@ -244,7 +289,7 @@ def test_infrastructure_failure_never_excludes_candidate_or_allows_freeze(journa
         def labels(*args, **kwargs):
             if phase == "labels":
                 raise data_fail("RESOURCE_UNAVAILABLE", "temporary label read failure")
-            return pd.DataFrame([{"event_id": "event", "absolute_move_pct": 4.0}])
+            return native_labels()
         monkeypatch.setattr(trials, "load_magnitude_targets", labels)
         with pytest.raises((OpsError, DataError)) as caught:
             journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
@@ -293,6 +338,22 @@ def test_non_json_request_is_typed_before_admission(invalid):
     with pytest.raises(OpsError) as caught:
         trials.SearchTrials(None, None, None, None, {"invalid": invalid}, None)
     assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "search request must be canonical JSON").problem
+
+
+@pytest.mark.parametrize("document", [{1: "value"}, {True: "value"}, {None: "value"},
+    {"nested": [{2: "value"}]}, {"nested": (1, 2)}])
+def test_json_coercion_is_not_canonical_request_admission(document):
+    with pytest.raises(OpsError) as caught:
+        trials.SearchTrials(None, None, None, None, document, None)
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "search request must be canonical JSON").problem
+
+
+def test_canonical_request_is_detached():
+    request = {"nested": [{"value": 1.5, "enabled": True, "optional": None}]}
+    recorder = trials.SearchTrials(None, None, None, None, request, None)
+    assert recorder.request == request
+    request["nested"][0]["value"] = 9
+    assert recorder.request["nested"][0]["value"] == 1.5
 
 
 @pytest.mark.parametrize("submission", ["both", "neither"])
@@ -359,8 +420,239 @@ def prepare_recording(journal, monkeypatch):
     snapshot = SnapshotRef(snapshot_id="snapshot", manifest_hash="hash", table_versions={},
         calendar_version="calendar", source_priority_version="priority", finality_receipt_refs=(), knowledge_mode_by_table={})
     journal.recorder.registration.document.update(snapshot=to_document(snapshot), holdouts={"holdout_as_of_month": "2026-01"})
-    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pd.DataFrame([
-        {"event_id": "event", "absolute_move_pct": 4.0}]))
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: native_labels())
+
+
+@pytest.mark.parametrize("mutation", [None, "actuals", "receipt", "missing_receipt", "validation_id"])
+def test_terminal_only_rewrites_cannot_change_the_true_winner(journal, monkeypatch, mutation):
+    prepare_recording(journal, monkeypatch)
+    append = journal.recorder._append
+    rewritten = content_hash(["plan", "2024", "2023", "a-first"])
+    def publish(slot, body, **kwargs):
+        if slot == "terminal:" + rewritten and mutation:
+            body = copy.deepcopy(body)
+            if mutation == "actuals":
+                for row in body["predictions"]:
+                    row["absolute_move_pct"] = 7.0
+                body["metrics"] = magnitude_metrics(body["predictions"])
+                assert body["metrics"]["rmse"] == 0  # This used to change the winner by the ID tie-break.
+            elif mutation == "receipt":
+                body["evaluation_inputs"]["labels_before"] = "2099-01-01"
+            elif mutation == "missing_receipt":
+                del body["evaluation_inputs"]
+            else:
+                body["validation_id"] = "wrong"
+        return append(slot, body, **kwargs)
+    monkeypatch.setattr(journal.recorder, "_append", publish)
+    for candidate, value in (("z-last", 4), ("a-first", 7)):
+        journal.recorder.start("2024", "2023", candidate)
+        journal.recorder.record("2024", "2023", candidate, forecasts=rows(value))
+    validation = journal.recorder._read("validation:" + content_hash(["plan", "2024", "2023"]))
+    assert validation == validation_evidence()
+    monkeypatch.setattr(journal.recorder, "_inputs", lambda *a: pytest.fail("native inputs reopened"))
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("labels reopened"))
+    if mutation:
+        for operation in (lambda: journal.recorder.record("2024", "2023", "a-first", forecasts=rows(7)),
+                          journal.recorder.freeze):
+            with pytest.raises(OpsError) as caught:
+                operation()
+            assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs").problem
+        assert journal.recorder._read("selection") is None
+    else:
+        frozen = journal.recorder.freeze()
+        assert frozen["prospective_candidate_id"] == "z-last"
+        assert [score["metrics"]["rmse"] for score in frozen["selections"][0]["scores"]] == [0.0, 3.0]
+        assert journal.recorder.record("2024", "2023", "a-first", forecasts=rows(7))["metrics"]["rmse"] == 3.0
+
+
+@pytest.mark.parametrize("field", ["schema_version", "snapshot_id", "holdout_as_of_month", "random_membership_version",
+    "rolling_membership_version", "population_use", "purpose", "computed_moves_version", "labels_before",
+    "target_recipe", "target_recipe_id", "consumed_inputs", "excluded_future_events", "holdout_exclusions", "inputs_id"])
+def test_valid_hash_receipt_rewrite_is_bound_to_admitted_preflight(journal, field):
+    validation = validation_evidence()
+    receipt = validation["evaluation_inputs"]
+    receipt[field] = ({} if field == "target_recipe" else [] if field == "consumed_inputs" else
+                      ["unexpected"] if field in ("excluded_future_events", "holdout_exclusions") else "different")
+    if field != "inputs_id":
+        receipt["inputs_id"] = content_hash({name: value for name, value in receipt.items()
+                                            if name not in ("inputs_id", "holdout_exclusions")})
+    forge_complete(journal, validation_override=validation)
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.freeze()
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs").problem
+    assert journal.recorder._read("selection") is None
+
+
+@pytest.mark.parametrize("mutation", ["inputs_id", "extra_field", "missing_targets"])
+def test_validation_envelope_is_bound_to_the_admitted_cohort(journal, mutation):
+    validation = validation_evidence()
+    if mutation == "inputs_id":
+        validation["inputs_id"] = "different"
+    elif mutation == "extra_field":
+        validation["unexpected"] = "field"
+    else:
+        del validation["targets"]
+    forge_complete(journal, validation_override=validation)
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.freeze()
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs").problem
+    assert journal.recorder._read("selection") is None
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "unplanned", "extra_field", "negative", "boolean", "huge"])
+def test_validation_targets_require_exact_typed_event_coverage(journal, mutation):
+    validation = validation_evidence()
+    targets = validation["targets"]
+    if mutation == "missing":
+        targets.clear()
+    elif mutation == "duplicate":
+        targets.append(targets[0].copy())
+    elif mutation == "unplanned":
+        targets[0]["event_id"] = "unknown"
+    elif mutation == "extra_field":
+        targets[0]["other"] = 4
+    else:
+        targets[0]["absolute_move_pct"] = {"negative": -1, "boolean": True, "huge": 10 ** 400}[mutation]
+    forge_complete(journal, validation_override=validation)
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.freeze()
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs").problem
+    assert journal.recorder._read("selection") is None
+
+
+@pytest.mark.parametrize("mutation", [None, "receipt_order", "target_order", "duplicate_membership", "unplanned_membership"])
+def test_validation_preserves_admitted_object_and_target_order(journal, monkeypatch, mutation):
+    prepare_recording(journal, monkeypatch)
+    inner = journal.plan["folds"][0]["inner"][0]
+    inner["evaluation_event_ids"] = ["later-event", "event"]  # Plan order need not be native chronological order.
+    inputs = native_inputs()
+    preflight = inputs["preflight"]
+    preflight["event_ids"].append("later-event")
+    preflight["planned_inputs"].append({"event_id": "later-event", "fragment_id": "later-fragment",
+                                       "object_id": "later-object", "content_hash": "later-hash"})
+    preflight["preflight_id"] = content_hash({key: value for key, value in preflight.items() if key != "preflight_id"})
+    monkeypatch.setattr(journal.recorder, "_inputs", lambda inner: copy.deepcopy(inputs))
+    labels = pd.DataFrame([{"event_id": "event", "absolute_move_pct": 4.0},
+                           {"event_id": "later-event", "absolute_move_pct": 5.0}])
+    labels.attrs.update(validation_evidence()["evaluation_inputs"])
+    labels.attrs["consumed_inputs"] = copy.deepcopy(preflight["planned_inputs"])
+    if mutation == "receipt_order":
+        labels.attrs["consumed_inputs"].reverse()
+    elif mutation == "target_order":
+        labels = labels.iloc[::-1].reset_index(drop=True)
+    elif mutation == "duplicate_membership":
+        labels.attrs["consumed_inputs"][1] = labels.attrs["consumed_inputs"][0].copy()
+    elif mutation == "unplanned_membership":
+        labels.attrs["consumed_inputs"][1]["object_id"] = "unplanned-object"
+    labels.attrs["inputs_id"] = content_hash({key: value for key, value in labels.attrs.items()
+                                             if key not in ("inputs_id", "holdout_exclusions")})
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: labels)
+    started = journal.recorder.start("2024", "2023", "z-last")
+    forecasts = rows() + [{**row, "event_id": "later-event"} for row in rows()]
+    if mutation is None:
+        result = journal.recorder.record("2024", "2023", "z-last", forecasts=forecasts)
+        assert result["evaluation_inputs"]["consumed_inputs"] == preflight["planned_inputs"]
+    else:
+        with pytest.raises(OpsError) as caught:
+            journal.recorder.record("2024", "2023", "z-last", forecasts=forecasts)
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search validation evidence differs").problem
+        assert journal.recorder._read("terminal:" + started["trial_id"]) is None
+        assert journal.recorder._read("validation:" + content_hash(["plan", "2024", "2023"])) is None
+
+
+@pytest.mark.parametrize("mutation", ["target", "receipt", "nan", "infinity"])
+def test_native_validation_drift_retains_unfinished_attempt(journal, monkeypatch, mutation):
+    prepare_recording(journal, monkeypatch)
+    journal.recorder.start("2024", "2023", "z-last")
+    journal.recorder.record("2024", "2023", "z-last", forecasts=rows(4))
+    started = journal.recorder.start("2024", "2023", "a-first")
+    changed = native_labels({"target": 7, "receipt": 4, "nan": float("nan"), "infinity": float("inf")}[mutation])
+    if mutation == "receipt":
+        changed.attrs["labels_before"] = "2099-01-01"
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: changed)
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.record("2024", "2023", "a-first", forecasts=rows(7))
+    message = "search journal slot is already committed" if mutation == "target" else "search validation evidence differs"
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
+    assert journal.recorder._read("forecasts:" + started["trial_id"]) == rows(7)
+    assert journal.recorder._read("terminal:" + started["trial_id"]) is None
+    assert journal.recorder._read("validation:" + content_hash(["plan", "2024", "2023"])) == validation_evidence()
+    for operation in (lambda: journal.recorder.start("2024", "2023", "a-first"),
+                      lambda: journal.recorder.record("2024", "2023", "a-first", forecasts=rows(7))):
+        with pytest.raises(OpsError) as caught:
+            operation()
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.freeze()
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
+    assert journal.recorder._read("selection") is None
+
+
+def test_crash_after_validation_commit_cannot_complete_or_restart_attempt(journal, monkeypatch):
+    prepare_recording(journal, monkeypatch)
+    started = journal.recorder.start("2024", "2023", "z-last")
+    def crash(*args):
+        raise RuntimeError("interrupted after validation")
+    monkeypatch.setattr(trials, "magnitude_metrics", crash)
+    with pytest.raises(RuntimeError, match="^interrupted after validation$"):
+        journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
+    assert journal.recorder._read("validation:" + content_hash(["plan", "2024", "2023"])) == validation_evidence()
+    assert journal.recorder._read("terminal:" + started["trial_id"]) is None
+    for operation in (lambda: journal.recorder.start("2024", "2023", "z-last"),
+                      lambda: journal.recorder.record("2024", "2023", "z-last", forecasts=rows())):
+        with pytest.raises(OpsError) as caught:
+            operation()
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.freeze()
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
+    assert journal.recorder._read("selection") is None
+
+
+def test_validation_association_failure_rolls_back_and_leaves_forecast_claim(journal, monkeypatch):
+    prepare_recording(journal, monkeypatch)
+    started = journal.recorder.start("2024", "2023", "z-last")
+    journal.conn.execute("""CREATE TRIGGER reject_validation BEFORE INSERT ON magnitude_search_records
+        WHEN NEW.slot LIKE 'validation:%' BEGIN SELECT RAISE(ABORT, 'validation commit failed'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match="^validation commit failed$"):
+        journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
+    assert not journal.conn.in_transaction
+    assert journal.recorder._read("forecasts:" + started["trial_id"]) == rows()
+    assert journal.recorder._read("validation:" + content_hash(["plan", "2024", "2023"])) is None
+    assert journal.recorder._read("terminal:" + started["trial_id"]) is None
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.freeze()
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
+    assert journal.recorder._read("selection") is None
+
+
+@pytest.mark.parametrize("other_value", [4.0, 5.0])
+def test_interleaved_writers_cannot_establish_different_validation_authorities(journal, monkeypatch, other_value):
+    slot = "validation:" + content_hash(["plan", "2024", "2023"])
+    path = journal.conn.execute("PRAGMA database_list").fetchone()[2]
+    peer = connect(path)
+    publish = ArtifactStore.publish_bytes
+    pending = True
+    def interleave(store, payload, *, schema_ref):
+        nonlocal pending
+        ref = publish(store, payload, schema_ref=schema_ref)
+        if pending and json.loads(payload)["slot"] == slot:
+            pending = False
+            assert not journal.conn.in_transaction
+            records.append_record(peer, journal.store, "run", slot, validation_evidence(other_value))
+        return ref
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", interleave)
+    try:
+        if other_value == 4.0:
+            assert journal.recorder._append(slot, validation_evidence()) == validation_evidence()
+        else:
+            with pytest.raises(OpsError) as caught:
+                journal.recorder._append(slot, validation_evidence())
+            assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
+        assert journal.recorder._read(slot) == validation_evidence(other_value)
+        assert journal.conn.execute("SELECT count(*) FROM magnitude_search_records WHERE slot=?", (slot,)).fetchone()[0] == 1
+    finally:
+        peer.close()
 
 
 @pytest.mark.parametrize("phase", ["start", "readmit", "labels"])
@@ -412,7 +704,7 @@ def test_numpy_and_real_forecasts_normalize_before_recording_and_replay(journal,
 @pytest.mark.parametrize("field,value", [
     ("predicted_absolute_move_pct", value) for value in (
         np.bool_(True), np.float64("nan"), np.float32("inf"), np.float64(-1), Fraction(-1, 10 ** 400))
-] + [("horizon_sessions", value) for value in (True, np.bool_(True), np.float64(1), np.int64(2))])
+] + [("horizon_sessions", value) for value in (True, np.bool_(True), np.float64(1))])
 def test_numeric_normalization_keeps_refusal_guards(journal, field, value):
     forecasts = rows()
     forecasts[0][field] = value

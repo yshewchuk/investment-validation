@@ -4,12 +4,14 @@ Keep fixture construction independent of test modules so import order and pytest
 collection do not define the available helpers.
 """
 import json
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from engine.v2.data import objects
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
@@ -74,6 +76,15 @@ class PlanRepository(TrackingRepository):
 def forbid_access(*args, **kwargs):
     """Fail if a pre-admission refusal touches metadata or an effect boundary."""
     raise AssertionError("forbidden access")
+
+
+@contextmanager
+def refuses(error_type, code):
+    """Assert the exact documented nonretryable envelope, never exception text."""
+    with pytest.raises(error_type) as caught:
+        yield
+    assert caught.value.code == code
+    assert caught.value.problem.retryable is False
 
 
 def history_event(day, *, protected=False, ticker="SYNTH", **overrides):

@@ -27,7 +27,6 @@ from tests.v2.research import magnitude_trial_support as support
 from tests.v2.research.test_event_history import _event, _poison
 from tests.v2.research.test_magnitude_baseline import _evidence, _result_from_report
 from tests.v2.research.test_magnitude_history_store import _build
-from tests.v2.research.test_magnitude_registration import _forbid, _refuses
 from tests.v2.research.test_native_outcomes import _clock, _document, _rows
 from tests.v2.research.test_native_registration import _catalog, _objects
 from tests.v2.research.test_prediction_inputs import _move
@@ -81,8 +80,8 @@ def _metadata_only(monkeypatch):
         yield from original(repository, query, table_name=table_name)
 
     monkeypatch.setattr(Repository, "scan", scan)
-    monkeypatch.setattr(model, "prediction_result", _forbid)
-    monkeypatch.setattr(model, "render_prediction_report", _forbid)
+    monkeypatch.setattr(model, "prediction_result", support.forbid_access)
+    monkeypatch.setattr(model, "render_prediction_report", support.forbid_access)
     _no_rebuild(monkeypatch)
 
 
@@ -197,8 +196,8 @@ def test_direct_reporter_preflights_later_label_before_feature_or_label_payloads
         before = _catalog(source.conn), _objects(source.store)
         _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
         for name in ("read_stored", "qualify_magnitude_training_targets", "load_magnitude_targets"):
-            monkeypatch.setattr(model, name, _forbid)
-        with _refuses(DataError, "HOLDOUT_ACCESS_DENIED"):
+            monkeypatch.setattr(model, name, support.forbid_access)
+        with support.refuses(DataError, "HOLDOUT_ACCESS_DENIED"):
             model.prediction_result(source.repository, source.registration)
         assert (_catalog(source.conn), _objects(source.store)) == before
         # Without run-wide label preflight, the forbidden feature read is reached.
@@ -461,10 +460,10 @@ def test_history_binding_is_exact_metadata_only_and_registers_one_attempt(tmp_pa
 ])
 def test_request_drift_refuses_before_metadata_or_feature_payload(source, monkeypatch, changes):
     before = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    monkeypatch.setattr(stored, "read_stored", _forbid)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    monkeypatch.setattr(stored, "read_stored", support.forbid_access)
     for operation in (native.require_native_registration, inputs.admit_magnitude_inputs):
-        with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
             operation(source.conn, source.store, source.repository, source.spec,
                       **{**_binding(source), **changes})
     assert (_catalog(source.conn), _objects(source.store)) == before
@@ -487,9 +486,9 @@ def test_absent_or_colliding_original_receipt_refuses_without_payloads(tmp_path,
                 store=source.store, audit_partitions=False)
         before = _catalog(source.conn), _objects(source.store)
         _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
-        monkeypatch.setattr(source.repository, "scan", _forbid)
+        monkeypatch.setattr(source.repository, "scan", support.forbid_access)
         for operation in (admit_stored, stored.read_stored):
-            with _refuses(DataError, "IDENTITY_CONFLICT"):
+            with support.refuses(DataError, "IDENTITY_CONFLICT"):
                 operation(source.repository, source.snapshot, context)
         assert (_catalog(source.conn), _objects(source.store)) == before
     finally:
@@ -525,9 +524,9 @@ def test_real_native_feature_contract_and_fragment_isolation_precede_payloads(tm
         monkeypatch.setattr(objects, "verify_object_path", verify)
         _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
         for operation in (admit_stored, stored.read_stored):
-            with _refuses(DataError, code):
+            with support.refuses(DataError, code):
                 operation(source.repository, source.feature_snapshot, source.build["context"])
-        with _refuses(OpsError if kind == "old-contract" else DataError,
+        with support.refuses(OpsError if kind == "old-contract" else DataError,
                       "EXPERIMENT_IDENTITY_CONFLICT" if kind == "old-contract" else code):
             _register(source)
         assert (_catalog(source.conn), _objects(source.store)) == before
@@ -601,8 +600,8 @@ def test_closed_schema_or_cross_context_binding_refuses_before_payload(source, m
             context["history_start"] = "2022-02-01"
         context["context_id"] = content_hash({key: value for key, value in context.items() if key != "context_id"})
     invalid = native.NativeRegistration(source.registration.run_id, canonical_json(document).encode())
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.prediction_result(source.repository, invalid)
 
 
@@ -614,8 +613,8 @@ def test_changed_execution_source_refuses_before_metadata_or_feature_payload(sou
 
     before = _catalog(source.conn), _objects(source.store)
     monkeypatch.setattr(native, "source_closure", changed)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         inputs.admit_magnitude_inputs(source.conn, source.store, source.repository, source.spec, **_binding(source))
     assert (_catalog(source.conn), _objects(source.store)) == before
 
@@ -624,11 +623,11 @@ def test_changed_producer_environment_refuses_without_feature_or_label_payload(s
     environment = {**source.build["context"]["producer"]["environment"], "numerical_threads": 2}
     monkeypatch.setattr(history, "environment_identity", lambda _: environment)
     _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
-    monkeypatch.setattr(model, "read_stored", _forbid)
+    monkeypatch.setattr(model, "read_stored", support.forbid_access)
     before = _catalog(source.conn), _objects(source.store)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.prediction_result(source.repository, source.registration)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         inputs.admit_magnitude_inputs(source.conn, source.store, source.repository, source.spec, **_binding(source))
     assert (_catalog(source.conn), _objects(source.store)) == before
 
@@ -653,9 +652,9 @@ def test_direct_reporter_rederives_self_rehashed_calendar_context_before_payload
     invalid = native.NativeRegistration(source.registration.run_id, canonical_json(document).encode())
     before = _catalog(source.conn), _objects(source.store)
     _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
-    monkeypatch.setattr(model, "read_stored", _forbid)
-    monkeypatch.setattr(stored, "_scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    monkeypatch.setattr(model, "read_stored", support.forbid_access)
+    monkeypatch.setattr(stored, "_scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.prediction_result(source.repository, invalid)
     assert (_catalog(source.conn), _objects(source.store)) == before
 
@@ -668,7 +667,7 @@ def test_fake_runner_closure_cannot_publish_invalid_first_registration(tmp_path,
         (code / "experiments" / "v2_prediction.py").write_text("pass\n")
         before = _catalog(source.conn), _objects(source.store)
         _metadata_only(monkeypatch)
-        with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
             native.register_native(source.conn, source.store, source.repository, source.spec,
                                    **{**_binding(source), "code_root": code})
         assert (_catalog(source.conn), _objects(source.store)) == before
@@ -679,8 +678,8 @@ def test_fake_runner_closure_cannot_publish_invalid_first_registration(tmp_path,
 
 def test_history_registration_cannot_prepare_final_holdout_authority(source, monkeypatch):
     before = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         native.prepare_final_holdout_request(source.conn, source.store, source.registration)
     assert source.conn.execute("SELECT COUNT(*) FROM final_holdout_authorizations").fetchone()[0] == 0
     assert (_catalog(source.conn), _objects(source.store)) == before
@@ -700,7 +699,7 @@ def test_renderer_refuses_identity_and_digest_drift(source, field):
         assert result["run_id"] == source.registration.run_id
         assert result["provenance"] == source.registration.document
         assert result["result_id"] == content_hash({key: value for key, value in result.items() if key != "result_id"})
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.render_prediction_report(source.registration, result, spec=source.spec, no_ledger=True)
 
 
@@ -716,7 +715,7 @@ def test_report_is_deterministic_and_binds_stored_snapshot_clocks_and_limits(sou
             assert text in report
         assert ("no-ledger smoke; not recorded" if no_ledger else "recorded evaluation") in report
         assert json.loads(report.split("```json\n", 1)[1].split("\n```", 1)[0]) == result
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.render_prediction_report(source.registration, result,
             spec=replace(source.spec, hypothesis="Another hypothesis"), no_ledger=True)
     assert (_catalog(source.conn), _objects(source.store)) == before
@@ -737,7 +736,7 @@ def test_bad_later_label_or_empty_training_refuses_without_partial_result(tmp_pa
     try:
         before = _catalog(source.conn), _objects(source.store)
         _no_rebuild(monkeypatch)
-        with _refuses(DataError, "POPULATION_COLLAPSED" if kind == "empty-training" else "EXPERIMENT_VARIANT_FAILED"):
+        with support.refuses(DataError, "POPULATION_COLLAPSED" if kind == "empty-training" else "EXPERIMENT_VARIANT_FAILED"):
             model.prediction_result(source.repository, source.registration)
         assert (_catalog(source.conn), _objects(source.store)) == before
         assert not list(tmp_path.rglob("REPORT.md")) and not list(tmp_path.rglob("*.csv"))
@@ -765,7 +764,7 @@ def test_native_build_cli_register_smoke_record_and_replay_without_rebuilding(tm
         with monkeypatch.context() as patch:
             for name in ("resolve", "open", "stat", "lstat", "mkdir", "touch"):
                 patch.setattr(Path, name, protect(getattr(Path, name)))
-            patch.setattr(outcomes, "ledger_append", _forbid)
+            patch.setattr(outcomes, "ledger_append", support.forbid_access)
             smoke = _invoke(source, capsys, "run", "--no-ledger", "--ledger", poison)
         result = _result_from_report(smoke["report"])
         assert result["metrics"] == pytest.approx(_metrics(_expected(source).values()))
@@ -823,7 +822,7 @@ def test_cli_history_drift_is_r6_before_attempt_and_never_uses_smoke_or_ledger_s
     assert changed_feature != source.feature_snapshot
     before_catalog, before_objects = _catalog(source.conn), _objects(source.store)
     _metadata_only(monkeypatch)
-    monkeypatch.setattr(outcomes, "ledger_append", _forbid)
+    monkeypatch.setattr(outcomes, "ledger_append", support.forbid_access)
     ledger = source.root / "must-not-exist" / "ledger.csv"
     response = _invoke(source, capsys, "run", "--no-ledger", "--ledger", ledger,
                        "--magnitude-history-start", "2022-02-01", "--magnitude-feature-snapshot-id",
@@ -847,9 +846,9 @@ def test_cli_history_drift_is_r6_before_attempt_and_never_uses_smoke_or_ledger_s
 ])
 @pytest.mark.parametrize("action", ["register", "run"])
 def test_invalid_model_options_refuse_before_store_or_spec(monkeypatch, capsys, action, extra):
-    monkeypatch.setattr(cli.foundation, "ArtifactStore", _forbid)
-    monkeypatch.setattr(cli, "connect", _forbid)
-    monkeypatch.setattr(Path, "read_text", _forbid)
+    monkeypatch.setattr(cli.foundation, "ArtifactStore", support.forbid_access)
+    monkeypatch.setattr(cli, "connect", support.forbid_access)
+    monkeypatch.setattr(Path, "read_text", support.forbid_access)
     with pytest.raises(SystemExit) as caught:
         cli.main([action, "--spec", "unused", "--catalog", "unused", "--store-root", "unused",
                   "--as-of-month", MONTH, "--no-ledger", *extra])
@@ -865,9 +864,9 @@ def test_invalid_model_options_refuse_before_store_or_spec(monkeypatch, capsys, 
     ("--magnitude-history-start", HISTORY),
 ])
 def test_history_cli_half_pair_refuses_at_exact_parser_guard(monkeypatch, capsys, action, kind, option, value):
-    monkeypatch.setattr(cli.foundation, "ArtifactStore", _forbid)
-    monkeypatch.setattr(cli, "connect", _forbid)
-    monkeypatch.setattr(Path, "read_text", _forbid)
+    monkeypatch.setattr(cli.foundation, "ArtifactStore", support.forbid_access)
+    monkeypatch.setattr(cli, "connect", support.forbid_access)
+    monkeypatch.setattr(Path, "read_text", support.forbid_access)
     with pytest.raises(SystemExit) as caught:
         cli.main([action, "--spec", "unused", "--catalog", "unused", "--store-root", "unused",
             "--as-of-month", MONTH, "--no-ledger", "--target", "absolute_move",
@@ -900,18 +899,18 @@ def _assert_history_problem(error, code, message):
 
 
 def _forbid_native_history_effects(monkeypatch, source):
-    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
-    monkeypatch.setattr(native, "transaction", _forbid)
-    monkeypatch.setattr(native, "register_hypothesis_in_transaction", _forbid)
+    monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
+    monkeypatch.setattr(native, "transaction", support.forbid_access)
+    monkeypatch.setattr(native, "register_hypothesis_in_transaction", support.forbid_access)
     for name in ("publish_native_outcome", "export_native_report", "ledger_append"):
-        monkeypatch.setattr(outcomes, name, _forbid)
+        monkeypatch.setattr(outcomes, name, support.forbid_access)
 
 
 def _assert_history_request_before_access(source, monkeypatch, changes, message, *, spec=None):
     before = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(native, "source_closure", _forbid)
+    monkeypatch.setattr(native, "source_closure", support.forbid_access)
     for name in ("resolve_pinned", "resolve", "scan"):
-        monkeypatch.setattr(source.repository, name, _forbid)
+        monkeypatch.setattr(source.repository, name, support.forbid_access)
     _forbid_native_history_effects(monkeypatch, source)
     for operation in (native.register_native, native.require_native_registration):
         with pytest.raises(OpsError) as caught:
@@ -962,8 +961,8 @@ def test_history_fresh_missing_pin_translates_real_resolution_before_effects(fre
     _metadata_only(monkeypatch)
     _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
     _forbid_native_history_effects(monkeypatch, source)
-    monkeypatch.setattr(stored, "read_stored", _forbid)
-    monkeypatch.setattr(model, "read_stored", _forbid)
+    monkeypatch.setattr(stored, "read_stored", support.forbid_access)
+    monkeypatch.setattr(model, "read_stored", support.forbid_access)
     with pytest.raises(OpsError) as caught:
         native.register_native(source.conn, source.store, source.repository, source.spec,
                                **_fresh_history_arguments())
@@ -996,7 +995,7 @@ def test_history_reader_identity_translation_is_reached_after_real_admission(sou
     monkeypatch.setattr(objects, "verify_object_path", metadata_only)
     _forbid_native_history_effects(monkeypatch, source)
     for name in ("qualify_magnitude_training_targets", "load_magnitude_targets"):
-        monkeypatch.setattr(model, name, _forbid)
+        monkeypatch.setattr(model, name, support.forbid_access)
     with pytest.raises(DataError) as caught:
         stored.read_stored(source.repository, source.snapshot, source.build["context"])
     _assert_history_problem(caught.value, "IDENTITY_CONFLICT",
