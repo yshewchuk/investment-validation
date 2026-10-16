@@ -25,17 +25,33 @@ def register_artifact(conn, ref, attempt_id, clock):
                  (ref.artifact_id, dumps(ref), attempt_id, format_timestamp(clock.now())))
 
 
-def registered_artifact(conn, artifact_id):
+def registered_artifact(conn, artifact_id, *, max_metadata_bytes=None):
     """Authoritative catalog registration for ``artifact_id``.
 
     Metadata only: it decodes the stored ``ArtifactRef`` and never asks the
     store to verify bytes, so it makes no byte-integrity claim.
     """
-    row = conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?",
-                       (artifact_id,)).fetchone()
+    if max_metadata_bytes is None:
+        row = conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
+    else:
+        encoding = conn.execute("PRAGMA encoding").fetchone()[0]
+        limit = max_metadata_bytes * (2 if encoding.startswith("UTF-16") else 1)
+        row = conn.execute("SELECT CASE WHEN typeof(ref_json)='text' "
+                           "AND length(CAST(ref_json AS BLOB))<=? THEN CAST(ref_json AS BLOB) END "
+                           "FROM artifacts WHERE artifact_id=?", (limit, artifact_id)).fetchone()
     if row is None:
         raise fail("INTEGRITY_FAILED", "required artifact is missing")
-    return load_json(ArtifactRef, row[0])
+    payload = row[0]
+    if max_metadata_bytes is not None:
+        try:
+            if payload is None:
+                raise ValueError
+            payload = payload.decode(encoding)
+            if len(payload.encode("utf-8")) > max_metadata_bytes:
+                raise ValueError
+        except (ValueError, UnicodeError):
+            raise fail("INTEGRITY_FAILED", "artifact reference requires bounded text") from None
+    return load_json(ArtifactRef, payload)
 
 
 def artifact(conn, store, artifact_id):

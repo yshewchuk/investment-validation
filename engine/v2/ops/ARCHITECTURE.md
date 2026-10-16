@@ -1056,7 +1056,7 @@ a read-only comparison. It performs no consistency check against `engine.score.D
 already excludes both disabled strategies by construction, so no legacy read is needed; it is instead checked against
 `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset assertion paid once at import time, no I/O, no legacy dependency).
 
-**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
+**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process. `experiments/native_outcomes.py` also consumes `native_registration.read_native_evidence`/`native_evidence_json`; the CLI → catalog table lists the `experiments.native_sweep_collection` and `experiments.v2_gate_collect` dependencies.
 `experiments/native_registration.py` imports ops `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`,
 `experiments.NATIVE_GATE_RUNNERS`/`NATIVE_GATE_WORKER`/`NATIVE_GATE_ENTRYPOINT`, `fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`/`magnitude_execution_document`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
 That unlayered caller also imports research's `_pricing.STRUCTURES`, `experiment_population.load_population` and `magnitude_folds.magnitude_window`/`plan_magnitude_folds`; these are caller dependencies, not ops-to-research edges.
@@ -1402,18 +1402,18 @@ flowchart LR
     E --> F["effects_graph.py:<br/>real catalog/outbox/filesystem write"]
 ```
 
-`submit()`/`submit_graph()` only inserts a `queued` (or `blocked`) job
-row in one transaction; it never claims a lease or launches a worker.
-Claiming and launching happen later, in a separately running supervisor
-process (`ops serve`'s `Service.tick`, via its `claim_next` call), which
-is the only path that acquires a job's lease before calling `_launch`.
-The worker process for a `supervisor._COORDINATOR_EFFECT_KINDS` job kind
-(14 kinds — see "Outputs" above) never touches the catalog directly; all
-real state change for those kinds happens in `_coordinator_effect`,
-called from the coordinator, not the worker — `_coordinator_effect`
-dispatches to `effects_graph.py` for some kinds and to
-`decision_commit.py`/`snapshot_promotion.py`/`snapshot_stages.py`/its own
-`supervisor.py` methods for the rest (see "Outputs").
+| Condition | Outcome |
+| --- | --- |
+| `submit()`/`submit_graph()` admission | Insert a `queued` or `blocked` job row in one transaction; never claim a lease or launch a worker. |
+| Submission replay or inspection through `get_job` | Its `failure_json` SQL projection transfers at most `MAX_JOB_FAILURE_BYTES` (1 MiB, matching executor result pipes) for UTF-8 catalogs or 2 MiB for UTF-16, then rechecks 1 MiB UTF-8 before JSON decoding. Oversized/non-text/malformed stored failures refuse `INTEGRITY_FAILED` without truncation; other receipt fields and lifecycle policy are unchanged. |
+| Sweep collection consumes ops | `experiments.native_sweep_collection` consumes `catalog.transaction`, `checkpoints.registered_artifact`, `experiments.experiment_spec_from_document`, `fingerprints.source_closure`, `native_registration.read_native_evidence`/`native_evidence_json`/`MAX_NATIVE_EVIDENCE_BYTES`, `submission.get_job`/`MAX_JOB_FAILURE_BYTES` and `errors.OpsError`/`fail` to verify exact terminal attempts and coordinate native scientific publication. Its direct catalog reads are `attempts` and `attempt_outputs`, and its immutable intent/index binding updates `experiment_runs.evidence_json` inside `catalog.transaction`; artifact registration lookup remains owned by `registered_artifact`. |
+| Bounded native evidence read/write | Project one verifier/evidence snapshot with a 16 MiB UTF-8 default (32 MiB SQL bytes for UTF-16, then UTF-8 recheck); the writer enforces the same canonical object ceiling. Malformed/oversized evidence refuses R6; raw storage failures propagate. Native outcomes consume both native evidence helpers. |
+| Native registration and outcome/replay/export opt in | `max_evidence_bytes`, default None, bounds registration/outcome/completion artifact metadata before reads. |
+| Registered reference metadata opts in | `checkpoints.registered_artifact(max_metadata_bytes=None)` offers a reference-JSON cap: non-text/oversized/invalid-encoding text refuses `INTEGRITY_FAILED`; malformed JSON/contract decoders retain raw `ValueError`/`DocumentError` or `RecursionError`. Existing defaults retain their policy. |
+| CLI observes submitted jobs | `experiments.v2_gate_collect` consumes `catalog.connect`, `submission.get_job` and `errors.OpsError`/`fail`; observation grants no supervisor ownership or final-read authority. |
+| Supervisor claims and launches | A separately running supervisor (`ops serve`'s `Service.tick`, via `claim_next`) is the only path that acquires a job's lease before calling `_launch`. |
+| Worker has a `supervisor._COORDINATOR_EFFECT_KINDS` kind | These 14 kinds (see "Outputs" above) never touch the catalog from the worker process. All real state change happens in `_coordinator_effect`, called from the coordinator, not the worker. |
+| Coordinator effect dispatches | `_coordinator_effect` dispatches to `effects_graph.py` for some kinds and to `decision_commit.py`/`snapshot_promotion.py`/`snapshot_stages.py`/its own `supervisor.py` methods for the rest (see "Outputs"). |
 
 ### Forward-calendar refresh: two-source, cache-first fetch (`forward_calendar_store.py`)
 

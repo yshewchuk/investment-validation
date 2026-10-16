@@ -153,12 +153,13 @@ def register_sweep(conn, store, repository, document, *, code_root, as_of_month,
 
 
 @_typed_sweep_io
-def submit_sweep(conn, store, repository, document, *, code_root, as_of_month, scope="shadow", event_ids=None):
+def submit_sweep(conn, store, repository, document, *, code_root, as_of_month, scope="shadow", event_ids=None,
+                 max_evidence_bytes=None):
     """Verify all sealed arms before atomically submitting unrecorded child jobs."""
     sealed, specs, registrations = _prepare(conn, repository, document, code_root=code_root,
                                            as_of_month=as_of_month, scope=scope, event_ids=event_ids, required=True)
     for registration in registrations:
-        native.verify_native_registration(conn, store, registration)
+        native.verify_native_registration(conn, store, registration, max_evidence_bytes=max_evidence_bytes)
     requests, clock = [], SystemClock()
     for spec, registration in zip(specs, registrations, strict=True):
         bindings = {}
