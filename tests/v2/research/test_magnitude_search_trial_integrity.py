@@ -715,9 +715,49 @@ def test_shared_admission_refusal_never_becomes_candidate_terminal(journal, monk
         journal.recorder.freeze()
     assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
     assert journal.recorder._read("selection") is None
+    before_retry = journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall()
+    def no_read(*args, **kwargs):
+        pytest.fail("an unfinished claim must not reopen native inputs or labels")
+    monkeypatch.setattr(journal.recorder, "_inputs", no_read)
+    monkeypatch.setattr(trials, "load_magnitude_targets", no_read)
     with pytest.raises(OpsError) as caught:
         journal.recorder.start("2024", "2023", "z-last")
     assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
+    if phase != "start":
+        with pytest.raises(OpsError) as caught:
+            journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
+    assert journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall() == before_retry
+
+
+def test_preclaim_validation_refusals_do_not_consume_an_attempt_or_submission(journal, monkeypatch):
+    prepare_recording(journal, monkeypatch)
+    before_start = journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall()
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.start("2024", "2023", "unplanned")
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan").problem
+    assert journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall() == before_start
+    started = journal.recorder.start("2024", "2023", "z-last")
+    before_forecasts = journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall()
+    with monkeypatch.context() as guard:
+        guard.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("invalid forecasts read labels"))
+        with pytest.raises(OpsError) as caught:
+            journal.recorder.record("2024", "2023", "z-last", forecasts=rows(-1))
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "trial forecasts require complete finite event-horizon coverage").problem
+    assert journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall() == before_forecasts
+    assert journal.recorder._read("forecasts:" + started["trial_id"]) is None
+    result = journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
+    assert result["status"] == "succeeded"
+    assert result["metrics"] == {"count": 3, "rmse": 3.0, "mae": 3.0}
+
+
+def test_public_metrics_refuse_empty_rows_and_preserve_nonempty_arithmetic():
+    with pytest.raises(OpsError) as caught:
+        magnitude_metrics([])
+    assert type(caught.value) is OpsError
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "magnitude metrics require scored rows").problem
+    assert magnitude_metrics([{"predicted_absolute_move_pct": 7.0, "absolute_move_pct": 4.0}]) == {
+        "count": 1, "rmse": 3.0, "mae": 3.0}
 
 
 @pytest.mark.parametrize("number", [np.float32(7.25), np.float64(7.25), np.int64(7), Fraction(29, 4)])

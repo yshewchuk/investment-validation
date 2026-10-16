@@ -384,13 +384,16 @@ def test_catalog_errors_still_propagate_without_journal_mutation(journal, operat
 
     journal.conn.set_authorizer(authorize)
     try:
-        with pytest.raises(sqlite3.DatabaseError):
+        with pytest.raises(sqlite3.DatabaseError) as caught:
             if operation == "read":
                 records.read_record(journal.conn, journal.store, RUN, "seal")
             else:
                 records.append_record(journal.conn, journal.store, RUN, SLOT, _wrapper()["body"])
     finally:
         journal.conn.set_authorizer(None)
+    assert type(caught.value) is sqlite3.DatabaseError
+    assert caught.value.sqlite_errorcode == sqlite3.SQLITE_AUTH
+    assert caught.value.sqlite_errorname == "SQLITE_AUTH"
     assert _journal_state(journal) == before
     assert not journal.conn.in_transaction
 

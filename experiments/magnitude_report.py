@@ -27,6 +27,8 @@ def validate_prediction_spec(spec):
 def magnitude_metrics(predictions):
     """Equal event weights; scale before squaring to preserve finite large errors."""
     errors = [abs(row["predicted_absolute_move_pct"] - row["absolute_move_pct"]) for row in predictions]
+    if not errors:
+        raise fail("EXPERIMENT_VARIANT_FAILED", "magnitude metrics require scored rows")
     scale = max(errors)
     rmse = scale * math.sqrt(mean((error / scale) ** 2 for error in errors)) if scale else 0.0
     mae = mean(errors)
