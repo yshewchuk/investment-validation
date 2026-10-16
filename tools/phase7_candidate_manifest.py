@@ -31,7 +31,7 @@ from checks import phase7_candidate_manifest as checker  # noqa: E402
 from engine.v2.ops import stages  # noqa: E402
 from tools.phase6_inventory import discover_entrypoints  # noqa: E402
 
-MAX_REF_BYTES = 256 * 1024 * 1024
+MAX_REF_BYTES = checker.MAX_REF_BYTES
 MAX_SPEC_BYTES = 1024 * 1024
 _JOB_FIELDS = ("id", "schedule", "owner", "kind", "writes_official")
 
@@ -94,23 +94,46 @@ def _commit(spec: dict, root: Path) -> str:
     if done.returncode != 0 or done.stdout.strip() != commit:
         raise SpecError("commit: does not equal this checkout's HEAD, so the registry and "
                         "inventory would describe a different commit")
+    dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain",
+                            "--untracked-files=no"], capture_output=True, text=True,
+                           check=False, timeout=30)
+    if dirty.returncode != 0 or dirty.stdout.strip():
+        raise SpecError("commit: the checkout has uncommitted tracked changes, so the registry "
+                        "and inventory would not describe that commit")
     return commit
 
 
-def registry_jobs(owner: str, official_kinds=()) -> list[dict]:
+#: Namespaces every kind may run in without being a writer of anything official.
+_SAFE_NAMESPACES = frozenset({"shadow", "smoke"})
+
+
+def registry_jobs(owner: str, official_kinds=(), non_official_kinds=()) -> list[dict]:
     """One row per job kind in the live registry. A kind is an official writer when
     its namespaces include ``official`` or the operator lists it in
-    ``official_registry_kinds`` (the registry does not yet declare official-write
-    effects per kind)."""
+    ``official_registry_kinds``. A kind that can run in any other namespace (today
+    ``experiment`` in ``primary``) must be decided explicitly in
+    ``official_registry_kinds`` or ``non_official_registry_kinds``; an undecided
+    one is refused (fail closed)."""
     reg, rows = stages.registry(), []
     for name in reg.names():
         kind = reg.get(name)
+        if (kind.namespaces - _SAFE_NAMESPACES - {"official"}
+                and name not in official_kinds and name not in non_official_kinds):
+            raise SpecError(f"{name}: can run in {sorted(kind.namespaces - _SAFE_NAMESPACES)}; "
+                            "list it in official_registry_kinds or non_official_registry_kinds")
         official = "official" in kind.namespaces or name in official_kinds
         rows.append({"id": name, "schedule": f"native:{name}", "owner": owner,
                      "kind": ("scheduled_writer" if official
                               else "background" if kind.effects else "reader"),
                      "writes_official": official})
     return rows
+
+
+def _kind_list(spec: dict, key: str) -> set:
+    value, known = spec.get(key, []), set(stages.registry().names())
+    if not isinstance(value, list) or not all(isinstance(k, str) and k in known for k in value):
+        raise SpecError(f"{key}: must be a list of registry job kind names")
+    return set(value)
 
 
 def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
@@ -122,12 +145,8 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
     owner = spec.get("registry_owner")
     if not isinstance(owner, str) or not owner:
         raise SpecError("registry_owner: required string")
-    official = spec.get("official_registry_kinds", [])
-    known = set(stages.registry().names())
-    if not isinstance(official, list) or not all(isinstance(k, str) and k in known
-                                                 for k in official):
-        raise SpecError("official_registry_kinds: must be a list of registry job kind names")
-    jobs = registry_jobs(owner, set(official))
+    jobs = registry_jobs(owner, _kind_list(spec, "official_registry_kinds"),
+                         _kind_list(spec, "non_official_registry_kinds"))
     seen = {j["id"] for j in jobs}
     for extra in _rows("extra_jobs", spec.get("extra_jobs", [])):
         jid = extra.get("id")

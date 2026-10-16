@@ -26,6 +26,9 @@ must be exact: an empty value, or one of ``latest``/``current``/``newest``/
 ``/`` and ``:`` separators are normalized away first, so ``refs/heads/main/``
 is caught exactly like ``refs/heads/main``.
 
+Every referenced file is refused above ``MAX_REF_BYTES`` (256 MiB) with a
+``P7_REF_MALFORMED`` finding before it is read.
+
 ``candidate``: ``{"commit": "<40- or 64-hex git sha>", "config": [{"name", "path",
 "sha256"}]}`` — at least one config identity; every referenced file must
 exist, hash to its recorded ``sha256`` (64-hex) and parse.
@@ -53,7 +56,9 @@ accounted for, or an accounted job the graph does not run, both fail.
 
 ``consumer_inventory``: ``{"path", "sha256", "consumers": ["<name>", ...]}``
 — a non-empty list of name strings; a dict, list or other nonstring entry
-is a named finding. The referenced document must contain every declared
+is a named finding. Consumer names are labels (a real route may end in
+``/current``), so only a blank name is rejected; the implicit-latest rule does
+not apply to them. The referenced document must contain every declared
 consumer name (as an ``id``/``name``/``consumer`` value anywhere in it).
 
 ``authority``: ``{"old": {"schedule", "writer", "credential_owner"},

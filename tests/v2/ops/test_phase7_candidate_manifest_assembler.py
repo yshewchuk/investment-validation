@@ -34,6 +34,7 @@ def spec(tmp_path):
                          "path": _write(tmp_path / f"ev{phase}.json", doc)})
     return {
         "commit": COMMIT, "registry_owner": "native-ops",
+        "non_official_registry_kinds": ["experiment"],
         "config": [{"name": "cfg", "path": _write(tmp_path / "cfg.json", {"a": 1})}],
         "data_snapshot": {"snapshot_id": "snap-1",
                           "path": _write(tmp_path / "snap.json", {"snapshot_id": "snap-1"})},
@@ -83,7 +84,8 @@ def test_official_kinds_are_scheduled_writers(monkeypatch):
     real = stages.registry()
     base = real.get(real.names()[0])
     official = dataclasses.replace(base, name="off_ns", namespaces=frozenset({"official"}))
-    reader = dataclasses.replace(base, name="plain_reader", effects=())
+    reader = dataclasses.replace(base, name="plain_reader", effects=(),
+                                 namespaces=frozenset({"shadow"}))
     monkeypatch.setattr(stages, "registry", lambda: submission.KindRegistry([official, reader]))
     rows = {j["id"]: j for j in asm.registry_jobs("o", {"plain_reader"})}
     assert rows["off_ns"] == {"id": "off_ns", "schedule": "native:off_ns", "owner": "o",
@@ -117,6 +119,19 @@ def test_planted_unaccounted_job_fails(spec, tmp_path):
 @pytest.mark.parametrize("mutate, match", [
     (lambda s, t: s["config"][0].update(path=str(t / "nope.json")), r"config\[0\]"),
     (lambda s, t: s.pop("commit"), "required"),
+    (lambda s, t: s.update(commit=5), "required"),
+    (lambda s, t: s["extra_jobs"].append({"id": "z1", "schedule": "", "owner": "o",
+                                          "kind": "reader", "writes_official": False}),
+     r"extra_jobs\[z1\]\.schedule"),
+    (lambda s, t: s["extra_jobs"].append({"id": "z2", "schedule": "s", "owner": "o",
+                                          "writes_official": False}),
+     r"extra_jobs\[z2\]\.kind"),
+    (lambda s, t: s.update(model_deployment=[]), "model_deployment"),
+    (lambda s, t: s["config"][0].update(name=""), r"config\[0\]\.name"),
+    (lambda s, t: s["phase_evidence"][0].update(phase=""), r"phase_evidence\[0\]\.phase"),
+    (lambda s, t: s["phase_evidence"][0].update(schema_version=None),
+     r"phase_evidence\[0\]\.schema_version"),
+    (lambda s, t: s.pop("non_official_registry_kinds"), "experiment"),
     (lambda s, t: s.update(official_registry_kinds="publication"), "official_registry_kinds"),
     (lambda s, t: s.update(official_registry_kinds=["no_such_kind"]), "official_registry_kinds"),
     (lambda s, t: s.update(official_registry_kinds=None), "official_registry_kinds"),
@@ -155,6 +170,71 @@ def test_oversize_file_is_refused(spec, tmp_path, monkeypatch):
         asm.assemble(spec, _out(tmp_path))
 
 
+def test_cap_is_inclusive_and_shared_with_the_checker(tmp_path, monkeypatch):
+    path = tmp_path / "f.bin"
+    path.write_bytes(b"12345")
+    monkeypatch.setattr(asm, "MAX_REF_BYTES", 5)
+    assert asm._sha256("f", path)[1] == hashlib.sha256(b"12345").hexdigest()
+    monkeypatch.setattr(asm, "MAX_REF_BYTES", 4)
+    with pytest.raises(asm.SpecError, match="exceeds"):
+        asm._sha256("f", path)
+    assert asm.MAX_REF_BYTES != 4 and checker.MAX_REF_BYTES == 256 * 1024 * 1024
+
+
+def test_checker_refuses_oversize_reference(spec, tmp_path, monkeypatch):
+    manifest = asm.assemble(spec, _out(tmp_path))
+    monkeypatch.setattr(checker, "MAX_REF_BYTES", 4)
+    assert checker.REF_MALFORMED in checker.validate(manifest, root=tmp_path)["finding_codes"]
+
+
+def _with_consumers(manifest, tmp_path, names):
+    doc = tmp_path / "inv.json"
+    doc.write_text(json.dumps({"consumers": [{"id": n} for n in names]}))
+    manifest["consumer_inventory"] = {
+        "path": str(doc), "sha256": hashlib.sha256(doc.read_bytes()).hexdigest(),
+        "consumers": names}
+    return checker.validate(manifest, root=tmp_path)["finding_codes"]
+
+
+def test_consumer_names_are_labels_but_not_blank(spec, tmp_path):
+    manifest = asm.assemble(spec, _out(tmp_path))
+    codes = _with_consumers(manifest, tmp_path, ["GET /release/current", "latest"])
+    assert checker.LATEST_REF not in codes and checker.MISSING_FIELD not in codes
+    assert checker.MISSING_FIELD in _with_consumers(manifest, tmp_path, ["   "])
+    assert checker.MISSING_FIELD in _with_consumers(manifest, tmp_path, [""])
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo), *args],
+                   check=True, capture_output=True)
+
+
+def test_dirty_tracked_tree_is_refused(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.txt").write_text("1")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-q", "-m", "x")
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    assert asm._commit({"commit": head}, repo) == head
+    (repo / "untracked.txt").write_text("u")
+    assert asm._commit({"commit": head}, repo) == head
+    (repo / "a.txt").write_text("2")
+    with pytest.raises(asm.SpecError, match="uncommitted"):
+        asm._commit({"commit": head}, repo)
+
+
+def test_undecided_primary_kind_is_refused():
+    with pytest.raises(asm.SpecError, match="experiment"):
+        asm.registry_jobs("o")
+    rows = {j["id"]: j for j in asm.registry_jobs("o", (), ("experiment",))}
+    assert rows["experiment"]["writes_official"] is False
+    rows = {j["id"]: j for j in asm.registry_jobs("o", ("experiment",), ())}
+    assert rows["experiment"]["kind"] == "scheduled_writer"
+
+
 def test_writes_exactly_three_files_inside_out_dir(spec, tmp_path):
     before = set(tmp_path.iterdir())
     asm.assemble(spec, _out(tmp_path))
@@ -186,7 +266,7 @@ def test_main_exit_codes(spec, tmp_path):
     assert not (tmp_path / "o2").exists()
 
 
-def test_main_unusable_spec_files_exit_2(tmp_path, monkeypatch):
+def test_main_unusable_spec_files_exit_2(tmp_path):
     out = str(tmp_path / "o")
     assert asm.main(["--spec", str(tmp_path / "missing.json"), "--out-dir", out]) == 2
     bad = tmp_path / "bad.json"
@@ -194,6 +274,12 @@ def test_main_unusable_spec_files_exit_2(tmp_path, monkeypatch):
     assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
     bad.write_text("{not json")
     assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
-    monkeypatch.setattr(asm, "MAX_SPEC_BYTES", 4)
-    bad.write_text("{}" + " " * 10)
     assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
+
+
+def test_spec_over_cap_is_refused_with_its_message(spec, tmp_path, monkeypatch, capsys):
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec))
+    monkeypatch.setattr(asm, "MAX_SPEC_BYTES", 100)
+    assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o")]) == 2
+    assert "spec exceeds" in capsys.readouterr().err
