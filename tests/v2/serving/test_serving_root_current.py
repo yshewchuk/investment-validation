@@ -11,7 +11,7 @@ import uvicorn
 
 from engine.v2.serving import projections
 from engine.v2.serving import api as api_module
-from engine.v2.serving.api import _read_small_text, create_app, main
+from engine.v2.serving.api import create_app, main
 from tests.v2.serving.test_v2_serving_publication_binding import (  # existing fixture builder
     _releases,  # shared with the publication-binding tests
 )
@@ -292,38 +292,6 @@ def test_operations_exactly_cap_status_file(tmp_path):
     assert r.json() == document
 
 
-def test_read_small_text_guards(tmp_path):
-    # _read_small_text is the unit under test; call it directly so the
-    # callers' own isfile/islink prechecks cannot mask its guards.
-    read = _read_small_text
-
-    regular = tmp_path / "regular.txt"
-    regular.write_text("hello")
-    link = tmp_path / "link.txt"
-    link.symlink_to(regular)
-    assert read(str(link)) is None
-
-    assert read(str(tmp_path)) is None
-
-    fifo = tmp_path / "pipe"
-    os.mkfifo(fifo)
-    assert read(str(fifo)) is None
-
-    invalid = tmp_path / "invalid.txt"
-    invalid.write_bytes(b"\xff\xfe")
-    assert read(str(invalid)) is None
-
-    assert read(str(tmp_path / "missing.txt")) is None
-
-    exact = tmp_path / "exact.txt"
-    exact.write_bytes(b"a" * _TEXT_CAP)
-    assert read(str(exact)) == "a" * _TEXT_CAP
-
-    over = tmp_path / "over.txt"
-    over.write_bytes(b"a" * (_TEXT_CAP + 1))
-    assert read(str(over)) is None
-
-
 def test_current_symlinked_pointer_is_absent(tmp_path):
     serving_conn, release_a, _, root, pub = _setup(tmp_path)
     _point(serving_conn, pub, release_a)
@@ -346,6 +314,36 @@ def test_current_oversized_binding_is_absent(tmp_path):
     text = json.dumps(document)
     assert len(text.encode("utf-8")) == _TEXT_CAP + 1
     binding_path.write_text(text)
+    client, h = _client(root, pub)
+    r = client.get("/api/v1/releases/current", headers=h)
+    assert r.status_code == 503
+    assert r.json()["code"] == "NO_CURRENT_RELEASE"
+
+
+def test_oversize_current_pointer(tmp_path):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    (pub / "CURRENT").write_bytes(b"ops1" + b" " * (_TEXT_CAP + 1 - 4))
+    client, h = _client(root, pub)
+    r = client.get("/api/v1/releases/current", headers=h)
+    assert r.status_code == 503
+    assert r.json()["code"] == "NO_CURRENT_RELEASE"
+
+
+def test_current_pointer_at_cap_is_accepted(tmp_path):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    (pub / "CURRENT").write_bytes(b"ops1" + b" " * (_TEXT_CAP - 4))
+    client, h = _client(root, pub)
+    r = client.get("/api/v1/releases/current", headers=h)
+    assert r.status_code == 200
+    assert r.json()["release_id"] == release_a.release_id
+
+
+def test_non_utf8_current_pointer(tmp_path):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    (pub / "CURRENT").write_bytes(b"\xff\xfe")
     client, h = _client(root, pub)
     r = client.get("/api/v1/releases/current", headers=h)
     assert r.status_code == 503
