@@ -98,6 +98,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from engine.v2.foundation import (
     ArtifactError,
     ArtifactStore,
+    DocumentError,
     canonical_json,
     content_hash,
     safe_relative_path,
@@ -286,7 +287,8 @@ def _publication_resolver(release_root, serving_db):
     hash no longer matches (a tampered doc or changed index row); and
     retryable ``SERVING_INDEX_UNREADABLE`` (503) on an open-time
     ``sqlite3.Error`` from ``projections.connect`` or a post-open
-    ``sqlite3.Error``/``json.JSONDecodeError`` while reverifying; the
+    ``sqlite3.Error``/``json.JSONDecodeError``/``DocumentError`` (a stored
+    release of an older schema) while reverifying; the
     connection closes either way."""
 
 
@@ -307,7 +309,7 @@ def _publication_resolver(release_root, serving_db):
                     "live serving index", details={"ops_release_id": ops_release_id}))
             release_id = binding.get("projection_release_id")
             scope = binding.get("scope")
-        except (projections.sqlite3.Error, json.JSONDecodeError):
+        except (projections.sqlite3.Error, json.JSONDecodeError, DocumentError):
             raise _index_unreadable() from None
         finally:
             if conn is not None:
@@ -509,7 +511,11 @@ def _release_response(serving_db, release_id: str | None, response: Response, re
     conn = _open(serving_db)
     try:
         release = projections.get_release(conn, release_id)
-    except (projections.sqlite3.Error, json.JSONDecodeError):
+    except (projections.sqlite3.Error, json.JSONDecodeError, DocumentError):
+        # A stored ``preview_release.v1.0`` row lacks the required
+        # ``row_sources`` field: strict ``from_document`` refuses it with
+        # ``DocumentError`` (MISSING_FIELD), so an unrebuildable old release
+        # reads as this same typed 503 rather than an unhandled 500.
         raise _index_unreadable() from None
     finally:
         conn.close()

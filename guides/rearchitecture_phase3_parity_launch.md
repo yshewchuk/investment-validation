@@ -235,9 +235,9 @@ Use existing foundation hashing and strict decoding. Operational timestamps
 live in envelopes, outside deterministic score/projection identity.
 
 ```text
-PreviewRelease (preview_release.v1.0):
+PreviewRelease (preview_release.v1.1):
   release_id, source_release_id, projection_manifest_ref
-  snapshot_ref, score_batch_ref, bundle_manifest_ref
+  snapshot_ref, score_batch_ref, bundle_manifest_ref, row_sources
   model_registry_artifact_refs, model_evidence_ref?
   comparison_receipt_refs, source_code_hash, projection_code_hash
   requested_as_of, resolved_as_of, clock_ids

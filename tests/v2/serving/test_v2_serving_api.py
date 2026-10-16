@@ -352,6 +352,26 @@ def test_release_current_resolves_and_matches_explicit_lookup(live):
     assert json.loads(body)["release_id"] == release_a.release_id
 
 
+def test_current_release_missing_row_sources_is_a_typed_503(live):
+    """A stored ``preview_release.v1.0`` document lacking the required
+    ``row_sources`` field (an unrebuildable pre-v1.1 release) reads as the
+    same retryable ``SERVING_INDEX_UNREADABLE`` 503 as any other unreadable
+    index row -- never an unhandled 500."""
+    base, serving_root, release_a, _ = live
+    _set_current(serving_root, release_a.release_id)
+    conn = projections.connect(str(serving_root / "serving.sqlite"))
+    try:
+        conn.execute(
+            "UPDATE serving_release SET document_json = json_remove(document_json, '$.row_sources') "
+            "WHERE release_id = ?", (release_a.release_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    code, body, _ = _get(base, "/api/v1/releases/current", token=TOKEN)
+    assert code == 503
+    assert json.loads(body)["code"] == "SERVING_INDEX_UNREADABLE"
+
+
 def test_release_current_is_no_store_with_etag_304_for_the_4s_poll(live):
     """The UI polls `/api/v1/releases/current` roughly every 4s (guide §7,
     `ui/src/hooks.ts` `usePinnedRelease`'s background poll) to detect a

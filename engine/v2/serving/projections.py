@@ -406,11 +406,10 @@ def build_candidate(
     succeeds with no partial release — the O11-style fault hook this
     package's siblings already use.
     """
-    _valid_row_sources = row_sources
-    if (not _valid_row_sources or _valid_row_sources[0] != "legacy_bundle"
-            or any(src not in {"legacy_bundle", "native_shadow"} for src in _valid_row_sources)
-            or len(set(_valid_row_sources)) != len(_valid_row_sources)):
-        raise ValueError("invalid row_sources " + repr(_valid_row_sources))
+    if (not row_sources or row_sources[0] != "legacy_bundle"
+            or any(src not in {"legacy_bundle", "native_shadow"} for src in row_sources)
+            or len(set(row_sources)) != len(row_sources)):
+        raise ValueError("invalid row_sources " + repr(row_sources))
     clock = clock or SystemClock()
     ensure_schema(conn, clock=clock)
     event_refs = resolve_event_refs(repository, snapshot_ref, _pairs(score_doc, bundle_rows_by_ticker))

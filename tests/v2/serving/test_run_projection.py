@@ -2,7 +2,8 @@
 
 Covers ``tools.v2_dashboard_project.run_projection`` (the callable entry
 point the CLI wraps), ``projections.build_candidate``'s ``row_sources``
-validation/identity, and ``_plan_row_sources``'s None/legacy/native read.
+validation/identity, and the plan-driven row-source selection ``run_projection``
+records on the stored release.
 """
 from __future__ import annotations
 
@@ -34,8 +35,9 @@ from tests.test_v2_serving_projections import (  # noqa: E402
     _score_doc,
     _serving,
 )
-from tests.v2.ops.test_native_shadow_render import _NATIVE_PLAN  # noqa: E402
-from tools.v2_dashboard_project import _plan_row_sources, run_projection  # noqa: E402
+from tools.v2_dashboard_project import run_projection  # noqa: E402
+
+_NATIVE_PLAN = {"shadow_serving_scorer": "native"}
 
 
 def digest(data: bytes) -> str:
@@ -115,7 +117,6 @@ def test_run_projection_matches_main_cli_print_for_same_inputs(tmp_path, capsys)
 
     code_direct, doc_direct = run_projection(
         **_args(inputs, tmp_path / "serving_direct"))
-    printed = json.loads(capsys.readouterr().out) if False else None  # noqa: F841
     assert code_direct == 0
     assert doc_direct["ok"] is True
 
@@ -176,7 +177,8 @@ def test_build_candidate_refuses_invalid_row_sources(tmp_path):
     row = _row()
     preview = _preview_input()
 
-    for bad in ((), ("native_shadow",), ("legacy_bundle", "bogus")):
+    for bad in ((), ("native_shadow",), ("legacy_bundle", "bogus"),
+                ("legacy_bundle", "legacy_bundle")):
         with pytest.raises(ValueError, match="invalid row_sources"):
             projections.build_candidate(
                 preview, _score_doc(rows=[row]), _bundle(_compact(row)),
@@ -210,14 +212,68 @@ def test_native_plan_without_native_inputs_raises_and_writes_no_release(tmp_path
             serving_conn.close()
 
 
-# 5. _plan_row_sources: None / legacy plan / native plan
-def test_plan_row_sources_none_legacy_and_native(tmp_path):
-    assert _plan_row_sources(None) == ("legacy_bundle",)
+# 5. run_projection records the plan's row_sources on the stored release
+def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch):
+    import tools.v2_dashboard_project as tool
 
-    legacy_path = tmp_path / "legacy.json"
-    legacy_path.write_text(json.dumps({"shadow_serving_scorer": "legacy"}))
-    assert _plan_row_sources(legacy_path) == ("legacy_bundle",)
+    inputs = _flat_inputs(tmp_path / "inputs")
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(dict(_NATIVE_PLAN)))
+    native_inputs_path = tmp_path / "native_inputs.json"
+    native_inputs_path.write_text("{}")
 
-    native_path = tmp_path / "native.json"
-    native_path.write_text(json.dumps(dict(_NATIVE_PLAN)))
-    assert _plan_row_sources(native_path) == ("legacy_bundle", "native_shadow")
+    monkeypatch.setattr(tool, "_load_native_inputs", lambda path: {})
+    monkeypatch.setattr(
+        tool, "shadow_serving_row_source",
+        lambda plan, score_doc, bundle_rows_by_ticker, pairs: bundle_rows_by_ticker)
+
+    _, bundle_doc = run_projection(**_args(inputs, tmp_path / "serving_bundle"))
+    _, native_doc = run_projection(
+        **_args(inputs, tmp_path / "serving_native", nightly_plan=plan_path,
+                native_inputs=native_inputs_path))
+    assert native_doc["release_id"] != bundle_doc["release_id"]
+
+    conn = projections.connect(str(tmp_path / "serving_native" / "serving.sqlite"))
+    try:
+        release = projections.get_release(conn, native_doc["release_id"])
+    finally:
+        conn.close()
+    assert release.row_sources == ("legacy_bundle", "native_shadow")
+
+
+# 6. legacy plan -> only the legacy_bundle row source
+def test_run_projection_legacy_plan_records_legacy_bundle_only(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps({"shadow_serving_scorer": "legacy"}))
+
+    _, doc = run_projection(
+        **_args(inputs, tmp_path / "serving", nightly_plan=plan_path))
+    conn = projections.connect(str(tmp_path / "serving" / "serving.sqlite"))
+    try:
+        release = projections.get_release(conn, doc["release_id"])
+    finally:
+        conn.close()
+    assert release.row_sources == ("legacy_bundle",)
+
+
+# 7. oversized nightly plan -> INVALID_REQUEST, no release row
+def test_run_projection_oversized_nightly_plan_raises_and_writes_no_release(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_bytes(b" " * 1048577)
+    serving_root = tmp_path / "serving"
+
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root, nightly_plan=plan_path))
+    assert error.value.code == "INVALID_REQUEST"
+
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()

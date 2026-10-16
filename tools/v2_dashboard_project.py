@@ -162,18 +162,21 @@ def _load_native_inputs(path: Path) -> dict[str, tuple[ScoreRequest, NativeScore
 
 
 def _shadow_rows(args: argparse.Namespace, score_doc: dict,
-                 bundle_rows_by_ticker: dict[str, list[dict]]) -> dict[str, list[dict]]:
+                 bundle_rows_by_ticker: dict[str, list[dict]],
+                 plan: dict | None = None) -> dict[str, list[dict]]:
     """The shadow board's rows through the one G5 seam.
 
     Without ``--nightly-plan`` there is no plan record, so the rows given are
     served unchanged.  With one, ``shadow_serving_row_source`` switches on
     the plan's ``shadow_serving_scorer``; ``"native"`` needs
     ``--native-inputs`` and is refused without them, never served legacy
-    rows under a native label.
+    rows under a native label.  A caller that already parsed the plan passes
+    it as ``plan`` to avoid re-reading the file; otherwise it is read here.
     """
-    if args.nightly_plan is None:
-        return bundle_rows_by_ticker
-    plan = json.loads(args.nightly_plan.read_text())
+    if plan is None:
+        if args.nightly_plan is None:
+            return bundle_rows_by_ticker
+        plan = json.loads(args.nightly_plan.read_text())
     native = native_shadow_serving_mode(plan) == "native"
     if native and args.native_inputs is None:
         raise fail("INVALID_REQUEST", "a native shadow plan needs --native-inputs")
@@ -181,10 +184,9 @@ def _shadow_rows(args: argparse.Namespace, score_doc: dict,
     return shadow_serving_row_source(plan, score_doc, bundle_rows_by_ticker, pairs)
 
 
-def _plan_row_sources(nightly_plan: Path | None) -> tuple[str, ...]:
-    if nightly_plan is None:
+def _row_sources_for_plan(plan: dict | None) -> tuple[str, ...]:
+    if plan is None:
         return ("legacy_bundle",)
-    plan = json.loads(nightly_plan.read_text())
     if native_shadow_serving_mode(plan) == "native":
         return ("legacy_bundle", "native_shadow")
     return ("legacy_bundle",)
@@ -269,6 +271,15 @@ def run_projection(*, preview_input: Path, source_provenance: Path | None, score
     preview = from_document(PreviewInput, json.loads(preview_input.read_text()))
     score_doc = load_score_document(score_json)
 
+    plan: dict | None = None
+    native = False
+    if nightly_plan is not None:
+        plan_bytes = nightly_plan.read_bytes()
+        if len(plan_bytes) > 1048576:
+            raise fail("INVALID_REQUEST", "nightly plan exceeds 1 MiB")
+        plan = json.loads(plan_bytes)
+        native = native_shadow_serving_mode(plan) == "native"
+
     bundle_manifest_ref = preview.bundle_manifest_ref
     if bundle_format == "flat":
         bundle_rows_by_ticker = _load_flat_bundle(bundle_dir)
@@ -289,7 +300,7 @@ def run_projection(*, preview_input: Path, source_provenance: Path | None, score
 
     bundle_rows_by_ticker = _shadow_rows(
         argparse.Namespace(nightly_plan=nightly_plan, native_inputs=native_inputs),
-        score_doc, bundle_rows_by_ticker)
+        score_doc, bundle_rows_by_ticker, plan=plan)
     clock = SystemClock()
     catalog_conn = open_catalog(catalog, clock=clock)
     try:
@@ -306,7 +317,7 @@ def run_projection(*, preview_input: Path, source_provenance: Path | None, score
                 repository=repository, snapshot_ref=snapshot_ref, store=serving_store,
                 conn=serving_conn, requested_as_of=requested_as_of,
                 resolved_as_of=resolved_as_of, clock=clock,
-                row_sources=_plan_row_sources(nightly_plan))
+                row_sources=_row_sources_for_plan(plan))
             document = _result_document(result, serving_conn)
         finally:
             serving_conn.close()
