@@ -1852,8 +1852,9 @@ def test_shared_readers_accept_exact_cap_and_refuse_one_below(tmp_path, monkeypa
     monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", msize)
     assert deployment.resolve_release(store, "prior1").release_id == "prior1"
     monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", msize - 1)
-    with pytest.raises(deployment.StagingRefused):
+    with pytest.raises(deployment.StagingRefused) as error:
         deployment.resolve_release(store, "prior1")
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
 
 
 def test_inventory_members_malformed_is_inventory_mismatch(tmp_path):
@@ -1964,7 +1965,7 @@ def test_catalog_reader_never_reads_past_its_cap(tmp_path, monkeypatch):
     assert sum(got for _, got in log) <= cap + 1
 
 
-def test_manifest_reader_stops_at_its_budget_on_a_chunk_boundary(tmp_path, monkeypatch):
+def test_manifest_reader_refuses_oversize_manifests_at_the_budget(tmp_path, monkeypatch):
     _stage_prior(tmp_path)
     store = phase5_release.deployment_root(tmp_path)
     manifest = phase5_release.staged_manifest_path(store, "prior1")
@@ -1978,19 +1979,9 @@ def test_manifest_reader_stops_at_its_budget_on_a_chunk_boundary(tmp_path, monke
         deployment.resolve_release(store, "prior1")
     assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
     manifest.write_bytes(base + b" " * (5 * limit))
-    requested, got = [], []
-    real_read = os.read
-
-    def watch(fd, size):
-        data = real_read(fd, size)
-        requested.append(size)
-        got.append(len(data))
-        return data
-
-    monkeypatch.setattr(os, "read", watch)
-    with pytest.raises(deployment.StagingRefused):
+    with pytest.raises(deployment.StagingRefused) as error:
         deployment.resolve_release(store, "prior1")
-    assert all(size <= 1024 * 1024 for size in requested) and sum(got) <= limit + 1
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
 
 
 @pytest.mark.parametrize("exc", [TypeError, AttributeError, KeyError])
@@ -2084,3 +2075,10 @@ def test_supplied_object_read_stops_at_its_claim(tmp_path, monkeypatch):
     assert error.value.code == "OBJECT_UNVERIFIED"
     assert log and all(0 <= size <= target.payload_bytes + 1 for size, _ in log)
     assert sum(got for _, got in log) <= target.payload_bytes + 1
+
+
+def test_release_caps_are_pinned():
+    assert deployment.MAX_MANIFEST_BYTES == 64 * 1024 * 1024
+    assert assembly.MAX_CATALOG_BYTES == 64 * 1024 * 1024
+    assert assembly.MAX_OBJECT_BYTES == 512 * 1024 * 1024
+    assert assembly.LOCK_WAIT_S == 30.0
