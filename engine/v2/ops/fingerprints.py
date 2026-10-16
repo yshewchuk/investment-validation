@@ -203,8 +203,10 @@ def _module_files(root, name):
 
 
 #: Parsed import names by (sha256 of source text, package parts). A pure function
-#: of the text, so a hit can never go stale; the whole-repo closure is rebuilt
-#: many times per process and parsing dominated it. Bounded: cleared when full.
+#: of (text, package parts), so a hit can never go stale; the whole-repo closure
+#: is rebuilt many times per process and parsing dominated it. Bounded: cleared
+#: when full. Hand-rolled rather than functools.lru_cache so the key is a digest
+#: and the cache never retains the source text itself.
 _IMPORT_NAMES: dict[tuple[bytes, tuple[str, ...]], tuple[str, ...]] = {}
 _IMPORT_NAMES_LIMIT = 20000
 
@@ -222,10 +224,11 @@ def _import_names(source, package):
             prefix = package[:len(package) - node.level + 1] if node.level else []
             base = ".".join(prefix + ([node.module] if node.module else []))
             names.extend([base, *(base + "." + alias.name for alias in node.names)])
+    result = tuple(names)
     if len(_IMPORT_NAMES) >= _IMPORT_NAMES_LIMIT:
         _IMPORT_NAMES.clear()
-    _IMPORT_NAMES[key] = tuple(names)
-    return _IMPORT_NAMES[key]
+    _IMPORT_NAMES[key] = result
+    return result
 
 
 def _imports(root, rel, source):
