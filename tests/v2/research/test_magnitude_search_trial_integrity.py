@@ -287,21 +287,54 @@ def test_submitted_infrastructure_failure_is_not_a_candidate_terminal(journal, c
     assert journal.recorder._read("terminal:" + started["trial_id"]) is None
 
 
-def test_non_json_request_is_typed_before_admission():
+@pytest.mark.parametrize("invalid", [object(), float("nan"), float("inf"), -float("inf")],
+                         ids=["object", "nan", "infinity", "negative-infinity"])
+def test_non_json_request_is_typed_before_admission(invalid):
     with pytest.raises(OpsError) as caught:
-        trials.SearchTrials(None, None, None, None, {"invalid": object()}, None)
+        trials.SearchTrials(None, None, None, None, {"invalid": invalid}, None)
     assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "search request must be canonical JSON").problem
 
 
-def test_interrupted_start_cannot_be_relabelled_as_candidate_fit_failure(journal, monkeypatch):
+@pytest.mark.parametrize("submission", ["both", "neither"])
+@pytest.mark.parametrize("state", ["outside_plan", "missing_start", "started"])
+def test_record_argument_refusal_respects_admission_and_start_precedence(journal, monkeypatch, state, submission):
+    args = ("2024", "2023", "z-last")
+    if state == "started":
+        journal.recorder.start(*args)
+    elif state == "outside_plan":
+        args = ("2024", "2022", "z-last")
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid submission reached native reads or publication")
+    monkeypatch.setattr(journal.recorder, "_inputs", forbidden)
+    monkeypatch.setattr(journal.recorder, "_append", forbidden)
+    monkeypatch.setattr(trials, "load_magnitude_targets", forbidden)
+    kwargs = {"forecasts": rows(), "failure": fail("EXPERIMENT_VARIANT_FAILED", "fit failed").problem}
+    before = journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall()
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.record(*args, **(kwargs if submission == "both" else {}))
+    expected = {"outside_plan": ("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan"),
+        "missing_start": ("EXPERIMENT_IDENTITY_CONFLICT", "trial must be started before recording"),
+        "started": ("INVALID_EXPERIMENT_SPEC", "record exactly one forecast submission or failure")}
+    assert caught.value.problem == fail(*expected[state]).problem
+    assert journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall() == before
+
+
+@pytest.mark.parametrize("submission", ["candidate_failure", "forecasts", "malformed_forecasts", "noncandidate_failure"])
+def test_interrupted_start_preserves_content_validation_before_input_binding(journal, monkeypatch, submission):
     def interrupted(inner):
         raise RuntimeError("interrupted")
     monkeypatch.setattr(journal.recorder, "_inputs", interrupted)
     with pytest.raises(RuntimeError, match="^interrupted$"):
         journal.recorder.start("2024", "2023", "z-last")
+    kwargs = {"candidate_failure": {"failure": fail("EXPERIMENT_VARIANT_FAILED", "fit failed").problem},
+        "forecasts": {"forecasts": rows()}, "malformed_forecasts": {"forecasts": rows(-1)},
+        "noncandidate_failure": {"failure": fail("RESOURCE_UNAVAILABLE", "private failure").problem}}[submission]
     with pytest.raises(OpsError) as caught:
-        journal.recorder.record("2024", "2023", "z-last", failure=fail("EXPERIMENT_VARIANT_FAILED", "fit failed").problem)
-    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs").problem
+        journal.recorder.record("2024", "2023", "z-last", **kwargs)
+    expected = (fail("INVALID_EXPERIMENT_SPEC", "trial forecasts require complete finite event-horizon coverage")
+        if submission == "malformed_forecasts" else fail("RESOURCE_UNAVAILABLE", "search trial did not complete")
+        if submission == "noncandidate_failure" else fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs"))
+    assert caught.value.problem == expected.problem
     key = content_hash(["plan", "2024", "2023", "z-last"])
     assert journal.recorder._read("start:" + key) is not None
     assert journal.recorder._read("terminal:" + key) is None

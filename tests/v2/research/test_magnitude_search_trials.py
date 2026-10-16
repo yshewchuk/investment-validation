@@ -208,7 +208,7 @@ def test_invalid_submissions_refuse_before_any_validation_labels(case, monkeypat
     args = _cases(case)[0]
     started = case.recorder.start(*args)
     for mutation in ("missing", "duplicate", "extra", "unknown", "extra_field", "boolean_horizon",
-                     "boolean_value", "negative", "nan", "infinity", "overflow", "none"):
+                     "boolean_value", "negative", "nan", "infinity", "overflow", "none", "both"):
         rows = _forecasts(case, args)
         if mutation == "missing":
             rows.pop()
@@ -224,14 +224,15 @@ def test_invalid_submissions_refuse_before_any_validation_labels(case, monkeypat
             next(row for row in rows if row["horizon_sessions"] == 1)["horizon_sessions"] = True
         elif mutation == "none":
             rows = None
-        else:
+        elif mutation != "both":
             rows[0]["predicted_absolute_move_pct"] = {"boolean_value": True, "negative": -1,
                 "nan": float("nan"), "infinity": float("inf"), "overflow": 10 ** 1000}[mutation]
         monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("labels opened"))
-        message = ("record exactly one forecast submission or failure" if mutation == "none"
+        message = ("record exactly one forecast submission or failure" if mutation in ("none", "both")
                    else "trial forecasts require complete finite event-horizon coverage")
+        failure = fail("EXPERIMENT_VARIANT_FAILED", "fit failed").problem if mutation == "both" else None
         with _assert_error("INVALID_EXPERIMENT_SPEC", message):
-            case.recorder.record(*args, forecasts=rows)
+            case.recorder.record(*args, forecasts=rows, failure=failure)
         assert case.recorder._read("forecasts:" + started["trial_id"]) is None
         assert case.recorder._read("terminal:" + started["trial_id"]) is None
 

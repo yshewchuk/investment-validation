@@ -108,8 +108,8 @@ class SearchTrials:
             binding["magnitude_history_request"], as_of_month=month, event_ids=binding["event_ids"])
         if history != binding["magnitude_history"]:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed")
-        participants = sorted(set(inner["training_candidate_event_ids"] + inner["evaluation_event_ids"]))
-        preflight = preflight_magnitude_targets(self.repository, snapshot, as_of_month=month, event_ids=participants)
+        participants = set(inner["training_candidate_event_ids"] + inner["evaluation_event_ids"])
+        preflight = preflight_magnitude_targets(self.repository, snapshot, as_of_month=month, event_ids=sorted(participants))
         stored = read_stored(self.repository, from_document(SnapshotRef, history["feature_snapshot"]), history["context"])
         train = qualify_magnitude_training_targets(self.repository, snapshot, as_of_month=month,
             labels_before=inner["training_labels_before"], event_ids=inner["training_candidate_event_ids"])

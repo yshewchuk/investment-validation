@@ -3,7 +3,7 @@ from engine.v2.ops.errors import OpsError, fail
 
 
 class SearchArtifactError(OpsError):
-    """Storage failures cannot be misclassified as candidate-owned validation failures."""
+    """Tagged artifact failure carrying shared, sanitized identity/resource policy."""
 
 
 def artifact_failure(error, *, integrity_message, resource_message, unsafe_is_conflict=False):
