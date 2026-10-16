@@ -185,7 +185,7 @@ def test_real_stored_rows_produce_issuer_and_horizon_specific_read_only_forecast
 def test_fold_oracle_rejects_cumulative_later_fold_diagnostics(source):
     result = model.prediction_result(source.repository, source.registration)
     _assert_fold_metrics(source, result)
-    # Exact counterfactual to _metrics(predictions) instead of _metrics(scored):
+    # Exact counterfactual to magnitude_metrics(predictions) instead of magnitude_metrics(scored):
     # the second fold would score all 18 forecasts rather than its own six.
     cumulative = json.loads(json.dumps(result))
     cumulative["folds"][1]["metrics"] = expected_history_metrics(_expected(source).values())

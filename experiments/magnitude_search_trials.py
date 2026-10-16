@@ -64,11 +64,10 @@ class SearchTrials:
 
     def _refused(self, key, error):
         problem = _problem(error.problem)
-        if _candidate_failure(problem):
-            try:
-                self._append("terminal:" + key, {"status": "refused", "problem": problem})
-            except (OpsError, OSError, sqlite3.Error) as publication_error:
-                raise error from publication_error
+        try:
+            self._append("terminal:" + key, {"status": "refused", "problem": problem})
+        except (OpsError, OSError, sqlite3.Error) as publication_error:
+            raise error from publication_error
 
     def _binding(self):
         plan = read_search_plan(self.conn, self.store, self.registration, self.request, self.plan_ref)

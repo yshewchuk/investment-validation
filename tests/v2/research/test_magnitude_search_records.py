@@ -256,7 +256,7 @@ def test_wrapper_requires_exact_schema_run_slot_and_fields(journal, mutation):
     ("corrupt_bytes", "EXPERIMENT_IDENTITY_CONFLICT"),
     ("unsafe_path", "EXPERIMENT_IDENTITY_CONFLICT"),
 ])
-def test_artifact_read_failures_preserve_classification_and_redact_paths(journal, failure, code):
+def test_artifact_read_failures_preserve_classification_and_redact_paths(journal, monkeypatch, failure, code):
     payload = canonical_json(_wrapper()).encode()
     ref = artifact_reference(payload, records.SCHEMA)
     if failure != "missing":
@@ -270,8 +270,13 @@ def test_artifact_read_failures_preserve_classification_and_redact_paths(journal
     elif failure == "unsafe_path":
         ref = replace(ref, storage_key="../private/credential")
     _insert(journal, canonical_json(to_document(ref)))
-    with _problem(code, "search journal artifact could not be verified"):
-        records.read_record(journal.conn, journal.store, RUN, SLOT)
+    before = _journal_state(journal)
+    with monkeypatch.context() as guard:
+        if failure == "unsafe_path":
+            guard.setattr(artifact_store.os, "open", lambda *a, **k: pytest.fail("unsafe reference attempted a filesystem open"))
+        with _problem(code, "search journal artifact could not be verified"):
+            records.read_record(journal.conn, journal.store, RUN, SLOT)
+    assert _journal_state(journal) == before
 
 
 @pytest.mark.parametrize("artifact_code, code", [
