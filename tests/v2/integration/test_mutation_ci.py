@@ -31,6 +31,11 @@ import mutation_pilot as pilot  # noqa: E402
 import mutation_report as rep  # noqa: E402
 import mutation_results as mr  # noqa: E402
 
+# Run the whole file on ONE xdist worker (CI uses `--dist loadgroup`). The real-repo
+# import graph and unresolved-import scans are cached per process; spread over 4
+# workers every worker rebuilt both cold (#791). Assertions are unchanged.
+pytestmark = pytest.mark.xdist_group("mutation_ci_real_repo")
+
 SEP = "ǁ"
 SOURCE = '''\
 def add(a, b):
