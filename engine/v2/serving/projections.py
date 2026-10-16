@@ -321,7 +321,8 @@ def _pairs(score_doc, bundle_rows_by_ticker) -> set[tuple[str, str]]:
 
 
 def _release_id(preview_input: PreviewInput, snapshot_ref: SnapshotRef, score_doc,
-                bundle_rows_by_ticker, *, requested_as_of: str, resolved_as_of: str) -> str:
+                bundle_rows_by_ticker, *, requested_as_of: str, resolved_as_of: str,
+                row_sources: tuple[str, ...]) -> str:
     """Pure function of content: identical inputs give an identical id; a
     changed score or bundle changes it (§5.3 point 8's idempotency test)."""
     return content_hash({
@@ -334,6 +335,7 @@ def _release_id(preview_input: PreviewInput, snapshot_ref: SnapshotRef, score_do
         "snapshot_id": snapshot_ref.snapshot_id,
         "snapshot_manifest_hash": snapshot_ref.manifest_hash,
         "requested_as_of": requested_as_of, "resolved_as_of": resolved_as_of,
+        "row_sources": list(row_sources),
         "score_doc": score_doc,
         "bundle_rows_by_ticker": dict(bundle_rows_by_ticker),
         "projection_code_hash": _PROJECTION_CODE_HASH,
@@ -393,7 +395,7 @@ def build_candidate(
     preview_input: PreviewInput, score_doc, bundle_rows_by_ticker, *,
     repository: Repository, snapshot_ref: SnapshotRef, store, conn: sqlite3.Connection,
     requested_as_of: str, resolved_as_of: str, clock: Clock | None = None,
-    fault=None,
+    fault=None, row_sources: tuple[str, ...] = ("legacy_bundle",),
 ) -> PreviewRelease | Problem:
     """§5.3-§5.4: resolve, bridge, publish, and — only if ``findings.ok`` —
     index one release, transactionally and idempotently.
@@ -404,6 +406,11 @@ def build_candidate(
     succeeds with no partial release — the O11-style fault hook this
     package's siblings already use.
     """
+    _valid_row_sources = row_sources
+    if (not _valid_row_sources or _valid_row_sources[0] != "legacy_bundle"
+            or any(src not in {"legacy_bundle", "native_shadow"} for src in _valid_row_sources)
+            or len(set(_valid_row_sources)) != len(_valid_row_sources)):
+        raise ValueError("invalid row_sources " + repr(_valid_row_sources))
     clock = clock or SystemClock()
     ensure_schema(conn, clock=clock)
     event_refs = resolve_event_refs(repository, snapshot_ref, _pairs(score_doc, bundle_rows_by_ticker))
@@ -413,7 +420,8 @@ def build_candidate(
         model_registry_artifact_refs=preview_input.model_registry_artifact_refs,
         request_provenance_refs=preview_input.score_job_input_refs)
     release_id = _release_id(preview_input, snapshot_ref, score_doc, bundle_rows_by_ticker,
-                             requested_as_of=requested_as_of, resolved_as_of=resolved_as_of)
+                             requested_as_of=requested_as_of, resolved_as_of=resolved_as_of,
+                             row_sources=row_sources)
     findings_ref = _publish_document(store, to_document(findings), "projection_findings.v1.0")
     if fault is not None:
         fault("findings_written")
@@ -445,6 +453,7 @@ def build_candidate(
         release_id=release_id, source_release_id=preview_input.source_release_id,
         projection_manifest_ref=manifest_ref.artifact_id, snapshot_ref=snapshot_ref.snapshot_id,
         score_batch_ref=preview_input.score_batch_ref, bundle_manifest_ref=preview_input.bundle_manifest_ref,
+        row_sources=row_sources,
         model_registry_artifact_refs=preview_input.model_registry_artifact_refs,
         model_evidence_ref=preview_input.model_evidence_ref,
         comparison_receipt_refs=(preview_input.score_comparison_receipt_ref,

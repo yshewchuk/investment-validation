@@ -40,6 +40,14 @@ projection bindings. Operations transport can return queued command job identiti
 The existing operations HTML/JavaScript shells and pinned legacy bundle hosting
 remain a compatibility exception; their presentation still requires React migration.
 
+**Row sources.** `PreviewRelease.row_sources` (schema `preview_release.v1.1`, required,
+no default) names where the board's rows came from: `("legacy_bundle",)` for the rendered
+bundle alone, `("legacy_bundle", "native_shadow")` when the saved plan's
+`shadow_serving_scorer` is `native`. It is part of the release-id derivation, so the two
+never share an id, and the board never shows an unlabelled mix. Stored `v1.0` releases are
+rebuilt, not migrated. The projection tool exposes `run_projection(...)` (the CLI is a thin
+wrapper over it); a native plan without native inputs is refused `INVALID_REQUEST`.
+
 ### Financial display units
 
 Serving preserves producer values; `legacy_via_v2` and native projections do not

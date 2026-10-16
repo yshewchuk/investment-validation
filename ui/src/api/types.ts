@@ -16,7 +16,7 @@ export interface PreviewCapabilities {
   collect_live: boolean;
 }
 
-/** `PreviewRelease` (preview_release.v1.0), contracts/serving.py §5.2. */
+/** `PreviewRelease` (preview_release.v1.1), contracts/serving.py §5.2. */
 export interface PreviewRelease {
   release_id: string;
   source_release_id: string;
@@ -24,6 +24,7 @@ export interface PreviewRelease {
   snapshot_ref: string;
   score_batch_ref: string;
   bundle_manifest_ref: string;
+  row_sources: string[];
   model_registry_artifact_refs: string[];
   model_evidence_ref: string | null;
   comparison_receipt_refs: string[];

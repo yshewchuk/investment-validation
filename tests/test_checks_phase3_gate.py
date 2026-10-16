@@ -313,7 +313,9 @@ def _portable_preview(artifact_root, *, source_release_id="SRC1"):
 def _accepted_release(release_id, *, source_release_id="SRC1") -> PreviewRelease:
     return PreviewRelease(
         release_id=release_id, source_release_id=source_release_id, projection_manifest_ref=H,
-        snapshot_ref=H, score_batch_ref=H, bundle_manifest_ref=H, model_registry_artifact_refs=(H,),
+        snapshot_ref=H, score_batch_ref=H, bundle_manifest_ref=H,
+        row_sources=("legacy_bundle",),
+        model_registry_artifact_refs=(H,),
         model_evidence_ref=None, comparison_receipt_refs=(H,), source_code_hash=H,
         projection_code_hash=H, requested_as_of="2026-09-01", resolved_as_of="2026-09-01",
         clock_ids=("clk1",))

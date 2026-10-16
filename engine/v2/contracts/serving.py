@@ -59,7 +59,7 @@ __all__ = [
 ]
 
 PREVIEW_INPUT_V1 = "preview_input.v1.0"
-PREVIEW_RELEASE_V1 = "preview_release.v1.0"
+PREVIEW_RELEASE_V1 = "preview_release.v1.1"
 LEGACY_SCORE_BRIDGE_V1 = "legacy_score_bridge.v1.0"
 EVENT_PAGE_V1 = "event_page.v1.0"
 EVENT_PAGE_ITEM_V1 = "event_page_item.v1.0"
@@ -130,6 +130,7 @@ class PreviewRelease:
     snapshot_ref: str
     score_batch_ref: str
     bundle_manifest_ref: str
+    row_sources: tuple[str, ...]
     model_registry_artifact_refs: tuple[str, ...]
     model_evidence_ref: str | None = None
     comparison_receipt_refs: tuple[str, ...]

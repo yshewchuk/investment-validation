@@ -20,6 +20,9 @@ this is the one place allowed to import both ``engine.v2.ops.bootstrap``
 (opening the Phase 2 catalog) and ``engine.v2.serving`` in one process; the
 serving package itself never imports ops.
 
+:func:`run_projection` is the callable entry point; the CLI below is a thin
+wrapper that parses flags, calls it, and prints its result document.
+
 **Bundle format (P3-4).** ``--bundle-format legacy`` (the default) reads the
 real ``engine/dashboard/render.py`` ``render_bundle`` output tree —
 ``data/board.json``/``data/tickers/<ticker>.json`` (or their ``.js``
@@ -178,6 +181,15 @@ def _shadow_rows(args: argparse.Namespace, score_doc: dict,
     return shadow_serving_row_source(plan, score_doc, bundle_rows_by_ticker, pairs)
 
 
+def _plan_row_sources(nightly_plan: Path | None) -> tuple[str, ...]:
+    if nightly_plan is None:
+        return ("legacy_bundle",)
+    plan = json.loads(nightly_plan.read_text())
+    if native_shadow_serving_mode(plan) == "native":
+        return ("legacy_bundle", "native_shadow")
+    return ("legacy_bundle",)
+
+
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -249,49 +261,65 @@ def _result_document(result: PreviewRelease | Problem, conn) -> dict:
             "findings": findings, "projection_binding": binding}
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(sys.argv[1:] if argv is None else argv)
-    preview_input = from_document(PreviewInput, json.loads(args.preview_input.read_text()))
-    score_doc = load_score_document(args.score_json)
+def run_projection(*, preview_input: Path, source_provenance: Path | None, score_json: Path,
+                   bundle_dir: Path, snapshot_id: str, catalog: Path, store_root: Path,
+                   serving_root: Path, requested_as_of: str, resolved_as_of: str,
+                   bundle_format: str = "legacy", nightly_plan: Path | None = None,
+                   native_inputs: Path | None = None) -> tuple[int, dict]:
+    preview = from_document(PreviewInput, json.loads(preview_input.read_text()))
+    score_doc = load_score_document(score_json)
 
-    bundle_manifest_ref = preview_input.bundle_manifest_ref
-    if args.bundle_format == "flat":
-        bundle_rows_by_ticker = _load_flat_bundle(args.bundle_dir)
+    bundle_manifest_ref = preview.bundle_manifest_ref
+    if bundle_format == "flat":
+        bundle_rows_by_ticker = _load_flat_bundle(bundle_dir)
     else:
-        bundle_rows_by_ticker, bundle_manifest = load_legacy_bundle(args.bundle_dir)
+        bundle_rows_by_ticker, bundle_manifest = load_legacy_bundle(bundle_dir)
         # The release's identity binds to the bundle's actual bytes, not to
         # whatever bundle_manifest_ref the caller's PreviewInput happened to
         # declare — a changed byte anywhere in the bundle must change the
         # release id (§5.3 point 8's idempotency/change-detection test).
         bundle_manifest_ref = content_hash(bundle_manifest)
-        if preview_input.bundle_manifest_ref != bundle_manifest_ref:
+        if preview.bundle_manifest_ref != bundle_manifest_ref:
             raise ValueError("preview input does not bind the supplied bundle directory")
 
-    if args.source_provenance is None:
+    if source_provenance is None:
         raise ValueError("projection requires --source-provenance")
-    _verify_source_provenance(preview_input, args.source_provenance,
-                              score_path=args.score_json, bundle_manifest_ref=bundle_manifest_ref)
+    _verify_source_provenance(preview, source_provenance,
+                              score_path=score_json, bundle_manifest_ref=bundle_manifest_ref)
 
-    bundle_rows_by_ticker = _shadow_rows(args, score_doc, bundle_rows_by_ticker)
+    bundle_rows_by_ticker = _shadow_rows(
+        argparse.Namespace(nightly_plan=nightly_plan, native_inputs=native_inputs),
+        score_doc, bundle_rows_by_ticker)
     clock = SystemClock()
-    catalog_conn = open_catalog(args.catalog, clock=clock)
-    phase2_store = ArtifactStore(args.store_root)
-    repository = Repository(catalog_conn, phase2_store)
-    snapshot_ref = repository.resolve(args.snapshot_id)
+    catalog_conn = open_catalog(catalog, clock=clock)
+    try:
+        phase2_store = ArtifactStore(store_root)
+        repository = Repository(catalog_conn, phase2_store)
+        snapshot_ref = repository.resolve(snapshot_id)
 
-    args.serving_root.mkdir(parents=True, exist_ok=True)
-    serving_store = ArtifactStore(args.serving_root / "objects")
-    serving_conn = connect(str(args.serving_root / "serving.sqlite"), clock=clock)
+        serving_root.mkdir(parents=True, exist_ok=True)
+        serving_store = ArtifactStore(serving_root / "objects")
+        serving_conn = connect(str(serving_root / "serving.sqlite"), clock=clock)
+        try:
+            result = build_candidate(
+                preview, score_doc, bundle_rows_by_ticker,
+                repository=repository, snapshot_ref=snapshot_ref, store=serving_store,
+                conn=serving_conn, requested_as_of=requested_as_of,
+                resolved_as_of=resolved_as_of, clock=clock,
+                row_sources=_plan_row_sources(nightly_plan))
+            document = _result_document(result, serving_conn)
+        finally:
+            serving_conn.close()
+    finally:
+        catalog_conn.close()
+    return (0 if isinstance(result, PreviewRelease) else 1), document
 
-    result = build_candidate(
-        preview_input, score_doc, bundle_rows_by_ticker,
-        repository=repository, snapshot_ref=snapshot_ref, store=serving_store, conn=serving_conn,
-        requested_as_of=args.requested_as_of, resolved_as_of=args.resolved_as_of, clock=clock)
 
-    print(json.dumps(_result_document(result, serving_conn), indent=2, sort_keys=True))
-    serving_conn.close()
-    catalog_conn.close()
-    return 0 if isinstance(result, PreviewRelease) else 1
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    code, doc = run_projection(**vars(args))
+    print(json.dumps(doc, indent=2, sort_keys=True))
+    return code
 
 
 if __name__ == "__main__":

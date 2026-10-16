@@ -143,6 +143,7 @@ def _preview_release():
     return PreviewRelease(
         release_id="rel_2", source_release_id="rel_1", projection_manifest_ref="pm_1",
         snapshot_ref="snap_1", score_batch_ref="batch_1", bundle_manifest_ref="bm_1",
+        row_sources=("legacy_bundle",),
         model_registry_artifact_refs=("model_1",), comparison_receipt_refs=("cr_1",),
         source_code_hash="h1", projection_code_hash="h2",
         requested_as_of="2026-01-14", resolved_as_of="2026-01-14", clock_ids=("c1",),
