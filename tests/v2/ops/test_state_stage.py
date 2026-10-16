@@ -154,7 +154,7 @@ def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None):
     for name in states:
         (staging / name).write_bytes(f"state-{name}".encode())
 
-    def fake_payloads(paths):
+    def fake_payloads(paths, max_bytes=None):
         name = Path(paths[0]).name
         member, object_name = states[name]
         return {member: {object_name: Path(paths[0]).read_bytes()}}
@@ -330,7 +330,7 @@ def test_worker_refuses_a_symlinked_state_file(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert err.value.code == "VALIDATION_FAILED"
-    assert "bounded regular file" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: a bound state file is not a bounded regular file"
 
 
 def test_worker_refuses_an_oversize_state_file(tmp_path, monkeypatch):
@@ -340,7 +340,7 @@ def test_worker_refuses_an_oversize_state_file(tmp_path, monkeypatch):
     monkeypatch.setattr(phase5_state_stage_job, "MAX_STATE_BYTES", 1)
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert "bounded regular file" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: a bound state file is not a bounded regular file"
 
 
 def test_worker_refuses_a_duplicate_state_object(tmp_path, monkeypatch):
@@ -349,7 +349,7 @@ def test_worker_refuses_a_duplicate_state_object(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch, states=states)
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert "appears twice" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: a state object appears twice"
     assert err.value.problem.details == {"member": "paired_residual_pool"}
 
 
@@ -358,13 +358,13 @@ def test_worker_refuses_a_corrupt_state_file(tmp_path, monkeypatch):
 
     parameters, staging = _wire(tmp_path, monkeypatch)
 
-    def corrupt(paths):
+    def corrupt(paths, max_bytes=None):
         raise FrozenStateError("bad")
 
     monkeypatch.setattr(phase5_prepare_release, "frozen_state_payloads", corrupt)
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert "could not be loaded" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: a bound state file could not be loaded"
 
 
 def test_worker_refuses_an_inventory_that_cannot_be_built(tmp_path, monkeypatch):
@@ -376,7 +376,7 @@ def test_worker_refuses_an_inventory_that_cannot_be_built(tmp_path, monkeypatch)
     monkeypatch.setattr(inventory_module, "current_release_inventory", broken)
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert "inventory could not be built" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: release inventory could not be built"
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
 
 
@@ -536,7 +536,7 @@ def test_worker_refuses_a_missing_bound_file(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert err.value.code == "VALIDATION_FAILED"
-    assert "could not be read" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: a bound state file could not be read"
 
 
 def test_a_trailing_month_that_is_not_a_date_is_refused(tmp_path, monkeypatch):
@@ -547,4 +547,24 @@ def test_a_trailing_month_that_is_not_a_date_is_refused(tmp_path, monkeypatch):
         run_state_stage_worker(parameters, staging)
     assert err.value.code == "VALIDATION_FAILED"
     assert err.value.problem.details == {"months": ["hist|abc"]}
-    assert "not a date" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: a trailing object month is not a date"
+
+
+def test_state_file_of_exactly_the_cap_is_accepted_and_one_more_byte_refused(tmp_path, monkeypatch):
+    from tools import phase5_state_stage_job
+
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    largest = max((staging / name).stat().st_size for name in _STATES)
+    monkeypatch.setattr(phase5_state_stage_job, "MAX_STATE_BYTES", largest)
+    assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
+
+
+def test_state_file_one_byte_over_the_cap_is_refused(tmp_path, monkeypatch):
+    from tools import phase5_state_stage_job
+
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    largest = max((staging / name).stat().st_size for name in _STATES)
+    monkeypatch.setattr(phase5_state_stage_job, "MAX_STATE_BYTES", largest - 1)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: a bound state file is not a bounded regular file"

@@ -44,18 +44,20 @@ def object_cutoff(member: str, name: str, cutoff: str) -> str:
 def classify(root: Path, names) -> dict[str, dict[str, bytes]]:
     """Load the bound state files; they must cover exactly the advancing members."""
     from engine.v2.models.frozen_state import FrozenStateError
+    from engine.v2.models.frozen_state_io import BoundedStateReadError
     from tools.phase5_prepare_release import frozen_state_payloads
 
     new: dict[str, dict[str, bytes]] = {}
     try:
         for name in names:
             _require_regular(root / name, MAX_STATE_BYTES, "a bound state file")
-            for member, objects in frozen_state_payloads([root / name]).items():
+            for member, objects in frozen_state_payloads(
+                    [root / name], max_bytes=MAX_STATE_BYTES).items():
                 for object_name, data in objects.items():
                     if object_name in new.setdefault(member, {}):
                         raise StageRefused("a state object appears twice", {"member": member})
                     new[member][object_name] = data
-    except (FrozenStateError, OSError) as exc:
+    except (FrozenStateError, BoundedStateReadError, OSError) as exc:
         raise StageRefused("a bound state file could not be loaded") from exc
     if set(new) != set(ADVANCING_MEMBERS):
         raise StageRefused("state files are not exactly the advancing members",
