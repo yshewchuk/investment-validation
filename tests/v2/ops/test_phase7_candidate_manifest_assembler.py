@@ -412,15 +412,16 @@ def test_git_calls_pass_a_timeout(monkeypatch):
     assert seen and all(t == 30 for t in seen)
 
 
-@pytest.mark.parametrize("failing_arg, message", [
-    ("rev-parse", r"git rev-parse HEAD failed \(exit 1\)"),
-    ("status", r"git status failed \(exit 1\)")])
-def test_git_nonzero_return_is_a_spec_error(monkeypatch, failing_arg, message):
+@pytest.mark.parametrize("failing_arg, code, message", [
+    ("rev-parse", 1, r"git rev-parse HEAD failed \(exit 1\)"),
+    ("ls-files", 1, r"git ls-files failed \(exit 1\)"),
+    ("diff-index", 2, r"git diff-index failed \(exit 2\)")])
+def test_git_nonzero_return_is_a_spec_error(monkeypatch, failing_arg, code, message):
     real_run = subprocess.run
 
     def fake(cmd, *args, **kwargs):
         if failing_arg in cmd:
-            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+            return subprocess.CompletedProcess(cmd, code, stdout="", stderr="boom")
         return real_run(cmd, *args, **kwargs)
 
     head = real_run(["git", "-C", str(asm.ROOT), "rev-parse", "HEAD"], capture_output=True,

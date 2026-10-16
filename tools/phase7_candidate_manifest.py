@@ -137,22 +137,16 @@ def check_commit(spec: dict, root: Path) -> str:
     if done.stdout.strip() != commit:
         raise SpecError("commit: does not equal this checkout's HEAD, so the registry and "
                         "inventory would describe a different commit")
-    # -z gives NUL-separated, unquoted records, so a path with a space or non-ASCII byte
-    # cannot slip past the scanned-tree prefix check; a rename/copy record is followed by
-    # its origin path as a separate record.
-    dirty = _git(root, "status", "--porcelain", "-z", "--untracked-files=normal")
-    if dirty.returncode != 0:
-        raise SpecError(f"commit: git status failed (exit {dirty.returncode})")
-    records, changed, i = dirty.stdout.split("\0"), [], 0
-    while i < len(records):
-        record = records[i]
-        i += 1
-        if not record:
-            continue
-        if record[0] in "RC" or record[1] in "RC":
-            i += 1  # skip the origin path of a rename/copy
-        if not record.startswith("?? ") or record[3:].startswith(_SCANNED_TREES):
-            changed.append(record)
+    # Plumbing, not a hand-parsed status: untracked files under the scanned trees, and any
+    # difference between the index/work tree and HEAD (diff-index exits 1 on a difference).
+    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z", "--",
+                     *_SCANNED_TREES)
+    if untracked.returncode != 0:
+        raise SpecError(f"commit: git ls-files failed (exit {untracked.returncode})")
+    tracked = _git(root, "diff-index", "--quiet", "HEAD", "--")
+    if tracked.returncode not in (0, 1):
+        raise SpecError(f"commit: git diff-index failed (exit {tracked.returncode})")
+    changed = bool(untracked.stdout.strip("\0")) or tracked.returncode == 1
     if changed:
         raise SpecError("commit: the checkout has uncommitted tracked changes or untracked "
                         "files under the scanned trees, so the registry and inventory would "
