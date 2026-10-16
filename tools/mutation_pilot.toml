@@ -515,6 +515,7 @@ tests = [
 [modules.chooser]
 why = "Native DYN-SV chooser: its 67-column feature vector, the frozen chooser analog pool and the ranked choice; a slip changes which structure the board picks."
 mutate = [
+    "engine/v2/scoring/dynamic_outcomes.py",
     "engine/v2/scoring/chooser_inputs.py",
     "engine/v2/scoring/native_chooser.py",
     "engine/v2/scoring/native_chooser_features.py",
@@ -522,6 +523,7 @@ mutate = [
     "engine/v2/models/training/chooser_pool.py",
 ]
 tests = [
+    "tests/v2/scoring/test_dynamic_outcomes.py",
     "tests/test_phase4_capture_strict.py",
     "tests/test_phase4_chooser_trace.py",
     "tests/test_v2_models_chooser_analog_pool.py",

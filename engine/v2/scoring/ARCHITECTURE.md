@@ -175,6 +175,24 @@ order. No eligible candidate yields a refused record with
 `NO_CHOOSER_CANDIDATE`. `score_batch` only preserves request order and never
 calls this menu resolver, so these interfaces do not enable nightly DYN-SV.
 
+`dynamic_outcomes` owns the separate pure accounting boundary: frozen
+`DynamicMenuIdentity` and `DynamicCandidateOutcome` summaries, validated by
+`validate_dynamic_menu` into registry order. Its callers supply complete shared
+event/session, snapshot/release/deployment, calendar/decision-clock, mode and
+fill/ATM policy identities. Exact comparisons never truncate an event instant.
+A record summary retains its request/score IDs, validation/readiness, reasons
+and warnings; a producer/assembly refusal retains its code and optional request
+hash. The helper verifies summaries, not original records or policy hashes.
+
+Duplicates (including reused candidate IDs and record/refusal overlap), unknown
+members, malformed values or identity mismatch raise `DynamicMenuRefusal` with
+`INVALID_CHOOSER_MENU`; missing members raise `CHOOSER_MENU_INCOMPLETE` and list
+fixed registry names. Invalid joins precede incomplete accounting. Complete
+all-refused menus pass; no eligibility, winner, margin or meta record is produced.
+There is no I/O, retry, fitting or source/finality/causal-training admission.
+Only tests consume this preparatory interface; existing selection and nightly
+dispatch are unchanged. See README for fields and ownership obligations.
+
 **Forward forecast assembly (design; not implemented).** STR-THRU forward
 inputs use native market/history features from the pinned snapshot (cutover
 6c), plus the verified release. The full-refit `size:*` champion supplies
