@@ -44,7 +44,7 @@ def spec(tmp_path):
                          "path": _write(tmp_path / f"ev{phase}.json", doc)})
     return {
         "commit": COMMIT, "registry_owner": "native-ops",
-        "non_official_registry_kinds": ["experiment", "models_promote", "models_rollback"],
+        "non_official_registry_kinds": ["experiment"],
         "config": [{"name": "cfg", "path": _write(tmp_path / "cfg.json", {"a": 1})}],
         "data_snapshot": {"snapshot_id": "snap-1",
                           "path": _write(tmp_path / "snap.json", {"snapshot_id": "snap-1"})},
@@ -284,23 +284,36 @@ def test_dirty_tracked_tree_is_refused(tmp_path):
 def test_undecided_primary_kind_is_refused():
     with pytest.raises(asm.SpecError, match="experiment"):
         asm.registry_jobs("o")
-    decided = ("experiment", "models_promote", "models_rollback")
-    rows = {j["id"]: j for j in asm.registry_jobs("o", (), decided)}
+    rows = {j["id"]: j for j in asm.registry_jobs("o", (), ("experiment",))}
     assert rows["experiment"]["writes_official"] is False
-    rows = {j["id"]: j for j in asm.registry_jobs("o", ("experiment",), decided[1:])}
+    rows = {j["id"]: j for j in asm.registry_jobs("o", ("experiment",), ())}
     assert rows["experiment"]["kind"] == "scheduled_writer"
+    # user decision 2026-10-16: shadow-only pointer actions need no listing and are not writers
+    for name in ("models_promote", "models_rollback"):
+        assert rows[name]["kind"] == "background" and rows[name]["writes_official"] is False
 
 
-def test_store_write_lease_kind_needs_a_decision(monkeypatch):
+def test_store_write_lease_kind_rules(monkeypatch):
     real = stages.registry()
     base = real.get(real.names()[0])
-    ptr = dataclasses.replace(base, name="ptr_writer", namespaces=frozenset({"shadow"}),
-                              store_domains=(("deployment_pointer", "write"),))
-    monkeypatch.setattr(stages, "registry", lambda: submission.KindRegistry([ptr]))
-    with pytest.raises(asm.SpecError, match="ptr_writer"):
+    lease = (("deployment_pointer", "write"),)
+    shadow = dataclasses.replace(base, name="ptr_shadow", namespaces=frozenset({"shadow"}),
+                                 store_domains=lease, effects=("staged",))
+    primary = dataclasses.replace(base, name="ptr_primary",
+                                  namespaces=frozenset({"shadow", "primary"}),
+                                  store_domains=lease, effects=("staged",))
+    monkeypatch.setattr(stages, "registry", lambda: submission.KindRegistry([shadow]))
+    row = asm.registry_jobs("o")[0]
+    assert (row["kind"], row["writes_official"]) == ("background", False)
+    with pytest.raises(asm.SpecError, match="shadow pointer"):
+        asm.registry_jobs("o", ("ptr_shadow",))
+    monkeypatch.setattr(stages, "registry", lambda: submission.KindRegistry([primary]))
+    with pytest.raises(asm.SpecError, match="only official_registry_kinds"):
         asm.registry_jobs("o")
-    assert asm.registry_jobs("o", ("ptr_writer",))[0]["kind"] == "scheduled_writer"
-    assert asm.registry_jobs("o", (), ("ptr_writer",))[0]["writes_official"] is False
+    with pytest.raises(asm.SpecError, match="only official_registry_kinds"):
+        asm.registry_jobs("o", (), ("ptr_primary",))
+    row = asm.registry_jobs("o", ("ptr_primary",))[0]
+    assert (row["kind"], row["writes_official"]) == ("scheduled_writer", True)
 
 
 def test_writes_exactly_three_files_inside_out_dir(spec, tmp_path):

@@ -519,17 +519,22 @@ Only a tracked path absent from the worktree reads as empty.
   the two documents plus `manifest.json` into `--out-dir` (created with its
   parents) and nothing else; the manifest echoes `authority` and absolute
   paths, so it is private like the spec. A kind that can run outside
-  `shadow`/`smoke` or holds a store `write` lease (today `experiment`,
-  `models_promote`, `models_rollback`) is refused until the spec lists it in
-  `official_registry_kinds` or `non_official_registry_kinds`; whether it is
-  official is the operator's call.
+  `shadow`/`smoke` (today `experiment`) is refused until the spec lists it in
+  `official_registry_kinds` or `non_official_registry_kinds`. User sign-offs
+  (2026-10-16): consumer-inventory rows are exempt from the implicit-latest
+  rule (the dashboard reads the moving current-release pointer); and a kind
+  holding a store `write` lease (`models_promote`, `models_rollback`) is an
+  operator action of its side, not an official scheduled writer, allowed only
+  while it can touch the shadow/non-official pointer (namespaces within
+  `shadow`/`smoke`) and refused otherwise unless listed official.
 
   | Condition | Outcome |
   |---|---|
   | spec missing/oversize/not a JSON object, a section of the wrong shape, a duplicate or colliding extra-job id, missing `commit` or `registry_owner`, a referenced file missing or over the cap | exit 2, nothing written for that run beyond files already produced |
   | spec file unreadable, not decodable JSON, or an uncreatable `--out-dir` | exit 2 |
   | spec `commit` differs from this checkout's `HEAD`, or tracked files are modified | exit 2 (registry and inventory would describe another commit) |
-  | a registry kind that can run outside `shadow`/`smoke`/`official` or holds a store `write` lease (today `experiment`, `models_promote`, `models_rollback`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
+  | a registry kind that can run outside `shadow`/`smoke`/`official` (today `experiment`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
+  | a store-write-lease kind that can run outside `shadow`/`smoke` is not in `official_registry_kinds`, or a shadow-only one is | exit 2 |
   | `--out-dir` inside the repository | exit 2 |
   | any other registry kind | job kind `background` when it declares effects, else `reader`; `writes_official` false (`scheduled_writer`/true only for `official` or an operator-listed kind) |
   | the checker reports findings | exit 1, manifest still written |

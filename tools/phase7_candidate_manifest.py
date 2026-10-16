@@ -130,19 +130,34 @@ _SAFE_NAMESPACES = frozenset({"shadow", "smoke"})
 def registry_jobs(owner: str, official_kinds=(), non_official_kinds=()) -> list[dict]:
     """One row per job kind in the live registry. A kind is an official writer when
     its namespaces include ``official`` or the operator lists it in
-    ``official_registry_kinds``. A kind that can run in any other namespace (today ``experiment`` in ``primary``) or
-    holds a store ``write`` lease (today ``models_promote`` and ``models_rollback`` on
-    ``deployment_pointer``) must be decided explicitly in ``official_registry_kinds`` or
-    ``non_official_registry_kinds``; an undecided one is refused (fail closed)."""
+    ``official_registry_kinds``. A kind that can run in any other namespace (today
+    ``experiment`` in ``primary``) must be decided explicitly in
+    ``official_registry_kinds`` or ``non_official_registry_kinds``; an undecided one is
+    refused (fail closed).
+
+    User decision (2026-10-16): a kind holding a store ``write`` lease (today
+    ``models_promote`` and ``models_rollback`` on ``deployment_pointer``) is an operator
+    action of its side, not an official scheduled writer, so it never counts against the
+    one-official-writer rule. It is allowed only while it can touch the shadow/non-official
+    pointer, i.e. its namespaces are within ``shadow``/``smoke``; one that can run in any
+    other namespace is refused unless listed in ``official_registry_kinds`` (then it is the
+    official writer), and a shadow-only one may not be listed official."""
     reg, rows = stages.registry(), []
     for name in reg.names():
         kind = reg.get(name)
         writes_store = any(mode == "write" for _, mode in kind.store_domains)
-        if ((kind.namespaces - _SAFE_NAMESPACES - {"official"} or writes_store)
-                and name not in official_kinds and name not in non_official_kinds):
-            raise SpecError(f"{name}: can run in {sorted(kind.namespaces - _SAFE_NAMESPACES)} "
-                            f"or holds a store write lease ({writes_store}); list it in "
-                            "official_registry_kinds or non_official_registry_kinds")
+        shadow_only = kind.namespaces <= _SAFE_NAMESPACES
+        listed = name in official_kinds or name in non_official_kinds
+        if writes_store and shadow_only and name in official_kinds:
+            raise SpecError(f"{name}: an operator action on the shadow pointer cannot be an "
+                            "official writer; remove it from official_registry_kinds")
+        if writes_store and not shadow_only and name not in official_kinds:
+            raise SpecError(f"{name}: holds a store write lease and can run in "
+                            f"{sorted(kind.namespaces - _SAFE_NAMESPACES)}; only "
+                            "official_registry_kinds may list it")
+        if not writes_store and kind.namespaces - _SAFE_NAMESPACES - {"official"} and not listed:
+            raise SpecError(f"{name}: can run in {sorted(kind.namespaces - _SAFE_NAMESPACES)}; "
+                            "list it in official_registry_kinds or non_official_registry_kinds")
         official = "official" in kind.namespaces or name in official_kinds
         rows.append({"id": name, "schedule": f"native:{name}", "owner": owner,
                      "kind": ("scheduled_writer" if official
