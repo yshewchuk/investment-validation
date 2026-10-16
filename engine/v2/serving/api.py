@@ -24,8 +24,9 @@ binding that does not (yet, or any longer) match is a typed, non-retryable
  index read failing during that reverification is the retryable
  ``SERVING_INDEX_UNREADABLE`` 503 (``_index_unreadable``, #342).
 
- The pointer root defaults to the serving root's ``publisher/``; ``/releases/
- current`` adds a top-level ``scope`` taken from the binding (null when absent).
+ The launcher's pointer root defaults to the serving root's ``publisher/``
+ (``create_app(publication_root=None)`` has no default); ``/releases/current``
+ adds a top-level ``scope`` taken from the binding (null when absent).
 
 
 ``create_app``'s ``resolver`` parameter remains the seam: any zero-argument
@@ -55,9 +56,11 @@ reverification, ``/releases/{id}`` + ``/releases/current``, ``/events``,
 ``/events/{id}/scores``, ``/scores/{id}`` -- wraps only its projection calls in
 ``except (projections.sqlite3.Error, json.JSONDecodeError)`` and raises
 ``_index_unreadable()``, keeping the existing guaranteed-close ``finally``.
-Open-time behavior, artifact decoding (still the existing 500), binding-invalid
+Artifact decoding (still the existing 500), binding-invalid
 (500), unknown release/event/score (404) and every validation refusal are
-unchanged; no global SQLite/JSON exception hook is registered.
+unchanged; no global SQLite/JSON exception hook is registered. An open-time
+``sqlite3.Error`` (``_open`` and the resolver's connect) and a post-open one
+both return the same typed 503.
 
 
 **Cursors** are opaque and integrity-protected (§6): ``release_id`` plus
@@ -143,17 +146,17 @@ def _handle_api_error(request: Request, exc: ApiError) -> Response:
 # connection-owning read applies, same shape as the operations listener's #339
 # listener fix: a ``try`` around only the projection calls, the existing
 # ``conn.close()`` ``finally`` kept, and this one typed refusal. No global
-# SQLite/JSON hooks, no open-time behavior change (an index that fails to
-# OPEN stays exactly what ``projections.connect`` already did), and artifact
-# decoding failures stay their existing 500 -- only INDEX reads/rows translate.
+# SQLite/JSON hooks, open-time ``sqlite3.Error`` is translated too (``_open``),
+# and artifact decoding failures stay their existing 500 -- only INDEX
+# reads/rows translate.
 # --------------------------------------------------------------------------
 
 
 def _index_unreadable() -> ApiError:
-    """A connection ``projections.connect`` opened successfully, but a later
-    API-owned index read failed: ``sqlite3.Error`` (a dropped/corrupt table the
-    migrations still tolerate) or ``json.JSONDecodeError`` (malformed stored
-    ``document_json``/``findings_json``/``ref_json``/``flags``). Retryable 503
+    """An API-owned index open or read failed: ``sqlite3.Error`` (a dropped/
+    corrupt table the migrations still tolerate) or ``json.JSONDecodeError``
+    (malformed stored ``document_json``/``findings_json``/``ref_json``/``flags``).
+    Retryable 503
     with the existing ``Problem`` shape and this FIXED message -- never raw
     exception text, a path, the token, a traceback or the malformed bytes.
     ``projections.sqlite3`` is reached through the sibling module's own import,
@@ -199,11 +202,45 @@ def _one_segment_pointer(raw: str) -> str | None:
     return raw if len(parts) == 1 else None
 
 
+def _read_small_text(path: str, cap: int = 1 << 20) -> str | None:
+    """Read a regular file as UTF-8 text without following a symlink.
+
+    ``O_NOFOLLOW`` refuses a symlinked path; ``O_NONBLOCK`` keeps a FIFO or
+    device from blocking the worker. Anything that is not a regular file, any
+    ``OSError``, more than ``cap`` bytes, or invalid UTF-8 yields ``None``.
+    The descriptor is always closed."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if (os.fstat(fd).st_mode & 0o170000) != 0o100000:
+            return None
+        raw = b""
+        while len(raw) < cap + 1:
+            chunk = os.read(fd, cap + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(raw) > cap:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def _read_pointer_file(path: str) -> str | None:
     if os.path.islink(path) or not os.path.isfile(path):
         return None
-    with open(path, encoding="utf-8") as handle:
-        return _one_segment_pointer(handle.read().strip())
+    text = _read_small_text(path)
+    if text is None:
+        return None
+    return _one_segment_pointer(text.strip())
 
 
 def _read_ops_current(release_root) -> str | None:
@@ -222,9 +259,11 @@ def _read_projection_binding(release_root, ops_release_id: str) -> dict | None:
     path = os.path.join(str(release_root), "releases", ops_release_id, "projection_binding.json")
     if os.path.islink(path) or not os.path.isfile(path):
         return None
+    text = _read_small_text(path)
+    if text is None:
+        return None
     try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.loads(handle.read())
+        document = json.loads(text)
     except (OSError, ValueError):
         return None
     return document if isinstance(document, dict) else None
@@ -433,9 +472,11 @@ def _read_operations_status(publication_root) -> dict | None:
     path = os.path.join(str(publication_root), "operations_status.json")
     if os.path.islink(path) or not os.path.isfile(path):
         return None
+    text = _read_small_text(path)
+    if text is None:
+        return None
     try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.loads(handle.read())
+        document = json.loads(text)
     except (OSError, ValueError):
         return None
     if not isinstance(document, dict) or document.get("schema_version") != _OPERATIONS_STATUS_SCHEMA:

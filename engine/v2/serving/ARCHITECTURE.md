@@ -90,7 +90,7 @@ storage. Authentication supports bearer or cookie; React uses same-origin cookie
 ## Failure semantics
 
 The authenticated `GET /api/v1/operations` reads the publisher's
-`operations_status.json` sidecar without importing ops or mutating the
+`operations_status.json` document without importing ops or mutating the
 release. The document carries the published and attempted release ids,
 requested/resolved sessions, and the scheduled engineering history. Missing,
 malformed, or unreadable status raises `OPERATIONS_UNAVAILABLE` (503,
