@@ -120,7 +120,8 @@ _SCANNED_TREES = ("engine/", "tools/", "dashboard/", "checks/")
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+        return subprocess.run(["git", "--no-optional-locks", "-C", str(root), *args],
+                              capture_output=True, text=True,
                               check=False, timeout=30)
     except (subprocess.SubprocessError, OSError) as exc:
         raise SpecError(f"commit: git {args[0]} failed ({type(exc).__name__})") from exc
