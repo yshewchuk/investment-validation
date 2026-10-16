@@ -106,3 +106,28 @@ def test_source_size_cap_is_eight_mebibytes_and_its_boundary_is_exact(tmp_path):
         fingerprints.source_closure(tmp_path, ["big.py"])
     assert caught.value.code == "INPUT_CHANGED"
     assert "exceeds the size bound" in str(caught.value)
+
+
+def test_source_closure_reads_each_py_file_once_for_digest_and_imports(tmp_path, monkeypatch):
+    (tmp_path / "m.py").write_bytes(b"import first_module\n")
+    (tmp_path / "first_module.py").write_bytes(b"")
+    (tmp_path / "second_module.py").write_bytes(b"")
+    real_open = fingerprints.Path.open
+    opens = []
+
+    def open_then_swap(self, *args, **kwargs):
+        if self.name == "m.py" and args[:1] == ("rb",):
+            opens.append(1)
+            if len(opens) == 1:
+                stream = real_open(self, *args, **kwargs)
+                # Swap the file after the first read so a second read would see different bytes.
+                self.unlink()
+                self.write_bytes(b"import second_module\n")
+                return stream
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(fingerprints.Path, "open", open_then_swap)
+    closure = fingerprints.source_closure(tmp_path, ["m.py"])
+    assert len(opens) == 1
+    assert closure["m.py"] == "sha256:" + hashlib.sha256(b"import first_module\n").hexdigest()
+    assert set(closure) == {"m.py", "first_module.py"}
