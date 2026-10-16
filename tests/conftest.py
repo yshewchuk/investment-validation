@@ -204,6 +204,10 @@ def pytest_runtest_teardown(item, nextitem):
 #   Playwright browser.
 # - tests/test_v2_ops_coordinator_lease.py (whole file): lost-lease tests settle through
 #   the real `prove_ownership_gone` /proc scan; in parallel it quarantined the attempt.
+# - tests/v2/integration/test_mutation_ci.py (whole file, group "mutation_ci_real_repo"):
+#   NOT a collision: the real-repo import-graph and unresolved-import scans are cached
+#   per process (tools/mutation_pilot.py), so one worker pays the ~1 min cold build
+#   once instead of every worker (#791).
 #
 # NOT grouped, and why: the ~30 other tests that launch a real worker
 # subprocess through `Service`/`tests.ops_support.TEST_POLICY` (in
