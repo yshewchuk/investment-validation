@@ -1,6 +1,5 @@
 """Real captured cache shape (see #247 fixture); only numeric payloads are synthetic."""
 from dataclasses import FrozenInstanceError, replace
-from pathlib import Path
 
 import joblib
 import numpy as np
@@ -9,10 +8,10 @@ import pytest
 
 from engine.data.features.tier4 import ServingModel
 from engine.v2.foundation import content_hash
-from engine.v2.models import FrozenInference, InferenceRequest, MODEL_NOT_READY
+from engine.v2.models import MODEL_NOT_READY, FrozenInference, InferenceRequest
 from engine.v2.models import serving_fold_loader as loader
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
-from tests.test_phase5_serving_folds import cache, staged, _bytes, _name, _policy  # noqa: F401
+from tests.test_phase5_serving_folds import _bytes, _name, _policy, cache, staged  # noqa: F401
 from tools.phase5_serving_folds import describe_size_fold
 
 
@@ -25,7 +24,7 @@ class Predictor:
 
 
 @pytest.fixture
-def setup(tmp_path, cache, staged):
+def setup(tmp_path, cache, staged):  # noqa: F811 - imported pytest fixtures
     cache["estimator"] = Predictor()
     raw = _bytes(cache)
     descriptor = describe_size_fold(raw, _name(cache), _policy(cache), staged)
@@ -215,24 +214,16 @@ def test_bytes_refused_before_decode_and_warm_inference(setup, monkeypatch, warm
         assert str(inference._root) not in result.detail
 
 
-def test_bounded_read_uses_limit_plus_one(setup, monkeypatch):
-    original, reads = Path.open, []
+def test_bounded_read_uses_shared_no_follow_reader(setup, monkeypatch):
+    from engine.v2.models import loader as inference_loader
 
-    class Reader:
-        def __init__(self, path, *args, **kwargs):
-            self.stream = original(path, *args, **kwargs)
+    original, reads = inference_loader.read_bounded_state, []
 
-        def __enter__(self):
-            return self
+    def read(path, limit, *, no_follow=False):
+        reads.append((path, limit, no_follow))
+        return original(path, limit, no_follow=no_follow)
 
-        def __exit__(self, *args):
-            self.stream.close()
-
-        def read(self, size):
-            reads.append(size)
-            return self.stream.read(size)
-
-    monkeypatch.setattr(Path, "open", lambda path, *a, **k: Reader(path, *a, **k))
+    monkeypatch.setattr(inference_loader, "read_bounded_state", read)
     ref = _load(setup)
     _infer(ref)
-    assert reads == [loader.MAX_FOLD_BYTES + 1] * 2
+    assert reads == [(setup[3], loader.MAX_FOLD_BYTES, True)] * 2

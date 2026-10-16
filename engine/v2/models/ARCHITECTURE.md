@@ -187,8 +187,8 @@ interval policy. Its held-out prediction/residual arrays belong to that same
 object. Offline release preparation records this metadata in the hashed state
 catalog; a read-only loader verifies it against bounded, hash-checked bytes.
 Existing catalogs without this declaration require offline restaging, not a
-nightly fit or a guessed interval policy. Verified loading covers size
-folds for STR-THRU gate features only; chooser authoring is separate below.
+nightly fit or a guessed interval policy. Verified loading covers size folds and the chooser producer artifacts below;
+this alone admits neither training sources nor a nightly chooser declaration.
 
 Selection uses the exact earlier of the event month and decision month,
 the registered size model and feature order, and the pinned panel byte hash.
@@ -298,7 +298,28 @@ descriptor against a verified parent manifest and catalog identity, returning
 a `ServingFoldRef` with immutable metadata/pools, its shared `FrozenInference`
 owner and an ephemeral single-binding inference view. The view identity binds
 parent, catalog and descriptor; it is never staged or promoted. Selection,
-catalog discovery and source-bundle wiring remain separate work.
+catalog discovery and source-bundle wiring remain separate work. Loaders are read-only:
+no writes/transactions/retries; failed calls leave no published partial result, and
+identical verified inputs produce identical references.
+
+`load_chooser_serving_fold` prepares the separately typed implied-t1/runup-move
+artifact from its exact `tier4_folds:<role>` catalog member. It rechecks catalog
+schema/self-hash/release/deployment, unique membership, descriptor/object identity,
+and the matching wildcard parent binding before decoding. The returned immutable
+`ChooserServingFoldRef` preserves the raw D14 producer output and paired held-out
+interval arrays; these are not the chooser k-NN population or driver residual state.
+It makes no event-month selection or source-ready declaration. This is partial
+DYN-SV slice 3: genuine training-source completion/finality, coordinator publication
+and per-request causal bounds remain an upstream admission prerequisite; current
+headers/descriptors contain no such proof. Existing nightly refusals remain.
+
+`FrozenInference.prepare_serving_fold(binding, max_member_bytes=..., expected_bytes=None)`
+returns detached immutable `ServingFoldMetadata`, never cached estimator/header objects.
+Both fold loaders use it; chooser catalog size is checked against the already-read
+buffers, including warm calls. The required byte limit is positive. Bounded reads use the shared regular-file reader with
+final-component no-follow; parent directories remain operator-trusted. Missing,
+special, symlinked, oversized or changed objects refuse before decode on cold and
+warm calls. Unbounded champion loading retains its existing behavior.
 
 `FrozenInference` owns the only decoded-artifact cache. Its existing adapter
 retains fold metadata with the estimator, so validation and prediction share
@@ -312,6 +333,8 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 | Parent/catalog/descriptor/header or embedded-pool disagreement | `MODEL_NOT_READY`; fixed path-free refusal, no inference or fallback |
 | Escaped path, missing/corrupt bytes or object above 32 MiB | Refuse before deserialization, including warm reads through the shared owner |
 | Repeated preparation and inference on the same owner/object | Reverify bytes; reuse the decoded artifact, never a second model cache |
+| Missing/duplicate chooser catalog membership, wrong role/output or opaque undeclared fold | Fixed `MODEL_NOT_READY`; no champion/size/other-fold substitution |
+| Source availability/finality or training-bound proof absent | No causal/source-ready claim; artifact preparation cannot bypass consuming admission |
 | Different current panel bytes or multi-fragment layout | No equivalence is inferred here; selector availability/provenance contract remains a prerequisite |
 
 - **`current_release_inventory` (`inventory.py`)**: the champion registry

@@ -1,0 +1,530 @@
+"""Artifact-only chooser preparation; independent synthetic numeric expectations."""
+
+import builtins
+import copy
+import hashlib
+import io
+import os
+import socket
+import sys
+from dataclasses import FrozenInstanceError, replace
+
+import joblib
+import numpy as np
+import pytest
+
+from engine.v2.foundation import content_hash, to_document
+from engine.v2.models import (
+    MODEL_NOT_READY,
+    ArtifactMember,
+    FrozenInference,
+    InferenceRequest,
+    ModelBinding,
+    ModelRelease,
+    no_fit_guard,
+)
+from engine.v2.models import serving_fold_loader as loader
+from engine.v2.models.deployment import (
+    RELEASE_HASH_SEMANTIC_V2,
+    StagedManifest,
+    semantic_release_hash,
+)
+from engine.v2.models.serving_folds import ChooserFoldPolicy, ChooserServingFoldDescriptor
+
+OUTPUTS = {
+    "implied_t1": ("driver_prediction", "pred_im_t1_d14"),
+    "runup_move": ("pred_runup_abs_move_d14", "pred_runup_abs_move_d14"),
+}
+
+
+class Predictor:
+    def predict(self, rows):
+        return np.asarray(rows).sum(axis=1) * 0.01
+
+    def fit(self, *args, **kwargs):
+        pytest.fail("runtime fit")
+
+
+def _raw(cache):
+    stream = io.BytesIO()
+    joblib.dump(cache, stream, compress=0)
+    return stream.getvalue()
+
+
+def _rehash(catalog):
+    catalog["manifest_hash"] = content_hash(
+        {k: v for k, v in catalog.items() if k != "manifest_hash"}
+    )
+    return catalog
+
+
+def _store(tmp_path, cache, parent, role):
+    raw = _raw(cache)
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    member = ArtifactMember(name="estimator", path=f"objects/{digest[7:]}", content_hash=digest)
+    path = tmp_path / member.path
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(raw)
+    output, producer = OUTPUTS[role]
+    descriptor = ChooserServingFoldDescriptor(
+        parent_release_id=parent.release.release_id,
+        parent_release_hash=parent.release_hash,
+        policy=ChooserFoldPolicy(
+            role=role,
+            model_id=cache["model_id"],
+            feature_order=("x", "y"),
+            panel_sha256="a" * 64,
+            interval_floor=0.0,
+        ),
+        fold_start="2026-02-01",
+        decision_clock_id="entry-close",
+        estimator=member,
+        pool_count=len(cache["pool_pred"]),
+        output_name=output,
+        producer_output=producer,
+    )
+    catalog = _rehash(
+        {
+            "schema_version": "phase5_staged_release.v1.0",
+            "release_id": "r1",
+            "deployment_id": "d1",
+            "sources": {},
+            "members": [
+                {
+                    "member_id": f"tier4_folds:{role}",
+                    "status": "STAGED",
+                    "objects": [
+                        {
+                            "name": f"{cache['model_id']}_202602_{'a' * 12}.joblib",
+                            "path": member.path,
+                            "content_hash": digest,
+                            "bytes": len(raw),
+                            "serving_fold": to_document(descriptor),
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    return descriptor, catalog, path
+
+
+@pytest.fixture(params=OUTPUTS)
+def setup(tmp_path, request):
+    role = request.param
+    binding = ModelBinding(
+        binding_id=f"{role}:*",
+        model_id=f"synthetic-{role}",
+        role=role,
+        strategy_id="*",
+        decision_clock_id="entry-close",
+        adapter="json-linear.v1",
+        feature_order=("x", "y"),
+        output_names=(OUTPUTS[role][0],),
+        members=(
+            ArtifactMember(
+                name="estimator", path="champion", content_hash=content_hash("champion")
+            ),
+        ),
+    )
+    release = ModelRelease(release_id="r1", deployment_id="d1", bindings=(binding,))
+    parent = StagedManifest(
+        release=release,
+        release_hash=semantic_release_hash(release),
+        release_hash_version=RELEASE_HASH_SEMANTIC_V2,
+        staged_at="2026-02-02T00:00:00Z",
+    )
+    cache = {
+        "estimator": Predictor(),
+        "model_id": binding.model_id,
+        "features": ["x", "y"],
+        "tier3_snapshot": "a" * 64,
+        "fold_start": "2026-02-01",
+        "pool_pred": [0.1, 0.2],
+        "pool_res": [-0.01, 0.02],
+    }
+    descriptor, catalog, path = _store(tmp_path, cache, parent, role)
+    return FrozenInference(tmp_path), descriptor, parent, catalog, path, cache
+
+
+def _load(setup, **overrides):
+    inference, descriptor, parent, catalog, _, _ = setup
+    return loader.load_chooser_serving_fold(
+        inference,
+        overrides.pop("descriptor", descriptor),
+        verified_parent_manifest=overrides.pop("parent", parent),
+        verified_catalog=overrides.pop("catalog", catalog),
+        **overrides,
+    )
+
+
+def _infer(ref):
+    binding = ref.release.bindings[0]
+    return ref.inference.infer(
+        ref.release,
+        InferenceRequest(
+            release_id=ref.release.release_id,
+            binding_id=binding.binding_id,
+            feature_order=("x", "y"),
+            rows=((2.0, 3.0),),
+        ),
+    )
+
+
+def test_one_decode_raw_outputs_immutable_and_no_source_admission(setup, monkeypatch):
+    original, calls = joblib.load, []
+    monkeypatch.setattr(joblib, "load", lambda *a, **k: (calls.append(1), original(*a, **k))[1])
+    ref = _load(setup)
+    assert _load(setup) == ref
+    assert _infer(ref).predictions == ((0.05,),)  # Raw D14: no horizon scaling.
+    assert _infer(ref).output_names == (OUTPUTS[ref.descriptor.policy.role][0],)
+    assert ref.descriptor.producer_output == OUTPUTS[ref.descriptor.policy.role][1]
+    assert ref.pool_pred == (0.1, 0.2) and ref.pool_res == (-0.01, 0.02)
+    assert calls == [1] and ref.inference.cache_size == 1
+    assert ref.inference is setup[0] and setup[2].release.bindings[0].adapter == "json-linear.v1"
+    assert not any(
+        hasattr(ref, name)
+        for name in ("source_ready", "admitted", "chooser_recipe", "chooser_analog_pool")
+    )
+    assert set(to_document(ref.descriptor)) == set(
+        setup[3]["members"][0]["objects"][0]["serving_fold"]
+    )
+    with pytest.raises(FrozenInstanceError):
+        ref.catalog_hash = "other"
+    with pytest.raises(TypeError):
+        ref.pool_res[0] = 1
+    with pytest.raises(loader.ServingFoldError):
+        loader.load_serving_fold(
+            setup[0],
+            ref.descriptor,
+            verified_parent_manifest=setup[2],
+            catalog_hash=ref.catalog_hash,
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"role": "size"},
+        {"strategy_id": "TWIN-P"},
+        {"model_id": "other"},
+        {"feature_order": ("y", "x")},
+        {"decision_clock_id": "next-open"},
+        {"output_names": ("wrong",)},
+    ],
+)
+def test_parent_mismatch_even_under_rehashed_manifest(setup, change, monkeypatch):
+    parent = setup[2]
+    release = replace(parent.release, bindings=(replace(parent.release.bindings[0], **change),))
+    parent = replace(parent, release=release, release_hash=semantic_release_hash(release))
+    descriptor = replace(setup[1], parent_release_hash=parent.release_hash)
+    catalog = copy.deepcopy(setup[3])
+    catalog["members"][0]["objects"][0]["serving_fold"] = to_document(descriptor)
+    monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("invalid parent decoded"))
+    with pytest.raises(loader.ServingFoldError):
+        _load(setup, parent=parent, descriptor=descriptor, catalog=_rehash(catalog))
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "hash",
+        "schema",
+        "release",
+        "deployment",
+        "missing",
+        "row-duplicate",
+        "object-duplicate",
+        "name-duplicate",
+        "status",
+        "wrong-role",
+        "path",
+        "object-hash",
+        "name",
+        "bytes",
+        "opaque",
+        "descriptor",
+        "members",
+        "objects",
+    ],
+)
+def test_catalog_membership_refuses_before_decode(setup, defect, monkeypatch):
+    catalog = copy.deepcopy(setup[3])
+    row, obj = catalog["members"][0], catalog["members"][0]["objects"][0]
+    if defect in {"schema", "release", "deployment"}:
+        catalog[
+            {"schema": "schema_version", "release": "release_id", "deployment": "deployment_id"}[
+                defect
+            ]
+        ] = "wrong"
+    elif defect == "missing":
+        catalog["members"] = []
+    elif defect == "row-duplicate":
+        catalog["members"].append(copy.deepcopy(row))
+    elif defect == "object-duplicate":
+        row["objects"].append(copy.deepcopy(obj))
+    elif defect == "name-duplicate":
+        other = copy.deepcopy(obj)
+        other["serving_fold"]["policy"]["interval_floor"] = 1.0
+        row["objects"].append(other)
+    elif defect == "status":
+        row["status"] = "PENDING"
+    elif defect == "wrong-role":
+        row["member_id"] = "chooser_analog_pool"
+    elif defect == "path":
+        obj["path"] = "champion"
+    elif defect == "object-hash":
+        obj["content_hash"] = content_hash("other")
+    elif defect == "name":
+        obj["name"] = "other.joblib"
+    elif defect == "bytes":
+        obj["bytes"] = True
+    elif defect == "opaque":
+        del obj["serving_fold"]
+    elif defect == "descriptor":
+        obj["serving_fold"]["policy"]["interval_floor"] = 1.0
+    elif defect == "members":
+        catalog["members"] = [None]
+    elif defect == "objects":
+        row["objects"] = [None]
+    if defect != "hash":
+        _rehash(catalog)
+    else:
+        catalog["manifest_hash"] = content_hash("wrong")
+    monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("invalid catalog decoded"))
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
+        _load(setup, catalog=catalog)
+    assert caught.value.code == MODEL_NOT_READY
+    assert setup[0].cache_size == 0
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("model_id", "wrong"),
+        ("features", ["y", "x"]),
+        ("tier3_snapshot", "b" * 64),
+        ("fold_start", "2026-03-01"),
+        ("pool_res", [float("nan"), 0]),
+        ("pool_res", [1]),
+        ("pool_res", [[1, 2]]),
+        ("pool_res", [True, False]),
+        ("pool_res", ["1", "2"]),
+        ("pool_res", None),
+        ("estimator", object()),
+    ],
+)
+def test_rehashed_header_and_pool_tamper_refuses(setup, key, value):
+    inference, _, parent, _, path, cache = setup
+    cache = dict(cache, **{key: value})
+    # Keep descriptor's registered model identity independent of a forged header.
+    model_id = cache["model_id"]
+    cache["model_id"] = parent.release.bindings[0].model_id
+    descriptor, catalog, new_path = _store(path.parent.parent, cache, parent, setup[1].policy.role)
+    if key == "model_id":
+        cache["model_id"] = model_id
+        raw = _raw(cache)
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        member = replace(descriptor.estimator, content_hash=digest, path=f"objects/{digest[7:]}")
+        descriptor = replace(descriptor, estimator=member)
+        new_path = path.parent.parent / member.path
+        new_path.write_bytes(raw)
+        obj = catalog["members"][0]["objects"][0]
+        obj.update(
+            path=member.path,
+            content_hash=digest,
+            bytes=len(raw),
+            serving_fold=to_document(descriptor),
+        )
+        _rehash(catalog)
+    with pytest.raises(loader.ServingFoldError):
+        _load((inference, descriptor, parent, catalog, new_path, cache))
+
+
+@pytest.mark.parametrize("warm", [False, True])
+@pytest.mark.parametrize("defect", ["oversize", "hash", "missing", "symlink", "fifo", "directory"])
+def test_cold_warm_bytes_refuse_and_no_stale_success(setup, warm, defect, monkeypatch):
+    inference, _, _, _, path, _ = setup
+    monkeypatch.setattr(loader, "MAX_FOLD_BYTES", path.stat().st_size)
+    ref = _load(setup) if warm else None
+    monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("bad bytes decoded"))
+    raw = path.read_bytes()
+    path.unlink()
+    if defect == "oversize":
+        path.write_bytes(raw + b"growth")
+    elif defect == "hash":
+        path.write_bytes(b"x" * len(raw))
+    elif defect == "symlink":
+        target = path.with_name("same-bytes")
+        target.write_bytes(raw)
+        path.symlink_to(target)
+    elif defect == "fifo":
+        os.mkfifo(path)
+    elif defect == "directory":
+        path.mkdir()
+    with pytest.raises(loader.ServingFoldError):
+        _load(setup)
+    with pytest.raises(loader.ServingFoldError):
+        _load(setup)
+    if ref is not None:
+        result = _infer(ref)
+        assert result.status == MODEL_NOT_READY
+        assert str(inference._root) not in result.detail
+
+
+@pytest.mark.parametrize("limit", [None, 0, -1, True, 1.5, sys.maxsize])
+def test_public_preparation_rejects_bad_limits_without_io(setup, limit, monkeypatch):
+    monkeypatch.setattr(
+        setup[0], "_load_artifact", lambda *a, **k: pytest.fail("invalid limit load")
+    )
+    with pytest.raises(ValueError):
+        setup[0].prepare_serving_fold(setup[2].release.bindings[0], max_member_bytes=limit)
+    assert setup[0].cache_size == 0
+
+
+def test_identity_catalog_and_policy_changes_share_only_decoded_cache(setup):
+    first = _load(setup)
+    catalog = copy.deepcopy(setup[3])
+    catalog["sources"]["extra"] = "changed"
+    other = _load(setup, catalog=_rehash(catalog))
+    descriptor = replace(setup[1], policy=replace(setup[1].policy, interval_floor=None))
+    catalog["members"][0]["objects"][0]["serving_fold"] = to_document(descriptor)
+    third = _load(setup, descriptor=descriptor, catalog=_rehash(catalog))
+    assert len({ref.release.release_id for ref in (first, other, third)}) == 3
+    assert setup[0].cache_size == 1
+    with pytest.raises(loader.ServingFoldError):
+        _load(setup, parent=replace(setup[2], release_hash=content_hash("wrong")))
+    parent = replace(
+        setup[2], release=replace(setup[2].release, bindings=setup[2].release.bindings * 2)
+    )
+    parent = replace(parent, release_hash=semantic_release_hash(parent.release))
+    with pytest.raises(loader.ServingFoldError):
+        _load(setup, parent=parent)
+
+
+def test_no_fit_network_write_or_source_ready_claim(setup, monkeypatch):
+    original = builtins.open
+    before = {p: p.read_bytes() for p in setup[4].parent.iterdir()}
+
+    def read_only(file, mode="r", *args, **kwargs):
+        assert not any(flag in mode for flag in "wax+")
+        return original(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", read_only)
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("network access"))
+    with no_fit_guard():
+        ref = _load(setup)
+        assert _infer(ref).predictions == ((0.05,),)
+        metadata = ref.inference.prepare_serving_fold(
+            ref.release.bindings[0], max_member_bytes=loader.MAX_FOLD_BYTES
+        )
+        assert not any(hasattr(metadata, key) for key in ("fit", "estimator", "header"))
+    assert {p: p.read_bytes() for p in setup[4].parent.iterdir()} == before
+    assert setup[3]["sources"] == {}  # Artifact-only success supplies no invented evidence.
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_empty_thin_artifact_pools_do_not_invent_intervals(setup, count):
+    inference, _, parent, _, path, cache = setup
+    cache = dict(cache, pool_pred=[0.1] * count, pool_res=[-0.01] * count)
+    descriptor, catalog, path = _store(path.parent.parent, cache, parent, setup[1].policy.role)
+    ref = _load((inference, descriptor, parent, catalog, path, cache))
+    assert ref.pool_pred == (0.1,) * count and ref.pool_res == (-0.01,) * count
+    assert not hasattr(ref, "interval")
+
+
+def test_standard_authoring_catalog_is_consumed_without_relabeling(setup, tmp_path):
+    from engine.v2.foundation import from_document
+    from tests.v2.integration.test_chooser_fold_authoring import (
+        _inputs,
+        _object,
+        _published_manifest,
+        _states,
+    )
+    from tools.phase5_prepare_release import write_release
+
+    role, cache = setup[1].policy.role, setup[5]
+    root = tmp_path / "standard"
+    write_release(root, *_inputs(role, cache), _states(role, cache))
+    catalog, obj = _object(root, role)
+    parent = _published_manifest(root / "deployment")
+    descriptor = from_document(ChooserServingFoldDescriptor, obj["serving_fold"])
+    ref = loader.load_chooser_serving_fold(
+        FrozenInference(root / "deployment"),
+        descriptor,
+        verified_parent_manifest=parent,
+        verified_catalog=catalog,
+    )
+    assert ref.descriptor == descriptor
+    assert _infer(ref).predictions == ((0.05,),)
+
+
+def test_public_metadata_cannot_poison_hash_verified_cached_state(setup):
+    ref = _load(setup)
+    owner, binding = ref.inference, ref.release.bindings[0]
+    metadata = owner.prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES)
+    assert metadata.feature_order == ("x", "y")
+    assert all(type(v) is float for v in metadata.pool_pred + metadata.pool_res)
+    with pytest.raises(TypeError):
+        metadata.pool_res[0] = 999.0
+    with pytest.raises(FrozenInstanceError):
+        metadata.pool_res = (999.0, 0.02)
+    # Even a forced mutation of this detached value cannot reach the cache.
+    object.__setattr__(metadata, "pool_res", (999.0, 0.02))
+    object.__setattr__(metadata, "feature_order", ("changed",))
+    again = _load(setup)
+    assert again.pool_res == (-0.01, 0.02)
+    assert _infer(again).predictions == ((0.05,),)
+    assert owner.cache_size == 1
+
+
+@pytest.mark.parametrize("warm", [False, True])
+@pytest.mark.parametrize("delta", [-1, 1])
+def test_wrong_declared_size_refuses_before_decode_and_preserves_warm_ceiling(
+    setup, warm, delta, monkeypatch
+):
+    owner = setup[0]
+    if warm:
+        _load(setup)
+    cached = next(iter(owner._cache.values())) if warm else None
+    ceiling = None if cached is None else cached.member_byte_limit
+    monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("wrong declared bytes decoded"))
+    catalog = copy.deepcopy(setup[3])
+    catalog["members"][0]["objects"][0]["bytes"] += delta
+    monkeypatch.setattr(loader, "MAX_FOLD_BYTES", loader.MAX_FOLD_BYTES // 2)
+    with pytest.raises(loader.ServingFoldError):
+        _load(setup, catalog=_rehash(catalog))
+    if warm:
+        assert cached.member_byte_limit == ceiling
+        assert _infer(_load(setup)).predictions == ((0.05,),)
+    else:
+        assert owner.cache_size == 0
+
+
+@pytest.mark.parametrize("expected", [0, -1, True, 1.5, sys.maxsize, loader.MAX_FOLD_BYTES + 1])
+def test_bad_expected_size_refuses_before_cache_access(setup, expected, monkeypatch):
+    monkeypatch.setattr(
+        setup[0], "_load_artifact", lambda *a, **k: pytest.fail("invalid size load")
+    )
+    with pytest.raises(ValueError):
+        setup[0].prepare_serving_fold(
+            setup[2].release.bindings[0],
+            max_member_bytes=loader.MAX_FOLD_BYTES,
+            expected_bytes=expected,
+        )
+
+
+def test_public_metadata_refuses_non_fold_or_missing_adapter(setup, monkeypatch):
+    owner = setup[0]
+    binding = setup[2].release.bindings[0]
+    monkeypatch.setattr(
+        owner, "_load_artifact", lambda *a, **k: pytest.fail("unsupported adapter load")
+    )
+    with pytest.raises(ValueError):
+        owner.prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES)
+    owner._adapters.clear()
+    with pytest.raises(ValueError):
+        owner.prepare_serving_fold(
+            replace(binding, adapter="tier4-serving-fold.v1"),
+            max_member_bytes=loader.MAX_FOLD_BYTES,
+        )

@@ -5,7 +5,13 @@ import hashlib
 from pathlib import Path
 from typing import Mapping
 
-from .adapters import AdapterError, InferenceAdapter, ReadOnlyArtifact, default_adapters
+from .adapters import (
+    AdapterError,
+    InferenceAdapter,
+    ReadOnlyArtifact,
+    ServingFoldMetadata,
+    default_adapters,
+)
 from .contracts import (
     MODEL_NOT_READY,
     MODEL_READY,
@@ -13,6 +19,7 @@ from .contracts import (
     InferenceResult,
     ModelRelease,
 )
+from .frozen_state_io import read_bounded_state, valid_byte_limit
 
 
 class _CachedArtifact(ReadOnlyArtifact):
@@ -78,7 +85,29 @@ class FrozenInference:
             return self._refuse(request, reason)
         return matches[0]
 
-    def _load_artifact(self, binding, *, max_member_bytes=None):
+    def prepare_serving_fold(self, binding, *, max_member_bytes: int,
+                             expected_bytes: int | None = None) -> ServingFoldMetadata:
+        """Return detached immutable fold metadata through the shared cache.
+
+        This verifies object bytes, not release membership or source admissibility.
+        The cached estimator/header is never exposed. Prediction uses ``infer``.
+        """
+        if max_member_bytes is None or not valid_byte_limit(max_member_bytes):
+            raise AdapterError("artifact byte limit must be a positive integer below sys.maxsize")
+        if expected_bytes is not None and (not valid_byte_limit(expected_bytes)
+                                           or expected_bytes > max_member_bytes):
+            raise AdapterError("invalid serving fold declared byte count")
+        if binding.adapter != "tier4-serving-fold.v1" or binding.adapter not in self._adapters:
+            raise AdapterError("unsupported serving fold adapter")
+        expected = None if expected_bytes is None else {"estimator": expected_bytes}
+        artifact = self._load_artifact(binding, max_member_bytes=max_member_bytes,
+                                       expected_member_bytes=expected)
+        try:
+            return artifact.metadata()
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            raise AdapterError("invalid serving fold metadata") from None
+
+    def _load_artifact(self, binding, *, max_member_bytes=None, expected_member_bytes=None):
         key = (binding.adapter, binding.feature_order, binding.output_names,
                tuple((item.name, item.content_hash) for item in binding.members))
         artifact = self._cache.get(key)
@@ -91,6 +120,9 @@ class FrozenInference:
             if limit is not None:
                 raise AdapterError("bounded artifact verification failed") from None
             raise
+        if (expected_member_bytes is not None
+                and {name: len(raw) for name, raw in members.items()} != expected_member_bytes):
+            raise AdapterError("artifact declared byte count mismatch")
         if artifact is None:
             artifact = _CachedArtifact(self._adapters[binding.adapter].load(members, binding), limit)
             self._cache[key] = artifact
@@ -104,20 +136,19 @@ class FrozenInference:
             raise AdapterError("artifact member names must be unique and non-empty")
         verified = {}
         for member in binding.members:
-            path = (self._root / member.path).resolve()
+            path = self._root / member.path
+            resolved = path.resolve()
             try:
-                path.relative_to(self._root)
+                resolved.relative_to(self._root)
             except ValueError as exc:
                 raise AdapterError("artifact path escapes artifact root") from exc
-            if not path.is_file():
-                raise FileNotFoundError(f"missing artifact member: {member.name}")
             if max_member_bytes is None:
+                path = resolved
+                if not path.is_file():
+                    raise FileNotFoundError(f"missing artifact member: {member.name}")
                 payload = path.read_bytes()
             else:
-                with path.open("rb") as stream:
-                    payload = stream.read(max_member_bytes + 1)
-                if len(payload) > max_member_bytes:
-                    raise AdapterError("artifact exceeds byte limit")
+                payload = read_bounded_state(path, max_member_bytes, no_follow=True)
             if "sha256:" + hashlib.sha256(payload).hexdigest() != member.content_hash:
                 raise AdapterError(f"artifact hash mismatch: {member.name}")
             verified[member.name] = payload

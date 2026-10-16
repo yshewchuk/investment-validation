@@ -111,7 +111,7 @@
     "tests/test_v2_serving_analogs.py",
     "tests/test_v2_serving_bridge.py",
     "tests/test_v2_serving_derivation.py",
-    "tests/test_v2_serving_fold_loader.py",
+    "tests/v2/models/test_v2_serving_fold_loader.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_native_parity.py",
     "tests/test_v2_serving_native_render.py",
