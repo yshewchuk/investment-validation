@@ -123,7 +123,7 @@ size check. Existing callers omitting the ceiling retain their read contract.
 
 ### 2.1 Pool release assembly
 
-`checks/phase5_release_assembly.py`, beside the catalog layout in `engine/v2/models/release_layout.py` (moved from `checks/phase5_release.py`; object hashing, `write_object` and the bounded catalog read live in `release_objects.py`, re-exported by `release_layout`, to stay inside the fan-out budget; the `modules_available` probe stays in `checks/phase5_modules.py` because production code may not import dynamically):
+`checks/phase5_release_assembly.py`, beside the catalog layout in `engine/v2/models/release_layout.py` (object hashing, `write_object` and the bounded catalog read live in `release_objects.py`, re-exported by `release_layout`, to stay inside the fan-out budget; the `modules_available` probe stays in `checks/phase5_modules.py` because production code may not import dynamically):
 
 - `derive_catalog(prior_catalog, *, release_id, expected_prior_release_id, outputs, chooser, cutoff) -> dict`
   — pure. Returns the candidate catalog body: the six pool members

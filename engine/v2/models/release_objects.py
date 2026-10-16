@@ -1,4 +1,4 @@
-"""Content-addressed object layout and durable writes for a staged release; split from release_layout to stay inside the fan-out budget."""
+"""Content-addressed object layout and durable writes for a staged release."""
 from __future__ import annotations
 
 import hashlib

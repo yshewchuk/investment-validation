@@ -603,7 +603,7 @@ def restage_semantic_hash(root: Path, release_id: str) -> StagedManifest:
     An explicit, operator-run upgrade step, never automatic --
     :func:`stage_release`'s own idempotent re-stage of identical content
     deliberately KEEPS a legacy manifest's original bytes and version (see
-    ``tests/test_checks_phase5_acceptance.py::
+    ``tests/v2/models/test_checks_phase5_acceptance.py::
     test_model_release_loader_and_restage_support_versioned_hashes``).
     :func:`promote`/:func:`rollback` refuse any ``release_hash_version``
     other than ``RELEASE_HASH_SEMANTIC_V2`` (:class:`StaleReleaseHash`);

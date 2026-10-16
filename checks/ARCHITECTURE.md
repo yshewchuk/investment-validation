@@ -12,10 +12,11 @@ every other path, including undeclared paths under `data/`, uses ordinary
 
 No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.
 Some checks also expose callable report functions.
+`phase5_modules.modules_available` probes optional modules (kept here: production code may not import dynamically).
 `phase5_release_assembly` (`derive_catalog`, `carry_forward_release`) assembles a carried-forward
 release catalog; its contract and refusal codes are `engine/v2/models/ARCHITECTURE.md` §2.1.
 
-`engine.v2.models.release_layout.write_object` (moved from `checks/phase5_release.py`, #807) returns hash/path in the existing flat deployment layout after exact bounded no-follow byte verification.
+`engine.v2.models.release_layout.write_object` returns hash/path in the existing flat deployment layout after exact bounded no-follow byte verification.
 New objects are durable before return; create-only publication never overwrites or repairs incumbents.
 Every retry verifies the object and syncs its directories; the byte allowance is the supplied payload length, including zero.
 Only invocation-owned staging is cleaned; no unbounded read or cross-filesystem copy fallback is permitted.
@@ -77,7 +78,7 @@ Commands write findings/progress to standard streams and may write reports or ev
 ## Dependencies
 
 Checks use Python and repository metadata; evidence checks may import application packages or read built stores. `repo_hygiene.py` avoids `engine` imports.
-`engine/v2/models/release_layout.py` uses foundation's public `ensure_directory`/`fsync_directory`
+`engine/v2/models/release_objects.py` uses foundation's public `ensure_directory`/`fsync_directory`
 and models deployment for the existing store/catalog contracts.
 Tier-0 support imports only the standard library and the diagnosis receipt
 interface; it never imports the corpus runner or starts a process.

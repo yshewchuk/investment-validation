@@ -162,7 +162,7 @@ for offline fold metadata. `tools/phase5_prepare_release.py`
 consumes `ChooserFoldPolicy` and `chooser_fold_outputs`, obtains registered
 policies, and invokes `tools/phase5_serving_folds.py`'s `preflight_chooser_fold`
 before publication.
-`release_layout.py` and `tools/phase5_prepare_release.py` use the shared bounded reader with final-component no-follow.
+`release_layout.py` (catalog read via `release_objects.read_regular_file`) and `tools/phase5_prepare_release.py` use the shared bounded reader with final-component no-follow.
 `checks/phase5_acceptance.py` publishes staging success after acceptance.
 `tools/phase5_prepare_release.py` invalidates prior success before re-preparation.
 `checks/phase5_release_assembly.py` re-stages a prior release under a new id
