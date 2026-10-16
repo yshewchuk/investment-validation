@@ -86,6 +86,11 @@ which this merge keeps alongside the PR's existing relocated-ops paths; as
 with v5-v9 the inventory and measurement identity refresh while the package
 counts remain historical, not a fresh run.
 
+Bumped to v11: ``tests/test_v2_serving_fold_loader.py`` moved to
+``tests/v2/models/``. The declared file list and measurement identity change;
+the fixed selector retains that path and package counts remain historical,
+not a fresh coverage measurement.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -177,7 +182,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v10"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v11"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.

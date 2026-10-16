@@ -1,6 +1,6 @@
 """Real captured cache shape (see #247 fixture); only numeric payloads are synthetic."""
+import copy
 from dataclasses import FrozenInstanceError, replace
-from pathlib import Path
 
 import joblib
 import numpy as np
@@ -9,10 +9,18 @@ import pytest
 
 from engine.data.features.tier4 import ServingModel
 from engine.v2.foundation import content_hash
-from engine.v2.models import FrozenInference, InferenceRequest, MODEL_NOT_READY
+from engine.v2.models import (
+    MODEL_NOT_READY,
+    AdapterError,
+    FrozenInference,
+    InferenceRequest,
+    deployment,
+)
 from engine.v2.models import serving_fold_loader as loader
+from engine.v2.models.serving_folds import SizeFoldPolicy
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
-from tests.test_phase5_serving_folds import cache, staged, _bytes, _name, _policy  # noqa: F401
+from tests.fixtures.size_serving_header import HEADER
+from tests.v2.models.serving_fold_support import fold_bytes, fold_name, release_inputs
 from tools.phase5_serving_folds import describe_size_fold
 
 
@@ -24,11 +32,21 @@ class Predictor:
         raise AssertionError("runtime fitting is forbidden")
 
 
+def _size_policy(cache):
+    return SizeFoldPolicy(model_id=cache["model_id"], feature_order=tuple(cache["features"]),
+                          panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)
+
+
 @pytest.fixture
-def setup(tmp_path, cache, staged):
-    cache["estimator"] = Predictor()
-    raw = _bytes(cache)
-    descriptor = describe_size_fold(raw, _name(cache), _policy(cache), staged)
+def setup(tmp_path):
+    cache = copy.deepcopy(HEADER)
+    captured = cache.pop("capture")
+    cache.update(estimator=Predictor(), pool_pred=np.array([0.1, 0.2]),
+                 pool_res=np.array([-0.01, 0.02]))
+    assert sorted(cache) == captured["keys"]
+    staged = deployment.stage_release(tmp_path / "deployment", *release_inputs("size", cache))
+    raw = fold_bytes(cache)
+    descriptor = describe_size_fold(raw, fold_name(cache), _size_policy(cache), staged)
     path = tmp_path / descriptor.estimator.path
     path.parent.mkdir(exist_ok=True)
     path.write_bytes(raw)
@@ -93,8 +111,9 @@ def test_warm_legacy_entry_reused_and_limit_never_relaxes(setup, monkeypatch):
     assert entry.member_byte_limit == ceiling
     assert _infer(ref).status == "READY"
     assert calls == [1]
-    with pytest.raises(ValueError):
+    with pytest.raises(AdapterError, match="^bounded artifact verification failed$") as caught:
         inference._load_artifact(binding, max_member_bytes=1)
+    assert type(caught.value) is AdapterError
     assert entry.member_byte_limit == ceiling
 
 
@@ -139,7 +158,7 @@ def test_legacy_minimal_fold_keeps_prediction_acceptance(setup, monkeypatch):
     import hashlib
 
     inference, descriptor, parent, path, stored = setup
-    raw = _bytes({key: stored[key] for key in ("estimator", "features")})
+    raw = fold_bytes({key: stored[key] for key in ("estimator", "features")})
     path.write_bytes(raw)
     member = replace(descriptor.estimator, content_hash="sha256:" + hashlib.sha256(raw).hexdigest())
     binding = replace(parent.release.bindings[0], adapter="tier4-serving-fold.v1", members=(member,))
@@ -168,7 +187,7 @@ def test_rehashed_invalid_header_and_pools_refuse(setup, key, value):
     stored[key] = value
     if value is None:
         stored.pop(key)
-    raw = _bytes(stored)
+    raw = fold_bytes(stored)
     path.write_bytes(raw)
     import hashlib
 
@@ -182,8 +201,8 @@ def test_empty_and_thin_pools_are_preserved(setup, count):
     inference, _, parent, _, stored = setup
     stored["pool_pred"] = np.zeros(count)
     stored["pool_res"] = np.ones(count)
-    raw = _bytes(stored)
-    descriptor = describe_size_fold(raw, _name(stored), _policy(stored), parent)
+    raw = fold_bytes(stored)
+    descriptor = describe_size_fold(raw, fold_name(stored), _size_policy(stored), parent)
     path = inference._root / descriptor.estimator.path
     path.write_bytes(raw)
     ref = _load((inference, descriptor, parent, path, stored))
@@ -215,24 +234,16 @@ def test_bytes_refused_before_decode_and_warm_inference(setup, monkeypatch, warm
         assert str(inference._root) not in result.detail
 
 
-def test_bounded_read_uses_limit_plus_one(setup, monkeypatch):
-    original, reads = Path.open, []
+def test_bounded_read_uses_shared_no_follow_reader(setup, monkeypatch):
+    from engine.v2.models import loader as inference_loader
 
-    class Reader:
-        def __init__(self, path, *args, **kwargs):
-            self.stream = original(path, *args, **kwargs)
+    original, reads = inference_loader.read_bounded_state, []
 
-        def __enter__(self):
-            return self
+    def read(path, limit, *, no_follow=False):
+        reads.append((path, limit, no_follow))
+        return original(path, limit, no_follow=no_follow)
 
-        def __exit__(self, *args):
-            self.stream.close()
-
-        def read(self, size):
-            reads.append(size)
-            return self.stream.read(size)
-
-    monkeypatch.setattr(Path, "open", lambda path, *a, **k: Reader(path, *a, **k))
+    monkeypatch.setattr(inference_loader, "read_bounded_state", read)
     ref = _load(setup)
     _infer(ref)
-    assert reads == [loader.MAX_FOLD_BYTES + 1] * 2
+    assert reads == [(setup[3], loader.MAX_FOLD_BYTES, True)] * 2

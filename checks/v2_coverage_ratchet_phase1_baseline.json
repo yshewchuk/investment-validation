@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v10",
+  "suite_version": "phase1_coverage_suite.v11",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -111,7 +111,7 @@
     "tests/test_v2_serving_analogs.py",
     "tests/test_v2_serving_bridge.py",
     "tests/test_v2_serving_derivation.py",
-    "tests/test_v2_serving_fold_loader.py",
+    "tests/v2/models/test_v2_serving_fold_loader.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_native_parity.py",
     "tests/test_v2_serving_native_render.py",

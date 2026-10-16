@@ -21,15 +21,18 @@ from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from experiments import prediction_report as prediction
 from experiments import v2_prediction as cli
-from tests.v2.research.test_native_outcomes import _clock, _rows
-from tests.v2.research.test_native_registration import (
-    _advance_head,
-    _catalog,
-    _new_snapshot,
-    _objects,
+from tests.v2.research.magnitude_trial_support import (
+    catalog_rows,
+    prediction_spec,
 )
-from tests.v2.research.test_prediction_inputs import MONTH, _commit
-from tests.v2.research.test_prediction_report import _dataset, _spec
+from tests.v2.research.test_native_outcomes import read_ledger_rows, set_outcome_clock
+from tests.v2.research.test_native_registration import (
+    advance_snapshot_head,
+    artifact_object_bytes,
+    new_native_snapshot,
+)
+from tests.v2.research.test_prediction_inputs import MONTH, commit_prediction_inputs
+from tests.v2.research.test_prediction_report import prediction_dataset
 
 
 @dataclass
@@ -43,13 +46,13 @@ class Source:
 
 
 def _source(tmp_path, *, spec=None, single_class=False):
-    events, moves = _dataset()
+    events, moves = prediction_dataset()
     if single_class:
         for move in moves[:3]:
             move["realized_move_pct"] = 1
-    conn, _, snapshot = _commit(tmp_path, events, moves)
+    conn, _, snapshot = commit_prediction_inputs(tmp_path, events, moves)
     spec_path = tmp_path / "spec.json"
-    spec_path.write_text(json.dumps(asdict(spec or _spec())))
+    spec_path.write_text(json.dumps(asdict(spec or prediction_spec())))
     return Source(conn, ArtifactStore(tmp_path / "store"), tmp_path, events,
                   snapshot, spec_path)
 
@@ -142,8 +145,8 @@ def _private_refusal(source, response, code):
 
 
 def _preserved(source, catalog, objects):
-    assert _catalog(source.conn) == catalog
-    after = _objects(source.store)
+    assert catalog_rows(source.conn) == catalog
+    after = artifact_object_bytes(source.store)
     assert {key: after[key] for key in objects} == objects
 
 
@@ -208,28 +211,28 @@ def test_recorded_run_after_smoke_replays_original_date_and_exactly_one_row(sour
     _invoke(source, capsys, "register")
     smoke = _invoke(source, capsys, "run", "--no-ledger")
     ledger = source.root / "recorded" / "ledger.csv"
-    _clock(monkeypatch, "2026-01-02")
+    set_outcome_clock(monkeypatch, "2026-01-02")
     first = _invoke(source, capsys, "run", "--ledger", ledger)
     assert first["recording_mode"] == "recorded"
     assert first["report"] != smoke["report"]
     assert "recorded evaluation" in Path(first["report"]).read_text()
-    before = _catalog(source.conn), _objects(source.store), ledger.read_bytes()
-    _clock(monkeypatch, "2026-02-10")
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()
+    set_outcome_clock(monkeypatch, "2026-02-10")
     _metadata_only(monkeypatch)
     repeated = _invoke(source, capsys, "run", "--ledger", ledger)
     assert repeated == first
     _preserved(source, before[0], before[1])
     assert ledger.read_bytes() == before[2]
-    assert len(_rows(ledger)) == 1
-    assert _rows(ledger)[0]["date"] == "2026-01-02"
-    assert _rows(ledger)[0]["stage"] == "ran"
+    assert len(read_ledger_rows(ledger)) == 1
+    assert read_ledger_rows(ledger)[0]["date"] == "2026-01-02"
+    assert read_ledger_rows(ledger)[0]["stage"] == "ran"
 
 
 def test_interrupted_recording_replays_saved_intent_without_refit(source, monkeypatch, capsys):
     """A failed append retains the original report/date; explicit replay finishes once."""
     _invoke(source, capsys, "register")
     ledger = source.root / "ledger.csv"
-    _clock(monkeypatch, "2026-01-02")
+    set_outcome_clock(monkeypatch, "2026-01-02")
 
     def interrupted(*args, **kwargs):
         raise OSError("synthetic interrupted append")
@@ -244,11 +247,11 @@ def test_interrupted_recording_replays_saved_intent_without_refit(source, monkey
     assert original["ledger_row"]["date"] == "2026-01-02"
     assert not ledger.exists()
     assert not list(source.root.rglob("REPORT.md"))
-    _clock(monkeypatch, "2026-02-10")
+    set_outcome_clock(monkeypatch, "2026-02-10")
     _metadata_only(monkeypatch)
     result = _invoke(source, capsys, "run", "--ledger", ledger)
     assert result["recording_mode"] == "recorded"
-    assert _rows(ledger) == [original["ledger_row"]]
+    assert read_ledger_rows(ledger) == [original["ledger_row"]]
     assert _document(source, _evidence(source)["native_outcome"]) == original
     assert Path(result["report"]).read_bytes() == source.store.read_verified(
         from_document(ArtifactRef, original["report_ref"]))
@@ -265,7 +268,7 @@ def test_pre_admission_refusals_do_not_evaluate_or_record(source, monkeypatch, c
         _invoke(source, capsys, "register")
         extra += ["--scope", "does-not-exist"]
     _metadata_only(monkeypatch)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     response = _invoke(source, capsys, "run", *extra, status=2)
     _private_refusal(source, response,
                      "SNAPSHOT_UNRESOLVED" if kind == "missing-scope" else "INVALID_EXPERIMENT_SPEC")
@@ -279,7 +282,7 @@ def test_pre_admission_refusals_do_not_evaluate_or_record(source, monkeypatch, c
 def test_invalid_folds_publish_typed_r4_without_partial_report(tmp_path, monkeypatch, capsys, kind, smoke):
     folds = {"empty-train": ("2022",), "empty-test": ("2023", "2025"),
              "single-class": ("2023",)}[kind]
-    source = _source(tmp_path, spec=_spec(folds=folds), single_class=kind == "single-class")
+    source = _source(tmp_path, spec=prediction_spec(folds=folds), single_class=kind == "single-class")
     try:
         _invoke(source, capsys, "register")
         monkeypatch.setattr(prediction, "render_prediction_report", _forbid)
@@ -296,7 +299,7 @@ def test_invalid_folds_publish_typed_r4_without_partial_report(tmp_path, monkeyp
         if smoke:
             assert not ledger.exists()
         else:
-            assert [row["stage"] for row in _rows(ledger)] == ["failed"]
+            assert [row["stage"] for row in read_ledger_rows(ledger)] == ["failed"]
     finally:
         source.conn.close()
 
@@ -330,13 +333,13 @@ def test_injected_r3_and_r4_at_prediction_input_boundary_are_recorded_and_replay
     if smoke:
         assert not ledger.parent.exists()
     else:
-        assert _rows(ledger) == [outcome["ledger_row"]]
-    catalog, objects = _catalog(source.conn), _objects(source.store)
+        assert read_ledger_rows(ledger) == [outcome["ledger_row"]]
+    catalog, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     ledger_bytes = None if smoke else ledger.read_bytes()
     monkeypatch.setattr(prediction, "load_prediction_targets", _forbid)
     replayed = _invoke(source, capsys, "run", *recording, status=2)
     assert replayed == {"refused": expected, "receipt_ref": evidence[key + "_receipt"]}
-    assert _catalog(source.conn) == catalog and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == catalog and artifact_object_bytes(source.store) == objects
     assert not list(source.root.rglob("REPORT.md"))
     if smoke:
         assert not ledger.parent.exists()
@@ -348,7 +351,7 @@ def test_injected_r3_and_r4_at_prediction_input_boundary_are_recorded_and_replay
 def test_transient_prediction_input_failure_stays_private_and_can_retry(
         source, monkeypatch, capsys, smoke):
     _invoke(source, capsys, "register")
-    catalog, objects, evidence = _catalog(source.conn), _objects(source.store), _evidence(source)
+    catalog, objects, evidence = catalog_rows(source.conn), artifact_object_bytes(source.store), _evidence(source)
     ledger = source.root / "recorded" / "ledger.csv"
     recording = ["--ledger", ledger] + (["--no-ledger"] if smoke else [])
 
@@ -362,9 +365,9 @@ def test_transient_prediction_input_failure_stays_private_and_can_retry(
     _private_refusal(source, response, "RESOURCE_UNAVAILABLE")
     _preserved(source, catalog, objects)
     assert _evidence(source) == evidence
-    added = _objects(source.store).keys() - objects.keys()
+    added = artifact_object_bytes(source.store).keys() - objects.keys()
     assert len(added) == 1
-    assert all(json.loads(_objects(source.store)[key])["schema_version"] ==
+    assert all(json.loads(artifact_object_bytes(source.store)[key])["schema_version"] ==
                "native_experiment_refusal.v1.0" for key in added)
     assert not ledger.parent.exists()
     assert not list(source.root.rglob("REPORT.md"))
@@ -374,7 +377,7 @@ def test_transient_prediction_input_failure_stays_private_and_can_retry(
     if smoke:
         assert not ledger.parent.exists()
     else:
-        assert [row["stage"] for row in _rows(ledger)] == ["ran"]
+        assert [row["stage"] for row in read_ledger_rows(ledger)] == ["ran"]
 
 
 @pytest.mark.parametrize("kind", ["random", "rolling", "metadata-drift"])
@@ -402,7 +405,7 @@ def test_r5_precedes_targets_fit_and_report_for_explicit_or_changed_metadata(
     if smoke:
         assert not ledger.exists()
     else:
-        assert [row["stage"] for row in _rows(ledger)] == ["refused"]
+        assert [row["stage"] for row in read_ledger_rows(ledger)] == ["refused"]
 
 
 @pytest.mark.parametrize("kind", ["explicit-holdout", "metadata-drift"])
@@ -415,7 +418,7 @@ def test_current_r5_blocks_saved_success_replay_without_changing_prior_bytes(
     recording = ["--ledger", ledger] + (["--no-ledger"] if smoke else [])
     completed = _invoke(source, capsys, "run", *recording, *selected)
     report = Path(completed["report"])
-    catalog, objects, report_bytes = _catalog(source.conn), _objects(source.store), report.read_bytes()
+    catalog, objects, report_bytes = catalog_rows(source.conn), artifact_object_bytes(source.store), report.read_bytes()
     ledger_bytes = None if smoke else ledger.read_bytes()
     if kind == "metadata-drift":
         _changed_metadata(source, monkeypatch)
@@ -431,9 +434,9 @@ def test_current_r5_blocks_saved_success_replay_without_changing_prior_bytes(
         assert not ledger.exists()
     else:
         assert ledger.read_bytes() == ledger_bytes
-    added = _objects(source.store).keys() - objects.keys()
+    added = artifact_object_bytes(source.store).keys() - objects.keys()
     assert added
-    assert all(json.loads(_objects(source.store)[key])["schema_version"] ==
+    assert all(json.loads(artifact_object_bytes(source.store)[key])["schema_version"] ==
                "native_experiment_refusal.v1.0" for key in added)
 
 
@@ -445,13 +448,13 @@ def test_changed_binding_precedes_holdout_and_cannot_consume_original_outcome(
     """R6 stays private, then restored inputs can still publish their first success."""
     if dimension == "snapshot":
         # The shared builder commits a real, distinct 2024-only metadata snapshot.
-        alternate = _new_snapshot(replace(source, events=[
+        alternate = new_native_snapshot(replace(source, events=[
             event for event in source.events if event["year"] == 2024]))
     elif dimension == "scope":
         source.conn.execute("INSERT INTO data_snapshot_heads SELECT 'same-snapshot', snapshot_id, 1, "
                             "updated_at, update_receipt_ref FROM data_snapshot_heads WHERE scope='shadow'")
     registered = _invoke(source, capsys, "register")
-    original_evidence, original_catalog = _evidence(source), _catalog(source.conn)
+    original_evidence, original_catalog = _evidence(source), catalog_rows(source.conn)
     original_registration = _document(source, original_evidence["native_registration"])
     spec_bytes = source.spec_path.read_bytes()
     ledger = source.root / "recorded" / "ledger.csv"
@@ -469,7 +472,7 @@ def test_changed_binding_precedes_holdout_and_cannot_consume_original_outcome(
             elif dimension == "code":
                 _changed_source_fingerprint(patch)
             elif dimension == "snapshot":
-                _advance_head(source, alternate)
+                advance_snapshot_head(source, alternate)
             elif dimension == "scope":
                 selected += ["--scope", "same-snapshot"]
             else:
@@ -484,14 +487,14 @@ def test_changed_binding_precedes_holdout_and_cannot_consume_original_outcome(
             patch.setattr(outcomes, "publish_native_outcome", _forbid)
             patch.setattr(outcomes, "replay_native_outcome", _forbid)
             patch.setattr(outcomes, "ledger_append", _forbid)
-            catalog, objects = _catalog(source.conn), _objects(source.store)
+            catalog, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
             response = _invoke(source, capsys, "run", *recording, *selected, status=2)
             _private_refusal(source, response, "EXPERIMENT_IDENTITY_CONFLICT")
             _preserved(source, catalog, objects)
             assert _evidence(source) == original_evidence
-            added = _objects(source.store).keys() - objects.keys()
+            added = artifact_object_bytes(source.store).keys() - objects.keys()
             assert len(added) == 1
-            assert all(json.loads(_objects(source.store)[key])["schema_version"] ==
+            assert all(json.loads(artifact_object_bytes(source.store)[key])["schema_version"] ==
                        "native_experiment_refusal.v1.0" for key in added)
             assert not ledger.parent.exists()
             assert not list(source.root.rglob("REPORT.md"))
@@ -501,8 +504,8 @@ def test_changed_binding_precedes_holdout_and_cannot_consume_original_outcome(
         source.spec_path.write_bytes(spec_bytes)
         if dimension == "snapshot":
             # Repinning the original bytes still advances the head generation.
-            _advance_head(source, source.snapshot)
-    restored_catalog = _catalog(source.conn)
+            advance_snapshot_head(source, source.snapshot)
+    restored_catalog = catalog_rows(source.conn)
     assert {key: value for key, value in restored_catalog.items() if key != "data_snapshot_heads"} == {
         key: value for key, value in original_catalog.items() if key != "data_snapshot_heads"}
     assert Repository(source.conn, source.store).resolve_pinned("shadow") == source.snapshot
@@ -519,7 +522,7 @@ def test_changed_binding_precedes_holdout_and_cannot_consume_original_outcome(
     if smoke:
         assert not ledger.parent.exists()
     else:
-        assert [row["stage"] for row in _rows(ledger)] == ["ran"]
+        assert [row["stage"] for row in read_ledger_rows(ledger)] == ["ran"]
 
 
 @pytest.mark.parametrize("kind", ["code", "spec", "registration-bytes", "catalog-evidence", "outcome-bytes", "destination"])
@@ -546,7 +549,7 @@ def test_r6_preserves_prior_report_catalog_and_ledger(source, monkeypatch, capsy
     else:
         target = source.root / "different" / "ledger.csv"
     before, objects, csv_bytes, report_bytes = (
-        _catalog(source.conn), _objects(source.store), ledger.read_bytes(), report.read_bytes())
+        catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes(), report.read_bytes())
     _metadata_only(monkeypatch)
     response = _invoke(source, capsys, "run", "--ledger", target, status=2)
     _private_refusal(source, response, "EXPERIMENT_IDENTITY_CONFLICT")
@@ -613,27 +616,27 @@ def test_cli_rejects_alternative_fingerprint_root(source, capsys):
     runner = fake_root / prediction.RUNNER
     runner.parent.mkdir(parents=True)
     runner.write_text("# Synthetic source that is never executed.\n")
-    catalog, objects = _catalog(source.conn), _objects(source.store)
+    catalog, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(SystemExit) as error:
         cli.main(_args(source, "register", "--code-root", fake_root))
     assert error.value.code == 2
     assert "unrecognized arguments: --code-root" in capsys.readouterr().err
-    assert _catalog(source.conn) == catalog
-    assert _objects(source.store) == objects
+    assert catalog_rows(source.conn) == catalog
+    assert artifact_object_bytes(source.store) == objects
 
 
 def test_nonzero_prior_seed_refuses_before_target_reads(tmp_path, monkeypatch, capsys):
-    source = _source(tmp_path, spec=_spec(seed=1))
+    source = _source(tmp_path, spec=prediction_spec(seed=1))
     try:
         _invoke(source, capsys, "register")
-        before = _catalog(source.conn)
+        before = catalog_rows(source.conn)
         monkeypatch.setattr(prediction, "load_prediction_targets", _forbid)
         monkeypatch.setattr(DummyClassifier, "fit", _forbid)
         monkeypatch.setattr(prediction, "render_prediction_report", _forbid)
         monkeypatch.setattr(outcomes, "ledger_append", _forbid)
         response = _invoke(source, capsys, "run", "--no-ledger", status=2)
         _private_refusal(source, response, "INVALID_EXPERIMENT_SPEC")
-        assert _catalog(source.conn) == before
+        assert catalog_rows(source.conn) == before
         assert not list(source.root.rglob("REPORT.md"))
     finally:
         source.conn.close()
@@ -643,13 +646,13 @@ def test_nonzero_prior_seed_refuses_before_target_reads(tmp_path, monkeypatch, c
 @pytest.mark.parametrize("action", ["register", "run"])
 @pytest.mark.parametrize("smoke", [False, True])
 def test_unsupported_prior_seed_refuses_before_admission_or_reads(tmp_path, monkeypatch, capsys, seed, action, smoke):
-    spec = _spec(seed=seed)
+    spec = prediction_spec(seed=seed)
     source = _source(tmp_path, spec=spec)
     try:
         if action == "run":
             native.register_native(source.conn, source.store, Repository(source.conn, source.store), spec,
                 code_root=Path(__file__).resolve().parents[3], as_of_month=MONTH)
-        before, objects = _catalog(source.conn), _objects(source.store)
+        before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
         monkeypatch.setattr(Repository, "scan", _forbid)
         monkeypatch.setattr(DummyClassifier, "fit", _forbid)
         monkeypatch.setattr(prediction, "render_prediction_report", _forbid)
@@ -667,7 +670,7 @@ def test_unsupported_prior_seed_refuses_before_admission_or_reads(tmp_path, monk
 
 @pytest.mark.parametrize("seed", [0])
 def test_sklearn_seed_boundaries_complete_real_cli_smoke(tmp_path, capsys, seed):
-    source = _source(tmp_path, spec=_spec(seed=seed))
+    source = _source(tmp_path, spec=prediction_spec(seed=seed))
     try:
         _invoke(source, capsys, "register")
         result = _invoke(source, capsys, "run", "--no-ledger")
@@ -679,11 +682,11 @@ def test_sklearn_seed_boundaries_complete_real_cli_smoke(tmp_path, capsys, seed)
 
 def test_sklearn_maximum_valid_seed_registers(tmp_path, capsys):
     seed = 2**32 - 1
-    source = _source(tmp_path, spec=_spec(seed=seed))
+    source = _source(tmp_path, spec=prediction_spec(seed=seed))
     try:
         _invoke(source, capsys, "register")
         registration = native.read_native_registration(
-            source.conn, source.store, _spec(seed=seed))
+            source.conn, source.store, prediction_spec(seed=seed))
         assert registration.document["execution_plan"]["seed"] == seed
     finally:
         source.conn.close()
@@ -695,7 +698,7 @@ def test_sklearn_maximum_valid_seed_registers(tmp_path, capsys):
 def test_report_destination_conflict_precedes_cli_publication_effects(
         source, monkeypatch, capsys, phase, smoke, obstruction):
     _invoke(source, capsys, "register")
-    registration = native.read_native_registration(source.conn, source.store, _spec())
+    registration = native.read_native_registration(source.conn, source.store, prediction_spec())
     ledger = source.root / "recorded" / "ledger.csv"
     args = ["--ledger", ledger] + (["--no-ledger"] if smoke else [])
     if phase == "pending":
@@ -735,7 +738,7 @@ def test_report_destination_conflict_precedes_cli_publication_effects(
         blocked.mkdir()
     else:
         blocked.symlink_to(source.root / "missing-foreign-report")
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     ledger_before = ledger.read_bytes() if ledger.exists() else None
     with monkeypatch.context() as patch:
         if phase != "fresh":
@@ -745,7 +748,7 @@ def test_report_destination_conflict_precedes_cli_publication_effects(
     _private_refusal(source, response, "EXPERIMENT_IDENTITY_CONFLICT")
     _preserved(source, before, objects)
     assert (ledger.read_bytes() if ledger.exists() else None) == ledger_before
-    after = _objects(source.store)
+    after = artifact_object_bytes(source.store)
     for key in set(after) - set(objects):
         assert json.loads(after[key])["schema_version"] == "native_experiment_refusal.v1.0"
     assert blocked.is_symlink() if obstruction == "symlink" else (
@@ -754,7 +757,7 @@ def test_report_destination_conflict_precedes_cli_publication_effects(
     result = _invoke(source, capsys, "run", *args)
     assert Path(result["report"]) == path
     assert "# Native prediction report" in path.read_text()
-    assert not ledger.exists() if smoke else len(_rows(ledger)) == 1
+    assert not ledger.exists() if smoke else len(read_ledger_rows(ledger)) == 1
 
 
 @pytest.mark.parametrize("error_type", [ValueError, TypeError, KeyError, RuntimeError])
@@ -766,7 +769,7 @@ def test_untyped_execution_errors_stay_private_and_retry_same_registration(
     _invoke(source, capsys, "register")
     ledger = source.root / "recorded" / "ledger.csv"
     args = ["--ledger", ledger] + (["--no-ledger"] if smoke else [])
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
 
     def unexpected(*args, **kwargs):
         raise error_type("SECRET synthetic implementation failure")
@@ -779,7 +782,7 @@ def test_untyped_execution_errors_stay_private_and_retry_same_registration(
     _preserved(source, before, objects)
     assert not ledger.parent.exists()
     assert not list(source.root.rglob("REPORT.md"))
-    after = _objects(source.store)
+    after = artifact_object_bytes(source.store)
     for key in set(after) - set(objects):
         assert json.loads(after[key])["schema_version"] == "native_experiment_refusal.v1.0"
     result = _invoke(source, capsys, "run", *args)
@@ -789,5 +792,5 @@ def test_untyped_execution_errors_stay_private_and_retry_same_registration(
     if smoke:
         assert not ledger.parent.exists()
     else:
-        assert len(_rows(ledger)) == 1
-        assert _rows(ledger)[0]["stage"] == "ran"
+        assert len(read_ledger_rows(ledger)) == 1
+        assert read_ledger_rows(ledger)[0]["stage"] == "ran"

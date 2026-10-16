@@ -1,58 +1,22 @@
 """Pinned calendar/history binding with synthetic native objects and poison guards."""
 from dataclasses import replace
 
-import pandas as pd
 import pytest
 
 from engine.v2.data import objects
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.foundation import content_hash
 from engine.v2.research import magnitude_features
-from tests.data_scan_support import (
-    catalog_and_store,
-    commit_tables,
-    contract_for,
-    contract_ref_for,
-    publish_and_inspect,
+from tests.v2.research.magnitude_trial_support import (
+    calendar_sessions,
+    commit_history_inputs,
+    history_event,
+    outcome_move,
+    poison_outcomes,
 )
-from tests.v2.research.test_event_history import _event, _poison
-from tests.v2.research.test_magnitude_inputs import _calendar
-from tests.v2.research.test_prediction_inputs import TrackingRepository, _move
 
 MONTH = "2025-01"
 START = "2023-01-01"
-
-
-def _commit(tmp_path, events, moves, *, days=None, mixed_days=(), include_calendar=True, marker=None):
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    conn, clock, store = catalog_and_store(tmp_path)
-    contracts = {"earnings_events": contract_for("earnings_events"), "computed_moves": COMPUTED_MOVES_CONTRACT}
-    inputs = {"earnings_events": events, "computed_moves": moves}
-    if include_calendar:
-        contracts["daily_market"] = contract_for("daily_market")
-        inputs["daily_market"] = [dict(ticker=ticker, date=pd.Timestamp(day), year=int(day[:4]), spot=marker)
-            for day in (_calendar().days if days is None else days) for ticker in ("CAL-A", "CAL-B")]
-    tables, hashes = {}, {}
-    for name, rows in inputs.items():
-        contract, groups = contracts[name], {}
-        for row in rows:
-            partition = str(row[contract.partition_columns[0]])
-            piece = "metadata" if name != "computed_moves" else (
-                "mixed" if row["event_date"] in mixed_days else row["event_date"])
-            groups.setdefault((partition, piece), []).append(row)
-        records = [publish_and_inspect(store, contract, contract_ref_for(contract),
-            sorted(group, key=lambda r: tuple(r[k] for k in contract.primary_key)), partition)
-            for (partition, _), group in groups.items()]
-        tables[name] = sorted(records, key=lambda r: (r.partition_key, r.primary_key_min))
-        partitions = {}
-        for record in tables[name]:
-            partitions.setdefault(record.partition_key, []).append(record)
-        hashes[name] = {key: objects.partition_logical_hash(store,
-            [r.object_ref for r in group], contract, contract_ref_for(contract), key)
-            for key, group in partitions.items() if len(group) > 1}
-    snapshot = commit_tables(conn, clock, tables, contracts, partition_logical_hashes=hashes, store=store)
-    return conn, TrackingRepository(conn, store), snapshot
 
 
 def _read(repository, snapshot, target, **changes):
@@ -61,20 +25,20 @@ def _read(repository, snapshot, target, **changes):
 
 
 def test_pinned_calendar_and_history_binding_never_reads_target_or_protected_outcomes(tmp_path, monkeypatch):
-    target, first, second, third = (_event(day) for day in ("2024-06-12", "2023-01-03", "2024-06-04", "2024-06-06"))
-    delayed, skipped = _event("2024-06-10"), _event("2023-02-03")
-    random, rolling = _event("2023-04-03", protected=True), _event("2024-12-03")
-    cutoff, future = _event("2024-06-11"), _event("2024-06-13")
-    alias = _event("2023-05-03")
+    target, first, second, third = (history_event(day) for day in ("2024-06-12", "2023-01-03", "2024-06-04", "2024-06-06"))
+    delayed, skipped = history_event("2024-06-10"), history_event("2023-02-03")
+    random, rolling = history_event("2023-04-03", protected=True), history_event("2024-12-03")
+    cutoff, future = history_event("2024-06-11"), history_event("2024-06-13")
+    alias = history_event("2023-05-03")
     sibling = {**alias, "event_id": "ambiguous-sibling", "session": "BMO"}
     forbidden = [target, random, rolling, cutoff, future, alias]
     events = [first, second, third, delayed, skipped, *forbidden, sibling]
-    moves = [_move(e, v) for e, v in zip([first, second, third], [-2.0, 4.0, 6.0])]
-    moves += [_move(e, None) for e in [delayed, *forbidden]]
-    moves += [_move(skipped, None, skipped=True, available_as_of_date=None)]
-    conn, repository, snapshot = _commit(tmp_path, events, moves)
+    moves = [outcome_move(e, v) for e, v in zip([first, second, third], [-2.0, 4.0, 6.0])]
+    moves += [outcome_move(e, None) for e in [delayed, *forbidden]]
+    moves += [outcome_move(skipped, None, skipped=True, available_as_of_date=None)]
+    conn, repository, snapshot = commit_history_inputs(tmp_path, events, moves)
     try:
-        _poison(monkeypatch, repository, snapshot, [e["event_date"].date().isoformat() for e in forbidden])
+        poison_outcomes(monkeypatch, repository, snapshot, [e["event_date"].date().isoformat() for e in forbidden])
         before = conn.total_changes
         result = _read(repository, snapshot, target)
         assert result == _read(repository, snapshot, target)
@@ -116,9 +80,9 @@ def test_pinned_calendar_and_history_binding_never_reads_target_or_protected_out
     (5, "2024-06-05", 1, 2.0), (3, "2024-06-07", 2, 3.0), (1, "2024-06-11", 3, 4.0),
 ])
 def test_forecast_horizon_drives_actual_history_availability(tmp_path, horizon, ceiling, count, absolute):
-    target = _event("2024-06-12")
-    prior = [_event(day) for day in ("2023-01-03", "2024-06-04", "2024-06-06")]
-    conn, repository, snapshot = _commit(tmp_path, [target, *prior], [_move(e, v) for e, v in zip(prior, [-2, 4, 6])])
+    target = history_event("2024-06-12")
+    prior = [history_event(day) for day in ("2023-01-03", "2024-06-04", "2024-06-06")]
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [target, *prior], [outcome_move(e, v) for e, v in zip(prior, [-2, 4, 6])])
     try:
         result = _read(repository, snapshot, target, horizon=horizon)
         assert result["forecast_cutoff"]["source_session_ceiling"] == ceiling
@@ -132,8 +96,8 @@ def test_forecast_horizon_drives_actual_history_availability(tmp_path, horizon, 
 
 @pytest.mark.parametrize("session,ceiling", [("AMC", "2024-06-11"), ("BMO", "2024-06-10")])
 def test_session_comes_from_canonical_event_and_empty_history_retains_nulls(tmp_path, session, ceiling):
-    target = {**_event("2024-06-12"), "session": session}
-    conn, repository, snapshot = _commit(tmp_path, [target], [])
+    target = {**history_event("2024-06-12"), "session": session}
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [target], [])
     try:
         result = _read(repository, snapshot, target)
         assert result["forecast_cutoff"]["source_session_ceiling"] == ceiling
@@ -146,9 +110,9 @@ def test_session_comes_from_canonical_event_and_empty_history_retains_nulls(tmp_
 
 
 def test_history_availability_on_source_session_uses_the_existing_inclusive_day_contract(tmp_path):
-    target, prior = _event("2024-06-12"), _event("2023-01-03")
-    conn, repository, snapshot = _commit(tmp_path, [target, prior],
-        [_move(prior, -7.0, available_as_of_date="2024-06-11")])
+    target, prior = history_event("2024-06-12"), history_event("2023-01-03")
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [target, prior],
+        [outcome_move(prior, -7.0, available_as_of_date="2024-06-11")])
     try:
         on_day = _read(repository, snapshot, target)
         earlier = _read(repository, snapshot, target, horizon=3)
@@ -162,11 +126,11 @@ def test_history_availability_on_source_session_uses_the_existing_inclusive_day_
 
 @pytest.mark.parametrize("kind", ["random", "rolling", "alias", "unknown", "final", "snapshot"])
 def test_target_admission_precedes_calendar_and_outcomes(tmp_path, monkeypatch, kind):
-    target = _event("2024-12-03" if kind == "rolling" else "2024-06-12", protected=kind == "random")
+    target = history_event("2024-12-03" if kind == "rolling" else "2024-06-12", protected=kind == "random")
     events = [target]
     if kind == "alias":
         events.append({**target, "event_id": "ambiguous", "session": "BMO"})
-    conn, repository, snapshot = _commit(tmp_path, events, [_move(target)])
+    conn, repository, snapshot = commit_history_inputs(tmp_path, events, [outcome_move(target)])
     original = objects.verify_object_path
     blocked = {r.object_ref.object_id for table in ("daily_market", "computed_moves")
                for r in repository.fragment_records(snapshot, table)}
@@ -192,8 +156,8 @@ def test_target_admission_precedes_calendar_and_outcomes(tmp_path, monkeypatch, 
     ("short", "CONTRACT_MISMATCH"), ("horizon", "CONTRACT_MISMATCH"),
 ])
 def test_calendar_refusals_precede_outcome_access(tmp_path, monkeypatch, kind, code):
-    target, prior = _event("2024-06-12"), _event("2023-01-03")
-    days = list(_calendar().days)
+    target, prior = history_event("2024-06-12"), history_event("2023-01-03")
+    days = list(calendar_sessions().days)
     if kind == "empty":
         days = []
     elif kind == "intraday":
@@ -204,10 +168,10 @@ def test_calendar_refusals_precede_outcome_access(tmp_path, monkeypatch, kind, c
         days.remove("2024-06-12" if kind == "anchor_gap" else "2024-06-11")
     elif kind == "short":
         days = days[-2:]
-    conn, repository, snapshot = _commit(tmp_path, [target, prior], [_move(prior)],
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [target, prior], [outcome_move(prior)],
         days=days, include_calendar=kind != "missing")
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         with pytest.raises(DataError, match=code):
             _read(repository, snapshot, target, horizon=2 if kind == "horizon" else 1)
     finally:
@@ -215,12 +179,12 @@ def test_calendar_refusals_precede_outcome_access(tmp_path, monkeypatch, kind, c
 
 
 def test_mixed_history_objects_refuse_before_first_safe_object_opens(tmp_path, monkeypatch):
-    first, second, protected, target = (_event("2023-01-03"), _event("2023-03-03"),
-        _event("2023-04-03", protected=True), _event("2024-06-12"))
-    conn, repository, snapshot = _commit(tmp_path, [first, second, protected, target],
-        [_move(e) for e in (first, second, protected)], mixed_days=("2023-03-03", "2023-04-03"))
+    first, second, protected, target = (history_event("2023-01-03"), history_event("2023-03-03"),
+        history_event("2023-04-03", protected=True), history_event("2024-06-12"))
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [first, second, protected, target],
+        [outcome_move(e) for e in (first, second, protected)], mixed_days=("2023-03-03", "2023-04-03"))
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
             _read(repository, snapshot, target)
         assert not any(name == "computed_moves" for name, _ in repository.scans)
@@ -229,10 +193,10 @@ def test_mixed_history_objects_refuse_before_first_safe_object_opens(tmp_path, m
 
 
 def test_changed_calendar_bytes_bind_identity_but_unused_market_values_are_not_features(tmp_path):
-    target, prior = _event("2024-06-12"), _event("2023-01-03")
+    target, prior = history_event("2024-06-12"), history_event("2023-01-03")
     results = []
     for marker in (1.0, 900.0):
-        conn, repository, snapshot = _commit(tmp_path / str(marker), [target, prior], [_move(prior)], marker=marker)
+        conn, repository, snapshot = commit_history_inputs(tmp_path / str(marker), [target, prior], [outcome_move(prior)], marker=marker)
         try:
             results.append(_read(repository, snapshot, target))
         finally:
@@ -244,8 +208,8 @@ def test_changed_calendar_bytes_bind_identity_but_unused_market_values_are_not_f
 
 
 def test_late_storage_failure_propagates_without_partial_result_or_retry(tmp_path, monkeypatch):
-    first, second, target = _event("2023-01-03"), _event("2023-03-03"), _event("2024-06-12")
-    conn, repository, snapshot = _commit(tmp_path, [first, second, target], [_move(first), _move(second)])
+    first, second, target = history_event("2023-01-03"), history_event("2023-03-03"), history_event("2024-06-12")
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [first, second, target], [outcome_move(first), outcome_move(second)])
     original, calls = repository.scan, []
     def scan(query, *, table_name):
         if table_name == "computed_moves":
@@ -271,9 +235,9 @@ def test_invalid_derived_feature_does_not_reach_a_model(value):
 
 
 def test_finite_labels_with_overflowing_aggregate_refuse_through_real_reader(tmp_path):
-    first, second, target = _event("2023-01-03"), _event("2023-03-03"), _event("2024-06-12")
-    conn, repository, snapshot = _commit(tmp_path, [first, second, target],
-        [_move(first, 1e308), _move(second, 1e308)])
+    first, second, target = history_event("2023-01-03"), history_event("2023-03-03"), history_event("2024-06-12")
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [first, second, target],
+        [outcome_move(first, 1e308), outcome_move(second, 1e308)])
     try:
         with pytest.warns(RuntimeWarning), pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             _read(repository, snapshot, target)

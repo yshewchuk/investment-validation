@@ -12,8 +12,12 @@ from engine.v2.data.errors import DataError, fail
 from engine.v2.research import event_history
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.prediction_inputs import _target_filters
-from tests.v2.research.test_event_history import _commit, _event, _poison, _read
-from tests.v2.research.test_prediction_inputs import _move
+from tests.v2.research.magnitude_trial_support import (
+    history_event,
+    outcome_move,
+    poison_outcomes,
+)
+from tests.v2.research.test_event_history import commit_event_history, read_event_history
 
 DAY = "2023-03-02"
 TICKER = "SYNTH"
@@ -21,8 +25,8 @@ TICKER = "SYNTH"
 
 @pytest.fixture
 def committed(tmp_path):
-    event = _event(DAY)
-    conn, repository, snapshot = _commit(tmp_path, [event], [_move(event)])
+    event = history_event(DAY)
+    conn, repository, snapshot = commit_event_history(tmp_path, [event], [outcome_move(event)])
     try:
         record, = repository.fragment_records(snapshot, "computed_moves")
         yield repository, snapshot, record
@@ -63,16 +67,16 @@ def _ids(population):
 def test_native_two_issuer_index_preserves_exact_admitted_membership_without_outcome_reads(
         tmp_path, monkeypatch):
     first, second = "2023-01-02", DAY
-    events = [_event(day, ticker=ticker) for ticker in (TICKER, "SYNTH_B")
+    events = [history_event(day, ticker=ticker) for ticker in (TICKER, "SYNTH_B")
               for day in (first, second)]
-    conn, repository, snapshot = _commit(tmp_path, events[::-1], [_move(e) for e in events])
+    conn, repository, snapshot = commit_event_history(tmp_path, events[::-1], [outcome_move(e) for e in events])
     try:
         records = tuple(repository.fragment_records(snapshot, "computed_moves"))
         by_key = {record.primary_key_min: record for record in records}
         assert set(by_key) == {(e["ticker"], e["event_date"].date().isoformat()) for e in events}
         assert len(records) == len(by_key) == 4
         assert len({record.object_ref.object_id for record in records}) == 4
-        opened = _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        opened = poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         before = conn.total_changes
         admitted = load_population(repository, snapshot, as_of_month="2025-01")
         assert set(admitted.event_id) == {e["event_id"] for e in events}
@@ -325,10 +329,10 @@ def test_irrelevant_malformed_metadata_and_future_min_preserve_short_circuit(com
 
 
 def test_late_competing_native_range_refuses_before_opening_earlier_safe_object(tmp_path, monkeypatch):
-    first, second, target = _event("2023-01-02"), _event(DAY), _event("2024-06-20")
+    first, second, target = history_event("2023-01-02"), history_event(DAY), history_event("2024-06-20")
     competing_days = (f"{DAY}T12:00:00", f"{DAY}T15:00:00")
-    moves = [_move(first), _move(second), *[_move(second, event_date=day) for day in competing_days]]
-    conn, repository, snapshot = _commit(tmp_path, [first, second, target], moves,
+    moves = [outcome_move(first), outcome_move(second), *[outcome_move(second, event_date=day) for day in competing_days]]
+    conn, repository, snapshot = commit_event_history(tmp_path, [first, second, target], moves,
         mixed_days=competing_days)
     try:
         records = repository.fragment_records(snapshot, "computed_moves")
@@ -336,9 +340,9 @@ def test_late_competing_native_range_refuses_before_opening_earlier_safe_object(
         late_population = _equivalent(records)
         assert first_population.row_count == len(first_population.records) == 1
         assert late_population.row_count == 3 and len(late_population.records) == 2
-        opened = _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        opened = poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         with pytest.raises(DataError) as failure:
-            _read(repository, snapshot, target)
+            read_event_history(repository, snapshot, target)
         assert failure.value.problem == fail("HOLDOUT_ACCESS_DENIED",
             "research requires event-isolated outcome fragments").problem
         assert all(name == "earnings_events" for name, _ in repository.scans)
