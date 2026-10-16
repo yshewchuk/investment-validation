@@ -1,6 +1,6 @@
 """Real synthetic snapshots for the prediction/sweep pinned-input prerequisite."""
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -9,7 +9,6 @@ from sklearn.linear_model import LogisticRegression
 
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError
-from engine.v2.data.repository import Repository
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.ops.experiment_folds import TrainFoldRule, fit_walk_forward_fold
 from engine.v2.research.experiment_population import load_population
@@ -21,6 +20,10 @@ from tests.data_scan_support import (
     contract_ref_for,
     publish_and_inspect,
 )
+from tests.v2.research import magnitude_trial_support as support
+
+TrackingRepository = support.TrackingRepository
+_move = support.outcome_move
 
 MONTH = "2025-01"
 
@@ -40,29 +43,6 @@ def _event(day, *, random=False, prefix="T", **overrides):
                 year=int(day[:4]), session="AMC", session_src="orats", src_orats=True,
                 src_oquants=False, src_nasdaq=False, src_yfinance=False,
                 date_agree=True, date_conflict=False, **overrides)
-
-
-def _move(event, value=2.0, **overrides):
-    day = event["event_date"].date()
-    row = dict(ticker=event["ticker"], event_date=day.isoformat(), realized_move_pct=value,
-               available_as_of_date=(day + timedelta(days=2)).isoformat(), implied_move_pct=3.0,
-               event_ordinal=0, admitted=False, mean_prior_or_implied=None, n_prior_implied=0,
-               skipped=False, computed_at="2025-01-01T00:00:00Z",
-               source_hash="synthetic-price-history", capture_id="synthetic-capture")
-    return {**row, **overrides}
-
-
-class TrackingRepository(Repository):
-    def __init__(self, conn, store):
-        super().__init__(conn, store)
-        self.scans = []
-
-    def scan(self, query, *, table_name):
-        self.scans.append((table_name, query))
-        yield from super().scan(query, table_name=table_name)
-
-    def resolve_pinned(self, _scope):
-        raise AssertionError("implicit latest is forbidden")
 
 
 def _commit(tmp_path, events, moves=None, *, include_targets=True):

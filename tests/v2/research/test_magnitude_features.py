@@ -1,58 +1,21 @@
 """Pinned calendar/history binding with synthetic native objects and poison guards."""
 from dataclasses import replace
 
-import pandas as pd
 import pytest
 
 from engine.v2.data import objects
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.foundation import content_hash
 from engine.v2.research import magnitude_features
-from tests.data_scan_support import (
-    catalog_and_store,
-    commit_tables,
-    contract_for,
-    contract_ref_for,
-    publish_and_inspect,
-)
+from tests.v2.research import magnitude_trial_support as support
 from tests.v2.research.test_event_history import _event, _poison
 from tests.v2.research.test_magnitude_inputs import _calendar
-from tests.v2.research.test_prediction_inputs import TrackingRepository, _move
+from tests.v2.research.test_prediction_inputs import _move
+
+_commit = support.commit_history_inputs
 
 MONTH = "2025-01"
 START = "2023-01-01"
-
-
-def _commit(tmp_path, events, moves, *, days=None, mixed_days=(), include_calendar=True, marker=None):
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    conn, clock, store = catalog_and_store(tmp_path)
-    contracts = {"earnings_events": contract_for("earnings_events"), "computed_moves": COMPUTED_MOVES_CONTRACT}
-    inputs = {"earnings_events": events, "computed_moves": moves}
-    if include_calendar:
-        contracts["daily_market"] = contract_for("daily_market")
-        inputs["daily_market"] = [dict(ticker=ticker, date=pd.Timestamp(day), year=int(day[:4]), spot=marker)
-            for day in (_calendar().days if days is None else days) for ticker in ("CAL-A", "CAL-B")]
-    tables, hashes = {}, {}
-    for name, rows in inputs.items():
-        contract, groups = contracts[name], {}
-        for row in rows:
-            partition = str(row[contract.partition_columns[0]])
-            piece = "metadata" if name != "computed_moves" else (
-                "mixed" if row["event_date"] in mixed_days else row["event_date"])
-            groups.setdefault((partition, piece), []).append(row)
-        records = [publish_and_inspect(store, contract, contract_ref_for(contract),
-            sorted(group, key=lambda r: tuple(r[k] for k in contract.primary_key)), partition)
-            for (partition, _), group in groups.items()]
-        tables[name] = sorted(records, key=lambda r: (r.partition_key, r.primary_key_min))
-        partitions = {}
-        for record in tables[name]:
-            partitions.setdefault(record.partition_key, []).append(record)
-        hashes[name] = {key: objects.partition_logical_hash(store,
-            [r.object_ref for r in group], contract, contract_ref_for(contract), key)
-            for key, group in partitions.items() if len(group) > 1}
-    snapshot = commit_tables(conn, clock, tables, contracts, partition_logical_hashes=hashes, store=store)
-    return conn, TrackingRepository(conn, store), snapshot
 
 
 def _read(repository, snapshot, target, **changes):

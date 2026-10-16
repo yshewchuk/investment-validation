@@ -20,16 +20,10 @@ from engine.v2.ops.experiment_folds import TrainFoldRule
 from engine.v2.ops.experiments import ExperimentSpec
 from experiments import prediction_report as prediction
 from experiments.native_registration import NativeRegistration, register_native
+from tests.v2.research import magnitude_trial_support as support
 from tests.v2.research.test_prediction_inputs import MONTH, _commit, _event, _move
 
-
-def _spec(**changes):
-    return ExperimentSpec(**{
-        "experiment_id": "synthetic-prediction", "hypothesis": "A fixed prior baseline provides a calibration reference.",
-        "primary_arm_id": "prior", "arms": ("prior",), "seed": 0,
-        "folds": ("2023", "2024"), "economic_params": {}, "price_source": "computed_moves",
-        "runner": prediction.RUNNER, **changes,
-    })
+_spec = support.prediction_spec
 
 
 def _dataset():

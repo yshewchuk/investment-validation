@@ -22,7 +22,8 @@ from engine.v2.research.magnitude_inputs import (
     qualify_magnitude_training_targets,
 )
 from experiments.magnitude_history_inputs import history_binding
-from experiments.magnitude_report import _metrics
+from experiments.magnitude_report import magnitude_metrics
+from experiments.magnitude_search_errors import SearchArtifactError
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 
@@ -37,19 +38,33 @@ def _problem(problem):
                                message="search trial did not complete"))
 
 
+def _candidate_failure(problem):
+    return (not problem["retryable"] and problem["code"] not in {
+        "EXPERIMENT_IDENTITY_CONFLICT", "IDENTITY_CONFLICT", "IDEMPOTENCY_CONFLICT"}
+        and (problem["category"] == "validation" or problem["code"] == "EXPERIMENT_VARIANT_FAILED"))
+
+
 class SearchTrials:
     """No fits, CLI, outer evaluation, deployment, ledger or final-read authority."""
 
     def __init__(self, conn, store, repository, registration, request, plan_ref):
         self.conn, self.store, self.repository = conn, store, repository
         self.registration, self.plan_ref = registration, plan_ref
-        self.request = json.loads(canonical_json(request))
+        try:
+            self.request = json.loads(json.dumps(request, allow_nan=False))
+        except (TypeError, ValueError, RecursionError):
+            raise fail("INVALID_EXPERIMENT_SPEC", "search request must be canonical JSON") from None
 
     def _read(self, slot):
         return read_record(self.conn, self.store, self.registration.run_id, slot)
 
     def _append(self, slot, body, **kwargs):
         return append_record(self.conn, self.store, self.registration.run_id, slot, body, **kwargs)
+
+    def _refused(self, key, error):
+        problem = _problem(error.problem)
+        if not isinstance(error, SearchArtifactError) and _candidate_failure(problem):
+            self._append("terminal:" + key, {"status": "refused", "problem": problem})
 
     def _binding(self):
         plan = read_search_plan(self.conn, self.store, self.registration, self.request, self.plan_ref)
@@ -113,7 +128,7 @@ class SearchTrials:
             self._append("cohort:" + cohort, inputs)
             self._append("inputs:" + key, {"cohort": cohort, "inputs_id": content_hash(inputs)})
         except (OpsError, DataError) as error:
-            self._append("terminal:" + key, {"status": "refused", "problem": _problem(error.problem)})
+            self._refused(key, error)
             raise
         return {**started, "inputs": inputs}
 
@@ -146,8 +161,13 @@ class SearchTrials:
         if (forecasts is None) == (failure is None):
             raise fail("INVALID_EXPERIMENT_SPEC", "record exactly one forecast submission or failure")
         if failure is not None:
-            return self._append("terminal:" + key, {"status": "failed", "problem": _problem(failure)},
-                                absent=("forecasts:" + key,))
+            problem = _problem(failure)
+            if not _candidate_failure(problem):
+                raise OpsError(from_document(Problem, problem))
+            if self._read("inputs:" + key) is None:
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
+            self._append("terminal:" + key, {"status": "failed", "problem": problem}, absent=("forecasts:" + key,))
+            return self._terminal(plan, outer_year, inner_year, candidate_id)[1]
         submitted = self._forecasts(forecasts, inner, plan["horizons"])
         terminal = self._read("terminal:" + key)
         if terminal is not None:
@@ -168,9 +188,9 @@ class SearchTrials:
             targets = dict(zip(labels.event_id, labels.absolute_move_pct))
             scored = [{**row, "absolute_move_pct": float(targets[row["event_id"]])} for row in submitted]
             terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
-                        "evaluation_inputs": dict(labels.attrs), "predictions": scored, "metrics": _metrics(scored)}
+                        "evaluation_inputs": dict(labels.attrs), "predictions": scored, "metrics": magnitude_metrics(scored)}
         except (OpsError, DataError) as error:
-            self._append("terminal:" + key, {"status": "refused", "problem": _problem(error.problem)})
+            self._refused(key, error)
             raise
         return self._append("terminal:" + key, terminal)
 
@@ -183,18 +203,31 @@ class SearchTrials:
             expected = {"trial_id": key, "outer_year": outer_year, "inner_year": inner_year, "candidate": candidate}
             if self._read("start:" + key) != expected:
                 raise ValueError
-            if record["status"] == "succeeded":
-                admitted = self._read("inputs:" + key)
+            admitted = self._read("inputs:" + key)
+            if admitted is not None or record["status"] in ("succeeded", "failed"):
                 cohort = self._read("cohort:" + admitted["cohort"])
-                submitted = self._forecasts(self._read("forecasts:" + key), inner, plan["horizons"])
+                if (admitted["cohort"] != content_hash([plan["plan_id"], outer_year, inner_year])
+                        or cohort is None or content_hash(cohort) != admitted["inputs_id"]):
+                    raise ValueError
+            submitted = self._read("forecasts:" + key)
+            if submitted is not None:
+                submitted = self._forecasts(submitted, inner, plan["horizons"])
+            if record["status"] == "succeeded":
                 forecasts = [{name: row[name] for name in ("event_id", "horizon_sessions", "predicted_absolute_move_pct")}
                              for row in record["predictions"]]
-                if (cohort is None or content_hash(cohort) != admitted["inputs_id"]
-                        or record["inputs_id"] != admitted["inputs_id"] or forecasts != submitted
-                        or record["metrics"] != _metrics(record["predictions"])):
+                if (record["inputs_id"] != admitted["inputs_id"] or forecasts != submitted
+                        or record["metrics"] != magnitude_metrics(record["predictions"])):
                     raise ValueError
             elif record["status"] not in ("failed", "refused"):
                 raise ValueError
+            else:
+                try:
+                    normalized = _problem(from_document(Problem, record["problem"]))
+                except OpsError:
+                    raise ValueError from None
+                if (set(record) != {"status", "problem"} or normalized != record["problem"]
+                        or not _candidate_failure(normalized) or (record["status"] == "failed" and submitted is not None)):
+                    raise ValueError
         except (ValueError, TypeError, KeyError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs") from None
         return key, record
@@ -213,7 +246,7 @@ class SearchTrials:
                     failed |= record["status"] != "succeeded"
                     if record["status"] == "succeeded":
                         rows.extend(record["predictions"])
-                scores.append({"candidate_id": candidate["candidate_id"], "metrics": None if failed else _metrics(rows)})
+                scores.append({"candidate_id": candidate["candidate_id"], "metrics": None if failed else magnitude_metrics(rows)})
             eligible = [score for score in scores if score["metrics"] is not None]
             if not eligible:
                 raise fail("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold")

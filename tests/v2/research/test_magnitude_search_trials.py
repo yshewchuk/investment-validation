@@ -26,19 +26,19 @@ from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_trials as trials
 from experiments import native_registration as native
 from experiments.magnitude_search_plan import seal_search_plan
-from tests.v2.research.test_event_history import _poison
-from tests.v2.research.test_magnitude_history_model import (
+from tests.v2.research.magnitude_trial_support import (
     CUTOFF,
     HISTORY,
     MONTH,
     ROOT,
-    _dataset,
-    _no_rebuild,
-    _source,
+    build_history,
+    catalog_rows,
+    forbid_history_rebuild,
+    magnitude_dataset,
+    magnitude_source,
+    poison_outcomes,
 )
-from tests.v2.research.test_magnitude_history_store import _build
 from tests.v2.research.test_magnitude_search_plan import source as base_source  # noqa: F401
-from tests.v2.research.test_native_registration import _catalog
 
 
 def _hash(value):
@@ -60,9 +60,9 @@ def case(base_source, tmp_path, monkeypatch):  # noqa: F811
     recorder = trials.SearchTrials(conn, store, source.repository, source.registration, request,
                                   from_document(ArtifactRef, sealed["plan_ref"]))
     recorder.seal(clock=SystemClock())
-    _no_rebuild(monkeypatch)
+    forbid_history_rebuild(monkeypatch)
     yield SimpleNamespace(source=source, recorder=recorder, plan=sealed["plan"], request=request,
-                          catalog_before=_catalog(conn))
+                          catalog_before=catalog_rows(conn))
     conn.close()
 
 
@@ -101,7 +101,7 @@ def _assert_error(code, message):
 
 
 def test_native_complete_journal_pools_metrics_freezes_latest_and_replays(case, monkeypatch):
-    _poison(monkeypatch, case.source.repository, case.source.snapshot,
+    poison_outcomes(monkeypatch, case.source.repository, case.source.snapshot,
             ("2023-04-03", "2025-01-07", "2025-12-03"))
     from engine.v2.models.training import magnitude
     monkeypatch.setattr(magnitude, "fit_magnitude_predictions", lambda *a: pytest.fail("recorder must not fit"))
@@ -128,7 +128,7 @@ def test_native_complete_journal_pools_metrics_freezes_latest_and_replays(case, 
     before = _slots(case)
     assert case.recorder.freeze() == frozen
     assert _slots(case) == before
-    actual = _catalog(case.source.conn)
+    actual = catalog_rows(case.source.conn)
     assert {key: value for key, value in actual.items() if key != "magnitude_search_records"} == {
         key: value for key, value in case.catalog_before.items() if key != "magnitude_search_records"}
     args = _cases(case)[0]
@@ -215,7 +215,7 @@ def test_invalid_submissions_refuse_before_any_validation_labels(case, monkeypat
         elif mutation == "extra_field":
             rows[0]["metric"] = 0
         elif mutation == "boolean_horizon":
-            rows[0]["horizon_sessions"] = True
+            next(row for row in rows if row["horizon_sessions"] == 1)["horizon_sessions"] = True
         elif mutation == "none":
             rows = None
         else:
@@ -228,6 +228,7 @@ def test_invalid_submissions_refuse_before_any_validation_labels(case, monkeypat
             case.recorder.record(*args, forecasts=rows)
         assert case.recorder._read("forecasts:" + started["trial_id"]) is None
         assert case.recorder._read("terminal:" + started["trial_id"]) is None
+
 
 def test_unplanned_trial_or_missing_start_refuses_before_native_reads(case, monkeypatch):
     monkeypatch.setattr(case.recorder, "_inputs", lambda *a: pytest.fail("native inputs opened"))
@@ -256,7 +257,7 @@ def test_source_and_plan_drift_refuse_before_native_payloads(case, monkeypatch):
         other.seal(clock=SystemClock())
 
 
-def test_native_input_drift_is_durable_refusal(case, monkeypatch):
+def test_native_input_drift_blocks_selection_without_excluding_candidate(case, monkeypatch):
     args = _cases(case)[0]
     started = case.recorder.start(*args)
     original = case.recorder._inputs
@@ -264,7 +265,9 @@ def test_native_input_drift_is_durable_refusal(case, monkeypatch):
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("validation opened"))
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start"):
         case.recorder.record(*args, forecasts=_forecasts(case, args))
-    assert case.recorder._read("terminal:" + started["trial_id"])["status"] == "refused"
+    assert case.recorder._read("terminal:" + started["trial_id"]) is None
+    with _assert_error("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
+        case.recorder.freeze()
 
 
 def test_corrupt_any_link_blocks_freeze(case):
@@ -346,13 +349,13 @@ def test_plan_reference_metadata_drift_cannot_initialize_records(case):
 
 
 def test_cutoff_equal_validation_label_is_recorded_as_refusal_without_dropping_row(tmp_path, monkeypatch):
-    events, moves = _dataset()
+    events, moves = magnitude_dataset()
     for row in moves:
         if row["ticker"] == "SYNTH_A" and row["event_date"] == "2023-06-02":
             row["available_as_of_date"] = "2024-01-01"
-    source = _source(tmp_path, register=False, build=False, events=events, moves=moves)
+    source = magnitude_source(tmp_path, register=False, build=False, events=events, moves=moves)
     try:
-        source.build, source.feature_snapshot = _build(source, training_start="2022-01-01",
+        source.build, source.feature_snapshot = build_history(source, training_start="2022-01-01",
                                                      evaluation_years=["2024", "2025"])
         source.registration = native.register_native(source.conn, source.store, source.repository, source.spec,
             code_root=ROOT, as_of_month=MONTH, magnitude_training_start="2022-01-01", magnitude_labels_before=CUTOFF,
@@ -364,7 +367,7 @@ def test_cutoff_equal_validation_label_is_recorded_as_refusal_without_dropping_r
         recorder = trials.SearchTrials(source.conn, source.store, source.repository, source.registration,
             request, from_document(ArtifactRef, sealed["plan_ref"]))
         recorder.seal(clock=SystemClock())
-        _no_rebuild(monkeypatch)
+        forbid_history_rebuild(monkeypatch)
         case = SimpleNamespace(source=source, plan=sealed["plan"], recorder=recorder)
         args = _cases(case)[0]
         started = recorder.start(*args)

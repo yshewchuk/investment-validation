@@ -6,6 +6,7 @@ from engine.v2.foundation import ArtifactError, canonical_json, from_document, t
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import fail
 from engine.v2.ops.migrations import Migration
+from experiments.magnitude_search_errors import artifact_failure
 
 OWNER = "magnitude_search"
 SCHEMA = "magnitude_search_record.v1"
@@ -50,7 +51,8 @@ def read_record(conn, store, run_id, slot):
             raise ValueError
         return record["body"]
     except ArtifactError as error:
-        raise artifact_failure(error) from None
+        raise artifact_failure(error, integrity_message="search journal artifact could not be verified or published",
+            resource_message="search journal artifact could not be verified or published", unsafe_is_conflict=True) from None
     except (ValueError, TypeError, KeyError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal binding is invalid") from None
 
@@ -68,7 +70,8 @@ def append_record(conn, store, run_id, slot, body, *, replay=True, absent=()):
     try:
         ref = store.publish_bytes(payload, schema_ref=SCHEMA)
     except ArtifactError as error:
-        raise artifact_failure(error) from None
+        raise artifact_failure(error, integrity_message="search journal artifact could not be verified or published",
+            resource_message="search journal artifact could not be verified or published", unsafe_is_conflict=True) from None
     with transaction(conn):
         if any(_reference(conn, run_id, other) is not None for other in absent):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial phase is already committed")
@@ -80,8 +83,3 @@ def append_record(conn, store, run_id, slot, body, *, replay=True, absent=()):
             conn.execute("INSERT INTO magnitude_search_records VALUES (?,?,?)",
                          (run_id, slot, canonical_json(to_document(ref))))
     return json.loads(payload)["body"]
-
-
-def artifact_failure(error):
-    code = "EXPERIMENT_IDENTITY_CONFLICT" if error.code == "INTEGRITY_FAILED" else "RESOURCE_UNAVAILABLE"
-    return fail(code, "search journal artifact could not be verified or published")

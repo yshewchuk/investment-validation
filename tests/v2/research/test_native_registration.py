@@ -39,7 +39,10 @@ from tests.data_scan_support import (
     publish_and_inspect,
 )
 from tests.ops_support import FakeClock
+from tests.v2.research import magnitude_trial_support as support
 from tests.v2.research.test_prediction_inputs import MONTH, TrackingRepository, _commit, _event
+
+_catalog = support.catalog_rows
 
 
 def _spec(**changes):
@@ -110,14 +113,6 @@ def _call(source, *, admit=False, spec=None, **kwargs):
     method = native.require_native_registration if admit else native.register_native
     return method(source.conn, source.store, source.repository, spec or _spec(),
                   **{"code_root": source.code_root, "as_of_month": MONTH, **kwargs})
-
-
-def _catalog(conn):
-    """Snapshot every catalog row so refusals cannot silently change other tables."""
-    tables = [row[0] for row in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
-    return {table: sorted(tuple(row) for row in conn.execute(f'SELECT * FROM "{table}"'))
-            for table in tables}
 
 
 def _objects(store):

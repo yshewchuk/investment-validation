@@ -27,14 +27,15 @@ from engine.v2.research import event_history, magnitude_features
 from engine.v2.research import magnitude_history_store as stored
 from engine.v2.research.magnitude_history_table import CONTRACT, FEATURES, TABLE
 from experiments import magnitude_history_store as entry
+from tests.v2.research import magnitude_trial_support as support
 from tests.v2.research.test_event_history import _event, _poison
 from tests.v2.research.test_magnitude_features import _commit
 from tests.v2.research.test_magnitude_inputs import _calendar
 from tests.v2.research.test_native_registration import _catalog, _objects
 from tests.v2.research.test_prediction_inputs import _move
 
-REQUEST = dict(as_of_month="2026-01", evaluation_years=["2024"],
-               training_start="2023-01-01", history_start="2022-01-01")
+REQUEST = support.HISTORY_REQUEST
+_build = support.build_history
 
 
 def _source(tmp_path, *, mixed_days=(), overrides=None, recent_day="2024-06-12"):
@@ -78,11 +79,6 @@ def long_source(tmp_path):
     source = _long_source(tmp_path, 12)
     yield source
     source.conn.close()
-
-
-def _build(source, **changes):
-    result = entry.build(source.repository, source.snapshot, **{**REQUEST, **changes})
-    return result, source.repository.resolve(result["feature_snapshot"]["snapshot_id"])
 
 
 def _read(source, output, **changes):
@@ -319,7 +315,7 @@ def test_non_native_computed_moves_contract_refuses_before_outcome_objects(tmp_p
     foreign = replace(stored.COMPUTED_MOVES_CONTRACT, contract_id="computed_moves.v0", semantic_version="0.0.0")
     foreign = replace(foreign, definition_hash=table_contract_hash(foreign))
     with monkeypatch.context() as fixture_contract:
-        fixture_contract.setattr("tests.v2.research.test_magnitude_features.COMPUTED_MOVES_CONTRACT", foreign)
+        fixture_contract.setattr(support, "COMPUTED_MOVES_CONTRACT", foreign)
         source = _source(tmp_path)
     try:
         assert source.repository.table_contract(source.snapshot, "computed_moves") == foreign

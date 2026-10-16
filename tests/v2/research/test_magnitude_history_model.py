@@ -2,9 +2,8 @@
 
 import json
 import math
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -12,11 +11,9 @@ from engine.v2.data import catalog, objects
 from engine.v2.data.errors import DataError
 from engine.v2.data.manifests import table_contract_hash
 from engine.v2.data.repository import Repository
-from engine.v2.features import panel_math
 from engine.v2.foundation import SystemClock, canonical_json, content_hash, to_document
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_registration import validate_magnitude_history_execution
-from engine.v2.research import event_history, magnitude_features
 from engine.v2.research import magnitude_history_store as stored
 from engine.v2.research.magnitude_history_inputs import admit_stored
 from engine.v2.research.magnitude_history_table import FEATURES, METADATA, TABLE
@@ -26,51 +23,25 @@ from experiments import magnitude_inputs as inputs
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from experiments import v2_prediction as cli
+from tests.v2.research import magnitude_trial_support as support
 from tests.v2.research.test_event_history import _event, _poison
 from tests.v2.research.test_magnitude_baseline import _evidence, _result_from_report
-from tests.v2.research.test_magnitude_features import _commit
 from tests.v2.research.test_magnitude_history_store import _build
-from tests.v2.research.test_magnitude_inputs import _calendar
-from tests.v2.research.test_magnitude_registration import PlanRepository, _forbid, _refuses
+from tests.v2.research.test_magnitude_registration import _forbid, _refuses
 from tests.v2.research.test_native_outcomes import _clock, _document, _rows
 from tests.v2.research.test_native_registration import _catalog, _objects
 from tests.v2.research.test_prediction_inputs import _move
-from tests.v2.research.test_prediction_report import _spec as _prior_spec
 
-MONTH, START, HISTORY, CUTOFF = "2026-01", "2023-01-01", "2022-01-01", "2025-02-01"
-ROOT = Path(__file__).resolve().parents[3]
-
-
-def _dataset():
-    dates = ("2022-06-02", "2023-01-03", "2023-06-02", "2024-06-12", "2024-06-17", "2025-01-07")
-    values = {"SYNTH_A": (-2., -4., 6., 10., 8., 12.),
-              "SYNTH_B": (2., 8., -12., 20., 4., 16.)}
-    groups = {ticker: [_event(day, ticker=ticker) for day in dates] for ticker in values}
-    # Overlapping dates and interleaved insertion must never join histories across issuers.
-    events = [event for pair in zip(*groups.values()) for event in reversed(pair)]
-    moves = [_move(event, value) for ticker, group in groups.items()
-             for event, value in zip(group, values[ticker])]
-    excluded = [_event("2023-04-03", protected=True), _event("2025-12-03")]
-    return events + excluded, moves + [_move(event, None) for event in excluded]
-
-
-def _source(tmp_path, *, register=True, build=True, events=None, moves=None, folds=("2024", "2025"), mixed_days=()):
-    if events is None:
-        events, moves = _dataset()
-    conn, original, snapshot = _commit(tmp_path, events, moves, mixed_days=mixed_days,
-        days=_calendar("2022-05-25", "2025-12-05").days)
-    spec = _prior_spec(experiment_id="synthetic-stored-magnitude", primary_arm_id="history",
-        arms=("history",), folds=folds)
-    source = SimpleNamespace(conn=conn, repository=PlanRepository(conn, original._store),
-        store=original._store, snapshot=snapshot, events=events, spec=spec, root=tmp_path,
-        spec_path=tmp_path / "spec.json")
-    source.spec_path.write_text(json.dumps(asdict(spec)))
-    if build:
-        source.build, source.feature_snapshot = _build(source, evaluation_years=list(folds))
-    if register:
-        source.registration = _register(source)
-        source.repository.scans.clear()
-    return source
+CUTOFF = support.CUTOFF
+HISTORY = support.HISTORY
+MONTH = support.MONTH
+ROOT = support.ROOT
+START = support.START
+_no_rebuild = support.forbid_history_rebuild
+_binding = support.history_binding
+_dataset = support.magnitude_dataset
+_source = support.magnitude_source
+_register = support.register_history
 
 
 @pytest.fixture
@@ -78,16 +49,6 @@ def source(tmp_path):
     value = _source(tmp_path)
     yield value
     value.conn.close()
-
-
-def _binding(source, **changes):
-    return dict(code_root=ROOT, as_of_month=MONTH, magnitude_training_start=START,
-        magnitude_labels_before=CUTOFF, magnitude_feature_snapshot_id=source.feature_snapshot.snapshot_id,
-        magnitude_history_start=HISTORY, **changes)
-
-
-def _register(source):
-    return native.register_native(source.conn, source.store, source.repository, source.spec, **_binding(source))
 
 
 def _fallback_source(tmp_path):
@@ -110,14 +71,6 @@ def _invoke(source, capsys, action, *extra, status=0):
     captured = capsys.readouterr()
     assert not captured.err and "Traceback" not in captured.out
     return json.loads(captured.out)
-
-
-def _no_rebuild(monkeypatch):
-    for owner, name in ((history, "build"), (stored, "materialize"), (stored, "_prepare_history"),
-        (stored, "_event_rows"), (event_history, "load_event_history"),
-        (event_history, "_assemble_history"), (magnitude_features, "load_magnitude_history"),
-        (panel_math, "history_features")):
-        monkeypatch.setattr(owner, name, _forbid)
 
 
 def _metadata_only(monkeypatch):

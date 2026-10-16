@@ -17,19 +17,15 @@ from tests.data_scan_support import (
     contract_ref_for,
     publish_and_inspect,
 )
+from tests.v2.research import magnitude_trial_support as support
 from tests.v2.research.test_prediction_inputs import TrackingRepository, _move
+
+_event = support.history_event
+_poison = support.poison_outcomes
 
 MONTH = "2025-01"
 DECISION = "2024-06-19"
 START = "2023-01-01"
-
-
-def _event(day, *, protected=False, ticker="SYNTH", **overrides):
-    event_id = next(f"{ticker}:{day}:{index}" for index in range(1000)
-        if ExperimentHoldouts.random_membership(f"{ticker}:{day}:{index}") == protected)
-    return dict(event_id=event_id, ticker=ticker, event_date=pd.Timestamp(day), year=int(day[:4]),
-        session="AMC", session_src="orats", src_orats=True, src_oquants=False, src_nasdaq=False,
-        src_yfinance=False, date_agree=True, date_conflict=False, **overrides)
 
 
 def _commit(tmp_path, events, moves, *, mixed_days=()):
@@ -64,22 +60,6 @@ def _commit(tmp_path, events, moves, *, mixed_days=()):
 def _read(repository, snapshot, target, **kwargs):
     return load_event_history(repository, snapshot, **dict(event_id=target["event_id"],
         as_of_month=MONTH, history_start=START, decision_session=DECISION, **kwargs))
-
-
-def _poison(monkeypatch, repository, snapshot, protected_days, *, all_outcomes=False):
-    records = repository.fragment_records(snapshot, "computed_moves")
-    forbidden = {r.object_ref.object_id for r in records
-        if all_outcomes or any(r.time_min <= day <= r.time_max for day in protected_days)}
-    original = objects.verify_object_path
-    opened = []
-
-    def verify(store, ref):
-        assert ref.object_id not in forbidden, "protected outcome bytes were requested"
-        opened.append(ref.object_id)
-        return original(store, ref)
-
-    monkeypatch.setattr(objects, "verify_object_path", verify)
-    return opened
 
 
 def test_multiple_histories_union_alias_cutoff_provenance_and_determinism(tmp_path, monkeypatch):

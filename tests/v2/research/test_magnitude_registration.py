@@ -1,6 +1,6 @@
 """Native magnitude preregistration over real synthetic metadata, never outcomes."""
-import json
 import inspect
+import json
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -8,32 +8,25 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import FinalHoldoutDeclaration
-from engine.v2.data.errors import DataError, fail as data_fail
-from engine.v2.data.repository import Repository
+from engine.v2.data.errors import DataError
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.foundation import artifact_reference, canonical_json, content_hash, to_document
 from engine.v2.foundation.final_holdout import request_from_document
-from engine.v2.ops.errors import OpsError, fail as ops_fail
+from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import fail as ops_fail
 from engine.v2.ops.experiments import resolve_experiment_plan
 from engine.v2.research.magnitude_folds import magnitude_window
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from tests.data_scan_support import commit_tables
 from tests.ops_support import FakeClock
+from tests.v2.research import magnitude_trial_support as support
 from tests.v2.research.test_event_history import _event
 from tests.v2.research.test_magnitude_folds import _fixture, _metadata_only, _plan
 from tests.v2.research.test_native_registration import _catalog, _objects, _spec
-from tests.v2.research.test_prediction_inputs import TrackingRepository
 
-
-class PlanRepository(TrackingRepository):
-    """Allow the registrar's one head pin while retaining real tracked scans."""
-    def __init__(self, conn, store):
-        super().__init__(conn, store)
-        self.pins = []
-
-    def resolve_pinned(self, scope):
-        self.pins.append(scope)
-        return Repository.resolve_pinned(self, scope)
+PlanRepository = support.PlanRepository
+_forbid = support.forbid_access
 
 
 @pytest.fixture
@@ -65,11 +58,6 @@ def _call(source, *, admit=False, spec=None, **changes):
     return method(source.conn, source.store, source.repository, spec or source.spec,
         **{"code_root": source.code_root, "as_of_month": "2026-01",
            "magnitude_training_start": "2023-12-10", **changes})
-
-
-def _forbid(*args, **kwargs):
-    """Fail if a pre-admission refusal touches metadata or an effect boundary."""
-    raise AssertionError("forbidden access")
 
 
 @contextmanager

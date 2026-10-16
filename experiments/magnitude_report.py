@@ -24,7 +24,7 @@ def validate_prediction_spec(spec):
     return plan
 
 
-def _metrics(predictions):
+def magnitude_metrics(predictions):
     """Equal event weights; scale before squaring to preserve finite large errors."""
     errors = [abs(row["predicted_absolute_move_pct"] - row["absolute_move_pct"]) for row in predictions]
     scale = max(errors)
@@ -64,8 +64,8 @@ def prediction_result(repository, registration):
         folds.append({**fold, "train_count": len(train), "test_count": len(test),
             "train_event_ids": train.event_id.tolist(), "test_event_ids": test.event_id.tolist(),
             "mean_absolute_move_pct": fitted_mean, "training_inputs": dict(train.attrs),
-            "evaluation_inputs": dict(test.attrs), "metrics": _metrics(scored)})
-    metrics = _metrics(predictions)
+            "evaluation_inputs": dict(test.attrs), "metrics": magnitude_metrics(scored)})
+    metrics = magnitude_metrics(predictions)
     result = {"schema_version": "native_magnitude_result.v1", "target": plan["target_recipe"],
         "model": execution["model"], "features": execution["features"], "attempted_variants": 1,
         "variant_id": registration.variant_id, "run_id": registration.run_id, "provenance": binding,

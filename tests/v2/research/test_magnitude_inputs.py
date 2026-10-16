@@ -6,11 +6,14 @@ import pandas as pd
 import pytest
 
 from engine.v2.data.errors import DataError, fail
-from engine.v2.foundation import content_hash, market_calendar
+from engine.v2.foundation import content_hash
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research import magnitude_inputs
+from tests.v2.research import magnitude_trial_support as support
 from tests.v2.research.test_event_history import _commit, _event, _poison
 from tests.v2.research.test_prediction_inputs import _move
+
+_calendar = support.calendar_sessions
 
 MONTH = "2025-01"
 CUTOFF = "2024-07-01"
@@ -24,12 +27,6 @@ def test_approved_magnitude_recipe_is_explicit_and_fixed():
         "estimand": "conditional_mean", "primary_loss": "pooled_rmse",
         "secondary_diagnostics": ["mae", "quantile_calibration"],
     }
-
-
-def _calendar(start="2024-06-03", end="2024-06-14"):
-    projected = market_calendar.build_calendar_sessions((start,), event_through=end)
-    days = tuple(d for d in projected.days if d <= end)
-    return market_calendar.CalendarSessions(days, days[-1])
 
 
 @pytest.mark.parametrize("session,horizon,expected", [
