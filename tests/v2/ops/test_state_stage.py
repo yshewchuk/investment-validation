@@ -7,6 +7,7 @@ import pytest
 
 from checks import phase5_release
 from checks import phase5_release_assembly as assembly
+from engine.v2.foundation import ArtifactError
 from engine.v2.models import (
     ArtifactInventoryMember,
     ArtifactMember,
@@ -19,6 +20,7 @@ from engine.v2.models import (
     deployment,
 )
 from engine.v2.models import inventory as inventory_module
+from engine.v2.models.deployment import DeploymentError
 from engine.v2.ops import stages
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.state_stage import (
@@ -157,6 +159,9 @@ def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None):
         (staging / name).write_bytes(f"state-{name}".encode())
 
     def fake_payloads(paths, max_bytes=None):
+        from tools import phase5_state_stage_job
+
+        assert max_bytes == phase5_state_stage_job.MAX_STATE_BYTES
         name = Path(paths[0]).name
         member, object_name = states[name]
         return {member: {object_name: Path(paths[0]).read_bytes()}}
@@ -412,11 +417,16 @@ def test_worker_refuses_a_corrupt_state_file(tmp_path, monkeypatch):
     assert str(err.value) == "VALIDATION_FAILED: a bound state file could not be loaded"
 
 
-def test_worker_refuses_an_inventory_that_cannot_be_built(tmp_path, monkeypatch):
+@pytest.mark.parametrize("exc_factory", [
+    lambda: ValueError("corrupt registry"),
+    lambda: ArtifactError("UNSAFE_PATH", "bad"),
+    lambda: DeploymentError("bad"),
+])
+def test_worker_refuses_an_inventory_that_cannot_be_built(tmp_path, monkeypatch, exc_factory):
     parameters, staging = _wire(tmp_path, monkeypatch)
 
     def broken(*args, **kwargs):
-        raise ValueError("corrupt registry")
+        raise exc_factory()
 
     monkeypatch.setattr(inventory_module, "current_release_inventory", broken)
     with pytest.raises(OpsError) as err:

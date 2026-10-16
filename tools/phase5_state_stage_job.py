@@ -116,6 +116,8 @@ def stage_candidate(parameters, root: Path) -> dict:
         carry_forward_release,
         prior_carry_set,
     )
+    from engine.v2.foundation import ArtifactError
+    from engine.v2.models.deployment import DeploymentError
     from engine.v2.models.inventory import current_release_inventory
 
     release_root = Path(parameters["release_root"])
@@ -126,7 +128,7 @@ def stage_candidate(parameters, root: Path) -> dict:
         _, carried = prior_carry_set(release_root, parameters["prior_release_id"])
         try:
             inventory, drift = current_release_inventory()
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, ArtifactError, DeploymentError) as exc:
             raise StageRefused("release inventory could not be built") from exc
         if drift:
             raise StageRefused("release inventory drifted", {"issues": len(drift)})
