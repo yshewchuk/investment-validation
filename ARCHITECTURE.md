@@ -529,7 +529,7 @@ Only a tracked path absent from the worktree reads as empty.
   | spec missing/oversize/not a JSON object, a section of the wrong shape, a duplicate or colliding extra-job id, missing `commit` or `registry_owner`, a referenced file missing or over the cap | exit 2, nothing written for that run beyond files already produced |
   | spec file unreadable, not decodable JSON, or an uncreatable `--out-dir` | exit 2 |
   | spec `commit` differs from this checkout's `HEAD`, or tracked files are modified | exit 2 (registry and inventory would describe another commit) |
-  | a registry kind that can run outside `shadow`/`smoke` or holds a store `write` lease (today `experiment`, `models_promote`, `models_rollback`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
+  | a registry kind that can run outside `shadow`/`smoke`/`official` or holds a store `write` lease (today `experiment`, `models_promote`, `models_rollback`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
   | `--out-dir` inside the repository | exit 2 |
   | any other registry kind | job kind `background` when it declares effects, else `reader`; `writes_official` false (`scheduled_writer`/true only for `official` or an operator-listed kind) |
   | the checker reports findings | exit 1, manifest still written |

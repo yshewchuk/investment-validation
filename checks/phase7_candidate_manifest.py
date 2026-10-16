@@ -57,9 +57,10 @@ accounted for, or an accounted job the graph does not run, both fail.
 
 ``consumer_inventory``: ``{"path", "sha256", "consumers": ["<name>", ...]}``
 — a non-empty list of name strings; a dict, list or other nonstring entry
-is a named finding. Consumer names are labels (a real route may end in
-``/current``), so only a blank, non-string or repeated name is rejected; the implicit-latest rule does
-not apply to them. The referenced document must contain every declared
+is a named finding. Consumer names are labels, not pinned refs: by user decision (2026-10-16) a consumer
+row is exempt from the implicit-latest rule, because the dashboard legitimately reads the
+moving current-release pointer (e.g. ``GET /release/current``). Only a blank, non-string
+or repeated name is rejected. The referenced document must contain every declared
 consumer name (as an ``id``/``name``/``consumer`` value anywhere in it).
 
 ``authority``: ``{"old": {"schedule", "writer", "credential_owner"},

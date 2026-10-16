@@ -162,7 +162,9 @@ def test_planted_unaccounted_job_fails(spec, tmp_path):
     (lambda s, t: s.update(authority=[]), "authority"),
     (lambda s, t: s["config"][0].update(path=5), "path must be a string"),
 
-    (lambda s, t: s.update(config={"name": "x"}), "config"),
+    (lambda s, t: s.update(config={"name": "x"}), r"config: must be a list"),
+    (lambda s, t: s.update(phase_evidence={"phase": "4"}), r"phase_evidence: must be a list"),
+    (lambda s, t: s.update(extra_jobs={"id": "x"}), r"extra_jobs: must be a list"),
     (lambda s, t: s.update(extra_jobs=["x"]), r"extra_jobs\[0\]"),
     (lambda s, t: s.update(data_snapshot=None), "data_snapshot"),
     (lambda s, t: s.update(registry_owner=""), "registry_owner"),

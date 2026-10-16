@@ -58,7 +58,9 @@ exact candidate commit and, for Phase 5, the deployed release (missing
 bindings fail closed; 3A preview evidence cannot substitute). It rejects
 implicit latest refs in every pinned identity (commit, config, snapshot,
 release, retained deployment, ownership; consumer-inventory entries are
-labels of existing readers, e.g. `GET /release/current`, and are exempt),
+labels of existing readers, e.g. `GET /release/current`, and are exempt by
+user decision of 2026-10-16: the dashboard reads the moving current-release
+pointer),
 duplicate or unaccounted scheduled writers/background
 jobs, conflicting writer ownership, and stale or malformed evidence. It is
 read-only: it never writes authority, production pointers, credentials or
