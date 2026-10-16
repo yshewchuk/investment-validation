@@ -930,7 +930,7 @@ waits without submitting until its paired succeeded inputs are ready.
   commit layer's own equality check decides this, never key presence in the
   parent).
 - `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not
-  `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes.
+  `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes (so does `phase5_state_stage`, registry-added, via `tools/phase5_state_stage_job.py`: models doc §2.2).
   `run_training_worker` calls one of four `tools/phase5_training_job.py`
   functions and writes `training_result.json`; `run_promote_worker` calls `deployment.promote`;
   `run_rollback_worker` uses its plan-pinned incumbent and target, then writes

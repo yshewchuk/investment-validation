@@ -2220,3 +2220,11 @@ def test_prior_carry_set_refuses_malformed_prior_catalog(tmp_path, mutate):
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
         assembly.prior_carry_set(tmp_path, "prior1")
     assert err.value.code == "PRIOR_MISMATCH"
+
+
+def test_carried_pool_object_with_a_changed_name_refuses(tmp_path):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], name="renamed.bin")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "POOL_SET_MISMATCH"

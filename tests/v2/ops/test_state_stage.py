@@ -145,9 +145,9 @@ def test_plan_refuses_invalid_request(tmp_path):
     assert err.value.code == "INVALID_REQUEST"
 
 
-def _wire(tmp_path, monkeypatch, states=None, drift=()):
+def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None):
     """Stage a prior release, patch the state classifier and the inventory, return worker args."""
-    inventory, _body = _stage_prior(tmp_path)
+    inventory, _body = _stage_prior(tmp_path, prior_names=prior_names)
     states = _STATES if states is None else states
     staging = tmp_path / "staging"
     staging.mkdir()
@@ -205,10 +205,13 @@ def test_worker_refuses_a_missing_advancing_member(tmp_path, monkeypatch):
 
 def test_worker_refuses_inventory_drift_before_any_candidate(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch, drift=("MISSING_ARTIFACT_FILE",))
+    store = phase5_release.deployment_root(tmp_path) / "objects"
+    before = sorted(path.name for path in store.iterdir())
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert err.value.problem.details == {"issues": 1}
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+    assert sorted(path.name for path in store.iterdir()) == before
 
 
 def test_worker_refuses_a_cutoff_that_does_not_advance(tmp_path, monkeypatch):
@@ -401,7 +404,7 @@ def test_light_checks_refuse_a_corrupted_staged_manifest(tmp_path, monkeypatch):
     assert "light checks" in str(err.value)
 
 
-def test_light_checks_refuse_a_catalog_with_a_bad_schema(tmp_path, monkeypatch):
+def test_light_checks_refuse_a_catalog_with_no_members(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch)
     _tamper_catalog(monkeypatch, lambda body: body.__setitem__("members", []))
     with pytest.raises(OpsError) as err:
@@ -410,15 +413,89 @@ def test_light_checks_refuse_a_catalog_with_a_bad_schema(tmp_path, monkeypatch):
 
 
 def test_a_resupplied_object_replaces_the_prior_object_of_the_same_name(tmp_path, monkeypatch):
+    from checks import phase5_release_assembly as assembly_module
+
+    names = {member_id: "prior.bin" for member_id in (
+        *assembly_module.POOL_MEMBER_IDS, assembly_module.CHOOSER_MEMBER_ID, UNRELATED_MEMBER_ID)}
+    names["trailing_pnl_cutoff"] = "hist|2026-10"
     states = dict(_STATES)
-    states["trailing.json"] = ("trailing_pnl_cutoff", "prior.bin")
-    parameters, staging = _wire(tmp_path, monkeypatch, states=states)
+    states["trailing.json"] = ("trailing_pnl_cutoff", "hist|2026-10")
+    parameters, staging = _wire(tmp_path, monkeypatch, states=states, prior_names=names)
     run_state_stage_worker(parameters, staging)
     body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
     rows = {row["member_id"]: row for row in body["members"]}
     new_hash = phase5_release.sha256_bytes((staging / "trailing.json").read_bytes())
     assert [(o["name"], o["content_hash"]) for o in rows["trailing_pnl_cutoff"]["objects"]] == [
-        ("prior.bin", new_hash)]
+        ("hist|2026-10", new_hash)]
     assert {o["name"] for o in rows["board_analog_matcher"]["objects"]} == {
         "prior.bin", "STR-THRU|0.5000|2026-10-01"}
     assert [o["name"] for o in rows["driver_residual_pool:size"]["objects"]] == ["prior.bin"]
+
+
+def test_a_trailing_month_after_the_cutoff_is_refused(tmp_path, monkeypatch):
+    states = dict(_STATES)
+    states["trailing.json"] = ("trailing_pnl_cutoff", "hist|2026-11")
+    parameters, staging = _wire(tmp_path, monkeypatch, states=states)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.problem.details == {"months": ["hist|2026-11"]}
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+def _tamper_raw(monkeypatch, mutate):
+    from checks import phase5_release_assembly as assembly_module
+
+    real = assembly_module.carry_forward_release
+
+    def wrapped(root, **kwargs):
+        path = real(root, **kwargs)
+        body = json.loads(path.read_bytes())
+        mutate(body)
+        path.write_text(json.dumps(body))
+        return path
+
+    monkeypatch.setattr(assembly_module, "carry_forward_release", wrapped)
+
+
+def test_light_checks_refuse_a_stale_manifest_hash(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    _tamper_raw(monkeypatch, lambda body: body["sources"].__setitem__("note", "x"))
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert "light checks" in str(err.value)
+
+
+def test_light_checks_refuse_a_catalog_for_another_release(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    _tamper_catalog(monkeypatch, lambda body: body.__setitem__("release_id", "other"))
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert "light checks" in str(err.value)
+
+
+def test_worker_dispatch_routes_phase5_state_stage(monkeypatch):
+    from engine.v2.ops import state_stage, worker
+
+    seen = {}
+
+    def fake(parameters, root):
+        seen["args"] = (parameters, root)
+        return {"ok": True}
+
+    monkeypatch.setattr(state_stage, "run_state_stage_worker", fake)
+    assert worker.dispatch("phase5_state_stage", {"p": 1}, "/r") == {"ok": True}
+    assert seen["args"] == ({"p": 1}, "/r")
+
+
+def test_registered_kind_validates_and_plan_hash_matches(tmp_path):
+    from engine.v2.foundation import content_hash
+
+    kind = stages.registry().get("phase5_state_stage")
+    assert kind.validate(None, _params()) == []
+    assert kind.validate(None, _params(cutoff="bad"))
+    refs = {name: f"job_x#training/{name}" for name in _STATES}
+    plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
+                            release_id="cand1", cutoff="2026-10-01", state_refs=refs,
+                            source_root=REPO_ROOT)
+    assert plan["spec_hash"] == content_hash(plan["parameters"])
+    assert plan["implementation_ref"] and plan["environment_ref"]

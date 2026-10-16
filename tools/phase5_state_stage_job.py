@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import stat
+from datetime import date
 from pathlib import Path
 
 ADVANCING_MEMBERS = ("paired_residual_pool", "board_analog_matcher", "trailing_pnl_cutoff")
@@ -62,6 +63,20 @@ def classify(root: Path, names) -> dict[str, dict[str, bytes]]:
     return new
 
 
+def check_trailing_months(new: dict[str, dict[str, bytes]], cutoff: str) -> None:
+    """A trailing object's month (last name segment, ``YYYY-MM...``) may not start after ``cutoff``."""
+    late = []
+    for name in new["trailing_pnl_cutoff"]:
+        try:
+            month_start = date.fromisoformat(name.rsplit("|", 1)[-1][:7] + "-01")
+        except ValueError as exc:
+            raise StageRefused("a trailing object month is not a date", {"months": [name]}) from exc
+        if month_start > date.fromisoformat(cutoff):
+            late.append(name)
+    if late:
+        raise StageRefused("a trailing object month starts after cutoff", {"months": sorted(late)})
+
+
 def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
     """Re-read the candidate catalog and staged manifest; refuse unless it matches the request."""
     from checks import phase5_release as rel
@@ -100,6 +115,7 @@ def stage_candidate(parameters, root: Path) -> dict:
     release_root = Path(parameters["release_root"])
     cutoff = parameters["cutoff"]
     new = classify(Path(root), parameters["state_files"])
+    check_trailing_months(new, cutoff)
     try:
         _, carried = prior_carry_set(release_root, parameters["prior_release_id"])
         try:

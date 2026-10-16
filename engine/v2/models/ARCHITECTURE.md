@@ -143,8 +143,8 @@ size check. Existing callers omitting the ceiling retain their read contract.
   non-carried object must carry `cutoff` exactly. `prior_carry_set(release_root,
   prior_release_id) -> (pool_cutoff, tuple[PoolOutput])` returns every prior
   pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
-  (`PRIOR_MISMATCH` on a missing prior or malformed rows, objects or `pool_cutoff`;
-  `POOL_SET_MISMATCH`/`CHOOSER_MISMATCH` apply to caller-supplied carried fields).
+  (`PRIOR_MISMATCH` on a missing prior or structurally malformed rows, object keys or `pool_cutoff`;
+  wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`).
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
@@ -206,7 +206,8 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
   `carry_forward_release`, re-reads the catalog and staged manifest (`validate_catalog`,
   `verify_staged`, `pool_cutoff`, `carried_from`, new hashes), then writes `stage_result.json`.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
-  `ReleaseAssemblyRefusal`, `members`, `issues`); the retry policy is a single attempt.
+  `ReleaseAssemblyRefusal`, `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
+  carries `problems`). A trailing object's month may not start after `cutoff`. One attempt only.
 
 | Rule | Behaviour |
 |---|---|
