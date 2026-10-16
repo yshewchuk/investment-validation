@@ -1016,6 +1016,7 @@ mutate = [
     "engine/v2/ops/incremental_data.py",
     "engine/v2/ops/provider_response.py",
     "engine/v2/ops/training.py",
+    "engine/v2/ops/state_stage.py",
     "engine/v2/ops/unit_receipts.py",
     "engine/v2/ops/computed_moves_store.py",
     "engine/v2/ops/pinned_partition_reader.py",

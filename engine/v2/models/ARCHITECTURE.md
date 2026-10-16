@@ -208,11 +208,11 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | Bound files re-classified by schema and member (hash-verified by `FrozenStateLoader`); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
+| R1 verified input | Bound files are bounded regular files, re-classified by schema and member (self-consistency only: the loader hashes the bytes it read, no recorded hash is compared); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
 | R2 cache | None; bound files, prior catalog and inventory are re-read each call |
 | R3 retry | One attempt; a failed stage is terminal for its key, and no caller re-stages a key in any state |
 | R4 transaction | Objects, staged manifest and catalog are written under the new id only; `stage_result.json` follows the light checks |
-| R5 partial failure | Orphan objects or a manifest may remain; no success output, no promotion, the deployed release is unchanged |
+| R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
 | R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
 
 ## 3. Inputs

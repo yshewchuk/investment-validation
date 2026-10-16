@@ -2,7 +2,7 @@
 
 Thin job wrapper (parameters, validator, plan, kind, worker adapter); the staging logic is
 ``tools/phase5_state_stage_job.py``, as ``training.py`` wraps ``tools/phase5_training_job.py``.
-Contract: ``engine/v2/ops/ARCHITECTURE.md`` (``phase5_state_stage``). Never touches ``DEPLOYED``;
+Contract: ``engine/v2/models/ARCHITECTURE.md`` section 2.2 (``phase5_state_stage``). Never touches ``DEPLOYED``;
 ``models_promote`` is a separate job.
 """
 from __future__ import annotations

@@ -2,16 +2,19 @@
 
 The worker logic of the ``phase5_state_stage`` ops job (``engine/v2/ops/state_stage.py`` is
 the thin job wrapper, as ``engine/v2/ops/training.py`` wraps ``tools/phase5_training_job.py``).
-Contract: ``engine/v2/ops/ARCHITECTURE.md`` (``phase5_state_stage``) and
-``engine/v2/models/ARCHITECTURE.md`` section 2.1. Never touches ``DEPLOYED``.
+Contract: ``engine/v2/models/ARCHITECTURE.md`` section 2.2 (``phase5_state_stage``).
+Never touches ``DEPLOYED``.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
+import stat
 from pathlib import Path
 
 ADVANCING_MEMBERS = ("paired_residual_pool", "board_analog_matcher", "trailing_pnl_cutoff")
+
+MAX_STATE_BYTES = 512 * 1024 * 1024
 
 
 class StageRefused(ValueError):
@@ -20,6 +23,16 @@ class StageRefused(ValueError):
     def __init__(self, message: str, details: dict | None = None) -> None:
         super().__init__(message)
         self.details = details or {}
+
+
+def _require_regular(path: Path, limit: int, what: str) -> None:
+    """Refuse a missing, symlinked, non-regular or oversize file before it is read."""
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise StageRefused(f"{what} could not be read") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+        raise StageRefused(f"{what} is not a bounded regular file")
 
 
 def object_cutoff(member: str, name: str, cutoff: str) -> str:
@@ -35,6 +48,7 @@ def classify(root: Path, names) -> dict[str, dict[str, bytes]]:
     new: dict[str, dict[str, bytes]] = {}
     try:
         for name in names:
+            _require_regular(root / name, MAX_STATE_BYTES, "a bound state file")
             for member, objects in frozen_state_payloads([root / name]).items():
                 for object_name, data in objects.items():
                     if object_name in new.setdefault(member, {}):
@@ -54,6 +68,8 @@ def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
 
     release_id = parameters["release_id"]
     try:
+        _require_regular(rel.catalog_path(release_root, release_id), rel.MAX_CATALOG_BYTES,
+                         "the candidate catalog")
         body = json.loads(rel.catalog_path(release_root, release_id).read_bytes())
         rel.validate_catalog(body, release_id)
         rel.verify_staged(rel.deployment_root(release_root), release_id)
@@ -85,7 +101,11 @@ def stage_candidate(parameters, root: Path) -> dict:
     cutoff = parameters["cutoff"]
     new = classify(Path(root), parameters["state_files"])
     try:
-        _prior_cutoff, carried = prior_carry_set(release_root, parameters["prior_release_id"])
+        _, carried = prior_carry_set(release_root, parameters["prior_release_id"])
+        inventory, drift = current_release_inventory()
+        if drift:
+            raise StageRefused("release inventory drifted", {"issues": len(drift)})
+        inventory = dataclasses.replace(inventory, release_id=parameters["release_id"])
         outputs = []
         for member, objects in new.items():
             for name, data in sorted(objects.items()):
@@ -98,10 +118,6 @@ def stage_candidate(parameters, root: Path) -> dict:
         outputs += [item for item in carried if item.member_id != CHOOSER_MEMBER_ID
                     and (item.member_id, item.name) not in supplied]
         chooser = [item for item in carried if item.member_id == CHOOSER_MEMBER_ID]
-        inventory, drift = current_release_inventory()
-        if drift:
-            raise StageRefused("release inventory drifted", {"issues": len(drift)})
-        inventory = dataclasses.replace(inventory, release_id=parameters["release_id"])
         carry_forward_release(
             release_root, prior_release_id=parameters["prior_release_id"],
             release_id=parameters["release_id"], inventory=inventory, outputs=outputs,

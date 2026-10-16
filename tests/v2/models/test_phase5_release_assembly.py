@@ -2170,3 +2170,50 @@ def test_carried_flag_must_be_a_bool(tmp_path):
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
         assembly.derive_catalog(body, **args)
     assert err.value.code == "POOL_SET_MISMATCH"
+
+
+def test_carried_object_with_wrong_payload_bytes_refuses(tmp_path):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(
+        args["outputs"][0], payload_bytes=args["outputs"][0].payload_bytes + 1)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "POOL_SET_MISMATCH"
+
+
+def test_carried_object_cutoff_equal_to_session_cutoff_is_accepted(tmp_path):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], cutoff=args["cutoff"])
+    candidate = assembly.derive_catalog(body, **args)
+    assert candidate["sources"]["pool_cutoff"] == args["cutoff"]
+
+
+def _rewrite_prior(tmp_path, mutate):
+    _inventory, body = _stage_prior(tmp_path)
+    mutate(body)
+    phase5_release.write_catalog(phase5_release.catalog_path(tmp_path, "prior1"), body)
+
+
+def _drop_pool_cutoff(body):
+    body["sources"] = {}
+
+
+def _bad_pool_cutoff(body):
+    body["sources"]["pool_cutoff"] = "2026-9-1"
+
+
+def _drop_object_bytes(body):
+    del body["members"][0]["objects"][0]["bytes"]
+
+
+def _drop_members(body):
+    body["members"] = "not-a-list"
+
+
+@pytest.mark.parametrize(
+    "mutate", [_drop_pool_cutoff, _bad_pool_cutoff, _drop_object_bytes, _drop_members])
+def test_prior_carry_set_refuses_malformed_prior_catalog(tmp_path, mutate):
+    _rewrite_prior(tmp_path, mutate)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.prior_carry_set(tmp_path, "prior1")
+    assert err.value.code == "PRIOR_MISMATCH"

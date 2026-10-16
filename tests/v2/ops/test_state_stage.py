@@ -103,9 +103,7 @@ def test_valid_parameters_have_no_problems():
 
 @pytest.mark.parametrize("changes", [
     {"expected_ids": ("training",)}, {"release_root": ""}, {"release_id": "prior1"},
-    {"release_id": "../x"}, {"cutoff": "2026-9-1"}, {"cutoff": "bad"}, {"state_files": ()},
-    {"state_files": ("a.json", "a.json")}, {"state_files": ("a/b.json",)},
-    {"state_files": ("x.summary.json",), "input_bindings": {"x.summary.json": "j#o"}},
+    {"release_id": "../x"}, {"cutoff": "2026-9-1"}, {"cutoff": "bad"},
     {"input_bindings": None}, {"input_bindings": {"paired.json": "j#o"}},
 ])
 def test_invalid_parameters_are_reported(changes):
@@ -204,3 +202,70 @@ def test_worker_refuses_a_cutoff_that_does_not_advance(tmp_path, monkeypatch):
         run_state_stage_worker(parameters, staging)
     assert err.value.problem.details == {"code": "CUTOFF_NOT_ADVANCED"}
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+@pytest.mark.parametrize("files,text", [
+    ((), "non-empty tuple"), (("a.json", "a.json"), "without duplicates"),
+    (("a.txt",), "plain .json"), (("../x.json",), "plain .json"), (("a/b.json",), "plain .json"),
+    (("x.summary.json",), "plain .json"),
+])
+def test_state_file_shape_problems_name_the_defect(files, text):
+    params = _params(state_files=files, input_bindings={name: "j#o" for name in files})
+    problems = state_stage_parameter_problems(None, params)
+    assert any(text in problem for problem in problems)
+
+
+def test_trailing_objects_are_stamped_and_paired_objects_use_their_name_cutoff(tmp_path, monkeypatch):
+    states = dict(_STATES)
+    states["trailing.json"] = ("trailing_pnl_cutoff", "hist|2026-09")
+    parameters, staging = _wire(tmp_path, monkeypatch, states=states)
+    assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
+
+
+def test_paired_object_with_other_name_cutoff_is_refused(tmp_path, monkeypatch):
+    states = dict(_STATES)
+    states["paired.json"] = ("paired_residual_pool", "mv|cr|2026-10-02")
+    parameters, staging = _wire(tmp_path, monkeypatch, states=states)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.problem.details == {"code": "CUTOFF_MISMATCH"}
+
+
+def _tamper_catalog(monkeypatch, mutate):
+    from checks import phase5_release_assembly as assembly_module
+
+    real = assembly_module.carry_forward_release
+
+    def wrapped(root, **kwargs):
+        path = real(root, **kwargs)
+        body = json.loads(path.read_bytes())
+        mutate(body)
+        path.write_text(json.dumps(body))
+        return path
+
+    monkeypatch.setattr(assembly_module, "carry_forward_release", wrapped)
+
+
+def _wrong_pool_cutoff(body):
+    body["sources"]["pool_cutoff"] = "2000-01-01"
+
+
+def _wrong_carried_from(body):
+    body["sources"]["carried_from"] = "other"
+
+
+def _drop_board_objects(body):
+    for row in body["members"]:
+        if row["member_id"] == "board_analog_matcher":
+            row["objects"] = []
+
+
+@pytest.mark.parametrize("mutate", [_wrong_pool_cutoff, _wrong_carried_from, _drop_board_objects])
+def test_light_checks_refuse_a_candidate_that_does_not_match(tmp_path, monkeypatch, mutate):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    _tamper_catalog(monkeypatch, mutate)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert "light checks" in str(err.value)
+    assert not (staging / "stage_result.json").exists()
