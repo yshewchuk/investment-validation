@@ -1,5 +1,8 @@
 """Isolated journal limits and typed refusals over real SQLite and artifact storage."""
+import errno
 import json
+import sqlite3
+import traceback
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -16,6 +19,7 @@ from engine.v2.foundation import (
     from_document,
     to_document,
 )
+from engine.v2.foundation import artifacts as artifact_store
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.migrations import migrate
@@ -59,7 +63,7 @@ def _publish(journal, payload):
 @contextmanager
 def _problem(code, message):
     with pytest.raises(OpsError) as caught:
-        yield
+        yield caught
     category, retryable = {"RESOURCE_LIMIT_EXCEEDED": ("resource", False),
         "RESOURCE_UNAVAILABLE": ("resource", True), "EXPERIMENT_IDENTITY_CONFLICT": ("validation", False)}[code]
     assert to_document(caught.value.problem) == {
@@ -75,6 +79,20 @@ def _problem(code, message):
         "details": {},
         "schema_version": "problem.v1.0",
     }
+
+
+def _journal_state(journal):
+    return (journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall(),
+            journal.conn.total_changes)
+
+
+def _assert_redacted_artifact_error(error):
+    assert type(error) is SearchArtifactError
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    diagnostic = "".join(traceback.format_exception(error))
+    assert "/private/credential" not in diagnostic
+    assert "token=secret" not in diagnostic
 
 
 def test_journal_default_limit_is_sixteen_mebibytes():
@@ -273,6 +291,107 @@ def test_publication_failures_leave_no_journal_association(journal, artifact_cod
         records.append_record(journal.conn, store, RUN, SLOT, _wrapper()["body"])
     assert journal.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == 0
     assert records.read_record(journal.conn, journal.store, RUN, SLOT) is None
+    assert not journal.conn.in_transaction
+
+
+@pytest.mark.parametrize("point", ["copied", "linked"])
+@pytest.mark.parametrize("number", [errno.ENOSPC, errno.EIO, errno.EACCES])
+def test_publication_oserror_has_exact_redacted_problem_and_no_journal_mutation(journal, point, number):
+    records.append_record(journal.conn, journal.store, RUN, "seal", {"existing": True})
+    before = _journal_state(journal)
+    visited = []
+
+    def fault(actual):
+        assert not journal.conn.in_transaction
+        visited.append(actual)
+        if actual == point:
+            raise OSError(number, "token=secret", "/private/credential")
+
+    store = ArtifactStore(journal.store.root, fault=fault)
+    with _problem("RESOURCE_UNAVAILABLE", "search journal artifact could not be published") as caught:
+        records.append_record(journal.conn, store, RUN, SLOT, _wrapper()["body"])
+    _assert_redacted_artifact_error(caught.value)
+    assert visited == (["copied"] if point == "copied" else ["copied", "linked"])
+    assert _journal_state(journal) == before
+    assert records.read_record(journal.conn, journal.store, RUN, SLOT) is None
+    assert not journal.conn.in_transaction
+
+
+@pytest.mark.parametrize("operation,number", [
+    ("write", errno.ENOSPC), ("fsync", errno.EIO),
+    ("chmod", errno.EACCES), ("link", errno.EIO),
+])
+def test_publication_syscall_oserror_preserves_journal(journal, monkeypatch, operation, number):
+    records.append_record(journal.conn, journal.store, RUN, "seal", {"existing": True})
+    before = _journal_state(journal)
+    calls = []
+
+    def fault(*args, **kwargs):
+        assert not journal.conn.in_transaction
+        calls.append(operation)
+        raise OSError(number, "token=secret", "/private/credential")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(artifact_store.os, operation, fault)
+        with _problem("RESOURCE_UNAVAILABLE", "search journal artifact could not be published") as caught:
+            records.append_record(journal.conn, journal.store, RUN, SLOT, _wrapper()["body"])
+    _assert_redacted_artifact_error(caught.value)
+    assert calls == [operation]
+    assert _journal_state(journal) == before
+    assert records.read_record(journal.conn, journal.store, RUN, SLOT) is None
+    assert not journal.conn.in_transaction
+
+
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("number", [errno.EIO, errno.EACCES])
+def test_read_syscall_oserror_has_exact_redacted_problem_and_no_journal_mutation(
+    journal, monkeypatch, replay, number,
+):
+    body = _wrapper()["body"]
+    records.append_record(journal.conn, journal.store, RUN, SLOT, body)
+    before = _journal_state(journal)
+    calls = []
+
+    def fault(fd, size):
+        assert not journal.conn.in_transaction
+        calls.append((fd, size))
+        raise OSError(number, "token=secret", "/private/credential")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(artifact_store.os, "read", fault)
+        patch.setattr(journal.store, "publish_bytes", lambda *a, **kw: pytest.fail("read failure published"))
+        with _problem("RESOURCE_UNAVAILABLE", "search journal artifact could not be verified") as caught:
+            if replay:
+                records.append_record(journal.conn, journal.store, RUN, SLOT, body)
+            else:
+                records.read_record(journal.conn, journal.store, RUN, SLOT)
+    _assert_redacted_artifact_error(caught.value)
+    assert len(calls) == 1
+    assert _journal_state(journal) == before
+    assert records.read_record(journal.conn, journal.store, RUN, SLOT) == body
+    assert not journal.conn.in_transaction
+
+
+@pytest.mark.parametrize("operation", ["read", "append"])
+def test_catalog_errors_still_propagate_without_journal_mutation(journal, operation):
+    records.append_record(journal.conn, journal.store, RUN, "seal", {"existing": True})
+    before = _journal_state(journal)
+    denied = sqlite3.SQLITE_READ if operation == "read" else sqlite3.SQLITE_INSERT
+
+    def authorize(action, table, *args):
+        return (sqlite3.SQLITE_DENY if action == denied and table == "magnitude_search_records"
+                else sqlite3.SQLITE_OK)
+
+    journal.conn.set_authorizer(authorize)
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            if operation == "read":
+                records.read_record(journal.conn, journal.store, RUN, "seal")
+            else:
+                records.append_record(journal.conn, journal.store, RUN, SLOT, _wrapper()["body"])
+    finally:
+        journal.conn.set_authorizer(None)
+    assert _journal_state(journal) == before
     assert not journal.conn.in_transaction
 
 

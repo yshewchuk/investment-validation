@@ -13,6 +13,7 @@ import pytest
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data.errors import DataError
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
     ArtifactError,
@@ -133,6 +134,8 @@ def test_native_complete_journal_pools_metrics_freezes_latest_and_replays(case, 
                 "rmse": pytest.approx(math.sqrt(sum(error ** 2 for error in errors) / len(errors))),
                 "mae": pytest.approx(sum(errors) / len(errors))}
     before = _slots(case)
+    monkeypatch.setattr(case.recorder, "_inputs", lambda *a: pytest.fail("replay reopened native inputs"))
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("replay reopened labels"))
     assert case.recorder.freeze() == frozen
     assert _slots(case) == before
     actual = catalog_rows(case.source.conn)
@@ -424,8 +427,10 @@ def test_cutoff_equal_validation_label_leaves_unfinished_claim_and_blocks_freeze
         case = SimpleNamespace(source=source, plan=sealed["plan"], recorder=recorder)
         args = _cases(case)[0]
         started = recorder.start(*args)
-        with pytest.raises(DataError, match="^EXPERIMENT_VARIANT_FAILED: magnitude label is not available before cutoff$"):
+        with pytest.raises(DataError) as caught:
             recorder.record(*args, forecasts=_forecasts(case, args))
+        assert caught.value.problem == data_fail(
+            "EXPERIMENT_VARIANT_FAILED", "magnitude label is not available before cutoff").problem
         assert recorder._read("terminal:" + started["trial_id"]) is None
         assert recorder._read("forecasts:" + started["trial_id"]) is not None
         with _assert_error("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):

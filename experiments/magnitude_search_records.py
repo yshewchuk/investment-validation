@@ -28,6 +28,8 @@ MIGRATIONS = (Migration(version=1, name="immutable_trial_records", statements=(
 
 def _artifact_failure(error, action):
     message = "search journal artifact could not be " + action
+    if isinstance(error, OSError):
+        error = ArtifactError("IO_ERROR", message)
     return artifact_failure(error, integrity_message=message, resource_message=message, unsafe_is_conflict=True)
 
 
@@ -50,13 +52,15 @@ def read_record(conn, store, run_id, slot):
     if ref is None:
         return None
     try:
-        record = json.loads(store.read_verified(ref))
+        payload = store.read_verified(ref)
+    except (ArtifactError, OSError) as error:
+        raise _artifact_failure(error, "verified") from None
+    try:
+        record = json.loads(payload)
         if (set(record) != {"schema_version", "run_id", "slot", "body"}
                 or record["schema_version"] != SCHEMA or record["run_id"] != run_id or record["slot"] != slot):
             raise ValueError
         return record["body"]
-    except ArtifactError as error:
-        raise _artifact_failure(error, "verified") from None
     except (ValueError, TypeError, KeyError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal binding is invalid") from None
 
@@ -73,7 +77,7 @@ def append_record(conn, store, run_id, slot, body, *, replay=True, absent=()):
         raise fail("RESOURCE_LIMIT_EXCEEDED", "search journal record exceeds its byte limit")
     try:
         ref = store.publish_bytes(payload, schema_ref=SCHEMA)
-    except ArtifactError as error:
+    except (ArtifactError, OSError) as error:
         raise _artifact_failure(error, "published") from None
     with transaction(conn):
         if any(_reference(conn, run_id, other) is not None for other in absent):

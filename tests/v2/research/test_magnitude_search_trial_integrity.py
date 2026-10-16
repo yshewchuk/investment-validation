@@ -729,6 +729,7 @@ def test_numpy_and_real_forecasts_normalize_before_recording_and_replay(journal,
         result = journal.recorder.record("2024", "2023", candidate, forecasts=forecasts)
         assert all(type(row["predicted_absolute_move_pct"]) in (int, float) and type(row["horizon_sessions"]) is int
                    for row in result["predictions"])
+        assert all(row["predicted_absolute_move_pct"] == float(number) for row in result["predictions"])
         assert journal.recorder.record("2024", "2023", candidate, forecasts=rows(float(number))) == result
     assert journal.recorder.freeze()["prospective_candidate_id"] == "a-first"
 
