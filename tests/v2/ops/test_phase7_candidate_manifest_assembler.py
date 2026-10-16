@@ -355,6 +355,7 @@ def test_main_unusable_spec_files_exit_2(tmp_path):
     assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
     bad.write_text("{not json")
     assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
+    assert not Path(out).exists()
 
 
 def test_spec_over_cap_is_refused_with_its_message(spec, tmp_path, monkeypatch, capsys):
@@ -365,12 +366,30 @@ def test_spec_over_cap_is_refused_with_its_message(spec, tmp_path, monkeypatch, 
     assert "spec exceeds" in capsys.readouterr().err
 
 
-def test_git_timeout_is_a_spec_error(monkeypatch):
-    def hang(*args, **kwargs):
-        raise subprocess.TimeoutExpired("git", 30)
-    monkeypatch.setattr(asm.subprocess, "run", hang)
+@pytest.mark.parametrize("failure", [
+    subprocess.TimeoutExpired("git", 30), FileNotFoundError("git")])
+def test_git_failure_is_a_spec_error(monkeypatch, failure):
+    def broken(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(asm.subprocess, "run", broken)
     with pytest.raises(asm.SpecError, match="git rev-parse failed"):
         _REAL_COMMIT({"commit": "a" * 40}, asm.ROOT)
+
+
+@pytest.mark.parametrize("failing_arg", ["rev-parse", "status"])
+def test_git_nonzero_return_is_a_spec_error(monkeypatch, failing_arg):
+    real_run = subprocess.run
+
+    def fake(cmd, *args, **kwargs):
+        if failing_arg in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(asm.subprocess, "run", fake)
+    head = subprocess.run(["git", "-C", str(asm.ROOT), "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    with pytest.raises(asm.SpecError, match="commit:"):
+        _REAL_COMMIT({"commit": head}, asm.ROOT)
 
 
 def test_write_is_atomic_and_manifest_is_replaced_last(spec, tmp_path, monkeypatch):
