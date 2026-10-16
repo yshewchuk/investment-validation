@@ -10,7 +10,6 @@ helpers exactly like ``tests/v2/serving/test_v2_serving_publication_binding.py``
 """
 from __future__ import annotations
 
-import builtins
 import json
 import math
 import os
@@ -608,7 +607,7 @@ def test_current_pointer_io_failure_leaves_report_available(parity, tmp_path, mo
     """A real I/O failure reading the ops publisher's ``CURRENT`` is the same
     availability contract as the resolver's own ``ApiError`` above: the parity
     report stays available. The failure is injected only for that exact file
-    through ``builtins.open`` so the real ``_publication_resolver`` chain is
+    through ``os.open`` so the real ``_publication_resolver`` chain is
     exercised, never a mocked resolver or freshness check."""
     publication_root = tmp_path / "publication"
     publication_root.mkdir()
@@ -622,17 +621,15 @@ def test_current_pointer_io_failure_leaves_report_available(parity, tmp_path, mo
                      native_parity_report_path=str(parity.report_path))
     server, thread, base = _start(app)
     injected = []
-    real_open = builtins.open
+    real_open = os.open
 
-    def deny_current_candidate(file, *args, **kwargs):
-        if isinstance(file, int):
-            return real_open(file, *args, **kwargs)
+    def deny_current_candidate(file, flags, *args, **kwargs):
         if os.fspath(file) == str(current_path):
             injected.append(str(current_path))
             raise PermissionError(13, "Permission denied", str(current_path))
-        return real_open(file, *args, **kwargs)
+        return real_open(file, flags, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", deny_current_candidate)
+    monkeypatch.setattr(os, "open", deny_current_candidate)
     try:
         code, body, headers = _get(base, "/api/v1/native_parity", token=TOKEN)
         assert code == 200

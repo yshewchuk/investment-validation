@@ -94,7 +94,7 @@ The authenticated `GET /api/v1/operations` reads the publisher's
 release. The document carries the published and attempted release ids,
 requested/resolved sessions, and the scheduled engineering history. Missing,
 malformed, or unreadable status raises `OPERATIONS_UNAVAILABLE` (503,
-retryable); an optional `release_id` that differs from the sidecar's release
+retryable); an optional `release_id` that differs from the document's release
 raises `OPERATIONS_STATUS_NOT_FOR_RELEASE` (409, not retryable). Success is
 `no-store`. Serving does not infer a missing observation from wall-clock age;
 it returns the recorded history unchanged. Clients compare its release ids
@@ -173,7 +173,12 @@ label the run it displays.
 `CURRENT` -> `projection_binding.json` (see the read path below) and adds a top-level `scope`:
 the binding's optional string `scope` (the effect scope of the retained publication that moved
 the pointer), `null` when the binding has none or a non-string. `verify_projection_binding`
-ignores `scope`. `scope` is `null` until a producer writes it.
+checks only index-derived fields, so it does not cover `scope`: scope is publication metadata,
+not projection content, and the binding file is bound as an ops artifact when published.
+`scope` is `null` until a producer writes it. `CURRENT`, the binding and
+`operations_status.json` are read without following symlinks, only as regular files and at most
+1 MiB; a symlinked, non-regular, oversize or non-UTF-8 file reads as absent (`NO_CURRENT_RELEASE`
+for the pointer chain, `OPERATIONS_UNAVAILABLE` for the status document).
 `/operations` serves `<publication_root>/operations_status.json` only; it is the publication-time
 status document, never a serving-projection status sidecar, so under the
 serving `publisher/` it answers `OPERATIONS_UNAVAILABLE` (503) until a producer writes that file.

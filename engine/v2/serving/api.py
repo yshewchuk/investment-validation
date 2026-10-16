@@ -25,8 +25,9 @@ binding that does not (yet, or any longer) match is a typed, non-retryable
  ``SERVING_INDEX_UNREADABLE`` 503 (``_index_unreadable``, #342).
 
  The launcher's pointer root defaults to the serving root's ``publisher/``
- (``create_app(publication_root=None)`` has no default); ``/releases/current``
- adds a top-level ``scope`` taken from the binding (null when absent).
+ (``create_app(publication_root=None)`` means no pointer; only ``main()``
+ derives ``publisher/``); ``/releases/current`` adds a top-level ``scope``
+ taken from the binding (null when absent).
 
 
 ``create_app``'s ``resolver`` parameter remains the seam: any zero-argument
@@ -278,12 +279,12 @@ def _publication_resolver(release_root, serving_db):
     publication yet (absent/malformed pointer or binding -- ordinary "no
     current release" 503). Raises :class:`ApiError` -- typed, non-
     retryable, distinct from "no current release" -- only when a binding
- names a release id that fails to verify: not committed, or its
- manifest/index hash no longer matches (a tampered doc or changed index row).
- Post-open failures of that reverification itself -- a dropped/corrupt table
- (``sqlite3.Error``) or a malformed stored row (``json.JSONDecodeError``) --
- are the retryable ``SERVING_INDEX_UNREADABLE`` 503 (#342); the connection
- closes either way."""
+  names a release id that fails to verify: not committed, or its
+  manifest/index hash no longer matches (a tampered doc or changed index row).
+  Both retryable ``SERVING_INDEX_UNREADABLE`` 503 branches are here: an
+  open-time ``sqlite3.Error`` from ``projections.connect`` and a post-open
+  ``sqlite3.Error``/``json.JSONDecodeError`` while reverifying; the connection
+  closes either way."""
 
 
     def resolve_pair() -> tuple[str | None, str | None]:
@@ -459,7 +460,7 @@ def _parse_bool_flag(raw: str | None, field_name: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# operations status -- §6/§5.5 items 2-3: the sidecar ``publication_effect``
+# operations status -- §6/§5.5 items 2-3: the document ``publication_effect``
 # writes into the publisher's scope root, read like ``_read_projection_
 # binding`` (files only, never an ``engine.v2.ops`` import), as a plain
 # untyped document (no ``engine.v2.contracts`` import; budget already spent).
@@ -631,10 +632,10 @@ def _score_detail_response(serving_db, store, response: Response, request: Reque
 
 
 def _operations_response(publication_root, response: Response, *, release_id: str | None = None) -> dict:
-    """§6 sidecar; missing history is the same typed refusal as a malformed
+    """§6 document; missing history is the same typed refusal as a malformed
     document -- never a silent green default (§5.5 item 3).
 
-    2026-09-14 review fix: the sidecar always describes the SCOPE's current
+    2026-09-14 review fix: the document always describes the SCOPE's current
     state, not any one release -- a client that pinned an earlier
     ``release_id`` (from a prior response's own field, or from
     ``/api/v1/releases/current``) and polls this route later can otherwise
