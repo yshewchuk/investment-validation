@@ -206,6 +206,23 @@ def test_catalog_cap_constant_and_regular_file_guard(tmp_path):
     assert release_objects.read_regular_file(small, 8) == b"x" * 8
     with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
         release_objects.read_regular_file(small, 7)
+    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
+        release_objects.read_regular_file(small, -1)
+
+
+def test_read_regular_file_refuses_fifo_without_blocking(tmp_path):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo")
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
+        release_objects.read_regular_file(fifo, 16)
+
+
+def test_write_object_accepts_empty_payload(tmp_path):
+    digest, rel = layout.write_object(tmp_path, b"")
+    assert (layout.deployment_root(tmp_path) / rel).read_bytes() == b""
+    assert digest == layout.sha256_bytes(b"")
 
 
 def test_legacy_fallback_requires_matching_id_and_local_needs_no_root(tmp_path):
@@ -273,6 +290,7 @@ def test_copy_preflight_is_read_only_and_failed_destination_is_retryable(tmp_pat
         return real_write(path, data)
 
     monkeypatch.setattr(deployment, "atomic_write_bytes", forbid_source_write)
+    monkeypatch.setattr(deployment, "_atomic_write_bytes", forbid_source_write)
     prep._copy_incumbent(store, destination)
     assert _local(destination.parent).read_bytes() == legacy
     assert {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
