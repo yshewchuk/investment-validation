@@ -223,7 +223,7 @@ _IMPORT_NAMES_LIMIT = 20000
 
 
 def _import_names(source, package):
-    key = (hashlib.sha256(source.encode("utf-8", "surrogatepass")).digest(), tuple(package))
+    key = (hashlib.sha256(source.encode("utf-8")).digest(), tuple(package))
     cached = _IMPORT_NAMES.get(key)
     if cached is not None:
         return cached
