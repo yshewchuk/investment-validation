@@ -180,15 +180,17 @@ calls this menu resolver, so these interfaces do not enable nightly DYN-SV.
 `validate_dynamic_menu` into registry order. Its callers supply complete shared
 event/session, snapshot/release/deployment, calendar/decision-clock, mode and
 fill/ATM policy identities. Exact comparisons never truncate an event instant.
+`event_revision` alone may be `None`; all other identity fields are nonblank text.
 A record summary retains its request/score IDs, validation/readiness, reasons
 and warnings; a producer/assembly refusal retains its code and optional request
 hash. The helper verifies summaries, not original records or policy hashes.
 
-Duplicates (including reused candidate IDs and record/refusal overlap), unknown
-members, malformed values or identity mismatch raise `DynamicMenuRefusal` with
-`INVALID_CHOOSER_MENU`; missing members raise `CHOOSER_MENU_INCOMPLETE` and list
-fixed registry names. Invalid joins precede incomplete accounting. Complete
-all-refused menus pass; no eligibility, winner, margin or meta record is produced.
+| Condition | Outcome |
+| --- | --- |
+| Duplicate member/ID, record/refusal overlap, unknown member, malformed value or identity mismatch | `DynamicMenuRefusal` with `INVALID_CHOOSER_MENU`, before missing-member checks |
+| Otherwise valid menu missing a registered member | `DynamicMenuRefusal` with `CHOOSER_MENU_INCOMPLETE`, listing fixed registry names |
+| Complete mixed or all-refused menu | Return seven summaries in registry order; no eligibility, winner, margin or meta record |
+
 There is no I/O, retry, fitting or source/finality/causal-training admission.
 Only tests consume this preparatory interface; existing selection and nightly
 dispatch are unchanged. See README for fields and ownership obligations.
@@ -361,6 +363,7 @@ produces the same `ScoreRecord`, `identity.py`). Other typed refusals:
 `AnalogRefusal` (`native_analog.py`), `FrozenBindingConflict`
 (`application.py`, below), `NightlySourceBundleRefusal`
 (`nightly_source_bundle.py`, below).
+`DynamicMenuRefusal` (`dynamic_outcomes.py`) covers malformed or incomplete menus.
 
 **Quote age policy (issue #169).** When native input context supplies
 `quote_max_age_sessions`, it is the permitted age of the raw quote at

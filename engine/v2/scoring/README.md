@@ -169,10 +169,13 @@ order. It never accepts a mapping that could conceal duplicates. Each summary
 names either a record (request hash, score ID, validation status and readiness)
 or an explicit refusal code (request hash optional); reasons and warnings are
 copied into immutable tuples, preserving their order and duplicates.
+Producer/assembly refusal codes are preserved nonblank text; this boundary does
+not validate them against a producer-code registry.
 
 The caller supplies `DynamicMenuIdentity` from pinned context: ticker, exact
 event date/instant, session, event ID/revision, calendar revision, snapshot,
 release/deployment, decision clock/instant, mode and full fill/ATM policy hashes.
+`event_revision` may be `None`; every other identity field requires nonblank text.
 Use the existing foundation content hash for policies. This helper compares
 opaque identities exactly; it neither derives dates nor verifies those hashes.
 Duplicate members or candidate IDs, record/refusal overlap, unexpected members,
@@ -180,7 +183,7 @@ malformed values and identity mismatches raise `INVALID_CHOOSER_MENU`. Missing
 members raise `CHOOSER_MENU_INCOMPLETE` with their fixed registry names.
 Invalid joins take precedence over missing membership in every input order.
 
-All-refused and partial-success menus are valid accounting; statuses and causes
+All-refused and mixed menus are valid accounting; statuses and causes
 are retained without eligibility or ranking decisions. These summaries do not
 verify their original records or establish source admission, finality or causal
 training. No I/O, scoring, fitting, retries or partial publication occurs here.

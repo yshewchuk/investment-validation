@@ -216,6 +216,11 @@ def test_malformed_identity_cannot_masquerade_as_complete(field, value):
     assert_invalid(lambda: identity(**{field: value}))
 
 
+@pytest.mark.parametrize("field", [name for name in IDENTITY if name != "event_revision"])
+def test_required_identity_fields_cannot_be_none(field):
+    assert_invalid(lambda: identity(**{field: None}))
+
+
 def test_optional_event_revision_can_be_absent_without_losing_identity():
     context = identity(event_revision=None)
     outcomes = tuple(record(s, context=context) for s in MENU)
@@ -229,7 +234,9 @@ def test_optional_event_revision_can_be_absent_without_losing_identity():
     {"request_hash": ""}, {"score_id": False}, {"readiness": []}, {"validation_status": {}},
     {"refusal_code": "QUOTE_MISSING"}, {"refusal_code": ""},
     {"reason_codes": "NO_SCORE"}, {"reason_codes": [None]}, {"reason_codes": [" "]},
+    {"reason_codes": ["NO_SCORE", None]}, {"reason_codes": [None, "NO_SCORE"]},
     {"warnings": {"warning": "text"}}, {"warnings": [42]}, {"warnings": None},
+    {"warnings": ["synthetic warning", 42]}, {"warnings": [42, "synthetic warning"]},
 ])
 def test_malformed_record_summaries_and_single_item_overlap_refuse(updates):
     assert_invalid(lambda: record("TWIN-P", **updates))
@@ -248,8 +255,9 @@ def test_malformed_envelopes_are_typed_and_never_missing_menu(outcomes):
     assert_invalid(lambda: validate_dynamic_menu(identity(), outcomes))
 
 
-def test_malformed_expected_identity_refuses():
-    assert_invalid(lambda: validate_dynamic_menu(IDENTITY, menu()))
+@pytest.mark.parametrize("outcomes", [menu(), (), None])
+def test_malformed_expected_identity_refuses(outcomes):
+    assert_invalid(lambda: validate_dynamic_menu(IDENTITY, outcomes))
 
 
 def test_invalid_outcome_takes_precedence_over_incomplete_accounting_in_every_order():
