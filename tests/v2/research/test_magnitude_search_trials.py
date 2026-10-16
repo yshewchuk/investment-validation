@@ -115,7 +115,13 @@ def test_native_complete_journal_pools_metrics_freezes_latest_and_replays(case, 
     assert frozen["prospective_candidate_id"] == second
     assert frozen["estimator_execution"] == "unverified_submitted_forecasts"
     assert frozen["evaluation_authority"] == "none"
-    assert len(frozen["attempts"]) == 6
+    expected_attempts = []
+    for outer in case.plan["folds"]:
+        for candidate in case.plan["candidates"]:
+            for inner in outer["inner"]:
+                key = _hash([case.plan["plan_id"], outer["outer"]["year"], inner["year"], candidate["candidate_id"]])
+                expected_attempts.append({"trial_id": key, "terminal_id": _hash(case.recorder._read("terminal:" + key))})
+    assert frozen["attempts"] == expected_attempts
     actuals = {"2023": [4, 6, 8, 12], "2024": [10, 8, 20, 4]}
     for selection in frozen["selections"]:
         for score in selection["scores"]:
@@ -298,7 +304,7 @@ def test_corrupt_any_link_blocks_freeze(case):
         path.chmod(0o644)
         path.write_bytes(b"corrupt")
         try:
-            with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified or published"):
+            with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified"):
                 case.recorder.freeze()
             assert case.recorder._read("selection") is None
         finally:
@@ -355,7 +361,7 @@ def test_artifact_publication_failure_leaves_no_admitted_start(case, monkeypatch
         return original(store, data, schema_ref=schema_ref)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", unavailable)
     before = _slots(case)
-    with _assert_error("RESOURCE_UNAVAILABLE", "search journal artifact could not be verified or published"):
+    with _assert_error("RESOURCE_UNAVAILABLE", "search journal artifact could not be published"):
         case.recorder.start(*_cases(case)[0])
     assert _slots(case) == before
 

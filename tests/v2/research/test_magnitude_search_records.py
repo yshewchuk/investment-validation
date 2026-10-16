@@ -202,7 +202,7 @@ def test_artifact_read_failures_preserve_classification_and_redact_paths(journal
     elif failure == "unsafe_path":
         ref = replace(ref, storage_key="../private/credential")
     _insert(journal, canonical_json(to_document(ref)))
-    with _problem(code, "search journal artifact could not be verified or published"):
+    with _problem(code, "search journal artifact could not be verified"):
         records.read_record(journal.conn, journal.store, RUN, SLOT)
 
 
@@ -219,7 +219,7 @@ def test_publication_failures_leave_no_journal_association(journal, artifact_cod
         raise ArtifactError(artifact_code, "/private/credential")
 
     store = ArtifactStore(journal.store.root, fault=fault)
-    with _problem(code, "search journal artifact could not be verified or published"):
+    with _problem(code, "search journal artifact could not be published"):
         records.append_record(journal.conn, store, RUN, SLOT, _wrapper()["body"])
     assert journal.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == 0
     assert records.read_record(journal.conn, journal.store, RUN, SLOT) is None

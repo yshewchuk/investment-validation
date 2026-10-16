@@ -39,7 +39,7 @@ def _problem(problem):
 
 
 def _candidate_failure(problem):
-    return problem["code"] == "EXPERIMENT_VARIANT_FAILED" and not problem["retryable"]
+    return problem["code"] == "EXPERIMENT_VARIANT_FAILED"
 
 
 class SearchTrials:
@@ -64,8 +64,8 @@ class SearchTrials:
         if _candidate_failure(problem):
             try:
                 self._append("terminal:" + key, {"status": "refused", "problem": problem})
-            except (OpsError, OSError, sqlite3.Error):
-                pass  # Preserve the original scoring refusal; an unfinished claim still blocks freeze.
+            except (OpsError, OSError, sqlite3.Error) as publication_error:
+                raise error from publication_error
 
     def _binding(self):
         plan = read_search_plan(self.conn, self.store, self.registration, self.request, self.plan_ref)

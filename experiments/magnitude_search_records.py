@@ -26,6 +26,11 @@ MIGRATIONS = (Migration(version=1, name="immutable_trial_records", statements=(
 )),)
 
 
+def _artifact_failure(error, action):
+    message = "search journal artifact could not be " + action
+    return artifact_failure(error, integrity_message=message, resource_message=message, unsafe_is_conflict=True)
+
+
 def _reference(conn, run_id, slot):
     row = conn.execute("SELECT CASE WHEN length(CAST(ref_json AS BLOB))<=4096 THEN ref_json END "
                        "FROM magnitude_search_records WHERE run_id=? AND slot=?", (run_id, slot)).fetchone()
@@ -51,8 +56,7 @@ def read_record(conn, store, run_id, slot):
             raise ValueError
         return record["body"]
     except ArtifactError as error:
-        raise artifact_failure(error, integrity_message="search journal artifact could not be verified or published",
-            resource_message="search journal artifact could not be verified or published", unsafe_is_conflict=True) from None
+        raise _artifact_failure(error, "verified") from None
     except (ValueError, TypeError, KeyError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal binding is invalid") from None
 
@@ -70,8 +74,7 @@ def append_record(conn, store, run_id, slot, body, *, replay=True, absent=()):
     try:
         ref = store.publish_bytes(payload, schema_ref=SCHEMA)
     except ArtifactError as error:
-        raise artifact_failure(error, integrity_message="search journal artifact could not be verified or published",
-            resource_message="search journal artifact could not be verified or published", unsafe_is_conflict=True) from None
+        raise _artifact_failure(error, "published") from None
     with transaction(conn):
         if any(_reference(conn, run_id, other) is not None for other in absent):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial phase is already committed")

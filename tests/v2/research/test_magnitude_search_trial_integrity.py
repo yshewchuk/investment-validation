@@ -22,6 +22,7 @@ from engine.v2.foundation import (
 )
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.migrations import Migration, migrate
 from experiments import magnitude_search_records as records
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_report import magnitude_metrics
@@ -93,7 +94,8 @@ def forge_complete(journal, mutation=None):
             predictions[0]["absolute_move_pct"] = 10 ** 400
         elif mutation == "status":
             terminal["status"] = "unknown"
-        elif mutation in ("failure_policy", "failure_unknown", "infrastructure_terminal", "refused_no_inputs", "refused_no_forecasts"):
+        elif mutation in ("failure_policy", "failure_unknown", "infrastructure_terminal", "refused_no_inputs",
+                          "refused_no_forecasts", "failed_extra", "refused_extra"):
             problem = expected_problem("EXPERIMENT_VARIANT_FAILED")
             if mutation == "failure_policy":
                 problem["retryable"] = True
@@ -102,8 +104,11 @@ def forge_complete(journal, mutation=None):
             elif mutation == "infrastructure_terminal":
                 problem.update(code="RESOURCE_UNAVAILABLE", category="resource", retryable=True)
             terminal = {"status": "refused" if mutation.startswith("refused_") else "failed", "problem": problem}
+            if mutation in ("failed_extra", "refused_extra"):
+                terminal["unexpected"] = "field"
         for prefix, body in (("start", started), ("inputs", admitted), ("forecasts", submitted), ("terminal", terminal)):
-            if (mutation, prefix) in (("refused_no_inputs", "inputs"), ("refused_no_forecasts", "forecasts")):
+            if (mutation, prefix) in (("refused_no_inputs", "inputs"), ("refused_no_forecasts", "forecasts"),
+                                     ("failed_extra", "forecasts")):
                 continue
             journal.recorder._append(prefix + ":" + key, body)
 
@@ -111,7 +116,7 @@ def forge_complete(journal, mutation=None):
 @pytest.mark.parametrize("mutation", ["start", "missing_cohort", "cohort_link", "cohort_digest", "terminal_inputs",
     "forecasts", "metrics", "status", "failure_policy", "failure_unknown", "infrastructure_terminal",
     "refused_no_inputs", "refused_no_forecasts", "stored_forecast_shape", "stored_metric_overflow",
-    "terminal_forecast_huge_integer", "stored_target_huge_integer"])
+    "terminal_forecast_huge_integer", "stored_target_huge_integer", "failed_extra", "refused_extra"])
 def test_valid_hash_inconsistent_evidence_chain_refuses(journal, mutation):
     forge_complete(journal, mutation)
     with pytest.raises(OpsError) as caught:
@@ -142,7 +147,7 @@ def test_stored_forecast_read_failure_retains_resource_policy(journal, monkeypat
     monkeypatch.setattr(ArtifactStore, "read_verified", unavailable)
     with pytest.raises(OpsError) as caught:
         journal.recorder.freeze()
-    assert caught.value.problem == fail("RESOURCE_UNAVAILABLE", "search journal artifact could not be verified or published").problem
+    assert caught.value.problem == fail("RESOURCE_UNAVAILABLE", "search journal artifact could not be verified").problem
     assert journal.recorder._read("selection") is None
 
 
@@ -246,7 +251,7 @@ def test_infrastructure_failure_never_excludes_candidate_or_allows_freeze(journa
     expected_code = "RESOURCE_UNAVAILABLE" if artifact_code == "IO_ERROR" else "EXPERIMENT_IDENTITY_CONFLICT"
     message = ("temporary native input failure" if phase == "native_inputs" else
                "temporary label read failure" if phase == "labels" else
-               "search journal artifact could not be verified or published")
+               "search journal artifact could not be published")
     assert caught.value.problem == fail(expected_code, message).problem
     assert journal.recorder._read("terminal:" + key) is None
     monkeypatch.setattr(journal.recorder, "_inputs", original_inputs)
@@ -313,7 +318,7 @@ def test_failed_candidate_still_requires_intact_admitted_cohort(journal):
     path.write_bytes(b"corrupt")
     with pytest.raises(OpsError) as caught:
         journal.recorder.freeze()
-    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified or published").problem
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified").problem
     assert journal.recorder._read("selection") is None
 
 
@@ -384,7 +389,7 @@ def test_numeric_normalization_keeps_refusal_guards(journal, field, value):
     assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "trial forecasts require complete finite event-horizon coverage").problem
 
 
-@pytest.mark.parametrize("write_failure", [None, "artifact", "catalog"])
+@pytest.mark.parametrize("write_failure", [None, "artifact", "catalog", "filesystem", "integrity"])
 def test_candidate_scoring_refusal_preserves_original_if_terminal_write_fails(journal, monkeypatch, write_failure):
     prepare_recording(journal, monkeypatch)
     journal.recorder.start("2024", "2023", "z-last")
@@ -393,17 +398,18 @@ def test_candidate_scoring_refusal_preserves_original_if_terminal_write_fails(jo
         raise original
     monkeypatch.setattr(trials, "magnitude_metrics", scoring)
     append = journal.recorder._append
+    publication_error = {None: None, "artifact": fail("RESOURCE_UNAVAILABLE", "unavailable"),
+        "catalog": sqlite3.OperationalError("unavailable"), "filesystem": OSError("unavailable"),
+        "integrity": fail("EXPERIMENT_IDENTITY_CONFLICT", "journal conflict")}[write_failure]
     def publish(slot, body, **kwargs):
-        if slot.startswith("terminal:"):
-            if write_failure == "artifact":
-                raise fail("RESOURCE_UNAVAILABLE", "unavailable")
-            if write_failure == "catalog":
-                raise sqlite3.OperationalError("unavailable")
+        if slot.startswith("terminal:") and publication_error is not None:
+            raise publication_error
         return append(slot, body, **kwargs)
     monkeypatch.setattr(journal.recorder, "_append", publish)
     with pytest.raises(OpsError) as caught:
         journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
     assert caught.value is original
+    assert caught.value.__cause__ is publication_error
     key = content_hash(["plan", "2024", "2023", "z-last"])
     expected = None if write_failure else {"status": "refused", "problem": expected_problem("EXPERIMENT_VARIANT_FAILED")}
     assert journal.recorder._read("terminal:" + key) == expected
@@ -415,8 +421,69 @@ def test_candidate_scoring_refusal_preserves_original_if_terminal_write_fails(jo
             journal.recorder.freeze()
         assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
         assert journal.recorder._read("selection") is None
+        with pytest.raises(OpsError) as caught:
+            journal.recorder.start("2024", "2023", "z-last")
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
+        with pytest.raises(OpsError) as caught:
+            journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
     else:
+        before = journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall()
+        monkeypatch.setattr(journal.recorder, "_inputs", lambda *a: pytest.fail("native inputs reopened"))
+        monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("labels reopened"))
+        monkeypatch.setattr(trials, "magnitude_metrics", lambda *a: pytest.fail("refusal rescored"))
         assert journal.recorder.record("2024", "2023", "z-last", forecasts=rows()) == expected
+        assert journal.conn.execute("SELECT * FROM magnitude_search_records ORDER BY slot").fetchall() == before
+        monkeypatch.setattr(trials, "magnitude_metrics", magnitude_metrics)
         selection = journal.recorder.freeze()["selections"][0]
         assert selection["selected_candidate_id"] == "a-first"
         assert selection["scores"][0] == {"candidate_id": "z-last", "metrics": None}
+
+
+@pytest.mark.parametrize("operation", ["start", "record", "freeze"])
+@pytest.mark.parametrize("schema", ["unmigrated", "older", "newer", "checksum", "unsealed"])
+def test_journal_admission_refuses_before_native_or_evidence_reads(tmp_path, monkeypatch, operation, schema):
+    conn = connect(tmp_path / "catalog.sqlite")
+    try:
+        conn.execute("CREATE TABLE experiment_runs(run_id TEXT PRIMARY KEY) STRICT")
+        conn.execute("INSERT INTO experiment_runs VALUES ('run')")
+        if schema != "unmigrated":
+            migrations = records.MIGRATIONS
+            if schema == "newer":
+                migrations += (Migration(version=2, name="future", statements=()),)
+            migrate(conn, records.OWNER, migrations, clock=SystemClock())
+        if schema == "older":
+            conn.execute("DELETE FROM schema_versions WHERE owner=?", (records.OWNER,))
+        elif schema == "checksum":
+            conn.execute("UPDATE schema_versions SET checksum='different' WHERE owner=?", (records.OWNER,))
+        recorder = trials.SearchTrials(conn, ArtifactStore(tmp_path / "store"), None,
+                                       SimpleNamespace(run_id="run"), {}, None)
+        def forbidden(*args, **kwargs):
+            pytest.fail("admission opened native or evidence payloads")
+        monkeypatch.setattr(recorder, "_binding", (lambda: ({}, {"plan_id": "plan"})) if schema == "unsealed" else forbidden)
+        monkeypatch.setattr(recorder, "_inputs", forbidden)
+        monkeypatch.setattr(ArtifactStore, "read_verified", forbidden)
+        monkeypatch.setattr(trials, "load_magnitude_targets", forbidden)
+        before = list(conn.iterdump())
+        with pytest.raises(OpsError) as caught:
+            if operation == "freeze":
+                recorder.freeze()
+            elif operation == "start":
+                recorder.start("2024", "2023", "candidate")
+            else:
+                recorder.record("2024", "2023", "candidate", forecasts=rows())
+        if schema == "unsealed":
+            expected = fail("EXPERIMENT_IDENTITY_CONFLICT", "search recording requires its exact sealed plan")
+        elif schema == "newer":
+            expected = fail("INTEGRITY_FAILED", "magnitude_search schema is newer than this code supports",
+                details={"reason": "schema_newer", "owner": records.OWNER, "applied": 2, "supported": 1})
+        elif schema == "checksum":
+            expected = fail("INTEGRITY_FAILED", "magnitude_search migration differs from the one applied",
+                details={"reason": "checksum_mismatch", "owner": records.OWNER, "version": 1})
+        else:
+            expected = fail("INTEGRITY_FAILED", "magnitude_search schema is missing migrations",
+                details={"reason": "schema_older", "owner": records.OWNER, "missing": [1]})
+        assert caught.value.problem == expected.problem
+        assert list(conn.iterdump()) == before
+    finally:
+        conn.close()
