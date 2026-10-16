@@ -24,7 +24,7 @@ official decisions or mutate research multiple-testing ledgers.
 
 | Task | Deliverable | Acceptance / negative control |
 |---|---|---|
-| P7-1 Candidate and authority manifest | Exact code/config, snapshots, model deployment, job graph, consumer inventory, scheduler/credential ownership and old deployment refs. | No implicit latest dependency; no unaccounted scheduled writer or background job. |
+| P7-1 Candidate and authority manifest | Exact code/config, snapshots, model deployment, job graph, consumer inventory, scheduler/credential ownership and old deployment refs. | No implicit latest dependency (consumer-inventory labels are exempt); no unaccounted scheduled writer or background job. |
 | P7-2 Qualify completed sessions | Ten consecutive completed-session runs on the integrated cutover path under automatic resource admission. | Real dated evidence, full expected population, selfcheck/engineering/publication success; retries count once; missing sessions unknown; manual CPU placement disqualifies a run. |
 | P7-3 Rehearse switch and rollback | Scratch/private-target drill using retained deployment, data/catalog backups, pointer and authority-fence changes. | Interrupted switch never leaves two official writers; rollback reconciles new decisions instead of deleting history. |
 | P7-4 Review concrete release | Candidate report and exact tested switch/backout commands, downtime expectation, snapshot/deployment refs and open dispositions. | All entry requirements and qualification records present; no untested placeholder command. |

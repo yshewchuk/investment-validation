@@ -43,7 +43,7 @@ def spec(tmp_path):
                          "path": _write(tmp_path / f"ev{phase}.json", doc)})
     return {
         "commit": COMMIT, "registry_owner": "native-ops",
-        "non_official_registry_kinds": ["experiment"],
+        "non_official_registry_kinds": ["experiment", "models_promote", "models_rollback"],
         "config": [{"name": "cfg", "path": _write(tmp_path / "cfg.json", {"a": 1})}],
         "data_snapshot": {"snapshot_id": "snap-1",
                           "path": _write(tmp_path / "snap.json", {"snapshot_id": "snap-1"})},
@@ -277,10 +277,23 @@ def test_dirty_tracked_tree_is_refused(tmp_path):
 def test_undecided_primary_kind_is_refused():
     with pytest.raises(asm.SpecError, match="experiment"):
         asm.registry_jobs("o")
-    rows = {j["id"]: j for j in asm.registry_jobs("o", (), ("experiment",))}
+    decided = ("experiment", "models_promote", "models_rollback")
+    rows = {j["id"]: j for j in asm.registry_jobs("o", (), decided)}
     assert rows["experiment"]["writes_official"] is False
-    rows = {j["id"]: j for j in asm.registry_jobs("o", ("experiment",), ())}
+    rows = {j["id"]: j for j in asm.registry_jobs("o", ("experiment",), decided[1:])}
     assert rows["experiment"]["kind"] == "scheduled_writer"
+
+
+def test_store_write_lease_kind_needs_a_decision(monkeypatch):
+    real = stages.registry()
+    base = real.get(real.names()[0])
+    ptr = dataclasses.replace(base, name="ptr_writer", namespaces=frozenset({"shadow"}),
+                              store_domains=(("deployment_pointer", "write"),))
+    monkeypatch.setattr(stages, "registry", lambda: submission.KindRegistry([ptr]))
+    with pytest.raises(asm.SpecError, match="ptr_writer"):
+        asm.registry_jobs("o")
+    assert asm.registry_jobs("o", ("ptr_writer",))[0]["kind"] == "scheduled_writer"
+    assert asm.registry_jobs("o", (), ("ptr_writer",))[0]["writes_official"] is False
 
 
 def test_writes_exactly_three_files_inside_out_dir(spec, tmp_path):
@@ -321,7 +334,6 @@ def test_main_unusable_spec_files_exit_2(tmp_path):
     bad.write_bytes(b"\xff\xfe\x00")
     assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
     bad.write_text("{not json")
-    assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
     assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
 
 

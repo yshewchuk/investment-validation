@@ -57,7 +57,7 @@ accounted for, or an accounted job the graph does not run, both fail.
 ``consumer_inventory``: ``{"path", "sha256", "consumers": ["<name>", ...]}``
 — a non-empty list of name strings; a dict, list or other nonstring entry
 is a named finding. Consumer names are labels (a real route may end in
-``/current``), so only a blank name is rejected; the implicit-latest rule does
+``/current``), so only a blank, non-string or repeated name is rejected; the implicit-latest rule does
 not apply to them. The referenced document must contain every declared
 consumer name (as an ``id``/``name``/``consumer`` value anywhere in it).
 

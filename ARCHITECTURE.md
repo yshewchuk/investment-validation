@@ -524,21 +524,24 @@ Only a tracked path absent from the worktree reads as empty.
   `phase6_inventory.discover_entrypoints`, both of this checkout. It writes
   both plus `manifest.json` into `--out-dir` and nothing else. The manifest
   echoes the spec's `authority` block and absolute resolved paths, so it is
-  a private artifact like the spec. A registry kind is `scheduled_writer`
-  with `writes_official` true when its namespaces include `official` or the
-  operator lists it in `official_registry_kinds` (a list of registry kind
-  names). Any kind that can run outside `shadow`/`smoke` must be decided
-  explicitly there or in `non_official_registry_kinds` (today only
-  `experiment`, which appends the research ledger in `primary`; whether that
-  counts as official is the operator's call, not the tool's); otherwise it is `background` (has effects) or `reader`. Registry rows get a
-  synthetic `native:<kind>` schedule.
+  a private artifact like the spec. `--out-dir` is created with its parents.
+  A registry kind is `scheduled_writer` with `writes_official` true when its
+  namespaces include `official` or the operator lists it in
+  `official_registry_kinds` (registry kind names). A kind that can run
+  outside `shadow`/`smoke` (today `experiment`, in `primary`) or holds a store
+  `write` lease (today `models_promote` and `models_rollback` on
+  `deployment_pointer`) is refused until the spec lists it in
+  `official_registry_kinds` or `non_official_registry_kinds`; whether it
+  counts as official is the operator's call. Every other kind is `background`
+  (has effects) or `reader`. Registry rows get a synthetic `native:<kind>`
+  schedule.
 
   | Condition | Outcome |
   |---|---|
   | spec missing/oversize/not a JSON object, a section of the wrong shape, a duplicate or colliding extra-job id, missing `commit` or `registry_owner`, a referenced file missing or over the cap | exit 2, nothing written for that run beyond files already produced |
   | spec file unreadable, not decodable JSON, or an uncreatable `--out-dir` | exit 2 |
   | spec `commit` differs from this checkout's `HEAD`, or tracked files are modified | exit 2 (registry and inventory would describe another commit) |
-  | a registry kind that can run outside `shadow`/`smoke` (today `experiment`, in `primary`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
+  | a registry kind that can run outside `shadow`/`smoke` or holds a store `write` lease (today `experiment`, `models_promote`, `models_rollback`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
   | `--out-dir` inside the repository | exit 2 |
   | the checker reports findings | exit 1, manifest still written |
   | the checker passes | exit 0 |

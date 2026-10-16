@@ -110,17 +110,19 @@ _SAFE_NAMESPACES = frozenset({"shadow", "smoke"})
 def registry_jobs(owner: str, official_kinds=(), non_official_kinds=()) -> list[dict]:
     """One row per job kind in the live registry. A kind is an official writer when
     its namespaces include ``official`` or the operator lists it in
-    ``official_registry_kinds``. A kind that can run in any other namespace (today
-    ``experiment`` in ``primary``) must be decided explicitly in
-    ``official_registry_kinds`` or ``non_official_registry_kinds``; an undecided
-    one is refused (fail closed)."""
+    ``official_registry_kinds``. A kind that can run in any other namespace (today ``experiment`` in ``primary``) or
+    holds a store ``write`` lease (today ``models_promote`` and ``models_rollback`` on
+    ``deployment_pointer``) must be decided explicitly in ``official_registry_kinds`` or
+    ``non_official_registry_kinds``; an undecided one is refused (fail closed)."""
     reg, rows = stages.registry(), []
     for name in reg.names():
         kind = reg.get(name)
-        if (kind.namespaces - _SAFE_NAMESPACES - {"official"}
+        writes_store = any(mode == "write" for _, mode in kind.store_domains)
+        if ((kind.namespaces - _SAFE_NAMESPACES - {"official"} or writes_store)
                 and name not in official_kinds and name not in non_official_kinds):
-            raise SpecError(f"{name}: can run in {sorted(kind.namespaces - _SAFE_NAMESPACES)}; "
-                            "list it in official_registry_kinds or non_official_registry_kinds")
+            raise SpecError(f"{name}: can run in {sorted(kind.namespaces - _SAFE_NAMESPACES)} "
+                            f"or holds a store write lease ({writes_store}); list it in "
+                            "official_registry_kinds or non_official_registry_kinds")
         official = "official" in kind.namespaces or name in official_kinds
         rows.append({"id": name, "schedule": f"native:{name}", "owner": owner,
                      "kind": ("scheduled_writer" if official
