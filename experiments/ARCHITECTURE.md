@@ -517,3 +517,31 @@ Stored spec/source/snapshot/scope/environment identity is checked before populat
 admission, so a changed request cannot consume an original variant's refusal slot.
 A current holdout denial preserves R5 and its private receipt even when an earlier
 immutable completion prevents a second terminal CSV row; prior reports stay unchanged.
+
+## Bounded inner-trial execution
+
+`SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` is a library-only
+native caller of the existing recorder and `magnitude_fitted.fitted_forecasts`.
+It consumes one declared candidate and inner fold; it does not run outer evaluation,
+recover claims, change the selection policy, write a ledger or grant final-read authority.
+The source seal explicitly includes the fixed child and its transitive fitting sources.
+
+| Condition | Outcome |
+|---|---|
+| Explicit positive integer `memory_bytes`, `cpu_seconds`, `wall_seconds` | Bind these limits to the immutable trial execution start. Linux child affinity uses one currently allowed CPU; numerical thread variables are one. |
+| Started trial with admitted cohort | A fixed fit-only subprocess receives stored features and qualified training targets, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
+| Child reaches a horizon fit | Parent independently reconstructs its matrix/event evidence and commits a non-replayable fit admission before acknowledging. Completion is separately acknowledged only after its immutable evidence commits. Counts distinguish admitted fit attempts from completed fits; an interrupted admission does not prove the estimator was entered. |
+| Child completes all fits | Publish execution receipt and complete forecasts before validation labels open through ordinary `record`; original candidate/validation scoring policy applies. |
+| Estimator-local `EXPERIMENT_VARIANT_FAILED` | Record the attempted/completed prefix and candidate failure. Other candidates and folds remain required by `freeze`. |
+| Memory, CPU or elapsed-time limit; launch/import/pipe/protocol/abnormal-exit failure | Raise resource/identity refusal, retain the unfinished claim and block freeze. Never convert shared admission or infrastructure failure into candidate exclusion. No retry, even for retryable Problems. |
+| Resource enforcement | Child `RLIMIT_AS` bounds virtual address space and `RLIMIT_CPU` bounds process CPU time; the parent bounds child elapsed time. These are per-process fit caps, not shared-host reservations or a cap on parent admission/journal I/O. Only fixed single-threaded native estimators run. |
+| Native completion replay/freeze | Revalidate every admitted/completed horizon, matrix digest, complete forecast digest and ordinary terminal chain; launch nothing and reopen no native labels/features. Changed limits, missing/corrupt evidence and caller-submitted terminals refuse native replay. |
+| Interrupted execution or label admission | Existing immutable start/forecast slots prevent restart; public recording cannot finish any unfinished native attempt, including a failed forecast publication. Receipt publication can precede a later failed forecast/terminal write; the unfinished trial remains blocking. |
+| Fitting guard active | Both parent no-fit guards refuse before a new claim or subprocess launch; completed replay remains read-only. |
+
+The child uses standard-library subprocess, selectors, resource limits and JSON; no
+optimizer, alternate estimator pipeline or general-purpose scheduler is introduced.
+Execution uses ops thread-environment constants and existing foundation/journal publication.
+Scratch inputs are removed when the call exits. Completed evidence is consistency-checked,
+not cryptographically authenticated against wholesale journal fabrication. Frozen selections
+retain their existing submitted-forecast label and confer no additional execution authority.
