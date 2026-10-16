@@ -16,11 +16,7 @@ Some checks also expose callable report functions.
 `phase5_release_assembly` (`derive_catalog`, `carry_forward_release`) assembles a carried-forward
 release catalog; its contract and refusal codes are `engine/v2/models/ARCHITECTURE.md` §2.1.
 
-`engine.v2.models.release_layout.write_object` returns hash/path in the existing flat deployment layout after exact bounded no-follow byte verification.
-New objects are durable before return; create-only publication never overwrites or repairs incumbents.
-Every retry verifies the object and syncs its directories; the byte allowance is the supplied payload length, including zero.
-Only invocation-owned staging is cleaned; no unbounded read or cross-filesystem copy fallback is permitted.
-Post-link failure may leave a complete unreferenced object, but no new catalog/pointer. Whole-release concurrency/root ownership stays with callers.
+The `write_object` durability contract (`engine.v2.models.release_objects`) is in `engine/v2/models/ARCHITECTURE.md` §2.1.
 
 | Object publication condition | Outcome |
 |---|---|

@@ -9,6 +9,7 @@ from checks import phase5_acceptance as acceptance
 from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
 from engine.v2.models import release_layout as layout
+from engine.v2.models import release_objects
 from engine.v2.models.analog_artifact import make_board_analog_pool_artifact
 from engine.v2.models.frozen_state import serialize_frozen_state
 from engine.v2.models.lineage import Lineage
@@ -191,8 +192,20 @@ def test_catalog_size_bound_is_exact(tmp_path, monkeypatch):
     body = layout.read_catalog(_local(tmp_path))
     assert body["release_id"] == "A"
     monkeypatch.setattr(layout, "MAX_CATALOG_BYTES", size - 1)
-    with pytest.raises(layout.ReleaseLayoutError):
+    with pytest.raises(layout.ReleaseLayoutError, match="could not be read or validated"):
         layout.read_catalog(_local(tmp_path))
+
+
+def test_catalog_cap_constant_and_regular_file_guard(tmp_path):
+    assert layout.MAX_CATALOG_BYTES == 64 * 1024 * 1024
+    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
+        release_objects.read_regular_file(tmp_path, 16)
+    assert release_objects.read_regular_file(tmp_path / "absent", 16) is None
+    small = tmp_path / "small.bin"
+    small.write_bytes(b"x" * 8)
+    assert release_objects.read_regular_file(small, 8) == b"x" * 8
+    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
+        release_objects.read_regular_file(small, 7)
 
 
 def test_legacy_fallback_requires_matching_id_and_local_needs_no_root(tmp_path):

@@ -481,6 +481,7 @@ tests = [
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_phase5_datasets.py",
     "tests/test_v2_models_releases.py",
+    "tests/v2/models/test_phase5_release_catalogs.py",
     "tests/test_v2_models_residual_artifact.py",
     "tests/test_v2_scoring_frozen_executor.py",
     "tests/test_v2_scoring_frozen_recipes.py",
