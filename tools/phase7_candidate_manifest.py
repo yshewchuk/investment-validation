@@ -208,9 +208,13 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
                                 agree=("schema_version", "status"))
                            for i, r in enumerate(evidence)],
     }
+    try:
+        found = discover_entrypoints(root)
+    except (SyntaxError, OSError, ValueError) as exc:
+        raise SpecError(f"consumer discovery failed in this checkout: "
+                        f"{type(exc).__name__}: {exc}") from exc
     out_dir.mkdir(parents=True, exist_ok=True)
     graph_path, inventory_path = out_dir / "job_graph.json", out_dir / "consumer_inventory.json"
-    found = discover_entrypoints(root)
     _write(graph_path, {"jobs": [{"id": j["id"], "schedule": j["schedule"],
                                   "writes_official": j["writes_official"]} for j in jobs]})
     _write(inventory_path, {"consumers": [{"id": i, "kind": m["kind"], "source": m["source"]}

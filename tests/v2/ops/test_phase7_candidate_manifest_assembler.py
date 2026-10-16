@@ -396,3 +396,15 @@ def test_manifest_digests_match_the_files_as_written(spec, tmp_path):
     for section in ("job_graph", "consumer_inventory"):
         data = Path(manifest[section]["path"]).read_bytes()
         assert manifest[section]["sha256"] == hashlib.sha256(data).hexdigest()
+
+
+def test_discovery_failure_is_exit_2_and_creates_nothing(spec, tmp_path, monkeypatch):
+    def boom(root):
+        raise SyntaxError("bad module")
+    monkeypatch.setattr(asm, "discover_entrypoints", boom)
+    with pytest.raises(asm.SpecError, match="consumer discovery failed"):
+        asm.assemble(spec, _out(tmp_path))
+    assert not _out(tmp_path).exists()
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec))
+    assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o")]) == 2
