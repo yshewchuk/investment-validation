@@ -616,3 +616,14 @@ def test_malformed_population_keys_are_invalid_request(tmp_path, key):
             commands._read_expected_population(args)
         assert raised.value.code == "INVALID_REQUEST"
         assert "not ticker|strategy|event_date" in raised.value.problem.message
+
+
+def test_submit_nightly_refuses_a_stored_plan_with_a_noncanonical_key(monkeypatch):
+    monkeypatch.setattr(commands, "_check_submitted_nightly_manifest", lambda *a, **k: None)
+    plan = {"expected_population": ["AAA|X|20261014"]}
+
+    with pytest.raises(OpsError) as raised:
+        commands._submit_nightly(plan, None, None, None, None, None)
+
+    assert raised.value.code == "INVALID_REQUEST"
+

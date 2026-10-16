@@ -135,7 +135,7 @@ def require_valid_population_keys(keys) -> None:
             valid = False
         if not valid:
             raise fail("INVALID_REQUEST",
-                       "expected_population.json holds a key that is not "
+                       "expected population holds a key that is not "
                        "ticker|strategy|event_date; fix or remove it")
 
 
@@ -326,6 +326,7 @@ def _submit_nightly(plan, conn, store, policy, clock, host_policy):
     # plan gets a subset effect scope even when the watchlist equals
     # the context (nightly.effect_scope_for).
     full_universe = context_tickers if plan.get("full_run") else None
+    require_valid_population_keys(plan.get("expected_population", ()))
     requests = build_legacy_job_requests(
         plan, tickers=tuple(plan.get("tickers", ())),
         context_tickers=context_tickers,
