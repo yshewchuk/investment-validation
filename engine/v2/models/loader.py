@@ -139,11 +139,16 @@ class FrozenInference:
         verified = {}
         for member in binding.members:
             path = self._root / member.path
-            resolved = path.resolve()
+            try:
+                resolved = path.resolve()
+            except (ValueError, RuntimeError):
+                if max_member_bytes is None:
+                    raise
+                raise AdapterError("invalid bounded artifact path") from None
             try:
                 resolved.relative_to(self._root)
-            except ValueError as exc:
-                raise AdapterError("artifact path escapes artifact root") from exc
+            except ValueError:
+                raise AdapterError("artifact path escapes artifact root") from None
             if max_member_bytes is None:
                 path = resolved
                 if not path.is_file():

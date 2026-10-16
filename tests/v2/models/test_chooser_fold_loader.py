@@ -324,33 +324,22 @@ def test_catalog_membership_refuses_before_decode(setup, defect, monkeypatch):
     ],
 )
 def test_rehashed_header_and_pool_tamper_refuses(setup, key, value):
-    inference, _, parent, _, path, cache = setup
+    inference, descriptor, parent, catalog, path, cache = setup
     cache = dict(cache, **{key: value})
-    # Keep descriptor's registered model identity independent of a forged header.
-    model_id = cache["model_id"]
-    cache["model_id"] = parent.release.bindings[0].model_id
-    descriptor, catalog, new_path = _store(path.parent.parent, cache, parent, setup[1].policy.role)
-    descriptor = replace(descriptor, pool_count=len(setup[5]["pool_pred"]))
-    catalog["members"][0]["objects"][0]["serving_fold"] = to_document(descriptor)
-    _rehash(catalog)
-    if key == "model_id":
-        cache["model_id"] = model_id
-        raw = _raw(cache)
-        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-        member = replace(descriptor.estimator, content_hash=digest, path=f"objects/{digest[7:]}")
-        descriptor = replace(descriptor, estimator=member)
-        new_path = path.parent.parent / member.path
-        new_path.write_bytes(raw)
-        obj = catalog["members"][0]["objects"][0]
-        obj.update(
-            path=member.path,
-            content_hash=digest,
-            bytes=len(raw),
-            serving_fold=to_document(descriptor),
-        )
-        _rehash(catalog)
-    with pytest.raises(loader.ServingFoldError):
-        _load((inference, descriptor, parent, catalog, new_path, cache))
+    raw = _raw(cache)
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    member = replace(descriptor.estimator, content_hash=digest, path=f"objects/{digest[7:]}")
+    # Keep every expected header/pool field independent of the tampered payload.
+    descriptor = replace(descriptor, estimator=member)
+    new_path = path.parent.parent / member.path
+    new_path.write_bytes(raw)
+    catalog = copy.deepcopy(catalog)
+    catalog["members"][0]["objects"][0].update(
+        path=member.path, content_hash=digest, bytes=len(raw), serving_fold=to_document(descriptor)
+    )
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
+        _load((inference, descriptor, parent, _rehash(catalog), new_path, cache))
+    assert caught.value.code == MODEL_NOT_READY
 
 
 @pytest.mark.parametrize("warm", [False, True])
@@ -493,7 +482,7 @@ def test_public_metadata_cannot_poison_hash_verified_cached_state(setup):
 
 @pytest.mark.parametrize("warm", [False, True])
 @pytest.mark.parametrize("delta", [-1, 1])
-def test_wrong_declared_size_refuses_before_decode_and_preserves_warm_ceiling(
+def test_chooser_wrong_declared_size_refuses_before_decode_and_preserves_warm_ceiling(
     setup, warm, delta, monkeypatch
 ):
     owner = setup[0]
@@ -582,3 +571,121 @@ def test_public_preparation_refuses_wrong_binding_type(setup, binding):
     with pytest.raises(AdapterError, match="^unsupported serving fold adapter$") as caught:
         setup[0].prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES)
     assert type(caught.value) is AdapterError
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_chooser_exact_byte_ceiling_accepts_and_next_byte_refuses(setup, warm, monkeypatch):
+    owner, _, _, catalog, path, _ = setup
+    if warm:
+        _load(setup)
+    ceiling = len(path.read_bytes())
+    assert catalog["members"][0]["objects"][0]["bytes"] == ceiling
+    monkeypatch.setattr(loader, "MAX_FOLD_BYTES", ceiling - 1)
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
+        _load(setup)
+    assert caught.value.code == MODEL_NOT_READY
+    assert owner.cache_size == int(warm)  # Cold refusal cannot populate the cache.
+    monkeypatch.setattr(loader, "MAX_FOLD_BYTES", ceiling)
+    ref = _load(setup)  # Declared and actual bytes equal the chooser ceiling.
+    assert ref.pool_pred == (0.1, 0.2)
+    assert _infer(ref).predictions == ((0.05,),)
+    assert owner.cache_size == 1
+    monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("oversize object decoded"))
+    monkeypatch.setattr(loader, "MAX_FOLD_BYTES", ceiling - 1)
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
+        _load(setup)  # The same valid object is now limit + 1 bytes.
+    assert caught.value.code == MODEL_NOT_READY
+    monkeypatch.setattr(loader, "MAX_FOLD_BYTES", ceiling)
+    assert _load(setup) == ref  # Refusal cannot poison an otherwise-valid reference.
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_public_expected_bytes_at_ceiling_accepts_and_next_byte_refuses(setup, warm, monkeypatch):
+    owner, descriptor, parent, _, path, _ = setup
+    binding = replace(parent.release.bindings[0], adapter="tier4-serving-fold.v1",
+                      members=(descriptor.estimator,))
+    ceiling = len(path.read_bytes())
+    if warm:
+        owner.prepare_serving_fold(binding, max_member_bytes=ceiling + 1)
+    with monkeypatch.context() as guard:
+        guard.setattr(owner, "_load_artifact", lambda *a, **k: pytest.fail("invalid size load"))
+        with pytest.raises(AdapterError, match="^invalid serving fold declared byte count$") as caught:
+            owner.prepare_serving_fold(binding, max_member_bytes=ceiling, expected_bytes=ceiling + 1)
+        assert type(caught.value) is AdapterError
+        assert owner.cache_size == int(warm)
+    metadata = owner.prepare_serving_fold(
+        binding, max_member_bytes=ceiling, expected_bytes=ceiling
+    )
+    assert metadata.pool_pred == (0.1, 0.2)
+    monkeypatch.setattr(owner, "_load_artifact", lambda *a, **k: pytest.fail("invalid size load"))
+    with pytest.raises(AdapterError, match="^invalid serving fold declared byte count$") as caught:
+        owner.prepare_serving_fold(binding, max_member_bytes=ceiling, expected_bytes=ceiling + 1)
+    assert type(caught.value) is AdapterError
+
+
+def test_chooser_passes_exact_limit_and_no_follow_to_shared_reader(setup, monkeypatch):
+    from engine.v2.models import loader as inference_loader
+
+    original, reads = inference_loader.read_bounded_state, []
+
+    def read(path, limit, *, no_follow=False):
+        reads.append((path, limit, no_follow))
+        return original(path, limit, no_follow=no_follow)
+
+    monkeypatch.setattr(inference_loader, "read_bounded_state", read)
+    ref = _load(setup)
+    _load(setup)
+    _infer(ref)
+    assert reads == [(setup[4], loader.MAX_FOLD_BYTES, True)] * 3
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_exact_descriptor_matches_among_two_same_role_folds(setup, reverse):
+    owner, descriptor, parent, catalog, path, cache = setup
+    other_cache = dict(cache, fold_start="2026-03-01", pool_pred=[4.0, 5.0])
+    other, other_catalog, _ = _store(path.parent.parent, other_cache, parent, descriptor.policy.role)
+    other = replace(other, fold_start="2026-03-01")
+    obj = other_catalog["members"][0]["objects"][0]
+    obj.update(name=f"{cache['model_id']}_202603_{'a' * 12}.joblib", serving_fold=to_document(other))
+    catalog = copy.deepcopy(catalog)
+    objects = catalog["members"][0]["objects"]
+    objects.append(obj)
+    if reverse:
+        objects.reverse()
+    _rehash(catalog)
+    first = _load(setup, catalog=catalog)
+    second = _load(setup, descriptor=other, catalog=catalog)
+    assert first.descriptor == descriptor and first.pool_pred == (0.1, 0.2)
+    assert second.descriptor == other and second.pool_pred == (4.0, 5.0)
+    assert first.release.release_id != second.release.release_id
+    assert owner.cache_size == 2
+
+
+@pytest.mark.parametrize("path, message", [
+    ("../outside", "artifact path escapes artifact root"),
+    ("objects/\0bad", "invalid bounded artifact path"),
+])
+def test_public_preparation_path_errors_are_typed_and_hide_cause(setup, path, message):
+    binding = replace(setup[2].release.bindings[0], adapter="tier4-serving-fold.v1",
+                      members=(replace(setup[1].estimator, path=path),))
+    with pytest.raises(AdapterError) as caught:
+        setup[0].prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES)
+    assert type(caught.value) is AdapterError
+    assert str(caught.value) == message
+    assert caught.value.__cause__ is None
+
+
+def test_public_preparation_normalizes_path_resolution_runtime_error(setup, monkeypatch):
+    from pathlib import Path
+
+    binding = replace(setup[2].release.bindings[0], adapter="tier4-serving-fold.v1",
+                      members=(setup[1].estimator,))
+
+    def loop(path, *args, **kwargs):
+        raise RuntimeError(f"symlink loop: {path}")
+
+    monkeypatch.setattr(Path, "resolve", loop)
+    with pytest.raises(AdapterError, match="^invalid bounded artifact path$") as caught:
+        setup[0].prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES)
+    assert type(caught.value) is AdapterError
+    assert caught.value.__cause__ is None
