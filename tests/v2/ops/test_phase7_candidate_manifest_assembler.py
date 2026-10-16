@@ -146,7 +146,7 @@ def test_planted_unaccounted_job_fails(spec, tmp_path):
     (lambda s, t: s["config"][0].update(name=""), r"config\[0\]\.name"),
     (lambda s, t: s["phase_evidence"][0].update(phase=""), r"phase_evidence\[0\]\.phase"),
     (lambda s, t: s["phase_evidence"][0].update(schema_version=None),
-     r"phase_evidence\[0\]\.schema_version"),
+     r"phase_evidence\[0\]\.schema_version: required non-empty string"),
     (lambda s, t: s.pop("non_official_registry_kinds"), "experiment"),
     (lambda s, t: s.update(official_registry_kinds="publication"), "official_registry_kinds"),
     (lambda s, t: s.update(official_registry_kinds=["no_such_kind"]), "official_registry_kinds"),
@@ -156,9 +156,12 @@ def test_planted_unaccounted_job_fails(spec, tmp_path):
     (lambda s, t: s["extra_jobs"].append({"id": "y", "schedule": "s", "kind": "reader",
                                           "owner": "o", "writes_official": "false"}),
      "writes_official"),
-    (lambda s, t: s["phase_evidence"][0].update(status=5), r"phase_evidence\[0\]\.status"),
-    (lambda s, t: s["data_snapshot"].pop("snapshot_id"), "snapshot_id"),
-    (lambda s, t: s["model_deployment"].update(release_id=""), "release_id"),
+    (lambda s, t: s["phase_evidence"][0].update(status=5),
+     r"phase_evidence\[0\]\.status: required non-empty string"),
+    (lambda s, t: s["data_snapshot"].pop("snapshot_id"),
+     r"data_snapshot\.snapshot_id: required non-empty string"),
+    (lambda s, t: s["model_deployment"].update(release_id=""),
+     r"model_deployment\.release_id: required non-empty string"),
     (lambda s, t: s.update(authority=[]), "authority"),
     (lambda s, t: s["config"][0].update(path=5), "path must be a string"),
 
@@ -274,6 +277,15 @@ def test_dirty_tracked_tree_is_refused(tmp_path):
     assert _REAL_COMMIT({"commit": head}, repo) == head
     with pytest.raises(asm.SpecError, match="HEAD"):
         _REAL_COMMIT({"commit": "b" * 40}, repo)
+    (repo / ".gitignore").write_text("__pycache__/\n")
+    (repo / "engine").mkdir()
+    (repo / "engine" / "__pycache__").mkdir()
+    (repo / "engine" / "__pycache__" / "x.pyc").write_text("ignored")
+    assert _REAL_COMMIT({"commit": head}, repo) == head
+    (repo / "engine" / "__pycache__" / "x.pyc").unlink()
+    (repo / "engine" / "__pycache__").rmdir()
+    (repo / "engine").rmdir()
+    (repo / ".gitignore").unlink()
     (repo / "untracked.txt").write_text("u")
     assert _REAL_COMMIT({"commit": head}, repo) == head
     for tree in ("engine", "tools", "dashboard", "checks"):
