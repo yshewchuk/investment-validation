@@ -149,3 +149,8 @@ def test_undecodable_py_lets_the_builtin_error_escape(tmp_path):
     (tmp_path / "m.py").write_bytes(b"\xff\xfe")
     with pytest.raises(UnicodeDecodeError):
         fingerprints.source_closure(tmp_path, ["m.py"])
+
+
+def test_absolute_from_import_names_the_module_and_each_imported_name():
+    fingerprints._IMPORT_NAMES.clear()
+    assert fingerprints._import_names("from pkg.mod import a, b\n", ["x"]) == ("pkg.mod", "pkg.mod.a", "pkg.mod.b")
