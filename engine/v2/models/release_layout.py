@@ -3,8 +3,7 @@
 Shared by ``tools/phase5_prepare_release.py`` (writes a staged release),
 ``checks/phase5_acceptance.py`` (verifies one) and
 ``checks/phase5_release_assembly.py``; it lives in
-``engine.v2.models`` so production code, checks and tools all import it
-directly.
+``engine.v2.models`` so checks and tools import it directly.
 
 A staged release root holds two things:
 
@@ -164,7 +163,7 @@ def _catalog_path(release_root: Path, release_id: str) -> Path:
     if not isinstance(release_id, str):
         raise ReleaseLayoutError("release_id must be a string")
     try:
-        return deployment._manifest_path(deployment_root(release_root), release_id).with_name(
+        return deployment.manifest_path(deployment_root(release_root), release_id).with_name(
             MANIFEST_NAME)
     except deployment.DeploymentError as exc:
         raise ReleaseLayoutError("unsafe release_id") from exc
@@ -198,16 +197,16 @@ def _read_catalog(path: Path, expected_id: str | None = None) -> dict | None:
 
 def _verify_staged(store: Path, release_id: str) -> None:
     try:
-        manifest = deployment._read_manifest(store, release_id)
+        manifest = deployment.read_manifest(store, release_id)
         if (manifest is None or manifest.release.release_id != release_id
-                or not deployment._manifest_hash_matches(manifest)):
+                or not deployment.manifest_hash_matches(manifest)):
             raise ReleaseLayoutError("catalog requires a matching verified staged release")
     except (OSError, ValueError, deployment.DeploymentError) as exc:
         raise ReleaseLayoutError("catalog staged release could not be verified") from exc
 
 
 def _write_catalog(path: Path, body: Mapping[str, Any]) -> None:
-    deployment._atomic_write_bytes(
+    deployment.atomic_write_bytes(
         path, (json.dumps(body, indent=2, sort_keys=True) + "\n").encode())
 
 
@@ -217,7 +216,7 @@ def validate_legacy_manifest(store: Path, legacy_path: Path) -> None:
     if body is not None:
         release_id = body["release_id"]
         _verify_staged(store, release_id)
-        path = deployment._manifest_path(store, release_id).with_name(MANIFEST_NAME)
+        path = deployment.manifest_path(store, release_id).with_name(MANIFEST_NAME)
         _read_catalog(path, release_id)
 
 

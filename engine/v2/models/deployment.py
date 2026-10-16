@@ -84,15 +84,18 @@ __all__ = [
     "StagingNotSuccessful",
     "StagingRefused",
     "StaleReleaseHash",
+    "atomic_write_bytes",
     "current_pointer",
     "current_release",
     "invalidate_staging_success",
+    "manifest_hash_matches",
     "manifest_path",
     "mark_staging_succeeded",
     "pointer_history",
     "production_deployment_root",
     "production_release_root",
     "promote",
+    "read_manifest",
     "resolve_release",
     "restage_semantic_hash",
     "rollback",
@@ -511,6 +514,12 @@ def _manifest_hash_matches(manifest: StagedManifest) -> bool:
     if manifest.release_hash_version == RELEASE_HASH_SEMANTIC_V2:
         return _release_hash(manifest.release) == manifest.release_hash
     return False
+
+
+# Public names for the release-layout module (the private names stay for internal use).
+read_manifest = _read_manifest
+manifest_hash_matches = _manifest_hash_matches
+atomic_write_bytes = _atomic_write_bytes
 
 
 def _write_object(root: Path, member: ArtifactMember, payload: bytes) -> None:

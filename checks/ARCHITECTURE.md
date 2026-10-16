@@ -79,7 +79,7 @@ Commands write findings/progress to standard streams and may write reports or ev
 
 Checks use Python and repository metadata; evidence checks may import application packages or read built stores. `repo_hygiene.py` avoids `engine` imports.
 `engine/v2/models/release_objects.py` uses foundation's public `ensure_directory`/`fsync_directory`
-and models deployment for the existing store/catalog contracts.
+and `frozen_state_io.read_bounded_state`; `release_layout.py` uses models deployment for the existing store/catalog contracts.
 Tier-0 support imports only the standard library and the diagnosis receipt
 interface; it never imports the corpus runner or starts a process.
 

@@ -1,4 +1,4 @@
-"""Content-addressed object layout and durable writes for a staged release."""
+"""Content-addressed object layout, durable writes and the bounded regular-file read for a staged release."""
 from __future__ import annotations
 
 import hashlib
@@ -70,6 +70,7 @@ def write_object(release_root: Path, payload: bytes) -> tuple[str, str]:
 
 
 def read_regular_file(path: Path, limit: int) -> bytes | None:
+    """Bytes of a regular file read no-follow and capped at ``limit``; None when absent."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
