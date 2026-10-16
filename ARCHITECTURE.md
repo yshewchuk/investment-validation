@@ -507,6 +507,22 @@ Only a tracked path absent from the worktree reads as empty.
   never abort the required graph); `Service._reconcile_native_parity`,
   calling `nightly.submit_native_parity_if_ready`, submits
   `native_parity` the identical way.
+- **Assembling the P7-1 manifest.** `tools/phase7_candidate_manifest.py` is a
+  read-only assembler for `checks/phase7_candidate_manifest.py`. It takes one
+  operator spec file (path passed on the command line; kept outside the
+  repository) holding the candidate commit, config/snapshot/release/phase
+  evidence paths, `authority` values (legacy scheduler entry, credential
+  owners, retained old deployment) and any extra jobs the registry cannot
+  know (the legacy nightly, the proposed official writer). It hashes every
+  referenced file, derives the job-graph document from the live
+  `stages.registry()` (so a new job kind such as `serving_projection`
+  appears with no edit here) and the consumer inventory from
+  `phase6_inventory.discover_entrypoints`, writes both plus the manifest
+  into `--out-dir`, and never writes authority, pointers or credentials.
+  Local paths, credentials and scheduler details live only in the private
+  spec, never in the repo. Registry jobs are `reader` (no effects) or
+  `background`, never official writers (`writes_official` is true only for
+  a kind whose namespaces include `official`).
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
