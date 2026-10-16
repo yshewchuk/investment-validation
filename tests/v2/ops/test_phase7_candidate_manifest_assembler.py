@@ -288,7 +288,7 @@ def test_dirty_tracked_tree_is_refused(tmp_path):
     (repo / ".gitignore").unlink()
     (repo / "untracked.txt").write_text("u")
     assert _REAL_COMMIT({"commit": head}, repo) == head
-    for tree in ("engine", "tools", "dashboard", "checks"):
+    for tree in ("engine", "tools", "dashboard", "checks", "experiments"):
         (repo / tree).mkdir()
         (repo / tree / "new.py").write_text("x = 1")
         with pytest.raises(asm.SpecError, match="untracked files under the scanned trees"):
@@ -568,3 +568,24 @@ def test_read_lease_does_not_count_as_write(monkeypatch):
     monkeypatch.setattr(stages, "registry", lambda: submission.KindRegistry([reader]))
     assert asm.registry_jobs("o", ("ptr_reader",))[0]["kind"] == "scheduled_writer"
     assert asm.registry_jobs("o")[0]["kind"] == "background"
+
+
+def _evidence_file(spec, content):
+    Path(spec["phase_evidence"][0]["path"]).write_text(content)
+
+
+@pytest.mark.parametrize("mutate, match", [
+    (lambda s, t: _evidence_file(s, "{not json"), r"phase_evidence\[0\]: referenced file is not JSON"),
+    (lambda s, t: _evidence_file(s, "[1, 2]"),
+     r"phase_evidence\[0\]: referenced document must be a JSON object"),
+    (lambda s, t: s["extra_jobs"].append({"id": 5, "schedule": "s", "owner": "o",
+                                          "kind": "reader", "writes_official": False}),
+     r"extra_jobs: id 5 is not a unique string"),
+    (lambda s, t: s["extra_jobs"].append({"id": "  ", "schedule": "s", "owner": "o",
+                                          "kind": "reader", "writes_official": False}),
+     r"extra_jobs: id '  ' is not a unique string"),
+])
+def test_evidence_and_job_id_refusals(spec, tmp_path, mutate, match):
+    mutate(spec, tmp_path)
+    with pytest.raises(asm.SpecError, match=match):
+        asm.assemble(spec, _out(tmp_path))

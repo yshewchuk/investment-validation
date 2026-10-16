@@ -537,11 +537,12 @@ Only a tracked path absent from the worktree reads as empty.
   | spec file unreadable, not decodable JSON, or an uncreatable `--out-dir` | exit 2 |
   | `git` times out, is missing or fails during the commit check | exit 2 |
   | the checker's input manifest is unreadable or larger than 256 MiB | checker exit 2 |
-  | spec `commit` differs from this checkout's `HEAD`, or tracked files are modified, or untracked files sit under `engine/`, `tools/`, `dashboard/` or `checks/` | exit 2 (registry and inventory would describe another commit) |
+  | spec `commit` differs from this checkout's `HEAD`, or tracked files are modified, or untracked (non-ignored) files sit under `engine/`, `tools/`, `dashboard/`, `checks/` or `experiments/` | exit 2 (registry and inventory would describe another commit) |
   | a registry kind that can run outside `shadow`/`smoke`/`official` (today `experiment`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
   | a store-write-lease kind that can run outside `shadow`/`smoke` is not in `official_registry_kinds`, or a shadow-only one is | exit 2 |
   | `--out-dir` inside the repository | exit 2 |
   | any other registry kind | job kind `background` when it declares effects, else `reader`; `writes_official` false (`scheduled_writer`/true only for `official` or an operator-listed kind) |
+  | a rule only the checker owns is broken (phase outside 3B/4/5/6, `authority` sub-keys missing or blank, owner/schedule rules) | exit 1, manifest still written |
   | the checker reports findings | exit 1, manifest still written |
   | the checker passes | exit 0 |
 

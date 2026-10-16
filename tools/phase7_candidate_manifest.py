@@ -10,7 +10,7 @@ extra jobs the registry cannot know. The commit is required and must equal
 this checkout's ``HEAD``, because the job graph (live ``stages.registry()``)
 and the consumer inventory both come from this checkout. A job kind added
 later (#726's ``serving_projection``) appears with no edit here unless it can run outside
-``shadow``/``smoke``, in which case the spec must decide it. Exit 0 = the
+``shadow``/``smoke``/``official``, in which case the spec must decide it. Exit 0 = the
 checker passes, 1 = findings, 2 = unusable spec.
 
 Spec keys: ``commit`` (required, must equal ``HEAD``), ``registry_owner``, ``config``
@@ -113,9 +113,9 @@ def _write(path: Path, doc: dict) -> None:
     os.replace(tmp, path)
 
 
-#: Trees whose files shape the registry import and the consumer inventory; an untracked file
-#: there would enter the manifest of a commit that does not contain it.
-_SCANNED_TREES = ("engine/", "tools/", "dashboard/", "checks/")
+#: Trees that ``stages.registry()`` imports from or ``phase6_inventory.discover_entrypoints``
+#: globs; an untracked file there would enter the manifest of a commit that does not contain it.
+_SCANNED_TREES = ("engine/", "tools/", "dashboard/", "checks/", "experiments/")
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -223,7 +223,7 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
     seen = {j["id"] for j in jobs}
     for extra in _rows("extra_jobs", spec.get("extra_jobs", [])):
         jid = extra.get("id")
-        if not isinstance(jid, str) or jid in seen:
+        if not isinstance(jid, str) or not jid.strip() or jid in seen:
             raise SpecError(f"extra_jobs: id {jid!r} is not a unique string "
                             "(duplicate or registry collision)")
         seen.add(jid)
