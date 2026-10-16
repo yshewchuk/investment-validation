@@ -57,7 +57,9 @@ def classify(root: Path, names) -> dict[str, dict[str, bytes]]:
                     if object_name in new.setdefault(member, {}):
                         raise StageRefused("a state object appears twice", {"member": member})
                     new[member][object_name] = data
-    except (FrozenStateError, BoundedStateReadError, OSError) as exc:
+    except StageRefused:
+        raise
+    except (FrozenStateError, BoundedStateReadError, OSError, ValueError, KeyError, TypeError) as exc:
         raise StageRefused("a bound state file could not be loaded") from exc
     if set(new) != set(ADVANCING_MEMBERS):
         raise StageRefused("state files are not exactly the advancing members",
@@ -96,6 +98,8 @@ def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
         ok = (sources.get("pool_cutoff") == parameters["cutoff"]
               and sources.get("carried_from") == parameters["prior_release_id"]
               and new_hashes <= present)
+    except StageRefused:
+        raise
     except (rel.ReleaseLayoutError, OSError, ValueError, KeyError, TypeError) as exc:
         raise StageRefused("candidate release failed the light checks") from exc
     if not ok:

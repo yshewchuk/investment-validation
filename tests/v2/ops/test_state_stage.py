@@ -329,8 +329,51 @@ def test_worker_refuses_a_symlinked_state_file(tmp_path, monkeypatch):
     target.symlink_to(real)
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert err.value.code == "VALIDATION_FAILED"
     assert str(err.value) == "VALIDATION_FAILED: a bound state file is not a bounded regular file"
+
+
+def test_real_loader_refuses_oversize_symlink_and_fifo(tmp_path):
+    import os
+
+    from engine.v2.models.frozen_state_io import BoundedStateReadError
+
+    big = tmp_path / "big.json"
+    big.write_bytes(b"x" * 10)
+    with pytest.raises(BoundedStateReadError):
+        phase5_prepare_release.frozen_state_payloads([big], max_bytes=9)
+    link = tmp_path / "link.json"
+    link.symlink_to(big)
+    with pytest.raises(OSError):
+        phase5_prepare_release.frozen_state_payloads([link], max_bytes=100)
+    fifo = tmp_path / "fifo.json"
+    os.mkfifo(fifo)
+    with pytest.raises(BoundedStateReadError):
+        phase5_prepare_release.frozen_state_payloads([fifo], max_bytes=100)
+
+
+def test_light_checks_refuse_an_oversize_catalog(tmp_path, monkeypatch):
+    from tools import phase5_state_stage_job as job
+
+    path = phase5_release.catalog_path(tmp_path, "cand1")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"{" + b" " * 20 + b"}")
+    monkeypatch.setattr(phase5_release, "MAX_CATALOG_BYTES", 5)
+    parameters = {"release_id": "cand1", "cutoff": "2026-10-01", "prior_release_id": "prior1"}
+    with pytest.raises(job.StageRefused) as err:
+        job.light_checks(tmp_path, parameters, set())
+    assert str(err.value) == "the candidate catalog is not a bounded regular file"
+
+
+def test_worker_maps_a_wrong_typed_state_file_to_a_typed_refusal(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+
+    def wrong_types(paths, max_bytes=None):
+        raise KeyError("role")
+
+    monkeypatch.setattr(phase5_prepare_release, "frozen_state_payloads", wrong_types)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: a bound state file could not be loaded"
 
 
 def test_worker_refuses_an_oversize_state_file(tmp_path, monkeypatch):
