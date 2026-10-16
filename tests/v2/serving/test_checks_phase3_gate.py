@@ -404,7 +404,7 @@ def valid_evidence(tmp_path, *, populate_all=True) -> tuple[dict, Path, Path]:
             "schema_version": "phase3_coverage.v1.0", "source_hash": code_hash,
             "suite": list(FIXED_SUITE),
             "suite_missing": [], "pytest_returncode": 0,
-            "packages": json.loads((Path(__file__).resolve().parents[1] /
+            "packages": json.loads((Path(__file__).resolve().parents[3] /
                                     "checks/v2_coverage_ratchet_phase3_baseline.json").read_text())["packages"],
         }).encode()),
         "performance_receipt_ref": _ref(artifact_root, "performance_receipt.json", json.dumps({

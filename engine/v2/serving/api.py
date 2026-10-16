@@ -156,8 +156,10 @@ def _handle_api_error(request: Request, exc: ApiError) -> Response:
 
 def _index_unreadable() -> ApiError:
     """An API-owned index open or read failed: ``sqlite3.Error`` (a dropped/
-    corrupt table the migrations still tolerate) or ``json.JSONDecodeError``
-    (malformed stored ``document_json``/``findings_json``/``ref_json``/``flags``).
+    corrupt table the migrations still tolerate), ``json.JSONDecodeError``
+    (malformed stored ``document_json``/``findings_json``/``ref_json``/``flags``),
+    or a stored release of an older schema (``DocumentError``, e.g. a row
+    missing ``row_sources``).
     Retryable 503
     with the existing ``Problem`` shape and this FIXED message -- never raw
     exception text, a path, the token, a traceback or the malformed bytes.
@@ -533,7 +535,11 @@ def _release_response(serving_db, release_id: str | None, response: Response, re
 
 
 def _require_release(conn, release_id: str) -> None:
-    if projections.get_release(conn, release_id) is None:
+    try:
+        release = projections.get_release(conn, release_id)
+    except DocumentError:
+        raise _index_unreadable() from None
+    if release is None:
         raise ApiError(404, _problem("UNKNOWN_RELEASE", "validation", "unknown release id"))
 
 

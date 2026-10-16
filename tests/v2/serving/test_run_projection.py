@@ -109,6 +109,13 @@ def _args(inputs: dict, serving_root: Path, **overrides) -> dict:
     return kwargs
 
 
+def _spy_row_source(calls: list):
+    def spy(plan, score_doc, bundle_rows_by_ticker, pairs):
+        calls.append(plan)
+        return bundle_rows_by_ticker
+    return spy
+
+
 # 1. run_projection(...) == main([...])'s printed JSON, fresh serving root each
 def test_run_projection_matches_main_cli_print_for_same_inputs(tmp_path, capsys):
     from tools.v2_dashboard_project import main
@@ -223,15 +230,18 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
     native_inputs_path.write_text("{}")
 
     monkeypatch.setattr(tool, "_load_native_inputs", lambda path: {})
+
+    calls = []
     monkeypatch.setattr(
-        tool, "shadow_serving_row_source",
-        lambda plan, score_doc, bundle_rows_by_ticker, pairs: bundle_rows_by_ticker)
+        tool, "shadow_serving_row_source", _spy_row_source(calls))
 
     _, bundle_doc = run_projection(**_args(inputs, tmp_path / "serving_bundle"))
+    assert calls == []
     _, native_doc = run_projection(
         **_args(inputs, tmp_path / "serving_native", nightly_plan=plan_path,
                 native_inputs=native_inputs_path))
     assert native_doc["release_id"] != bundle_doc["release_id"]
+    assert len(calls) == 1
 
     conn = projections.connect(str(tmp_path / "serving_native" / "serving.sqlite"))
     try:
@@ -241,14 +251,22 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
     assert release.row_sources == ("legacy_bundle", "native_shadow")
 
 
-# 6. legacy plan -> only the legacy_bundle row source
-def test_run_projection_legacy_plan_records_legacy_bundle_only(tmp_path):
+# 6. legacy plan -> only the legacy_bundle row source, shadow source unused
+def test_run_projection_legacy_plan_records_legacy_bundle_only(tmp_path, monkeypatch):
+    import tools.v2_dashboard_project as tool
+
     inputs = _flat_inputs(tmp_path / "inputs")
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(json.dumps({"shadow_serving_scorer": "legacy"}))
 
+    calls = []
+    monkeypatch.setattr(
+        tool, "shadow_serving_row_source", _spy_row_source(calls))
+
     _, doc = run_projection(
         **_args(inputs, tmp_path / "serving", nightly_plan=plan_path))
+    assert len(calls) == 1
+    assert calls[0]["shadow_serving_scorer"] == "legacy"
     conn = projections.connect(str(tmp_path / "serving" / "serving.sqlite"))
     try:
         release = projections.get_release(conn, doc["release_id"])
@@ -266,6 +284,41 @@ def test_run_projection_oversized_nightly_plan_raises_and_writes_no_release(tmp_
 
     with pytest.raises(OpsError) as error:
         run_projection(**_args(inputs, serving_root, nightly_plan=plan_path))
+    assert error.value.code == "INVALID_REQUEST"
+
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()
+
+
+# 8. nightly plan size boundary: exactly 1 MiB is allowed, one byte over refused
+def test_run_projection_plan_size_boundary(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    base = b'{"shadow_serving_scorer": "legacy"}'
+
+    at_limit_path = tmp_path / "plan_at_limit.json"
+    at_limit = base + b" " * (1048576 - len(base))
+    at_limit_path.write_bytes(at_limit)
+    assert len(at_limit) == 1048576
+
+    _, doc = run_projection(
+        **_args(inputs, tmp_path / "serving_at_limit", nightly_plan=at_limit_path))
+    assert doc["ok"] is True
+
+    over_path = tmp_path / "plan_over_limit.json"
+    over = base + b" " * (1048577 - len(base))
+    over_path.write_bytes(over)
+    assert len(over) == 1048577
+
+    serving_root = tmp_path / "serving_over_limit"
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root, nightly_plan=over_path))
     assert error.value.code == "INVALID_REQUEST"
 
     index_path = serving_root / "serving.sqlite"

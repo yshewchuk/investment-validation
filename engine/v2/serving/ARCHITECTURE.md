@@ -45,12 +45,15 @@ no default) names where the board's rows came from: `("legacy_bundle",)` for the
 bundle alone, `("legacy_bundle", "native_shadow")` when the saved plan's
 `shadow_serving_scorer` is `native`. It is part of the release-id derivation, so the two
 never share an id; the release names its row sources (no route or renderer reads the field
-yet). Stored `v1.0` releases are rebuilt, not migrated: until then the current-release read
-of such a row is `SERVING_INDEX_UNREADABLE` (503, retryable). The projection tool exposes
-`run_projection(...)` (the CLI is a thin wrapper over it). The nightly plan is read once
-(at most 1 MiB), and that one parse picks both the rows and `row_sources`. A native plan
-without native inputs, or an oversized plan, is refused `INVALID_REQUEST` by the tool
-before any index write; the release and the serving pointer are unchanged.
+yet). Stored `v1.0` releases are rebuilt, not migrated: until then every read that
+loads such a row (current-release discovery, and the pinned release routes) is
+`SERVING_INDEX_UNREADABLE` (503, retryable; the trigger is a `DocumentError` from the stored
+document, in addition to the `sqlite3.Error`/`json.JSONDecodeError` triggers in the failure
+table). The projection tool exposes `run_projection(...)` (the CLI is a thin wrapper over
+it). The nightly plan is read once through a 1 MiB bounded read, and that one parse picks
+both the rows and `row_sources`. A native plan without native inputs, or an oversized or
+non-object plan, is refused `INVALID_REQUEST` by the tool before any index write; the
+release and the serving pointer are unchanged.
 
 ### Financial display units
 

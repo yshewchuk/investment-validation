@@ -387,7 +387,7 @@ the comparator, and assert it names **this package's stage** and that field
 path — not that "a row is red". A check that has never failed is not known to
 work.
 
-`tests/test_v2_serving_bridge.py` (P3-1a) and `tests/test_v2_serving_
+`tests/v2/serving/test_v2_serving_bridge.py` (P3-1a) and `tests/test_v2_serving_
 projections.py` (P3-1b) cover the offline bridge/index over synthetic
 `score.json`/bundle pairs and a synthetic Phase 2 catalog (real
 `earnings_events` fragments, never a real panel or renderer).
@@ -399,7 +399,7 @@ ticker file changing the manifest hash and the CLI's `release_id`; and every
 refusal (symlink, traversal, a ticker the board references with no file,
 duplicate ticker, malformed `.js` wrapper):
 
-    python3 -m pytest -q tests/test_v2_serving_bridge.py tests/test_v2_serving_projections.py tests/test_v2_serving_legacy_bundle.py
+    python3 -m pytest -q tests/v2/serving/test_v2_serving_bridge.py tests/test_v2_serving_projections.py tests/test_v2_serving_legacy_bundle.py
 
 `tests/v2/serving/test_v2_serving_api.py` (P3-2) builds a real `serving.sqlite` the
 same way and serves it over REAL HTTP — a real `uvicorn.Server` bound to an

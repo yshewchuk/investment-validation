@@ -111,7 +111,7 @@ def _receipt(kind: str, tier: int, left_ref: str, right_ref: str, findings: list
 # here, imported above under their original names. coverage_findings is
 # imported directly from checks.v2_coverage_ratchet by
 # checks/rearchitecture_phase3_evidence.py, and FIXED_SUITE by
-# tests/test_checks_phase3_gate.py -- neither goes through this module.
+# tests/v2/serving/test_checks_phase3_gate.py -- neither goes through this module.
 # --------------------------------------------------------------------------
 
 

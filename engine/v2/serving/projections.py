@@ -405,6 +405,11 @@ def build_candidate(
     transaction) so a test can raise mid-sequence and assert the rerun
     succeeds with no partial release — the O11-style fault hook this
     package's siblings already use.
+
+    ``row_sources`` must be non-empty, its first element must be
+    ``"legacy_bundle"``, every element must be one of ``"legacy_bundle"``/
+    ``"native_shadow"``, and it must carry no duplicates; anything else raises
+    ``ValueError`` before any durable write.
     """
     if (not row_sources or row_sources[0] != "legacy_bundle"
             or any(src not in {"legacy_bundle", "native_shadow"} for src in row_sources)
@@ -599,8 +604,10 @@ def verify_projection_binding(conn: sqlite3.Connection, binding: dict) -> bool:
     pointer (guide §5.4: "refuse ... if the projection isn't fully committed
     in serving.sqlite or its manifest hash mismatches"). ``False`` for
     anything malformed, an uncommitted release, a tampered binding document,
-    or an index whose own row content moved — never raises; the caller
-    decides how to turn a ``False`` into a refusal."""
+    or an index whose own row content moved — raises DocumentError for a
+    stored release of an older schema (callers map it to
+    SERVING_INDEX_UNREADABLE); the caller decides how to turn a ``False``
+    into a refusal."""
     release_id = binding.get("projection_release_id") if isinstance(binding, dict) else None
     if not isinstance(release_id, str):
         return False

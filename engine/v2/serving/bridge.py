@@ -131,7 +131,7 @@ _UNITS: dict[str, str] = {
 
 #: ``dashboard/render.py`` ``_BOARD_FIELDS`` — ``compact_row``'s real output
 #: keys, transcribed (this module may not import ``engine.dashboard``, a
-#: legacy package). A test in ``tests/test_v2_serving_bridge.py`` asserts a
+#: legacy package). A test in ``tests/v2/serving/test_v2_serving_bridge.py`` asserts a
 #: synthetic ``compact_row``-shaped dict's keys are all covered here.
 _BOARD_FIELD_NAMES: tuple[str, ...] = (
     "row_id", "ticker", "strategy", "as_of", "event_date", "session",

@@ -34,7 +34,7 @@ Bumped again to v3 by two independent same-day changes, merged together:
   was added to the glob for exactly this.
 * (P3-1a) the first real production module under ``engine/v2/serving``
   (``bridge.py``, plus its ``contracts/serving.py`` schemas) lands with its
-  own ``tests/test_v2_serving_bridge.py`` -- named for the *layer*
+  own ``tests/v2/serving/test_v2_serving_bridge.py`` -- named for the *layer*
   (``serving``), not the ops adapter, so it matched neither existing glob and
   would otherwise merge as permanently-uncovered ``engine.v2.serving`` source.
   ``phase1_suite()`` now also picks up ``tests/test_v2_serving_*.py``.
@@ -593,14 +593,14 @@ PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.0"
 PHASE3_FIXED_SUITE = (
     "tests/v2/serving/test_v2_serving_api.py",
     "tests/v2/serving/test_serving_root_current.py",
-    "tests/test_v2_serving_bridge.py",
+    "tests/v2/serving/test_v2_serving_bridge.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
     "tests/test_v2_dashboard_preview.py",
     "tests/test_v2_dashboard_browser.py",
     "tests/v2/dashboard/test_v2_dashboard_integration.py",
-    "tests/test_checks_phase3_gate.py",
+    "tests/v2/serving/test_checks_phase3_gate.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
 )
 

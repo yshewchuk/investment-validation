@@ -108,6 +108,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _read_plan(path: Path) -> dict:
+    """Read the shadow nightly plan with a bounded read and object check.
+
+    The file is read through a 1 MiB cap so an oversized plan cannot exhaust
+    memory; anything over the cap, or that is not valid JSON, or that is not a
+    JSON object, is refused as ``INVALID_REQUEST``.
+    """
+    with open(path, "rb") as fh:
+        raw = fh.read(1048577)
+    if len(raw) > 1048576:
+        raise fail("INVALID_REQUEST", "nightly plan exceeds 1 MiB")
+    try:
+        plan = json.loads(raw)
+    except ValueError:
+        raise fail("INVALID_REQUEST", "nightly plan is not a JSON object") from None
+    if not isinstance(plan, dict):
+        raise fail("INVALID_REQUEST", "nightly plan is not a JSON object")
+    return plan
+
+
 def _load_flat_bundle(bundle_dir: Path) -> dict[str, list[dict]]:
     bundle: dict[str, list[dict]] = {}
     for path in sorted(bundle_dir.glob("*.json")):
@@ -176,7 +196,7 @@ def _shadow_rows(args: argparse.Namespace, score_doc: dict,
     if plan is None:
         if args.nightly_plan is None:
             return bundle_rows_by_ticker
-        plan = json.loads(args.nightly_plan.read_text())
+        plan = _read_plan(args.nightly_plan)
     native = native_shadow_serving_mode(plan) == "native"
     if native and args.native_inputs is None:
         raise fail("INVALID_REQUEST", "a native shadow plan needs --native-inputs")
@@ -272,13 +292,8 @@ def run_projection(*, preview_input: Path, source_provenance: Path | None, score
     score_doc = load_score_document(score_json)
 
     plan: dict | None = None
-    native = False
     if nightly_plan is not None:
-        plan_bytes = nightly_plan.read_bytes()
-        if len(plan_bytes) > 1048576:
-            raise fail("INVALID_REQUEST", "nightly plan exceeds 1 MiB")
-        plan = json.loads(plan_bytes)
-        native = native_shadow_serving_mode(plan) == "native"
+        plan = _read_plan(nightly_plan)
 
     bundle_manifest_ref = preview.bundle_manifest_ref
     if bundle_format == "flat":
