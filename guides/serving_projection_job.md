@@ -56,17 +56,18 @@ The sections above settle ownership (new leaf job after `publication`), serving 
 
 | Phase | Nightly scope | Serving swap | Board |
 |---|---|---|---|
-| Today to S5 (shadow nightly) | `shadow` (`plans.nightly_plan` refuses other modes) | Planned (once slices 3-4 land): exempt from the fence; each nightly moves the serving `CURRENT` | The shadow nightly's release |
+| Before S2 (shadow nightly runs) | `shadow` (`plans.nightly_plan` refuses other modes) | Planned (once slices 3-4 land): exempt from the fence; each nightly moves the serving `CURRENT` | The shadow nightly's release |
+| S2 to S6 (the S2 drain pauses the shadow nightly and drills) | none runs | No nightly requests a swap | Last release swapped before S2 |
 | Mid-S5 (legacy fenced, catalog not yet granted: zero writers) | none runs | Official-scope swaps refused `AUTHORITY_FENCED` | Last validated release |
 | S5 granted, S6 not started (owner `v2`) | none runs | No nightly requests one; an operator official-scope retained publication is allowed at the current generation | Last validated release until an operator swap |
 | After S6 (official, owner `v2`, current generation) | `official` | Allowed; a stale generation is refused `AUTHORITY_GENERATION_STALE` | Each night's release |
-| After B1 to B5 (rollback) | none from v2 | Official-scope swaps refused `AUTHORITY_FENCED`; only the rollback's own official-scope retained publication moves the pointer. Shadow and drill scopes stay exempt, but no shadow nightly is scheduled after B5 (the rollback returns scheduling to legacy), so none runs | Last validated release, or the one the operator re-pointed |
+| After B1 to B5 (rollback) | none from v2 | Official-scope swaps refused `AUTHORITY_FENCED` (owner `none` at B1, `legacy` from B4). This guide adds no rollback exemption; how B5 "switches consumers back" is the fence guide's to define, and this guide only requires that it use slice 4's serving-root target. On the pre-S5 abandonment path B5 also unpauses the shadow nightly, which then resumes shadow swaps | Last validated release, or the one B5 re-points |
 
 A fence refusal (`AUTHORITY_FENCED`, `AUTHORITY_GENERATION_STALE`) is a typed retained-publication refusal, the same pre-swap row as `STALE_EXPECTATION`/`PUBLICATION_REFUSED` in the failure table (slice 4 adds both codes to that row): the job fails with the typed code, `CURRENT` and the board are unchanged, `publication` is untouched. S7 ("switch read consumers") is therefore no new mechanism: it is the first `serving_projection` swap after S6, or an operator retained publication of an already-indexed release, both through slice 4's serving-root target. S7 depends on slice 4 only, and `ops cutover consumers` reads the same serving `CURRENT`, binding and ETag the board does.
 
-**First run, backfill and retention.** A fresh serving root has no `CURRENT`; the board reads `NO_CURRENT_RELEASE` until the first successful `serving_projection`. There is no automatic backfill of earlier nights: an operator reruns the job against a retained session's publication (idempotent, per the retry rules); anything older is rebuilt from providers, not migrated. Projection release rows and objects are append-only and never pruned by this job, because rollback needs old releases to stay verifiable. A retention policy is a separate design, filed as a follow-up issue and a precondition of no slice.
+**First run, backfill and retention.** A fresh serving root has no `CURRENT`; the board reads `NO_CURRENT_RELEASE` until the first successful `serving_projection`. There is no automatic backfill of earlier nights: an operator reruns the job against a retained session's publication (idempotent, per the retry rules); anything older is rebuilt from providers, not migrated. Projection release rows and objects are append-only and never pruned by this job, because rollback needs old releases to stay verifiable. A retention policy is a separate design, to be filed as a follow-up issue by the supervisor, and a precondition of no slice.
 
-**Decisions for the user (defaults chosen; say if you disagree).** (1) Pre-cutover swap scope: default is the `shadow` scope so the board follows the shadow nightly now; the alternative is an operator-only swap until S6, which keeps the board empty until cutover and defeats #717's goal. (2) Completion role (also the role stated under the failure table; that statement is this default until the user decides): default `completed_degraded` for a session whose only failure is the post-publication `serving_projection`; the alternative is `failed`, which would re-trigger delivery and backup retry logic for a session whose publication already succeeded.
+**Decisions for the user (defaults chosen; say if you disagree).** (1) Pre-cutover swap scope: default is the `shadow` scope so the board follows the shadow nightly until the S2 drain (the nightly is paused from S2 to S6); the alternative is an operator-only swap until S6, which keeps the board empty until the first operator swap and defeats #717's goal. (2) Completion role (also the role stated under the failure table; that statement is this default until the user decides): default `completed_degraded` for a session whose only failure is the post-publication `serving_projection`; the alternative is `failed`, which would re-trigger delivery and backup retry logic for a session whose publication already succeeded.
 
 ## Read side: serving root and nightly current release
 
@@ -80,7 +81,7 @@ does not resolve "current" from it.
 `projection_binding.json` -> projection release id -> `verify_projection_binding` against the
 live index. Only the fenced ops publisher replaces that pointer, on request from the nightly
 `serving_projection` job (after the projection is committed and its binding verified) or an
-operator rollback retained publication; the swap is one atomic file replace into a
+operator retained publication that the fence allows (see the fence guide for rollback); the swap is one atomic file replace into a
 complete release directory. A request resolves once, so it sees the previous release or the
 new one, never a mix. Index rows are append-only, so the old binding verifies during the swap.
 
