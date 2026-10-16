@@ -229,8 +229,9 @@ def test_parent_mismatch_even_under_rehashed_manifest(setup, change, monkeypatch
     catalog = copy.deepcopy(setup[3])
     catalog["members"][0]["objects"][0]["serving_fold"] = to_document(descriptor)
     monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("invalid parent decoded"))
-    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$"):
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
         _load(setup, parent=parent, descriptor=descriptor, catalog=_rehash(catalog))
+    assert caught.value.code == MODEL_NOT_READY
 
 
 @pytest.mark.parametrize(
@@ -415,7 +416,13 @@ def test_identity_catalog_and_policy_changes_share_only_decoded_cache(setup):
 
 def test_no_fit_network_write_or_source_ready_claim(setup, monkeypatch):
     original = builtins.open
-    before = {p: p.read_bytes() for p in setup[4].parent.iterdir()}
+    root = setup[4].parent.parent
+
+    def tree():
+        return {p.relative_to(root): p.read_bytes() if p.is_file() else None
+                for p in root.rglob("*")}
+
+    before = tree()
     catalog_before = copy.deepcopy(setup[3])
 
     def read_only(file, mode="r", *args, **kwargs):
@@ -431,7 +438,7 @@ def test_no_fit_network_write_or_source_ready_claim(setup, monkeypatch):
             ref.release.bindings[0], max_member_bytes=loader.MAX_FOLD_BYTES
         )
         assert not any(hasattr(metadata, key) for key in ("fit", "estimator", "header"))
-    assert {p: p.read_bytes() for p in setup[4].parent.iterdir()} == before
+    assert tree() == before  # Include sidecars and directories anywhere under the root.
     assert setup[3] == catalog_before  # Artifact loading adds no source evidence.
 
 
@@ -698,3 +705,28 @@ def test_public_preparation_normalizes_path_resolution_runtime_error(setup, monk
         setup[0].prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES)
     assert type(caught.value) is AdapterError
     assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize("key,value", [
+    ("model_id", 123), ("fold_start", 123), ("tier3_snapshot", 123),
+    ("features", "xy"), ("features", [1, 2]),
+])
+def test_public_metadata_rejects_header_types_after_adapter_decode(setup, key, value, monkeypatch):
+    owner, descriptor, parent, _, path, cache = setup
+    raw = _raw(dict(cache, **{key: value}))
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    member = replace(descriptor.estimator, content_hash=digest, path=f"objects/{digest[7:]}")
+    (path.parent.parent / member.path).write_bytes(raw)
+    binding = replace(parent.release.bindings[0], adapter="tier4-serving-fold.v1", members=(member,))
+    if key == "features":
+        # Both malformed feature containers pass the adapter's tuple-equality check.
+        binding = replace(binding, feature_order=tuple(value))
+    original, loads = joblib.load, []
+    monkeypatch.setattr(joblib, "load", lambda *a, **k: (loads.append(1), original(*a, **k))[1])
+    for _ in range(2):
+        with pytest.raises(AdapterError, match="^invalid serving fold metadata$") as caught:
+            owner.prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES,
+                                       expected_bytes=len(raw))
+        assert type(caught.value) is AdapterError
+        assert caught.value.__cause__ is None
+    assert loads == [1] and owner.cache_size == 1  # Reached metadata on cold and warm calls.

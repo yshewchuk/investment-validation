@@ -49,6 +49,7 @@ def _hash_valid(text, prefix="sha256:"):
 
 
 def _validate_descriptor(descriptor):
+    # Size descriptors need these shared checks; chooser intrinsic validation overlaps.
     policy = descriptor.policy
     month = date.fromisoformat(descriptor.fold_start)
     if (month.day != 1 or month.isoformat() != descriptor.fold_start

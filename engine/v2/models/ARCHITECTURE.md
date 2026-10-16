@@ -187,8 +187,9 @@ interval policy. Its held-out prediction/residual arrays belong to that same
 object. Offline release preparation records this metadata in the hashed state
 catalog; a read-only loader verifies it against bounded, hash-checked bytes.
 Existing catalogs without this declaration require offline restaging, not a
-nightly fit or a guessed interval policy. Verified loading covers size folds and the chooser producer artifacts below;
-this alone admits neither training sources nor a nightly chooser declaration.
+nightly fit or a guessed interval policy. Verified loading covers size folds and
+the chooser producer artifacts below; this alone admits neither training sources
+nor a nightly chooser declaration.
 
 Selection uses the exact earlier of the event month and decision month,
 the registered size model and feature order, and the pinned panel byte hash.
@@ -317,15 +318,17 @@ provide that proof. Existing nightly refusals remain.
 `FrozenInference.prepare_serving_fold(binding, max_member_bytes=..., expected_bytes=None)`
 returns detached immutable `ServingFoldMetadata`, never cached estimator/header objects.
 Both fold loaders use it; chooser catalog size is checked against the already-read
-buffers, including warm calls. The required byte limit is positive. Bounded reads use the shared regular-file reader with
-final-component no-follow; parent directories remain operator-trusted. Missing,
+buffers, including warm calls. The required byte limit is positive. Bounded reads
+use the shared regular-file reader with final-component no-follow; parent directories remain operator-trusted. Missing,
 special, symlinked, oversized or changed objects refuse before decode on cold and
 warm calls. Direct preparation normalizes bounded I/O and regular-file/size
-refusals to path-free `AdapterError`. Unbounded champion loading retains its existing behavior.
+refusals to path-free `AdapterError`. Any binding without an established cache-entry
+byte ceiling, including legacy fold bindings and champions, retains unbounded
+verification. An established ceiling applies to every subsequent inference read.
 
 `FrozenInference` owns the only decoded-artifact cache, retained for its owner
-lifetime without eviction. Its existing adapter
-retains fold metadata with the estimator, so validation and prediction share
+lifetime without eviction. Its adapter retains fold metadata with the estimator,
+so validation and prediction share
 one decode. Each cache entry may also own a byte ceiling established by bounded
 preparation; subsequent cold/warm verification cannot relax that ceiling.
 Legacy entries without a ceiling retain their existing behavior. Prediction
@@ -334,7 +337,7 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 | Verified fold condition | Outcome |
 |---|---|
 | Parent/catalog/descriptor/header or embedded-pool disagreement | `MODEL_NOT_READY`; fixed path-free refusal, no inference or fallback |
-| Escaped path, missing/corrupt bytes or object above 32 MiB during fold preparation or prepared inference | Refuse before deserialization, including warm reads; inference entries never boundedly prepared have no ceiling |
+| Escaped path, missing/corrupt bytes or object above 32 MiB during fold preparation or prepared inference | Refuse before deserialization, including warm reads; entries with no established byte ceiling retain legacy unbounded verification |
 | Repeated preparation and inference on the same owner/object | Reverify bytes; reuse the decoded artifact, never a second model cache |
 | Missing/duplicate chooser catalog membership, wrong role/output or opaque undeclared fold | Fixed `MODEL_NOT_READY`; no champion/size/other-fold substitution |
 | Source availability/finality or training-bound proof absent | No causal/source-ready claim; artifact preparation cannot bypass consuming admission |
