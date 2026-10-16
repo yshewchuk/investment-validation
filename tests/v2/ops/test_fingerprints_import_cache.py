@@ -131,3 +131,10 @@ def test_source_closure_reads_each_py_file_once_for_digest_and_imports(tmp_path,
     assert len(opens) == 1
     assert closure["m.py"] == "sha256:" + hashlib.sha256(b"import first_module\n").hexdigest()
     assert set(closure) == {"m.py", "first_module.py"}
+
+
+def test_source_closure_hashes_a_non_py_entry_without_import_expansion(tmp_path):
+    (tmp_path / "data.txt").write_bytes(b"import os\n")
+    (tmp_path / "os.py").write_bytes(b"")
+    assert fingerprints.source_closure(tmp_path, ["data.txt"]) == {
+        "data.txt": "sha256:" + hashlib.sha256(b"import os\n").hexdigest()}
