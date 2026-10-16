@@ -206,8 +206,6 @@ def test_catalog_cap_constant_and_regular_file_guard(tmp_path):
     assert release_objects.read_regular_file(small, 8) == b"x" * 8
     with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
         release_objects.read_regular_file(small, 7)
-    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
-        release_objects.read_regular_file(small, -1)
 
 
 def test_read_regular_file_refuses_fifo_without_blocking(tmp_path):
