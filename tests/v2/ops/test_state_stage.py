@@ -119,7 +119,9 @@ def test_kind_is_registered_and_leases_the_pointer():
     assert kind.checkpoint_contract == "phase5_state_stage_result.v1.0"
     assert kind.namespaces == frozenset({"shadow", "smoke"})
     assert kind.store_domains == (("deployment_pointer", "write"),)
-    assert state_stage_job_kind().retry.max_attempts == 1
+    from engine.v2.ops.submission import RetryPolicy
+
+    assert state_stage_job_kind().retry == RetryPolicy("none", 1)
 
 
 def test_plan_pins_files_refs_and_absolute_root(tmp_path):
@@ -611,3 +613,68 @@ def test_state_file_one_byte_over_the_cap_is_refused(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert str(err.value) == "VALIDATION_FAILED: a bound state file is not a bounded regular file"
+
+
+@pytest.mark.parametrize("changes,problem", [
+    ({"expected_ids": ("training",)}, "expected_ids must be exactly ('phase5_state_stage',)"),
+    ({"release_root": ""}, "release_root must be a non-empty string"),
+    ({"release_id": "../x"}, "prior_release_id and release_id must be safe non-empty ids"),
+    ({"release_id": "prior1"}, "release_id must differ from prior_release_id"),
+    ({"cutoff": "2026-9-1"}, "cutoff must be an extended ISO date (YYYY-MM-DD)"),
+    ({"input_bindings": None}, "input_bindings keys must equal state_files"),
+])
+def test_each_invalid_parameter_reports_its_exact_problem(changes, problem):
+    assert state_stage_parameter_problems(None, _params(**changes)) == [problem]
+
+
+def test_plan_hashes_follow_the_source_root(tmp_path, monkeypatch):
+    from engine.v2.foundation import content_hash
+    from engine.v2.ops import fingerprints
+
+    seen = []
+
+    def manifest(root):
+        seen.append(root)
+        return {"root": str(root)}
+
+    monkeypatch.setattr(fingerprints, "worker_source_manifest", manifest)
+    refs = {name: f"job_x#training/{name}" for name in _STATES}
+    first, second = tmp_path / "a", tmp_path / "b"
+    plans = [state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
+                              release_id="cand1", cutoff="2026-10-01", state_refs=refs,
+                              source_root=root) for root in (first, second)]
+    assert seen == [first, second]
+    assert plans[0]["implementation_ref"] == content_hash({"root": str(first)})
+    assert plans[1]["implementation_ref"] == content_hash({"root": str(second)})
+    assert plans[0]["environment_ref"] == plans[1]["environment_ref"]
+    assert plans[0]["spec_hash"] == content_hash(plans[0]["parameters"])
+
+
+def test_light_checks_refuse_a_vanished_catalog_with_the_exact_message(tmp_path, monkeypatch):
+    from checks import phase5_release_assembly as assembly_module
+
+    real = assembly_module.carry_forward_release
+
+    def wrapped(root, **kwargs):
+        path = real(root, **kwargs)
+        path.unlink()
+        return path
+
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    monkeypatch.setattr(assembly_module, "carry_forward_release", wrapped)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: the candidate catalog could not be read"
+
+
+def test_object_write_failure_is_a_typed_refusal(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+
+    def broken(release_root, payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(phase5_release, "write_object", broken)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate objects could not be written"
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
