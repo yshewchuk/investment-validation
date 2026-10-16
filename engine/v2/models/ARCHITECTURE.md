@@ -201,9 +201,8 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 - Every other prior pool/chooser object, and every prior object of an advancing member not
   re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
   driver pools and the chooser keep their hash until a retrain re-supplies them.
-- The worker builds the inventory from the legacy champion registry via
-  `current_release_inventory()` under the new id (drift refuses), writes new objects, calls
-  `carry_forward_release`, re-reads the candidate (`read_catalog`, `verify_staged`), then writes `stage_result.json`.
+- Output: a re-verified candidate release (never `DEPLOYED`) and `stage_result.json`. The
+  inventory comes from the legacy champion registry under the new id; drift refuses before any write.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
   `ReleaseAssemblyRefusal`, `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
   carries `problems`). A trailing object's month may not start after `cutoff`. One attempt only.

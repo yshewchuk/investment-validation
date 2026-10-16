@@ -8,6 +8,7 @@ present in every worktree unlike ``data/models/*.joblib``.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import joblib
@@ -205,3 +206,37 @@ def test_non_model_state_reports_presence_against_a_root(tmp_path):
     assert entries["payoff_line:STR-THRU"].backing_file is None
     assert entries["paired_residual_pool"].status == "missing_source"
     assert entries["recalibration_map"].status == "missing_source"
+
+
+# --------------------------------------------------------------------------
+# bounded reads: oversized files are refused, never slurped
+# --------------------------------------------------------------------------
+
+
+def test_a_file_one_byte_over_the_artifact_cap_is_refused(tmp_path, monkeypatch):
+    from engine.v2.models import inventory
+
+    path = tmp_path / "big.joblib"
+    path.write_bytes(b"x" * 16)
+    monkeypatch.setattr(inventory, "MAX_ARTIFACT_BYTES", 15)
+    with pytest.raises(ValueError) as error:
+        inventory._hash_file(path)
+    assert str(error.value) == "file exceeds size cap"
+
+
+def test_a_file_of_exactly_the_artifact_cap_is_hashed(tmp_path, monkeypatch):
+    from engine.v2.models import inventory
+
+    path = tmp_path / "exact.joblib"
+    path.write_bytes(b"x" * 16)
+    monkeypatch.setattr(inventory, "MAX_ARTIFACT_BYTES", 16)
+    assert inventory._hash_file(path) == "sha256:" + hashlib.sha256(b"x" * 16).hexdigest()
+
+
+def test_an_oversize_registry_is_refused_before_it_is_read(monkeypatch):
+    from engine.v2.models import inventory
+
+    monkeypatch.setattr(inventory, "MAX_REGISTRY_BYTES", 0)
+    with pytest.raises(ValueError) as error:
+        inventory.current_release_inventory()
+    assert str(error.value) == "registry exceeds size cap"

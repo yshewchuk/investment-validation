@@ -145,6 +145,9 @@ def stage_candidate(parameters, root: Path) -> dict:
         outputs += [item for item in carried if item.member_id != CHOOSER_MEMBER_ID
                     and (item.member_id, item.name) not in supplied]
         chooser = [item for item in carried if item.member_id == CHOOSER_MEMBER_ID]
+    except (rel.ReleaseLayoutError, OSError) as exc:
+        raise StageRefused("candidate objects could not be written") from exc
+    try:
         carry_forward_release(
             release_root, prior_release_id=parameters["prior_release_id"],
             release_id=parameters["release_id"], inventory=inventory, outputs=outputs,
@@ -152,7 +155,7 @@ def stage_candidate(parameters, root: Path) -> dict:
     except ReleaseAssemblyRefusal as exc:
         raise StageRefused("release assembly refused", {"code": exc.code}) from exc
     except (rel.ReleaseLayoutError, OSError) as exc:
-        raise StageRefused("candidate objects could not be written") from exc
+        raise StageRefused("candidate release could not be published") from exc
     light_checks(release_root, parameters, new_hashes)
     return {"release_id": parameters["release_id"],
             "prior_release_id": parameters["prior_release_id"], "cutoff": cutoff,

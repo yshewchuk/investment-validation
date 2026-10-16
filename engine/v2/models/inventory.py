@@ -95,6 +95,11 @@ RELEASE_ID = "legacy-model-registry-current"
 #: (checked, not duplicated, by the module's own test).
 FEATURE_ROLES = ("size", "implied_t1", "runup_move", "iv_crush")
 
+#: Refuse to read (and hash) any single artifact file larger than this.
+MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+#: Refuse to read the registry manifest if it exceeds this.
+MAX_REGISTRY_BYTES = 16 * 1024 * 1024
+
 _TIER4_DIR = paths.DATA / "models" / "tier4"
 _FOLD_NAME = re.compile(r"^(?P<model_id>.+)_(?P<yyyymm>\d{6})_(?P<snapshot>[0-9a-f]+)\.joblib$")
 
@@ -110,10 +115,22 @@ def _hash_bytes(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+def _require_size(path: Path, limit: int, message: str) -> None:
+    """Refuse a file larger than ``limit`` before it is read."""
+    if path.lstat().st_size > limit:
+        raise ValueError(message)
+
+
 def _hash_file(path: Path) -> str | None:
     if not path.is_file():
         return None
-    return _hash_bytes(path.read_bytes())
+    if path.lstat().st_size > MAX_ARTIFACT_BYTES:
+        raise ValueError("file exceeds size cap")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
 
 
 def _required_kinds(role: str) -> tuple[str, ...]:
@@ -191,6 +208,8 @@ def _champion_members(entry: "legacy_registry.RegistryEntry") -> _MemberBuild:
             artifact_ref=_relative(path), content_hash=file_hash,
         ))
     if entry.role == "gate" and entry.threshold is not None:
+        _require_size(legacy_registry.REGISTRY_PATH, MAX_REGISTRY_BYTES,
+                      "registry exceeds size cap")
         manifest_hash = _hash_file(legacy_registry.REGISTRY_PATH)
         if manifest_hash is not None:
             members.append(ArtifactInventoryMember(
@@ -233,7 +252,10 @@ def current_release_inventory(
     (never instead of) the deterministic checks ``release_issues`` still runs
     on the object this returns.
     """
-    reg = reg if reg is not None else legacy_registry.load_registry()
+    if reg is None:
+        _require_size(legacy_registry.REGISTRY_PATH, MAX_REGISTRY_BYTES,
+                      "registry exceeds size cap")
+    reg = legacy_registry.load_registry() if reg is None else reg
     artifacts: list[ModelArtifactInventory] = []
     bindings: list[ReleaseBinding] = []
     requirements: list[ReleaseRequirement] = []
@@ -265,6 +287,8 @@ def current_release_inventory(
             role=entry.role, strategy_id=entry.strategy, clock_id=KNOWN_CLOCK_IDS[0],
         ))
 
+    _require_size(legacy_registry.REGISTRY_PATH, MAX_REGISTRY_BYTES,
+                  "registry exceeds size cap")
     manifest_hash = _hash_file(legacy_registry.REGISTRY_PATH)
     evidence = paths.FEATURES / "model_evidence.json"
     release = ModelReleaseInventory(

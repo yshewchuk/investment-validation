@@ -176,9 +176,12 @@ def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None):
 
 def test_worker_stages_candidate_carrying_the_unadvanced_members(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch)
+    deployed = phase5_release.deployment_root(tmp_path) / "DEPLOYED"
+    assert not deployed.exists()
     result = run_state_stage_worker(parameters, staging)
     assert result["completed_ids"] == ["phase5_state_stage"]
     assert result["no_work"] is False
+    assert not deployed.exists()
     assert result["outputs"] == [{"name": "stage_result", "path": "stage_result.json",
                                   "schema": "phase5_state_stage_result.v1.0"}]
     summary = json.loads((staging / "stage_result.json").read_text())
@@ -208,6 +211,8 @@ def test_worker_refuses_a_missing_advancing_member(tmp_path, monkeypatch):
     assert not (staging / "stage_result.json").exists()
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
     assert err.value.problem.details == {"members": ["paired_residual_pool"]}
+    assert str(err.value) == ("VALIDATION_FAILED: state files are not exactly "
+                              "the advancing members")
 
 
 def test_worker_refuses_a_state_file_beyond_the_advancing_members(tmp_path, monkeypatch):
@@ -222,6 +227,8 @@ def test_worker_refuses_a_state_file_beyond_the_advancing_members(tmp_path, monk
                                                      "driver_residual_pool:size",
                                                      "paired_residual_pool",
                                                      "trailing_pnl_cutoff"]}
+    assert str(err.value) == ("VALIDATION_FAILED: state files are not exactly "
+                              "the advancing members")
 
 
 def test_worker_refuses_inventory_drift_before_any_candidate(tmp_path, monkeypatch):
@@ -231,6 +238,7 @@ def test_worker_refuses_inventory_drift_before_any_candidate(tmp_path, monkeypat
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert err.value.problem.details == {"issues": 1}
+    assert str(err.value) == "VALIDATION_FAILED: release inventory drifted"
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
     assert sorted(path.name for path in store.iterdir()) == before
 
@@ -243,6 +251,7 @@ def test_worker_refuses_a_cutoff_that_does_not_advance(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert err.value.problem.details == {"code": "CUTOFF_NOT_ADVANCED"}
+    assert str(err.value) == "VALIDATION_FAILED: release assembly refused"
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
 
 
@@ -273,6 +282,7 @@ def test_paired_object_with_other_name_cutoff_is_refused(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert err.value.problem.details == {"code": "CUTOFF_MISMATCH"}
+    assert str(err.value) == "VALIDATION_FAILED: release assembly refused"
 
 
 def _tamper_catalog(monkeypatch, mutate):
@@ -312,8 +322,7 @@ def test_light_checks_refuse_a_candidate_that_does_not_match(tmp_path, monkeypat
     _tamper_catalog(monkeypatch, mutate)
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert err.value.code == "VALIDATION_FAILED"
-    assert "light checks" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release failed the light checks"
     assert not (staging / "stage_result.json").exists()
 
 
@@ -469,8 +478,7 @@ def test_light_checks_refuse_a_corrupted_staged_manifest(tmp_path, monkeypatch):
     _corrupt_staged_manifest(monkeypatch)
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert err.value.code == "VALIDATION_FAILED"
-    assert "light checks" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release failed the light checks"
 
 
 def test_light_checks_refuse_a_catalog_with_no_members(tmp_path, monkeypatch):
@@ -478,7 +486,7 @@ def test_light_checks_refuse_a_catalog_with_no_members(tmp_path, monkeypatch):
     _tamper_catalog(monkeypatch, lambda body: body.__setitem__("members", []))
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert "light checks" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release failed the light checks"
 
 
 def test_a_resupplied_object_replaces_the_prior_object_of_the_same_name(tmp_path, monkeypatch):
@@ -508,6 +516,7 @@ def test_a_trailing_month_after_the_cutoff_is_refused(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert err.value.problem.details == {"months": ["hist|2026-11"]}
+    assert str(err.value) == "VALIDATION_FAILED: a trailing object month starts after cutoff"
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
 
 
@@ -531,7 +540,7 @@ def test_light_checks_refuse_a_stale_manifest_hash(tmp_path, monkeypatch):
     _tamper_raw(monkeypatch, lambda body: body["sources"].__setitem__("note", "x"))
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert "light checks" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release failed the light checks"
 
 
 def test_light_checks_refuse_a_catalog_for_another_release(tmp_path, monkeypatch):
@@ -539,7 +548,7 @@ def test_light_checks_refuse_a_catalog_for_another_release(tmp_path, monkeypatch
     _tamper_catalog(monkeypatch, lambda body: body.__setitem__("release_id", "other"))
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert "light checks" in str(err.value)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release failed the light checks"
 
 
 def test_worker_dispatch_routes_phase5_state_stage(monkeypatch):
@@ -643,15 +652,6 @@ def test_a_trailing_month_that_is_not_a_date_is_refused(tmp_path, monkeypatch):
     assert str(err.value) == "VALIDATION_FAILED: a trailing object month is not a date"
 
 
-def test_state_file_of_exactly_the_cap_is_accepted_and_one_more_byte_refused(tmp_path, monkeypatch):
-    from tools import phase5_state_stage_job
-
-    parameters, staging = _wire(tmp_path, monkeypatch)
-    largest = max((staging / name).stat().st_size for name in _STATES)
-    monkeypatch.setattr(phase5_state_stage_job, "MAX_STATE_BYTES", largest)
-    assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
-
-
 def test_state_file_one_byte_over_the_cap_is_refused(tmp_path, monkeypatch):
     from tools import phase5_state_stage_job
 
@@ -726,3 +726,25 @@ def test_object_write_failure_is_a_typed_refusal(tmp_path, monkeypatch):
         run_state_stage_worker(parameters, staging)
     assert str(err.value) == "VALIDATION_FAILED: candidate objects could not be written"
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+def test_carry_failure_is_a_typed_publish_refusal(tmp_path, monkeypatch):
+    from checks import phase5_release_assembly as assembly_module
+
+    def broken(root, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(assembly_module, "carry_forward_release", broken)
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release could not be published"
+
+
+def test_state_file_of_exactly_the_cap_is_accepted(tmp_path, monkeypatch):
+    from tools import phase5_state_stage_job
+
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    largest = max((staging / name).stat().st_size for name in _STATES)
+    monkeypatch.setattr(phase5_state_stage_job, "MAX_STATE_BYTES", largest)
+    assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
