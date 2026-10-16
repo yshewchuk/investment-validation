@@ -226,7 +226,7 @@ def production_release_root() -> Path:
     ``MODEL_RELEASE_ROOT`` on every call, never cached. This is the store
     root, NOT this module's own ``root`` parameter:
     ``release_bindings.resolve_release_binding`` and
-    ``checks/phase5_release.py`` both navigate from a value at this level
+    ``engine/v2/models/release_layout.py`` both navigate from a value at this level
     by appending their own ``deployment/`` subdirectory
     (``<release_root>/deployment/DEPLOYED``); this module's own
     :func:`promote`/:func:`rollback`/:func:`resolve_release`/
@@ -254,7 +254,7 @@ def production_deployment_root() -> Path:
     operating against the ONE configured production store, matching the
     same ``<release_root>/deployment/`` layout
     ``release_bindings.resolve_release_binding`` and
-    ``checks/phase5_release.py`` already use for the identical value.
+    ``engine/v2/models/release_layout.py`` already use for the identical value.
     ``training.promote_plan`` resolves an omitted ``--release-root``
     through THIS function, never through :func:`production_release_root`
     directly -- the two disagreed on which directory ``MODEL_RELEASE_ROOT``

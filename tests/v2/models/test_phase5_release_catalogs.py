@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 
 from checks import phase5_acceptance as acceptance
-from checks import phase5_release as layout
 from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
+from engine.v2.models import release_layout as layout
 from engine.v2.models.analog_artifact import make_board_analog_pool_artifact
 from engine.v2.models.frozen_state import serialize_frozen_state
 from engine.v2.models.lineage import Lineage
@@ -17,7 +17,7 @@ from engine.v2.models.recalibration_artifact import (
     make_recalibration_map_artifact, serialize_recalibration_artifact,
 )
 from engine.v2.scoring.release_bindings import ModelNotReady, resolve_release_binding
-from tests.test_checks_phase5_acceptance import _models
+from tests.v2.models.test_checks_phase5_acceptance import _models
 from tools import phase5_prepare_release as prep
 from tools.phase5_calibration_keys import staged_keys
 
@@ -159,7 +159,7 @@ def test_unreadable_local_catalog_is_not_absence(tmp_path, monkeypatch):
         if Path(path) == _local(tmp_path):
             raise PermissionError("private path")
         return real_open(path, *args, **kwargs)
-    monkeypatch.setattr(layout.os, "open", unreadable)
+    monkeypatch.setattr(os, "open", unreadable)
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert "private path" not in str(error.value)

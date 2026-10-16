@@ -9,7 +9,7 @@ import joblib
 import numpy as np
 import pytest
 
-from checks import phase5_release as layout
+from engine.v2.models import release_layout as layout
 from engine.v2.foundation import from_document, to_document
 from engine.v2.foundation import content_hash
 from engine.v2.models import (

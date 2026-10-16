@@ -20,7 +20,7 @@ from checks.phase4_frozen_bridge import prepare_frozen_replay
 from engine.v2.contracts import ScoreRequest
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.scoring.stages import NativeScoreInputs, receipt
-from tests.test_checks_phase5_acceptance import CLOCK, _linear, _release, _run
+from tests.v2.models.test_checks_phase5_acceptance import CLOCK, _linear, _release, _run
 from tools.capture_tier0_corpus import make_pair, package_strict_trace
 from tools.phase4_frozen_resources import package_frozen_resources
 from tools.phase4_request_translation import canonical_request_from_legacy
@@ -109,7 +109,7 @@ def test_traced_pair_replays_from_the_staged_release(tmp_path):
 
 
 def test_replay_reads_the_staged_bytes_not_the_corpus_copy(tmp_path):
-    from checks.phase5_release import deployment_root, object_relpath
+    from engine.v2.models.release_layout import deployment_root, object_relpath
 
     corpus = _corpus(tmp_path)
     root = _release(tmp_path)
@@ -124,7 +124,7 @@ def test_replay_reads_the_staged_bytes_not_the_corpus_copy(tmp_path):
 
 
 def test_rebound_plan_points_only_at_staged_objects(tmp_path):
-    from checks.phase5_release import deployment_root, read_manifest
+    from engine.v2.models.release_layout import deployment_root, read_manifest
     from engine.v2.models.deployment import resolve_release
 
     corpus = _corpus(tmp_path)
@@ -199,7 +199,7 @@ def test_fit_during_replay_fails_the_phase4_subject(tmp_path, monkeypatch):
 def test_checkpoint_resumes_without_replaying_again(tmp_path, monkeypatch):
     """A second ``replay_corpus`` call against the same corpus and checkpoint
     reuses the first call's row instead of re-verifying/re-scoring the pair."""
-    from checks.phase5_release import deployment_root, read_manifest
+    from engine.v2.models.release_layout import deployment_root, read_manifest
     from checks.tier0_corpus import load, resolve_corpus
     from engine.v2.models.deployment import resolve_release
 
@@ -244,7 +244,7 @@ def test_checkpoint_from_a_different_corpus_is_discarded(tmp_path, monkeypatch):
     so this test overwrites it directly to give corpus_b a genuinely
     different declared identity -- the same field a real capture's INDEX.json
     computes from its own content."""
-    from checks.phase5_release import deployment_root, read_manifest
+    from engine.v2.models.release_layout import deployment_root, read_manifest
     from engine.v2.models.deployment import resolve_release
 
     root = _release(tmp_path)

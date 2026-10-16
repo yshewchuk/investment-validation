@@ -34,7 +34,7 @@ from engine.v2.models.payoff_artifact import (
 from engine.v2.models.residual_artifact import make_driver_residual_pool_artifact
 from engine.v2.scoring import native_gate_features
 from engine.v2.scoring.release_bindings import ModelNotReady, resolve_release_binding
-from tests.test_v2_scoring_release_bindings import (
+from tests.v2.scoring.test_v2_scoring_release_bindings import (
     _dep_root,
     _obj,
     _row,

@@ -12,7 +12,7 @@ from engine.v2.models.frozen_state import FrozenStateError, serialize_frozen_sta
 from engine.v2.models.lineage import DataDependency, Lineage
 from engine.v2.scoring import release_bindings
 from engine.v2.scoring.release_bindings import ModelNotReady, resolve_release_binding
-from tests.test_v2_scoring_release_bindings import (
+from tests.v2.scoring.test_v2_scoring_release_bindings import (
     _assert_no_leak,
     _dep_root,
     _happy_catalog,

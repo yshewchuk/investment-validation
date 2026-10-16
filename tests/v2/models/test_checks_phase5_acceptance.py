@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from checks import phase5_acceptance as gate
-from checks import phase5_release as layout
+from engine.v2.models import release_layout as layout
 from engine.v2.models import (
     ArtifactInventoryMember,
     ArtifactMember,

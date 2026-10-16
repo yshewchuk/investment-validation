@@ -8,7 +8,7 @@ fold, under ``--training-root``) and the frozen states the training job's
 ``--state`` writes (driver and paired residual pools, via ``--frozen-state``).
 The admissible-depth table is built here from ``legacy_n_admissible_table()``,
 and the frozen chooser analog pool from ``data/features/chooser_analog_pool.parquet``.
-Which calibration folds to train: ``tools/phase5_calibration_keys.py``. Writes one release root (layout: ``checks/phase5_release.py``) under
+Which calibration folds to train: ``tools/phase5_calibration_keys.py``. Writes one release root (layout: ``engine/v2/models/release_layout.py``) under
 ``--out``, which may not be inside ``data/``:
 
 * the seven champion bindings are staged through
@@ -47,7 +47,12 @@ from typing import Iterable, Mapping
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from checks.phase5_release import (  # noqa: E402
+from checks.phase5_modules import modules_available  # noqa: E402
+from engine.v2.foundation import CONTENT_HASH_PREFIX, to_document  # noqa: E402
+from engine.v2.models import deployment  # noqa: E402
+from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease  # noqa: E402
+from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state  # noqa: E402
+from engine.v2.models.release_layout import (  # noqa: E402
     MANIFEST_NAME,
     MISSING,
     PENDING,
@@ -58,7 +63,6 @@ from checks.phase5_release import (  # noqa: E402
     deployment_root,
     manifest_body,
     member_row,
-    modules_available,
     object_relpath,
     preserve_legacy_manifest,
     sha256_bytes,
@@ -66,10 +70,6 @@ from checks.phase5_release import (  # noqa: E402
     write_manifest,
     write_object,
 )
-from engine.v2.foundation import CONTENT_HASH_PREFIX, to_document  # noqa: E402
-from engine.v2.models import deployment  # noqa: E402
-from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease  # noqa: E402
-from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state  # noqa: E402
 from engine.v2.models.releases import ModelReleaseInventory  # noqa: E402
 from engine.v2.models.serving_folds import (  # noqa: E402
     ChooserFoldPolicy,

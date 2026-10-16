@@ -39,7 +39,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from checks.phase5_release import deployment_root, object_relpath
+from engine.v2.models.release_layout import deployment_root, object_relpath
 
 PHASE4_UNVERIFIED = "P5_PHASE4_UNVERIFIED"
 PHASE4_MEMBER_ABSENT = "P5_PHASE4_MEMBER_ABSENT"

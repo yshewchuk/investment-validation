@@ -505,7 +505,7 @@ def _strict_trace_corpus(tmp_path) -> Path:
     """One genuinely traced STR-THRU pair, built by Phase 4's own tooling
     (adapted from tests/test_checks_phase5_phase4_replay.py::_corpus)."""
     from checks.phase4_frozen_bridge import prepare_frozen_replay
-    from tests.test_checks_phase5_acceptance import CLOCK, _linear
+    from tests.v2.models.test_checks_phase5_acceptance import CLOCK, _linear
     from tools.capture_tier0_corpus import make_pair, package_strict_trace
     from tools.phase4_request_translation import canonical_request_from_legacy
     from tools.phase4_frozen_resources import package_frozen_resources

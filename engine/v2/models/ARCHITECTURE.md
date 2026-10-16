@@ -123,7 +123,7 @@ size check. Existing callers omitting the ceiling retain their read contract.
 
 ### 2.1 Pool release assembly
 
-`checks/phase5_release_assembly.py`, beside the catalog in `checks/phase5_release.py`:
+`checks/phase5_release_assembly.py`, beside the catalog layout in `engine/v2/models/release_layout.py` (moved from `checks/phase5_release.py`; object hashing, `write_object` and the bounded catalog read live in `release_objects.py`, re-exported by `release_layout`, to stay inside the fan-out budget; the `modules_available` probe stays in `checks/phase5_modules.py` because production code may not import dynamically):
 
 - `derive_catalog(prior_catalog, *, release_id, expected_prior_release_id, outputs, chooser, cutoff) -> dict`
   — pure. Returns the candidate catalog body: the six pool members
@@ -386,7 +386,7 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 - Every non-model frozen-state builder (`training/residuals.py`,
   `training/chooser_pool.py`, …) returns an immutable dataclass; the
   release/state catalog (`phase5_release.json`) is owned by
-  `checks/phase5_release.py` and stored beside each release manifest.
+  `engine/v2/models/release_layout.py` and stored beside each release manifest.
   The release-root copy selects the last staged candidate for existing
   tooling; it is not authority for a different deployed release.
 
@@ -545,15 +545,15 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 Catalogs live at `<release_root>/deployment/releases/<release_id>/phase5_release.json`.
 Release IDs are validated before path construction; preservation requires
 a matching, hash-verified staged model manifest.
-`checks.phase5_release.read_manifest` selects a candidate using the root copy;
+`release_layout.read_manifest` selects a candidate using the root copy;
 production scoring instead selects the release named by `DEPLOYED`.
 
 | Condition | Outcome |
 |---|---|
 | Selected release-local catalog exists | It is authoritative; schema, self-hash and release identity must validate |
-| Cache | `checks.phase5_release.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
+| Cache | `release_layout.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
-| Local catalog corrupt or unreadable, a symlink or non-regular file, or over 64 MiB (`checks.phase5_release.read_manifest`; scoring `_read_state_catalog` likewise) | Refuse (`ReleaseLayoutError`, scoring `ModelNotReady`); never fall back to a valid root copy |
+| Local catalog corrupt or unreadable, a symlink or non-regular file, or over 64 MiB (`release_layout.read_manifest`; scoring `_read_state_catalog` likewise) | Refuse (`ReleaseLayoutError`, scoring `ModelNotReady`); never fall back to a valid root copy |
 | Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs; incumbent validation is read-only and precedes copying |
 | Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee, except `carry_forward_release` calls, which serialize on `deployment/.carry_forward.lock` (§2.1) |
 | Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |

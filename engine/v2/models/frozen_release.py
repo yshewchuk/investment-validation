@@ -30,9 +30,9 @@ _MEMBER_KIND = {
     PAIRED_RESIDUAL_POOL_ARTIFACT_V1: "paired_simulation",
     ADMISSIBLE_DEPTH_TABLE_V1: "calibration",
     BOARD_ANALOG_POOL_ARTIFACT_V1: "residual",
-    # checks/phase5_release.py ``chooser_analog_pool`` (kind "residual").
+    # engine/v2/models/release_layout.py ``chooser_analog_pool`` (kind "residual").
     CHOOSER_ANALOG_POOL_ARTIFACT_V1: "residual",
-    # checks/phase5_release.py ``trailing_pnl_cutoff`` (kind "threshold").
+    # engine/v2/models/release_layout.py ``trailing_pnl_cutoff`` (kind "threshold").
     TRAILING_CUTOFF_ARTIFACT_V1: "threshold",
 }
 

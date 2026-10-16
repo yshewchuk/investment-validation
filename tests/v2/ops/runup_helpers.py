@@ -3,7 +3,7 @@ from engine.v2.models.frozen_state import serialize_frozen_state
 from engine.v2.models.lineage import Lineage
 from engine.v2.models.payoff_artifact import make_payoff_surface_artifact, serialize_payoff_artifact
 from engine.v2.models.residual_artifact import make_driver_residual_pool_artifact
-from tests.test_v2_scoring_release_bindings import _obj, _row, _write_object
+from tests.v2.scoring.test_v2_scoring_release_bindings import _obj, _row, _write_object
 from tests.v2.ops.test_native_score_batch_driver_alias import _stage
 
 

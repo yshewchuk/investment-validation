@@ -23,7 +23,7 @@ from engine.v2.models.residual_artifact import (
 )
 from engine.v2.scoring import release_bindings
 from engine.v2.scoring.release_bindings import ModelNotReady, resolve_release_binding
-from tests.test_v2_scoring_release_bindings import (
+from tests.v2.scoring.test_v2_scoring_release_bindings import (
     _assert_no_leak,
     _dep_root,
     _obj,

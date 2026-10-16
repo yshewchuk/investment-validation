@@ -2,10 +2,10 @@
 """P5-6 integrated acceptance gate over one staged model release.
 
 Given a release root written by ``tools/phase5_prepare_release.py`` (layout:
-:mod:`checks.phase5_release`), the gate:
+:mod:`engine.v2.models.release_layout`), the gate:
 
 1. **Members.** Every expected model binding and every catalog state
-   (:data:`checks.phase5_release.STATE_SPECS`) has a staged member whose
+   (:data:`engine.v2.models.release_layout.STATE_SPECS`) has a staged member whose
    object bytes hash to the recorded ``content_hash``, and a typed loader
    accepts it where one exists. A MISSING or PENDING member is a finding, not
    a skip.
@@ -58,8 +58,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from checks.phase5_consumers import CONSUMERS, ReleaseContext  # noqa: E402
+from checks.phase5_modules import modules_available  # noqa: E402
 from checks.phase5_phase4_replay import REPLAY_CODES, replay_corpus  # noqa: E402
-from checks.phase5_release import (  # noqa: E402
+from engine.v2.foundation import content_hash, to_document  # noqa: E402
+from engine.v2.models import deployment  # noqa: E402
+from engine.v2.models.contracts import ModelRelease  # noqa: E402
+from engine.v2.models.release_layout import (  # noqa: E402
     EXPECTED_MODEL_BINDINGS,
     MISSING,
     PENDING,
@@ -68,13 +72,9 @@ from checks.phase5_release import (  # noqa: E402
     ReleaseLayoutError,
     StateSpec,
     deployment_root,
-    modules_available,
     read_manifest,
     sha256_bytes,
 )
-from engine.v2.foundation import content_hash, to_document  # noqa: E402
-from engine.v2.models import deployment  # noqa: E402
-from engine.v2.models.contracts import ModelRelease  # noqa: E402
 
 PHASE5_EVIDENCE_SCHEMA = "phase5_acceptance.v1.0"
 

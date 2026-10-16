@@ -162,13 +162,13 @@ for offline fold metadata. `tools/phase5_prepare_release.py`
 consumes `ChooserFoldPolicy` and `chooser_fold_outputs`, obtains registered
 policies, and invokes `tools/phase5_serving_folds.py`'s `preflight_chooser_fold`
 before publication.
-`checks/phase5_release.py` and `tools/phase5_prepare_release.py` use the shared bounded reader with final-component no-follow.
+`release_layout.py` and `tools/phase5_prepare_release.py` use the shared bounded reader with final-component no-follow.
 `checks/phase5_acceptance.py` publishes staging success after acceptance.
 `tools/phase5_prepare_release.py` invalidates prior success before re-preparation.
 `checks/phase5_release_assembly.py` re-stages a prior release under a new id
 (`deployment.stage_release`, `resolve_release`, `StagingRefused`, `DeploymentError`,
 `MAX_MANIFEST_BYTES`, and `releases.ModelReleaseRefusal`) when carrying pool objects forward;
-`checks/phase5_release.py` reaches `manifest_path` for catalog layout checks.
+`release_layout.py` reaches `manifest_path` for catalog layout checks.
 engine.v2.serving.operations (P6-4) imports the deployment pointer
 (`current_pointer`, `resolve_release`, plus the two refusal exception types)
 to serve the deployed model release read-only at `/models/release.json` --
