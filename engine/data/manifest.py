@@ -47,7 +47,8 @@ def write_text_atomic(path: Path, text: str) -> None:
     leaves the previous content untouched. The unique name keeps two writers
     from clobbering each other's temp file. The temp file is fsynced before
     the swap. This is the shared atomic text writer used by the SNAPSHOT,
-    MANIFEST, flag-report, nightly-report and ``--json`` writers.
+    MANIFEST, flag-report, dashboard nightly-state/report and the ``rebuild``
+    and ``tier4`` ``--json`` writers.
     """
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".",
                                     suffix=".tmp")

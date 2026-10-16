@@ -9,6 +9,7 @@ import json
 import os
 import stat
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 from engine.v2.foundation import ArtifactStore, to_document
@@ -123,11 +124,27 @@ def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
     return manifest.artifact_id
 
 
+def require_valid_population_keys(keys) -> None:
+    """Refuse any key that is not ``ticker|strategy|YYYY-MM-DD`` (canonical ISO date)."""
+    for key in keys:
+        parts = str(key).split("|")
+        try:
+            valid = (len(parts) == 3 and all(parts)
+                     and date.fromisoformat(parts[2]).isoformat() == parts[2])
+        except ValueError:
+            valid = False
+        if not valid:
+            raise fail("INVALID_REQUEST",
+                       "expected_population.json holds a key that is not "
+                       "ticker|strategy|event_date; fix or remove it")
+
+
 def _read_expected_population(args):
     keys = getattr(args, "expected_population_keys", None)
     if keys is not None:
         if not all(isinstance(v, str) for v in keys):
             raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
+        require_valid_population_keys(keys)
         return tuple(keys)
     if not args.expected_population:
         return ()
@@ -141,6 +158,7 @@ def _read_expected_population(args):
                    "oversize, or not valid JSON") from None
     if not isinstance(payload, list) or not all(isinstance(v, str) for v in payload):
         raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
+    require_valid_population_keys(payload)
     return tuple(payload)
 
 

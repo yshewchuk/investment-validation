@@ -53,6 +53,9 @@ from engine.v2.foundation import SystemClock, format_timestamp
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.workflows.commands import MAX_EXPECTED_POPULATION_BYTES as _MAX_POPULATION_BYTES
 from engine.v2.ops.workflows.commands import read_bounded_json
+from engine.v2.ops.workflows.commands import (
+    require_valid_population_keys as _require_valid_population_keys,
+)
 
 __all__ = [
     "TriggerReceipt",
@@ -670,20 +673,6 @@ def _population_keys(path) -> tuple[str, ...] | None:
 def _tickers_from_keys(keys) -> tuple[str, ...]:
     return tuple(sorted({str(key).split("|")[0] for key in (keys or ())
                          if "|" in key and key.split("|")[0]}))
-
-
-def _require_valid_population_keys(keys) -> None:
-    for key in keys:
-        parts = str(key).split("|")
-        try:
-            valid = (len(parts) == 3 and all(parts)
-                     and date.fromisoformat(parts[2]).isoformat() == parts[2])
-        except ValueError:
-            valid = False
-        if not valid:
-            raise fail("INVALID_REQUEST",
-                       "expected_population.json holds a key that is not "
-                       "ticker|strategy|event_date; fix or remove it")
 
 
 def _ops_root(root: Path) -> Path:
