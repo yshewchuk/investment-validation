@@ -29,6 +29,7 @@ is caught exactly like ``refs/heads/main``.
 Every referenced file is read at most ``MAX_REF_BYTES`` (256 MiB) plus one
 byte in a single call; a larger file is refused with a ``P7_REF_MALFORMED``
 finding. A FIFO or device node is refused as missing (``is_file``); the residual is an ``is_file``-then-open race on operator-named paths.
+The manifest file itself is read under the same cap by ``load_manifest``; a larger one raises ``ManifestUnreadable`` (exit 2).
 
 ``candidate``: ``{"commit": "<40- or 64-hex git sha>", "config": [{"name", "path",
 "sha256"}]}`` — at least one config identity; every referenced file must

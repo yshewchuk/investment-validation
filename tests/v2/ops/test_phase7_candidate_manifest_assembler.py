@@ -385,9 +385,9 @@ def test_git_nonzero_return_is_a_spec_error(monkeypatch, failing_arg):
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
         return real_run(cmd, *args, **kwargs)
 
+    head = real_run(["git", "-C", str(asm.ROOT), "rev-parse", "HEAD"], capture_output=True,
+                    text=True, check=True).stdout.strip()
     monkeypatch.setattr(asm.subprocess, "run", fake)
-    head = subprocess.run(["git", "-C", str(asm.ROOT), "rev-parse", "HEAD"], capture_output=True,
-                          text=True, check=True).stdout.strip()
     with pytest.raises(asm.SpecError, match="commit:"):
         _REAL_COMMIT({"commit": head}, asm.ROOT)
 
@@ -417,11 +417,13 @@ def test_duplicate_consumer_name_is_a_finding(spec, tmp_path):
                for r in result["findings"])
 
 
-def test_load_manifest_cap(tmp_path, monkeypatch):
+def test_load_manifest_cap_boundary(tmp_path, monkeypatch):
     path = tmp_path / "m.json"
     path.write_text('{"a": 1}')
     assert checker.load_manifest(path) == {"a": 1}
-    monkeypatch.setattr(checker, "MAX_REF_BYTES", 4)
+    monkeypatch.setattr(checker, "MAX_REF_BYTES", 8)
+    assert checker.load_manifest(path) == {"a": 1}
+    monkeypatch.setattr(checker, "MAX_REF_BYTES", 7)
     with pytest.raises(checker.ManifestUnreadable, match="exceeds"):
         checker.load_manifest(path)
 
