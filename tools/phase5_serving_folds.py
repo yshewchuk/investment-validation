@@ -1,14 +1,15 @@
 """Offline role-specific fold declarations from bounded bytes and registered policy.
 
 The descriptor is preparation metadata, not a runtime loader or inference view.
-Legacy cache decoding stays outside the native model package.
+Legacy cache decoding stays outside the native model package. Inputs must be
+trusted uncompressed output from the serving-fold writers; byte caps and hashes
+do not establish provenance or bound decoded memory.
 """
 from __future__ import annotations
 
 import hashlib
 import io
 import math
-import re
 from dataclasses import dataclass
 from datetime import date
 
@@ -16,7 +17,11 @@ from engine.v2.foundation import from_document, to_document
 from engine.v2.models import ArtifactMember, ModelRelease
 from engine.v2.models.deployment import StagedManifest, semantic_release_hash
 from engine.v2.models.serving_folds import (
-    ChooserFoldPolicy, ChooserServingFoldDescriptor, ServingFoldDescriptor, SizeFoldPolicy,
+    FOLD_PANEL_SHA256_PATTERN,
+    ChooserFoldPolicy,
+    ChooserServingFoldDescriptor,
+    ServingFoldDescriptor,
+    SizeFoldPolicy,
     chooser_fold_outputs,
 )
 
@@ -69,8 +74,8 @@ def preflight_chooser_fold(data: bytes, name: str, policy: ChooserFoldPolicy,
 def _preflight_fold(data, name, policy, release, *, role, output, interval_policy, result_type):
     if len(data) > MAX_FOLD_BYTES:
         raise ValueError("serving fold exceeds byte limit")
-    if (not isinstance(policy.panel_sha256, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", policy.panel_sha256)
+    if role == "size" and (not isinstance(policy.panel_sha256, str)
+            or not FOLD_PANEL_SHA256_PATTERN.fullmatch(policy.panel_sha256)
             or not policy.feature_order
             or any(not isinstance(key, str) or not key for key in policy.feature_order)
             or len(set(policy.feature_order)) != len(policy.feature_order)

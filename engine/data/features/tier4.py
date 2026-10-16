@@ -1659,21 +1659,24 @@ def serving_model(
         import joblib
 
         paths.assert_writable(SERVING_DIR).mkdir(parents=True, exist_ok=True)
-        joblib.dump(
-            {
-                "estimator": served.estimator,
-                "model_id": served.model_id,
-                "fold_start": str(fold.date()),
-                "tier3_snapshot": snapshot,
-                "features": list(served.features),
-                # Embedded so a future cache HIT (this process or another)
-                # never has to recompute _pool_before's model.prepare(panel)
-                # pass -- see the cache-hit branch above.
-                "pool_pred": served.pool_pred,
-                "pool_res": served.pool_res,
-            },
-            path,
-        )
+        # A file handle prevents filename suffixes from enabling compression.
+        with path.open("wb") as handle:
+            joblib.dump(
+                {
+                    "estimator": served.estimator,
+                    "model_id": served.model_id,
+                    "fold_start": str(fold.date()),
+                    "tier3_snapshot": snapshot,
+                    "features": list(served.features),
+                    # Embedded so a future cache HIT (this process or another)
+                    # never has to recompute _pool_before's model.prepare(panel)
+                    # pass -- see the cache-hit branch above.
+                    "pool_pred": served.pool_pred,
+                    "pool_res": served.pool_res,
+                },
+                handle,
+                compress=0,
+            )
     return served
 
 
