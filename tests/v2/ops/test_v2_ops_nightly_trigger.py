@@ -1872,6 +1872,7 @@ def test_prepare_default_plan_refuses_an_override_with_a_malformed_key(tmp_path,
             tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
             expected_shadow_snapshot_id="snap_before")
     assert raised.value.code == "INVALID_REQUEST"
+    assert "ticker|strategy|event_date" in raised.value.problem.message
 
 
 @pytest.mark.parametrize("kind", ["dangling_symlink", "symlink_to_regular_file",
