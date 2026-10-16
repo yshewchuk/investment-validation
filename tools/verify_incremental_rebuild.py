@@ -18,7 +18,7 @@ snapshot id are excluded; see :data:`IGNORED_STAT_KEYS`) and the quarantine
 flags (ignoring ``flagged_at``). The warm run FAILs unless every cached table
 reused at least one input with nothing re-parsed. The worker calls
 ``engine.data.rebuild.rebuild(tables=("events", "daily", "chains"),
-incremental=...)`` exactly as ``engine/dashboard/nightly.py`` does, so the
+incremental=...)`` as ``engine/dashboard/nightly.py`` does, so the
 ``_with_cache`` path and the manifest/snapshot writes are exercised.
 
 A source root missing any raw input tree the rebuild reads is refused with exit
@@ -112,9 +112,9 @@ def _run_worker(root: Path, mode: str, out: Path, cache_out: Path) -> None:
 
 
 def _worker(mode: str, report: Path, cache_report: Path) -> int:
-    """One subprocess build, called exactly as the nightly calls it."""
+    """One subprocess build, called as the nightly calls it."""
     from engine import paths
-    from engine.data import rebuild
+    from engine.data import manifest, rebuild
 
     paths.ensure_dirs()
     built: list = []
@@ -133,8 +133,9 @@ def _worker(mode: str, report: Path, cache_report: Path) -> int:
         )
     finally:
         rebuild.InputCache = original
-    report.write_text(json.dumps(result.as_dict(), sort_keys=True, default=str, indent=1))
-    cache_report.write_text(json.dumps(
+    manifest.write_text_atomic(
+        report, json.dumps(result.as_dict(), sort_keys=True, default=str, indent=1))
+    manifest.write_text_atomic(cache_report, json.dumps(
         {cache.table: dict(cache.stats, full=cache.full) for cache in built},
         sort_keys=True, default=str, indent=1,
     ))

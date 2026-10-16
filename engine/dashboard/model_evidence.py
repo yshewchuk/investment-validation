@@ -84,7 +84,13 @@ def _sanitize_reason(text: str) -> str:
     return re.sub(r"\S+", _redact_token, text)
 
 
-__all__ = ["build_model_evidence", "evidence_path", "load_model_evidence", "DECILES"]
+#: Public alias so callers outside this module need not import a private name:
+#: used by the nightly's degrade path and its repair-failure message.
+sanitize_reason = _sanitize_reason
+
+
+__all__ = ["build_model_evidence", "evidence_path", "load_model_evidence", "DECILES",
+           "sanitize_reason"]
 
 #: Buckets per feature. Ten is enough to show a shape and few enough to read.
 DECILES = 10

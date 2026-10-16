@@ -65,7 +65,7 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
-from engine.data import store
+from engine.data import manifest, store
 from engine.models import registry as registry_mod
 from engine.models.no_fit import forbid_fitting
 from engine.models.training import size_model
@@ -956,8 +956,9 @@ def _carried_prefix(
         detail += (
             f"; {len(unfilled):,} event(s) still uncovered beyond the "
             f"{BACKFILL_WINDOW_MONTHS}-month backfill window — left ABSENT from "
-            f"the table (flagged tier4_gap_partial; no --since rebuild covers "
-            f"them, only a full Tier-4 rebuild with no --since closes them): "
+            f"the table (reported in the build's gap_fill; no --since rebuild "
+            f"covers them, only a full Tier-4 rebuild with no --since closes "
+            f"them — the legacy nightly runs that rebuild automatically): "
             f"{list(map(tuple, unfilled[['ticker', 'event_date']].head(10).to_numpy()))}"
         )
     log(detail)
@@ -1406,13 +1407,15 @@ def main(argv: list[str] | None = None) -> int:
         help="recompute from this date's fold forward; earlier rows are carried over",
     )
     ap.add_argument("--out", default=None, help="write here instead of the canonical path")
-    ap.add_argument("--json", default=None, help="write the run report to this path")
+    ap.add_argument("--json", default=None,
+                    help="write the run report to this path (written atomically; "
+                    "a failed write keeps the previous report)")
     args = ap.parse_args(argv)
 
     report = build_table(since=args.since, out=args.out)
     print(json.dumps(report, indent=1), flush=True)
     if args.json:
-        Path(args.json).write_text(json.dumps(report, indent=1))
+        manifest.write_text_atomic(Path(args.json), json.dumps(report, indent=1))
     return 0
 
 

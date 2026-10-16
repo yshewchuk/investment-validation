@@ -34,7 +34,8 @@ from engine.data.features import tier4 as tier4_mod
 from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n_securities, n_trades
 from engine.data.rebuild_cache import InputCache
 
-__all__ = ["rebuild", "RebuildResult", "TABLE_ORDER"]
+__all__ = ["rebuild", "finalize_rebuild", "finalize_current_store", "RebuildResult",
+           "TABLE_ORDER"]
 
 #: ``daily_market`` before ``securities`` (which is derived from it) and before
 #: the panel (which joins it).
@@ -56,6 +57,10 @@ class RebuildResult:
     reports: dict = field(default_factory=dict)
     snapshot: str | None = None
     elapsed_s: float = 0.0
+    #: The wall-clock start of the build, stashed so a caller that rebuilds the
+    #: tables with ``finalize=False`` can finalize later (see
+    #: :func:`finalize_rebuild`). Not serialised: ``as_dict`` enumerates fields.
+    started: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -460,6 +465,7 @@ def rebuild(
     sample: int | None = None,
     tier4_since=None,
     incremental: bool = False,
+    finalize: bool = True,
 ) -> RebuildResult:
     """Rebuild the named tables.
 
@@ -471,6 +477,12 @@ def rebuild(
     ``sample`` cannot be combined with ``incremental``: a sampled run sees only
     part of the inputs, so committing its manifest would prune the cache of
     every input the sample skipped.
+
+    ``finalize=False`` returns after the builders, leaving the manifest and
+    snapshot unwritten and stashing ``started`` on the result for a later
+    :func:`finalize_rebuild`. A caller that must not publish a snapshot for a
+    bad build (the nightly, on a gapped Tier-4) uses this and only finalizes
+    once the result checks out; the default path is unchanged.
     """
     if incremental and sample:
         raise ValueError("--sample cannot be combined with --incremental")
@@ -495,17 +507,48 @@ def rebuild(
             continue
         result.reports[name] = builders[name]()
 
+    result.started = started
+    if not finalize:
+        result.elapsed_s = time.time() - started
+        return result
+    return finalize_rebuild(result)
+
+
+def finalize_rebuild(result: RebuildResult) -> RebuildResult:
+    """Write the manifest and snapshot for a built result and stamp elapsed.
+
+    Split from :func:`rebuild` so a caller can build the tables first and only
+    publish a snapshot after deciding the result is sound -- the nightly
+    defers finalizing the incremental Tier-3/4 build until the Tier-4 gap check
+    passes, so a night whose full repair is refused leaves no new snapshot behind.
+    """
     _banner("manifest + snapshot")
     stats = manifest.collect_stats()
     result.tables = stats
-    result.snapshot = manifest.write_snapshot(stats)
+    # Write the manifest BEFORE the snapshot: the snapshot is the file the
+    # native import reads, so it must be the last write. A manifest failure
+    # then leaves no snapshot for the night to import.
     manifest_path = manifest.write_manifest(stats)
+    result.snapshot = manifest.write_snapshot(stats)
     print(f"  snapshot {result.snapshot}", flush=True)
     print(f"  manifest {manifest_path}", flush=True)
 
-    result.elapsed_s = time.time() - started
+    result.elapsed_s = time.time() - result.started
     print(f"\nrebuild complete in {result.elapsed_s:.0f}s", flush=True)
     return result
+
+
+def finalize_current_store() -> RebuildResult:
+    """Write the manifest and SNAPSHOT of the store as found.
+
+    Called by ``engine.dashboard.nightly.mark_tiers_degraded`` on any tiers
+    degrade; when refresh ran it also covers the refresh rebuild's deferred
+    snapshot. The refresh rebuild was told
+    ``finalize=False`` because the tiers step would finalize, and a degraded
+    tiers step still scores the store as it is found (the refreshed store when
+    refresh ran), so the SNAPSHOT of that store is written here.
+    """
+    return finalize_rebuild(RebuildResult(started=time.time()))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -528,7 +571,9 @@ def main(argv: list[str] | None = None) -> int:
         help="reuse cached per-input parses for daily/chains (set "
         "INVESTING_PLAN_REBUILD_FULL=1 to force a full parse that rewrites the cache)",
     )
-    ap.add_argument("--json", default=None, help="write the run report to this path")
+    ap.add_argument("--json", default=None,
+                    help="write the run report to this path (written atomically; "
+                    "a failed write keeps the previous report)")
     ap.add_argument(
         "--tier4-since",
         default=None,
@@ -544,7 +589,8 @@ def main(argv: list[str] | None = None) -> int:
     result = rebuild(tables=tables, sample=args.sample, tier4_since=args.tier4_since,
                      incremental=args.incremental)
     if args.json:
-        Path(args.json).write_text(json.dumps(result.as_dict(), indent=1, default=str))
+        manifest.write_text_atomic(Path(args.json),
+                                   json.dumps(result.as_dict(), indent=1, default=str))
     return 0
 
 

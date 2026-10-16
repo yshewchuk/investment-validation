@@ -35,7 +35,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -51,7 +50,8 @@ from engine.score import LADDER_STEP
 
 __all__ = [
     "NightlyStop", "NightlyReport", "run_nightly", "refresh_calendar_data",
-    "single_run_lock",
+    "repair_tier4_gap", "repair_tier4_gap_if_needed",
+    "single_run_lock", "mark_tiers_degraded",
     "strike_ladder", "validate_refresh",
 ]
 
@@ -568,6 +568,7 @@ def refresh_calendar_data(
     sessions: int = CHAIN_SESSIONS,
     forward: bool = True,
     max_confirmations: int = 400,
+    finalize: bool = True,
 ) -> dict:
     """Refresh what the board scores from, cheapest and most load-bearing first.
 
@@ -593,6 +594,10 @@ def refresh_calendar_data(
 
     Everything is ``live=True``, one cache entry per source per day, so a re-run
     the same day is a cache hit rather than a re-spend.
+
+    ``finalize=False`` defers the refresh rebuild's manifest/SNAPSHOT write;
+    the nightly passes it when the tiers step will write the one SNAPSHOT
+    after the Tier-4 gap check.
     """
     from engine.data.fetch import Fetcher
 
@@ -703,7 +708,8 @@ def refresh_calendar_data(
     # Incremental: unchanged raw inputs reuse their cached parse (byte-identical
     # outputs; see engine/data/rebuild_cache.py). INVESTING_PLAN_REBUILD_FULL=1
     # forces a full parse.
-    rebuild_result = rebuild(tables=("events", "daily", "chains"), incremental=True)
+    rebuild_result = rebuild(tables=("events", "daily", "chains"), incremental=True,
+                             finalize=finalize)
     out["rebuild"] = {"snapshot": rebuild_result.snapshot, "elapsed_s": round(rebuild_result.elapsed_s, 1)}
     return out
 
@@ -740,6 +746,32 @@ def _recently_printed(as_of, tickers: Sequence[str]) -> list[str]:
 MAX_PANEL_LAG_SESSIONS = 2
 
 
+def _tier4_gap_distinct_keys(gap_fill: dict) -> tuple[dict, set]:
+    """Split a Tier-4 build's ``gap_fill`` into producers-with-a-gap and keys.
+
+    ``gap_fill`` maps producer name -> report entry; an entry's
+    ``out_of_window_gap`` (when present) is a list of ``{"ticker",
+    "event_date"}`` dicts for keys that producer's build left ABSENT this run
+    (see ``engine.data.features.tier4`` §6a — never a null-forecast row).
+
+    The SAME gap normally shows up in every producer's list (they all read
+    the same on-disk table), so counting event(s) by summing each producer's
+    list length overcounts by a factor of however many producers are wired —
+    a 3-event gap across 4 producers would report as 12. This returns the
+    ``{name: info}`` map of producers that left a gap together with the
+    DISTINCT ``(ticker, event_date)`` keys they name, so every caller counts
+    events the same way.
+    """
+    partial = {name: info for name, info in gap_fill.items()
+               if info.get("out_of_window_gap")}
+    distinct = {
+        (entry["ticker"], entry["event_date"])
+        for info in partial.values()
+        for entry in info["out_of_window_gap"]
+    }
+    return partial, distinct
+
+
 def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
     """The ``tier4_gap_partial`` flag for a Tier-4 build report's ``gap_fill``
     section, or ``None`` if nothing is out-of-window.
@@ -755,15 +787,9 @@ def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
     a 3-event gap across 4 producers would report as 12. Count DISTINCT
     ``(ticker, event_date)`` keys instead.
     """
-    partial = {name: info for name, info in gap_fill.items()
-               if info.get("out_of_window_gap")}
+    partial, distinct = _tier4_gap_distinct_keys(gap_fill)
     if not partial:
         return None
-    distinct = {
-        (entry["ticker"], entry["event_date"])
-        for info in partial.values()
-        for entry in info["out_of_window_gap"]
-    }
     n = len(distinct)
     return {
         "kind": "tier4_gap_partial",
@@ -772,6 +798,167 @@ def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
                    f"forecast row) in {sorted(partial)}; a full Tier-4 "
                    "rebuild with no --since closes out-of-window gaps.")[:300],
     }
+
+
+#: Wall-clock budget for the full Tier-4 repair rebuild (~17-24 min healthy,
+#: gap nights only). Checked after the rebuild returns, not enforced mid-run.
+TIER4_REPAIR_BUDGET_S = 3600
+
+
+def _refuse(report: NightlyReport, step: str, detail: str) -> NightlyStop:
+    """Record a refusal on ``report`` and return the typed stop to raise.
+
+    Sets ``report.stopped``, appends a ``tiers_stop`` flag carrying the typed
+    code, and writes the run's flag report best-effort (a failed flag write
+    must never replace the typed stop being raised). Returns the ``NightlyStop``
+    so every refusal site reads ``raise _refuse(...)``.
+    """
+    report.stopped = step
+    report.flags.append({"kind": "tiers_stop", "detail": detail[:300]})
+    try:
+        _write_flag_report(report.as_of, report.flags, report.steps)
+    except Exception:  # noqa: BLE001 — a failed flag write must not mask the stop
+        pass
+    return NightlyStop(step, detail)
+
+
+def _repair_failed(report: NightlyReport, exc: Exception) -> NightlyStop:
+    """The typed stop for a Tier-4 repair that raised or failed to finalize."""
+    from engine.dashboard.model_evidence import sanitize_reason
+
+    return _refuse(
+        report,
+        "tier4_repair",
+        f"TIER4_REPAIR_FAILED: {type(exc).__name__}: {sanitize_reason(str(exc))}"[:300],
+    )
+
+
+def repair_tier4_gap(report: NightlyReport, rebuild_tables, *, clock=time.time,
+                     finalize) -> None:
+    """Full Tier-4 rebuild (no ``--since``) to close an out-of-window gap.
+
+    The incremental build's backfill window skipped keys it can never reach;
+    a full rebuild is the only thing that closes them. A repair that raises,
+    blows :data:`TIER4_REPAIR_BUDGET_S`, or still leaves a gap stops the run
+    with a typed code at the start of the detail — a gapped Tier-4 must not
+    be scored, published, or imported over. Success records
+    ``steps["tiers"]["tier4_repair"]`` and appends no flag.
+
+    The repair is itself built with ``finalize=False`` and only finalized once
+    BOTH the budget and gap checks pass: the snapshot must not be written for a
+    build that was refused, exactly as for the incremental result. A finalize
+    failure is a refused repair too, so it stops with the same typed code.
+    """
+    start = clock()
+    try:
+        result = rebuild_tables(("tier4",), tier4_since=None, finalize=False)
+    except Exception as exc:
+        raise _repair_failed(report, exc) from exc
+    elapsed = clock() - start
+    if elapsed > TIER4_REPAIR_BUDGET_S:
+        raise _refuse(
+            report,
+            "tier4_repair",
+            (f"TIER4_REPAIR_BUDGET: full Tier-4 rebuild took {elapsed:.1f}s, "
+             f"over the {TIER4_REPAIR_BUDGET_S}s budget")[:300],
+        )
+    gap_fill = result.reports.get("tier4", {}).get("gap_fill", {})
+    partial, distinct = _tier4_gap_distinct_keys(gap_fill)
+    if partial:
+        detail = (
+            "TIER4_GAP_REMAINS: the full Tier-4 rebuild ran and still left "
+            f"{len(distinct)} event(s) unfilled (absent from the table) in "
+            f"{sorted(partial)}"
+        )[:300]
+        raise _refuse(report, "tier4_repair", detail)
+    try:
+        finalized = finalize(result)
+    except Exception as exc:
+        raise _repair_failed(report, exc) from exc
+    # The night's SNAPSHOT hash belongs in the report: the repair's finalize is
+    # the write that produced it. ``getattr`` tolerates a fake finalize (None).
+    report.steps["tiers"]["snapshot"] = getattr(finalized, "snapshot", None)
+    report.steps["tiers"]["tier4_repair"] = {
+        "ran": True,
+        "elapsed_s": round(elapsed, 1),
+    }
+
+
+def mark_tiers_degraded(report: NightlyReport, exc: Exception) -> None:
+    """Degrade the tiers step and append the ``tiers_degraded`` flag.
+
+    The single definition of what "the tiers step degraded" means: a rebuild
+    or a finalize failure records the error on ``steps["tiers"]`` and appends
+    the flag, and the run continues to score rather than leaving the board
+    dark. Called from run_nightly's rebuild handler and from the gap-free
+    finalize path of :func:`repair_tier4_gap_if_needed`.
+
+    A degraded tiers step still scores the store as found (the refreshed store
+    when refresh ran), and the SNAPSHOT of that store is written here (the
+    deferred refresh snapshot when refresh ran; the scorer reads the SNAPSHOT
+    digest). If that write fails the digest would no longer describe
+    the store being scored, so the run does NOT continue: the failure is
+    recorded (type only) as ``steps["tiers"]["snapshot_error"]`` and the helper
+    raises ``NightlyStop`` with the typed ``TIERS_SNAPSHOT_FAILED`` code
+    (exception type only, no text) from the snapshot error.
+
+    The exception text reaches the published bundle, so it is scrubbed of
+    local paths under the roots ``model_evidence.sanitize_reason`` knows before
+    either field is built.
+    """
+    from engine.dashboard.model_evidence import sanitize_reason
+
+    reason = sanitize_reason(str(exc))
+    report.steps["tiers"] = {"degraded": True,
+                             "error": f"{type(exc).__name__}: {reason}"[:300]}
+    report.flags.append({
+        "kind": "tiers_degraded",
+        "detail": ("Tier 3/Tier 4 step incomplete (the rebuild or its snapshot "
+                   "write failed) — scoring from the stored panel and "
+                   f"forecasts, which may not cover recent prints. {type(exc).__name__}: {reason}")[:300],
+    })
+    from engine.data.rebuild import finalize_current_store
+
+    try:
+        finalized = finalize_current_store()
+    except Exception as snap_exc:
+        report.steps["tiers"]["snapshot_error"] = f"{type(snap_exc).__name__}"
+        raise _refuse(
+            report, "tiers", f"TIERS_SNAPSHOT_FAILED: {type(snap_exc).__name__}"
+        ) from snap_exc
+    else:
+        # The degrade path's finalize wrote the deferred SNAPSHOT; record its
+        # hash. ``getattr`` tolerates a fake finalize that returns None.
+        report.steps["tiers"]["snapshot"] = getattr(finalized, "snapshot", None)
+
+
+def repair_tier4_gap_if_needed(report: NightlyReport, tier_result,
+                                rebuild_tables, *, clock=time.time,
+                                finalize) -> None:
+    """Close an out-of-window Tier-4 gap, else finalize the incremental result.
+
+    Called by the tiers step once the incremental rebuild returns. When the
+    build left an out-of-window gap (``tier4_gap_partial``) a full Tier-4
+    repair runs and finalizes its own result; with no gap the incremental
+    result is sound and its snapshot is written here. A finalize failure on
+    the gap-free path degrades the tiers step exactly as a rebuild failure
+    does, so the run keeps scoring rather than leaving the board dark.
+    """
+    gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
+    if _tier4_gap_partial_flag(gap_fill) is not None:
+        repair_tier4_gap(report, rebuild_tables, clock=clock, finalize=finalize)
+    else:
+        # No gap: the incremental result is sound, so write its snapshot now.
+        # The nightly passes finalize=False to the incremental rebuild for
+        # exactly this reason — a refused repair must leave no snapshot behind.
+        try:
+            finalized = finalize(tier_result)
+        except Exception as exc:
+            mark_tiers_degraded(report, exc)
+        else:
+            # The finalize wrote the night's SNAPSHOT; record its hash. The
+            # ``getattr`` keeps a fake finalize returning None from crashing.
+            report.steps["tiers"]["snapshot"] = getattr(finalized, "snapshot", None)
 
 
 def _panel_staleness_flags(as_of) -> list[dict]:
@@ -1112,10 +1299,12 @@ def _upcoming_event_rows(events: pd.DataFrame) -> list[dict]:
 
 
 def _write_flag_report(as_of, flags: list[dict], steps: dict) -> Path:
+    from engine.data.manifest import write_text_atomic
+
     out = paths.assert_writable(paths.REPORTS / "phase3_flags")
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{pd.Timestamp(as_of).date()}.json"
-    path.write_text(json.dumps(
+    write_text_atomic(path, json.dumps(
         {"as_of": str(pd.Timestamp(as_of).date()),
          "generated_at": datetime.now(timezone.utc).isoformat(),
          "flags": flags, "steps": list(steps)},
@@ -1243,9 +1432,15 @@ def run_nightly(
         from engine.data.throttle import QuotaExhausted
 
         try:
+            # The snapshot is deferred to the tiers step: its own
+            # finalize_rebuild writes the one snapshot after the Tier-4 gap
+            # check — or mark_tiers_degraded writes it when the tiers step
+            # degrades. When tiers is off there is no later finalize, so the
+            # refresh rebuild finalizes as before. So defer here exactly when a
+            # later step will finalize.
             report.steps["refresh"] = refresh_calendar_data(
                 calendar_tickers, as_of, fetcher=fetcher, horizon_days=horizon_days,
-                sessions=chain_sessions,
+                sessions=chain_sessions, finalize=not tiers,
             )
             # The calendar may have moved under the refresh — re-read it.
             events = store.read_table(
@@ -1335,7 +1530,7 @@ def run_nightly(
     # which is wrong but visible; a nightly that refuses to render leaves the
     # board dark, which is worse and less visible.
     if refresh and tiers:
-        from engine.data.rebuild import rebuild as rebuild_tables
+        from engine.data.rebuild import finalize_rebuild, rebuild as rebuild_tables
 
         # -- 2b(i). realized moves, the layer BOTH tiers are derived from ----
         # Rebuilding Tier 3/4 without this cannot advance coverage by a day:
@@ -1386,35 +1581,43 @@ def run_nightly(
                            f"since {moves_since}. {type(exc).__name__}: {exc}")[:300],
             })
 
+        tier_result = None
         try:
             # Tier 4 only has to redo the tail Tier 3 actually moved. Its own
             # contract: "Tier 3 changing at date D makes every forecast from D
             # onward stale ... so a partial Tier-3 rebuild must be followed by
             # --since D". The nightly passed nothing and rebuilt ~100 monthly
             # folds x 4 producers from 2018 every night to absorb one day.
-            tier_result = rebuild_tables(("panel", "tier4"), tier4_since=moves_since)
+            #
+            # finalize=False: the snapshot is written only after the Tier-4 gap
+            # check below passes (or the full repair finalizes it). That is what
+            # keeps a night whose repair is refused from leaving a snapshot for
+            # the native import to read.
+            tier_result = rebuild_tables(("panel", "tier4"), tier4_since=moves_since, finalize=False)
             report.steps["tiers"] = {
                 "rebuilt": ["panel", "tier4"],
                 "tier4_since": moves_since,
                 "elapsed_s": getattr(tier_result, "elapsed_s", None),
             }
-            # A bounded gap-fill (engine/data/features/tier4.py) can now close
-            # a hole in the carried prefix without raising at all — but a gap
-            # OLDER than its backfill window is a named, logged skip, not a
-            # silent pass. Surface that here too, or the only place it would
-            # be visible is a JSON report field nobody is watching.
-            gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
-            flag = _tier4_gap_partial_flag(gap_fill)
-            if flag is not None:
-                report.flags.append(flag)
+            # An out-of-window Tier-4 gap (tier4_gap_partial) is not skipped:
+            # repair_tier4_gap_if_needed (called after this try/except, which
+            # keeps tier_result for it) repairs it or raises a typed TIER4_*
+            # stop. A rebuild failure here goes to mark_tiers_degraded
+            # (tiers_degraded).
         except Exception as exc:
-            report.steps["tiers"] = {"degraded": True,
-                                     "error": f"{type(exc).__name__}: {exc}"[:300]}
-            report.flags.append({
-                "kind": "tiers_degraded",
-                "detail": ("Tier 3/Tier 4 not rebuilt — scoring from the stored panel and "
-                           f"forecasts, which may not cover recent prints. {type(exc).__name__}: {exc}")[:300],
-            })
+            # mark_tiers_degraded is the one definition of the degrade path: the
+            # "kind": "tiers_degraded" literal lives there (not here); it also
+            # writes report.steps["tiers"].
+            mark_tiers_degraded(report, exc)
+
+        # A typed TIER4_* stop from the repair propagates (it is not the
+        # "degraded" path above), so the run fails before score or import.
+        # tier_result stays None exactly when the rebuild above raised (it is
+        # initialised to None before the try), so the None check alone already
+        # excludes the degraded path.
+        if tier_result is not None:
+            repair_tier4_gap_if_needed(report, tier_result, rebuild_tables,
+                                        finalize=finalize_rebuild)
 
         # -- 2b(ii). did any of that actually advance? ----------------------
         # The failure this exists for was silent: the pull wrote nothing, the
@@ -1783,24 +1986,10 @@ def _backup_sync(flags: list) -> dict:
 
 
 def _write_report_atomic(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically via a sibling temp file."""
+    """Write ``text`` to ``path``; delegates to the shared atomic text writer."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    tmp_path = Path(tmp_name)
-    fd_open = True
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            fd_open = False
-            handle.write(text)
-
-        os.chmod(tmp_path, 0o644)
-        os.replace(tmp_path, path)
-    finally:
-        if fd_open:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        with contextlib.suppress(OSError):
-            tmp_path.unlink()
+    from engine.data.manifest import write_text_atomic
+    write_text_atomic(path, text)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
