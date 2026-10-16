@@ -380,6 +380,7 @@ SQLite transactions and existing canonical JSON/content-hash helpers own identit
 | Submit with partial registration | Refuse `EXPERIMENT_IDENTITY_CONFLICT` before staging/jobs; only register resumes missing reservations. |
 | Changed request, source bytes, environment, binding or existing roster arm | `EXPERIMENT_IDENTITY_CONFLICT`; preserve sealed evidence and create no roster for a pre-existing roster-arm/spec conflict. Earlier non-roster arms do not prevent sealing. Both Python APIs translate filesystem/SQLite failures during preparation, sealing, reservation, staging or graph submission to `INPUT_CHANGED`, with private exception type; existing typed errors retain their policy. |
 | Unresolved initial or saved pin | `SNAPSHOT_UNRESOLVED`, without fallback. |
+| `code_root` that is not path-like | `INVALID_EXPERIMENT_SPEC`, never a leaked `TypeError`. |
 | Changed explicit IDs | Saved-pin metadata admission gives R5 for excluded/unknown IDs; changed eligible membership gives R6. |
 | Child admission | Exact staged identity, runner-source closure and single-thread environment are required before inputs; malformed staged `ValueError`/`TypeError`/`KeyError`/`RecursionError` gives `INVALID_EXPERIMENT_SPEC`. |
 | Child success | Independent prior-session history/fitting/pricing; one create-only `native_gate_result.v1.0` supervisor-committed artifact. |
