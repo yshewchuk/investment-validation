@@ -66,7 +66,7 @@ def append_record(conn, store, run_id, slot, body, *, replay=True, absent=()):
         return previous
     payload = canonical_json({"schema_version": SCHEMA, "run_id": run_id, "slot": slot, "body": body}).encode()
     if len(payload) > MAX_BYTES:
-        raise fail("INVALID_EXPERIMENT_SPEC", "search journal record exceeds its byte limit")
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "search journal record exceeds its byte limit")
     try:
         ref = store.publish_bytes(payload, schema_ref=SCHEMA)
     except ArtifactError as error:

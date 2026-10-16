@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from engine.v2.contracts import ArtifactRef
+from engine.v2.contracts import FAILURE_CODES, ArtifactRef
 from engine.v2.foundation import (
     ArtifactError,
     ArtifactStore,
@@ -61,8 +61,8 @@ def _problem(code, message):
         yield
     assert to_document(caught.value.problem) == {
         "code": code,
-        "category": "resource" if code == "RESOURCE_UNAVAILABLE" else "validation",
-        "retryable": code == "RESOURCE_UNAVAILABLE",
+        "category": FAILURE_CODES[code][0],
+        "retryable": FAILURE_CODES[code][1],
         "message": message,
         "stage": None,
         "trace_id": None,
@@ -88,7 +88,7 @@ def test_write_cap_counts_utf8_bytes_and_accepts_exact_limit(journal, monkeypatc
     assert len(payload) == size
     assert len(payload.decode()) < size
     if size > 256:
-        with _problem("INVALID_EXPERIMENT_SPEC", "search journal record exceeds its byte limit"):
+        with _problem("RESOURCE_LIMIT_EXCEEDED", "search journal record exceeds its byte limit"):
             records.append_record(journal.conn, journal.store, RUN, SLOT, wrapper["body"])
         assert journal.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == 0
         assert not (journal.store.root / "objects").exists()

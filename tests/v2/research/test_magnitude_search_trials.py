@@ -270,6 +270,24 @@ def test_native_input_drift_blocks_selection_without_excluding_candidate(case, m
         case.recorder.freeze()
 
 
+def test_native_history_binding_drift_refuses_exactly_before_readmission(case, monkeypatch):
+    args = _cases(case)[0]
+    started = case.recorder.start(*args)
+    changed = {**case.source.registration.document["magnitude_history"], "unexpected_identity": "changed"}
+    monkeypatch.setattr(trials, "history_binding", lambda *a, **k: changed)
+    monkeypatch.setattr(trials, "preflight_magnitude_targets", lambda *a, **k: pytest.fail("preflight opened"))
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("validation opened"))
+    with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"):
+        case.recorder.record(*args, forecasts=_forecasts(case, args))
+    assert case.recorder._read("forecasts:" + started["trial_id"]) is not None
+    assert case.recorder._read("terminal:" + started["trial_id"]) is None
+    with _assert_error("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
+        case.recorder.freeze()
+    assert case.recorder._read("selection") is None
+    with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
+        case.recorder.start(*args)
+
+
 def test_corrupt_any_link_blocks_freeze(case):
     _all(case)
     for slot_prefix in ("start", "inputs", "cohort", "forecasts", "terminal"):

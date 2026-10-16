@@ -212,12 +212,20 @@ class SearchTrials:
                 raise ValueError
             submitted = self._read("forecasts:" + key)
             if submitted is not None:
-                submitted = self._forecasts(submitted, inner, plan["horizons"])
+                try:
+                    submitted = self._forecasts(submitted, inner, plan["horizons"])
+                except OpsError:
+                    raise ValueError from None
             if record["status"] == "succeeded":
                 forecasts = [{name: row[name] for name in ("event_id", "horizon_sessions", "predicted_absolute_move_pct")}
                              for row in record["predictions"]]
-                if (record["inputs_id"] != admitted["inputs_id"] or forecasts != submitted
-                        or record["metrics"] != magnitude_metrics(record["predictions"])):
+                if record["inputs_id"] != admitted["inputs_id"] or forecasts != submitted:
+                    raise ValueError
+                try:
+                    metrics = magnitude_metrics(record["predictions"])
+                except (OpsError, OverflowError):
+                    raise ValueError from None
+                if record["metrics"] != metrics:
                     raise ValueError
             elif record["status"] not in ("failed", "refused"):
                 raise ValueError
