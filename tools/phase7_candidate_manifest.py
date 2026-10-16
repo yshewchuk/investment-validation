@@ -68,6 +68,12 @@ def _rows(field: str, value) -> list[dict]:
     return [_obj(f"{field}[{i}]", row) for i, row in enumerate(value)]
 
 
+def _strings(field: str, row: dict, *keys: str) -> None:
+    for key in keys:
+        if not isinstance(row.get(key), str) or not row[key].strip():
+            raise SpecError(f"{field}.{key}: required non-empty string")
+
+
 def _ref(field: str, row: dict, *keys: str) -> dict:
     path, digest = _sha256(field, row.get("path"))
     out = {k: row.get(k) for k in keys}
@@ -116,7 +122,12 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
     owner = spec.get("registry_owner")
     if not isinstance(owner, str) or not owner:
         raise SpecError("registry_owner: required string")
-    jobs = registry_jobs(owner, set(spec.get("official_registry_kinds", [])))
+    official = spec.get("official_registry_kinds", [])
+    known = set(stages.registry().names())
+    if not isinstance(official, list) or not all(isinstance(k, str) and k in known
+                                                 for k in official):
+        raise SpecError("official_registry_kinds: must be a list of registry job kind names")
+    jobs = registry_jobs(owner, set(official))
     seen = {j["id"] for j in jobs}
     for extra in _rows("extra_jobs", spec.get("extra_jobs", [])):
         jid = extra.get("id")
@@ -124,12 +135,22 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
             raise SpecError(f"extra_jobs: id {jid!r} is not a unique string "
                             "(duplicate or registry collision)")
         seen.add(jid)
+        _strings(f"extra_jobs[{jid}]", extra, "schedule", "owner", "kind")
+        if not isinstance(extra.get("writes_official"), bool):
+            raise SpecError(f"extra_jobs[{jid}].writes_official: must be a JSON boolean")
         jobs.append({k: extra.get(k) for k in _JOB_FIELDS})
     jobs.sort(key=lambda j: j["id"])
     config = _rows("config", spec.get("config", []))
     evidence = _rows("phase_evidence", spec.get("phase_evidence", []))
     snapshot = _obj("data_snapshot", spec.get("data_snapshot"))
     deployment = _obj("model_deployment", spec.get("model_deployment"))
+    for i, row in enumerate(config):
+        _strings(f"config[{i}]", row, "name")
+    for i, row in enumerate(evidence):
+        _strings(f"phase_evidence[{i}]", row, "phase", "schema_version", "status")
+    _strings("data_snapshot", snapshot, "snapshot_id")
+    _strings("model_deployment", deployment, "release_id")
+    _obj("authority", spec.get("authority"))
     manifest = {
         "schema_version": checker.MANIFEST_SCHEMA,
         "candidate": {"commit": commit,

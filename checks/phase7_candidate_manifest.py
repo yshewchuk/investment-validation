@@ -105,6 +105,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SCHEMA = "phase7_candidate_manifest.v1.0"
 JOB_KINDS = ("scheduled_writer", "background", "reader")
 REQUIRED_PHASES = ("3B", "4", "5", "6")
+MAX_REF_BYTES = 256 * 1024 * 1024
 
 #: Identity values that mean "whatever is live now" — exactly what P7-1
 #: forbids ("no implicit latest dependency").
@@ -273,6 +274,10 @@ def _read_verified(findings: _Findings, subject: str, path: Any, digest: Any,
     if target is None or want is None:
         return None
     try:
+        if target.stat().st_size > MAX_REF_BYTES:
+            findings.add(REF_MALFORMED, subject,
+                         f"{target} exceeds the {MAX_REF_BYTES}-byte reference cap")
+            return None
         data = target.read_bytes()
     except OSError as exc:
         findings.add(REF_MISSING, subject, f"{target}: {type(exc).__name__}")
@@ -533,7 +538,11 @@ def _check_consumer_inventory(inv: Mapping, findings: _Findings, root: Path) -> 
             findings.add(BAD_CONSUMER, f"consumer_inventory.consumers[{i}]",
                          f"entry {name!r} is not a consumer name string")
             continue
-        _identity(findings, "consumer_inventory", "consumer", name)
+        # A consumer name is a label (a real route may end in ``/current``), not a pinned
+        # ref, so only emptiness is rejected; the implicit-latest rule applies to refs.
+        if not name.strip():
+            findings.add(MISSING_FIELD, "consumer_inventory", "consumer name is empty")
+            continue
         if name in seen:
             findings.add(DUPLICATE, f"consumer:{name}", "consumer listed twice")
         seen.add(name)

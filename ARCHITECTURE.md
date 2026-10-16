@@ -507,10 +507,12 @@ Only a tracked path absent from the worktree reads as empty.
   never abort the required graph); `Service._reconcile_native_parity`,
   calling `nightly.submit_native_parity_if_ready`, submits
   `native_parity` the identical way.
-- **Assembling the P7-1 manifest.** `tools/phase7_candidate_manifest.py` is a
-  operator-run assembler (no production caller) for
+- **Assembling the P7-1 manifest.** `tools/phase7_candidate_manifest.py` is an
+  operator-run assembler (no production caller; listed here beside its
+  sibling Phase 6 inventory tool) for
   `checks/phase7_candidate_manifest.py`. It takes one operator spec file
-  (path on the command line, at most 1 MiB, kept outside the repository)
+  (path on the command line, at most 1 MiB; keep it outside the repository,
+  which nothing enforces)
   holding the required candidate commit, config/snapshot/release/phase
   evidence paths (each at most 256 MiB, hashed by streaming), `authority`
   values (legacy scheduler entry, credential owners, retained old
@@ -524,14 +526,16 @@ Only a tracked path absent from the worktree reads as empty.
   echoes the spec's `authority` block and absolute resolved paths, so it is
   a private artifact like the spec. A registry kind is `scheduled_writer`
   with `writes_official` true when its namespaces include `official` or the
-  operator lists it in `official_registry_kinds` (the registry does not yet
-  declare official-write effects per kind; `publication` and `backup`
-  currently need that listing); otherwise it is `background` (has effects)
-  or `reader`.
+  operator lists it in `official_registry_kinds` (a list of registry kind
+  names; today no kind can run in the official namespace, so the list is
+  normally empty and exists for kinds that become official-capable);
+  otherwise it is `background` (has effects) or `reader`. Registry rows get a
+  synthetic `native:<kind>` schedule.
 
   | Condition | Outcome |
   |---|---|
   | spec missing/oversize/not a JSON object, a section of the wrong shape, a duplicate or colliding extra-job id, missing `commit` or `registry_owner`, a referenced file missing or over the cap | exit 2, nothing written for that run beyond files already produced |
+  | spec file unreadable, not UTF-8/JSON, or an uncreatable `--out-dir` | exit 2 |
   | spec `commit` differs from this checkout's `HEAD` | exit 2 (registry and inventory would describe another commit) |
   | `--out-dir` inside the repository | exit 2 |
   | the checker reports findings | exit 1, manifest still written |

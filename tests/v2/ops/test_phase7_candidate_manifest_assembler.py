@@ -116,7 +116,20 @@ def test_planted_unaccounted_job_fails(spec, tmp_path):
 
 @pytest.mark.parametrize("mutate, match", [
     (lambda s, t: s["config"][0].update(path=str(t / "nope.json")), r"config\[0\]"),
-    (lambda s, t: s.pop("commit"), "commit"),
+    (lambda s, t: s.pop("commit"), "required"),
+    (lambda s, t: s.update(official_registry_kinds="publication"), "official_registry_kinds"),
+    (lambda s, t: s.update(official_registry_kinds=["no_such_kind"]), "official_registry_kinds"),
+    (lambda s, t: s.update(official_registry_kinds=None), "official_registry_kinds"),
+    (lambda s, t: s["extra_jobs"].append({"id": "x", "schedule": "s", "kind": "reader",
+                                          "writes_official": False}), r"extra_jobs\[x\]\.owner"),
+    (lambda s, t: s["extra_jobs"].append({"id": "y", "schedule": "s", "kind": "reader",
+                                          "owner": "o", "writes_official": "false"}),
+     "writes_official"),
+    (lambda s, t: s["phase_evidence"][0].update(status=5), r"phase_evidence\[0\]\.status"),
+    (lambda s, t: s["data_snapshot"].pop("snapshot_id"), "snapshot_id"),
+    (lambda s, t: s["model_deployment"].update(release_id=""), "release_id"),
+    (lambda s, t: s.update(authority=[]), "authority"),
+    (lambda s, t: s["config"][0].update(path=5), "path must be a string"),
     (lambda s, t: s.update(commit="b" * 40), "HEAD"),
     (lambda s, t: s.update(config={"name": "x"}), "config"),
     (lambda s, t: s.update(extra_jobs=["x"]), r"extra_jobs\[0\]"),
@@ -142,10 +155,22 @@ def test_oversize_file_is_refused(spec, tmp_path, monkeypatch):
         asm.assemble(spec, _out(tmp_path))
 
 
-def test_writes_only_inside_out_dir(spec, tmp_path):
+def test_writes_exactly_three_files_inside_out_dir(spec, tmp_path):
     before = set(tmp_path.iterdir())
     asm.assemble(spec, _out(tmp_path))
     assert set(tmp_path.iterdir()) - before == {_out(tmp_path)}
+    assert sorted(p.name for p in _out(tmp_path).iterdir()) == [
+        "consumer_inventory.json", "job_graph.json", "manifest.json"]
+
+
+def test_spec_listed_official_kind_is_a_writer_in_the_graph(spec, tmp_path):
+    name = stages.registry().names()[0]
+    spec["official_registry_kinds"] = [name]
+    asm.assemble(spec, _out(tmp_path))
+    rows = {j["id"]: j for j in json.loads((_out(tmp_path) / "job_graph.json").read_text())["jobs"]}
+    assert rows[name]["writes_official"] is True
+    manifest = json.loads((_out(tmp_path) / "manifest.json").read_text())
+    assert {j["id"]: j for j in manifest["job_graph"]["jobs"]}[name]["kind"] == "scheduled_writer"
 
 
 def test_main_exit_codes(spec, tmp_path):
@@ -155,5 +180,20 @@ def test_main_exit_codes(spec, tmp_path):
     spec["authority"]["proposed"] = dict(spec["authority"]["old"])
     path.write_text(json.dumps(spec))
     assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o1")]) == 1
+    assert (tmp_path / "o1" / "manifest.json").is_file()
     path.write_text("[]")
     assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o2")]) == 2
+    assert not (tmp_path / "o2").exists()
+
+
+def test_main_unusable_spec_files_exit_2(tmp_path, monkeypatch):
+    out = str(tmp_path / "o")
+    assert asm.main(["--spec", str(tmp_path / "missing.json"), "--out-dir", out]) == 2
+    bad = tmp_path / "bad.json"
+    bad.write_bytes(b"\xff\xfe\x00")
+    assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
+    bad.write_text("{not json")
+    assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
+    monkeypatch.setattr(asm, "MAX_SPEC_BYTES", 4)
+    bad.write_text("{}" + " " * 10)
+    assert asm.main(["--spec", str(bad), "--out-dir", out]) == 2
