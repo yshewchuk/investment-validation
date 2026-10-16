@@ -202,8 +202,18 @@ def _module_files(root, name):
     return found
 
 
-def _imports(root, rel, source):
-    package = rel.removesuffix(".py").replace("/", ".").split(".")[:-1]
+#: Parsed import names by (sha256 of source text, package parts). A pure function
+#: of the text, so a hit can never go stale; the whole-repo closure is rebuilt
+#: many times per process and parsing dominated it. Bounded: cleared when full.
+_IMPORT_NAMES: dict[tuple[bytes, tuple[str, ...]], tuple[str, ...]] = {}
+_IMPORT_NAMES_LIMIT = 20000
+
+
+def _import_names(source, package):
+    key = (hashlib.sha256(source.encode("utf-8", "surrogatepass")).digest(), tuple(package))
+    cached = _IMPORT_NAMES.get(key)
+    if cached is not None:
+        return cached
     names = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -212,8 +222,16 @@ def _imports(root, rel, source):
             prefix = package[:len(package) - node.level + 1] if node.level else []
             base = ".".join(prefix + ([node.module] if node.module else []))
             names.extend([base, *(base + "." + alias.name for alias in node.names)])
+    if len(_IMPORT_NAMES) >= _IMPORT_NAMES_LIMIT:
+        _IMPORT_NAMES.clear()
+    _IMPORT_NAMES[key] = tuple(names)
+    return _IMPORT_NAMES[key]
+
+
+def _imports(root, rel, source):
+    package = rel.removesuffix(".py").replace("/", ".").split(".")[:-1]
     paths = set()
-    for name in names:
+    for name in _import_names(source, package):
         paths.update(_module_files(root, name))
     return sorted(paths)
 
