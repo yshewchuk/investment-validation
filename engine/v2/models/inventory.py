@@ -53,7 +53,7 @@ from pathlib import Path
 from engine import paths
 from engine.models import registry as legacy_registry
 
-from .frozen_state_io import hash_bounded_file
+from .frozen_state_io import hash_bounded_file, read_hashed
 from .releases import (
     ArtifactInventoryMember,
     ModelArtifactInventory,
@@ -157,12 +157,13 @@ def _champion_members(entry: "legacy_registry.RegistryEntry") -> _MemberBuild:
     path = entry.path
     issues: list[ReleaseIssue] = []
     members: list[ArtifactInventoryMember] = []
-    file_hash = _hash_file(path)
-    if file_hash is None:
+    found = read_hashed(path, MAX_ARTIFACT_BYTES, "file exceeds size cap")
+    if found is None:
         issues.append(ReleaseIssue(
             path=f"$.artifacts[{entry.id}]", code="MISSING_ARTIFACT_FILE", detail=_relative(path),
         ))
         return _MemberBuild((), tuple(issues))
+    file_hash, stream = found
     if entry.artifact_sha256 and file_hash[len("sha256:"):] != entry.artifact_sha256:
         issues.append(ReleaseIssue(
             path=f"$.artifacts[{entry.id}]", code="ARTIFACT_HASH_DRIFT",
@@ -173,7 +174,7 @@ def _champion_members(entry: "legacy_registry.RegistryEntry") -> _MemberBuild:
         artifact_ref=_relative(path), content_hash=file_hash,
     ))
     try:
-        artifact = legacy_registry.load_artifact(path)
+        artifact = legacy_registry.load_artifact(stream)
     except Exception as exc:  # a corrupt or wrong-type pickle is INCOMPATIBLE, not absent
         issues.append(ReleaseIssue(
             path=f"$.artifacts[{entry.id}]", code="ARTIFACT_UNREADABLE", detail=type(exc).__name__,
@@ -235,7 +236,8 @@ def current_release_inventory(
     feature list against the real pickle, and returns what it found as
     :class:`~.releases.ReleaseIssue` tuples using the same shape, on top of
     (never instead of) the deterministic checks ``release_issues`` still runs
-    on the object this returns.
+    on the object this returns. A symlink, non-regular or oversize file
+    raises ``ValueError`` instead of returning an issue.
     """
     if reg is None:
         manifest_hash = _hash_registry()

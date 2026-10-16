@@ -233,7 +233,8 @@ def frozen_state_payloads(files: Iterable[Path],
     ``board_analog_matcher__<strategy>__<alpha>__<cutoff>.json``,
     ``trailing_pnl_cutoff__<month>.json``) are
     classified by their own schema and role, not by file name.
-    ``max_bytes`` bounds each read (no-follow, regular file only) and the loader.
+    ``max_bytes`` bounds each read and the loader; only the first read is no-follow,
+    the loader re-reads the resolved path and its bytes must hash to that first read.
     """
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
     from engine.v2.models.frozen_state_io import read_bounded_state

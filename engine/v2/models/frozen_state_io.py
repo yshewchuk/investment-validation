@@ -1,5 +1,6 @@
 """Shared bounded regular-file admission for frozen state and offline publication."""
 import hashlib
+import io
 import os
 import stat
 import sys
@@ -42,8 +43,8 @@ def read_bounded_state(path: Path, limit: int, *, no_follow: bool = False) -> by
     return bytes(raw)
 
 
-def hash_bounded_file(path: Path, limit: int, too_big: str) -> str | None:
-    """sha256 of a regular, non-symlink file of at most `limit` bytes; None when absent."""
+def read_hashed(path: Path, limit: int, too_big: str) -> tuple[str, "io.BytesIO"] | None:
+    """sha256 and bounded bytes of a regular, non-symlink file; None when absent."""
     try:
         data = read_bounded_state(path, limit, no_follow=True)
     except FileNotFoundError:
@@ -52,4 +53,10 @@ def hash_bounded_file(path: Path, limit: int, too_big: str) -> str | None:
         raise ValueError(too_big if exc.code == "SIZE_LIMIT" else "not a regular file") from None
     except OSError:
         raise ValueError("not a regular file") from None
-    return "sha256:" + hashlib.sha256(data).hexdigest()
+    return "sha256:" + hashlib.sha256(data).hexdigest(), io.BytesIO(data)
+
+
+def hash_bounded_file(path: Path, limit: int, too_big: str) -> str | None:
+    """sha256 of a regular, non-symlink file of at most `limit` bytes; None when absent."""
+    found = read_hashed(path, limit, too_big)
+    return None if found is None else found[0]

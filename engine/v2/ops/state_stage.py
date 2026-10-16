@@ -128,11 +128,27 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
             "resource_class": "delivery"}
 
 
+def _worker_problems(parameters) -> list[str]:
+    try:
+        params = StateStageParameters(
+            expected_ids=tuple(parameters["expected_ids"]), release_root=parameters["release_root"],
+            prior_release_id=parameters["prior_release_id"], release_id=parameters["release_id"],
+            cutoff=parameters["cutoff"], state_files=tuple(parameters["state_files"]),
+            input_bindings=parameters["input_bindings"])
+    except (KeyError, TypeError):
+        return ["parameters are missing a field or have the wrong type"]
+    return state_stage_parameter_problems(None, params)
+
+
 def run_state_stage_worker(parameters, root) -> dict:
     """Stage the candidate inside the job's staging root; a refusal is a typed ``OpsError``."""
     from tools import phase5_state_stage_job as job
 
     root = Path(root)
+    problems = _worker_problems(parameters)
+    if problems:
+        raise fail("VALIDATION_FAILED", "state stage parameters are invalid",
+                   details={"problems": problems})
     try:
         summary = job.stage_candidate(parameters, root)
     except job.StageRefused as exc:

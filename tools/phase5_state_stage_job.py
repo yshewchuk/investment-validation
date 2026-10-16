@@ -68,13 +68,17 @@ def classify(root: Path, names) -> dict[str, dict[str, bytes]]:
 
 def check_trailing_months(new: dict[str, dict[str, bytes]], cutoff: str) -> None:
     """A trailing object's month (last name segment, ``YYYY-MM...``) may not start after ``cutoff``."""
+    try:
+        cutoff_day = date.fromisoformat(cutoff)
+    except ValueError as exc:
+        raise StageRefused("cutoff is not an ISO date") from exc
     late = []
     for name in new["trailing_pnl_cutoff"]:
         try:
             month_start = date.fromisoformat(name.rsplit("|", 1)[-1][:7] + "-01")
         except ValueError as exc:
             raise StageRefused("a trailing object month is not a date", {"months": [name]}) from exc
-        if month_start > date.fromisoformat(cutoff):
+        if month_start > cutoff_day:
             late.append(name)
     if late:
         raise StageRefused("a trailing object month starts after cutoff", {"months": sorted(late)})

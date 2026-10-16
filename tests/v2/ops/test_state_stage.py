@@ -170,7 +170,8 @@ def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None):
     monkeypatch.setattr(inventory_module, "current_release_inventory", lambda *a, **k: (inventory, drift))
     parameters = {"expected_ids": ["phase5_state_stage"], "release_root": str(tmp_path),
                   "prior_release_id": "prior1", "release_id": "cand1", "cutoff": "2026-10-01",
-                  "state_files": sorted(states)}
+                  "state_files": sorted(states),
+                  "input_bindings": {name: f"job_x#training/{name}" for name in states}}
     return parameters, staging
 
 
@@ -667,6 +668,11 @@ def test_state_file_one_byte_over_the_cap_is_refused(tmp_path, monkeypatch):
     ({"expected_ids": ("training",)}, "expected_ids must be exactly ('phase5_state_stage',)"),
     ({"release_root": ""}, "release_root must be a non-empty string"),
     ({"release_id": "../x"}, "prior_release_id and release_id must be safe non-empty ids"),
+    ({"release_id": ""}, "prior_release_id and release_id must be safe non-empty ids"),
+    ({"release_id": 5}, "prior_release_id and release_id must be safe non-empty ids"),
+    ({"release_id": ".hidden"}, "prior_release_id and release_id must be safe non-empty ids"),
+    ({"release_id": "a\\b"}, "prior_release_id and release_id must be safe non-empty ids"),
+    ({"release_id": "a\x00b"}, "prior_release_id and release_id must be safe non-empty ids"),
     ({"release_id": "prior1"}, "release_id must differ from prior_release_id"),
     ({"cutoff": "2026-9-1"}, "cutoff must be an extended ISO date (YYYY-MM-DD)"),
     ({"input_bindings": None}, "input_bindings keys must equal state_files"),
@@ -771,3 +777,47 @@ def test_state_file_of_exactly_the_cap_is_accepted(tmp_path, monkeypatch):
     largest = max((staging / name).stat().st_size for name in _STATES)
     monkeypatch.setattr(phase5_state_stage_job, "MAX_STATE_BYTES", largest)
     assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
+
+
+def test_state_cap_is_pinned():
+    from tools import phase5_state_stage_job
+
+    assert phase5_state_stage_job.MAX_STATE_BYTES == 512 * 1024 * 1024
+
+
+def test_worker_refuses_an_invalid_cutoff_before_staging(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    parameters["cutoff"] = "not-a-date"
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: state stage parameters are invalid"
+    assert err.value.problem.details == {
+        "problems": ["cutoff must be an extended ISO date (YYYY-MM-DD)"]}
+    assert not (staging / "stage_result.json").exists()
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+def test_worker_refuses_a_traversing_state_file_before_staging(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    parameters["state_files"] = [*parameters["state_files"], "../evil.json"]
+    parameters["input_bindings"] = {
+        name: f"job_x#training/{name}" for name in parameters["state_files"]}
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: state stage parameters are invalid"
+    assert err.value.problem.details == {
+        "problems": ["state_files must be plain .json names, not summaries"]}
+    assert not (staging / "stage_result.json").exists()
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+def test_worker_refuses_a_parameters_dict_missing_a_field(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    del parameters["release_id"]
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: state stage parameters are invalid"
+    assert err.value.problem.details == {
+        "problems": ["parameters are missing a field or have the wrong type"]}
+    assert not (staging / "stage_result.json").exists()
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()

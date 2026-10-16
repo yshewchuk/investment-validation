@@ -9,6 +9,7 @@ present in every worktree unlike ``data/models/*.joblib``.
 from __future__ import annotations
 
 import hashlib
+import io
 from dataclasses import replace
 
 import joblib
@@ -273,3 +274,23 @@ def test_an_oversize_registry_is_refused_before_it_is_read(monkeypatch):
     with pytest.raises(ValueError) as error:
         inventory.current_release_inventory()
     assert str(error.value) == "registry exceeds size cap"
+
+
+def test_inventory_caps_are_pinned():
+    from engine.v2.models import inventory
+
+    assert inventory.MAX_ARTIFACT_BYTES == 512 * 1024 * 1024
+    assert inventory.MAX_REGISTRY_BYTES == 16 * 1024 * 1024
+
+
+def test_artifact_is_unpickled_from_the_bounded_bytes(tmp_path, monkeypatch):
+    original = legacy_registry.load_artifact
+    recorded = []
+
+    def recorder(arg):
+        recorded.append(type(arg))
+        return original(arg)
+
+    monkeypatch.setattr(legacy_registry, "load_artifact", recorder)
+    _one_entry_release(tmp_path, id_="size_x", role="size")
+    assert recorded and all(kind is io.BytesIO for kind in recorded)

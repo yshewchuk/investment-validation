@@ -390,7 +390,7 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 
 - **`current_release_inventory` (`inventory.py`)**: the champion registry
   (`engine.models.registry`) and the real files under `data/models/*` —
-  content hashes, never values.
+  content hashes, never values; a symlink, non-regular or oversize file raises `ValueError`.
 - **`deployment.stage_release`**: a caller-built `ModelRelease` +
   `ModelReleaseInventory` (already validated against each other by every
   training/preparation tool) plus a `{content_hash: bytes}` payload map for

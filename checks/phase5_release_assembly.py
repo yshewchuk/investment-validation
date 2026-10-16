@@ -159,7 +159,8 @@ def _outputs_by_member(outputs: object) -> dict[str, tuple[PoolOutput, ...]]:
 
 
 def _check_carried(output: PoolOutput, cutoff_day: date, prior_rows: dict) -> None:
-    """A carried object keeps its own cutoff (not after ``cutoff``) and must equal a prior-row object."""
+    """A carried object's cutoff must be an ISO date not after ``cutoff`` and the object must equal
+    a prior-row object; it is recorded at the prior ``pool_cutoff``."""
     if _parse_day(output.cutoff, "CUTOFF_MISMATCH", "a carried object cutoff is not an ISO date") > cutoff_day:
         raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "a carried object cutoff is after cutoff")
     code = "CHOOSER_MISMATCH" if output.member_id == CHOOSER_MEMBER_ID else "POOL_SET_MISMATCH"
