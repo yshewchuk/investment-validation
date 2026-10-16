@@ -175,9 +175,10 @@ the binding's optional string `scope` (the effect scope of the retained publicat
 the pointer), `null` when the binding has none or a non-string. `verify_projection_binding`
 checks only index-derived fields, so it does not cover `scope`: scope is publication metadata,
 not projection content, and the binding file is bound as an ops artifact when published.
-`scope` is `null` until a producer writes it. `CURRENT`, the binding and
-`operations_status.json` are read without following symlinks, only as regular files and at most
-1 MiB; a symlinked, non-regular, oversize or non-UTF-8 file reads as absent (`NO_CURRENT_RELEASE`
+`scope` is `null` until a producer writes it. The API routes read `CURRENT`, the binding and
+`operations_status.json` without following a symlink at the final path component (the
+`releases/<id>/` directory is followed), only as regular files and at most
+1 MiB (the operations listener's own reads are not bounded; #799); a symlinked, non-regular, oversize or non-UTF-8 file reads as absent (`NO_CURRENT_RELEASE`
 for the pointer chain, `OPERATIONS_UNAVAILABLE` for the status document).
 `/operations` serves `<publication_root>/operations_status.json` only; it is the publication-time
 status document, never a serving-projection status sidecar, so under the

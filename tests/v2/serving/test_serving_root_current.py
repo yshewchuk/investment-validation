@@ -46,7 +46,7 @@ def _get(base, path, token, headers=None):
     request = urllib.request.Request(base + path, headers=headers or {})
     request.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, response.read(), response.headers
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(), exc.headers
@@ -99,6 +99,38 @@ def _client(root, pub, serving_db=None):
         publication_root=str(pub),
         token=TOKEN,
     )), {"Authorization": f"Bearer {TOKEN}"}
+
+
+def _bypass_prechecks(monkeypatch):
+    """Make the ``_read_small_text`` guards the only thing refusing a file.
+
+    The publication prechecks reject a symlink or a non-regular file before the
+    bounded read ever runs. The server runs in in-process threads, so patching
+    ``os.path`` here is seen by the request handler.
+    """
+    monkeypatch.setattr(os.path, "islink", lambda path: False)
+    monkeypatch.setattr(os.path, "isfile", lambda path: True)
+
+
+def _nonregular(path, kind, text):
+    """Replace ``path`` with a symlink (to a file holding ``text``), a FIFO, or a dir."""
+    path.unlink(missing_ok=True)
+    if kind == "symlink":
+        real = path.with_name(path.name + ".real")
+        real.write_text(text)
+        path.symlink_to(real)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.mkdir()
+
+
+def _expect_no_current(client, h):
+    r = client.get("/api/v1/releases/current", headers=h)
+    assert r.status_code == 503
+    body = r.json()
+    assert body["code"] == "NO_CURRENT_RELEASE"
+    assert body["retryable"] is True
 
 
 def _capture_app(monkeypatch, argv):
@@ -300,9 +332,7 @@ def test_current_symlinked_pointer_is_absent(tmp_path):
     (pub / "CURRENT").unlink()
     (pub / "CURRENT").symlink_to(real)
     client, h = _client(root, pub)
-    r = client.get("/api/v1/releases/current", headers=h)
-    assert r.status_code == 503
-    assert r.json()["code"] == "NO_CURRENT_RELEASE"
+    _expect_no_current(client, h)
 
 
 def test_current_oversized_binding_is_absent(tmp_path):
@@ -315,9 +345,7 @@ def test_current_oversized_binding_is_absent(tmp_path):
     assert len(text.encode("utf-8")) == _TEXT_CAP + 1
     binding_path.write_text(text)
     client, h = _client(root, pub)
-    r = client.get("/api/v1/releases/current", headers=h)
-    assert r.status_code == 503
-    assert r.json()["code"] == "NO_CURRENT_RELEASE"
+    _expect_no_current(client, h)
 
 
 def test_oversize_current_pointer(tmp_path):
@@ -325,9 +353,7 @@ def test_oversize_current_pointer(tmp_path):
     _point(serving_conn, pub, release_a)
     (pub / "CURRENT").write_bytes(b"ops1" + b" " * (_TEXT_CAP + 1 - 4))
     client, h = _client(root, pub)
-    r = client.get("/api/v1/releases/current", headers=h)
-    assert r.status_code == 503
-    assert r.json()["code"] == "NO_CURRENT_RELEASE"
+    _expect_no_current(client, h)
 
 
 def test_current_pointer_at_cap_is_accepted(tmp_path):
@@ -345,6 +371,59 @@ def test_non_utf8_current_pointer(tmp_path):
     _point(serving_conn, pub, release_a)
     (pub / "CURRENT").write_bytes(b"\xff\xfe")
     client, h = _client(root, pub)
-    r = client.get("/api/v1/releases/current", headers=h)
+    _expect_no_current(client, h)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory"])
+def test_current_nonregular_pointer_is_absent(tmp_path, monkeypatch, kind):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    _bypass_prechecks(monkeypatch)
+    _nonregular(pub / "CURRENT", kind, "ops1")
+    client, h = _client(root, pub)
+    _expect_no_current(client, h)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_binding_nonregular_is_absent(tmp_path, monkeypatch, kind):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    _bypass_prechecks(monkeypatch)
+    binding = projections.projection_binding(serving_conn, release_a.release_id)
+    _nonregular(pub / "releases" / "ops1" / "projection_binding.json", kind, json.dumps(binding))
+    client, h = _client(root, pub)
+    _expect_no_current(client, h)
+
+
+def test_binding_non_utf8_is_absent(tmp_path):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    (pub / "releases" / "ops1" / "projection_binding.json").write_bytes(b"\xff\xfe")
+    client, h = _client(root, pub)
+    _expect_no_current(client, h)
+
+
+def _expect_operations_unavailable(client, h):
+    r = client.get("/api/v1/operations", headers=h)
     assert r.status_code == 503
-    assert r.json()["code"] == "NO_CURRENT_RELEASE"
+    body = r.json()
+    assert body["code"] == "OPERATIONS_UNAVAILABLE"
+    assert body["retryable"] is True
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_operations_nonregular_status_file(tmp_path, monkeypatch, kind):
+    _, _, _, _, pub = _setup(tmp_path)
+    pub.mkdir(parents=True, exist_ok=True)
+    _bypass_prechecks(monkeypatch)
+    _nonregular(pub / "operations_status.json", kind, json.dumps(_STATUS_BASE))
+    client, h = _client(pub.parent, pub)
+    _expect_operations_unavailable(client, h)
+
+
+def test_operations_non_utf8_status_file(tmp_path):
+    _, _, _, _, pub = _setup(tmp_path)
+    pub.mkdir(parents=True, exist_ok=True)
+    (pub / "operations_status.json").write_bytes(b"\xff\xfe")
+    client, h = _client(pub.parent, pub)
+    _expect_operations_unavailable(client, h)
