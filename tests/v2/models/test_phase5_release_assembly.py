@@ -2084,3 +2084,89 @@ def test_supplied_object_read_stops_at_its_claim(tmp_path, monkeypatch):
     assert error.value.code == "OBJECT_UNVERIFIED"
     assert log and all(0 <= size <= target.payload_bytes + 1 for size, _ in log)
     assert sum(got for _, got in log) <= target.payload_bytes + 1
+
+
+def _carry_args(tmp_path, carried_members=(), chooser_carried=False):
+    """derive args where ``carried_members`` (and optionally the chooser) are the prior objects, carried."""
+    _inventory, body = _stage_prior(tmp_path)
+    cutoff_prior, carried = assembly.prior_carry_set(tmp_path, "prior1")
+    assert cutoff_prior == "2026-09-01"
+    args = _valid_derive_args(tmp_path)
+    by_key = {item.member_id: item for item in carried}
+    args["outputs"] = [by_key[o.member_id] if o.member_id in carried_members else o
+                       for o in args["outputs"]]
+    if chooser_carried:
+        args["chooser"] = by_key[assembly.CHOOSER_MEMBER_ID]
+    return body, args
+
+
+def test_prior_carry_set_returns_every_prior_object_as_carried(tmp_path):
+    _stage_prior(tmp_path)
+    cutoff, carried = assembly.prior_carry_set(tmp_path, "prior1")
+    assert cutoff == "2026-09-01"
+    members = {item.member_id for item in carried}
+    assert members == {*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID}
+    assert all(item.carried and item.cutoff == "2026-09-01" and item.name == "prior.bin"
+               for item in carried)
+
+
+@pytest.mark.parametrize("release_id", ["missing", "", "../x", ".hidden"])
+def test_prior_carry_set_refuses_unknown_or_unsafe_prior(tmp_path, release_id):
+    _stage_prior(tmp_path)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.prior_carry_set(tmp_path, release_id)
+    assert err.value.code == "PRIOR_MISMATCH"
+
+
+def test_carried_objects_keep_their_hash_and_old_cutoff(tmp_path):
+    body, args = _carry_args(
+        tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:3], chooser_carried=True)
+    candidate = assembly.derive_catalog(body, **args)
+    prior_rows = {row["member_id"]: row for row in body["members"]}
+    rows = {row["member_id"]: row for row in candidate["members"]}
+    for member_id in (*assembly.POOL_MEMBER_IDS[:3], assembly.CHOOSER_MEMBER_ID):
+        assert rows[member_id]["objects"] == prior_rows[member_id]["objects"]
+    for member_id in assembly.POOL_MEMBER_IDS[3:]:
+        assert rows[member_id]["objects"] != prior_rows[member_id]["objects"]
+    assert candidate["sources"]["pool_cutoff"] == "2026-10-01"
+
+
+def test_carried_object_not_in_prior_row_refuses_pool_set_mismatch(tmp_path):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], content_hash=args["outputs"][-1].content_hash)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "POOL_SET_MISMATCH"
+
+
+def test_carried_chooser_not_in_prior_row_refuses_chooser_mismatch(tmp_path):
+    body, args = _carry_args(tmp_path, chooser_carried=True)
+    args["chooser"] = dataclasses.replace(args["chooser"], name="other.bin")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "CHOOSER_MISMATCH"
+
+
+@pytest.mark.parametrize("cutoff", ["2026-10-02", "2026-9-1", "bad"])
+def test_carried_cutoff_after_session_or_malformed_refuses(tmp_path, cutoff):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], cutoff=cutoff)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "CUTOFF_MISMATCH"
+
+
+def test_non_carried_object_with_old_cutoff_still_refuses(tmp_path):
+    body, args = _carry_args(tmp_path)
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], cutoff="2026-09-01")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "CUTOFF_MISMATCH"
+
+
+def test_carried_flag_must_be_a_bool(tmp_path):
+    body, args = _carry_args(tmp_path)
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], carried="yes")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "POOL_SET_MISMATCH"

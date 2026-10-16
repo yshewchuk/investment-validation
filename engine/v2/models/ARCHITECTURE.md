@@ -134,7 +134,15 @@ size check. Existing callers omitting the ceiling retain their read contract.
   unique within a member, and every object carries `cutoff`), replacing that
   row's objects wholesale; every other member row is copied unchanged;
   `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
-  the prior release id.
+  the prior release id. A `PoolOutput` may be `carried=True` (default
+  `False`): an object that only changes on a retrain (driver residual pools,
+  chooser row) is re-supplied unchanged. It keeps its own recorded `cutoff`
+  (an extended ISO date not after `cutoff`) and must equal an object of the
+  same member in the prior row (name, `content_hash`, `payload_bytes`). Every
+  non-carried object must carry `cutoff` exactly. `prior_carry_set(release_root,
+  prior_release_id) -> (pool_cutoff, tuple[PoolOutput])` returns every prior
+  pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
+  (`PRIOR_MISMATCH` on any malformed or missing prior).
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
@@ -147,9 +155,9 @@ publish `OSError` to `PUBLICATION_FAILED`).
 | Condition | Code |
 |---|---|
 | Prior release id empty, not a string or unsafe (`/`, `\`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest, model payload or untouched STAGED row object missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
-| Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
-| Chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
-| An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
+| Outputs do not cover exactly the six pool members; a carried object absent from the prior row of its member; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
+| A carried chooser object absent from the prior chooser row; chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
+| A non-carried object's `cutoff` differs from `cutoff`; a carried object's cutoff is not an extended date or is after `cutoff`; `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
 | `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
 | Supplied object missing, unreadable, not a regular file, `payload_bytes` above `MAX_OBJECT_BYTES`, longer than its claim, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
 | Candidate id empty, unsafe or equal to the prior's; inventory `release_id` differs from it; candidate catalog or staged manifest exists with different or corrupt content | `ID_CONFLICT` |

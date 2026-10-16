@@ -1,0 +1,116 @@
+"""Stage the nightly's advanced pools as a candidate release (#192 slice 3).
+
+The worker logic of the ``phase5_state_stage`` ops job (``engine/v2/ops/state_stage.py`` is
+the thin job wrapper, as ``engine/v2/ops/training.py`` wraps ``tools/phase5_training_job.py``).
+Contract: ``engine/v2/ops/ARCHITECTURE.md`` (``phase5_state_stage``) and
+``engine/v2/models/ARCHITECTURE.md`` section 2.1. Never touches ``DEPLOYED``.
+"""
+from __future__ import annotations
+
+import dataclasses
+import json
+from pathlib import Path
+
+ADVANCING_MEMBERS = ("paired_residual_pool", "board_analog_matcher", "trailing_pnl_cutoff")
+
+
+class StageRefused(ValueError):
+    """A refusal with a fixed message (never path text) and small JSON-safe details."""
+
+    def __init__(self, message: str, details: dict | None = None) -> None:
+        super().__init__(message)
+        self.details = details or {}
+
+
+def object_cutoff(member: str, name: str, cutoff: str) -> str:
+    """Paired and board objects record their cutoff as the last name segment; trailing ones are stamped."""
+    return cutoff if member == "trailing_pnl_cutoff" else name.rsplit("|", 1)[-1]
+
+
+def classify(root: Path, names) -> dict[str, dict[str, bytes]]:
+    """Load the bound state files; they must cover exactly the advancing members."""
+    from engine.v2.models.frozen_state import FrozenStateError
+    from tools.phase5_prepare_release import frozen_state_payloads
+
+    new: dict[str, dict[str, bytes]] = {}
+    try:
+        for name in names:
+            for member, objects in frozen_state_payloads([root / name]).items():
+                for object_name, data in objects.items():
+                    if object_name in new.setdefault(member, {}):
+                        raise StageRefused("a state object appears twice", {"member": member})
+                    new[member][object_name] = data
+    except (FrozenStateError, OSError) as exc:
+        raise StageRefused("a bound state file could not be loaded") from exc
+    if set(new) != set(ADVANCING_MEMBERS):
+        raise StageRefused("state files are not exactly the advancing members",
+                           {"members": sorted(new)})
+    return new
+
+
+def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
+    """Re-read the candidate catalog and staged manifest; refuse unless it matches the request."""
+    from checks import phase5_release as rel
+
+    release_id = parameters["release_id"]
+    try:
+        body = json.loads(rel.catalog_path(release_root, release_id).read_bytes())
+        rel.validate_catalog(body, release_id)
+        rel.verify_staged(rel.deployment_root(release_root), release_id)
+        sources = body["sources"]
+        present = {item["content_hash"] for row in body["members"]
+                   for item in row.get("objects", ())}
+        ok = (sources.get("pool_cutoff") == parameters["cutoff"]
+              and sources.get("carried_from") == parameters["prior_release_id"]
+              and new_hashes <= present)
+    except (rel.ReleaseLayoutError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise StageRefused("candidate release failed the light checks") from exc
+    if not ok:
+        raise StageRefused("candidate release failed the light checks")
+
+
+def stage_candidate(parameters, root: Path) -> dict:
+    """Assemble and stage the candidate release; returns a JSON-safe summary."""
+    from checks import phase5_release as rel
+    from checks.phase5_release_assembly import (
+        CHOOSER_MEMBER_ID,
+        PoolOutput,
+        ReleaseAssemblyRefusal,
+        carry_forward_release,
+        prior_carry_set,
+    )
+    from engine.v2.models.inventory import current_release_inventory
+
+    release_root = Path(parameters["release_root"])
+    cutoff = parameters["cutoff"]
+    new = classify(Path(root), parameters["state_files"])
+    try:
+        _prior_cutoff, carried = prior_carry_set(release_root, parameters["prior_release_id"])
+        outputs = []
+        for member, objects in new.items():
+            for name, data in sorted(objects.items()):
+                digest, _relpath = rel.write_object(release_root, data)
+                outputs.append(PoolOutput(member, name, digest,
+                                          object_cutoff(member, name, cutoff), len(data)))
+        n_new = len(outputs)
+        new_hashes = {output.content_hash for output in outputs}
+        supplied = {(output.member_id, output.name) for output in outputs}
+        outputs += [item for item in carried if item.member_id != CHOOSER_MEMBER_ID
+                    and (item.member_id, item.name) not in supplied]
+        chooser = [item for item in carried if item.member_id == CHOOSER_MEMBER_ID]
+        inventory, drift = current_release_inventory()
+        if drift:
+            raise StageRefused("release inventory drifted", {"issues": len(drift)})
+        inventory = dataclasses.replace(inventory, release_id=parameters["release_id"])
+        carry_forward_release(
+            release_root, prior_release_id=parameters["prior_release_id"],
+            release_id=parameters["release_id"], inventory=inventory, outputs=outputs,
+            chooser=chooser, cutoff=cutoff)
+    except ReleaseAssemblyRefusal as exc:
+        raise StageRefused("release assembly refused", {"code": exc.code}) from exc
+    except (rel.ReleaseLayoutError, OSError) as exc:
+        raise StageRefused("candidate objects could not be written") from exc
+    light_checks(release_root, parameters, new_hashes)
+    return {"release_id": parameters["release_id"],
+            "prior_release_id": parameters["prior_release_id"], "cutoff": cutoff,
+            "n_new": n_new, "n_carried": len(outputs) - n_new + len(chooser)}
