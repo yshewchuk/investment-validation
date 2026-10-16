@@ -592,6 +592,7 @@ PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.0"
 #: code, kept only if it exists on disk.
 PHASE3_FIXED_SUITE = (
     "tests/v2/serving/test_v2_serving_api.py",
+    "tests/v2/serving/test_serving_root_current.py",
     "tests/test_v2_serving_bridge.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",

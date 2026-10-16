@@ -38,9 +38,12 @@ from experiments import native_gate_entrypoint as worker
 from experiments.native_gate_worker import RUNNER
 from experiments.native_registration import register_native
 from tests.ops_support import TEST_POLICY, run_until
+from tests.v2.research.magnitude_trial_support import (
+    catalog_rows,
+)
 from tests.v2.research.test_gate_variant import _document
 from tests.v2.research.test_gate_variant import source as source
-from tests.v2.research.test_native_registration import _catalog, _objects
+from tests.v2.research.test_native_registration import artifact_object_bytes
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -160,7 +163,7 @@ def test_supervised_arms_consume_independent_fill_and_never_record(source, tmp_p
     checkout = tmp_path / "checkout"
     snapshot_code(REPO, checkout, worker_source_manifest(REPO))
     requests = [_registered(source, alpha, code_root=checkout) for alpha in (0.0, 1.0)]
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     ledger = experiments_ledger_path(checkout)
     assert ledger == checkout / "experiments" / "LEDGER.csv"
     ledger.write_bytes(b"sentinel legacy ledger\n")
@@ -188,7 +191,7 @@ def test_supervised_arms_consume_independent_fill_and_never_record(source, tmp_p
     assert results[0]["variant_id"] != results[1]["variant_id"]
     assert {result["execution_plan"]["experiment_id"] for result in results} == {"synthetic-worker"}
     assert {result["execution_plan"]["arms"][0] for result in results} == {"candidate", "control"}
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert ledger.read_bytes() == b"sentinel legacy ledger\n"
     private_checkouts = list(tmp_path.glob("arm-*/code/*"))
     assert len(private_checkouts) == 2
@@ -309,10 +312,10 @@ def test_supervised_unconsumed_economics_refuse_without_receipt(source, tmp_path
     """The real launcher must not admit an economic change with no consumer."""
     request = _registered(source, economic_params={"fill": 0.0, "strategy": "STR-THRU",
                                                   "exit": {"kind": "fixed_day", "trading_days": 1}})
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     result = _supervise(tmp_path, source, *request)
     assert result["code"] == "INVALID_EXPERIMENT_SPEC"
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
 
 
@@ -356,7 +359,7 @@ def test_ill_typed_worker_identities_refuse_before_database_binding(
     document, registration, parameters = _registered(source)
     stage = _stage(tmp_path / "staging", document, registration)
     parameters[field] = value
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
 
     def forbidden(*args, **kwargs):
         pytest.fail("catalog opened before worker argument validation")
@@ -368,7 +371,7 @@ def test_ill_typed_worker_identities_refuse_before_database_binding(
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
     assert error.value.problem.retryable is False
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -380,7 +383,7 @@ def test_recorded_execution_refuses_before_catalog_access(
     document, registration, parameters = _registered(source)
     stage = _stage(tmp_path / "staging", document, registration)
     parameters["no_ledger"] = False
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
 
     def forbidden(*args, **kwargs):
         pytest.fail("recorded request opened the catalog")
@@ -395,7 +398,7 @@ def test_recorded_execution_refuses_before_catalog_access(
     kind = stages.registry().get("native_gate_pricing")
     assert kind.namespaces == {"smoke"}
     assert kind.retry.max_attempts == 1
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert {path.name for path in stage.iterdir()} == {"spec.json", "native_registration.json"}
 
 
@@ -419,13 +422,13 @@ def test_catalog_connection_is_read_only_and_autocommit(source, tmp_path, single
             conn.close()
             raise
 
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     monkeypatch.setattr(native, "sqlite3", SimpleNamespace(**(vars(sqlite3) | {"connect": observe})))
     with closing(sqlite3.connect(tmp_path / "observer.sqlite")) as observer:
         observer.execute("CREATE TABLE observer(value)")
     result = worker.dispatch("native_gate_pricing", parameters, stage)
     assert checked == [True] and result["completed_ids"] == [registration.variant_id]
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
 
 
 def test_library_environment_drift_refuses_before_pricing(
@@ -436,7 +439,7 @@ def test_library_environment_drift_refuses_before_pricing(
     metadata = tmp_path / "library-metadata" / "numpy-0.dist-info" / "METADATA"
     metadata.parent.mkdir(parents=True)
     metadata.write_text("Metadata-Version: 2.1\nName: numpy\nVersion: 0+synthetic\n")
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     monkeypatch.syspath_prepend(str(metadata.parent.parent))
     observed = environment_identity(1)
     expected = registration.document["environment"]
@@ -447,7 +450,7 @@ def test_library_environment_drift_refuses_before_pricing(
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert error.value.problem.retryable is False
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -471,7 +474,7 @@ def test_each_launch_thread_variable_refuses_drift_before_pricing(
 @pytest.mark.parametrize("runner", ["experiments/v2_gate_variant.py", "experiments/v2_prediction.py"])
 def test_non_gate_runner_cannot_register_unused_strategy(source, monkeypatch, runner):
     """The real registration path refuses before pinning, scanning or writing."""
-    before, objects = _catalog(source[0]), _objects(source[2])
+    before, objects = catalog_rows(source[0]), artifact_object_bytes(source[2])
 
     def forbidden(*args, **kwargs):
         pytest.fail("unused economics reached snapshot reads")
@@ -483,8 +486,8 @@ def test_non_gate_runner_cannot_register_unused_strategy(source, monkeypatch, ru
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
     assert error.value.problem.details == {"keys": ["strategy"]}
     assert error.value.problem.retryable is False
-    assert _catalog(source[0]) == before
-    assert _objects(source[2]) == objects
+    assert catalog_rows(source[0]) == before
+    assert artifact_object_bytes(source[2]) == objects
 
 
 @pytest.mark.parametrize("economics", [{"fill": 0.0}, *(
@@ -492,7 +495,7 @@ def test_non_gate_runner_cannot_register_unused_strategy(source, monkeypatch, ru
     for strategy in [None, True, 1, [], {}, "", " ", "unsupported-native-structure"])])
 def test_invalid_strategy_cannot_reserve_native_identity(source, monkeypatch, economics):
     """Real registration refuses before any read/effect; the corrected arm remains usable."""
-    before, objects = _catalog(source[0]), _objects(source[2])
+    before, objects = catalog_rows(source[0]), artifact_object_bytes(source[2])
 
     def forbidden(*args, **kwargs):
         pytest.fail("invalid strategy reached snapshot reads")
@@ -511,8 +514,8 @@ def test_invalid_strategy_cannot_reserve_native_identity(source, monkeypatch, ec
         expected = "native worker requires a registered strategy"
     assert error.value.problem.message == expected
     assert error.value.problem.retryable is False
-    assert _catalog(source[0]) == before
-    assert _objects(source[2]) == objects
+    assert catalog_rows(source[0]) == before
+    assert artifact_object_bytes(source[2]) == objects
     _, registration, _ = _registered(source)
     assert registration.document["execution_plan"]["economic_params"]["strategy"] == "STR-THRU"
     assert _registered(source)[1].variant_id == registration.variant_id
@@ -524,13 +527,13 @@ def test_registered_unsupported_runner_refuses_before_pricing(
     document, registration, parameters = _registered(source, runner="experiments/v2_gate_variant.py",
                                                      economic_params={"fill": 0.0})
     stage = _stage(tmp_path / "staging", document, registration)
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
     assert error.value.problem.message == "native gate runner is not allowlisted"
     assert error.value.problem.retryable is False
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -559,10 +562,10 @@ def test_supervised_holdout_request_refuses_without_success_output(source, tmp_p
     """The real supervisor preserves R5 and publishes no pricing result."""
     document, registration, parameters = _registered(source)
     parameters.update(purpose="final", catalog_path=str(tmp_path / "must-not-open.sqlite"))
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     result = _supervise(tmp_path, source, document, registration, parameters)
     assert result["code"] == "HOLDOUT_ACCESS_DENIED"
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
     assert not (tmp_path / "must-not-open.sqlite").exists()
 
@@ -599,11 +602,11 @@ def test_malformed_staging_has_no_success_evidence(source, tmp_path, single_thre
         parameters["input_bindings"]["old-trades.parquet"] = "unused"
     else:
         (stage / "spec.json").write_text("not-json")
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == code
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -614,7 +617,7 @@ def test_excessive_staged_json_depth_has_exact_refusal(source, tmp_path, single_
     data = b"[" * 100_000 + b"0" + b"]" * 100_000
     stage = _stage(tmp_path / "staging", document, registration)
     (stage / name).write_bytes(data)
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
@@ -624,7 +627,7 @@ def test_excessive_staged_json_depth_has_exact_refusal(source, tmp_path, single_
                         staged_bytes={name: data}, expected_details={})
     assert result["code"] == "INVALID_EXPERIMENT_SPEC"
     assert result["retryable"] is False
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
 
 
@@ -664,7 +667,7 @@ def test_real_data_failures_preserve_private_diagnostics(
         source[0].execute("PRAGMA ignore_check_constraints=OFF")
         assert source[3].resolve(source[4].snapshot_id) == source[4]
     stage = _stage(tmp_path / "staging", document, registration)
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     details = {"data_failure_code": data_code}
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
@@ -675,7 +678,7 @@ def test_real_data_failures_preserve_private_diagnostics(
                         expected_details=details)
     assert result["code"] == ops_code
     assert result["retryable"] is False
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
 
 
@@ -691,7 +694,7 @@ def test_pricing_boundary_failures_keep_private_diagnostics(
     document, registration, parameters = _registered(source)
     stage = _stage(tmp_path / "staging", document, registration)
     price, consumed = native.price_variant, []
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
 
     def fail_after_replay(*args, **kwargs):
         consumed.append(price(*args, **kwargs))
@@ -706,7 +709,7 @@ def test_pricing_boundary_failures_keep_private_diagnostics(
     assert "private" not in error.value.problem.message
     result, = consumed
     assert list(result.stage_inputs.event_ids) == registration.document["event_ids"]
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -724,7 +727,7 @@ def test_replay_exceptions_preserve_private_type(source, tmp_path, single_thread
     document, registration, parameters = _registered(source)
     stage = _stage(tmp_path / "staging", document, registration)
     replay, consumed = gate.replay, []
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
 
     def fail_after_replay(*args, **kwargs):
         result = replay(*args, **kwargs)
@@ -739,7 +742,7 @@ def test_replay_exceptions_preserve_private_type(source, tmp_path, single_thread
     assert error.value.problem.message == "native gate pricing failed"
     assert error.value.problem.retryable is False
     assert sorted(consumed) == registration.document["event_ids"]
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -760,14 +763,14 @@ def test_unexpected_replay_failure_retains_generic_worker_boundary(source, tmp_p
     replay_module.write_text(modified)
     fault_location = f"experiments/v2_gate_variant.py:{modified.splitlines().index(fault_line) + 1}"
     request = _registered(source, code_root=checkout)
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     failure = _supervise(tmp_path, source, *request, code_source=checkout)
     assert failure["code"] == "WORKER_FAILED"
     assert failure["message"] == "worker raised an unhandled exception"
     assert failure["retryable"] is True
     assert "private replay diagnostic" not in json.dumps(failure)
     assert exception_type not in json.dumps(failure)
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     root = tmp_path / "smoke"
     conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
     try:
@@ -830,10 +833,10 @@ def test_supervised_changed_fill_cannot_reuse_registered_identity(source, tmp_pa
     """R6 current-request admission occurs inside the actual launched process."""
     document, registration, parameters = _registered(source)
     document["economic_params"]["fill"] = 1.0
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     result = _supervise(tmp_path, source, document, registration, parameters)
     assert result["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
 
 
@@ -934,13 +937,13 @@ def test_registered_code_must_match_the_running_worker(
     else:
         runner.write_bytes(b"def broken(:\n" if change == "malformed" else b"\xff")
     monkeypatch.chdir(code)
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     stage = _stage(tmp_path / "staging", document, registration)
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert error.value.problem.retryable is False
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -954,7 +957,7 @@ def test_supervised_missing_strategy_refuses_before_population_reads(
     document, registration, parameters = request
     del document["economic_params"]["strategy"]
     stage = _stage(tmp_path / "staging", document, registration)
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
 
     def forbidden(*args, **kwargs):
         pytest.fail("missing strategy reached population reads")
@@ -966,7 +969,7 @@ def test_supervised_missing_strategy_refuses_before_population_reads(
     assert error.value.problem.message == "native worker requires a registered strategy"
     result = _supervise(tmp_path, source, *request)
     assert result["code"] == "INVALID_EXPERIMENT_SPEC"
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
 
 
@@ -974,10 +977,10 @@ def test_supervised_changed_strategy_cannot_reuse_registered_identity(source, tm
     """Changed strategy is an economic conflict, independent of unchanged arm identity."""
     document, registration, parameters = _registered(source)
     document["economic_params"]["strategy"] = "SHORT-PUT"
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     result = _supervise(tmp_path, source, document, registration, parameters)
     assert result["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
 
 
@@ -1016,10 +1019,10 @@ def test_supervised_required_spec_fields_use_experiment_refusal(source, tmp_path
         del document[field]
     else:
         document[field] = None
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     result = _supervise(tmp_path, source, document, registration, parameters)
     assert result["code"] == "INVALID_EXPERIMENT_SPEC"
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not list(tmp_path.rglob("native_gate_consumption.json"))
     assert not list(tmp_path.rglob("REPORT.md"))
 
@@ -1041,7 +1044,7 @@ def test_staged_documents_refuse_unsafe_files_without_blocking(source, tmp_path,
     else:
         with path.open("wb") as stream:
             stream.truncate(16_777_217)
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     program = """
 import json, sys
 from pathlib import Path
@@ -1057,7 +1060,7 @@ else:
     child = subprocess.run([sys.executable, "-c", program, json.dumps(parameters), str(stage)],
                            capture_output=True, text=True, timeout=10, check=True)
     assert child.stdout.strip() == "INVALID_EXPERIMENT_SPEC"
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -1107,7 +1110,7 @@ def test_staged_replacement_after_open_consumes_original_bytes(
             swapped.append(True)
         return info
 
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     monkeypatch.setattr(native.os, "fstat", replace_after_open)
     result = worker.dispatch("native_gate_pricing", parameters, stage)
     receipt = json.loads((stage / "native_gate_consumption.json").read_bytes())
@@ -1116,7 +1119,7 @@ def test_staged_replacement_after_open_consumes_original_bytes(
     assert receipt["execution_plan"] == registration.document["execution_plan"]
     assert receipt["variant_id"] == registration.variant_id
     assert receipt["stage_inputs"]["event_ids"] == registration.document["event_ids"]
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
 
 
 @pytest.mark.parametrize("field", ["event_ids", "holdout_as_of_month",
@@ -1136,7 +1139,7 @@ def test_consumed_provenance_must_match_registration(
         value = ("OTHER_2024-05-02",) if field == "event_ids" else "changed-provenance"
         return replace(result, stage_inputs=replace(result.stage_inputs, **{field: value}))
 
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     monkeypatch.setattr(native, "price_variant", mismatched)
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
@@ -1144,7 +1147,7 @@ def test_consumed_provenance_must_match_registration(
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert error.value.problem.retryable is False
     assert not (stage / "native_gate_consumption.json").exists()
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
 
 
 @pytest.mark.parametrize("name", ["spec.json", "native_registration.json"])
@@ -1214,7 +1217,7 @@ def test_receipt_destination_refuses_without_truncation_or_blocking(source, tmp_
     elif kind == "replacement-write-error":
         replacement.write_bytes(b"replacement sentinel")
         replacement_stat = replacement.stat()
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     program = """
 import errno, json, os, resource, signal, sys
 from pathlib import Path
@@ -1259,7 +1262,7 @@ else:
                             str(replacement)],
                            capture_output=True, text=True, timeout=10, check=True)
     assert json.loads(child.stdout.strip().splitlines()[-1]) == {"code": "INPUT_CHANGED", "retryable": False}
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
     assert outside.read_bytes() == b"foreign sentinel"
     if kind == "file":
         assert path.read_bytes() == b"existing sentinel"
@@ -1305,12 +1308,12 @@ def test_supervised_receipt_conflict_has_no_success_output(source, tmp_path, mon
         return overlay
 
     monkeypatch.setattr(Service, "_stage_legacy_inputs", occupy_destination)
-    before = _catalog(source[0])
+    before = catalog_rows(source[0])
     result = _supervise(tmp_path, source, *request, expected_details={})
     assert result["code"] == "INPUT_CHANGED"
     assert result["retryable"] is False
     assert outside.read_bytes() == b"foreign sentinel"
-    assert _catalog(source[0]) == before
+    assert catalog_rows(source[0]) == before
 
 
 @pytest.mark.parametrize("parameters", [None, [], 0, False, "", ()])

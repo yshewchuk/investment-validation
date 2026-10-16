@@ -24,6 +24,11 @@ binding that does not (yet, or any longer) match is a typed, non-retryable
  index read failing during that reverification is the retryable
  ``SERVING_INDEX_UNREADABLE`` 503 (``_index_unreadable``, #342).
 
+ The launcher's pointer root defaults to the serving root's ``publisher/``
+ (``create_app(publication_root=None)`` means no pointer; only ``main()``
+ derives ``publisher/``); ``/releases/current`` adds a top-level ``scope``
+ taken from the binding (null when absent).
+
 
 ``create_app``'s ``resolver`` parameter remains the seam: any zero-argument
 ``Callable[[], str | None]`` (may also raise ``ApiError``) may replace it,
@@ -52,9 +57,11 @@ reverification, ``/releases/{id}`` + ``/releases/current``, ``/events``,
 ``/events/{id}/scores``, ``/scores/{id}`` -- wraps only its projection calls in
 ``except (projections.sqlite3.Error, json.JSONDecodeError)`` and raises
 ``_index_unreadable()``, keeping the existing guaranteed-close ``finally``.
-Open-time behavior, artifact decoding (still the existing 500), binding-invalid
+Artifact decoding (still the existing 500), binding-invalid
 (500), unknown release/event/score (404) and every validation refusal are
-unchanged; no global SQLite/JSON exception hook is registered.
+unchanged; no global SQLite/JSON exception hook is registered. An open-time
+``sqlite3.Error`` (``_open`` and the resolver's connect) and a post-open one
+both return the same typed 503.
 
 
 **Cursors** are opaque and integrity-protected (§6): ``release_id`` plus
@@ -99,7 +106,7 @@ from engine.v2.foundation import (
 
 from . import native_parity_projection, projections
 
-__all__ = ["ApiError", "create_app", "main"]
+__all__ = ["ApiError", "create_app", "main", "open_index_untranslated"]
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 _OPERATIONS_STATUS_SCHEMA = "operations_status.v1.0"
@@ -140,17 +147,17 @@ def _handle_api_error(request: Request, exc: ApiError) -> Response:
 # connection-owning read applies, same shape as the operations listener's #339
 # listener fix: a ``try`` around only the projection calls, the existing
 # ``conn.close()`` ``finally`` kept, and this one typed refusal. No global
-# SQLite/JSON hooks, no open-time behavior change (an index that fails to
-# OPEN stays exactly what ``projections.connect`` already did), and artifact
-# decoding failures stay their existing 500 -- only INDEX reads/rows translate.
+# SQLite/JSON hooks, open-time ``sqlite3.Error`` is translated too (``_open``),
+# and artifact decoding failures stay their existing 500 -- only INDEX
+# reads/rows translate.
 # --------------------------------------------------------------------------
 
 
 def _index_unreadable() -> ApiError:
-    """A connection ``projections.connect`` opened successfully, but a later
-    API-owned index read failed: ``sqlite3.Error`` (a dropped/corrupt table the
-    migrations still tolerate) or ``json.JSONDecodeError`` (malformed stored
-    ``document_json``/``findings_json``/``ref_json``/``flags``). Retryable 503
+    """An API-owned index open or read failed: ``sqlite3.Error`` (a dropped/
+    corrupt table the migrations still tolerate) or ``json.JSONDecodeError``
+    (malformed stored ``document_json``/``findings_json``/``ref_json``/``flags``).
+    Retryable 503
     with the existing ``Problem`` shape and this FIXED message -- never raw
     exception text, a path, the token, a traceback or the malformed bytes.
     ``projections.sqlite3`` is reached through the sibling module's own import,
@@ -196,11 +203,48 @@ def _one_segment_pointer(raw: str) -> str | None:
     return raw if len(parts) == 1 else None
 
 
+def _read_small_text(path: str, cap: int = 1 << 20) -> str | None:
+    """Read a regular file as UTF-8 text without following a symlink.
+
+    ``O_NOFOLLOW`` refuses a symlinked path; ``O_NONBLOCK`` keeps a FIFO or
+    device from blocking the worker. Anything that is not a regular file, any
+    ``OSError``, more than ``cap`` bytes, or invalid UTF-8 yields ``None``.
+    The descriptor is always closed."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        # ``stat.S_ISREG`` would read better, but ``import stat`` would be a
+        # ninth distinct imported module and the §4.3 fan-out budget is 8, so
+        # the literal S_IFMT/S_IFREG test stays (tools/oc_check code_budgets).
+        if (os.fstat(fd).st_mode & 0o170000) != 0o100000:
+            return None
+        raw = b""
+        while len(raw) < cap + 1:
+            chunk = os.read(fd, cap + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(raw) > cap:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def _read_pointer_file(path: str) -> str | None:
     if os.path.islink(path) or not os.path.isfile(path):
         return None
-    with open(path, encoding="utf-8") as handle:
-        return _one_segment_pointer(handle.read().strip())
+    text = _read_small_text(path)
+    if text is None:
+        return None
+    return _one_segment_pointer(text.strip())
 
 
 def _read_ops_current(release_root) -> str | None:
@@ -219,10 +263,12 @@ def _read_projection_binding(release_root, ops_release_id: str) -> dict | None:
     path = os.path.join(str(release_root), "releases", ops_release_id, "projection_binding.json")
     if os.path.islink(path) or not os.path.isfile(path):
         return None
+    text = _read_small_text(path)
+    if text is None:
+        return None
     try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.loads(handle.read())
-    except (OSError, ValueError):
+        document = json.loads(text)
+    except (OSError, ValueError, RecursionError):
         return None
     return document if isinstance(document, dict) else None
 
@@ -234,37 +280,45 @@ def _publication_resolver(release_root, serving_db):
     Files (plus one bounded ``serving.sqlite`` connection) only -- keeps
     serving/ops layering intact. ``None`` when there is genuinely no
     publication yet (absent/malformed pointer or binding -- ordinary "no
-    current release" 503). Raises :class:`ApiError` -- typed, non-
-    retryable, distinct from "no current release" -- only when a binding
- names a release id that fails to verify: not committed, or its
- manifest/index hash no longer matches (a tampered doc or changed index row).
- Post-open failures of that reverification itself -- a dropped/corrupt table
- (``sqlite3.Error``) or a malformed stored row (``json.JSONDecodeError``) --
- are the retryable ``SERVING_INDEX_UNREADABLE`` 503 (#342); the connection
- closes either way."""
+    current release" 503). Raises :class:`ApiError` in two branches:
+    non-retryable ``CURRENT_BINDING_INVALID`` (500) when a binding names a
+    release id that fails to verify: not committed, or its manifest/index
+    hash no longer matches (a tampered doc or changed index row); and
+    retryable ``SERVING_INDEX_UNREADABLE`` (503) on an open-time
+    ``sqlite3.Error`` from ``projections.connect`` or a post-open
+    ``sqlite3.Error``/``json.JSONDecodeError`` while reverifying; the
+    connection closes either way."""
 
 
-    def resolve() -> str | None:
+    def resolve_pair() -> tuple[str | None, str | None]:
         ops_release_id = _read_ops_current(release_root)
         if ops_release_id is None:
-            return None
+            return None, None
         binding = _read_projection_binding(release_root, ops_release_id)
         if binding is None:
-            return None
-        conn = projections.connect(str(serving_db))
+            return None, None
+        conn = None
         try:
+            conn = projections.connect(str(serving_db))
             if not projections.verify_projection_binding(conn, binding):
                 raise ApiError(500, _problem(
                     "CURRENT_BINDING_INVALID", "integrity",
                     "the published pointer's projection binding does not match the "
                     "live serving index", details={"ops_release_id": ops_release_id}))
             release_id = binding.get("projection_release_id")
+            scope = binding.get("scope")
         except (projections.sqlite3.Error, json.JSONDecodeError):
             raise _index_unreadable() from None
         finally:
-            conn.close()
-        return release_id if isinstance(release_id, str) else None
+            if conn is not None:
+                conn.close()
+        return (release_id if isinstance(release_id, str) else None,
+                scope if isinstance(scope, str) else None)
 
+    def resolve() -> str | None:
+        return resolve_pair()[0]
+
+    resolve.with_scope = resolve_pair
     return resolve
 
 
@@ -409,7 +463,7 @@ def _parse_bool_flag(raw: str | None, field_name: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# operations status -- §6/§5.5 items 2-3: the sidecar ``publication_effect``
+# operations status -- §6/§5.5 items 2-3: the document ``publication_effect``
 # writes into the publisher's scope root, read like ``_read_projection_
 # binding`` (files only, never an ``engine.v2.ops`` import), as a plain
 # untyped document (no ``engine.v2.contracts`` import; budget already spent).
@@ -422,10 +476,12 @@ def _read_operations_status(publication_root) -> dict | None:
     path = os.path.join(str(publication_root), "operations_status.json")
     if os.path.islink(path) or not os.path.isfile(path):
         return None
+    text = _read_small_text(path)
+    if text is None:
+        return None
     try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.loads(handle.read())
-    except (OSError, ValueError):
+        document = json.loads(text)
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(document, dict) or document.get("schema_version") != _OPERATIONS_STATUS_SCHEMA:
         return None
@@ -439,11 +495,14 @@ def _read_operations_status(publication_root) -> dict | None:
 
 
 def _open(serving_db):
-    return projections.connect(str(serving_db))
+    try:
+        return projections.connect(str(serving_db))
+    except projections.sqlite3.Error:
+        raise _index_unreadable() from None
 
 
 def _release_response(serving_db, release_id: str | None, response: Response, request: Request, *,
-                      require_current: bool) -> dict | Response:
+                      require_current: bool, scope=None) -> dict | Response:
     if release_id is None:
         raise ApiError(503, _problem("NO_CURRENT_RELEASE", "resource",
                                      "no current release is configured", retryable=True))
@@ -461,6 +520,8 @@ def _release_response(serving_db, release_id: str | None, response: Response, re
                                          "projection", retryable=True))
         raise ApiError(404, _problem("UNKNOWN_RELEASE", "validation", "unknown release id"))
     document = to_document(release)
+    if require_current:
+        document = {**document, "scope": scope}
     cache_control = "no-store" if require_current else _IMMUTABLE_CACHE
     return _cached_response(request, response, release.release_id, document, cache_control=cache_control)
 
@@ -574,10 +635,10 @@ def _score_detail_response(serving_db, store, response: Response, request: Reque
 
 
 def _operations_response(publication_root, response: Response, *, release_id: str | None = None) -> dict:
-    """§6 sidecar; missing history is the same typed refusal as a malformed
+    """§6 document; missing history is the same typed refusal as a malformed
     document -- never a silent green default (§5.5 item 3).
 
-    2026-09-14 review fix: the sidecar always describes the SCOPE's current
+    2026-09-14 review fix: the document always describes the SCOPE's current
     state, not any one release -- a client that pinned an earlier
     ``release_id`` (from a prior response's own field, or from
     ``/api/v1/releases/current``) and polls this route later can otherwise
@@ -759,10 +820,15 @@ def _ops_native_parity_report_source(ops_root):
     return source
 
 
+def open_index_untranslated(serving_db):
+    """Open the serving index untranslated, so a failed re-open reads as "available"."""
+    return projections.connect(str(serving_db))
+
+
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
     """Classify report freshness; an ApiError/OSError resolver means unknown current."""
     return native_parity_projection.native_parity_freshness(
-        serving_db, resolve_current, as_of, _open, projections.get_release,
+        serving_db, resolve_current, as_of, open_index_untranslated, projections.get_release,
         (ApiError, OSError))
 
 
@@ -864,6 +930,12 @@ def _register_native_parity_routes(app, auth, serving_db, resolve_current, curso
 # --------------------------------------------------------------------------
 
 
+def _with_scope(resolve_current):
+    """(release_id, scope) from the publication resolver; scope is None for any other resolver."""
+    pair = getattr(resolve_current, "with_scope", None)
+    return pair() if pair else (resolve_current(), None)
+
+
 def create_app(*, serving_db, store_root, serving_root, token: str, resolver=None,
               publication_root=None, ops_root=None, native_parity_report_path=None) -> FastAPI:
     """Build the read-only API. ``resolver``, given, replaces the default
@@ -902,7 +974,8 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
 
     @app.get("/api/v1/releases/current", dependencies=auth)
     def releases_current(request: Request, response: Response):
-        return _release_response(serving_db, resolve_current(), response, request, require_current=True)
+        release_id, scope = _with_scope(resolve_current)
+        return _release_response(serving_db, release_id, response, request, require_current=True, scope=scope)
 
     @app.get("/api/v1/releases/{release_id}", dependencies=auth)
     def releases_by_id(release_id: str, request: Request, response: Response):
@@ -913,8 +986,7 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
                      date_from: str | None = None, date_to: str | None = None,
                      ticker: str | None = None, strategy: str | None = None, verdict: str | None = None,
                      gate: str | None = None, out_of_domain: str | None = None,
-                     disabled: str | None = None,
-                     limit: str | None = None, cursor: str | None = None):
+                     disabled: str | None = None, limit: str | None = None, cursor: str | None = None):
         # `date_from`/`date_to` are `ui/src/api/client.ts` `EventQuery`'s own
         # names; `_events_response`'s internal `event_date_from`/
         # `event_date_to` stay projections.py's storage-facing names.
@@ -950,16 +1022,47 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
 # --------------------------------------------------------------------------
 
 
+def _serving_paths(args) -> tuple[str, str, str]:
+    """Resolve the three serving paths, each defaulting under ``--serving-root``
+    when its explicit flag is omitted; the explicit flag overrides."""
+    serving_db = (args.serving_db if args.serving_db is not None
+                  else os.path.join(args.serving_root, "serving.sqlite"))
+    store_root = (args.store_root if args.store_root is not None
+                  else os.path.join(args.serving_root, "objects"))
+    publication_root = (args.publication_root if args.publication_root is not None
+                        else os.path.join(args.serving_root, "publisher"))
+    return serving_db, store_root, publication_root
+
+
+_PATH_FLAGS = ("serving_root", "serving_db", "store_root", "publication_root",
+               "ops_root", "native_parity_report_path")
+
+
+def _empty_path_flag(args) -> str | None:
+    """Return the ``--flag-name`` of the first explicit path flag given empty,
+    or ``None`` when every explicitly given flag carries a value."""
+    for name in _PATH_FLAGS:
+        value = getattr(args, name)
+        if value is not None and value == "":
+            return "--" + name.replace("_", "-")
+    return None
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="v2 serving read API")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--serving-db", required=True)
-    parser.add_argument("--store-root", required=True)
+    parser.add_argument("--serving-db", required=False, default=None,
+                        help="the serving index path; defaults under --serving-root, "
+                             "an explicit flag overrides")
+    parser.add_argument("--store-root", required=False, default=None,
+                        help="the artifact store root; defaults under --serving-root, "
+                             "an explicit flag overrides")
     parser.add_argument("--serving-root", required=True)
     parser.add_argument("--publication-root", default=None,
                         help="the fenced ops publisher's release root for this shadow scope "
-                             "(<ops_root>/releases/<scope>); omit for no configured pointer")
+                             "(<ops_root>/releases/<scope>); defaults under --serving-root, "
+                             "an explicit flag overrides")
     parser.add_argument("--native-parity-report-path", default=None,
                         help="the producer's native parity report JSON; omit for no_report")
     parser.add_argument("--ops-root", default=None,
@@ -979,9 +1082,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.host not in _LOOPBACK_HOSTS and not args.allow_non_loopback:
         print("refusing a non-loopback host without --allow-non-loopback")
         return 2
-    app = create_app(serving_db=args.serving_db, store_root=args.store_root,
+    empty_flag = _empty_path_flag(args)
+    if empty_flag:
+        print(f"{empty_flag} must not be empty")
+        return 2
+    serving_db, store_root, publication_root = _serving_paths(args)
+    app = create_app(serving_db=serving_db, store_root=store_root,
                      serving_root=args.serving_root, token=token,
-                     publication_root=args.publication_root,
+                     publication_root=publication_root,
                      ops_root=args.ops_root,
                      native_parity_report_path=args.native_parity_report_path)
     uvicorn.run(app, host=args.host, port=args.port)

@@ -1,6 +1,7 @@
 """Pool release assembly: derive/stage a carried-forward candidate catalog (#192 slice 2)."""
 from __future__ import annotations
 
+import builtins
 import copy
 import dataclasses
 import fcntl
@@ -1852,8 +1853,9 @@ def test_shared_readers_accept_exact_cap_and_refuse_one_below(tmp_path, monkeypa
     monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", msize)
     assert deployment.resolve_release(store, "prior1").release_id == "prior1"
     monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", msize - 1)
-    with pytest.raises(deployment.StagingRefused):
+    with pytest.raises(deployment.StagingRefused) as error:
         deployment.resolve_release(store, "prior1")
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
 
 
 def test_inventory_members_malformed_is_inventory_mismatch(tmp_path):
@@ -1964,33 +1966,64 @@ def test_catalog_reader_never_reads_past_its_cap(tmp_path, monkeypatch):
     assert sum(got for _, got in log) <= cap + 1
 
 
-def test_manifest_reader_stops_at_its_budget_on_a_chunk_boundary(tmp_path, monkeypatch):
+def test_manifest_reader_refuses_oversize_manifests_at_the_budget(tmp_path, monkeypatch):
     _stage_prior(tmp_path)
     store = phase5_release.deployment_root(tmp_path)
     manifest = phase5_release.staged_manifest_path(store, "prior1")
     limit = 1024 * 1024
     monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", limit)
     base = manifest.read_bytes()
+
+    reads = []
+    real_open = builtins.open
+
+    class _ManifestReadSpy:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def read(self, *args, **kwargs):
+            data = self._handle.read(*args, **kwargs)
+            reads.append(len(data))
+            return data
+
+        def readinto(self, *args, **kwargs):
+            count = self._handle.readinto(*args, **kwargs)
+            reads.append(count)
+            return count
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    def spy(file, *args, **kwargs):
+        stream = real_open(file, *args, **kwargs)
+        if str(file) == str(manifest):
+            return _ManifestReadSpy(stream)
+        return stream
+
+    monkeypatch.setattr(builtins, "open", spy)
+
     manifest.write_bytes(base + b" " * (limit - len(base)))
     assert deployment.resolve_release(store, "prior1").release_id == "prior1"
+    assert reads and sum(reads) == limit
+    reads.clear()
     manifest.write_bytes(base + b" " * (limit + 1 - len(base)))
     with pytest.raises(deployment.StagingRefused) as error:
         deployment.resolve_release(store, "prior1")
     assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
+    assert sum(reads) <= limit + 1
+    reads.clear()
     manifest.write_bytes(base + b" " * (5 * limit))
-    requested, got = [], []
-    real_read = os.read
-
-    def watch(fd, size):
-        data = real_read(fd, size)
-        requested.append(size)
-        got.append(len(data))
-        return data
-
-    monkeypatch.setattr(os, "read", watch)
-    with pytest.raises(deployment.StagingRefused):
+    with pytest.raises(deployment.StagingRefused) as error:
         deployment.resolve_release(store, "prior1")
-    assert max(requested) <= 1024 * 1024 and sum(got) <= limit + 1
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
+    assert sum(reads) <= limit + 1
 
 
 @pytest.mark.parametrize("exc", [TypeError, AttributeError, KeyError])
@@ -2259,3 +2292,23 @@ def test_carried_object_matches_any_object_of_a_multi_object_prior_row(tmp_path)
     candidate = assembly.derive_catalog(body, **args)
     row = next(r for r in candidate["members"] if r["member_id"] == member)
     assert [o["name"] for o in row["objects"]] == ["second.bin"]
+
+
+def test_release_caps_are_pinned():
+    assert deployment.MAX_MANIFEST_BYTES == 64 * 1024 * 1024
+    assert assembly.MAX_CATALOG_BYTES == 64 * 1024 * 1024
+    assert assembly.MAX_OBJECT_BYTES == 512 * 1024 * 1024
+    assert assembly.LOCK_WAIT_S == 30.0
+
+
+def test_symlinked_staged_manifest_is_refused(tmp_path):
+    _stage_prior(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    manifest = phase5_release.staged_manifest_path(store, "prior1")
+    real = tmp_path / "real_manifest.json"
+    real.write_bytes(manifest.read_bytes())
+    manifest.unlink()
+    manifest.symlink_to(real)
+    with pytest.raises(deployment.StagingRefused) as error:
+        deployment.resolve_release(store, "prior1")
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
