@@ -221,31 +221,26 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` is a library-only begin/record/freeze boundary; it has no CLI or production
-caller. `seal(clock=...)` explicitly initializes the search-owned journal through ops migrations and binds one verified
-plan per anchor to the installed recorder sources.
-SQLite/foundation own durability; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE; `magnitude_search_errors` tags artifact failures.
+`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. SQLite/foundation own durability;
+public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE and `magnitude_search_errors` tags artifact failures.
 `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission.
-No fitting or outer evaluation occurs.
-`start(outer_year, inner_year, candidate_id)` re-admits the native source and stored feature binding, preflights inner
-participants, and qualifies training labels strictly before the inner fit boundary. Its immutable cohort binds stored
-feature rows and qualified training targets. All candidates in a fold must share that exact cohort. `record` accepts
-complete nonnegative finite real forecasts with integral horizons (normalized to JSON float/int), or an explicit
-`EXPERIMENT_VARIANT_FAILED` fit failure after input admission; Booleans and caller scores are refused. Forecasts are associated with the
-attempt in a short catalog transaction before complete inner validation labels may open, strictly before outer fitting.
-Only explicit candidate fit failures and local scoring failures become terminals. Every shared native-input/label admission
-failure leaves its attempt unfinished and blocks selection, regardless of error code, without authorizing retries.
-Durable records are never updated, deleted or replaced; refusal-publication failure preserves the original scoring error.
-Artifact publication precedes the catalog commit; a failed commit may leave an unreferenced object, not admitted evidence.
-`freeze()` requires every planned candidate/inner-fold attempt to be terminal. It excludes an entire candidate within an
-outer fold after any failed/refused inner fold, pools all successful event/horizon errors, breaks exact RMSE ties by
-candidate ID, and freezes all outer selections plus the latest-outer prospective candidate. Missing/started-only records
-or an outer fold with no successful candidate refuse `EXPERIMENT_VARIANT_FAILED`; exact terminal/freeze replay is idempotent.
-Repeated starts, changed submissions, another plan for the anchor, source drift and corrupt evidence refuse
-`EXPERIMENT_IDENTITY_CONFLICT`. Zero fit retries remain the plan's policy. Invalid forecast shape refuses
-`INVALID_EXPERIMENT_SPEC` without reading labels; artifact unavailability is `RESOURCE_UNAVAILABLE`. Records are bounded
-to 16 MiB. These are selections from submitted forecasts, with estimator execution unverified. They grant no
-outer-evaluation, deployment, ledger or final-read authority.
+
+| Condition | Outcome |
+|---|---|
+| `seal(clock=...)` | Explicitly initialize the search-owned journal through ops migrations; bind one verified plan per anchor to the installed recorder sources. |
+| `start(outer_year, inner_year, candidate_id)` | Claim once before native reads, re-admit source/stored feature bindings, preflight inner participants, and qualify training labels strictly before inner fitting. The immutable cohort binds stored feature rows and qualified targets; every candidate in a fold must share it exactly. |
+| Complete nonnegative finite real forecasts and integral horizons | Normalize to JSON float/int and associate forecasts with the attempt in a short catalog transaction before complete inner validation labels open, strictly before outer fitting. |
+| Boolean, malformed or incomplete forecasts; caller scores | `INVALID_EXPERIMENT_SPEC` before any validation-label read. |
+| Explicit `EXPERIMENT_VARIANT_FAILED` fit failure after input admission; local scoring failure | Record a candidate terminal. A refusal-publication failure preserves the original scoring error. No other stage creates automatic candidate refusals. |
+| Any shared native-input/label admission failure | Preserve the unfinished attempt and block selection regardless of error code; grant no retry. |
+| Durable journal write | Publish the artifact before the catalog commit; a failed commit may leave an unreferenced object, never admitted evidence. Records are capped at 16 MiB and cannot be updated, deleted or replaced. |
+| `freeze()` with every planned candidate/inner-fold attempt terminal | Exclude a candidate's entire outer score after any failed/refused inner fold; pool all successful event/horizon errors, break exact RMSE ties by candidate ID, and freeze every outer choice plus the latest-outer prospective candidate. |
+| Missing/started-only attempt or outer fold without a successful candidate | Refuse `EXPERIMENT_VARIANT_FAILED`; publish no selection. |
+| Exact terminal/freeze replay | Return the verified original result idempotently. |
+| Repeated start, changed submission, another plan for the anchor, source drift or corrupt evidence | Refuse `EXPERIMENT_IDENTITY_CONFLICT`; fit retries remain zero. |
+| Unavailable artifact | Refuse `RESOURCE_UNAVAILABLE`. |
+| Journal payload exceeds 16 MiB | Refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record; incomplete attempts remain unfinished and block selection. |
+| Submitted-forecast selection | Estimator execution stays unverified; no fitting or outer evaluation occurs, and no outer-evaluation, deployment, ledger or final-read authority is granted. |
 
 ## Stored research-history entrypoint
 

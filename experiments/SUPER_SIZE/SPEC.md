@@ -97,6 +97,7 @@ and excludes a candidate's entire score for an admitted explicit fit failure or 
 Every shared native-input/label admission failure leaves the attempt unfinished, regardless of its error code;
 infrastructure/resource/shared-identity failures also block selection. Exact replay of a
 terminal submission or freeze is idempotent; another start is a forbidden retry.
+Journal writes above 16 MiB refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record.
 The submitted forecasts do not prove that an estimator ran. Frozen selections grant
 no outer-evaluation, deployment or final-read authority. A resource-capped executor,
 interrupted-attempt reconciliation, outer evaluation and reporting remain unimplemented.
