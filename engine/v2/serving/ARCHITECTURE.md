@@ -178,7 +178,7 @@ not projection content, and the binding file is bound as an ops artifact when pu
 `scope` is `null` until a producer writes it. The API routes read `CURRENT`, the binding and
 `operations_status.json` without following a symlink at the final path component (the
 `releases/<id>/` directory is followed), only as regular files and at most
-1 MiB (the operations listener's reads and the native-parity report load are not bounded); a symlinked, non-regular, oversize or non-UTF-8 file reads as absent (`NO_CURRENT_RELEASE`
+1 MiB (the operations listener's reads and the native-parity report load are not bounded); a symlinked, non-regular, oversize or non-UTF-8 file, or a binding or status document nested deeply enough to raise `RecursionError`, reads as absent (`NO_CURRENT_RELEASE`
 for the pointer chain, `OPERATIONS_UNAVAILABLE` for the status document).
 `/operations` serves `<publication_root>/operations_status.json` only; it is the publication-time
 status document, never a serving-projection status sidecar, so under the

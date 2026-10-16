@@ -1034,6 +1034,20 @@ def _serving_paths(args) -> tuple[str, str, str]:
     return serving_db, store_root, publication_root
 
 
+_PATH_FLAGS = ("serving_root", "serving_db", "store_root", "publication_root",
+               "ops_root", "native_parity_report_path")
+
+
+def _empty_path_flag(args) -> str | None:
+    """Return the ``--flag-name`` of the first explicit path flag given empty,
+    or ``None`` when every explicitly given flag carries a value."""
+    for name in _PATH_FLAGS:
+        value = getattr(args, name)
+        if value is not None and value == "":
+            return "--" + name.replace("_", "-")
+    return None
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="v2 serving read API")
     parser.add_argument("--host", default="127.0.0.1")
@@ -1068,8 +1082,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.host not in _LOOPBACK_HOSTS and not args.allow_non_loopback:
         print("refusing a non-loopback host without --allow-non-loopback")
         return 2
-    if not args.serving_root:
-        print("--serving-root must not be empty")
+    empty_flag = _empty_path_flag(args)
+    if empty_flag:
+        print(f"{empty_flag} must not be empty")
         return 2
     serving_db, store_root, publication_root = _serving_paths(args)
     app = create_app(serving_db=serving_db, store_root=store_root,

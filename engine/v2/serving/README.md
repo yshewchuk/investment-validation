@@ -218,7 +218,9 @@ given) follows it one more hop: that release's bound `projection_binding.
 json` names the projection `release_id`. Both files are read directly (the
 same symlink/one-clean-segment safety `operations.py`'s own
 `_resolve_current_id` applies, reimplemented since serving may not import
-ops), then the named release is reverified against the LIVE `serving.sqlite`
+ops; reads are final-component no-follow, regular-file only, at most 1 MiB and UTF-8,
+else the file reads as absent; `/releases/current` also returns the binding's optional
+string `scope`, `null` when absent: see ARCHITECTURE.md "Serving root"), then the named release is reverified against the LIVE `serving.sqlite`
 index (`projections.verify_projection_binding`) before being trusted — never
 a silent fallback to "latest". A release published with no bound projection
 at all (the plain P3-0 compatibility preview) resolves to the ordinary

@@ -183,6 +183,23 @@ def test_scope_passthrough(tmp_path):
     assert "scope" in body and body["scope"] is None
 
 
+def test_plain_resolver_scope_is_null(tmp_path):
+    _, release_a, _, root, _ = _setup(tmp_path)
+    app = create_app(
+        resolver=lambda: release_a.release_id,
+        serving_db=str(root / "serving.sqlite"),
+        store_root=str(root / "objects"),
+        serving_root=str(root),
+        token=TOKEN,
+    )
+    h = {"Authorization": f"Bearer {TOKEN}"}
+    r = _Client(app).get("/api/v1/releases/current", headers=h)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["release_id"] == release_a.release_id
+    assert "scope" in body and body["scope"] is None
+
+
 def test_etag(tmp_path):
     serving_conn, release_a, _, root, pub = _setup(tmp_path)
     _point(serving_conn, pub, release_a)
@@ -482,12 +499,18 @@ def test_current_pointer_no_fd_leak(tmp_path):
     assert after - before <= 3
 
 
-def test_main_empty_serving_root(monkeypatch):
+@pytest.mark.parametrize("flag", ["serving-root", "serving-db", "store-root",
+                                   "publication-root", "ops-root",
+                                   "native-parity-report-path"])
+def test_main_empty_path_flag(monkeypatch, capsys, flag):
     monkeypatch.setenv("V2_DASHBOARD_TOKEN", TOKEN)
     calls = []
     monkeypatch.setattr(api_module.uvicorn, "run", lambda app, **kw: calls.append(app))
-    assert main(["--port", "1", "--serving-root", ""]) == 2
+    argv = ["--port", "1", "--serving-root", ""] if flag == "serving-root" else [
+        "--port", "1", "--serving-root", "/r", f"--{flag}", ""]
+    assert main(argv) == 2
     assert calls == []
+    assert f"--{flag} must not be empty" in capsys.readouterr().out
 
 
 def _expect_operations_unavailable(client, h):
