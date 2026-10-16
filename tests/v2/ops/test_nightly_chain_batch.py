@@ -411,3 +411,73 @@ def test_candidate_expiries_refuse_unusable_rows_on_both_paths(tmp_path, change)
         scan_candidate_expiries(repository, snapshot, _AAA, decision_session=_SESSION,
                                 chain_rows=[row])
     assert batched.value.code == "CONTRACT_MISMATCH"
+
+
+def test_scan_chain_slices_records_rows_returned_step(tmp_path, monkeypatch):
+    import engine.v2.ops.nightly_chain_batch as batch
+    from engine.v2.ops import worker_progress
+
+    monkeypatch.setattr(batch, "_BATCH_CAP", 3)
+    worker_progress.configure(tmp_path)
+    try:
+        repository, snapshot = _snap(tmp_path)
+        slices = scan_chain_slices(repository, snapshot, ["AAA", "BBB"],
+                                   decision_session=_SESSION)
+    finally:
+        worker_progress.reset()
+    records, _ = worker_progress.read_new_records(
+        tmp_path / "diagnostics" / worker_progress.STEPS_FILENAME, 0)
+    ends = [record for record in records
+            if record["event"] == "end" and record["step"] == "option_chains_rows_returned"]
+    assert len(ends) == 1
+    assert ends[0]["units"] == sum(len(rows) for rows in slices.values()) == 7
+    step_records = [record for record in records
+                    if record["step"] == "option_chains_rows_returned"]
+    assert [record["event"] for record in step_records] == ["start", "end"]
+
+
+@pytest.mark.parametrize(("tickers", "cap", "expected"), [
+    (["AAA", "BBB"], 8, "option_chains read returned 7 of 8 allowed rows"),
+    (["AAA", "BBB"], 7, "option_chains read returned 7 of 7 allowed rows"),
+    (["AAA", "BBB"], 9, None),
+    (["AAA"], 6, "option_chains read returned 5 of 6 allowed rows"),
+    (["AAA"], 7, None),
+    (["AAA", "BBB"], 1_000_000, None),
+])
+def test_rows_returned_warning_observes_only_at_the_eighty_percent_line(tmp_path, monkeypatch,
+                                                                        caplog, tickers, cap,
+                                                                        expected):
+    import engine.v2.ops.nightly_chain_batch as batch
+
+    repository, snapshot = _snap(tmp_path)
+    unpatched = scan_chain_slices(repository, snapshot, tickers, decision_session=_SESSION)
+    monkeypatch.setattr(batch, "_RESULT_CAP", cap)
+    with caplog.at_level("WARNING", logger=batch.__name__):
+        slices = scan_chain_slices(repository, snapshot, tickers, decision_session=_SESSION)
+    assert {ticker: len(rows) for ticker, rows in slices.items()} == {
+        ticker: len(rows) for ticker, rows in unpatched.items()}
+    assert [record.getMessage() for record in caplog.records] == (
+        [expected] if expected is not None else [])
+
+
+@pytest.mark.parametrize(("cap", "warning"), [
+    (5, ["option_chains read returned 4 of 5 allowed rows"]),
+    (6, []),
+])
+def test_rows_returned_warning_fires_at_exactly_eighty_percent(tmp_path, monkeypatch, caplog,
+                                                                cap, warning):
+    import engine.v2.ops.nightly_chain_batch as batch
+
+    rows = [
+        _chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0, right="C"),
+        _chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0, right="P"),
+        _chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 105.0, right="C"),
+        _chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 105.0, right="P"),
+    ]
+    repository, snapshot = _snapshot(
+        tmp_path, price={"AAA": [_price_row("AAA", _SESSION)]}, chains=rows)
+    monkeypatch.setattr(batch, "_RESULT_CAP", cap)
+    with caplog.at_level("WARNING", logger=batch.__name__):
+        slices = scan_chain_slices(repository, snapshot, ["AAA"], decision_session=_SESSION)
+    assert len(slices["AAA"]) == 4
+    assert [record.getMessage() for record in caplog.records] == warning

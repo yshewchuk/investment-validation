@@ -7,10 +7,13 @@ by ticker in primary-key order (so each group equals what the per-key scan
 returns). Failure semantics: a ticker with no rows maps to ``[]``; a missing
 table is ``Repository.table_contract``'s own ``CONTRACT_MISMATCH``; every
 repository error (including ``RESULT_LIMIT_EXCEEDED``) propagates and never
-falls back to per-key scans.
+falls back to per-key scans. The rows-returned worker step and the near-cap
+warning are observation only: the rows returned and every failure are
+unchanged.
 """
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -18,6 +21,7 @@ from typing import Any
 from engine.v2.contracts import DataQuery, KeyPredicate, SnapshotRef
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
+from engine.v2.ops import worker_progress
 from engine.v2.ops.errors import fail
 from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal, validated_as_of
 
@@ -127,7 +131,15 @@ def scan_chain_slices(repository: Repository, snapshot: SnapshotRef, tickers: It
         order_by=tuple(contract.primary_key),
         max_batch_rows=max_batch_rows,
         max_result_rows=max_result_rows)
+    count = 0
     for batch in repository.scan(query, table_name=CHAIN_TABLE):
-        for row in batch.to_pylist():
+        rows = batch.to_pylist()
+        for row in rows:
             slices[row["ticker"]].append(row)
+        count += len(rows)
+    worker_progress.step_start("option_chains_rows_returned")
+    worker_progress.step_end("option_chains_rows_returned", units=count)
+    if count >= 0.8 * _RESULT_CAP:
+        logging.getLogger(__name__).warning("option_chains read returned %d of %d allowed rows",
+                                            count, _RESULT_CAP)
     return slices
