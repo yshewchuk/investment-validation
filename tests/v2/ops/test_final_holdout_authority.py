@@ -336,7 +336,7 @@ def test_native_admission_maps_artifact_reference_errors_to_identity_conflict(co
 
     monkeypatch.setattr(native, "artifact_reference", invalid_reference)
     with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
-        native._existing(context.conn, context.store, context.registration)
+        native.native_registration_exists(context.conn, context.store, context.registration)
 
 
 def test_private_authority_is_not_reachable_from_production_callers_and_code_matches_data():

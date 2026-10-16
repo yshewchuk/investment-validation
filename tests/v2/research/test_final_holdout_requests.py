@@ -109,7 +109,7 @@ def test_preparation_reads_only_the_original_registration_and_never_writes(sourc
     monkeypatch.setattr(source.store, "publish_bytes", forbidden)
     monkeypatch.setattr(source.repository, "resolve_pinned", forbidden)
     monkeypatch.setattr(native, "load_population", forbidden)
-    monkeypatch.setattr(native, "_binding", forbidden)
+    monkeypatch.setattr(native, "prepare_native_registration", forbidden)
     source.conn.set_authorizer(lambda action, *args: sqlite3.SQLITE_OK if action in
                               (sqlite3.SQLITE_READ, sqlite3.SQLITE_SELECT) else sqlite3.SQLITE_DENY)
     try:

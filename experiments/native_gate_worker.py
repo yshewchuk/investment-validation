@@ -10,7 +10,7 @@ from math import isfinite
 from pathlib import Path
 from tempfile import mkdtemp
 
-from engine.v2.contracts import FAILURE_CODES
+from engine.v2.contracts import DATA_FAILURE_CODES, FAILURE_CODES
 from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
@@ -33,7 +33,20 @@ BINDINGS = {"spec.json", "native_registration.json"}
 MAX_STAGED_BYTES = 16 * 1024 * 1024
 
 
-def _read_staged(path):
+def native_gate_data_failure(error):
+    """Translate data-only refusals without changing the ops registry's policy."""
+    code = error.code
+    if code not in FAILURE_CODES:
+        code = {("integrity", False): "INTEGRITY_FAILED",
+                ("validation", False): "VALIDATION_FAILED",
+                ("dependency", False): "INPUT_CHANGED",
+                ("dependency", True): "SNAPSHOT_NOT_READY",
+                ("resource", False): "RESOURCE_LIMIT_EXCEEDED",
+                ("resource", True): "RESOURCE_UNAVAILABLE"}[DATA_FAILURE_CODES[code]]
+    return fail(code, "native gate data refused", details={"data_failure_code": error.code})
+
+
+def read_native_staged_input(path):
     """Bound allocation and validate the descriptor actually supplying bytes."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
@@ -54,7 +67,7 @@ def _read_staged(path):
         raise
 
 
-def _write_receipt(path, receipt):
+def write_native_gate_receipt(path, receipt):
     """Install complete bytes create-only; clean only private temporary names."""
     directory = Path(mkdtemp(prefix=".native-gate-", dir=path.parent))
     private = directory / "receipt.json"
@@ -75,28 +88,29 @@ def _write_receipt(path, receipt):
                 pass
 
 
-def _admit(parameters, root, conn, store):
+def admit_native_gate_inputs(parameters, root, conn, store, *, runner=RUNNER):
     """Validate the staged request against existing immutable native admission."""
     if (parameters.get("no_ledger") is not True
             or set(parameters.get("input_bindings") or {}) != BINDINGS):
-        raise fail("INVALID_EXPERIMENT_SPEC", "native pricing requires bound smoke inputs")
+        raise fail("INVALID_EXPERIMENT_SPEC", "native gate requires bound smoke inputs")
     try:
-        spec = experiment_spec_from_document(json.loads(_read_staged(root / "spec.json")))
+        spec = experiment_spec_from_document(json.loads(read_native_staged_input(root / "spec.json")))
     except OpsError as error:
         if error.code != "INVALID_REQUEST":
             raise
         raise fail("INVALID_EXPERIMENT_SPEC", "native staged specification is malformed") from None
     plan = resolve_experiment_plan(spec)
-    if plan.runner != RUNNER:
-        raise fail("INVALID_EXPERIMENT_SPEC", "native pricing runner is not allowlisted")
+    if plan.runner != runner:
+        raise fail("INVALID_EXPERIMENT_SPEC", "native gate runner is not allowlisted")
     if not isinstance(plan.economic_params.get("strategy"), str):
         raise fail("INVALID_EXPERIMENT_SPEC", "native worker requires a registered strategy")
     registration = NativeRegistration(parameters["run_id"],
-                                      _read_staged(root / "native_registration.json"))
+                                      read_native_staged_input(root / "native_registration.json"))
     verify_native_registration(conn, store, registration)
     binding = registration.document
     try:
-        current_source = source_closure(Path.cwd(), [RUNNER, NATIVE_GATE_ENTRYPOINT])
+        entries = [runner] + ([NATIVE_GATE_ENTRYPOINT] if runner == RUNNER else [])
+        current_source = source_closure(Path.cwd(), entries)
     except (OpsError, OSError, SyntaxError, ValueError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registered source cannot be verified") from None
     if (registration.variant_id != parameters["variant_id"]
@@ -129,7 +143,7 @@ def run(parameters, root):
         conn.row_factory = sqlite3.Row
         try:
             store = ArtifactStore(parameters["objects_root"])
-            spec, registration = _admit(parameters, root, conn, store)
+            spec, registration = admit_native_gate_inputs(parameters, root, conn, store)
             binding = registration.document
             pricing = True
             result = price_variant(
@@ -152,10 +166,9 @@ def run(parameters, root):
         finally:
             conn.close()
         pricing = False
-        _write_receipt(root / "native_gate_consumption.json", receipt)
+        write_native_gate_receipt(root / "native_gate_consumption.json", receipt)
     except DataError as error:
-        code = error.code if error.code in FAILURE_CODES else "EXPERIMENT_VARIANT_FAILED"
-        raise fail(code, "native pinned pricing refused", details={"data_failure_code": error.code}) from None
+        raise native_gate_data_failure(error) from None
     except (ArtifactError, ValueError, TypeError, KeyError, RecursionError, OSError, sqlite3.Error) as error:
         if pricing:
             raise fail("EXPERIMENT_VARIANT_FAILED", "native pinned pricing failed",

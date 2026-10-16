@@ -92,6 +92,8 @@ MODEL_PICKLE_MODULES = (
 CODE_ASSET_FILES: tuple[str, ...] = (
     # Fixed -m child entrypoint: no Python import in the executor names it.
     "experiments/native_gate_entrypoint.py",
+    # The fixed evaluation child's registered runner is verified, not imported.
+    "experiments/v2_gate.py",
     "engine/v2/data/legacy_annotations.json",
     # engine/models/training/chooser.py dynamically loads this file via
     # importlib.util.spec_from_file_location (not a static import, so the

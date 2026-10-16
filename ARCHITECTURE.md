@@ -105,10 +105,10 @@ evidence. See the models and data component contracts.
   validating recipe and state parameters for `ops plan --kind training`.
   Describe dependencies at the module level because some modules serve shared
   runtime paths.
-  The smoke-only `native_gate_pricing` kind launches the fixed unlayered child
+  The smoke-only `native_gate_pricing` and `native_gate_evaluation` kinds launch the fixed child
   `experiments.native_gate_entrypoint`. After the ops protocol's launch gate opens,
-  its callback imports native pricing; ops never imports that adapter or research.
-  The verified source closure includes both files; the receipt grants no recording authority.
+  its fixed callback imports pricing or evaluation; ops imports neither adapter nor research.
+  Verified source manifests bind the child; staged results grant no recording authority.
   `experiments.v2_gate` separately composes native preregistration, reconstructed-history
   gate evaluation and the existing outcome/ledger lifecycle; its component contract owns timing.
   - `tools/oc_check.py` appends one best-effort JSONL line per run to
@@ -444,6 +444,7 @@ Only a tracked path absent from the worktree reads as empty.
 
 ## 4. Production entrypoints and the job graph
 
+- **Gate sweep staging — `python -m experiments.v2_gate_sweep register|submit --no-ledger`.** Explicit operator registration/submission; `ops serve` runs independent evaluation children. No scientific collection or completed sweep index; see the [sweep contract](experiments/ARCHITECTURE.md#sealed-gate-sweep-submission).
 - **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
 - **Massive acquisition — `python -m engine.v2.ops.massive_acquire`.** Explicit shadow-job submission; `ops serve` performs bounded, cache-first REST acquisition. See the [acquisition contract](engine/v2/ops/stores/massive/ARCHITECTURE.md).
 - **Massive snapshot — `python -m engine.v2.ops.massive_snapshot`.** A separate supervised offline job normalizes saved daily/action pins into a reconstructed native snapshot, optionally refreshing an explicit parent interval; research uses the data layer's bounded pinned reader. [Contract](engine/v2/ops/stores/massive/ARCHITECTURE.md#invariants).

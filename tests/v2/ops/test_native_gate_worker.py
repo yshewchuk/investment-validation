@@ -528,7 +528,7 @@ def test_registered_unsupported_runner_refuses_before_pricing(
     with pytest.raises(OpsError) as error:
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert error.value.problem.message == "native pricing runner is not allowlisted"
+    assert error.value.problem.message == "native gate runner is not allowlisted"
     assert error.value.problem.retryable is False
     assert _catalog(source[0]) == before
     assert not (stage / "native_gate_consumption.json").exists()
@@ -630,8 +630,8 @@ def test_excessive_staged_json_depth_has_exact_refusal(source, tmp_path, single_
 
 @pytest.mark.parametrize("case,data_code,ops_code", [
     ("corrupt-snapshot", "SNAPSHOT_UNRESOLVED", "SNAPSHOT_UNRESOLVED"),
-    ("missing-calendar", "CONTRACT_MISMATCH", "EXPERIMENT_VARIANT_FAILED"),
-    ("empty-calendar", "CALENDAR_UNAVAILABLE", "EXPERIMENT_VARIANT_FAILED"),
+    ("missing-calendar", "CONTRACT_MISMATCH", "VALIDATION_FAILED"),
+    ("empty-calendar", "CALENDAR_UNAVAILABLE", "VALIDATION_FAILED"),
     ("malformed-contract", "JSONDecodeError", "EXPERIMENT_VARIANT_FAILED"),
     ("incomplete-contract", "MISSING_FIELD", "EXPERIMENT_VARIANT_FAILED"),
     ("unreadable-contract", "OperationalError", "EXPERIMENT_VARIANT_FAILED"),
@@ -852,6 +852,23 @@ def test_finite_quotes_that_overflow_cashflows_refuse_whole_worker(source, tmp_p
         worker.dispatch("native_gate_pricing", parameters, stage)
     assert error.value.code == "EXPERIMENT_VARIANT_FAILED"
     assert error.value.problem.message == "native pricing produced nonfinite cash flows"
+    assert not (stage / "native_gate_consumption.json").exists()
+
+
+def test_corrupt_pricing_fragment_preserves_integrity_refusal(source, tmp_path, single_thread):
+    document, registration, parameters = _registered(source)
+    stage = _stage(tmp_path / "staging", document, registration)
+    fragment = source[3].fragment_records(source[4], "option_chains")[0]
+    digest = fragment.object_ref.content_hash.removeprefix("sha256:")
+    path = source[2].root / "objects" / digest[:2] / digest
+    assert path.read_bytes().startswith(b"PAR1")
+    path.unlink()  # Replace only this fixture's synthetic immutable fragment.
+    path.write_bytes(b"corrupted synthetic parquet")
+    with pytest.raises(OpsError) as caught:
+        worker.dispatch("native_gate_pricing", parameters, stage)
+    problem = caught.value.problem
+    assert (problem.code, problem.category, problem.retryable) == ("INTEGRITY_FAILED", "integrity", False)
+    assert problem.details == {"data_failure_code": "OBJECT_CORRUPT"}
     assert not (stage / "native_gate_consumption.json").exists()
 
 
@@ -1140,10 +1157,10 @@ def test_staged_literal_size_boundary(tmp_path, name, size):
     expected = b"x" * size
     path.write_bytes(expected)
     if size == 16_777_216:
-        assert native._read_staged(path) == expected
+        assert native.read_native_staged_input(path) == expected
     else:
         with pytest.raises(OpsError) as error:
-            native._read_staged(path)
+            native.read_native_staged_input(path)
         assert error.value.code == "INVALID_EXPERIMENT_SPEC"
         assert error.value.problem.retryable is False
 
@@ -1166,10 +1183,10 @@ def test_staged_growth_is_bounded_after_descriptor_validation(tmp_path, monkeypa
 
     monkeypatch.setattr(native.os, "fstat", grow_after_stat)
     if size == 16_777_216:
-        assert native._read_staged(path) == b"{}" + b"\0" * 16_777_214
+        assert native.read_native_staged_input(path) == b"{}" + b"\0" * 16_777_214
     else:
         with pytest.raises(OpsError) as error:
-            native._read_staged(path)
+            native.read_native_staged_input(path)
         assert error.value.code == "INVALID_EXPERIMENT_SPEC"
         assert error.value.problem.retryable is False
 
@@ -1337,7 +1354,7 @@ native.os.open, native.os.unlink = observe_open, cleanup
 signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
 resource.setrlimit(resource.RLIMIT_FSIZE, (64, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
 try:
-    native._write_receipt(path, {'padding': 'x' * 256})
+    native.write_native_gate_receipt(path, {'padding': 'x' * 256})
 except OSError as error:
     assert len(failures) == 1 and error is failures[0]
     assert error.errno == errno.EFBIG
