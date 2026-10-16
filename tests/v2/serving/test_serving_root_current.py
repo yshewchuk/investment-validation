@@ -377,12 +377,21 @@ def test_non_utf8_current_pointer(tmp_path):
     _expect_no_current(client, h)
 
 
-@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory"])
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
 def test_current_nonregular_pointer_is_absent(tmp_path, monkeypatch, kind):
     serving_conn, release_a, _, root, pub = _setup(tmp_path)
     _point(serving_conn, pub, release_a)
     _bypass_prechecks(monkeypatch)
     _nonregular(pub / "CURRENT", kind, "ops1")
+    client, h = _client(root, pub)
+    _expect_no_current(client, h)
+
+
+def test_current_directory_pointer_is_absent(tmp_path, monkeypatch):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    _bypass_prechecks(monkeypatch)
+    _nonregular(pub / "CURRENT", "directory", "ops1")
     client, h = _client(root, pub)
     _expect_no_current(client, h)
 
@@ -413,25 +422,13 @@ def test_fifo_current_refused_by_fstat_alone(tmp_path, monkeypatch):
     current = pub / "CURRENT"
     current.unlink()
     os.mkfifo(current)
-
-    def _write_pointer():
-        fd = os.open(current, os.O_WRONLY)
-        try:
-            os.write(fd, b"ops1")
-        except OSError:
-            pass
-        finally:
-            os.close(fd)
-
-    writer = threading.Thread(target=_write_pointer, daemon=True)
-    writer.start()
+    fd = os.open(current, os.O_RDWR | os.O_NONBLOCK)
     try:
+        os.write(fd, b"ops1")
         client, h = _client(root, pub)
         _expect_no_current(client, h)
     finally:
-        fd = os.open(current, os.O_RDONLY | os.O_NONBLOCK)
         os.close(fd)
-        writer.join(5)
 
 
 def test_non_utf8_current_refused_by_strict_decode(tmp_path):
