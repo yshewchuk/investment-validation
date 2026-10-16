@@ -1767,3 +1767,4 @@ def test_destination_reverification_is_bounded_on_every_writer_path(
     assert len(handles) == (0 if replacement in ("missing", "unreadable", "fifo-symlink", "regular-symlink") else 1)
     assert all(stream.closed for stream in handles)
     assert deployment.current_pointer(out / "deployment") is None
+
