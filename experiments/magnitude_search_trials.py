@@ -1,10 +1,11 @@
 """All-attempt recording and selection from forecasts; estimator execution is unverified."""
 import json
 import math
+import sqlite3
+from numbers import Integral, Real
 from pathlib import Path
 
 from engine.v2.contracts import DATA_FAILURE_CODES, FAILURE_CODES, Problem, SnapshotRef
-from engine.v2.data.errors import DataError
 from engine.v2.foundation import (
     ArtifactError,
     canonical_json,
@@ -23,7 +24,6 @@ from engine.v2.research.magnitude_inputs import (
 )
 from experiments.magnitude_history_inputs import history_binding
 from experiments.magnitude_report import magnitude_metrics
-from experiments.magnitude_search_errors import SearchArtifactError
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 
@@ -39,9 +39,7 @@ def _problem(problem):
 
 
 def _candidate_failure(problem):
-    return (not problem["retryable"] and problem["code"] not in {
-        "EXPERIMENT_IDENTITY_CONFLICT", "IDENTITY_CONFLICT", "IDEMPOTENCY_CONFLICT"}
-        and (problem["category"] == "validation" or problem["code"] == "EXPERIMENT_VARIANT_FAILED"))
+    return problem["code"] == "EXPERIMENT_VARIANT_FAILED" and not problem["retryable"]
 
 
 class SearchTrials:
@@ -63,8 +61,11 @@ class SearchTrials:
 
     def _refused(self, key, error):
         problem = _problem(error.problem)
-        if not isinstance(error, SearchArtifactError) and _candidate_failure(problem):
-            self._append("terminal:" + key, {"status": "refused", "problem": problem})
+        if _candidate_failure(problem):
+            try:
+                self._append("terminal:" + key, {"status": "refused", "problem": problem})
+            except (OpsError, OSError, sqlite3.Error):
+                pass  # Preserve the original scoring refusal; an unfinished claim still blocks freeze.
 
     def _binding(self):
         plan = read_search_plan(self.conn, self.store, self.registration, self.request, self.plan_ref)
@@ -122,14 +123,10 @@ class SearchTrials:
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
         started = {"trial_id": key, "outer_year": outer_year, "inner_year": inner_year, "candidate": candidate}
         self._append("start:" + key, started, replay=False)
-        try:
-            inputs = self._inputs(inner)
-            cohort = content_hash([plan["plan_id"], outer_year, inner_year])
-            self._append("cohort:" + cohort, inputs)
-            self._append("inputs:" + key, {"cohort": cohort, "inputs_id": content_hash(inputs)})
-        except (OpsError, DataError) as error:
-            self._refused(key, error)
-            raise
+        inputs = self._inputs(inner)
+        cohort = content_hash([plan["plan_id"], outer_year, inner_year])
+        self._append("cohort:" + cohort, inputs)
+        self._append("inputs:" + key, {"cohort": cohort, "inputs_id": content_hash(inputs)})
         return {**started, "inputs": inputs}
 
     @staticmethod
@@ -142,12 +139,15 @@ class SearchTrials:
             for row in forecasts:
                 if not isinstance(row, dict) or set(row) != {"event_id", "horizon_sessions", "predicted_absolute_move_pct"}:
                     raise ValueError
-                pair = row["event_id"], row["horizon_sessions"]
+                horizon = row["horizon_sessions"]
                 value = row["predicted_absolute_move_pct"]
-                if (type(pair[1]) is not int or pair not in expected or pair in found
-                        or type(value) not in (float, int) or not math.isfinite(value) or value < 0):
+                if (isinstance(horizon, bool) or not isinstance(horizon, Integral)
+                        or isinstance(value, bool) or not isinstance(value, Real) or value < 0):
                     raise ValueError
-                found[pair] = row
+                pair, value = (row["event_id"], int(horizon)), float(value)
+                if pair not in expected or pair in found or not math.isfinite(value):
+                    raise ValueError
+                found[pair] = {"event_id": pair[0], "horizon_sessions": pair[1], "predicted_absolute_move_pct": value}
             return json.loads(canonical_json([found[pair] for pair in sorted(expected)]))
         except (ValueError, TypeError, OverflowError):
             raise fail("INVALID_EXPERIMENT_SPEC", "trial forecasts require complete finite event-horizon coverage") from None
@@ -178,18 +178,18 @@ class SearchTrials:
         if admitted is None:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
         self._append("forecasts:" + key, submitted, replay=False, absent=("terminal:" + key,))
+        if content_hash(self._inputs(inner)) != admitted["inputs_id"]:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
+        binding = self.registration.document
+        labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
+            as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=inner["evaluation_labels_before"],
+            event_ids=inner["evaluation_event_ids"])
+        targets = dict(zip(labels.event_id, labels.absolute_move_pct))
+        scored = [{**row, "absolute_move_pct": float(targets[row["event_id"]])} for row in submitted]
         try:
-            if content_hash(self._inputs(inner)) != admitted["inputs_id"]:
-                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
-            binding = self.registration.document
-            labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
-                as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=inner["evaluation_labels_before"],
-                event_ids=inner["evaluation_event_ids"])
-            targets = dict(zip(labels.event_id, labels.absolute_move_pct))
-            scored = [{**row, "absolute_move_pct": float(targets[row["event_id"]])} for row in submitted]
             terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
                         "evaluation_inputs": dict(labels.attrs), "predictions": scored, "metrics": magnitude_metrics(scored)}
-        except (OpsError, DataError) as error:
+        except OpsError as error:
             self._refused(key, error)
             raise
         return self._append("terminal:" + key, terminal)
@@ -204,11 +204,12 @@ class SearchTrials:
             if self._read("start:" + key) != expected:
                 raise ValueError
             admitted = self._read("inputs:" + key)
-            if admitted is not None or record["status"] in ("succeeded", "failed"):
-                cohort = self._read("cohort:" + admitted["cohort"])
-                if (admitted["cohort"] != content_hash([plan["plan_id"], outer_year, inner_year])
-                        or cohort is None or content_hash(cohort) != admitted["inputs_id"]):
-                    raise ValueError
+            if admitted is None:
+                raise ValueError
+            cohort = self._read("cohort:" + admitted["cohort"])
+            if (admitted["cohort"] != content_hash([plan["plan_id"], outer_year, inner_year])
+                    or cohort is None or content_hash(cohort) != admitted["inputs_id"]):
+                raise ValueError
             submitted = self._read("forecasts:" + key)
             if submitted is not None:
                 submitted = self._forecasts(submitted, inner, plan["horizons"])
@@ -226,7 +227,8 @@ class SearchTrials:
                 except OpsError:
                     raise ValueError from None
                 if (set(record) != {"status", "problem"} or normalized != record["problem"]
-                        or not _candidate_failure(normalized) or (record["status"] == "failed" and submitted is not None)):
+                        or not _candidate_failure(normalized)
+                        or (record["status"] == "failed") != (submitted is None)):
                     raise ValueError
         except (ValueError, TypeError, KeyError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs") from None

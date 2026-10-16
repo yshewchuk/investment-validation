@@ -21,6 +21,7 @@ from engine.v2.foundation import (
     canonical_json,
     from_document,
 )
+from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_trials as trials
@@ -103,14 +104,13 @@ def _assert_error(code, message):
 def test_native_complete_journal_pools_metrics_freezes_latest_and_replays(case, monkeypatch):
     poison_outcomes(monkeypatch, case.source.repository, case.source.snapshot,
             ("2023-04-03", "2025-01-07", "2025-12-03"))
-    from engine.v2.models.training import magnitude
-    monkeypatch.setattr(magnitude, "fit_magnitude_predictions", lambda *a: pytest.fail("recorder must not fit"))
     first, second = [item["candidate_id"] for item in case.plan["candidates"]]
     values = {args: (7 if args[0] == "2024" and args[2] == first else
                      0 if args[0] == "2024" else 10 if args[2] == second else
                      7 if args[1] == "2023" else 0) for args in _cases(case)}
-    _all(case, values=values)
-    frozen = case.recorder.freeze()
+    with no_fit_guard():
+        _all(case, values=values)
+        frozen = case.recorder.freeze()
     assert [item["selected_candidate_id"] for item in frozen["selections"]] == [first, second]
     assert frozen["prospective_candidate_id"] == second
     assert frozen["estimator_execution"] == "unverified_submitted_forecasts"
@@ -348,7 +348,7 @@ def test_plan_reference_metadata_drift_cannot_initialize_records(case):
         case.recorder.seal(clock=SystemClock())
 
 
-def test_cutoff_equal_validation_label_is_recorded_as_refusal_without_dropping_row(tmp_path, monkeypatch):
+def test_cutoff_equal_validation_label_leaves_unfinished_claim_and_blocks_freeze(tmp_path, monkeypatch):
     events, moves = magnitude_dataset()
     for row in moves:
         if row["ticker"] == "SYNTH_A" and row["event_date"] == "2023-06-02":
@@ -373,12 +373,12 @@ def test_cutoff_equal_validation_label_is_recorded_as_refusal_without_dropping_r
         started = recorder.start(*args)
         with pytest.raises(DataError, match="^EXPERIMENT_VARIANT_FAILED: magnitude label is not available before cutoff$"):
             recorder.record(*args, forecasts=_forecasts(case, args))
-        terminal = recorder._read("terminal:" + started["trial_id"])
-        assert terminal == {"status": "refused", "problem": {
-            "code": "EXPERIMENT_VARIANT_FAILED", "category": "internal", "retryable": False,
-            "message": "search trial did not complete", "stage": None, "details": {},
-            "retry_after_seconds": None, "dependency_refs": [], "trace_id": None,
-            "diagnostic_ref": None, "schema_version": "problem.v1.0"}}
-        assert "predictions" not in terminal and recorder._read("selection") is None
+        assert recorder._read("terminal:" + started["trial_id"]) is None
+        assert recorder._read("forecasts:" + started["trial_id"]) is not None
+        with _assert_error("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
+            recorder.freeze()
+        assert recorder._read("selection") is None
+        with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
+            recorder.start(*args)
     finally:
         source.conn.close()

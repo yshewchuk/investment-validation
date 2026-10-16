@@ -1,12 +1,16 @@
 """Small real-journal oracles for exact refusal, phase, and valid-hash chain guards."""
 import copy
 import json
+import sqlite3
+from fractions import Fraction
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from engine.v2.contracts import Problem
+from engine.v2.contracts import DATA_FAILURE_CODES, FAILURE_CODES, Problem, SnapshotRef
+from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.foundation import (
     ArtifactError,
@@ -77,21 +81,24 @@ def forge_complete(journal, mutation=None):
             terminal["metrics"]["rmse"] = 42
         elif mutation == "status":
             terminal["status"] = "unknown"
-        elif mutation in ("failure_policy", "failure_unknown", "infrastructure_terminal"):
+        elif mutation in ("failure_policy", "failure_unknown", "infrastructure_terminal", "refused_no_inputs", "refused_no_forecasts"):
             problem = expected_problem("EXPERIMENT_VARIANT_FAILED")
             if mutation == "failure_policy":
                 problem["retryable"] = True
             elif mutation == "failure_unknown":
                 problem["code"] = "UNREGISTERED"
-            else:
+            elif mutation == "infrastructure_terminal":
                 problem.update(code="RESOURCE_UNAVAILABLE", category="resource", retryable=True)
-            terminal = {"status": "failed", "problem": problem}
+            terminal = {"status": "refused" if mutation.startswith("refused_") else "failed", "problem": problem}
         for prefix, body in (("start", started), ("inputs", admitted), ("forecasts", rows()), ("terminal", terminal)):
+            if (mutation, prefix) in (("refused_no_inputs", "inputs"), ("refused_no_forecasts", "forecasts")):
+                continue
             journal.recorder._append(prefix + ":" + key, body)
 
 
 @pytest.mark.parametrize("mutation", ["start", "missing_cohort", "cohort_link", "cohort_digest", "terminal_inputs",
-    "forecasts", "metrics", "status", "failure_policy", "failure_unknown", "infrastructure_terminal"])
+    "forecasts", "metrics", "status", "failure_policy", "failure_unknown", "infrastructure_terminal",
+    "refused_no_inputs", "refused_no_forecasts"])
 def test_valid_hash_inconsistent_evidence_chain_refuses(journal, mutation):
     forge_complete(journal, mutation)
     with pytest.raises(OpsError) as caught:
@@ -217,10 +224,12 @@ def forge_complete_peer(journal):
 
 
 @pytest.mark.parametrize("code", ["RESOURCE_UNAVAILABLE", "RESOURCE_LIMIT_EXCEEDED", "TRANSIENT_SOURCE",
-    "INTEGRITY_FAILED", "EXPERIMENT_IDENTITY_CONFLICT", "IDEMPOTENCY_CONFLICT"])
+    "INTEGRITY_FAILED", "EXPERIMENT_IDENTITY_CONFLICT", "IDEMPOTENCY_CONFLICT", "IDENTITY_CONFLICT",
+    "CONTRACT_MISMATCH", "POPULATION_COLLAPSED", "CALENDAR_UNAVAILABLE", "HOLDOUT_ACCESS_DENIED", "INVALID_EXPERIMENT_SPEC"])
 def test_submitted_infrastructure_failure_is_not_a_candidate_terminal(journal, code):
     started = journal.recorder.start("2024", "2023", "z-last")
-    problem = fail(code, "private").problem
+    category, retryable = {**DATA_FAILURE_CODES, **FAILURE_CODES}[code]
+    problem = Problem(code=code, category=category, retryable=retryable, message="private")
     with pytest.raises(OpsError) as caught:
         journal.recorder.record("2024", "2023", "z-last", failure=problem)
     assert caught.value.problem == Problem(code=code, category=problem.category, retryable=problem.retryable,
@@ -267,14 +276,106 @@ def test_failed_candidate_still_requires_intact_admitted_cohort(journal):
     assert journal.recorder._read("selection") is None
 
 
-def test_start_candidate_refusal_records_exact_problem(journal, monkeypatch):
-    original = fail("EXPERIMENT_VARIANT_FAILED", "private qualification detail")
-    def refused(inner):
+def prepare_recording(journal, monkeypatch):
+    snapshot = SnapshotRef(snapshot_id="snapshot", manifest_hash="hash", table_versions={},
+        calendar_version="calendar", source_priority_version="priority", finality_receipt_refs=(), knowledge_mode_by_table={})
+    journal.recorder.registration.document.update(snapshot=to_document(snapshot), holdouts={"holdout_as_of_month": "2026-01"})
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pd.DataFrame([
+        {"event_id": "event", "absolute_move_pct": 4.0}]))
+
+
+@pytest.mark.parametrize("phase", ["start", "readmit", "labels"])
+@pytest.mark.parametrize("code", ["CONTRACT_MISMATCH", "POPULATION_COLLAPSED", "EXPERIMENT_VARIANT_FAILED",
+    "CALENDAR_UNAVAILABLE", "HOLDOUT_ACCESS_DENIED", "IDENTITY_CONFLICT", "OBJECT_CORRUPT",
+    "RESOURCE_UNAVAILABLE", "EVENT_NOT_FOUND", "TRANSIENT_SOURCE"])
+def test_shared_admission_refusal_never_becomes_candidate_terminal(journal, monkeypatch, phase, code):
+    prepare_recording(journal, monkeypatch)
+    original = data_fail(code, "shared native admission failed")
+    def refused(*args, **kwargs):
         raise original
-    monkeypatch.setattr(journal.recorder, "_inputs", refused)
-    with pytest.raises(OpsError) as caught:
+    if phase != "start":
         journal.recorder.start("2024", "2023", "z-last")
+    monkeypatch.setattr(trials if phase == "labels" else journal.recorder,
+                        "load_magnitude_targets" if phase == "labels" else "_inputs", refused)
+    with pytest.raises(DataError) as caught:
+        if phase == "start":
+            journal.recorder.start("2024", "2023", "z-last")
+        else:
+            journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
     assert caught.value is original
     key = content_hash(["plan", "2024", "2023", "z-last"])
-    assert journal.recorder._read("terminal:" + key) == {
-        "status": "refused", "problem": expected_problem("EXPERIMENT_VARIANT_FAILED")}
+    assert journal.recorder._read("start:" + key) is not None
+    assert journal.recorder._read("terminal:" + key) is None
+    assert (journal.recorder._read("forecasts:" + key) is None) == (phase == "start")
+    forge_complete_peer(journal)
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.freeze()
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
+    assert journal.recorder._read("selection") is None
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.start("2024", "2023", "z-last")
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
+
+
+@pytest.mark.parametrize("number", [np.float32(7.25), np.float64(7.25), np.int64(7), Fraction(29, 4)])
+def test_numpy_and_real_forecasts_normalize_before_recording_and_replay(journal, monkeypatch, number):
+    prepare_recording(journal, monkeypatch)
+    for candidate in ("z-last", "a-first"):
+        journal.recorder.start("2024", "2023", candidate)
+        forecasts = [{**row, "horizon_sessions": np.int64(row["horizon_sessions"])} for row in rows(number)]
+        result = journal.recorder.record("2024", "2023", candidate, forecasts=forecasts)
+        assert all(type(row["predicted_absolute_move_pct"]) in (int, float) and type(row["horizon_sessions"]) is int
+                   for row in result["predictions"])
+        assert journal.recorder.record("2024", "2023", candidate, forecasts=rows(float(number))) == result
+    assert journal.recorder.freeze()["prospective_candidate_id"] == "a-first"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("predicted_absolute_move_pct", value) for value in (
+        np.bool_(True), np.float64("nan"), np.float32("inf"), np.float64(-1), Fraction(-1, 10 ** 400))
+] + [("horizon_sessions", value) for value in (True, np.bool_(True), np.float64(1), np.int64(2))])
+def test_numeric_normalization_keeps_refusal_guards(journal, field, value):
+    forecasts = rows()
+    forecasts[0][field] = value
+    inner = journal.plan["folds"][0]["inner"][0]
+    with pytest.raises(OpsError) as caught:
+        journal.recorder._forecasts(forecasts, inner, journal.plan["horizons"])
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "trial forecasts require complete finite event-horizon coverage").problem
+
+
+@pytest.mark.parametrize("write_failure", [None, "artifact", "catalog"])
+def test_candidate_scoring_refusal_preserves_original_if_terminal_write_fails(journal, monkeypatch, write_failure):
+    prepare_recording(journal, monkeypatch)
+    journal.recorder.start("2024", "2023", "z-last")
+    original = fail("EXPERIMENT_VARIANT_FAILED", "candidate metrics must be finite")
+    def scoring(*args):
+        raise original
+    monkeypatch.setattr(trials, "magnitude_metrics", scoring)
+    append = journal.recorder._append
+    def publish(slot, body, **kwargs):
+        if slot.startswith("terminal:"):
+            if write_failure == "artifact":
+                raise fail("RESOURCE_UNAVAILABLE", "unavailable")
+            if write_failure == "catalog":
+                raise sqlite3.OperationalError("unavailable")
+        return append(slot, body, **kwargs)
+    monkeypatch.setattr(journal.recorder, "_append", publish)
+    with pytest.raises(OpsError) as caught:
+        journal.recorder.record("2024", "2023", "z-last", forecasts=rows())
+    assert caught.value is original
+    key = content_hash(["plan", "2024", "2023", "z-last"])
+    expected = None if write_failure else {"status": "refused", "problem": expected_problem("EXPERIMENT_VARIANT_FAILED")}
+    assert journal.recorder._read("terminal:" + key) == expected
+    monkeypatch.setattr(journal.recorder, "_append", append)
+    monkeypatch.setattr(trials, "magnitude_metrics", magnitude_metrics)
+    forge_complete_peer(journal)
+    if write_failure:
+        with pytest.raises(OpsError) as caught:
+            journal.recorder.freeze()
+        assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
+        assert journal.recorder._read("selection") is None
+    else:
+        assert journal.recorder.record("2024", "2023", "z-last", forecasts=rows()) == expected
+        selection = journal.recorder.freeze()["selections"][0]
+        assert selection["selected_candidate_id"] == "a-first"
+        assert selection["scores"][0] == {"candidate_id": "z-last", "metrics": None}
