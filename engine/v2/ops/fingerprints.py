@@ -204,10 +204,9 @@ def _module_files(root, name):
 
 #: Parsed import names by (sha256 of source text, package parts). A pure function
 #: of (text, package parts), so a hit can never go stale; the whole-repo closure
-#: is rebuilt many times per process and profiling (#791) put ~90% of its time in
-#: this parse. Bounded: cleared
-#: when full. Hand-rolled rather than functools.lru_cache so the key is a digest
-#: and the cache never retains the source text itself.
+#: is rebuilt many times per process and the AST parse dominated its cost.
+#: Bounded: cleared when full. Hand-rolled rather than functools.lru_cache so the
+#: key is a digest and the cache never retains the source text itself.
 _IMPORT_NAMES: dict[tuple[bytes, tuple[str, ...]], tuple[str, ...]] = {}
 _IMPORT_NAMES_LIMIT = 20000
 
