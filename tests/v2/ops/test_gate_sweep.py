@@ -217,7 +217,8 @@ def test_real_two_arm_children_consume_distinct_inputs_and_only_stage(source, tm
     _replace_source(ledger, text.replace(marker, "    raise AssertionError('synthetic child ledger access')\n" + marker))
     control = subprocess.run([sys.executable, "-c", "from pathlib import Path; import experiments.lib as lib; "
         "assert Path(lib.__file__).resolve() == Path('experiments/lib.py').resolve(); lib.ledger_append([])"],
-        cwd=checkout, env={**os.environ, "PYTHONPATH": str(checkout)}, capture_output=True, text=True, timeout=30)
+        cwd=checkout, env={**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+                           "PYTHONPATH": str(checkout)}, capture_output=True, text=True, timeout=30)
     assert control.returncode == 1 and control.stdout == ""
     assert control.stderr.rstrip().endswith("AssertionError: synthetic child ledger access")
     identity = _call(source, code_root=checkout)
@@ -808,6 +809,20 @@ def test_public_api_io_failures_are_typed_and_recoverable(source, monkeypatch, p
     assert _call(source) == identity
     jobs = _call(source, sweep.submit_sweep)
     assert len(jobs) == 2 and [job.job_id for job in _call(source, sweep.submit_sweep)] == [job.job_id for job in jobs]
+
+
+@pytest.mark.parametrize("bad", [None, 5])
+def test_non_path_code_root_is_a_typed_refusal(source, bad):
+    with pytest.raises(OpsError) as raised:
+        _call(source, code_root=bad)
+    assert raised.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_str_code_root_is_coerced_to_the_same_sealed_identity(source, tmp_path):
+    checkout = _checkout(tmp_path)
+    identity = _call(source, code_root=str(checkout))
+    assert identity == content_hash(_row(source))
+    assert identity == _call(source, code_root=checkout)
 
 
 @pytest.mark.parametrize("action", [sweep.register_sweep, sweep.submit_sweep])
