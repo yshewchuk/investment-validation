@@ -138,3 +138,14 @@ def test_source_closure_hashes_a_non_py_entry_without_import_expansion(tmp_path)
     (tmp_path / "os.py").write_bytes(b"")
     assert fingerprints.source_closure(tmp_path, ["data.txt"]) == {
         "data.txt": "sha256:" + hashlib.sha256(b"import os\n").hexdigest()}
+
+
+def test_unresolved_import_is_omitted_without_refusal(tmp_path):
+    (tmp_path / "m.py").write_bytes(b"import not_in_the_repo\n")
+    assert list(fingerprints.source_closure(tmp_path, ["m.py"])) == ["m.py"]
+
+
+def test_undecodable_py_lets_the_builtin_error_escape(tmp_path):
+    (tmp_path / "m.py").write_bytes(b"\xff\xfe")
+    with pytest.raises(UnicodeDecodeError):
+        fingerprints.source_closure(tmp_path, ["m.py"])
