@@ -167,6 +167,17 @@ label the run it displays.
 | Cursor belongs to another report or detail filter | `CURSOR_MISMATCH` Problem (409) |
 | Cache/retry/transaction/partial write/idempotency | `no-store`, no ETag; no retries, jobs or writes; report-derived summary fields and detail items stay stable for the same report and query; freshness `status` may change with current-release resolution |
 
+**Serving root.** The launcher takes one `--serving-root`; unless overridden, the index is
+`<serving_root>/serving.sqlite`, the object store `<serving_root>/objects` and the pointer root
+(`publication_root`) `<serving_root>/publisher`. `/releases/current` follows that pointer root's
+`CURRENT` -> `projection_binding.json` (see the read path below) and adds a top-level `scope`:
+the binding's optional string `scope` (the effect scope of the retained publication that moved
+the pointer), `null` when the binding has none or a non-string. `verify_projection_binding`
+ignores `scope`. Until the serving-projection job writes it (#717 slice 4), `scope` is `null`.
+`/operations` serves `<publication_root>/operations_status.json` only; it is the publication-time
+status document, never the serving-projection status sidecar (#717 slice 5), so under the
+serving `publisher/` it answers `OPERATIONS_UNAVAILABLE` (503) until a producer writes that file.
+
 API errors raised as `ApiError` share one `Problem` envelope (`code`, `category`, `retryable`);
 HTTP statuses are in parentheses. Index integrity failures (`ServingIndexError`, e.g. a schema
 newer than the code supports) are not caught by the API handler, so they are not returned as a
@@ -181,8 +192,8 @@ ceiling, while a larger population retains the lookup limit.
 |---|---|
 | Missing input: identity | No or wrong token: `UNAUTHORIZED` (401). Event-scores and score-detail routes without a release pin: `RELEASE_ID_REQUIRED` (400); no route searches across releases. `GET /events` without a pin uses the current release. |
 | Missing input: data | Unknown release/event/score: 404. No current release: `NO_CURRENT_RELEASE` (503, retryable). Binding that fails re-verification: `CURRENT_BINDING_INVALID` (500, not retryable). Bad filter/limit: `INVALID_REQUEST` (422). |
-| Missing input: files | Absent, indirect or unreadable health file: 503. Analog index missing, failing to open, or outdated: 503 with a `reason_code`; post-open `sqlite3.Error` or `json.JSONDecodeError` during currency checks or analog reads returns `SERVING_INDEX_UNREADABLE` (503, typed JSON). API post-open `sqlite3.Error` or `json.JSONDecodeError` during index projection reads or current-binding verification returns `SERVING_INDEX_UNREADABLE` (503, retryable `Problem`, no raw exception text); connections always close. Artifact decoding failures retain their existing behavior. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
-| Cache | `/releases/current` is `no-store` with a strong ETag (304 on match). `/releases/{id}`, event-scores and score detail are immutable with an ETag (304 on match). `/events`: current reads are `no-store` without an ETag; explicit-release reads are immutable with an ETag but never 304. A cursor bound to another release or filter set: `CURSOR_MISMATCH` (409). |
+| Missing input: files | Absent, indirect or unreadable health file: 503. Analog index missing, failing to open, or outdated: 503 with a `reason_code`; post-open `sqlite3.Error` or `json.JSONDecodeError` during currency checks or analog reads returns `SERVING_INDEX_UNREADABLE` (503, typed JSON). API `sqlite3.Error` while opening the index, or post-open `sqlite3.Error` or `json.JSONDecodeError` during index projection reads or current-binding verification returns `SERVING_INDEX_UNREADABLE` (503, retryable `Problem`, no raw exception text); connections always close. Artifact decoding failures retain their existing behavior. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
+| Cache | `/releases/current` is `no-store` with a strong ETag over the complete response including `scope` (304 on match; a changed `scope` changes the ETag). `/releases/{id}`, event-scores and score detail are immutable with an ETag (304 on match). `/events`: current reads are `no-store` without an ETag; explicit-release reads are immutable with an ETag but never 304. A cursor bound to another release or filter set: `CURSOR_MISMATCH` (409). |
 | Retry | None inside serving: no read retries and no job is started by a GET. Callers retry only when `retryable`. Command POSTs pass through the configured callback's status and body (a queued job identity or typed refusal is the callback's contract); a callback exception is 500. |
 | Transaction | The serving index uses short `BEGIN IMMEDIATE` transactions; any error rolls back. A schema newer than the code, or an edited migration: `INTEGRITY_FAILED`. The operations analog read opens the index `mode=ro` and never migrates; the API opens it through `connect`, which applies pending migrations. |
 | Partial write | `build_candidate` publishes findings, details and manifest as content-addressed immutable objects before the index transaction; a crash before the index commit leaves only unreferenced objects (a rerun keeps any release row already committed); after the commit the complete release row is durable. Findings not ok: receipt published, `PROJECTION_REFUSED`, no release. |

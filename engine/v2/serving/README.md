@@ -355,11 +355,11 @@ binds the render bundle. No scoring, no provider calls, no legacy import —
 it composes `engine.v2.ops.bootstrap.open_catalog` and this package in the
 one place (`tools/`) allowed to import both.
 
-`python3 -m engine.v2.serving.api --host 127.0.0.1 --port 8766 --serving-db
-serving/serving.sqlite --store-root serving/objects --serving-root serving
---publication-root <ops_root>/releases/<scope> --ops-root <ops_root>` starts the read API under
-uvicorn, "current" resolved through that fenced ops publisher's own pointer
-(§5.4/P3-1c; omit `--publication-root` for no configured pointer). The
+`python3 -m engine.v2.serving.api --host 127.0.0.1 --port 8766 --serving-root
+<serving_root> --ops-root <ops_root>` starts the read API under uvicorn, "current"
+resolved through that fenced ops publisher's own pointer; `serving.sqlite`,
+`objects/` and `publisher/` under `--serving-root` are the defaults, and
+`--serving-db`/`--store-root`/`--publication-root` override them (§5.4/P3-1c). The
 explicit `--ops-root` also enables read-only discovery of the newest
 succeeded shadow `native_parity` job when `--native-parity-report-path` is
 omitted; the explicit report path takes precedence. Omit `--ops-root` to

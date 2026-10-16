@@ -24,6 +24,9 @@ binding that does not (yet, or any longer) match is a typed, non-retryable
  index read failing during that reverification is the retryable
  ``SERVING_INDEX_UNREADABLE`` 503 (``_index_unreadable``, #342).
 
+ The pointer root defaults to the serving root's ``publisher/``; ``/releases/
+ current`` adds a top-level ``scope`` taken from the binding (null when absent).
+
 
 ``create_app``'s ``resolver`` parameter remains the seam: any zero-argument
 ``Callable[[], str | None]`` (may also raise ``ApiError``) may replace it,
@@ -244,27 +247,35 @@ def _publication_resolver(release_root, serving_db):
  closes either way."""
 
 
-    def resolve() -> str | None:
+    def resolve_pair() -> tuple[str | None, str | None]:
         ops_release_id = _read_ops_current(release_root)
         if ops_release_id is None:
-            return None
+            return None, None
         binding = _read_projection_binding(release_root, ops_release_id)
         if binding is None:
-            return None
-        conn = projections.connect(str(serving_db))
+            return None, None
+        conn = None
         try:
+            conn = projections.connect(str(serving_db))
             if not projections.verify_projection_binding(conn, binding):
                 raise ApiError(500, _problem(
                     "CURRENT_BINDING_INVALID", "integrity",
                     "the published pointer's projection binding does not match the "
                     "live serving index", details={"ops_release_id": ops_release_id}))
             release_id = binding.get("projection_release_id")
+            scope = binding.get("scope")
         except (projections.sqlite3.Error, json.JSONDecodeError):
             raise _index_unreadable() from None
         finally:
-            conn.close()
-        return release_id if isinstance(release_id, str) else None
+            if conn is not None:
+                conn.close()
+        return (release_id if isinstance(release_id, str) else None,
+                scope if isinstance(scope, str) else None)
 
+    def resolve() -> str | None:
+        return resolve_pair()[0]
+
+    resolve.with_scope = resolve_pair
     return resolve
 
 
@@ -439,11 +450,14 @@ def _read_operations_status(publication_root) -> dict | None:
 
 
 def _open(serving_db):
-    return projections.connect(str(serving_db))
+    try:
+        return projections.connect(str(serving_db))
+    except projections.sqlite3.Error:
+        raise _index_unreadable() from None
 
 
 def _release_response(serving_db, release_id: str | None, response: Response, request: Request, *,
-                      require_current: bool) -> dict | Response:
+                      require_current: bool, scope=None) -> dict | Response:
     if release_id is None:
         raise ApiError(503, _problem("NO_CURRENT_RELEASE", "resource",
                                      "no current release is configured", retryable=True))
@@ -461,6 +475,8 @@ def _release_response(serving_db, release_id: str | None, response: Response, re
                                          "projection", retryable=True))
         raise ApiError(404, _problem("UNKNOWN_RELEASE", "validation", "unknown release id"))
     document = to_document(release)
+    if require_current:
+        document = {**document, "scope": scope}
     cache_control = "no-store" if require_current else _IMMUTABLE_CACHE
     return _cached_response(request, response, release.release_id, document, cache_control=cache_control)
 
@@ -864,6 +880,12 @@ def _register_native_parity_routes(app, auth, serving_db, resolve_current, curso
 # --------------------------------------------------------------------------
 
 
+def _with_scope(resolve_current):
+    """(release_id, scope) from the publication resolver; scope is None for any other resolver."""
+    pair = getattr(resolve_current, "with_scope", None)
+    return pair() if pair else (resolve_current(), None)
+
+
 def create_app(*, serving_db, store_root, serving_root, token: str, resolver=None,
               publication_root=None, ops_root=None, native_parity_report_path=None) -> FastAPI:
     """Build the read-only API. ``resolver``, given, replaces the default
@@ -902,7 +924,8 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
 
     @app.get("/api/v1/releases/current", dependencies=auth)
     def releases_current(request: Request, response: Response):
-        return _release_response(serving_db, resolve_current(), response, request, require_current=True)
+        release_id, scope = _with_scope(resolve_current)
+        return _release_response(serving_db, release_id, response, request, require_current=True, scope=scope)
 
     @app.get("/api/v1/releases/{release_id}", dependencies=auth)
     def releases_by_id(release_id: str, request: Request, response: Response):
@@ -913,8 +936,7 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
                      date_from: str | None = None, date_to: str | None = None,
                      ticker: str | None = None, strategy: str | None = None, verdict: str | None = None,
                      gate: str | None = None, out_of_domain: str | None = None,
-                     disabled: str | None = None,
-                     limit: str | None = None, cursor: str | None = None):
+                     disabled: str | None = None, limit: str | None = None, cursor: str | None = None):
         # `date_from`/`date_to` are `ui/src/api/client.ts` `EventQuery`'s own
         # names; `_events_response`'s internal `event_date_from`/
         # `event_date_to` stay projections.py's storage-facing names.
@@ -950,16 +972,30 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
 # --------------------------------------------------------------------------
 
 
+def _serving_paths(args) -> tuple[str, str, str]:
+    """Resolve the three serving paths, each defaulting under ``--serving-root``
+    when its explicit flag is omitted; the explicit flag overrides."""
+    serving_db = args.serving_db or os.path.join(args.serving_root, "serving.sqlite")
+    store_root = args.store_root or os.path.join(args.serving_root, "objects")
+    publication_root = args.publication_root or os.path.join(args.serving_root, "publisher")
+    return serving_db, store_root, publication_root
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="v2 serving read API")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--serving-db", required=True)
-    parser.add_argument("--store-root", required=True)
+    parser.add_argument("--serving-db", required=False, default=None,
+                        help="the serving index path; defaults under --serving-root, "
+                             "an explicit flag overrides")
+    parser.add_argument("--store-root", required=False, default=None,
+                        help="the artifact store root; defaults under --serving-root, "
+                             "an explicit flag overrides")
     parser.add_argument("--serving-root", required=True)
     parser.add_argument("--publication-root", default=None,
                         help="the fenced ops publisher's release root for this shadow scope "
-                             "(<ops_root>/releases/<scope>); omit for no configured pointer")
+                             "(<ops_root>/releases/<scope>); defaults under --serving-root, "
+                             "an explicit flag overrides")
     parser.add_argument("--native-parity-report-path", default=None,
                         help="the producer's native parity report JSON; omit for no_report")
     parser.add_argument("--ops-root", default=None,
@@ -979,9 +1015,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.host not in _LOOPBACK_HOSTS and not args.allow_non_loopback:
         print("refusing a non-loopback host without --allow-non-loopback")
         return 2
-    app = create_app(serving_db=args.serving_db, store_root=args.store_root,
+    serving_db, store_root, publication_root = _serving_paths(args)
+    app = create_app(serving_db=serving_db, store_root=store_root,
                      serving_root=args.serving_root, token=token,
-                     publication_root=args.publication_root,
+                     publication_root=publication_root,
                      ops_root=args.ops_root,
                      native_parity_report_path=args.native_parity_report_path)
     uvicorn.run(app, host=args.host, port=args.port)
