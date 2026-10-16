@@ -46,6 +46,27 @@ Regression cases: slice 1 asserts `/releases/current` ETag changes when the resp
 Estimates (code / test / doc lines): 1: 120 / 100 / 15; 2: 150 / 120 / 10; 3: 250 / 200 / 20; 4: 300 / 250 / 25; 5: 200 / 150 / 20; 6: 40 / 150 / 10. Slice 4 must first confirm `submit_retained_publication` can target the separate serving pointer root; if it needs a parameter, that goes in slice 4.
 
 
+## What #726 left open (#717 follow-up decisions)
+
+The sections above settle ownership (new leaf job after `publication`), serving root, swap order, idempotency, failure table and slices. Three things were not stated; they are decided here and bind the slices.
+
+**Inputs: one projection, native and legacy together.** There is no separate native or legacy projection path. The job projects the session's rendered legacy-format bundle (`bundle.tar`, read by `load_legacy_bundle`) and attaches the native rows the saved plan's `shadow_serving_scorer` names (`--nightly-plan`, `--native-inputs`), as `tools/v2_dashboard_project.py` does offline today. A night with no native rows projects the bundle alone; the release records which row sources it carries, so the board never shows an unlabelled mix. Nothing is read from a checkout or a "latest" pointer.
+
+**Scope and the P7-3 authority fence (`guides/authority_fence_switch_rollback.md`).** The swap is a retained publication carrying the session's effect scope, so the fence rules for `publish_local` apply unchanged; the job adds no authority logic of its own.
+
+| Phase | Nightly scope | Serving swap | Board |
+|---|---|---|---|
+| Today to S5 (shadow nightly) | `shadow` (`plans.nightly_plan` refuses other modes) | Exempt from the fence; each nightly moves the serving `CURRENT` | The shadow nightly's release |
+| S5 done, S6 not started (zero writers) | none runs | Operator-only; any swap is refused `AUTHORITY_FENCED` | Last validated release |
+| After S6 (official, owner `v2`, current generation) | `official` | Allowed; a stale generation is refused `AUTHORITY_GENERATION_STALE` | Each night's release |
+| After B1 to B5 (rollback) | none from v2 | Refused `AUTHORITY_FENCED`; only the rollback's own retained publication moves the pointer | Last validated release, or the one the operator re-pointed |
+
+A fence refusal is a pre-swap failure in the failure table: the job fails with the typed code, `CURRENT` and the board are unchanged, `publication` is untouched. S7 ("switch read consumers") is therefore no new mechanism: it is the first `serving_projection` swap after S6, or an operator retained publication of an already-indexed release, both through slice 4's serving-root target. S7 depends on slice 4 only, and `ops cutover consumers` reads the same serving `CURRENT`, binding and ETag the board does.
+
+**First run, backfill and retention.** A fresh serving root has no `CURRENT`; the board reads `NO_CURRENT_RELEASE` until the first successful `serving_projection`. There is no automatic backfill of earlier nights: an operator reruns the job against a retained session's publication (idempotent, per the retry rules); anything older is rebuilt from providers, not migrated. Projection release rows and objects are append-only and never pruned by this job, because rollback needs old releases to stay verifiable. A retention policy is a separate design, filed as a follow-up issue and a precondition of no slice.
+
+**Decisions for the user (defaults chosen; say if you disagree).** (1) Pre-cutover swap scope: default is the `shadow` scope so the board follows the shadow nightly now; the alternative is an operator-only swap until S6, which keeps the board empty until cutover and defeats #717's goal. (2) Completion role: default `completed_degraded` for a session whose only failure is the post-publication `serving_projection`; the alternative is `failed`, which would re-trigger delivery and backup retry logic for a session whose publication already succeeded.
+
 ## Read side: serving root and nightly current release
 
 Production reads use one configured serving root, `<ops_root>/serving`: `serving.sqlite`,
