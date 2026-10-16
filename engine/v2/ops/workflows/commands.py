@@ -9,7 +9,6 @@ import json
 import os
 import stat
 from dataclasses import replace
-from datetime import date
 from pathlib import Path
 
 from engine.v2.foundation import ArtifactStore, to_document
@@ -24,6 +23,7 @@ from engine.v2.ops.nightly import (
     refuse_unfittable_memory_plan,
 )
 from engine.v2.ops.plans import nightly_plan, request_from_plan, save_plan
+from engine.v2.ops.snapshot_planning import require_valid_population_keys
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit, submit_graph
 
@@ -122,21 +122,6 @@ def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
     with transaction(conn):
         register_artifact(conn, manifest, None, clock)
     return manifest.artifact_id
-
-
-def require_valid_population_keys(keys) -> None:
-    """Refuse any key that is not ``ticker|strategy|YYYY-MM-DD`` (canonical ISO date)."""
-    for key in keys:
-        parts = str(key).split("|")
-        try:
-            valid = (len(parts) == 3 and all(parts)
-                     and date.fromisoformat(parts[2]).isoformat() == parts[2])
-        except ValueError:
-            valid = False
-        if not valid:
-            raise fail("INVALID_REQUEST",
-                       "expected population holds a key that is not "
-                       "ticker|strategy|event_date; fix or remove it")
 
 
 def _read_expected_population(args):

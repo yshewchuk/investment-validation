@@ -2082,3 +2082,16 @@ def test_release_caps_are_pinned():
     assert assembly.MAX_CATALOG_BYTES == 64 * 1024 * 1024
     assert assembly.MAX_OBJECT_BYTES == 512 * 1024 * 1024
     assert assembly.LOCK_WAIT_S == 30.0
+
+
+def test_symlinked_staged_manifest_is_refused(tmp_path):
+    _stage_prior(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    manifest = phase5_release.staged_manifest_path(store, "prior1")
+    real = tmp_path / "real_manifest.json"
+    real.write_bytes(manifest.read_bytes())
+    manifest.unlink()
+    manifest.symlink_to(real)
+    with pytest.raises(deployment.StagingRefused) as error:
+        deployment.resolve_release(store, "prior1")
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
