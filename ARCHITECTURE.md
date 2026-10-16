@@ -511,30 +511,18 @@ Only a tracked path absent from the worktree reads as empty.
   operator-run assembler (no production caller; listed here beside its
   sibling Phase 6 inventory tool) for
   `checks/phase7_candidate_manifest.py`. It takes one operator spec file
-  (path on the command line, at most 1 MiB; keep it outside the repository,
-  which nothing enforces)
-  holding the required candidate commit, config/snapshot/release/phase
-  evidence paths (each at most 256 MiB, hashed by streaming), `authority`
-  values (legacy scheduler entry, credential owners, retained old
-  deployment), `registry_owner`, any extra jobs the registry cannot know (the
-  legacy nightly, the proposed official writer) and optional
-  `official_registry_kinds`. The job-graph document comes from the live
-  `stages.registry()` (a future kind such as `serving_projection` appears
-  with no edit here) and the consumer inventory from
+  (path on the command line; keep it outside the repository, which nothing
+  enforces) with the commit, evidence paths, `authority` values and extra
+  jobs; the tool docstring lists the keys and size caps. The job graph comes
+  from the live `stages.registry()` and the consumer inventory from
   `phase6_inventory.discover_entrypoints`, both of this checkout. It writes
-  both plus `manifest.json` into `--out-dir` and nothing else. The manifest
-  echoes the spec's `authority` block and absolute resolved paths, so it is
-  a private artifact like the spec. `--out-dir` is created with its parents.
-  A registry kind is `scheduled_writer` with `writes_official` true when its
-  namespaces include `official` or the operator lists it in
-  `official_registry_kinds` (registry kind names). A kind that can run
-  outside `shadow`/`smoke` (today `experiment`, in `primary`) or holds a store
-  `write` lease (today `models_promote` and `models_rollback` on
-  `deployment_pointer`) is refused until the spec lists it in
-  `official_registry_kinds` or `non_official_registry_kinds`; whether it
-  counts as official is the operator's call. Every other kind is `background`
-  (has effects) or `reader`. Registry rows get a synthetic `native:<kind>`
-  schedule.
+  the two documents plus `manifest.json` into `--out-dir` (created with its
+  parents) and nothing else; the manifest echoes `authority` and absolute
+  paths, so it is private like the spec. A kind that can run outside
+  `shadow`/`smoke` or holds a store `write` lease (today `experiment`,
+  `models_promote`, `models_rollback`) is refused until the spec lists it in
+  `official_registry_kinds` or `non_official_registry_kinds`; whether it is
+  official is the operator's call.
 
   | Condition | Outcome |
   |---|---|

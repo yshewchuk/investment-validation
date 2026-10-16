@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -15,13 +16,13 @@ from engine.v2.ops import stages, submission
 from tools import phase7_candidate_manifest as asm
 
 COMMIT = "a" * 40
-_REAL_COMMIT = asm._commit
+_REAL_COMMIT = asm.check_commit
 
 
 @pytest.fixture(autouse=True)
 def _stub_commit(monkeypatch):
     """Bind the spec commit without consulting the (possibly dirty) checkout."""
-    monkeypatch.setattr(asm, "_commit", lambda spec, root: spec["commit"]
+    monkeypatch.setattr(asm, "check_commit", lambda spec, root: spec["commit"]
                         if isinstance(spec.get("commit"), str) and spec["commit"]
                         else _REAL_COMMIT(spec, root))
 
@@ -183,38 +184,36 @@ def test_cap_is_inclusive_and_shared_with_the_checker(tmp_path, monkeypatch):
     path = tmp_path / "f.bin"
     path.write_bytes(b"12345")
     monkeypatch.setattr(asm, "MAX_REF_BYTES", 5)
-    assert asm._sha256("f", path)[1] == hashlib.sha256(b"12345").hexdigest()
+    assert asm.hash_ref("f", path)[1] == hashlib.sha256(b"12345").hexdigest()
     monkeypatch.setattr(asm, "MAX_REF_BYTES", 4)
     with pytest.raises(asm.SpecError, match="exceeds"):
-        asm._sha256("f", path)
+        asm.hash_ref("f", path)
     assert checker.MAX_REF_BYTES == 256 * 1024 * 1024
     monkeypatch.undo()
     assert asm.MAX_REF_BYTES == checker.MAX_REF_BYTES
     assert asm.MAX_SPEC_BYTES == 1024 * 1024
 
 
-def test_checker_reference_cap_boundary(tmp_path, monkeypatch):
-    path = tmp_path / "f.bin"
-    path.write_bytes(b"12345")
-    digest = hashlib.sha256(b"12345").hexdigest()
-    monkeypatch.setattr(checker, "MAX_REF_BYTES", 5)
-    ok = checker._Findings()
-    assert checker._read_verified(ok, "s", str(path), digest, tmp_path) == b"12345"
-    assert ok.sorted_rows() == []
-    monkeypatch.setattr(checker, "MAX_REF_BYTES", 4)
-    over = checker._Findings()
-    assert checker._read_verified(over, "s", str(path), digest, tmp_path) is None
-    assert [r["code"] for r in over.sorted_rows()] == [checker.REF_MALFORMED]
+def test_checker_reference_cap_boundary(spec, tmp_path, monkeypatch):
+    manifest = asm.assemble(spec, _out(tmp_path))
+    refs = [manifest["candidate"]["config"][0], manifest["data_snapshot"],
+            manifest["model_deployment"], manifest["job_graph"], manifest["consumer_inventory"],
+            *manifest["phase_evidence"]]
+    biggest = max(Path(r["path"]).stat().st_size for r in refs)
+    monkeypatch.setattr(checker, "MAX_REF_BYTES", biggest)
+    assert checker.REF_MALFORMED not in checker.validate(manifest, root=tmp_path)["finding_codes"]
+    monkeypatch.setattr(checker, "MAX_REF_BYTES", biggest - 1)
+    assert checker.REF_MALFORMED in checker.validate(manifest, root=tmp_path)["finding_codes"]
 
 
 def test_spec_cap_boundary(tmp_path, monkeypatch):
     path = tmp_path / "spec.json"
     path.write_bytes(b'{"a":1}')
     monkeypatch.setattr(asm, "MAX_SPEC_BYTES", 7)
-    assert asm._load_spec(path) == {"a": 1}
+    assert asm.load_spec(path) == {"a": 1}
     monkeypatch.setattr(asm, "MAX_SPEC_BYTES", 6)
     with pytest.raises(asm.SpecError, match="spec exceeds"):
-        asm._load_spec(path)
+        asm.load_spec(path)
 
 
 def test_overlapping_registry_kind_lists_are_refused(spec, tmp_path):
@@ -343,3 +342,36 @@ def test_spec_over_cap_is_refused_with_its_message(spec, tmp_path, monkeypatch, 
     monkeypatch.setattr(asm, "MAX_SPEC_BYTES", 100)
     assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o")]) == 2
     assert "spec exceeds" in capsys.readouterr().err
+
+
+def test_nested_out_dir_and_rerun(spec, tmp_path):
+    out = tmp_path / "a" / "b" / "out"
+    asm.assemble(spec, out)
+    asm.assemble(spec, out)
+    assert sorted(p.name for p in out.iterdir()) == [
+        "consumer_inventory.json", "job_graph.json", "manifest.json"]
+
+
+@pytest.mark.parametrize("mutate, match", [
+    (lambda s, t: s["data_snapshot"].update(snapshot_id="other"), r"data_snapshot\.snapshot_id"),
+    (lambda s, t: s["model_deployment"].update(release_id="other"),
+     r"model_deployment\.release_id"),
+    (lambda s, t: s["phase_evidence"][0].update(status="FAIL"), r"phase_evidence\[0\]\.status"),
+    (lambda s, t: s["phase_evidence"][0].update(schema_version="phase3b.y"),
+     r"phase_evidence\[0\]\.schema_version"),
+])
+def test_spec_identity_must_match_the_document(spec, tmp_path, mutate, match):
+    mutate(spec, tmp_path)
+    with pytest.raises(asm.SpecError, match=match):
+        asm.assemble(spec, _out(tmp_path))
+
+
+def test_real_commit_check_runs_inside_assemble_and_main(spec, tmp_path, monkeypatch):
+    monkeypatch.setattr(asm, "check_commit", _REAL_COMMIT)
+    spec["commit"] = "b" * 40
+    with pytest.raises(asm.SpecError, match="HEAD"):
+        asm.assemble(spec, _out(tmp_path))
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec))
+    assert asm.main(["--spec", str(path), "--out-dir", str(tmp_path / "o")]) == 2
+    assert not (tmp_path / "o").exists()

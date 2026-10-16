@@ -26,8 +26,9 @@ must be exact: an empty value, or one of ``latest``/``current``/``newest``/
 ``/`` and ``:`` separators are normalized away first, so ``refs/heads/main/``
 is caught exactly like ``refs/heads/main``.
 
-Every referenced file is refused above ``MAX_REF_BYTES`` (256 MiB) with a
-``P7_REF_MALFORMED`` finding before it is read.
+Every referenced regular file larger than ``MAX_REF_BYTES`` (256 MiB) is
+refused with a ``P7_REF_MALFORMED`` finding before it is read; the size
+check uses ``stat``, so a FIFO or device node is not covered.
 
 ``candidate``: ``{"commit": "<40- or 64-hex git sha>", "config": [{"name", "path",
 "sha256"}]}`` — at least one config identity; every referenced file must

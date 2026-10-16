@@ -40,7 +40,7 @@ class SpecError(Exception):
     """The operator spec (or a file it names) cannot be used."""
 
 
-def _sha256(field: str, path) -> tuple[str, str]:
+def hash_ref(field: str, path) -> tuple[str, str]:
     if not isinstance(path, (str, Path)):
         raise SpecError(f"{field}: path must be a string")
     target = Path(path).resolve()
@@ -74,8 +74,22 @@ def _strings(field: str, row: dict, *keys: str) -> None:
             raise SpecError(f"{field}.{key}: required non-empty string")
 
 
-def _ref(field: str, row: dict, *keys: str) -> dict:
-    path, digest = _sha256(field, row.get("path"))
+def _ref(field: str, row: dict, *keys: str, agree: tuple[str, ...] = ()) -> dict:
+    """Hash the referenced file; every key in ``agree`` must equal the value the
+    (size-capped) document itself carries, so the manifest never records an
+    identity or status the file does not hold."""
+    path, digest = hash_ref(field, row.get("path"))
+    if agree:
+        try:
+            doc = json.loads(Path(path).read_bytes())
+        except ValueError as exc:
+            raise SpecError(f"{field}: referenced file is not JSON ({exc})") from exc
+        if not isinstance(doc, dict):
+            raise SpecError(f"{field}: referenced document must be a JSON object")
+        for key in agree:
+            if doc.get(key) != row.get(key):
+                raise SpecError(f"{field}.{key}: spec says {row.get(key)!r} but the document "
+                                f"says {doc.get(key)!r}")
     out = {k: row.get(k) for k in keys}
     out.update(path=path, sha256=digest)
     return out
@@ -85,7 +99,7 @@ def _write(path: Path, doc: dict) -> None:
     path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
-def _commit(spec: dict, root: Path) -> str:
+def check_commit(spec: dict, root: Path) -> str:
     commit = spec.get("commit")
     if not isinstance(commit, str) or not commit:
         raise SpecError("commit: required in the spec")
@@ -143,7 +157,7 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
     out_dir = Path(out_dir).resolve()
     if out_dir.is_relative_to(root.resolve()):
         raise SpecError("out-dir: must be outside the repository")
-    commit = _commit(spec, root)
+    commit = check_commit(spec, root)
     owner = spec.get("registry_owner")
     if not isinstance(owner, str) or not owner:
         raise SpecError("registry_owner: required string")
@@ -180,10 +194,12 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
         "schema_version": checker.MANIFEST_SCHEMA,
         "candidate": {"commit": commit,
                       "config": [_ref(f"config[{i}]", r, "name") for i, r in enumerate(config)]},
-        "data_snapshot": _ref("data_snapshot", snapshot, "snapshot_id"),
-        "model_deployment": _ref("model_deployment", deployment, "release_id"),
+        "data_snapshot": _ref("data_snapshot", snapshot, "snapshot_id", agree=("snapshot_id",)),
+        "model_deployment": _ref("model_deployment", deployment, "release_id",
+                                 agree=("release_id",)),
         "authority": _obj("authority", spec.get("authority")),
-        "phase_evidence": [_ref(f"phase_evidence[{i}]", r, "phase", "schema_version", "status")
+        "phase_evidence": [_ref(f"phase_evidence[{i}]", r, "phase", "schema_version", "status",
+                                agree=("schema_version", "status"))
                            for i, r in enumerate(evidence)],
     }
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -202,7 +218,7 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
     return manifest
 
 
-def _load_spec(path: Path) -> dict:
+def load_spec(path: Path) -> dict:
     with path.open("rb") as handle:
         data = handle.read(MAX_SPEC_BYTES + 1)
     if len(data) > MAX_SPEC_BYTES:
@@ -216,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        manifest = assemble(_load_spec(args.spec), args.out_dir)
+        manifest = assemble(load_spec(args.spec), args.out_dir)
     except (SpecError, OSError, ValueError) as exc:
         print(f"spec unusable: {exc}", file=sys.stderr)
         return 2
