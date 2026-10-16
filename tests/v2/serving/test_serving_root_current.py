@@ -443,6 +443,52 @@ def test_non_utf8_current_refused_by_strict_decode(tmp_path):
     _expect_no_current(client, h)
 
 
+def test_current_regular_mode_755_resolves(tmp_path):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    os.chmod(pub / "CURRENT", 0o755)
+    client, h = _client(root, pub)
+    r = client.get("/api/v1/releases/current", headers=h)
+    assert r.status_code == 200
+    assert r.json()["release_id"] == release_a.release_id
+
+
+def test_current_read_failure(tmp_path, monkeypatch):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    real_read = os.read
+
+    def failing_read(fd, count):
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            target = ""
+        if target.endswith("/CURRENT"):
+            raise OSError(5, "EIO")
+        return real_read(fd, count)
+
+    monkeypatch.setattr(os, "read", failing_read)
+    client, h = _client(root, pub)
+    _expect_no_current(client, h)
+
+
+def test_current_pointer_no_fd_leak(tmp_path):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    client, h = _client(root, pub)
+    client.get("/api/v1/releases/current", headers=h)
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(20):
+        client.get("/api/v1/releases/current", headers=h)
+    after = len(os.listdir("/proc/self/fd"))
+    assert after - before <= 3
+
+
+def test_main_empty_serving_root(monkeypatch):
+    monkeypatch.setenv("V2_DASHBOARD_TOKEN", TOKEN)
+    assert main(["--port", "1", "--serving-root", ""]) == 2
+
+
 def _expect_operations_unavailable(client, h):
     r = client.get("/api/v1/operations", headers=h)
     assert r.status_code == 503

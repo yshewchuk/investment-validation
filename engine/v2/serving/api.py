@@ -215,6 +215,9 @@ def _read_small_text(path: str, cap: int = 1 << 20) -> str | None:
     except OSError:
         return None
     try:
+        # ``stat.S_ISREG`` would read better but ``import stat`` is a ninth
+        # distinct-module edge (§4.3 fan-out budget is exactly spent); the
+        # literal S_IFMT/S_IFREG test stays instead.
         if (os.fstat(fd).st_mode & 0o170000) != 0o100000:
             return None
         raw = b""
@@ -1022,9 +1025,12 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
 def _serving_paths(args) -> tuple[str, str, str]:
     """Resolve the three serving paths, each defaulting under ``--serving-root``
     when its explicit flag is omitted; the explicit flag overrides."""
-    serving_db = args.serving_db or os.path.join(args.serving_root, "serving.sqlite")
-    store_root = args.store_root or os.path.join(args.serving_root, "objects")
-    publication_root = args.publication_root or os.path.join(args.serving_root, "publisher")
+    serving_db = (args.serving_db if args.serving_db is not None
+                  else os.path.join(args.serving_root, "serving.sqlite"))
+    store_root = (args.store_root if args.store_root is not None
+                  else os.path.join(args.serving_root, "objects"))
+    publication_root = (args.publication_root if args.publication_root is not None
+                        else os.path.join(args.serving_root, "publisher"))
     return serving_db, store_root, publication_root
 
 
@@ -1061,6 +1067,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.host not in _LOOPBACK_HOSTS and not args.allow_non_loopback:
         print("refusing a non-loopback host without --allow-non-loopback")
+        return 2
+    if not args.serving_root:
+        print("--serving-root must not be empty")
         return 2
     serving_db, store_root, publication_root = _serving_paths(args)
     app = create_app(serving_db=serving_db, store_root=store_root,
