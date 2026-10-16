@@ -310,7 +310,7 @@ the mock disagree, §6 wins":**
   src/api/client.ts` sends) succeeds on every route, not just proves the
   logic exists.
 
-<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, projection_binding, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, legacy_bundle, load_legacy_bundle, load_score_document, LegacyBundleError, score_projection, legacy_score_projection -->
+<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, projection_binding, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, open_index_untranslated, legacy_bundle, load_legacy_bundle, load_score_document, LegacyBundleError, score_projection, legacy_score_projection -->
 
 ## Consumers
 
@@ -371,7 +371,9 @@ retain `no_report` when no report path is supplied. The token comes from the `V2
 launcher refuses to start without one, and refuses a non-loopback `--host`
 without `--allow-non-loopback`, the two refusals `engine/v2/
 dashboard/preview.py`'s launcher already makes for the compatibility
-surface; it also refuses an empty `--serving-root`.
+surface; it also refuses any explicitly given path flag whose value is empty
+(`--serving-root`, `--serving-db`, `--store-root`, `--publication-root`, `--ops-root`,
+`--native-parity-report-path`).
 
 ## Testing
 
