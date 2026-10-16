@@ -178,7 +178,10 @@ def pytest_runtest_teardown(item, nextitem):
 # A file gets `pytestmark = pytest.mark.xdist_group("serial")` (or, for a
 # single test, the same mark on just that function) when it touches a REAL,
 # process-wide or host-wide resource that a concurrent sibling test could
-# collide with -- not because it is merely slow. Two xdist workers are two
+# collide with -- not because it is merely slow. ONE exception: a file may be
+# grouped for process-local cache locality when its expensive setup is cached
+# per process and spreading it over workers would rebuild that cache on each
+# (test_mutation_ci.py below). Two xdist workers are two
 # independent OS processes; anything scoped to `tmp_path` and this worker's
 # own subprocesses is already safe run-anywhere.  Grouped so far, and why:
 #
@@ -205,7 +208,7 @@ def pytest_runtest_teardown(item, nextitem):
 # - tests/test_v2_ops_coordinator_lease.py (whole file): lost-lease tests settle through
 #   the real `prove_ownership_gone` /proc scan; in parallel it quarantined the attempt.
 # - tests/v2/integration/test_mutation_ci.py (whole file, group "mutation_ci_real_repo"):
-#   NOT a collision: the real-repo import-graph and unresolved-import scans are cached
+#   Cache-locality exception (no collision): the real-repo import-graph and unresolved-import scans are cached
 #   per process (tools/mutation_pilot.py), so one worker pays the ~1 min cold build
 #   once instead of every worker (#791).
 #
