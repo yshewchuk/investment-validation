@@ -292,4 +292,16 @@ MIGRATIONS = (
                      (job_id=NEW.job_id AND request_hash=NEW.request_hash AND page_index=NEW.page_index))
         BEGIN SELECT RAISE(ABORT, 'Massive pages are immutable'); END""",
     )),
+    Migration(version=13, name="native_gate_sweep_rosters", statements=(
+        """CREATE TABLE native_gate_sweeps (
+            experiment_id TEXT PRIMARY KEY, document_json TEXT NOT NULL
+        ) STRICT""",
+        """CREATE TRIGGER native_gate_sweeps_no_update BEFORE UPDATE ON native_gate_sweeps
+        BEGIN SELECT RAISE(ABORT, 'native gate rosters are immutable'); END""",
+        """CREATE TRIGGER native_gate_sweeps_no_delete BEFORE DELETE ON native_gate_sweeps
+        BEGIN SELECT RAISE(ABORT, 'native gate rosters are immutable'); END""",
+        """CREATE TRIGGER native_gate_sweeps_no_replace BEFORE INSERT ON native_gate_sweeps
+        WHEN EXISTS (SELECT 1 FROM native_gate_sweeps WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'native gate rosters are immutable'); END""",
+    )),
 )

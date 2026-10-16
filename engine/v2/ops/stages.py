@@ -96,14 +96,16 @@ class NativeGateParameters:
     purpose: str = "sweep"
 
 
-def _native_gate_kind():
+def _native_gate_kind(*, evaluation=False):
     """Keep native smoke admission separate from the legacy recording effect."""
+    name = "native_gate_evaluation" if evaluation else "native_gate_pricing"
     return JobKind(
-        name="native_gate_pricing", worker="native_gate_pricing", parameters=NativeGateParameters,
+        name=name, worker=name, parameters=NativeGateParameters,
         resource_classes=frozenset({"native_experiment"}), effects=("staged",),
-        retry=RetryPolicy("once", 1), checkpoint_contract="native_gate_consumption.v1.0",
+        retry=RetryPolicy("once", 1), checkpoint_contract=(
+            "native_gate_result.v1.0" if evaluation else "native_gate_consumption.v1.0"),
         namespaces=frozenset({"smoke"}),
-        validate=lambda spec, params: [] if params.no_ledger else ["native pricing is smoke-only"])
+        validate=lambda spec, params: [] if params.no_ledger else ["native gate execution is smoke-only"])
 
 
 @dataclass(frozen=True)
@@ -430,7 +432,8 @@ def _core_kinds():
 
 
 def registry():
-    kinds = [*_core_kinds(), _native_gate_kind(), massive_acquisition_kind(), massive_history_kind(), massive_snapshot_kind()]
+    kinds = [*_core_kinds(), _native_gate_kind(), _native_gate_kind(evaluation=True),
+             massive_acquisition_kind(), massive_history_kind(), massive_snapshot_kind()]
     # P2-5/Task5: the export/publication/backup outbox effects, wired into the
     # nightly job DAG (guide §9.4 item 3). Each worker is trivial (it emits a
     # small receipt); the supervisor's coordinator effect

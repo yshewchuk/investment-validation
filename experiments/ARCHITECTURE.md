@@ -9,8 +9,7 @@ through the shared holdout population reader, never outcomes or prior results.
 The stable registration key is experiment ID plus primary arm. Its immutable
 binding includes the full resolved plan, detached spec hash, exact snapshot,
 static source closure, numerical environment and declared single-thread policy,
-scope, eligible event IDs and versioned holdout
-context. External input files and non-Python runner paths are refused.
+scope, eligible event IDs and versioned holdout context. External input files and non-Python runner paths are refused.
 The caller supplies the checkout root used for source fingerprinting.
 
 Registration publishes canonical bytes through `ArtifactStore`, then reserves
@@ -19,10 +18,9 @@ transaction. Re-registering identical content returns the same identity.
 The reserved arm is planned; registration does not mark a variant as tried.
 Admission verifies the stored object and compares a freshly built binding;
 returned documents are copies, not mutable views of registered bytes.
-Registration and current-request admission do not fit models, publish reports,
-write the CSV ledger or emit outcome/refusal receipts. The supervisor module does
-not call them directly; its dispatched smoke worker reuses
-`verify_native_registration` to verify its staged binding.
+Registration and current-request admission do not fit models, publish reports, write the CSV ledger or emit outcome/refusal receipts.
+The supervisor does not call them directly; its dispatched smoke worker reuses `verify_native_registration` for staged binding verification.
+Public registration preparation/reservation and worker I/O/admission/error helpers remain in their owning modules; [README.md](README.md) lists their contracts and callers. Saved binding bytes and declared source roots are not rewritten.
 
 Optional `final_read` metadata creates a versioned native registration that seals recipe, completeness-bar and frozen-model artifact references. Legacy registration bytes remain unchanged when omitted.
 `prepare_final_holdout_request` verifies that original registration and derives an immutable request keyed by experiment ID; missing declarations or malformed request metadata refuse `INVALID_EXPERIMENT_SPEC`, and changed catalog/artifact identity refuses `EXPERIMENT_IDENTITY_CONFLICT`.
@@ -291,7 +289,7 @@ Pre-admission receipts cannot invent admission; rejected-request ledger identiti
 
 `python -m experiments.v2_gate register|run` evaluates one preregistered arm.
 It composes native registration, `gate_report` and native outcome/replay/export;
-the supervisor's smoke-only pricing kind remains a separate entrypoint.
+the separate supervisor pricing/evaluation kinds share the fixed child entrypoint.
 The fixed recipe requires this runner, seed zero, ordered unique year folds,
 option-chain prices, and exactly `strategy` and finite `fill` economics.
 Other declarations refuse before repository access. Each arm independently
@@ -335,9 +333,9 @@ Changed inputs under the same arm identity refuse R6, preserving prior evidence.
 ## Native gate-variant pricing
 
 The `native_gate_pricing` supervisor kind launches only the fixed unlayered
-`native_gate_entrypoint` child. Its callback imports native pricing after the
-ops protocol's stdin/PID launch gate, refusing every other worker name. Both
-entrypoint and adapter belong to the verified registration/source snapshot.
+`native_gate_entrypoint` child. After the ops stdin/PID launch gate it accepts exactly
+`native_gate_pricing` and `native_gate_evaluation`, importing their fixed callbacks.
+For pricing, both entrypoint and adapter belong to the verified registration/source snapshot.
 The adapter reads staged `spec.json` and
 `native_registration.json`, verifies existing preregistration, and checks
 the requested identity, resolved plan, source closure and single-thread
@@ -362,13 +360,33 @@ This receipt is not an evaluation report or promotion evidence.
 | Non-mapping or ill-typed worker arguments, including non-string purpose; unsupported recipe or malformed staging, including missing/null required spec fields or excessive JSON nesting; missing staged bytes | `INVALID_EXPERIMENT_SPEC` before catalog access for malformed arguments and before pricing for malformed staging; `INPUT_CHANGED` for missing bytes. |
 | Changed staged spec, registration, expected identity, source (including missing, unreadable or malformed Python) or numerical environment | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT` before pricing; preserve registration and prior evidence. |
 | Unresolved pin or non-sweep purpose | `SNAPSHOT_UNRESOLVED` or `HOLDOUT_ACCESS_DENIED`; no pricing receipt or partial report. |
-| Incomplete/nonfinite pricing or caught pinned-data failure | `EXPERIMENT_VARIANT_FAILED`; registered data refusal codes retain their code. Caught underlying failures retain their code, or uncoded type, only in private `data_failure_code` details; no success receipt. The real replay and catalog-failure regressions define the supported catch boundary. |
+| Incomplete/nonfinite pricing or caught pinned-data failure | `EXPERIMENT_VARIANT_FAILED` for pricing/validation failures; `DataError` uses the shared canonical ops mapping below, preserving ops policy for existing codes and data category/retryability for data-only codes. Underlying codes/types stay in private `data_failure_code`; no success receipt. The replay/catalog regressions define the catch boundary. |
 | Unexpected programming failure | The existing worker classifier remains authoritative: unexpected replay exceptions such as `RuntimeError`, `IndexError` or `AttributeError` yield generic `WORKER_FAILED`, private type/location diagnostics and no successful output. This admission-only boundary does not reconcile full-sweep R4 outcomes. |
 | Retry/cache/transaction | One attempt; cross-job cache reuse is disabled so admission is checked again. No worker catalog transaction or CSV access. |
 | Existing receipt destination or receipt I/O failure | Non-retryable `INPUT_CHANGED`; preserve existing destinations and the original failure. Private partial bytes or a complete assigned receipt may remain, never a partial assigned receipt or successful output. |
 | Successful smoke | Operations job/output artifact rows only; no reusable checkpoint is stored. Native registration/outcome and experiment ledger rows stay unchanged. |
 
-This admitted path does not fit gates, record outcomes or orchestrate sweeps.
+This pricing-only path does not fit gates, record outcomes or orchestrate sweeps.
+
+## Sealed gate sweep submission
+
+`python -m experiments.v2_gate_sweep register|submit --no-ledger` accepts a bounded regular JSON roster, a catalog migrated through version 13, its store, explicit `--code-root` and a holdout month; read-only schema admission requires current checksums (`INTEGRITY_FAILED` otherwise), without migration. CLI success exits 0 with `{"roster": <hash>}` for registration or `{"state": "submitted_uncollected", "job_ids": [...]}` for submission; typed refusal exits 2 with only `{"refused": <code>}`. Untranslated foundation `ArtifactError` retains its code in CLI refusals; typed sweep/evaluation boundaries preserve registered codes, otherwise use `INTEGRITY_FAILED` with the original code in private `data_failure_code`. Existing data/registration translations remain authoritative. The closed `native_gate_sweep_request.v1.0` envelope contains `variants` and an ordered, two-member `primary_comparison`; other arms are exploratory. Arm order and explicit event-ID order are canonicalized. Every arm has one immutable `v2_gate.py` plan; experiment, hypothesis, strategy, folds, seed and price source must agree. Only supported fill economics may differ; other declarations refuse `INVALID_EXPERIMENT_SPEC` before population reads or reservation. No prior experiment output or shared prepriced frame is an input. `register_sweep` binds every arm to one verified scope-head `SnapshotRef` and eligible population; the roster seals requests, registrations (each with its environment), coordinator source and implementation ref. A shared SQL reader bounds stored text before Python materialization; the decoder caps JSON at 16 MiB UTF-8: malformed, non-object or oversized rows give `EXPERIMENT_IDENTITY_CONFLICT`; oversized new seals give `INVALID_EXPERIMENT_SPEC` before insertion. Missing seals give `INVALID_EXPERIMENT_SPEC` on submit; register may create one. Existing roster-arm/spec reservations are checked in the seal transaction before insertion. Every reservation call after sealing, including replay, must match the roster before artifact publication and again in its committing transaction; either writer ordering preserves roster-arm bindings. Earlier non-roster registrations remain independent and runnable, outside sweep submission/accounting. Catalogs without a roster table retain single-arm admission.
+
+SQLite transactions and existing canonical JSON/content-hash helpers own identity and atomicity; no new serialization or scheduling framework is used. `submit_sweep` requires matching catalog evidence before staging; `submit_graph` inserts children atomically and replays their job IDs. The regular operations service owns execution; submission never starts a supervisor. Single-arm `v2_gate.py` bindings retain their runner-only source roots. The sealed worker implementation manifest separately binds the evaluation entrypoint and is verified by the launch gate; existing registration bytes are never rewritten. The roster is preregistration, and job success is durable child evidence only. Neither registration nor submission creates scientific outcomes, CSV rows, reports, aggregate attempted counts or a completed sweep index. A failed child cannot imply scientific completion. This interface has no scientific collection, recording, reconciliation or incomplete-run accounting authority. Non-sweep purpose refuses `HOLDOUT_ACCESS_DENIED` before catalog/input access; missing smoke opt-in refuses before effects. No final-read authority is accepted.
+
+| Condition | Outcome |
+| --- | --- |
+| Register replay or interrupted arm reservation | Verify the saved pin and resume missing reservations; never resolve a replacement head. |
+| Submit with partial registration | Refuse `EXPERIMENT_IDENTITY_CONFLICT` before staging/jobs; only register resumes missing reservations. |
+| Changed request, source bytes, environment, binding or existing roster arm | `EXPERIMENT_IDENTITY_CONFLICT`; preserve sealed evidence and create no roster for a pre-existing roster-arm/spec conflict. Earlier non-roster arms do not prevent sealing. Both Python APIs translate filesystem/SQLite failures during preparation, sealing, reservation, staging or graph submission to `INPUT_CHANGED`, with private exception type; existing typed errors retain their policy. |
+| Unresolved initial or saved pin | `SNAPSHOT_UNRESOLVED`, without fallback. |
+| Changed explicit IDs | Saved-pin metadata admission gives R5 for excluded/unknown IDs; changed eligible membership gives R6. |
+| Child admission | Exact staged identity, runner-source closure and single-thread environment are required before inputs; malformed staged `ValueError`/`TypeError`/`KeyError`/`RecursionError` gives `INVALID_EXPERIMENT_SPEC`. |
+| Child success | Independent prior-session history/fitting/pricing; one create-only `native_gate_result.v1.0` supervisor-committed artifact. |
+| Child failure | No successful output or sibling suppression; one attempt, no reusable checkpoint or cache. |
+| Data refusal (pricing and evaluation) | Codes registered by ops retain ops category/retryability, including non-retryable `INPUT_CHANGED`. Data-only codes map to a canonical ops code with the data registry's category/retryability (for example `OBJECT_CORRUPT` → `INTEGRITY_FAILED`); the original code stays in private `data_failure_code`. |
+| Evaluation input refusal | Registered `ArtifactError` codes retain ops semantics; foundation-only codes give `INTEGRITY_FAILED`. Caught evaluation validation failures give `EXPERIMENT_VARIANT_FAILED`, with private `data_failure_code`. Raw filesystem/SQLite failures give `INPUT_CHANGED` in admission or evaluation. Unexpected programming errors keep generic worker classification. |
+| Evaluation receipt | Serialization `ValueError`/`TypeError`/`RecursionError` gives `EXPERIMENT_VARIANT_FAILED` with private exception type; receipt I/O remains `INPUT_CHANGED`. Neither publishes successful output. |
 
 `v2_gate_variant.price_variant(repository, snapshot, spec, *, strategy,
 as_of_month, event_ids=None)` resolves one immutable single-arm plan and

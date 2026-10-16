@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
+from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data.errors import DataError
 from engine.v2.foundation import (
     ArtifactError,
@@ -42,6 +43,43 @@ from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_folds import magnitude_window, plan_magnitude_folds
 from experiments.magnitude_history_inputs import history_binding
 
+MAX_GATE_SWEEP_BYTES = 16 * 1024 * 1024
+
+
+def read_native_gate_sweep(conn, experiment_id):
+    """Read bounded stored text atomically; None means no seal, never invalid text."""
+    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
+    limit = MAX_GATE_SWEEP_BYTES * (2 if encoding.startswith("UTF-16") else 1)
+    row = conn.execute("SELECT CASE WHEN typeof(document_json)='text' "
+                       "AND length(CAST(document_json AS BLOB))<=? THEN CAST(document_json AS BLOB) END "
+                       "FROM native_gate_sweeps WHERE experiment_id=?",
+                       (limit, experiment_id)).fetchone()
+    if row is None:
+        return None
+    try:
+        if row[0] is None:
+            raise ValueError
+        payload = row[0].decode(encoding)
+        if len(payload.encode("utf-8")) > MAX_GATE_SWEEP_BYTES:
+            raise ValueError
+        return payload
+    except (ValueError, UnicodeError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored sweep requires bounded text") from None
+
+
+def decode_native_gate_sweep(payload, *, failure_code="EXPERIMENT_IDENTITY_CONFLICT"):
+    """Bound UTF-8 JSON before decoding; callers choose stored R6 or new-seal R1."""
+    try:
+        if (not isinstance(payload, str) or len(payload) > MAX_GATE_SWEEP_BYTES
+                or len(payload.encode("utf-8")) > MAX_GATE_SWEEP_BYTES):
+            raise ValueError
+        document = json.loads(payload)
+        if not isinstance(document, dict):
+            raise ValueError
+        return document
+    except (ValueError, TypeError, RecursionError):
+        raise fail(failure_code, "native sweep requires bounded JSON object evidence") from None
+
 
 @dataclass(frozen=True)
 class NativeRegistration:
@@ -58,9 +96,11 @@ class NativeRegistration:
         return content_hash(self.document)
 
 
-def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
+def prepare_native_registration(repository, spec, *, code_root, as_of_month, scope, event_ids,
              final_read=None, expected=None, magnitude_training_start=None, magnitude_labels_before=None,
-             admission=None, magnitude_feature_snapshot_id=None, magnitude_history_start=None, magnitude_fit_model=None):
+             admission=None, magnitude_feature_snapshot_id=None, magnitude_history_start=None, magnitude_fit_model=None,
+             snapshot=None):
+    """Prepare immutable registration/spec inputs without reserving or evaluating."""
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
@@ -118,7 +158,10 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
     try:
         if not isinstance(scope, str) or not scope.strip():
             raise ValueError
-        snapshot = repository.resolve_pinned(scope)
+        if snapshot is None:
+            snapshot = repository.resolve_pinned(scope)
+        elif not isinstance(snapshot, SnapshotRef) or repository.resolve(snapshot.snapshot_id) != snapshot:
+            raise ValueError
     except (DataError, ValueError, TypeError, KeyError):
         raise fail("SNAPSHOT_UNRESOLVED", "native registration requires a current committed snapshot") from None
     document = {
@@ -186,7 +229,8 @@ def _binding(repository, spec, *, code_root, as_of_month, scope, event_ids,
     return NativeRegistration(run_id, canonical_json(document).encode("utf-8")), spec
 
 
-def _existing(conn, store, registration):
+def native_registration_exists(conn, store, registration):
+    """Read exact expected evidence: absent is false; changed or corrupt is R6."""
     try:
         ref = artifact_reference(registration.binding_json, registration.document["schema_version"])
         binding = verified_registration_bytes(conn, store, registration.run_id, expected_ref=ref)
@@ -204,18 +248,40 @@ def register_native(conn, store, repository, spec, *, code_root, as_of_month,
     Publication precedes the short catalog transaction. A failed commit can
     leave an unreferenced complete object, never a partially admitted binding.
     """
-    registration, spec = _binding(repository, spec, code_root=code_root, as_of_month=as_of_month,
+    registration, spec = prepare_native_registration(repository, spec, code_root=code_root, as_of_month=as_of_month,
                                   scope=scope, event_ids=event_ids, final_read=final_read,
                                   magnitude_training_start=magnitude_training_start,
                                   magnitude_labels_before=magnitude_labels_before,
                                   magnitude_feature_snapshot_id=magnitude_feature_snapshot_id,
                                   magnitude_history_start=magnitude_history_start, magnitude_fit_model=magnitude_fit_model)
-    if _existing(conn, store, registration):
+    return reserve_native_registration(conn, store, registration, spec)
+
+
+def _require_sweep_binding(conn, registration, spec):
+    """Constrain reservations after sealing; earlier non-roster arms stay independent."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_gate_sweeps'").fetchone() is None:
+        return
+    payload = read_native_gate_sweep(conn, spec.experiment_id)
+    if payload is None:
+        return
+    try:
+        matches = [item for item in decode_native_gate_sweep(payload)["registrations"] if item["run_id"] == registration.run_id]
+        if canonical_json(matches) != canonical_json([{"run_id": registration.run_id, "binding": registration.document}]):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native reservation differs from sealed sweep") from None
+
+
+def reserve_native_registration(conn, store, registration, spec):
+    """Reserve a prepared binding, including an explicitly pinned sweep arm."""
+    _require_sweep_binding(conn, registration, spec)
+    if native_registration_exists(conn, store, registration):
         return registration
     ref = store.publish_bytes(registration.binding_json,
                               schema_ref=registration.document["schema_version"])
     with transaction(conn):
-        if _existing(conn, store, registration):
+        _require_sweep_binding(conn, registration, spec)
+        if native_registration_exists(conn, store, registration):
             return registration
         if conn.execute("SELECT 1 FROM hypotheses WHERE spec_hash=?", (spec.spec_hash,)).fetchone():
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native specification is already reserved")
@@ -235,20 +301,20 @@ def require_native_registration(conn, store, repository, spec, *, code_root,
                                 magnitude_training_start=None, magnitude_labels_before=None,
                                 magnitude_feature_snapshot_id=None, magnitude_history_start=None, magnitude_fit_model=None):
     """Read-only admission; never create registration, ledger, or result rows."""
-    registration, _ = _binding(repository, spec, code_root=code_root, as_of_month=as_of_month,
+    registration, _ = prepare_native_registration(repository, spec, code_root=code_root, as_of_month=as_of_month,
                                scope=scope, event_ids=event_ids, final_read=final_read, expected=expected,
                                magnitude_training_start=magnitude_training_start,
                                magnitude_labels_before=magnitude_labels_before, admission=(conn, store),
                                magnitude_feature_snapshot_id=magnitude_feature_snapshot_id,
                                magnitude_history_start=magnitude_history_start, magnitude_fit_model=magnitude_fit_model)
-    if not _existing(conn, store, registration):
+    if not native_registration_exists(conn, store, registration):
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     return registration
 
 
 def verify_native_registration(conn, store, registration):
     """Verify stored admission without claiming current-request revalidation."""
-    if not isinstance(registration, NativeRegistration) or not _existing(conn, store, registration):
+    if not isinstance(registration, NativeRegistration) or not native_registration_exists(conn, store, registration):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native outcome requires an intact registration")
 
 

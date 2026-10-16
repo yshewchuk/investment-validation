@@ -105,8 +105,8 @@ basis, mark provenance and the declared vs. applied exit alpha. Neither function
 writes results or combines mark-based P&L with fill-validated performance.
 
 `experiment_population.load_population` returns holdout-admitted canonical event
-metadata, including for the smoke-only `native_gate_pricing` supervisor worker
-through `experiments.v2_gate_variant.price_variant`.
+metadata, including for smoke-only `native_gate_pricing` and `native_gate_evaluation`
+supervisor workers through `v2_gate_variant.price_variant` and `gate_report`.
 `prediction_inputs.load_prediction_targets` reads eligible positive-move labels
 and their availability dates from that same pinned snapshot; it has no supervisor
 caller. Neither input reader writes reports or ledger rows.

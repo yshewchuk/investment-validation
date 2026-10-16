@@ -59,7 +59,7 @@ def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds
     stderr_fd = os.open(diagnostics / "worker.stderr",
                         os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        module = ("experiments.native_gate_entrypoint" if kind.worker == "native_gate_pricing"
+        module = ("experiments.native_gate_entrypoint" if kind.worker in {"native_gate_pricing", "native_gate_evaluation"}
                   else "engine.v2.ops.worker")
         child = subprocess.Popen([sys.executable, "-u", "-m", module],
                                  cwd=code_root, env=env, stdin=subprocess.PIPE,

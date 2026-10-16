@@ -110,8 +110,8 @@ ambiguity logic; neither source dates nor ticker names substitute for event IDs.
 Multiple IDs on one ticker/day are ambiguous even when their sessions differ:
 the prediction outcome table cannot distinguish those event identities.
 `experiments.v2_gate_variant` consumes this population in sweep mode before
-fresh native replay, directly or through the smoke-only `native_gate_pricing`
-worker. Its no-report/no-ledger contract lives in `experiments/ARCHITECTURE.md`.
+fresh native replay, directly or through the smoke-only pricing/evaluation
+workers. Their no-report/no-ledger contracts live in `experiments/ARCHITECTURE.md`.
 `experiments.gate_report` separately composes population, observed calendar sessions,
 protected `event_history` and fresh replay for each fold's training/evaluation rows;
 its reconstructed date-ceiling and native publication contracts live in that same doc.
