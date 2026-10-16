@@ -30,6 +30,8 @@ def file_hash(path, *, keepalive: Callable[[], None] | None = None):
     return "sha256:" + digest.hexdigest()
 
 
+_MAX_SOURCE_BYTES = 8 * 1024 * 1024
+
 def source_closure(root, entries):
     """Resolve local static imports; callers also declare runtime/configuration edges."""
     pending, found = list(entries), {}
@@ -41,9 +43,15 @@ def source_closure(root, entries):
         path = root / rel
         if not path.is_file():
             raise fail("INPUT_CHANGED", "declared implementation file is missing")
-        found[rel] = file_hash(path)
         if path.suffix == ".py":
-            pending.extend(_imports(root, rel, path.read_text()))
+            # One bounded read: the digest and the parsed imports describe the same bytes.
+            if path.stat().st_size > _MAX_SOURCE_BYTES:
+                raise fail("INPUT_CHANGED", "declared implementation file exceeds the size bound")
+            data = path.read_bytes()
+            found[rel] = "sha256:" + hashlib.sha256(data).hexdigest()
+            pending.extend(_imports(root, rel, data.decode("utf-8")))
+        else:
+            found[rel] = file_hash(path)
     return dict(sorted(found.items()))
 
 

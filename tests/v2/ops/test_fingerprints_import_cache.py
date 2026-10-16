@@ -2,7 +2,10 @@
 import ast
 import hashlib
 
+import pytest
+
 from engine.v2.ops import fingerprints
+from engine.v2.ops.errors import OpsError
 
 
 def test_identical_text_under_two_packages_resolves_relative_imports_differently():
@@ -81,3 +84,13 @@ def test_source_closure_derives_the_package_from_the_file_path(tmp_path):
     closure = fingerprints.source_closure(tmp_path, ["pkg/sub/mod.py"])
     assert set(closure) == {"pkg/__init__.py", "pkg/sub/__init__.py", "pkg/sub/mod.py",
                             "pkg/sub/sibling.py", "pkg/top.py"}
+
+
+def test_source_closure_hashes_the_bytes_it_parses_and_bounds_the_read(tmp_path, monkeypatch):
+    (tmp_path / "m.py").write_bytes(b"import os\n")
+    assert fingerprints.source_closure(tmp_path, ["m.py"]) == {
+        "m.py": "sha256:" + hashlib.sha256(b"import os\n").hexdigest()}
+    monkeypatch.setattr(fingerprints, "_MAX_SOURCE_BYTES", 4)
+    with pytest.raises(OpsError) as caught:
+        fingerprints.source_closure(tmp_path, ["m.py"])
+    assert caught.value.code == "INPUT_CHANGED"
