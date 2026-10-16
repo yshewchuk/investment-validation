@@ -173,9 +173,9 @@ label the run it displays.
 `CURRENT` -> `projection_binding.json` (see the read path below) and adds a top-level `scope`:
 the binding's optional string `scope` (the effect scope of the retained publication that moved
 the pointer), `null` when the binding has none or a non-string. `verify_projection_binding`
-ignores `scope`. Until the serving-projection job writes it (#717 slice 4), `scope` is `null`.
+ignores `scope`. `scope` is `null` until a producer writes it.
 `/operations` serves `<publication_root>/operations_status.json` only; it is the publication-time
-status document, never the serving-projection status sidecar (#717 slice 5), so under the
+status document, never a serving-projection status sidecar, so under the
 serving `publisher/` it answers `OPERATIONS_UNAVAILABLE` (503) until a producer writes that file.
 
 API errors raised as `ApiError` share one `Problem` envelope (`code`, `category`, `retryable`);

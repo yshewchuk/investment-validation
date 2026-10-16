@@ -357,9 +357,11 @@ one place (`tools/`) allowed to import both.
 
 `python3 -m engine.v2.serving.api --host 127.0.0.1 --port 8766 --serving-root
 <serving_root> --ops-root <ops_root>` starts the read API under uvicorn, "current"
-resolved through that fenced ops publisher's own pointer; `serving.sqlite`,
+resolved through the pointer root `<serving_root>/publisher`; `serving.sqlite`,
 `objects/` and `publisher/` under `--serving-root` are the defaults, and
-`--serving-db`/`--store-root`/`--publication-root` override them (§5.4/P3-1c). The
+`--serving-db`/`--store-root`/`--publication-root` override them (an explicit
+`--publication-root <ops_root>/releases/<scope>` selects that fenced ops
+publisher's own pointer instead) (§5.4/P3-1c). The
 explicit `--ops-root` also enables read-only discovery of the newest
 succeeded shadow `native_parity` job when `--native-parity-report-path` is
 omitted; the explicit report path takes precedence. Omit `--ops-root` to
