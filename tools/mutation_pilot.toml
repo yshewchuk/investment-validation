@@ -1030,6 +1030,7 @@ mutate = [
 ]
 tests = [
     "tests/v2/ops/test_gate_sweep.py",
+    "tests/v2/ops/test_fingerprints_import_cache.py",
     "tests/v2/ops/test_runup_model_inputs.py",
     "tests/v2/ops/test_runup_worker_activation.py",
     "tests/v2/ops/test_native_driver_declarations.py",
