@@ -30,6 +30,7 @@ from engine.v2.ops.state_stage import (
 )
 from tools import phase5_prepare_release
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 UNRELATED_MEMBER_ID = "payoff_line:STR-THRU"
 
 
@@ -124,7 +125,8 @@ def test_kind_is_registered_and_leases_the_pointer():
 def test_plan_pins_files_refs_and_absolute_root(tmp_path):
     refs = {name: f"job_x#training/{name}" for name in _STATES}
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
-                            release_id="cand1", cutoff="2026-10-01", state_refs=refs)
+                            release_id="cand1", cutoff="2026-10-01", state_refs=refs,
+                            source_root=REPO_ROOT)
     assert plan["kind"] == "phase5_state_stage"
     assert plan["parameters"]["release_root"] == str(tmp_path.resolve())
     assert plan["input_refs"] == sorted(refs.values())
@@ -138,7 +140,8 @@ def test_plan_pins_files_refs_and_absolute_root(tmp_path):
 def test_plan_refuses_invalid_request(tmp_path):
     with pytest.raises(OpsError) as err:
         state_stage_plan(release_root=str(tmp_path), prior_release_id="p", release_id="p",
-                         cutoff="2026-10-01", state_refs={"a.json": "j#o"})
+                         cutoff="2026-10-01", state_refs={"a.json": "j#o"},
+                         source_root=REPO_ROOT)
     assert err.value.code == "INVALID_REQUEST"
 
 
@@ -197,6 +200,7 @@ def test_worker_refuses_a_missing_advancing_member(tmp_path, monkeypatch):
     assert err.value.code == "VALIDATION_FAILED"
     assert not (staging / "stage_result.json").exists()
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+    assert err.value.problem.details == {"members": ["paired_residual_pool"]}
 
 
 def test_worker_refuses_inventory_drift_before_any_candidate(tmp_path, monkeypatch):
@@ -234,6 +238,8 @@ def test_trailing_objects_are_stamped_and_paired_objects_use_their_name_cutoff(t
     states["trailing.json"] = ("trailing_pnl_cutoff", "hist|2026-09")
     parameters, staging = _wire(tmp_path, monkeypatch, states=states)
     assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
+    body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
+    assert body["sources"]["pool_cutoff"] == "2026-10-01"
 
 
 def test_paired_object_with_other_name_cutoff_is_refused(tmp_path, monkeypatch):
@@ -292,7 +298,8 @@ def test_plan_resolves_the_production_release_root(tmp_path, monkeypatch):
 
     monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path)
     plan = state_stage_plan(release_root="", prior_release_id="prior1", release_id="cand1",
-                            cutoff="2026-10-01", state_refs={"a.json": "j#o"})
+                            cutoff="2026-10-01", state_refs={"a.json": "j#o"},
+                            source_root=REPO_ROOT)
     assert plan["parameters"]["release_root"] == str(tmp_path.resolve())
 
 
@@ -305,7 +312,8 @@ def test_plan_without_any_release_root_is_an_invalid_request(monkeypatch):
     monkeypatch.setattr(deployment, "production_release_root", missing)
     with pytest.raises(OpsError) as err:
         state_stage_plan(release_root="", prior_release_id="prior1", release_id="cand1",
-                         cutoff="2026-10-01", state_refs={"a.json": "j#o"})
+                         cutoff="2026-10-01", state_refs={"a.json": "j#o"},
+                         source_root=REPO_ROOT)
     assert err.value.code == "INVALID_REQUEST"
 
 
@@ -339,6 +347,7 @@ def test_worker_refuses_a_duplicate_state_object(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert "appears twice" in str(err.value)
+    assert err.value.problem.details == {"member": "paired_residual_pool"}
 
 
 def test_worker_refuses_a_corrupt_state_file(tmp_path, monkeypatch):
@@ -398,3 +407,18 @@ def test_light_checks_refuse_a_catalog_with_a_bad_schema(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert "light checks" in str(err.value)
+
+
+def test_a_resupplied_object_replaces_the_prior_object_of_the_same_name(tmp_path, monkeypatch):
+    states = dict(_STATES)
+    states["trailing.json"] = ("trailing_pnl_cutoff", "prior.bin")
+    parameters, staging = _wire(tmp_path, monkeypatch, states=states)
+    run_state_stage_worker(parameters, staging)
+    body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
+    rows = {row["member_id"]: row for row in body["members"]}
+    new_hash = phase5_release.sha256_bytes((staging / "trailing.json").read_bytes())
+    assert [(o["name"], o["content_hash"]) for o in rows["trailing_pnl_cutoff"]["objects"]] == [
+        ("prior.bin", new_hash)]
+    assert {o["name"] for o in rows["board_analog_matcher"]["objects"]} == {
+        "prior.bin", "STR-THRU|0.5000|2026-10-01"}
+    assert [o["name"] for o in rows["driver_residual_pool:size"]["objects"]] == ["prior.bin"]

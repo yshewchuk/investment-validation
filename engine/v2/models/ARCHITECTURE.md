@@ -131,7 +131,7 @@ size check. Existing callers omitting the ceiling retain their read contract.
   `trailing_pnl_cutoff`, `board_analog_matcher`) and `chooser_analog_pool` each
   get the full set of supplied objects (`outputs` holds one or more
   `PoolOutput` per pool member; `chooser` is one or more; object names are
-  unique within a member, and every object carries `cutoff`), replacing that
+  unique within a member, and every non-carried object carries `cutoff`), replacing that
   row's objects wholesale; every other member row is copied unchanged;
   `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
   the prior release id. A `PoolOutput` may be `carried=True` (default
@@ -143,8 +143,8 @@ size check. Existing callers omitting the ceiling retain their read contract.
   non-carried object must carry `cutoff` exactly. `prior_carry_set(release_root,
   prior_release_id) -> (pool_cutoff, tuple[PoolOutput])` returns every prior
   pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
-  (`PRIOR_MISMATCH` on a missing prior, malformed rows or `pool_cutoff`; malformed object
-  fields surface later as `POOL_SET_MISMATCH`).
+  (`PRIOR_MISMATCH` on a missing prior or malformed rows, objects or `pool_cutoff`;
+  `POOL_SET_MISMATCH`/`CHOOSER_MISMATCH` apply to caller-supplied carried fields).
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),

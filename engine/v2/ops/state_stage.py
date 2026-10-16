@@ -93,8 +93,9 @@ def state_stage_job_kind() -> JobKind:
                    store_domains=(("deployment_pointer", "write"),))
 
 
-def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, state_refs) -> dict:
-    """Build a ``phase5_state_stage`` plan; ``state_refs`` maps file name -> training output id."""
+def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, state_refs, source_root) -> dict:
+    """Build a ``phase5_state_stage`` plan; ``state_refs`` maps file name -> training output id.
+    ``source_root`` is the code checkout the implementation fingerprint is taken from (the caller's code source)."""
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
@@ -116,7 +117,7 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
     if problems:
         raise fail("INVALID_REQUEST", "state stage plan is invalid",
                    details={"problems": list(problems)})
-    root3 = Path(__file__).resolve().parents[3]
+    root3 = Path(source_root)
     return {"schema_version": "operations_plan.v1.0", "kind": "phase5_state_stage",
             "mode": "shadow", "effects": ["staged"], "parameters": vars(params),
             "input_refs": sorted(refs.values()), "blocked_prerequisites": [],
