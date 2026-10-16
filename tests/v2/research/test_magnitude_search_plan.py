@@ -1003,7 +1003,8 @@ def test_cli_fifo_refuses_without_blocking(source, tmp_path):
     os.mkfifo(path)
     before = _catalog(source.conn), _objects(source.store)
     result = subprocess.run([sys.executable, "-m", "experiments.v2_magnitude_search",
-        *_args(source, "prepare", path)], cwd=ROOT, capture_output=True, text=True, timeout=15)
+        *_args(source, "prepare", path)], cwd=ROOT, capture_output=True, text=True, timeout=15,
+        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
     assert result.returncode == 2 and not result.stderr
     assert json.loads(result.stdout) == {"refused": _problem(
         "INVALID_EXPERIMENT_SPEC", "search metadata requires bounded regular files")}

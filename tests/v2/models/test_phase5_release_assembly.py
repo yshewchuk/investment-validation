@@ -1990,7 +1990,7 @@ def test_manifest_reader_stops_at_its_budget_on_a_chunk_boundary(tmp_path, monke
     monkeypatch.setattr(os, "read", watch)
     with pytest.raises(deployment.StagingRefused):
         deployment.resolve_release(store, "prior1")
-    assert max(requested) <= 1024 * 1024 and sum(got) <= limit + 1
+    assert all(size <= 1024 * 1024 for size in requested) and sum(got) <= limit + 1
 
 
 @pytest.mark.parametrize("exc", [TypeError, AttributeError, KeyError])

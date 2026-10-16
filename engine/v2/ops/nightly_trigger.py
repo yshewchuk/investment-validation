@@ -676,7 +676,8 @@ def _require_valid_population_keys(keys) -> None:
     for key in keys:
         parts = str(key).split("|")
         try:
-            valid = len(parts) == 3 and all(parts) and date.fromisoformat(parts[2])
+            valid = (len(parts) == 3 and all(parts)
+                     and date.fromisoformat(parts[2]).isoformat() == parts[2])
         except ValueError:
             valid = False
         if not valid:
@@ -805,8 +806,6 @@ def _validated_override(root) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
         raise fail("INVALID_REQUEST",
                    "expected_population.json is present but yields no tickers "
                    "(unreadable, oversize, non-list or empty); fix or remove it")
-    from engine.v2.ops.snapshot_planning import direct_scope_for
-    direct_scope_for(keys)
     _require_valid_population_keys(keys)
     return keys, override_tickers
 
