@@ -253,7 +253,7 @@ Without pinned COPY, the panel digest is caller-asserted; preparation does not v
 |---|---|
 | Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
 | Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
-| Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks) | Typed `DocumentError`; decode preserves nested paths |
+| Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks) | `DocumentError`, including `CHOOSER_OUTPUT_MISMATCH` and `BAD_FOLD_OBJECT`; decode preserves nested paths |
 | Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
 | Registered chooser producer rejects recipe features/target | Fixed `PrepareRefused` with original cause; CLI exits 2 without a traceback |
 | Pinned COPY context | Full panel hash must match; preflight precedes output effects and destination bytes must retain the validated hash |

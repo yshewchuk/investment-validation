@@ -124,10 +124,13 @@ def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
 
 
 def _read_expected_population(args):
+    from engine.v2.ops.snapshot_planning import direct_scope_for
+
     keys = getattr(args, "expected_population_keys", None)
     if keys is not None:
         if not all(isinstance(v, str) for v in keys):
             raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
+        direct_scope_for(keys)
         return tuple(keys)
     if not args.expected_population:
         return ()
@@ -141,6 +144,7 @@ def _read_expected_population(args):
                    "oversize, or not valid JSON") from None
     if not isinstance(payload, list) or not all(isinstance(v, str) for v in payload):
         raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
+    direct_scope_for(payload)
     return tuple(payload)
 
 

@@ -1857,7 +1857,8 @@ def test_prepare_default_plan_refuses_an_override_that_yields_no_tickers(
     assert "yields no tickers" in raised.value.problem.message
 
 
-@pytest.mark.parametrize("key", ["AAA|bad", "AAA||2026-10-14", "AAA|STR-THRU|2026-not-a-date"])
+@pytest.mark.parametrize("key", ["AAA|bad", "AAA||2026-10-14", "AAA|STR-THRU|2026-not-a-date",
+                                 "AAA|STR-THRU|20261014"])
 def test_prepare_default_plan_refuses_an_override_with_a_malformed_key(tmp_path, monkeypatch, key):
     # A present, readable population whose key is malformed is refused INVALID_REQUEST
     # while validating the override, before any refresh or snapshot work. The stubs
@@ -1872,7 +1873,17 @@ def test_prepare_default_plan_refuses_an_override_with_a_malformed_key(tmp_path,
             tmp_path, AS_OF, (), (), FakeClock(IN_WINDOW),
             expected_shadow_snapshot_id="snap_before")
     assert raised.value.code == "INVALID_REQUEST"
-    assert "ticker|strategy|event_date" in raised.value.problem.message
+    assert raised.value.problem.message == "planned population key is not ticker|strategy|event_date"
+
+
+def test_read_expected_population_refuses_malformed_keys_on_the_cli_path():
+    from types import SimpleNamespace
+    from engine.v2.ops.workflows import commands
+
+    args = SimpleNamespace(expected_population_keys=["AAA||2026-10-14"], expected_population=None)
+    with pytest.raises(OpsError) as raised:
+        commands._read_expected_population(args)
+    assert raised.value.code == "INVALID_REQUEST"
 
 
 @pytest.mark.parametrize("kind", ["dangling_symlink", "symlink_to_regular_file",

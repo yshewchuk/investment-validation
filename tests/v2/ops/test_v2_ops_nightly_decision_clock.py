@@ -15,6 +15,7 @@ from tests.ops_support import sample
 SESSION = "2026-09-12"
 
 
+# 4 CPUs cannot satisfy DEFAULT_POLICY CPU admission, so the fitting host counts are 8 and 12.
 @pytest.mark.parametrize("host_cpu_count", [8, 12])
 def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(
         tmp_path, capsys, monkeypatch, host_cpu_count):

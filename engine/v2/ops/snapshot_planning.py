@@ -32,6 +32,7 @@ rather than re-resolving "latest" — see its module docstring.
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 from engine.v2.contracts import SnapshotRef
@@ -71,7 +72,12 @@ def direct_scope_for(expected_population) -> dict:
     tickers, years = set(), set()
     for key in expected_population:
         parts = str(key).split("|")
-        if len(parts) != 3 or not parts[0] or not parts[2][:4].isdigit():
+        try:
+            canonical = len(parts) == 3 and all(parts) and (
+                date.fromisoformat(parts[2]).isoformat() == parts[2])
+        except ValueError:
+            canonical = False
+        if not canonical:
             raise fail("INVALID_REQUEST", "planned population key is not ticker|strategy|event_date",
                        details={"key": str(key)})
         tickers.add(parts[0])
