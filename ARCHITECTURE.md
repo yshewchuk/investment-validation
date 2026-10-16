@@ -547,7 +547,7 @@ Only a tracked path absent from the worktree reads as empty.
   Tier-4 forecasts table native currently only imports from a legacy snapshot
   is cutover PR-13c. Forward inference instead uses the design in
   `engine/v2/scoring/ARCHITECTURE.md`; it needs no stored forward row. See
-  this bullet, `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
+  `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
   issue #192 for the full design.
 - **Captured native comparison export (tools, read-only inputs).**
   `tools/captured_native_comparison.py` exports one explicitly selected,

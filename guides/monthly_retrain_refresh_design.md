@@ -58,13 +58,13 @@ any other stage failure is terminal for `M`, like `retrain:{M}`.
 **Retry.** A hard failure is terminal for `retrain:{M}`. No automatic
 replacement key. Recovery is operator-driven; the missing replacement-key path is the open gap
 #154, which this design does not close.
-Nothing else stalls: the ordinary nightly advance and carry continue on the
-incumbent, so a failed retrain costs stale driver pools/models, not a stale
-board.
+A failed retrain costs stale driver pools/models, not a stale board: the
+nightly advance and carry continue on the incumbent. A *running* retrain is
+different: it delays the next session's heavy steps, including scoring (§6, D6).
 
 **Missed month.** Training is cumulative to its cutoff, so a missed month is
 subsumed by the next one. If months `M1 < M2` are both in the due set (the system was down,
-or a retrain failed and was left), only the latest, `M2`, is retrained; earlier
+or months were never evaluated), only the latest, `M2`, is retrained; earlier
 due months get a durable `superseded:{M1}` marker naming `M2`, written once, so
 they are not re-evaluated every tick. A failed `M1` followed by a due `M2`
 therefore recovers by itself without reusing the failed key.
@@ -84,7 +84,7 @@ admits no row dated after `M_end` and reads no live registry.
    `cutoff = M_end` over rows whose event and outcome data dates are on or before `M_end`. Fold and
    holdout rules are the existing training contracts; this design adds none.
 2. **Regenerate** the three `driver_residual_pool:{size,implied_t1,runup_move}`
-   pools and the chooser analog pool from the retrained models at `M_end`.
+   pools and the chooser analog pool at `M_end` from the incumbent models (retrained ones only under D1(b)).
 3. **Stage** one candidate release: the six pool members plus chooser row via
    `phase5_state_stage`, retrained models bound, all other bindings carried.
 
@@ -115,7 +115,8 @@ stage refuses `PRIOR_MISMATCH` and the retrain is wasted, not applied.
 ## 4. Promotion, gating and rollback
 
 Pool/chooser-only retrains (models unchanged) follow the nightly path: staged by
-`phase5_state_stage`, light consistency checks, auto-promoted with
+`phase5_state_stage`, light consistency checks, the staging-success record
+(models doc §7.2, written by the stage job's check step), auto-promoted with
 `expected_previous_release_id`.
 
 A release with **changed champion/gate bindings** has a new semantic hash and
@@ -163,7 +164,7 @@ re-advances the board pool from it.
 | R2 cache | None: reads job, release and pointer state every tick | No cached catalog or artifact reads | Pointer read for this swap only |
 | R3 retry | No resubmission of a key in any state; failed is terminal; the next due month supersedes | At most two stage keys per `M`: one per incumbent, the second only after `ConcurrentPromote`; other failures terminal | No retry or alternate target on refusal |
 | R4 transaction | Training outputs are written to per-attempt staging and hashed only after a clean exit | New candidate release id; `DEPLOYED` untouched | Existing atomic pointer/history swap |
-| R5 partial failure | Orphan outputs may remain; nothing is staged or promoted; incumbent keeps serving | Orphan objects or a manifest without a catalog may remain and a retry completes it; no promotion | A refusal leaves pointer and history unchanged; the candidate stays staged |
+| R5 partial failure | Orphan outputs may remain; nothing is staged or promoted; incumbent keeps serving | Orphan objects or a manifest without a catalog may remain unused; a later stage attempt only under R3's `ConcurrentPromote` rule; no promotion | A refusal leaves pointer and history unchanged; the candidate stays staged |
 | R6 idempotency | Same month, same key, never trains twice | Identical inputs derive identical catalog content; a reused id with different content refuses | Re-promoting the live id is a no-op |
 
 Reconcile-level rows:
@@ -173,8 +174,7 @@ Reconcile-level rows:
 | Month not yet due (cutoff short of `M_end`, or session refresh failed) | No-op this tick; re-evaluated next tick |
 | Another heavy job running (non-blocking admission probe says busy) | Not submitted; no key written; re-evaluated next tick |
 | Reconcile itself raises | Degrades only this sidecar, like the other sidecars; required job dispatch is not blocked |
-| Retrain running past the next session | That session's required-graph heavy steps wait for admission, non-heavy steps proceed (§6); scoring uses the incumbent; no second retrain is started (one key per month, one heavy job at a time) |
-| Retrain output for month `M` arrives after `M` was superseded | Stage refuses; objects are orphaned and unused |
+| Retrain running past the next session | That session's required-graph heavy steps wait for admission, non-heavy steps proceed (§6), so that session's scoring is delayed until the retrain ends (no bound until the deadline deliverable exists; D6); no second retrain is started (one key per month, one heavy job at a time) |
 | Release store missing or incumbent unreadable | Refuse; no fallback to a stale release or a legacy rebuild |
 
 ## 6. Resource budget
@@ -243,6 +243,12 @@ job spec come from that measurement, not from this document.
   (a) keeps momentum toward the cutover date; (b) makes the qualified release
   the one that goes live. Recommendation: (b) only for model-changing retrains
   (so with D1(a) nothing resets).
+- **D6 Retrain vs next session's scoring.** A running retrain delays heavy
+  scoring unboundedly until a deadline exists. (a) *Deadline only* (slices 3/5a
+  fail the job at a limit sized from the receipt); (b) *start only in a window*
+  with enough hours before the next session's heavy steps; (c) *let scoring
+  preempt*. (a) is simplest, (b) avoids the delay, (c) needs executor work.
+  Recommendation: (a)+(b).
 - **D5 Missed months.** Designed as latest-only with a `superseded` marker (§2);
   the alternative is to retrain each missed month in order. Recommendation:
   latest-only; ordering adds cost and no information.
@@ -265,7 +271,8 @@ Sizes are non-test code / test / doc lines, estimated.
    `retrain-stage` job (retrained members non-carried), with the §2 crash and
    race rules. 140-180 / 150-200 / 35-50. Depends on 1-3 and #192 slice 4.
 5. **Champion/gate retrain** (D1 b). Retrain kind, acceptance gate wiring, the
-   non-regression check and receipt. Split: 5a retrain kind and check-candidate
+   non-regression check and receipt; the retrain job gets a wall-clock deadline
+   like slice 3. Split: 5a retrain kind and check-candidate
    fit, 150-190 / 130-170 / 30-40; 5b acceptance wiring and the non-regression
    check with receipt, 120-160 / 120-160 / 30-40.
 6. **Promotion and rollback path** (D2, D3). Guarded promotion of a
