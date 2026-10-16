@@ -30,7 +30,9 @@ def file_hash(path, *, keepalive: Callable[[], None] | None = None):
     return "sha256:" + digest.hexdigest()
 
 
+#: Largest declared `.py` file `source_closure` will read (the repo's largest is far below it).
 _MAX_SOURCE_BYTES = 8 * 1024 * 1024
+
 
 def source_closure(root, entries):
     """Resolve local static imports; callers also declare runtime/configuration edges."""
@@ -45,9 +47,10 @@ def source_closure(root, entries):
             raise fail("INPUT_CHANGED", "declared implementation file is missing")
         if path.suffix == ".py":
             # One bounded read: the digest and the parsed imports describe the same bytes.
-            if path.stat().st_size > _MAX_SOURCE_BYTES:
+            with path.open("rb") as stream:
+                data = stream.read(_MAX_SOURCE_BYTES + 1)
+            if len(data) > _MAX_SOURCE_BYTES:
                 raise fail("INPUT_CHANGED", "declared implementation file exceeds the size bound")
-            data = path.read_bytes()
             found[rel] = "sha256:" + hashlib.sha256(data).hexdigest()
             pending.extend(_imports(root, rel, data.decode("utf-8")))
         else:

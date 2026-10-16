@@ -86,7 +86,7 @@ def test_source_closure_derives_the_package_from_the_file_path(tmp_path):
                             "pkg/sub/sibling.py", "pkg/top.py"}
 
 
-def test_source_closure_hashes_the_bytes_it_parses_and_bounds_the_read(tmp_path, monkeypatch):
+def test_source_closure_digest_matches_the_file_bytes_and_a_tiny_cap_refuses(tmp_path, monkeypatch):
     (tmp_path / "m.py").write_bytes(b"import os\n")
     assert fingerprints.source_closure(tmp_path, ["m.py"]) == {
         "m.py": "sha256:" + hashlib.sha256(b"import os\n").hexdigest()}
@@ -94,3 +94,15 @@ def test_source_closure_hashes_the_bytes_it_parses_and_bounds_the_read(tmp_path,
     with pytest.raises(OpsError) as caught:
         fingerprints.source_closure(tmp_path, ["m.py"])
     assert caught.value.code == "INPUT_CHANGED"
+
+
+def test_source_size_cap_is_eight_mebibytes_and_its_boundary_is_exact(tmp_path):
+    assert fingerprints._MAX_SOURCE_BYTES == 8 * 1024 * 1024
+    limit = fingerprints._MAX_SOURCE_BYTES
+    (tmp_path / "ok.py").write_bytes(b"#" * (limit - 1) + b"\n")
+    assert list(fingerprints.source_closure(tmp_path, ["ok.py"])) == ["ok.py"]
+    (tmp_path / "big.py").write_bytes(b"#" * (limit + 1))
+    with pytest.raises(OpsError) as caught:
+        fingerprints.source_closure(tmp_path, ["big.py"])
+    assert caught.value.code == "INPUT_CHANGED"
+    assert "exceeds the size bound" in str(caught.value)

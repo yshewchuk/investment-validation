@@ -40,7 +40,8 @@ Native experiment registration also exposes these existing submodule APIs:
 `catalog.transaction`, `errors.OpsError`, `errors.fail`,
 `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`,
 `experiments.register_hypothesis_in_transaction`, `experiments.NATIVE_GATE_WORKER`, `experiments.NATIVE_GATE_ENTRYPOINT`, `experiments.NATIVE_GATE_RUNNERS`,
-`fingerprints.environment_identity`, `fingerprints.source_closure` and
+`fingerprints.environment_identity`, `fingerprints.source_closure` (reads each `.py` once and refuses
+`INPUT_CHANGED` for one over 8 MiB) and
 `native_registration.verified_registration_bytes` and
 `native_registration.magnitude_execution_document` (the fixed mean-baseline
 execution policy with an explicit evaluation-label cutoff) and
