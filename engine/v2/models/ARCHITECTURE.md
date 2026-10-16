@@ -299,8 +299,9 @@ a `ServingFoldRef` with immutable metadata/pools, its shared `FrozenInference`
 owner and an ephemeral single-binding inference view. The view identity binds
 parent, catalog and descriptor; it is never staged or promoted. Selection,
 catalog discovery and source-bundle wiring remain separate work. Loaders are read-only:
-no writes/transactions/retries; failed calls leave no published partial result, and
-identical verified inputs produce identical references.
+no writes/transactions/retries. Refused calls return no reference but may retain a
+hash-verified decoded artifact in the shared cache; each call still validates its
+metadata and descriptor. Identical verified inputs produce identical references.
 
 `load_chooser_serving_fold` prepares the separately typed implied-t1/runup-move
 artifact from its exact `tier4_folds:<role>` catalog member. It rechecks catalog
@@ -308,10 +309,10 @@ schema/self-hash/release/deployment, unique membership, descriptor/object identi
 and the matching wildcard parent binding before decoding. The returned immutable
 `ChooserServingFoldRef` preserves the raw D14 producer output and paired held-out
 interval arrays; these are not the chooser k-NN population or driver residual state.
-It makes no event-month selection or source-ready declaration. This is partial
-DYN-SV slice 3: genuine training-source completion/finality, coordinator publication
-and per-request causal bounds remain an upstream admission prerequisite; current
-headers/descriptors contain no such proof. Existing nightly refusals remain.
+It makes no event-month selection or source-ready declaration. Genuine
+training-source completion/finality, coordinator publication and per-request causal
+bounds are required for admission; current headers/descriptors contain no such
+proof. Existing nightly refusals remain.
 
 `FrozenInference.prepare_serving_fold(binding, max_member_bytes=..., expected_bytes=None)`
 returns detached immutable `ServingFoldMetadata`, never cached estimator/header objects.
@@ -319,7 +320,8 @@ Both fold loaders use it; chooser catalog size is checked against the already-re
 buffers, including warm calls. The required byte limit is positive. Bounded reads use the shared regular-file reader with
 final-component no-follow; parent directories remain operator-trusted. Missing,
 special, symlinked, oversized or changed objects refuse before decode on cold and
-warm calls. Unbounded champion loading retains its existing behavior.
+warm calls. Direct preparation normalizes bounded I/O and regular-file/size
+refusals to path-free `AdapterError`. Unbounded champion loading retains its existing behavior.
 
 `FrozenInference` owns the only decoded-artifact cache. Its existing adapter
 retains fold metadata with the estimator, so validation and prediction share

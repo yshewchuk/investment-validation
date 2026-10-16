@@ -1,4 +1,5 @@
 """Real captured cache shape (see #247 fixture); only numeric payloads are synthetic."""
+import copy
 from dataclasses import FrozenInstanceError, replace
 
 import joblib
@@ -8,10 +9,12 @@ import pytest
 
 from engine.data.features.tier4 import ServingModel
 from engine.v2.foundation import content_hash
-from engine.v2.models import MODEL_NOT_READY, FrozenInference, InferenceRequest
+from engine.v2.models import MODEL_NOT_READY, FrozenInference, InferenceRequest, deployment
 from engine.v2.models import serving_fold_loader as loader
+from engine.v2.models.serving_folds import SizeFoldPolicy
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
-from tests.test_phase5_serving_folds import _bytes, _name, _policy, cache, staged  # noqa: F401
+from tests.fixtures.size_serving_header import HEADER
+from tests.v2.models.serving_fold_support import fold_bytes, fold_name, release_inputs
 from tools.phase5_serving_folds import describe_size_fold
 
 
@@ -23,11 +26,21 @@ class Predictor:
         raise AssertionError("runtime fitting is forbidden")
 
 
+def _size_policy(cache):
+    return SizeFoldPolicy(model_id=cache["model_id"], feature_order=tuple(cache["features"]),
+                          panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)
+
+
 @pytest.fixture
-def setup(tmp_path, cache, staged):  # noqa: F811 - imported pytest fixtures
-    cache["estimator"] = Predictor()
-    raw = _bytes(cache)
-    descriptor = describe_size_fold(raw, _name(cache), _policy(cache), staged)
+def setup(tmp_path):
+    cache = copy.deepcopy(HEADER)
+    captured = cache.pop("capture")
+    cache.update(estimator=Predictor(), pool_pred=np.array([0.1, 0.2]),
+                 pool_res=np.array([-0.01, 0.02]))
+    assert sorted(cache) == captured["keys"]
+    staged = deployment.stage_release(tmp_path / "deployment", *release_inputs("size", cache))
+    raw = fold_bytes(cache)
+    descriptor = describe_size_fold(raw, fold_name(cache), _size_policy(cache), staged)
     path = tmp_path / descriptor.estimator.path
     path.parent.mkdir(exist_ok=True)
     path.write_bytes(raw)
@@ -138,7 +151,7 @@ def test_legacy_minimal_fold_keeps_prediction_acceptance(setup, monkeypatch):
     import hashlib
 
     inference, descriptor, parent, path, stored = setup
-    raw = _bytes({key: stored[key] for key in ("estimator", "features")})
+    raw = fold_bytes({key: stored[key] for key in ("estimator", "features")})
     path.write_bytes(raw)
     member = replace(descriptor.estimator, content_hash="sha256:" + hashlib.sha256(raw).hexdigest())
     binding = replace(parent.release.bindings[0], adapter="tier4-serving-fold.v1", members=(member,))
@@ -167,7 +180,7 @@ def test_rehashed_invalid_header_and_pools_refuse(setup, key, value):
     stored[key] = value
     if value is None:
         stored.pop(key)
-    raw = _bytes(stored)
+    raw = fold_bytes(stored)
     path.write_bytes(raw)
     import hashlib
 
@@ -181,8 +194,8 @@ def test_empty_and_thin_pools_are_preserved(setup, count):
     inference, _, parent, _, stored = setup
     stored["pool_pred"] = np.zeros(count)
     stored["pool_res"] = np.ones(count)
-    raw = _bytes(stored)
-    descriptor = describe_size_fold(raw, _name(stored), _policy(stored), parent)
+    raw = fold_bytes(stored)
+    descriptor = describe_size_fold(raw, fold_name(stored), _size_policy(stored), parent)
     path = inference._root / descriptor.estimator.path
     path.write_bytes(raw)
     ref = _load((inference, descriptor, parent, path, stored))

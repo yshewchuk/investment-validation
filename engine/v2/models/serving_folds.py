@@ -94,7 +94,7 @@ class ChooserFoldPolicy:
 
 @dataclass(frozen=True, kw_only=True)
 class ChooserServingFoldDescriptor:
-    """Role-specific declaration; accepted only by the chooser artifact loader."""
+    """Role-specific declaration; loaded only by the chooser artifact loader."""
 
     parent_release_id: str
     parent_release_hash: str

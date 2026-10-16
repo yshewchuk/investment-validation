@@ -17,9 +17,10 @@ from .contracts import (
     MODEL_READY,
     InferenceRequest,
     InferenceResult,
+    ModelBinding,
     ModelRelease,
 )
-from .frozen_state_io import read_bounded_state, valid_byte_limit
+from .frozen_state_io import BoundedStateReadError, read_bounded_state, valid_byte_limit
 
 
 class _CachedArtifact(ReadOnlyArtifact):
@@ -97,7 +98,8 @@ class FrozenInference:
         if expected_bytes is not None and (not valid_byte_limit(expected_bytes)
                                            or expected_bytes > max_member_bytes):
             raise AdapterError("invalid serving fold declared byte count")
-        if binding.adapter != "tier4-serving-fold.v1" or binding.adapter not in self._adapters:
+        if (not isinstance(binding, ModelBinding) or binding.adapter != "tier4-serving-fold.v1"
+                or binding.adapter not in self._adapters):
             raise AdapterError("unsupported serving fold adapter")
         expected = None if expected_bytes is None else {"estimator": expected_bytes}
         artifact = self._load_artifact(binding, max_member_bytes=max_member_bytes,
@@ -116,7 +118,7 @@ class FrozenInference:
         limit = min(limits) if limits else None
         try:
             members = self._verified_members(binding, limit)
-        except OSError:
+        except (OSError, BoundedStateReadError):
             if limit is not None:
                 raise AdapterError("bounded artifact verification failed") from None
             raise

@@ -7,7 +7,7 @@ import io
 import os
 import socket
 import sys
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
 
 import joblib
 import numpy as np
@@ -16,6 +16,7 @@ import pytest
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.models import (
     MODEL_NOT_READY,
+    AdapterError,
     ArtifactMember,
     FrozenInference,
     InferenceRequest,
@@ -174,7 +175,9 @@ def _infer(ref):
 def test_one_decode_raw_outputs_immutable_and_no_source_admission(setup, monkeypatch):
     original, calls = joblib.load, []
     monkeypatch.setattr(joblib, "load", lambda *a, **k: (calls.append(1), original(*a, **k))[1])
+    before = copy.deepcopy(setup[3])
     ref = _load(setup)
+    assert setup[3] == before
     assert _load(setup) == ref
     assert _infer(ref).predictions == ((0.05,),)  # Raw D14: no horizon scaling.
     assert _infer(ref).output_names == (OUTPUTS[ref.descriptor.policy.role][0],)
@@ -182,10 +185,15 @@ def test_one_decode_raw_outputs_immutable_and_no_source_admission(setup, monkeyp
     assert ref.pool_pred == (0.1, 0.2) and ref.pool_res == (-0.01, 0.02)
     assert calls == [1] and ref.inference.cache_size == 1
     assert ref.inference is setup[0] and setup[2].release.bindings[0].adapter == "json-linear.v1"
-    assert not any(
-        hasattr(ref, name)
-        for name in ("source_ready", "admitted", "chooser_recipe", "chooser_analog_pool")
-    )
+    assert {field.name for field in fields(ref)} == {
+        "descriptor", "catalog_hash", "pool_pred", "pool_res", "inference", "release"
+    }
+    assert ref.catalog_hash == before["manifest_hash"]
+    expected_id = content_hash({
+        "parent": setup[2].release, "catalog": before["manifest_hash"], "descriptor": setup[1]
+    })
+    assert ref.release.release_id == expected_id
+    assert ref.release.bindings[0].binding_id == expected_id
     assert set(to_document(ref.descriptor)) == set(
         setup[3]["members"][0]["objects"][0]["serving_fold"]
     )
@@ -307,6 +315,7 @@ def test_catalog_membership_refuses_before_decode(setup, defect, monkeypatch):
         ("fold_start", "2026-03-01"),
         ("pool_res", [float("nan"), 0]),
         ("pool_res", [1]),
+        ("pool_pred", [1]),
         ("pool_res", [[1, 2]]),
         ("pool_res", [True, False]),
         ("pool_res", ["1", "2"]),
@@ -321,6 +330,9 @@ def test_rehashed_header_and_pool_tamper_refuses(setup, key, value):
     model_id = cache["model_id"]
     cache["model_id"] = parent.release.bindings[0].model_id
     descriptor, catalog, new_path = _store(path.parent.parent, cache, parent, setup[1].policy.role)
+    descriptor = replace(descriptor, pool_count=len(setup[5]["pool_pred"]))
+    catalog["members"][0]["objects"][0]["serving_fold"] = to_document(descriptor)
+    _rehash(catalog)
     if key == "model_id":
         cache["model_id"] = model_id
         raw = _raw(cache)
@@ -377,8 +389,9 @@ def test_public_preparation_rejects_bad_limits_without_io(setup, limit, monkeypa
     monkeypatch.setattr(
         setup[0], "_load_artifact", lambda *a, **k: pytest.fail("invalid limit load")
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(AdapterError) as caught:
         setup[0].prepare_serving_fold(setup[2].release.bindings[0], max_member_bytes=limit)
+    assert type(caught.value) is AdapterError
     assert setup[0].cache_size == 0
 
 
@@ -405,6 +418,7 @@ def test_identity_catalog_and_policy_changes_share_only_decoded_cache(setup):
 def test_no_fit_network_write_or_source_ready_claim(setup, monkeypatch):
     original = builtins.open
     before = {p: p.read_bytes() for p in setup[4].parent.iterdir()}
+    catalog_before = copy.deepcopy(setup[3])
 
     def read_only(file, mode="r", *args, **kwargs):
         assert not any(flag in mode for flag in "wax+")
@@ -420,7 +434,7 @@ def test_no_fit_network_write_or_source_ready_claim(setup, monkeypatch):
         )
         assert not any(hasattr(metadata, key) for key in ("fit", "estimator", "header"))
     assert {p: p.read_bytes() for p in setup[4].parent.iterdir()} == before
-    assert setup[3]["sources"] == {}  # Artifact-only success supplies no invented evidence.
+    assert setup[3] == catalog_before  # Artifact loading adds no source evidence.
 
 
 @pytest.mark.parametrize("count", [0, 1])
@@ -430,24 +444,23 @@ def test_empty_thin_artifact_pools_do_not_invent_intervals(setup, count):
     descriptor, catalog, path = _store(path.parent.parent, cache, parent, setup[1].policy.role)
     ref = _load((inference, descriptor, parent, catalog, path, cache))
     assert ref.pool_pred == (0.1,) * count and ref.pool_res == (-0.01,) * count
-    assert not hasattr(ref, "interval")
 
 
 def test_standard_authoring_catalog_is_consumed_without_relabeling(setup, tmp_path):
     from engine.v2.foundation import from_document
-    from tests.v2.integration.test_chooser_fold_authoring import (
-        _inputs,
-        _object,
-        _published_manifest,
-        _states,
+    from tests.v2.models.serving_fold_support import (
+        catalog_object,
+        fold_states,
+        published_manifest,
+        release_inputs,
     )
     from tools.phase5_prepare_release import write_release
 
     role, cache = setup[1].policy.role, setup[5]
     root = tmp_path / "standard"
-    write_release(root, *_inputs(role, cache), _states(role, cache))
-    catalog, obj = _object(root, role)
-    parent = _published_manifest(root / "deployment")
+    write_release(root, *release_inputs(role, cache), fold_states(role, cache))
+    catalog, obj = catalog_object(root, role)
+    parent = published_manifest(root / "deployment")
     descriptor = from_document(ChooserServingFoldDescriptor, obj["serving_fold"])
     ref = loader.load_chooser_serving_fold(
         FrozenInference(root / "deployment"),
@@ -506,12 +519,13 @@ def test_bad_expected_size_refuses_before_cache_access(setup, expected, monkeypa
     monkeypatch.setattr(
         setup[0], "_load_artifact", lambda *a, **k: pytest.fail("invalid size load")
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(AdapterError) as caught:
         setup[0].prepare_serving_fold(
             setup[2].release.bindings[0],
             max_member_bytes=loader.MAX_FOLD_BYTES,
             expected_bytes=expected,
         )
+    assert type(caught.value) is AdapterError
 
 
 def test_public_metadata_refuses_non_fold_or_missing_adapter(setup, monkeypatch):
@@ -520,11 +534,51 @@ def test_public_metadata_refuses_non_fold_or_missing_adapter(setup, monkeypatch)
     monkeypatch.setattr(
         owner, "_load_artifact", lambda *a, **k: pytest.fail("unsupported adapter load")
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(AdapterError) as caught:
         owner.prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES)
+    assert type(caught.value) is AdapterError
     owner._adapters.clear()
-    with pytest.raises(ValueError):
+    with pytest.raises(AdapterError) as caught:
         owner.prepare_serving_fold(
             replace(binding, adapter="tier4-serving-fold.v1"),
             max_member_bytes=loader.MAX_FOLD_BYTES,
         )
+    assert type(caught.value) is AdapterError
+
+
+@pytest.mark.parametrize("field", ["output_name", "producer_output"])
+def test_forged_descriptor_output_refuses_at_public_loader_boundary(setup, field, monkeypatch):
+    descriptor = copy.copy(setup[1])
+    object.__setattr__(descriptor, field, "wrong-output")
+    monkeypatch.setattr(joblib, "load", lambda *a, **k: pytest.fail("wrong output decoded"))
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
+        _load(setup, descriptor=descriptor)
+    assert caught.value.code == MODEL_NOT_READY
+    assert setup[0].cache_size == 0
+
+
+@pytest.mark.parametrize("defect", ["missing", "oversize", "fifo", "symlink"])
+def test_public_preparation_normalizes_bounded_read_failures(setup, defect):
+    ref = _load(setup)
+    path = setup[4]
+    raw = path.read_bytes()
+    path.unlink()
+    if defect == "oversize":
+        path.write_bytes(raw + b"growth")
+    elif defect == "fifo":
+        os.mkfifo(path)
+    elif defect == "symlink":
+        target = path.with_name("same-bytes")
+        target.write_bytes(raw)
+        path.symlink_to(target)
+    with pytest.raises(AdapterError, match="^bounded artifact verification failed$") as caught:
+        ref.inference.prepare_serving_fold(ref.release.bindings[0], max_member_bytes=len(raw))
+    assert type(caught.value) is AdapterError
+    assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize("binding", [None, {}, object()])
+def test_public_preparation_refuses_wrong_binding_type(setup, binding):
+    with pytest.raises(AdapterError, match="^unsupported serving fold adapter$") as caught:
+        setup[0].prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES)
+    assert type(caught.value) is AdapterError
