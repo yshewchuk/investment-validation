@@ -438,12 +438,40 @@ def test_fifo_current_refused_by_fstat_alone(tmp_path, monkeypatch):
     current.unlink()
     os.mkfifo(current)
     fd = os.open(current, os.O_RDWR | os.O_NONBLOCK)
+    rfd = None
     try:
         os.write(fd, b"ops1")
+        rfd = os.open(current, os.O_RDONLY | os.O_NONBLOCK)
+        os.close(fd)
+        fd = None
         client, h = _client(root, pub)
         _expect_no_current(client, h)
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
+        if rfd is not None:
+            os.close(rfd)
+
+
+def _deep_nesting_text():
+    return "[" * 100000 + "]" * 100000
+
+
+def test_deeply_nested_binding_reads_absent(tmp_path):
+    serving_conn, release_a, _, root, pub = _setup(tmp_path)
+    _point(serving_conn, pub, release_a)
+    binding_path = pub / "releases" / "ops1" / "projection_binding.json"
+    binding_path.write_text(_deep_nesting_text())
+    client, h = _client(root, pub)
+    _expect_no_current(client, h)
+
+
+def test_deeply_nested_status_reads_absent(tmp_path):
+    _, _, _, _, pub = _setup(tmp_path)
+    pub.mkdir(parents=True, exist_ok=True)
+    (pub / "operations_status.json").write_text(_deep_nesting_text())
+    client, h = _client(pub.parent, pub)
+    _expect_operations_unavailable(client, h)
 
 
 def test_non_utf8_current_refused_by_strict_decode(tmp_path):
