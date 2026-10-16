@@ -151,7 +151,7 @@ matching score row (an `EXISTS` against `serving_score_summary`) and narrow
 each returned event's attached `scores` to those same matching rows.
 
 api (P3-2): `create_app(*, serving_db, store_root, serving_root, token,
-resolver=None, ops_root=None, native_parity_report_path=None) -> FastAPI` wires §6's six routes over `projections`' route-specific
+resolver=None, publication_root=None, ops_root=None, native_parity_report_path=None) -> FastAPI` wires §6's six routes over `projections`' route-specific
 read helpers only — no route or app-startup path imports or initiates
 scoring, a provider, `engine.v2.ops` or legacy `engine.*`. The relocated API
 test `tests/v2/serving/test_v2_serving_api.py` proves this with a real
@@ -367,9 +367,9 @@ succeeded shadow `native_parity` job when `--native-parity-report-path` is
 omitted; the explicit report path takes precedence. Omit `--ops-root` to
 retain `no_report` when no report path is supplied. The token comes from the `V2_DASHBOARD_TOKEN` environment variable — the
 launcher refuses to start without one, and refuses a non-loopback `--host`
-without `--allow-non-loopback`, exactly the two refusals `engine/v2/
+without `--allow-non-loopback`, the two refusals `engine/v2/
 dashboard/preview.py`'s launcher already makes for the compatibility
-surface.
+surface; it also refuses an empty `--serving-root`.
 
 ## Testing
 

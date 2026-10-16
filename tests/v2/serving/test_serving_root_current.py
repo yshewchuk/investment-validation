@@ -13,9 +13,7 @@ import uvicorn
 from engine.v2.serving import projections
 from engine.v2.serving import api as api_module
 from engine.v2.serving.api import create_app, main
-from tests.v2.serving.test_v2_serving_publication_binding import (  # existing fixture builder
-    _releases,  # shared with the publication-binding tests
-)
+from tests.v2.serving.release_support import build_releases
 
 TOKEN = "t-serving-root"
 
@@ -78,7 +76,7 @@ def _stop_servers():
 
 
 def _setup(tmp_path):
-    repo, snap, serving_conn, store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, store, release_a, release_b = build_releases(tmp_path)
     root = tmp_path / "serving"
     pub = root / "publisher"
     return serving_conn, release_a, release_b, root, pub
@@ -486,7 +484,10 @@ def test_current_pointer_no_fd_leak(tmp_path):
 
 def test_main_empty_serving_root(monkeypatch):
     monkeypatch.setenv("V2_DASHBOARD_TOKEN", TOKEN)
+    calls = []
+    monkeypatch.setattr(api_module.uvicorn, "run", lambda app, **kw: calls.append(app))
     assert main(["--port", "1", "--serving-root", ""]) == 2
+    assert calls == []
 
 
 def _expect_operations_unavailable(client, h):
