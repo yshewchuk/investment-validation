@@ -39,16 +39,20 @@ from tests.v2.research.test_magnitude_search_plan import source as base_source  
 HORIZONS = [5, 3, 1]
 CONFLICT = "outer evaluation evidence differs from its sealed inputs"
 HOLDOUTS = {"random": "excluded; not evaluated", "rolling": "excluded; not evaluated"}
+TARGET_RECIPE = {"schema_version": "earnings_magnitude.v1", "units": "percentage_points",
+    "target": "absolute_earnings_close_to_close_return", "price_basis": "split_neutral_non_dividend_adjusted",
+    "estimand": "conditional_mean", "primary_loss": "pooled_rmse",
+    "secondary_diagnostics": ["mae", "quantile_calibration"]}
 
 
 @contextmanager
-def outer_problem(code, message, *, category="validation", retryable=False):
+def outer_problem(code, message, *, category="validation", retryable=False, details=None):
     with pytest.raises(OpsError) as caught:
         yield
     assert to_document(caught.value.problem) == {
         "schema_version": "problem.v1.0", "code": code, "category": category,
         "retryable": retryable, "message": message, "stage": None, "trace_id": None,
-        "dependency_refs": [], "retry_after_seconds": None, "diagnostic_ref": None, "details": {}}
+        "dependency_refs": [], "retry_after_seconds": None, "diagnostic_ref": None, "details": details or {}}
 
 
 @cache
@@ -83,6 +87,32 @@ def independent_metrics(rows):
             "rmse": pytest.approx(math.sqrt(math.fsum(error ** 2 for error in errors) / len(errors)))}
 
 
+def expected_training_receipt(case, year):
+    """Pin fixture membership and physical identities without journal or qualifier output."""
+    days = ["2022-06-02", "2022-12-22", "2022-12-23", "2023-01-03", "2023-06-02"]
+    if year == "2025":
+        days += ["2024-06-12", "2024-06-17"]
+    events = sorted([history_event(day, ticker=ticker) for day in days for ticker in ("SYNTH_A", "SYNTH_B")],
+                    key=lambda event: (event["event_date"], event["event_id"]))
+    records = {(record.partition_key, record.time_min): record for record in
+               case.recorder.repository.fragment_records(case.snapshot, "computed_moves")}
+    physical = []
+    for event in events:
+        record = records[event["ticker"], event["event_date"].date().isoformat()]
+        physical.append({"event_id": event["event_id"], "fragment_id": record.fragment_id,
+            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash})
+    keys = [event["event_id"] for event in events]
+    identity = {"schema_version": "research_magnitude_training_targets.v1",
+        "snapshot_id": case.snapshot.snapshot_id, "holdout_as_of_month": "2026-01",
+        "random_membership_version": "canonical-event-sha256.v1", "rolling_membership_version": "calendar-months.v1",
+        "population_use": "post-release selection", "purpose": "selection",
+        "computed_moves_version": case.snapshot.table_versions["computed_moves"].dataset_version_id,
+        "labels_before": {"2024": "2024-01-01", "2025": "2024-12-27"}[year],
+        "target_recipe": TARGET_RECIPE, "target_recipe_id": content_hash(TARGET_RECIPE),
+        "candidate_event_ids": keys, "qualified_event_ids": keys, "read_inputs": physical, "omitted_labels": []}
+    return {**identity, "inputs_id": content_hash(identity), "holdout_exclusions": []}
+
+
 def assert_fold_oracle(case, result, year):
     targets = {event: target for event, target in known_targets().items() if event.split(":")[1][:4] == year}
     forecasts = slot(case, "forecasts", year)
@@ -97,7 +127,8 @@ def assert_fold_oracle(case, result, year):
                      if item["candidate_id"] == selection["selected_candidate_id"])
     inputs, execution, validation = (slot(case, name, year) for name in ("inputs", "execution", "validation"))
     assert {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]} == targets
-    assert inputs["training_inputs"]["labels_before"] == {"2024": "2024-01-01", "2025": "2024-12-27"}[year]
+    training_inputs = expected_training_receipt(case, year)
+    assert inputs["training_inputs"] == training_inputs
     assert validation["evaluation_inputs"]["labels_before"] == "2025-02-01"
     assert validation["evaluation_inputs"]["purpose"] == "selection"
     assert case.plan["horizons"] == HORIZONS
@@ -105,7 +136,7 @@ def assert_fold_oracle(case, result, year):
         "outer_id": content_hash([case.plan["plan_id"], year]), "plan_id": case.plan["plan_id"],
         "outer_year": year, "candidate": candidate, "selection_id": content_hash(case.selected),
         "inputs_id": content_hash(inputs), "execution_id": content_hash(execution),
-        "validation_id": content_hash(validation), "training_inputs": inputs["training_inputs"],
+        "validation_id": content_hash(validation), "training_inputs": training_inputs,
         "evaluation_inputs": validation["evaluation_inputs"], "fit_attempt_count": 3,
         "event_count": {"2024": 8, "2025": 2}[year], "forecast_count": {"2024": 24, "2025": 6}[year],
         "predictions": expected_predictions, "metrics": independent_metrics(expected_predictions),

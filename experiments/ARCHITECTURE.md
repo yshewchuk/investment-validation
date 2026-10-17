@@ -221,7 +221,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
+`magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads and `magnitude_search_evidence`. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
 
 | Condition | Outcome |
 |---|---|
