@@ -60,17 +60,19 @@ no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 `training.d14_dataset.build_d14_dataset` calculates only the `implied_t1` and
 `runup_move` monthly inputs. Bounded native Repository scans pin earnings,
 daily state and the stored `feature_panel` history block to one SnapshotRef.
-History retains the original panel population and missing values; this slice
-does not replace its historical producer or reconstruct it with `scan_panel_row`.
+History retains the original panel population and missing values from its
+historical producer; it is not reconstructed with `scan_panel_row`.
 Only daily features at the D14 entry and labels at the session-aware exit are
 calculated. The original calendar is read from one explicit committed import
 receipt, verified against the snapshot and object hash, with native projection
-math. No mutable calendar file, head resolution or legacy reader is used.
+math. The consumed calendar bytes are hash-verified and capped at 16 MiB.
+No mutable calendar file, head resolution or legacy reader is used.
 
 `python -m tools.phase5_d14_inputs` requires explicit catalog, artifact root,
-snapshot and import-receipt identifiers for this additive monthly training path.
-Existing phase5 and supervised callers are unchanged until their input-binding
-integration can switch together; this slice does not cut them over.
+snapshot and import-receipt identifiers. The API's supplied calendar must be
+receipt-verified by its caller; the CLI enforces that binding. The fixed
+2017–2026 event window is the current monthly recipe population, with daily
+history from 2016. Snapshot coverage does not widen that recipe contract.
 The existing preparation, fold planning and label/membership receipts remain
 unchanged. `run_training_job(input_identity=...)` additionally binds the pinned
 source identity in `job.json`; changed sources refuse resume even if values
@@ -79,6 +81,15 @@ reconstruction, held-out residual pools and serving publication are separate.
 No eligible decisions refuse before history/daily reads, preventing a zero-fold
 success. An absent panel history row stays missing; missing quotes retain legacy as-of
 and positional-lag behavior. Nonpositive prices produce missing move labels.
+
+| Condition | Outcome |
+| --- | --- |
+| Input exceeds table, ticker or calendar-byte bound | `RESULT_LIMIT_EXCEEDED` |
+| Snapshot identity or committed receipt association differs | `IDENTITY_CONFLICT` |
+| Committed receipt has no pinned reference inputs | `SNAPSHOT_NOT_READY` |
+| Catalog, required table/calendar, session, role or decision population invalid | `CONTRACT_MISMATCH` |
+| Calendar object bytes differ from their registered hash/size | `OBJECT_CORRUPT` |
+| CLI output is inside configured data root or input store | argparse exit 2 before reads/writes |
 
 An automated nightly append cycle for the pool/residual/cutoff artifacts:
 release assembly is §2.1; the rest is design only — see #192.

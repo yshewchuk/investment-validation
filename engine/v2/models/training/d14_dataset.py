@@ -26,6 +26,9 @@ DAILY_COLUMNS = (
       for f in panel_math.LAGGED_FIELDS for lag in panel_math.DAILY_STATE_LAGS],
 )
 _TABLES = ("earnings_events", "feature_panel", "daily_market")
+# Fixed population shared by the current monthly recipe contracts. Advancing
+# this window is a recipe/population change, not snapshot discovery.
+_EVENT_START, _WINDOW_END = "2017-01-01", "2027-01-01"
 
 
 def _rows(repository, snapshot, table, columns, *, start, end, cap=500000):
@@ -61,7 +64,10 @@ def _scan(repository, snapshot, table, columns, **kwargs):
 
 def _decisions(events, calendar):
     """Same supplied-session index arithmetic as legacy's pre-print/shift pair."""
-    days = pd.DatetimeIndex(calendar.days)
+    try:
+        days = pd.DatetimeIndex(getattr(calendar, "days", ()))
+    except (TypeError, ValueError) as exc:
+        raise errors.fail("CONTRACT_MISMATCH", "D14 calendar has invalid days") from exc
     if days.empty or days.hasnans or days.tz is not None or not days.is_unique \
             or not days.is_monotonic_increasing or not days.equals(days.normalize()):
         raise errors.fail("CONTRACT_MISMATCH", "D14 calendar must be ordered unique naive days")
@@ -89,7 +95,7 @@ def _daily_features(frame, repository, snapshot):
     groups = {ticker: group for ticker, group in frame.groupby("ticker", sort=True)}
     stream = _rows(repository, snapshot, "daily_market",
                    ("ticker", "date", "src_iv", *panel_math.DAILY_STATE_FIELDS),
-                   start="2016-01-01", end="2027-01-01", cap=20000000)
+                   start="2016-01-01", end=_WINDOW_END, cap=20000000)
     for ticker, stream_rows in groupby(stream, key=lambda row: row["ticker"]):
         group = groups.get(ticker)
         if group is None:
@@ -117,21 +123,21 @@ def build_d14_dataset(repository, snapshot, *, calendar, role):
     availability or independently validate the stored historical aggregates.
     """
     if role not in ("implied_t1", "runup_move"):
-        raise ValueError("D14 datasets support only implied_t1 and runup_move")
+        raise errors.fail("CONTRACT_MISMATCH", "D14 datasets support only implied_t1 and runup_move")
     if repository.resolve(snapshot.snapshot_id) != snapshot:
         raise errors.fail("IDENTITY_CONFLICT", "D14 snapshot differs from its catalog identity")
     if any(table not in snapshot.table_versions for table in _TABLES):
         raise errors.fail("CONTRACT_MISMATCH", "D14 snapshot lacks a required input table")
     events = _scan(repository, snapshot, "earnings_events",
                    ("event_id", "ticker", "event_date", "session", "year"),
-                   start="2017-01-01", end="2027-01-01")
+                   start=_EVENT_START, end=_WINDOW_END)
     # Legacy reads year partitions in order, with event_id order inside each.
     events = events.sort_values(["year", "event_id"], kind="stable")
     frame = _decisions(events, calendar)
     if frame.empty:
         raise errors.fail("CONTRACT_MISMATCH", "D14 inputs contain no eligible decision rows")
     history = _scan(repository, snapshot, "feature_panel", ("ticker", "date", *HISTORY_COLUMNS),
-                    start="2017-01-01", end="2027-01-01")
+                    start=_EVENT_START, end=_WINDOW_END)
     # Arrow's all-null/empty projection otherwise becomes object dtype, changing
     # the legacy dataset fingerprint even though the missing mask is identical.
     for column in HISTORY_COLUMNS:

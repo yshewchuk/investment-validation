@@ -77,8 +77,20 @@ def _inputs():
 
 
 @pytest.fixture
-def pinned(tmp_path):
+def pinned(tmp_path, request):
     events, panel, daily, days = _inputs()
+    case = getattr(request, "param", "normal")
+    if case == "empty":
+        panel = panel.iloc[:0]
+    elif case == "all_null":
+        panel["ema12_prior_move"] = np.nan
+    elif case == "boundary":
+        for year in (2016, 2027):
+            event = events.iloc[0].to_dict()
+            event.update(event_id=f"boundary-{year}", event_date=pd.Timestamp(f"{year}-07-01"), year=year)
+            events = pd.concat([events, pd.DataFrame([event])], ignore_index=True)
+    elif case == "blank_session":
+        events.loc[0, "session"] = ""
     conn, clock, store = catalog_and_store(tmp_path)
     frames = {"earnings_events": events, "feature_panel": panel, "daily_market": daily}
     contracts = {table: contract_for(table) for table in frames}
@@ -86,7 +98,8 @@ def pinned(tmp_path):
     for table, frame in frames.items():
         contract = contracts[table]
         records[table] = []
-        parts = [(None, frame)] if table == "feature_panel" else frame.groupby("year", sort=True)
+        parts = ([] if frame.empty else [(None, frame)]) if table == "feature_panel" \
+            else frame.groupby("year", sort=True)
         for year, part in parts:
             part = part.sort_values(list(contract.primary_key))
             records[table].append(publish_and_inspect(
@@ -96,12 +109,14 @@ def pinned(tmp_path):
     # Original yfinance CSV's three header rows, then dates. Exact immutable object.
     obj = publish_bytes(store, ("Price,Close\nTicker,^GSPC\nDate,\n" +
                                "\n".join(f"{d.date()},100" for d in days) + "\n").encode())
-    ref = ReferenceInput(kind="calendar", legacy_path="data/raw/yf/index.csv",
+    ref = ReferenceInput(kind="model_registry" if case == "no_calendar" else "calendar", legacy_path="data/raw/yf/index.csv",
                          object_id=obj.object_id, content_hash=obj.content_hash, byte_size=obj.byte_size)
-    insert_reference_inputs(conn, "r1", (ref,))
+    if case != "no_refs":
+        insert_reference_inputs(conn, "r1", (ref,))
     conn.commit()
     yield dict(repository=Repository(conn, store), snapshot=snapshot, events=events,
-               panel=panel, daily=daily, days=days,
+               panel=panel, daily=daily, days=days, conn=conn, calendar_ref=ref,
+               records=records, contracts=contracts, clock=clock, store=store,
                inputs=dict(catalog=tmp_path / "catalog.sqlite", artifact_root=store.root,
                            snapshot_id=snapshot.snapshot_id, receipt_id="r1"))
     conn.close()
@@ -111,9 +126,11 @@ def _legacy(pinned, role, monkeypatch):
     calendar = TradingCalendar(list(pinned["days"]) + list(projected_trading_days(
         pinned["days"][-1], pinned["days"][-1] + pd.Timedelta(days=400))))
     monkeypatch.setattr(implied_t1, "trading_calendar", lambda: calendar)
-    monkeypatch.setattr(tier4.store, "read_table", lambda name, **kwargs: coerce(
-        pinned["events"] if name == "earnings_events" else pinned["daily"],
-        name, only=kwargs["columns"]))
+    def read(name, **kwargs):
+        frame = pinned["events"] if name == "earnings_events" else pinned["daily"]
+        return coerce(frame[frame.year.isin(kwargs["years"])], name, only=kwargs["columns"])
+
+    monkeypatch.setattr(tier4.store, "read_table", read)
     factory = tier4.im_t1_feature_model if role == "implied_t1" else tier4.runup_move_feature_model
     return factory().prepare(pinned["panel"]).rename(columns={"date": "event_date"})
 
@@ -182,28 +199,14 @@ def test_cli_requires_pins_before_legacy_reads(monkeypatch, tmp_path):
 
 
 def test_wrong_receipt_refuses(pinned):
-    with pytest.raises(errors.DataError, match="receipt"):
+    with pytest.raises(errors.DataError, match="receipt") as err:
         phase5_d14_inputs.build_dataset("implied_t1", **{**pinned["inputs"], "receipt_id": "missing"})
+    assert err.value.code == "IDENTITY_CONFLICT"
 
 
-@pytest.mark.parametrize("case", ("empty", "all_null"))
-def test_missing_history_preserves_numeric_dtypes_and_identity(pinned, case, monkeypatch):
-    from engine.v2.models.training import d14_dataset
-
-    panel = pinned["panel"].copy()
-    if case == "empty":
-        panel = panel.iloc[:0]
-    else:
-        panel["ema12_prior_move"] = np.nan
-    oracle = _legacy({**pinned, "panel": panel}, "implied_t1", monkeypatch)
-    original = d14_dataset._rows
-
-    def rows(*args, **kwargs):
-        if args[2] == "feature_panel":
-            return iter(panel[list(args[3])].to_dict("records"))
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(d14_dataset, "_rows", rows)
+@pytest.mark.parametrize("pinned", ("empty", "all_null"), indirect=True)
+def test_missing_history_preserves_numeric_dtypes_and_identity(pinned, monkeypatch):
+    oracle = _legacy(pinned, "implied_t1", monkeypatch)
     actual = phase5_d14_inputs.build_dataset("implied_t1", **pinned["inputs"])
     assert_frame_equal(actual[oracle.columns], oracle, check_exact=True)
     recipe = _recipe("implied_t1")
@@ -274,15 +277,22 @@ def test_native_cli_plan_and_resume_with_legacy_readers_disabled(pinned, monkeyp
     assert phase5_d14_inputs.main(args) == 0
     assert phase5_d14_inputs.main(args) == 0
     job = json.loads((tmp_path / "planned" / "job.json").read_text())
-    assert job["input_identity"]["snapshot_id"] == pinned["snapshot"].snapshot_id
+    assert job["input_identity"] == {
+        "schema_version": "d14.snapshot_dataset.v1", "receipt_id": "r1",
+        "snapshot_id": pinned["snapshot"].snapshot_id,
+        "calendar_hash": pinned["calendar_ref"].content_hash,
+        "table_versions": {table: pinned["snapshot"].table_versions[table].dataset_version_id
+                           for table in ("earnings_events", "feature_panel", "daily_market")}}
 
 
-def test_cli_respects_configured_data_root(pinned, monkeypatch, tmp_path):
+@pytest.mark.parametrize("root", ("data", "artifact"))
+def test_cli_respects_configured_data_root(pinned, monkeypatch, tmp_path, root):
     from engine import paths
 
     alternate = tmp_path / "alternate-root" / "data"
     monkeypatch.setattr(paths, "DATA", alternate)
-    args = ["--role", "implied_t1", "--out", str(alternate / "unsafe"), "--plan-only"]
+    unsafe = (alternate if root == "data" else pinned["inputs"]["artifact_root"]) / "unsafe"
+    args = ["--role", "implied_t1", "--out", str(unsafe), "--plan-only"]
     for name, value in pinned["inputs"].items():
         args += ["--" + name.replace("_", "-"), str(value)]
     with pytest.raises(SystemExit) as err:
@@ -296,7 +306,12 @@ def test_no_decisions_refuse_before_history_or_daily_reads(pinned, case, monkeyp
     from engine.v2.models.training import d14_dataset
 
     original = d14_dataset._scan
+    original_rows = d14_dataset._rows
     calls = []
+
+    def rows(*args, **kwargs):
+        assert args[2] == "earnings_events"
+        return original_rows(*args, **kwargs)
 
     def scan(*args, **kwargs):
         calls.append(args[2])
@@ -311,13 +326,16 @@ def test_no_decisions_refuse_before_history_or_daily_reads(pinned, case, monkeyp
         return events
 
     monkeypatch.setattr(d14_dataset, "_scan", scan)
-    with pytest.raises(errors.DataError, match="no eligible decision"):
+    monkeypatch.setattr(d14_dataset, "_rows", rows)
+    with pytest.raises(errors.DataError, match="no eligible decision") as err:
         phase5_d14_inputs.build_dataset("implied_t1", **pinned["inputs"])
+    assert err.value.code == "CONTRACT_MISMATCH"
     assert calls == ["earnings_events"]
 
 
 def test_wrong_snapshot_ref_refuses_before_reads(pinned):
     calendar = native_trading_calendar({"index": pd.DataFrame({"date": pinned["days"]})})
     forged = dataclasses.replace(pinned["snapshot"], calendar_version="different")
-    with pytest.raises(errors.DataError, match="catalog identity"):
+    with pytest.raises(errors.DataError, match="catalog identity") as err:
         build_d14_dataset(pinned["repository"], forged, calendar=calendar, role="implied_t1")
+    assert err.value.code == "IDENTITY_CONFLICT"
