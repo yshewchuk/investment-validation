@@ -2,6 +2,7 @@
 # ruff: noqa: F811
 import copy
 import sqlite3
+import sys
 from fractions import Fraction
 from unittest.mock import Mock
 
@@ -20,6 +21,7 @@ from tests.v2.research.test_magnitude_search_outer import (
     CONFLICT,
     TARGET_RECIPE,
     base_source,  # noqa: F401
+    collect,
     expected_fits,
     independent_metrics,
     journal_slots,
@@ -107,6 +109,37 @@ def test_outer_migrations_refuse_before_plan_evidence_or_native_access(monkeypat
         conn.close()
 
 
+def assert_invalid_limits_first(conn, invoke, monkeypatch):
+    forbidden = Mock(side_effect=AssertionError("malformed limits crossed the first admission boundary"))
+    for name in ("require_current", "read_search_plan", "read_record", "_native_selection", "source_closure",
+                 "_replay", "_inputs", "load_magnitude_targets", "execution_limits", "run_fitted_trial", "append_record"):
+        monkeypatch.setattr(outer, name, forbidden)
+    monkeypatch.setattr(ArtifactStore, "read_verified", forbidden)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", forbidden)
+    before = conn.total_changes, list(conn.iterdump())
+    for limits in (None, [], {}, {**LIMITS, "wall_seconds": True}, {**LIMITS, "memory_bytes": 0},
+                   {**LIMITS, "wall_seconds": 1.2}, {**LIMITS, "extra": 1}, {**LIMITS, "cpu_seconds": sys.maxsize}):
+        with outer_problem("INVALID_EXPERIMENT_SPEC", "search execution requires explicit positive integer resource limits"):
+            invoke(limits)
+        forbidden.assert_not_called()
+        assert (conn.total_changes, list(conn.iterdump())) == before
+
+
+def test_invalid_limits_precede_completed_outer_replay(outer_case, monkeypatch):
+    completed = run(outer_case)
+    assert slot(outer_case, "terminal") == completed
+    assert_invalid_limits_first(outer_case.conn, lambda limits: run(outer_case, limits=limits), monkeypatch)
+
+
+def test_invalid_limits_precede_missing_migrations(monkeypatch):
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        assert_invalid_limits_first(conn, lambda limits: outer.execute_outer_fold(
+            conn, None, None, None, None, None, "2024", limits=limits), monkeypatch)
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("missing", ["selection", "execution", "terminal"])
 def test_missing_or_submitted_only_native_evidence_cannot_launch(outer_case, monkeypatch, missing):
     case = outer_case
@@ -147,7 +180,7 @@ def test_valid_native_candidate_failure_is_excluded_without_blocking_outer(case,
     assert result["candidate"]["candidate_id"] != cases[0][2]
 
 
-MUTATIONS = ["start_selection", "start_sources", "inputs_features", "inputs_training",
+MUTATIONS = ["start_selection", "start_sources", "start_year", "start_missing_year", "inputs_features", "inputs_training",
     "fit_started", "fit_completed", "execution_count", "execution_extra", "execution_forecasts",
     "forecasts_value", "forecasts_missing", "forecasts_boolean", "validation_cutoff", "validation_purpose",
     "validation_targets", "terminal_metrics", "terminal_candidate", "terminal_prospective", "terminal_extra"]
@@ -164,6 +197,10 @@ def test_valid_hash_outer_evidence_tampering_refuses_replay(outer_case, monkeypa
                 body["selection_id"] = "wrong"
             if mutation == "start_sources":
                 body["outer_sources"] = {}
+            if mutation == "start_year":
+                body["outer_year"] = "2025"
+            if mutation == "start_missing_year":
+                body.pop("outer_year")
         if name.startswith("outer-inputs:"):
             if mutation == "inputs_features":
                 body["features"][0]["n_prior"] += 1
@@ -216,6 +253,34 @@ def test_valid_hash_outer_evidence_tampering_refuses_replay(outer_case, monkeypa
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         run(case)
     assert case.conn.total_changes == before
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_collect_admits_every_stored_limit_before_any_replay(outer_case, monkeypatch, missing):
+    case = outer_case
+    run(case)
+    original = outer.append_record
+    second_start = "outer-start:" + content_hash([case.plan["plan_id"], "2025"])
+    def append(conn, store, run_id, name, body, **kwargs):
+        if name == second_start:
+            body = copy.deepcopy(body)
+            if missing:
+                body.pop("limits")
+            else:
+                body["limits"]["wall_seconds"] = True
+        return original(conn, store, run_id, name, body, **kwargs)
+    monkeypatch.setattr(outer, "append_record", append)
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        run(case, "2025")
+    assert all(slot(case, "terminal", year) is not None for year in ("2024", "2025"))
+    before = case.conn.total_changes, journal_slots(case)
+    replay = Mock(side_effect=AssertionError("collection replayed a fold before admitting all stored limits"))
+    monkeypatch.setattr(outer, "execute_outer_fold", replay)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", replay)
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        collect(case)
+    replay.assert_not_called()
+    assert (case.conn.total_changes, journal_slots(case)) == before
 
 
 @pytest.mark.parametrize("kind", ["missing", "extra", "nonfinite", "boolean"])
