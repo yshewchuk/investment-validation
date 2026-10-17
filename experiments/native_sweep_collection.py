@@ -114,6 +114,10 @@ def _mode(no_ledger, ledger_path):
         metadata = path.lstat()
     except FileNotFoundError:
         pass  # The ledger sink creates absent destinations and parent directories.
+    except OSError as exc:
+        if exc.errno not in (errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG):
+            raise
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must be a valid path") from None
     else:
         if not stat.S_ISREG(metadata.st_mode):
             raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must name a regular file")

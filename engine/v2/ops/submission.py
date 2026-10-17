@@ -48,7 +48,7 @@ from engine.v2.foundation import (
     parse_timestamp,
     to_document,
 )
-from engine.v2.ops.catalog import dumps, load_json, transaction
+from engine.v2.ops.catalog import MAX_JOB_FAILURE_BYTES, dumps, load_json, transaction
 from engine.v2.ops.errors import fail, make_problem
 from engine.v2.ops.provider_requirements import validate_scalar_provider_shape
 
@@ -68,8 +68,6 @@ __all__ = [
 
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _BLOCKING_PARENT_STATES = frozenset({"failed", "cancelled", "blocked"})
-# Same byte ceiling as executor result pipes; diagnostics belong in artifacts.
-MAX_JOB_FAILURE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)

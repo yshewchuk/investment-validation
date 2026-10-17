@@ -918,6 +918,16 @@ def test_empty_ledger_path_refuses_as_invalid_text_before_filesystem_inspection(
     assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
 
 
+def test_ledger_parent_that_is_a_file_refuses_as_invalid_spec(tmp_path, monkeypatch):
+    file = tmp_path / "file"
+    file.write_text("not a directory")
+    monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
+    with pytest.raises(OpsError, match="sweep ledger destination must be a valid path") as error:
+        collection.collect_sweep(None, None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, ledger_path=file / "ledger.csv")
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
+
+
 def test_active_transaction_refuses_before_submission_without_ending_caller_transaction(monkeypatch):
     conn = sqlite3.connect(":memory:", isolation_level=None)
     try:
