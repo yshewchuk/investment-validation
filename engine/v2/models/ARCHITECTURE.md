@@ -241,8 +241,8 @@ outputs; (3) one `models_promote` job guarded by `expected_previous_release_id` 
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
 | R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
 | R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |
-| R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; the prior release stays deployed |
-| R6 idempotency | keys `nightly:<session>:pool:<phase>:<manifest tag>:<prior release id>` and release id `pools-<session>-<manifest tag>` (tag = first 8 hex of the manifest id's SHA-256) are stable, so a rerun scored from a new manifest retrains; a deployed release already named so ends the cycle |
+| R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules |
+| R6 idempotency | phase keys and the candidate release id are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; a deployed release already named so ends the cycle |
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
@@ -522,8 +522,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   `promote_plan` — NOT `production_release_root` directly: `promote_plan`
   hands its resolved value straight to `deployment.promote`, which takes
   the `deployment/` directory itself as `root`); `engine/v2/ops/pool_refresh.py`
-  and `supervisor.py` (`deployment.production_release_root`/`current_pointer`
-  for the §2.2.1 sidecar). Neither `nightly.py`,
+  (reads the `DEPLOYED` pointer through the bounded reader) and `supervisor.py`
+  (`deployment.production_release_root`) for the §2.2.1 sidecar. Neither `nightly.py`,
   `worker.py` nor `stages.py` import this package's deployment surface
   directly.
 - `engine.v2.serving` — `engine/v2/serving/operations.py` reads the

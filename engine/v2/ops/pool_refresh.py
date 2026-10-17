@@ -60,14 +60,19 @@ def pool_refresh_identity(conn):
     # SQLite walk the (namespace, idempotency_key) index in descending key order
     # and stop after MAX_SCORE_ROWS, so only the newest session's rows are read;
     # the Python max-selection below re-ranks those newest rows by created_at.
+    # The ``idempotency_key`` range pins the scan to the ``nightly:`` key space
+    # (``:`` is followed by ``;`` in ASCII) so the primary-key index is used as a
+    # range, never a full scan of every ``shadow`` key.
     rows = conn.execute(
         "SELECT idempotency_key, spec_json, created_at FROM jobs "
         "WHERE namespace = 'shadow' AND kind = ? AND state = 'succeeded' "
-        "AND length(spec_json) <= ? ORDER BY idempotency_key DESC LIMIT ?",
-        (nightly._LEGACY_SCORE_KIND, MAX_SPEC_BYTES, MAX_SCORE_ROWS)).fetchall()
+        "AND length(spec_json) <= ? "
+        "AND idempotency_key >= 'nightly:' AND idempotency_key < 'nightly;' "
+        "ORDER BY idempotency_key DESC LIMIT ?",
+        (nightly.LEGACY_SCORE_KIND, MAX_SPEC_BYTES, MAX_SCORE_ROWS)).fetchall()
     candidates = []
     for row in rows:
-        parsed = nightly._session_scope_from_score_key(row["idempotency_key"])
+        parsed = nightly.session_scope_from_score_key(row["idempotency_key"])
         if parsed is None:
             continue
         created_at = row["created_at"]

@@ -1049,7 +1049,24 @@ def test_identity_query_plan_has_no_temp_b_tree():
             "EXPLAIN QUERY PLAN "
             "SELECT idempotency_key, spec_json, created_at FROM jobs "
             "WHERE namespace = 'shadow' AND kind = ? AND state = 'succeeded' "
-            "AND length(spec_json) <= ? ORDER BY idempotency_key DESC LIMIT ?",
-            (pool_refresh.nightly._LEGACY_SCORE_KIND, pool_refresh.MAX_SPEC_BYTES,
+            "AND length(spec_json) <= ? "
+            "AND idempotency_key >= 'nightly:' AND idempotency_key < 'nightly;' "
+            "ORDER BY idempotency_key DESC LIMIT ?",
+            (pool_refresh.nightly.LEGACY_SCORE_KIND, pool_refresh.MAX_SPEC_BYTES,
              pool_refresh.MAX_SCORE_ROWS)))
     assert "USE TEMP B-TREE FOR ORDER BY" not in plan.upper()
+    assert "SEARCH" in plan.upper()
+    assert "SCAN" not in plan.upper()
+    assert "idempotency_key>" in plan and "idempotency_key<" in plan
+
+
+def test_identity_finds_the_score_job_among_later_keys():
+    conn = _db()
+    _add_score(conn, session=SESSION, manifest=MANIFEST)
+    for index in range(40):
+        key = f"retrain:2026-01-{index + 1:02d}:job"
+        conn.execute(
+            "INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
+            "VALUES (?, 'training', 'succeeded', ?, '{}', '2027-01-01T00:00:00Z')",
+            (job_id_for("shadow", key), key))
+    assert pool_refresh.pool_refresh_identity(conn) == (SESSION, MANIFEST)

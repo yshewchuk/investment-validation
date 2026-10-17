@@ -1028,7 +1028,7 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
 `identity`/`application`, and since #681 `native_analog_query.analog_declarations` plus `identity.score_request_key`, declaring the frozen board analog pool on each row whose release carries a matching one), `engine.v2.ledger` (6.0), `engine.v2.parity`
-(6.5). `engine.v2.models` (3.5) permits top-level `payoff_artifact_key` in `native_score_batch` and `PayoffSurfaceArtifact`/`payoff_artifact_key`/`DriverResidualPoolArtifact` in `native_runup_inputs`, and `engine.v2.models.deployment` in `pool_refresh`; all other direct model imports are lazy.
+(6.5). `engine.v2.models` (3.5) permits top-level `payoff_artifact_key` in `native_score_batch` and `PayoffSurfaceArtifact`/`payoff_artifact_key`/`DriverResidualPoolArtifact` in `native_runup_inputs`, and `engine.v2.models.deployment`/`frozen_state_io` in `pool_refresh`; all other direct model imports are lazy.
 `engine.v2.domain.generation` (2.0, `Geometry`/`Pricing`) remains lazy-only. Ops does not import the native experiment adapter; the executor selects a fixed child module.
 `engine.v2.domain.generation` supplies geometry to the rescore decoder
 (`native/input_decoding.py::_load_native_score_inputs`). The `nightly_calendar_inputs`
