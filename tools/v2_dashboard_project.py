@@ -20,6 +20,9 @@ this is the one place allowed to import both ``engine.v2.ops.bootstrap``
 (opening the Phase 2 catalog) and ``engine.v2.serving`` in one process; the
 serving package itself never imports ops.
 
+:func:`run_projection` is the callable entry point; the CLI below is a thin
+wrapper that parses flags, calls it, and prints its result document.
+
 **Bundle format (P3-4).** ``--bundle-format legacy`` (the default) reads the
 real ``engine/dashboard/render.py`` ``render_bundle`` output tree —
 ``data/board.json``/``data/tickers/<ticker>.json`` (or their ``.js``
@@ -33,6 +36,13 @@ flat`` keeps the pre-P3-4 simplification (one ``<ticker>.json`` file per
 ticker, each a JSON array of ``compact_row``-shaped dicts) for tests that
 predate the real adapter; it leaves ``--preview-input``'s own
 ``bundle_manifest_ref`` untouched.
+
+:func:`run_projection` reads ``score.json`` exactly once through
+:func:`engine.v2.serving.legacy_bundle.read_score_bytes`, the strict reader
+that refuses a missing file or a symlink and caps the read at 64 MiB; the
+same bytes are hashed into the source-provenance check and parsed into the
+release's document. Bundle members are read through the same capped reader
+(``read_capped_bytes``, the 64 MiB cap shared by both).
 """
 from __future__ import annotations
 
@@ -63,7 +73,13 @@ from engine.v2.ops.native_shadow_render import native_shadow_serving_mode  # noq
 from engine.v2.scoring.stages import NativeScoreInputs  # noqa: E402
 from engine.v2.serving.native_shadow_render import shadow_serving_row_source  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
-from engine.v2.serving.legacy_bundle import load_legacy_bundle, load_score_document  # noqa: E402
+from engine.v2.serving.legacy_bundle import (  # noqa: E402
+    LegacyBundleError,
+    load_legacy_bundle,
+    parse_score_document,
+    read_capped_bytes,
+    read_score_bytes,
+)
 from engine.v2.serving.projections import build_candidate, connect  # noqa: E402
 
 
@@ -105,10 +121,51 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _read_plan(path: Path) -> dict:
+    """Read the shadow nightly plan with a bounded read and object check.
+
+    The file is read through a 1 MiB cap so an oversized plan cannot exhaust
+    memory; anything over the cap, that cannot be read, that is not valid JSON,
+    or that is not a JSON object, is refused as ``INVALID_REQUEST``.
+    """
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(1048577)
+        if len(raw) > 1048576:
+            raise fail("INVALID_REQUEST", "nightly plan exceeds 1 MiB")
+        plan = json.loads(raw)
+    except (OSError, RecursionError):
+        raise fail("INVALID_REQUEST", "nightly plan is unreadable") from None
+    except ValueError:
+        raise fail("INVALID_REQUEST", "nightly plan is not valid JSON") from None
+    if not isinstance(plan, dict):
+        raise fail("INVALID_REQUEST", "nightly plan is not a JSON object")
+    return plan
+
+
+def _read_input(path: Path, *, score: bool = False) -> bytes:
+    """Read a delivered input artifact through a shared bounded reader.
+
+    ``read_capped_bytes`` refuses anything over its cap with
+    :class:`LegacyBundleError`, and ``read_score_bytes`` additionally refuses
+    a missing file or a symlink (the score is read through it); the tool
+    reports every such refusal as a typed ``INVALID_REQUEST`` so a bad
+    delivered input stays one failure kind. Open/read failures — a missing
+    file, a permission denial, a directory in place of a file — are likewise
+    refused as ``INVALID_REQUEST``.
+    """
+    try:
+        return read_score_bytes(path) if score else read_capped_bytes(path)
+    except LegacyBundleError as exc:
+        raise fail("INVALID_REQUEST", f"{path.name} is unreadable ({exc.code})") from None
+    except OSError:
+        raise fail("INVALID_REQUEST", f"{path.name} is unreadable") from None
+
+
 def _load_flat_bundle(bundle_dir: Path) -> dict[str, list[dict]]:
     bundle: dict[str, list[dict]] = {}
     for path in sorted(bundle_dir.glob("*.json")):
-        rows = json.loads(path.read_text())
+        rows = json.loads(_read_input(path).decode("utf-8"))
         if not isinstance(rows, list):
             raise ValueError(f"{path}: expected a JSON array of rendered rows")
         bundle[path.stem] = rows
@@ -152,25 +209,28 @@ def _load_native_inputs(path: Path) -> dict[str, tuple[ScoreRequest, NativeScore
     """
     from engine.v2.ops.native.input_decoding import _load_native_score_inputs
 
-    doc = json.loads(path.read_text())
+    doc = json.loads(_read_input(path).decode("utf-8"))
     return {key: (from_document(ScoreRequest, pair["request"]),
                   _load_native_score_inputs(_with_contract_quote_keys(pair["inputs"])))
             for key, pair in sorted(doc.items())}
 
 
 def _shadow_rows(args: argparse.Namespace, score_doc: dict,
-                 bundle_rows_by_ticker: dict[str, list[dict]]) -> dict[str, list[dict]]:
+                 bundle_rows_by_ticker: dict[str, list[dict]],
+                 plan: dict | None = None) -> dict[str, list[dict]]:
     """The shadow board's rows through the one G5 seam.
 
     Without ``--nightly-plan`` there is no plan record, so the rows given are
     served unchanged.  With one, ``shadow_serving_row_source`` switches on
     the plan's ``shadow_serving_scorer``; ``"native"`` needs
     ``--native-inputs`` and is refused without them, never served legacy
-    rows under a native label.
+    rows under a native label.  A caller that already parsed the plan passes
+    it as ``plan`` to avoid re-reading the file; otherwise it is read here.
     """
-    if args.nightly_plan is None:
-        return bundle_rows_by_ticker
-    plan = json.loads(args.nightly_plan.read_text())
+    if plan is None:
+        if args.nightly_plan is None:
+            return bundle_rows_by_ticker
+        plan = _read_plan(args.nightly_plan)
     native = native_shadow_serving_mode(plan) == "native"
     if native and args.native_inputs is None:
         raise fail("INVALID_REQUEST", "a native shadow plan needs --native-inputs")
@@ -178,11 +238,20 @@ def _shadow_rows(args: argparse.Namespace, score_doc: dict,
     return shadow_serving_row_source(plan, score_doc, bundle_rows_by_ticker, pairs)
 
 
+def _row_sources_for_plan(plan: dict | None) -> tuple[str, ...]:
+    if plan is None:
+        return ("legacy_bundle",)
+    if native_shadow_serving_mode(plan) == "native":
+        return ("native_shadow",)
+    return ("legacy_bundle",)
+
+
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: Path,
+def _verify_source_provenance(preview: PreviewInput, path: Path, *,
+                              score_bytes: bytes | None = None, score_path: Path | None = None,
                               bundle_manifest_ref: str) -> None:
     """Refuse detached score/bundle inputs at the real coordinator boundary.
 
@@ -190,8 +259,17 @@ def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: 
     Phase 2 store. This second check binds the files delivered to this command
     to that retained proof, rather than allowing a caller to swap either one
     after the verifier ran.
+
+    ``score_bytes`` is the already-read score artifact the caller parsed; when
+    only ``score_path`` is supplied (legacy callers/tests), the file is read
+    here through :func:`_read_input` so the hash still binds the delivered
+    bytes.
     """
-    doc = json.loads(path.read_text())
+    if score_bytes is None:
+        if score_path is None:
+            raise ValueError("source provenance requires the score bytes or path")
+        score_bytes = _read_input(score_path)
+    doc = json.loads(_read_input(path).decode("utf-8"))
     if not isinstance(doc, dict) or doc.get("schema_version") != "phase3_source_provenance.v1.0":
         raise ValueError("source provenance has an unsupported schema")
     if doc.get("release_id") != preview.source_release_id or \
@@ -205,7 +283,7 @@ def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: 
             refs["finality_artifact"].get("content_hash") != preview.finality_ref or \
             refs["model_evidence_artifact"].get("content_hash") != preview.model_evidence_ref:
         raise ValueError("source provenance and preview artifact bindings disagree")
-    if _sha256(score_path.read_bytes()) != refs["score_artifact"].get("content_hash"):
+    if _sha256(score_bytes) != refs["score_artifact"].get("content_hash"):
         raise ValueError("score json is not the verified score artifact")
     if doc.get("bundle_manifest_ref") != bundle_manifest_ref:
         raise ValueError("bundle directory is not the verified delivered bundle")
@@ -220,7 +298,7 @@ def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: 
             receipt_path.relative_to(path.parent.resolve())
         except ValueError:
             raise ValueError(f"{name} escapes source provenance directory")
-        receipt_bytes = receipt_path.read_bytes()
+        receipt_bytes = _read_input(receipt_path)
         receipt = from_document(ComparisonReceipt, json.loads(receipt_bytes))
         if _sha256(receipt_bytes) != expected_ref or ref.get("content_hash") != expected_ref \
                 or receipt.comparison_kind != expected_kind:
@@ -249,49 +327,74 @@ def _result_document(result: PreviewRelease | Problem, conn) -> dict:
             "findings": findings, "projection_binding": binding}
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(sys.argv[1:] if argv is None else argv)
-    preview_input = from_document(PreviewInput, json.loads(args.preview_input.read_text()))
-    score_doc = load_score_document(args.score_json)
+def run_projection(*, preview_input: Path, source_provenance: Path | None, score_json: Path,
+                   bundle_dir: Path, snapshot_id: str, catalog: Path, store_root: Path,
+                   serving_root: Path, requested_as_of: str, resolved_as_of: str,
+                   bundle_format: str = "legacy", nightly_plan: Path | None = None,
+                   native_inputs: Path | None = None) -> tuple[int, dict]:
+    if bundle_format not in ("flat", "legacy"):
+        raise fail("INVALID_REQUEST", "bundle_format must be flat or legacy")
+    preview = from_document(PreviewInput, json.loads(_read_input(preview_input).decode("utf-8")))
+    # Read the score bytes once: the same bytes are hashed into the provenance
+    # check and parsed into the document the release is built from.
+    score_bytes = _read_input(score_json, score=True)
+    score_doc = parse_score_document(score_bytes)
 
-    bundle_manifest_ref = preview_input.bundle_manifest_ref
-    if args.bundle_format == "flat":
-        bundle_rows_by_ticker = _load_flat_bundle(args.bundle_dir)
+    plan: dict | None = None
+    if nightly_plan is not None:
+        plan = _read_plan(nightly_plan)
+
+    bundle_manifest_ref = preview.bundle_manifest_ref
+    if bundle_format == "flat":
+        bundle_rows_by_ticker = _load_flat_bundle(bundle_dir)
     else:
-        bundle_rows_by_ticker, bundle_manifest = load_legacy_bundle(args.bundle_dir)
+        bundle_rows_by_ticker, bundle_manifest = load_legacy_bundle(bundle_dir)
         # The release's identity binds to the bundle's actual bytes, not to
         # whatever bundle_manifest_ref the caller's PreviewInput happened to
         # declare — a changed byte anywhere in the bundle must change the
         # release id (§5.3 point 8's idempotency/change-detection test).
         bundle_manifest_ref = content_hash(bundle_manifest)
-        if preview_input.bundle_manifest_ref != bundle_manifest_ref:
+        if preview.bundle_manifest_ref != bundle_manifest_ref:
             raise ValueError("preview input does not bind the supplied bundle directory")
 
-    if args.source_provenance is None:
+    if source_provenance is None:
         raise ValueError("projection requires --source-provenance")
-    _verify_source_provenance(preview_input, args.source_provenance,
-                              score_path=args.score_json, bundle_manifest_ref=bundle_manifest_ref)
+    _verify_source_provenance(preview, source_provenance,
+                              score_bytes=score_bytes, bundle_manifest_ref=bundle_manifest_ref)
 
-    bundle_rows_by_ticker = _shadow_rows(args, score_doc, bundle_rows_by_ticker)
+    bundle_rows_by_ticker = _shadow_rows(
+        argparse.Namespace(nightly_plan=nightly_plan, native_inputs=native_inputs),
+        score_doc, bundle_rows_by_ticker, plan=plan)
     clock = SystemClock()
-    catalog_conn = open_catalog(args.catalog, clock=clock)
-    phase2_store = ArtifactStore(args.store_root)
-    repository = Repository(catalog_conn, phase2_store)
-    snapshot_ref = repository.resolve(args.snapshot_id)
+    catalog_conn = open_catalog(catalog, clock=clock)
+    try:
+        phase2_store = ArtifactStore(store_root)
+        repository = Repository(catalog_conn, phase2_store)
+        snapshot_ref = repository.resolve(snapshot_id)
 
-    args.serving_root.mkdir(parents=True, exist_ok=True)
-    serving_store = ArtifactStore(args.serving_root / "objects")
-    serving_conn = connect(str(args.serving_root / "serving.sqlite"), clock=clock)
+        serving_root.mkdir(parents=True, exist_ok=True)
+        serving_store = ArtifactStore(serving_root / "objects")
+        serving_conn = connect(str(serving_root / "serving.sqlite"), clock=clock)
+        try:
+            result = build_candidate(
+                preview, score_doc, bundle_rows_by_ticker,
+                repository=repository, snapshot_ref=snapshot_ref, store=serving_store,
+                conn=serving_conn, requested_as_of=requested_as_of,
+                resolved_as_of=resolved_as_of, clock=clock,
+                row_sources=_row_sources_for_plan(plan))
+            document = _result_document(result, serving_conn)
+        finally:
+            serving_conn.close()
+    finally:
+        catalog_conn.close()
+    return (0 if isinstance(result, PreviewRelease) else 1), document
 
-    result = build_candidate(
-        preview_input, score_doc, bundle_rows_by_ticker,
-        repository=repository, snapshot_ref=snapshot_ref, store=serving_store, conn=serving_conn,
-        requested_as_of=args.requested_as_of, resolved_as_of=args.resolved_as_of, clock=clock)
 
-    print(json.dumps(_result_document(result, serving_conn), indent=2, sort_keys=True))
-    serving_conn.close()
-    catalog_conn.close()
-    return 0 if isinstance(result, PreviewRelease) else 1
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    code, doc = run_projection(**vars(args))
+    print(json.dumps(doc, indent=2, sort_keys=True))
+    return code
 
 
 if __name__ == "__main__":

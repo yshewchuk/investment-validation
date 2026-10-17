@@ -52,12 +52,17 @@ signing, the CURRENT/health files and the launcher. The shape is pinned by
  dataclass's own field names, so the two cannot drift silently.
 
 **A serving index that opens but cannot be read is one typed 503** (#342):
-every connection-owning read block -- the publication resolver's binding
+the connection-owning read blocks that call projections directly -- the
+publication resolver's binding
 reverification, ``/releases/{id}`` + ``/releases/current``, ``/events``,
-``/events/{id}/scores``, ``/scores/{id}`` -- wraps only its projection calls in
-``except (projections.sqlite3.Error, json.JSONDecodeError)`` and raises
-``_index_unreadable()``, keeping the existing guaranteed-close ``finally``.
-Artifact decoding (still the existing 500), binding-invalid
+``/events/{id}/scores``, ``/scores/{id}`` -- wraps its projection calls and
+raises ``_index_unreadable()``, keeping the existing guaranteed-close
+``finally``. The resolver's reverification and the release blocks catch
+``(projections.sqlite3.Error, json.JSONDecodeError, DocumentError)``; the
+events/score routes get ``DocumentError`` mapped by ``_require_release``
+(``sqlite3.Error``/``json.JSONDecodeError`` are caught inline). There
+``DocumentError`` means a stored release that fails its contract, including an
+older schema. Artifact decoding (still the existing 500), binding-invalid
 (500), unknown release/event/score (404) and every validation refusal are
 unchanged; no global SQLite/JSON exception hook is registered. An open-time
 ``sqlite3.Error`` (``_open`` and the resolver's connect) and a post-open one
@@ -98,6 +103,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from engine.v2.foundation import (
     ArtifactError,
     ArtifactStore,
+    DocumentError,
     canonical_json,
     content_hash,
     safe_relative_path,
@@ -155,8 +161,10 @@ def _handle_api_error(request: Request, exc: ApiError) -> Response:
 
 def _index_unreadable() -> ApiError:
     """An API-owned index open or read failed: ``sqlite3.Error`` (a dropped/
-    corrupt table the migrations still tolerate) or ``json.JSONDecodeError``
-    (malformed stored ``document_json``/``findings_json``/``ref_json``/``flags``).
+    corrupt table the migrations still tolerate), ``json.JSONDecodeError``
+    (malformed stored ``document_json``/``findings_json``/``ref_json``/``flags``),
+    or a stored release of an older schema (``DocumentError``, e.g. a row
+    missing ``row_sources``).
     Retryable 503
     with the existing ``Problem`` shape and this FIXED message -- never raw
     exception text, a path, the token, a traceback or the malformed bytes.
@@ -286,7 +294,8 @@ def _publication_resolver(release_root, serving_db):
     hash no longer matches (a tampered doc or changed index row); and
     retryable ``SERVING_INDEX_UNREADABLE`` (503) on an open-time
     ``sqlite3.Error`` from ``projections.connect`` or a post-open
-    ``sqlite3.Error``/``json.JSONDecodeError`` while reverifying; the
+    ``sqlite3.Error``/``json.JSONDecodeError``/``DocumentError`` (a stored
+    release of an older schema) while reverifying; the
     connection closes either way."""
 
 
@@ -307,7 +316,7 @@ def _publication_resolver(release_root, serving_db):
                     "live serving index", details={"ops_release_id": ops_release_id}))
             release_id = binding.get("projection_release_id")
             scope = binding.get("scope")
-        except (projections.sqlite3.Error, json.JSONDecodeError):
+        except (projections.sqlite3.Error, json.JSONDecodeError, DocumentError):
             raise _index_unreadable() from None
         finally:
             if conn is not None:
@@ -509,7 +518,11 @@ def _release_response(serving_db, release_id: str | None, response: Response, re
     conn = _open(serving_db)
     try:
         release = projections.get_release(conn, release_id)
-    except (projections.sqlite3.Error, json.JSONDecodeError):
+    except (projections.sqlite3.Error, json.JSONDecodeError, DocumentError):
+        # A stored ``preview_release.v1.0`` row lacks the required
+        # ``row_sources`` field: strict ``from_document`` refuses it with
+        # ``DocumentError`` (MISSING_FIELD), so an unrebuildable old release
+        # reads as this same typed 503 rather than an unhandled 500.
         raise _index_unreadable() from None
     finally:
         conn.close()
@@ -527,7 +540,11 @@ def _release_response(serving_db, release_id: str | None, response: Response, re
 
 
 def _require_release(conn, release_id: str) -> None:
-    if projections.get_release(conn, release_id) is None:
+    try:
+        release = projections.get_release(conn, release_id)
+    except DocumentError:
+        raise _index_unreadable() from None
+    if release is None:
         raise ApiError(404, _problem("UNKNOWN_RELEASE", "validation", "unknown release id"))
 
 
@@ -825,11 +842,34 @@ def open_index_untranslated(serving_db):
     return projections.connect(str(serving_db))
 
 
+class _ParityIndexUnreadable(Exception):
+    """A resolver's ``SERVING_INDEX_UNREADABLE`` ApiError, surfaced past the
+    freshness check's "any ApiError means unknown current" rule."""
+
+
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
-    """Classify report freshness; an ApiError/OSError resolver means unknown current."""
-    return native_parity_projection.native_parity_freshness(
-        serving_db, resolve_current, as_of, open_index_untranslated, projections.get_release,
-        (ApiError, OSError))
+    """Classify report freshness; an ApiError/OSError resolver means unknown current.
+
+    The production resolver's ``SERVING_INDEX_UNREADABLE`` (a stored
+    old-schema current release) must not read as "available", so it is
+    re-raised as :class:`_ParityIndexUnreadable` by ``resolve`` below and
+    turned into the 503 here; every other ``ApiError``/``OSError`` still
+    means an unknown current release.
+    """
+    def resolve() -> str | None:
+        try:
+            return resolve_current()
+        except ApiError as exc:
+            if exc.problem.get("code") == "SERVING_INDEX_UNREADABLE":
+                raise _ParityIndexUnreadable() from None
+            raise
+
+    try:
+        return native_parity_projection.native_parity_freshness(
+            serving_db, resolve, as_of, open_index_untranslated, projections.get_release,
+            (ApiError, OSError))
+    except (_ParityIndexUnreadable, DocumentError):
+        raise _index_unreadable() from None
 
 
 def _native_parity_encoded_response(document) -> Response:

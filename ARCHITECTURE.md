@@ -629,9 +629,12 @@ Only a tracked path absent from the worktree reads as empty.
   The authenticated `/api/v1/native_parity*` routes also flag a report as
   `stale` when its `as_of` predates the current release's `resolved_as_of`,
   resolved through the same publication resolver as `/releases/current`.
-  An unavailable current release, including pointer-read or SQLite operational
-  failures, leaves freshness indeterminate and the
-  report `available`; retained counts and details are never withheld for age.
+  An absent or unresolvable current pointer, or a SQLite operational failure
+  re-opening the index or reading the release after it resolved, leaves
+  freshness indeterminate and the report `available`. A current-release
+  resolver failure reading the serving index (including a stored release of an
+  older schema) is the retryable `SERVING_INDEX_UNREADABLE` 503. Retained
+  counts and details are never withheld for age.
   `Service.tick()`'s sidecar submits a `native_parity` job once its
   paired inputs are ready, so `"no_report"` stays the answer whenever
   nothing has completed yet, not a degraded one.
