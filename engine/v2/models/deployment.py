@@ -84,15 +84,18 @@ __all__ = [
     "StagingNotSuccessful",
     "StagingRefused",
     "StaleReleaseHash",
+    "atomic_write_bytes",
     "current_pointer",
     "current_release",
     "invalidate_staging_success",
+    "manifest_hash_matches",
     "manifest_path",
     "mark_staging_succeeded",
     "pointer_history",
     "production_deployment_root",
     "production_release_root",
     "promote",
+    "read_manifest",
     "resolve_release",
     "restage_semantic_hash",
     "rollback",
@@ -226,7 +229,7 @@ def production_release_root() -> Path:
     ``MODEL_RELEASE_ROOT`` on every call, never cached. This is the store
     root, NOT this module's own ``root`` parameter:
     ``release_bindings.resolve_release_binding`` and
-    ``checks/phase5_release.py`` both navigate from a value at this level
+    ``engine/v2/models/release_layout.py`` both navigate from a value at this level
     by appending their own ``deployment/`` subdirectory
     (``<release_root>/deployment/DEPLOYED``); this module's own
     :func:`promote`/:func:`rollback`/:func:`resolve_release`/
@@ -254,7 +257,7 @@ def production_deployment_root() -> Path:
     operating against the ONE configured production store, matching the
     same ``<release_root>/deployment/`` layout
     ``release_bindings.resolve_release_binding`` and
-    ``checks/phase5_release.py`` already use for the identical value.
+    ``engine/v2/models/release_layout.py`` already use for the identical value.
     ``training.promote_plan`` resolves an omitted ``--release-root``
     through THIS function, never through :func:`production_release_root`
     directly -- the two disagreed on which directory ``MODEL_RELEASE_ROOT``
@@ -513,6 +516,12 @@ def _manifest_hash_matches(manifest: StagedManifest) -> bool:
     return False
 
 
+# Public names for the release-layout module (the private names stay for internal use).
+read_manifest = _read_manifest
+manifest_hash_matches = _manifest_hash_matches
+atomic_write_bytes = _atomic_write_bytes
+
+
 def _write_object(root: Path, member: ArtifactMember, payload: bytes) -> None:
     actual = "sha256:" + hashlib.sha256(payload).hexdigest()
     if actual != member.content_hash:
@@ -603,8 +612,8 @@ def restage_semantic_hash(root: Path, release_id: str) -> StagedManifest:
     An explicit, operator-run upgrade step, never automatic --
     :func:`stage_release`'s own idempotent re-stage of identical content
     deliberately KEEPS a legacy manifest's original bytes and version (see
-    ``tests/test_checks_phase5_acceptance.py::
-    test_model_release_loader_and_restage_support_versioned_hashes``).
+    ``test_model_release_loader_and_restage_support_versioned_hashes`` in
+    ``tests/v2/models/test_checks_phase5_acceptance.py``).
     :func:`promote`/:func:`rollback` refuse any ``release_hash_version``
     other than ``RELEASE_HASH_SEMANTIC_V2`` (:class:`StaleReleaseHash`);
     this is how an already-staged legacy release becomes eligible again,

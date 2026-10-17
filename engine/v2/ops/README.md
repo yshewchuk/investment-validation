@@ -139,6 +139,10 @@ either required table. Their current consumer is
 
 ## Consumers
 
+`experiments/runup_exit_report.py` consumes `fingerprints.source_closure` /
+`environment_identity` and `errors.OpsError` / `fail` for exploratory identity
+and typed refusals; `experiments/v2_runup_exits.py` consumes those typed errors.
+
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
@@ -146,6 +150,7 @@ failure rather than a stale sentence.
 `experiments/native_gate_worker.py` consumes `stages.NativeGateParameters`, `executor.THREAD_VARIABLES`, `experiments.experiment_spec_from_document`/`resolve_experiment_plan`, `fingerprints.environment_identity`/`source_closure` and `errors.OpsError`/`fail` for admission.
 `experiments/native_gate_entrypoint.py` consumes `worker.main` and injects only fixed pricing/evaluation callbacks.
 `experiments/native_gate_evaluation.py` consumes `stages.NativeGateParameters` and `errors.fail`; its admission/receipt helpers are owned by unlayered `experiments.native_gate_worker`, not ops.
+`tools/phase7_candidate_manifest.py` consumes `stages.registry` to build the job-graph rows of the P7-1 manifest (operator-run, read-only).
 `experiments/v2_gate_sweep.py` consumes `submission.submit_graph`/`NamespacePolicy`,
 `stages.registry`, `checkpoints.register_artifact`, `catalog.connect`/`transaction`,
 `migrations.require_current`, `schema.OWNER`/`MIGRATIONS`, `experiments.experiment_spec_from_document`, `errors.OpsError`/`fail` and `fingerprints.environment_identity`/`source_closure`/`worker_source_manifest`

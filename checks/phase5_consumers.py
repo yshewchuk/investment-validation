@@ -17,8 +17,8 @@ import dataclasses
 from pathlib import Path
 from typing import Callable
 
-from checks.phase5_release import deployment_root
 from engine.v2.models.contracts import ModelRelease
+from engine.v2.models.release_layout import deployment_root
 
 __all__ = ["CONSUMERS", "ReleaseContext"]
 

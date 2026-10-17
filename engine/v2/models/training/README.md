@@ -66,6 +66,28 @@ P5-3 (current dataset/training recipes):
 - `run_training_job` — the only entry that fits a recipe; resumable per fold,
   guarded by the shared no-fit switch.
 
+`build_d14_dataset` builds the two monthly D14 datasets from explicit catalog,
+artifact root, snapshot and receipt identifiers. It verifies receipt association
+and calendar bytes before calculating any frame. Earnings and daily-state
+calculations use native readers/math; the historical panel producer remains a
+dependency through its snapshot-pinned history columns. It does not substitute
+the live panel-row population. The CLI,
+`python -m tools.phase5_d14_inputs --role implied_t1 --out OUT`, requires
+`--catalog`, `--artifact-root`, `--snapshot-id`, and `--receipt-id`; optional
+`--plan-only` writes receipts without fitting. Existing
+phase5 and supervised routes are separate entry points. The receipt must belong to that snapshot and pin its original
+calendar. `run_training_job(input_identity=...)` records those source pins in
+the resume identity, alongside the unchanged dataset and recipe fingerprints.
+
+`d14_dataset.calculate_frame(repository, snapshot, *, calendar, role)` is the
+calculation helper for caller-admitted inputs. It checks snapshot identity but
+neither certifies calendar provenance nor attaches `training_inputs`; use
+`build_d14_dataset` for verified training inputs. The same module exposes
+`input_rows`/`input_frame` (bounded reads), `decision_rows` (session decisions),
+`daily_features` (in-place daily-state attachment) and `validate_role` (early
+role refusal). These are public module members, not package-root re-exports;
+they do not imply receipt or source admission.
+
 P5-4 (`residuals.py`) adds the frozen residual-pool builders:
 `build_driver_residual_pool_artifact` (bucketing via `native_payoff`
 unchanged) and `build_paired_residual_pool_artifact` (legacy
@@ -78,7 +100,7 @@ are not saved, so they cannot be re-bucketed). The real-data dataset
 builders for these and for the calibration recipes live in
 `tools/phase5_datasets.py` (legacy readers stay outside `engine/v2`).
 
-<!-- public-interface: fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool -->
+<!-- public-interface: build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool -->
 
 ## Consumers
 
@@ -88,8 +110,8 @@ failure rather than a stale sentence.
 
 `engine.v2.ops` imports `TrainingRefused` (to map a refused training receipt to a
 typed `OpsError`); no other v2 package
-imports this one, and none below layer 6 may. The real-data entry point is
-`tools/phase5_training_job.py`, which is not a v2 package.
+imports this one, and none below layer 6 may. The real-data entry points are
+`tools/phase5_training_job.py` and `tools/phase5_d14_inputs.py`, outside v2 packages.
 
 `experiments/magnitude_fitted.py` consumes `fit_magnitude_predictions` after native admission.
 
