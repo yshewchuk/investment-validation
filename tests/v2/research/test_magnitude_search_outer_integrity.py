@@ -1,19 +1,24 @@
 """No-launch prerequisites and valid-hash negatives for the outer evidence chain."""
 # ruff: noqa: F811
 import copy
+import sqlite3
 from fractions import Fraction
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.ops.migrations import Migration, migrate
 from experiments import magnitude_search_outer as outer
+from experiments import magnitude_search_records as records
 from experiments import magnitude_search_trials as trials
 from tests.v2.models.training.test_magnitude_estimators import FEATURES, RIDGE_PARAMS
-from tests.v2.research.magnitude_trial_support import trial_cases, trial_forecasts
+from tests.v2.research.magnitude_trial_support import history_event, trial_cases, trial_forecasts
 from tests.v2.research.test_magnitude_search_execution import LIMITS, inject_child
 from tests.v2.research.test_magnitude_search_outer import (
     CONFLICT,
+    TARGET_RECIPE,
     base_source,  # noqa: F401
     expected_fits,
     independent_metrics,
@@ -38,6 +43,68 @@ def test_shared_forecast_validation_preserves_inner_and_outer_numeric_policies(h
     assert type(normalized[0]["predicted_absolute_move_pct"]) is float
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         outer._forecasts(forecasts, fold, [1])
+
+
+@pytest.mark.parametrize("value, json_native", [
+    (2, True), (2.5, True), (np.int64(2), False), (np.float32(2.5), False), (Fraction(5, 2), False)])
+def test_shared_target_validation_preserves_inner_and_outer_numeric_policies(value, json_native):
+    common = {"snapshot_id": "snapshot", "holdout_as_of_month": "2026-01",
+        "random_membership_version": "canonical-event-sha256.v1", "rolling_membership_version": "calendar-months.v1",
+        "population_use": "post-release selection", "purpose": "selection", "computed_moves_version": "moves"}
+    physical = [{"event_id": "event", "fragment_id": "fragment", "object_id": "object", "content_hash": "hash"}]
+    cohort = {"preflight": {**common, "planned_inputs": physical}}
+    identity = {"schema_version": "research_magnitude_targets.v1", **common,
+        "labels_before": "2025-02-01", "target_recipe": TARGET_RECIPE, "target_recipe_id": content_hash(TARGET_RECIPE),
+        "consumed_inputs": physical, "excluded_future_events": []}
+    validation = {"evaluation_inputs": {**identity, "inputs_id": content_hash(identity), "holdout_exclusions": []},
+                  "targets": [{"event_id": "event", "absolute_move_pct": value}]}
+    fold = {"evaluation_event_ids": ["event"], "evaluation_labels_before": "2025-02-01"}
+    admitted = {"inputs_id": content_hash(cohort)}
+    trials.SearchTrials._validation(fold, admitted, cohort, {**validation, **admitted})
+    if json_native:
+        outer._validate_targets(cohort, validation, fold)
+    else:
+        with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+            outer._validate_targets(cohort, validation, fold)
+
+
+@pytest.mark.parametrize("operation", ["execute_outer_fold", "collect_outer_results"])
+@pytest.mark.parametrize("schema", ["missing", "older", "newer", "checksum"])
+def test_outer_migrations_refuse_before_plan_evidence_or_native_access(monkeypatch, operation, schema):
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        if schema != "missing":
+            conn.execute("CREATE TABLE experiment_runs (run_id TEXT PRIMARY KEY)")
+            migrations = records.MIGRATIONS + ((Migration(version=2, name="future", statements=()),)
+                                               if schema == "newer" else ())
+            migrate(conn, records.OWNER, migrations, clock=SystemClock())
+        if schema == "older":
+            conn.execute("DELETE FROM schema_versions WHERE owner='magnitude_search'")
+        elif schema == "checksum":
+            conn.execute("UPDATE schema_versions SET checksum='different' WHERE owner='magnitude_search'")
+        forbidden = Mock(side_effect=AssertionError("opened plan, evidence or native inputs before migration admission"))
+        for name in ("read_search_plan", "read_record", "_inputs", "load_magnitude_targets", "run_fitted_trial"):
+            monkeypatch.setattr(outer, name, forbidden)
+        monkeypatch.setattr(ArtifactStore, "read_verified", forbidden)
+        message, details = "magnitude_search schema is missing migrations", {
+            "reason": "schema_older", "owner": "magnitude_search", "missing": [1]}
+        if schema == "newer":
+            message, details = "magnitude_search schema is newer than this code supports", {
+                "reason": "schema_newer", "owner": "magnitude_search", "applied": 2, "supported": 1}
+        elif schema == "checksum":
+            message, details = "magnitude_search migration differs from the one applied", {
+                "reason": "checksum_mismatch", "owner": "magnitude_search", "version": 1}
+        before = list(conn.iterdump())
+        with outer_problem("INTEGRITY_FAILED", message, category="integrity", details=details):
+            args = [conn, None, None, None, None, None]
+            if operation == "execute_outer_fold":
+                outer.execute_outer_fold(*args, "2024", limits=LIMITS)
+            else:
+                outer.collect_outer_results(*args)
+        forbidden.assert_not_called()
+        assert list(conn.iterdump()) == before
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("missing", ["selection", "execution", "terminal"])
@@ -187,19 +254,29 @@ def test_outer_child_receives_only_prior_training_labels(outer_case, monkeypatch
     assert all(recipe != candidate["recipe"] for candidate in case.plan["candidates"]
                if candidate["candidate_id"] != winner)
     children = inject_child(monkeypatch, f"""
+count = 0
 def injected(recipe, train, labels, test):
+    global count
+    count += 1
     assert recipe == {recipe!r}
     assert len(labels) == 10
     assert sorted(labels.tolist()) == [2, 2, 3, 3, 3, 3, 4, 6, 8, 12]
     assert len(test) == 8
-    return [10 * recipe['estimator']['params']['alpha']] * len(test)
+    return [10 * recipe['estimator']['params']['alpha'] + count + index for index in range(len(test))]
 """)
     result = run(case)
-    assert {row["predicted_absolute_move_pct"] for row in result["predictions"]} == {5.0}
-    assert result["metrics"] == {"count": 24, "rmse": pytest.approx((276 / 8) ** 0.5), "mae": 4.0}
-    expected = [{"event_id": event, "predicted_absolute_move_pct": 5.0}
-                for event in known_targets() if ":2024-" in event]
-    assert result["per_horizon"] == [{"horizon_sessions": horizon, **independent_metrics(expected)}
+    events = sorted([history_event(day, ticker=ticker) for day in
+        ("2024-06-12", "2024-06-17", "2024-12-27", "2024-12-30") for ticker in ("SYNTH_A", "SYNTH_B")],
+        key=lambda event: (event["event_date"], event["event_id"]))
+    expected = sorted([{"event_id": event["event_id"], "horizon_sessions": horizon,
+        "predicted_absolute_move_pct": 5.0 + {5: 1, 3: 2, 1: 3}[horizon] + index,
+        "absolute_move_pct": known_targets()[event["event_id"]]}
+        for index, event in enumerate(events) for horizon in (5, 3, 1)],
+        key=lambda row: (row["event_id"], row["horizon_sessions"]))
+    assert result["predictions"] == expected
+    assert result["metrics"] == independent_metrics(expected)
+    assert result["per_horizon"] == [{"horizon_sessions": horizon, **independent_metrics([
+        row for row in expected if row["horizon_sessions"] == horizon])}
                                       for horizon in [5, 3, 1]]
     assert len(children) == 1
     assert all(child.poll() is not None and not path.exists() for child, path in children)
