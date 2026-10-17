@@ -47,8 +47,10 @@ def _db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
-        "CREATE TABLE jobs (job_id TEXT, kind TEXT, state TEXT, idempotency_key TEXT, "
-        "spec_json TEXT, created_at TEXT);"
+        "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, "
+        "namespace TEXT NOT NULL DEFAULT 'shadow', kind TEXT, state TEXT, "
+        "idempotency_key TEXT, spec_json TEXT, created_at TEXT, "
+        "UNIQUE (namespace, idempotency_key));"
         "CREATE TABLE attempts (attempt_id TEXT, job_id TEXT, state TEXT, "
         "attempt_number INTEGER);"
         "CREATE TABLE attempt_outputs (attempt_id TEXT, name TEXT, artifact_id TEXT);")
@@ -95,7 +97,21 @@ def _succeeded_training(conn, phase, outputs, *, session=SESSION, prior=PRIOR):
     return job_id
 
 
-def _wire(monkeypatch, *, pointer=PRIOR):
+def _pointer_bytes(release_id):
+    """The exact ``DEPLOYED`` encoding ``deployment._encode`` writes, via public APIs."""
+    pointer = deployment.PointerState(
+        sequence=1, release_id=release_id, previous_release_id=None,
+        action="promote", at="2026-01-01T00:00:00Z")
+    return json.dumps(to_document(pointer), indent=2, sort_keys=True).encode("utf-8")
+
+
+def _write_pointer(release_root, release_id):
+    deploy = Path(release_root) / "deployment"
+    deploy.mkdir(parents=True, exist_ok=True)
+    (deploy / "DEPLOYED").write_bytes(_pointer_bytes(release_id))
+
+
+def _wire(monkeypatch, tmp_path, *, pointer=PRIOR):
     """Patch every collaborator ``pool_refresh`` calls; records each call."""
     rec = SimpleNamespace(training=[], stage=[], promote=[], requests=[], submits=[])
 
@@ -119,11 +135,12 @@ def _wire(monkeypatch, *, pointer=PRIOR):
         rec.submits.append(request)
         return "receipt"
 
+    deploy = Path(tmp_path) / "deployment"
+    pointer_file = deploy / "DEPLOYED"
     if pointer is None:
-        monkeypatch.setattr(pool_refresh.deployment, "current_pointer", lambda root: None)
+        pointer_file.unlink(missing_ok=True)
     else:
-        monkeypatch.setattr(pool_refresh.deployment, "current_pointer",
-                            lambda root: SimpleNamespace(release_id=pointer))
+        _write_pointer(tmp_path, pointer)
     monkeypatch.setattr(pool_refresh.training, "training_plan", training_plan)
     monkeypatch.setattr(pool_refresh.training, "promote_plan", promote_plan)
     monkeypatch.setattr(pool_refresh.state_stage, "state_stage_plan", stage_plan)
@@ -180,13 +197,13 @@ def test_identity_is_none_for_a_non_string_or_empty_binding(binding):
 
 
 def test_no_pointer_no_conn_or_already_advanced_submits_nothing(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch, pointer=None)
+    rec = _wire(monkeypatch, tmp_path, pointer=None)
     conn = _db()
     _add_score(conn)
     assert _submit(conn, tmp_path) == []
     assert _submit(None, tmp_path) == []
 
-    rec2 = _wire(monkeypatch, pointer=f"pools-{SESSION}-{TAG}")
+    rec2 = _wire(monkeypatch, tmp_path, pointer=f"pools-{SESSION}-{TAG}")
     assert _submit(conn, tmp_path) == []
     assert rec.submits == [] and rec2.submits == []
 
@@ -197,7 +214,7 @@ def test_no_pointer_no_conn_or_already_advanced_submits_nothing(monkeypatch, tmp
 
 
 def test_all_training_phases_missing_submit_three(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     assert _submit(conn, tmp_path) == ["receipt"] * 3
@@ -221,7 +238,7 @@ def test_all_training_phases_missing_submit_three(monkeypatch, tmp_path):
 
 
 def test_two_manifests_same_session_and_prior_use_distinct_tags(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn, manifest="old-manifest", created_at="2026-01-01T00:00:00Z")
     old_tag = hashlib.sha256(b"old-manifest").hexdigest()[:8]
@@ -241,10 +258,10 @@ def test_two_manifests_same_session_and_prior_use_distinct_tags(monkeypatch, tmp
         for phase in pool_refresh.TRAINING_PHASES]
 
     # the release id carries the tag: a pointer at the new tag's release is a no-op
-    _wire(monkeypatch, pointer=f"pools-{SESSION}-{new_tag}")
+    _wire(monkeypatch, tmp_path, pointer=f"pools-{SESSION}-{new_tag}")
     assert _submit(conn, tmp_path) == []
     # ... while the old tag's release id does not suppress the new tag's work
-    _wire(monkeypatch, pointer=f"pools-{SESSION}-{old_tag}")
+    _wire(monkeypatch, tmp_path, pointer=f"pools-{SESSION}-{old_tag}")
     assert _submit(conn, tmp_path) == ["receipt"] * 3
 
 
@@ -254,7 +271,7 @@ def test_two_manifests_same_session_and_prior_use_distinct_tags(monkeypatch, tmp
 
 
 def test_existing_failed_training_job_is_not_resubmitted(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     _add_training(conn, "train-paired", state="failed")
@@ -270,7 +287,7 @@ def test_existing_failed_training_job_is_not_resubmitted(monkeypatch, tmp_path):
 
 
 def test_waiting_while_a_training_job_runs(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     _add_training(conn, "train-paired", state="succeeded")
@@ -281,7 +298,7 @@ def test_waiting_while_a_training_job_runs(monkeypatch, tmp_path):
 
 
 def test_plans_are_built_lazily_only_for_missing_phases(monkeypatch, tmp_path):
-    _wire(monkeypatch)
+    _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     for phase in pool_refresh.TRAINING_PHASES:
@@ -300,7 +317,7 @@ def test_plans_are_built_lazily_only_for_missing_phases(monkeypatch, tmp_path):
 
 
 def test_all_training_succeeded_submits_the_stage_with_plain_refs(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     board_file = "board_analog_matcher__STR-THRU__0.5000__2026-10-01.json"
@@ -331,7 +348,7 @@ def test_all_training_succeeded_submits_the_stage_with_plain_refs(monkeypatch, t
 
 
 def test_state_refs_use_only_the_latest_succeeded_attempt(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     job_id = _add_training(conn, "train-paired", state="succeeded")
@@ -348,7 +365,7 @@ def test_state_refs_use_only_the_latest_succeeded_attempt(monkeypatch, tmp_path)
 
 
 def test_state_refs_exclude_wrong_prefix_suffix_and_failed_attempts(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     paired = _add_training(conn, "train-paired", state="succeeded")
@@ -371,7 +388,7 @@ def test_state_refs_exclude_wrong_prefix_suffix_and_failed_attempts(monkeypatch,
 
 
 def test_duplicate_state_file_name_raises(monkeypatch, tmp_path):
-    _wire(monkeypatch)
+    _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     _succeeded_training(conn, "train-paired", ["training/paired.json"])
@@ -385,7 +402,7 @@ def test_duplicate_state_file_name_raises(monkeypatch, tmp_path):
 
 
 def test_training_job_without_a_succeeded_attempt_raises(monkeypatch, tmp_path):
-    _wire(monkeypatch)
+    _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     job_id = _add_training(conn, "train-paired", state="succeeded")  # no attempt row
@@ -409,7 +426,7 @@ def _all_training_succeeded(conn):
 
 
 def test_stage_that_is_not_yet_succeeded_waits(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     _all_training_succeeded(conn)
@@ -419,7 +436,7 @@ def test_stage_that_is_not_yet_succeeded_waits(monkeypatch, tmp_path):
 
 
 def test_failed_stage_job_blocks_promote(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     _all_training_succeeded(conn)
@@ -429,7 +446,7 @@ def test_failed_stage_job_blocks_promote(monkeypatch, tmp_path):
 
 
 def test_stage_succeeded_submits_a_guarded_promote(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     _all_training_succeeded(conn)
@@ -444,7 +461,7 @@ def test_stage_succeeded_submits_a_guarded_promote(monkeypatch, tmp_path):
 
 
 def test_existing_promote_is_idempotent(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     _all_training_succeeded(conn)
@@ -465,6 +482,7 @@ def test_promote_request_pins_the_code_source_implementation(monkeypatch, tmp_pa
     _add_score(conn)
     _all_training_succeeded(conn)
     _add_training(conn, "stage", state="succeeded")
+    _write_pointer(tmp_path, PRIOR)
 
     assert _submit(conn, tmp_path) == ["receipt"]
     expected = content_hash(worker_source_manifest(REPO_ROOT))
@@ -634,7 +652,7 @@ def test_identity_prefers_the_later_session_over_an_earlier_created_at():
 
 
 def test_state_refs_with_only_summaries_is_a_typed_refusal(monkeypatch, tmp_path):
-    _wire(monkeypatch)
+    _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     for phase in pool_refresh.TRAINING_PHASES:
@@ -664,6 +682,7 @@ def test_real_training_planners_build_the_three_phase_plans(monkeypatch, tmp_pat
     monkeypatch.setattr(pool_refresh, "submit", submit)
     conn = _db()
     _add_score(conn)
+    _write_pointer(tmp_path, PRIOR)
     assert _submit(conn, tmp_path) == ["receipt"] * 3
 
     plans = {request.job.parameters["mode"]: request.job.parameters for request in recorded}
@@ -774,20 +793,20 @@ def test_identity_is_unaffected_by_older_rows_beyond_the_limit():
 # --------------------------------------------------------------------------
 
 
-def _assert_pointer_refused(root):
+def _assert_pointer_refused(deployment_dir):
     with pytest.raises(OpsError) as err:
-        pool_refresh._require_bounded_pointer(root)
+        pool_refresh._read_pointer(deployment_dir)
     assert err.value.code == "VALIDATION_FAILED"
     assert err.value.problem.message == "deployment pointer is not a bounded regular file"
 
 
 def test_bounded_pointer_allows_a_missing_file(tmp_path):
-    pool_refresh._require_bounded_pointer(tmp_path)
+    assert pool_refresh._read_pointer(tmp_path) is None
 
 
 def test_bounded_pointer_allows_a_small_regular_file(tmp_path):
-    (tmp_path / "DEPLOYED").write_text("{}")
-    pool_refresh._require_bounded_pointer(tmp_path)
+    (tmp_path / "DEPLOYED").write_bytes(_pointer_bytes(PRIOR))
+    assert pool_refresh._read_pointer(tmp_path).release_id == PRIOR
 
 
 def test_bounded_pointer_rejects_a_symlink(tmp_path):
@@ -818,7 +837,7 @@ def _assert_submission_pointer_refused(rec):
 
 
 def test_production_submission_refuses_an_oversize_pointer(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path, pointer=None)
     conn = _db()
     _add_score(conn)
     (tmp_path / "deployment").mkdir()
@@ -832,7 +851,7 @@ def test_production_submission_refuses_an_oversize_pointer(monkeypatch, tmp_path
 
 
 def test_production_submission_refuses_a_symlink_pointer(monkeypatch, tmp_path):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path, pointer=None)
     conn = _db()
     _add_score(conn)
     deploy = _deployment_dir(tmp_path)
@@ -849,7 +868,7 @@ def test_production_submission_refuses_a_symlink_pointer(monkeypatch, tmp_path):
 def test_production_submission_refuses_a_fifo_pointer(monkeypatch, tmp_path):
     if not hasattr(os, "mkfifo"):
         pytest.skip("os.mkfifo is unsupported on this platform")
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path, pointer=None)
     conn = _db()
     _add_score(conn)
     deploy = _deployment_dir(tmp_path)
@@ -858,6 +877,19 @@ def test_production_submission_refuses_a_fifo_pointer(monkeypatch, tmp_path):
         _submit(conn, tmp_path)
     assert err.value.code == "VALIDATION_FAILED"
     assert err.value.problem.message == "deployment pointer is not a bounded regular file"
+    _assert_submission_pointer_refused(rec)
+
+
+def test_production_submission_refuses_an_undecodable_pointer(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch, tmp_path, pointer=None)
+    conn = _db()
+    _add_score(conn)
+    deploy = _deployment_dir(tmp_path)
+    (deploy / "DEPLOYED").write_bytes(b"{not json")
+    with pytest.raises(OpsError) as err:
+        _submit(conn, tmp_path)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "deployment pointer could not be decoded"
     _assert_submission_pointer_refused(rec)
 
 
@@ -881,7 +913,7 @@ def test_real_board_training_plan_defaults_to_no_strategies():
 @pytest.mark.parametrize("state", ["running", "failed"])
 @pytest.mark.parametrize("phase", pool_refresh.TRAINING_PHASES)
 def test_a_non_succeeded_training_phase_blocks_the_stage(monkeypatch, tmp_path, phase, state):
-    rec = _wire(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path)
     conn = _db()
     _add_score(conn)
     for other in pool_refresh.TRAINING_PHASES:
@@ -940,6 +972,7 @@ def test_promote_request_pins_the_override_code_source(monkeypatch, tmp_path):
     _add_score(conn)
     _all_training_succeeded(conn)
     _add_training(conn, "stage", state="succeeded")
+    _write_pointer(tmp_path, PRIOR)
 
     assert _submit(conn, tmp_path, code_source=other_source) == ["receipt"]
     override = content_hash(worker_source_manifest(other_source))
@@ -965,6 +998,7 @@ def test_training_requests_pin_the_override_code_source(monkeypatch, tmp_path):
         lambda conn, registry, policy, request, *, clock: recorded.append(request) or "receipt")
     conn = _db()
     _add_score(conn)
+    _write_pointer(tmp_path, PRIOR)
 
     assert _submit(conn, tmp_path, code_source=other_source) == ["receipt"] * 3
     override = content_hash(worker_source_manifest(other_source))
@@ -973,3 +1007,49 @@ def test_training_requests_pin_the_override_code_source(monkeypatch, tmp_path):
     assert len(recorded) == len(pool_refresh.TRAINING_PHASES)
     assert all(request.job.implementation_ref == override for request in recorded)
     assert all(request.job.implementation_ref != repo_root for request in recorded)
+
+
+# --------------------------------------------------------------------------
+# 22. the DEPLOYED pointer is read exactly once per submission
+# --------------------------------------------------------------------------
+
+
+def test_pointer_is_read_exactly_once_per_submission(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path)
+    conn = _db()
+    _add_score(conn)
+    calls = []
+    real_read = pool_refresh.read_bounded_state
+
+    def counting_read(*args, **kwargs):
+        calls.append(args)
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(pool_refresh, "read_bounded_state", counting_read)
+    assert _submit(conn, tmp_path) == ["receipt"] * 3
+    assert len(calls) == 1
+    assert _submit(conn, tmp_path) == ["receipt"] * 3
+    assert len(calls) == 2
+
+
+# --------------------------------------------------------------------------
+# 23. the identity query plan needs no temp b-tree for its ORDER BY
+# --------------------------------------------------------------------------
+
+
+def test_identity_query_plan_has_no_temp_b_tree():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE jobs (namespace TEXT NOT NULL DEFAULT 'shadow', "
+        "idempotency_key TEXT NOT NULL, kind TEXT, state TEXT, spec_json TEXT, "
+        "created_at TEXT, PRIMARY KEY (namespace, idempotency_key))")
+    plan = " ".join(
+        row["detail"] for row in conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT idempotency_key, spec_json, created_at FROM jobs "
+            "WHERE namespace = 'shadow' AND kind = ? AND state = 'succeeded' "
+            "AND length(spec_json) <= ? ORDER BY idempotency_key DESC LIMIT ?",
+            (pool_refresh.nightly._LEGACY_SCORE_KIND, pool_refresh.MAX_SPEC_BYTES,
+             pool_refresh.MAX_SCORE_ROWS)))
+    assert "USE TEMP B-TREE FOR ORDER BY" not in plan.upper()

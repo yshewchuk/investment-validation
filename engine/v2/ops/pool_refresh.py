@@ -15,7 +15,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import ArtifactError, content_hash, from_document
 from engine.v2.models import deployment
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops import nightly, state_stage, training
@@ -56,12 +56,14 @@ def pool_refresh_identity(conn):
     (session, created_at, scope_hash) over parseable keys with a usable
     ``created_at``; ``manifest_id`` is that job's ``legacy_manifest.json`` binding.
     Returns ``None`` when no score job exists or its binding is absent/not a string."""
-    # Bounded per-tick read: keys sort so the latest session is listed first; the
-    # Python max-selection below re-ranks only those newest rows by created_at.
+    # Bounded per-tick read: the ``namespace`` prefix plus the key order lets
+    # SQLite walk the (namespace, idempotency_key) index in descending key order
+    # and stop after MAX_SCORE_ROWS, so only the newest session's rows are read;
+    # the Python max-selection below re-ranks those newest rows by created_at.
     rows = conn.execute(
         "SELECT idempotency_key, spec_json, created_at FROM jobs "
-        "WHERE kind = ? AND state = 'succeeded' AND length(spec_json) <= ? "
-        "ORDER BY idempotency_key DESC LIMIT ?",
+        "WHERE namespace = 'shadow' AND kind = ? AND state = 'succeeded' "
+        "AND length(spec_json) <= ? ORDER BY idempotency_key DESC LIMIT ?",
         (nightly._LEGACY_SCORE_KIND, MAX_SPEC_BYTES, MAX_SCORE_ROWS)).fetchall()
     candidates = []
     for row in rows:
@@ -119,19 +121,25 @@ def _implementation_ref(code_source):
     return content_hash(worker_source_manifest(code_source))
 
 
-def _require_bounded_pointer(deployment_root):
-    """Refuse a ``DEPLOYED`` pointer that is not a bounded regular file.
+def _read_pointer(deployment_root):
+    """Read the ``DEPLOYED`` pointer once, or ``None`` when it is absent.
 
-    A missing pointer is fine (``current_pointer`` then yields ``None``); a
-    symlink, FIFO, directory or oversize regular file is refused before any
-    read so a planted pointer cannot steer or exhaust the per-tick read."""
-    path = Path(deployment_root) / "DEPLOYED"
+    Reads the file exactly once: a symlink, FIFO, directory or oversize
+    regular file is refused before any content read, so a planted pointer
+    cannot steer or exhaust the per-tick read, and bytes that are not a
+    decodable ``PointerState`` document are refused too. A missing pointer
+    is the only benign outcome -- it means nothing has ever been promoted."""
     try:
-        read_bounded_state(path, MAX_POINTER_BYTES, no_follow=True)
+        data = read_bounded_state(Path(deployment_root) / "DEPLOYED",
+                                  MAX_POINTER_BYTES, no_follow=True)
     except FileNotFoundError:
-        return
+        return None
     except (BoundedStateReadError, OSError):
         raise fail("VALIDATION_FAILED", "deployment pointer is not a bounded regular file")
+    try:
+        return from_document(deployment.PointerState, json.loads(data.decode("utf-8")))
+    except (ValueError, TypeError, ArtifactError):
+        raise fail("VALIDATION_FAILED", "deployment pointer could not be decoded")
 
 
 def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_root, *,
@@ -146,9 +154,7 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
         return []
     session, manifest_id = identity
     tag = manifest_tag(manifest_id)
-    deployment_root = Path(release_root) / "deployment"
-    _require_bounded_pointer(deployment_root)
-    pointer = deployment.current_pointer(deployment_root)
+    pointer = _read_pointer(Path(release_root) / "deployment")
     if pointer is None:
         return []
     prior = pointer.release_id
