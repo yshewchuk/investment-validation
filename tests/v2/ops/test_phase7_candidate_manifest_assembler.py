@@ -617,3 +617,20 @@ def test_git_runs_with_no_optional_locks(monkeypatch):
     except asm.SpecError:
         pass  # a dirty checkout still ran every git call
     assert seen and all(cmd[:2] == ["git", "--no-optional-locks"] for cmd in seen)
+
+
+def test_commit_refuses_ignored_python_source_in_scanned_tree(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / ".gitignore").write_text("diag.py\n__pycache__/\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "x")
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    (repo / "tools" / "__pycache__").mkdir(parents=True)
+    (repo / "tools" / "__pycache__" / "m.py").write_text("x = 1")
+    assert _REAL_COMMIT({"commit": head}, repo) == head
+    (repo / "tools" / "diag.py").write_text("print(1)\n")
+    with pytest.raises(asm.SpecError, match="uncommitted tracked changes or untracked"):
+        _REAL_COMMIT({"commit": head}, repo)

@@ -143,10 +143,18 @@ def check_commit(spec: dict, root: Path) -> str:
                      *_SCANNED_TREES)
     if untracked.returncode != 0:
         raise SpecError(f"commit: git ls-files failed (exit {untracked.returncode})")
+    # discover_entrypoints globs *.py without applying .gitignore, so an ignored source
+    # file would enter the inventory of a commit that does not contain it.
+    ignored = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
+                   *_SCANNED_TREES)
+    if ignored.returncode != 0:
+        raise SpecError(f"commit: git ls-files failed (exit {ignored.returncode})")
+    ignored_sources = [p for p in ignored.stdout.split("\0")
+                       if p.endswith(".py") and "__pycache__/" not in p]
     tracked = _git(root, "diff-index", "--quiet", "HEAD", "--")
     if tracked.returncode not in (0, 1):
         raise SpecError(f"commit: git diff-index failed (exit {tracked.returncode})")
-    changed = bool(untracked.stdout.strip("\0")) or tracked.returncode == 1
+    changed = bool(untracked.stdout.strip("\0")) or bool(ignored_sources) or tracked.returncode == 1
     if changed:
         raise SpecError("commit: the checkout has uncommitted tracked changes or untracked "
                         "files under the scanned trees, so the registry and inventory would "
