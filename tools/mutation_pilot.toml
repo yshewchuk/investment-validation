@@ -866,6 +866,9 @@ tests = [
     "tests/v2/research/test_magnitude_registration.py",
     "tests/v2/research/test_magnitude_execution_registration.py",
     "tests/v2/research/test_magnitude_history_model.py",
+    "tests/v2/ops/test_native_evidence_bounds.py",
+    "tests/v2/ops/test_sweep_native_bounds.py",
+    "tests/v2/ops/test_gate_sweep_collection.py",
 ]
 
 [modules.ops_catalog_sched]
