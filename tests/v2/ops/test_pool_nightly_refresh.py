@@ -20,11 +20,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, to_document
 from engine.v2.models import deployment
-from engine.v2.ops import pool_refresh
-from engine.v2.ops.errors import OpsError, fail
-from engine.v2.ops.fingerprints import worker_source_manifest
+from engine.v2.ops import pool_refresh, training
+from engine.v2.ops.errors import OpsError, fail, make_problem
+from engine.v2.ops.fingerprints import (
+    CODE_ASSET_DIRS,
+    CODE_ASSET_FILES,
+    worker_source_manifest,
+)
 from engine.v2.ops.plans import request_from_plan as real_request_from_plan
 from engine.v2.ops.stages import registry
 from engine.v2.ops.state_stage import state_stage_plan
@@ -59,6 +63,12 @@ def _add_score(conn, *, session=SESSION, manifest=MANIFEST, scope="sha256:abc",
                  "VALUES (?, 'legacy_score', ?, ?, ?, ?)",
                  (job_id_for("shadow", key), state, key, spec, created_at))
     return key
+
+
+def _add_score_spec(conn, *, key, created_at, spec_json, state="succeeded"):
+    conn.execute("INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
+                 "VALUES (?, 'legacy_score', ?, ?, ?, ?)",
+                 (job_id_for("shadow", key), state, key, spec_json, created_at))
 
 
 def _add_training(conn, phase, *, session=SESSION, prior=PRIOR, tag=TAG, state="queued"):
@@ -122,9 +132,9 @@ def _wire(monkeypatch, *, pointer=PRIOR):
     return rec
 
 
-def _submit(conn, tmp_path):
+def _submit(conn, tmp_path, *, code_source=REPO_ROOT):
     return pool_refresh.submit_pool_nightly_refresh_if_ready(
-        conn, None, None, None, tmp_path, code_source=REPO_ROOT, clock=None)
+        conn, None, None, None, tmp_path, code_source=code_source, clock=None)
 
 
 # --------------------------------------------------------------------------
@@ -518,8 +528,10 @@ def test_reconcile_swallows_missing_root_and_reports_once(monkeypatch, capsys):
 
     monkeypatch.setattr(deployment, "production_release_root", lambda: "/somewhere")
 
+    planted = fail("INPUT_CHANGED", "planted pool refresh failure")
+
     def _boom(*args, **kwargs):
-        raise fail("INPUT_CHANGED", "planted pool refresh failure")
+        raise planted
 
     monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready", _boom)
     Service._reconcile_pool_nightly_refresh(service)
@@ -528,6 +540,12 @@ def test_reconcile_swallows_missing_root_and_reports_once(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out.count("pool_nightly_refresh_reconcile_failed") == 1
     assert "INPUT_CHANGED" in out and "planted pool refresh failure" in out
+    document = to_document(planted.problem)
+    payload = next(json.loads(line) for line in out.splitlines()
+                   if line.startswith("{") and "pool_nightly_refresh_reconcile_failed" in line)
+    assert payload["event"] == "pool_nightly_refresh_reconcile_failed"
+    for field in ("code", "category", "retryable"):
+        assert payload["problem"][field] == document[field]
 
     monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready",
                         lambda *args, **kwargs: [])
@@ -682,3 +700,175 @@ def test_reconcile_generic_failure_is_typed_and_sanitized(monkeypatch, capsys):
     assert "pool nightly refresh reconciliation failed" in out
     assert "secret" not in out
     assert "/tmp/path" not in out
+    document = to_document(make_problem(
+        "VALIDATION_FAILED", "pool nightly refresh reconciliation failed"))
+    payload = next(json.loads(line) for line in out.splitlines()
+                   if line.startswith("{") and "pool_nightly_refresh_reconcile_failed" in line)
+    assert payload["event"] == "pool_nightly_refresh_reconcile_failed"
+    for field in ("code", "category", "retryable"):
+        assert payload["problem"][field] == document[field]
+
+
+# --------------------------------------------------------------------------
+# 16. identity bounds the per-tick spec read
+# --------------------------------------------------------------------------
+
+
+def _oversize_score_spec():
+    filler = "x" * (pool_refresh.MAX_SPEC_BYTES + 1)
+    return json.dumps({"parameters": {"input_bindings": {"legacy_manifest.json": filler}}})
+
+
+def test_identity_ignores_an_oversize_spec_and_keeps_the_older_job():
+    conn = _db()
+    _add_score(conn, session="2026-01-02", manifest="good")
+    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:score",
+                    created_at="2026-01-09T00:00:00Z", spec_json=_oversize_score_spec())
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "good")
+
+
+def test_identity_is_none_when_the_only_score_spec_is_oversize():
+    conn = _db()
+    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:score",
+                    created_at="2026-01-09T00:00:00Z", spec_json=_oversize_score_spec())
+    assert pool_refresh.pool_refresh_identity(conn) is None
+
+
+def test_identity_is_none_for_an_unparseable_spec_without_raising():
+    conn = _db()
+    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:score",
+                    created_at="2026-01-05T00:00:00Z", spec_json="{not json")
+    assert pool_refresh.pool_refresh_identity(conn) is None
+
+
+def test_identity_is_none_for_a_non_mapping_spec():
+    conn = _db()
+    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:score",
+                    created_at="2026-01-05T00:00:00Z", spec_json="[]")
+    assert pool_refresh.pool_refresh_identity(conn) is None
+
+
+# --------------------------------------------------------------------------
+# 17. the pointer read is bounded to a bounded regular file
+# --------------------------------------------------------------------------
+
+
+def _assert_pointer_refused(root):
+    with pytest.raises(OpsError) as err:
+        pool_refresh._require_bounded_pointer(root)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "deployment pointer is not a bounded regular file"
+
+
+def test_bounded_pointer_allows_a_missing_file(tmp_path):
+    pool_refresh._require_bounded_pointer(tmp_path)
+
+
+def test_bounded_pointer_allows_a_small_regular_file(tmp_path):
+    (tmp_path / "DEPLOYED").write_text("{}")
+    pool_refresh._require_bounded_pointer(tmp_path)
+
+
+def test_bounded_pointer_rejects_a_symlink(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text("{}")
+    (tmp_path / "DEPLOYED").symlink_to(target)
+    _assert_pointer_refused(tmp_path)
+
+
+def test_bounded_pointer_rejects_a_directory(tmp_path):
+    (tmp_path / "DEPLOYED").mkdir()
+    _assert_pointer_refused(tmp_path)
+
+
+def test_bounded_pointer_rejects_an_oversize_regular_file(tmp_path):
+    (tmp_path / "DEPLOYED").write_bytes(b"x" * (pool_refresh.MAX_POINTER_BYTES + 1))
+    _assert_pointer_refused(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# 18. the real board plan defaults to no strategies (all replay strategies)
+# --------------------------------------------------------------------------
+
+
+def test_real_board_training_plan_defaults_to_no_strategies():
+    plan = training.training_plan(
+        mode="board_analog", alpha=pool_refresh.FILL_ALPHA, cutoffs=(SESSION,),
+        manifest_ref=MANIFEST)
+    assert plan["parameters"]["strategies"] == ()
+
+
+# --------------------------------------------------------------------------
+# 19. one non-succeeded training phase blocks the stage
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("state", ["running", "failed"])
+@pytest.mark.parametrize("phase", pool_refresh.TRAINING_PHASES)
+def test_a_non_succeeded_training_phase_blocks_the_stage(monkeypatch, tmp_path, phase, state):
+    rec = _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn)
+    for other in pool_refresh.TRAINING_PHASES:
+        if other != phase:
+            _add_training(conn, other, state="succeeded")
+    _add_training(conn, phase, state=state)
+
+    assert _submit(conn, tmp_path) == []
+    assert rec.stage == [] and rec.submits == []
+
+
+# --------------------------------------------------------------------------
+# 20. the promote request pins the caller's code source, not the repo root
+# --------------------------------------------------------------------------
+
+
+_CODE_BASE_FILES = {
+    "engine/__init__.py": "",
+    "engine/v2/__init__.py": "",
+    "engine/v2/ops/__init__.py": "",
+    "engine/v2/ops/worker.py": "",
+    "engine/models/__init__.py": "",
+    "engine/models/ensemble.py": "",
+    "engine/models/registry.py": "",
+    "engine/models/training/__init__.py": "",
+    "engine/models/training/common.py": "",
+    "engine/models/training/runup_move.py": "",
+}
+
+
+def _seed_code_source(root):
+    for relative, content in _CODE_BASE_FILES.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    for relative in CODE_ASSET_FILES:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+    for relative in CODE_ASSET_DIRS:
+        path = root / relative / "index.html"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("<html></html>")
+
+
+def test_promote_request_pins_the_override_code_source(monkeypatch, tmp_path):
+    other_source = tmp_path / "code"
+    _seed_code_source(other_source)
+    monkeypatch.setattr(pool_refresh.deployment, "current_pointer",
+                        lambda root: SimpleNamespace(release_id=PRIOR))
+    recorded = []
+    monkeypatch.setattr(
+        pool_refresh, "submit",
+        lambda conn, registry, policy, request, *, clock: recorded.append(request) or "receipt")
+    conn = _db()
+    _add_score(conn)
+    _all_training_succeeded(conn)
+    _add_training(conn, "stage", state="succeeded")
+
+    assert _submit(conn, tmp_path, code_source=other_source) == ["receipt"]
+    override = content_hash(worker_source_manifest(other_source))
+    repo_root = content_hash(worker_source_manifest(REPO_ROOT))
+    assert override != repo_root
+    assert recorded[0].job.implementation_ref == override
+    assert recorded[0].job.implementation_ref != repo_root

@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
+from collections.abc import Mapping
 from pathlib import Path
 
 from engine.v2.foundation import content_hash
@@ -26,6 +29,13 @@ PHASES = ("train-paired", "train-board", "train-trailing", "stage", "promote")
 TRAINING_PHASES = PHASES[:3]
 
 FILL_ALPHA = 0.5  # engine.fills.MID.alpha, the shadow fill alpha native_score_batch scores with
+
+#: Largest ``spec_json`` a score job may carry to still be considered (a bound on
+#: the per-tick read; anything larger is ignored rather than parsed).
+MAX_SPEC_BYTES = 1 << 20
+
+#: Largest ``DEPLOYED`` pointer file that may be read as a regular file.
+MAX_POINTER_BYTES = 64 * 1024
 
 
 def manifest_tag(manifest_id):
@@ -44,8 +54,8 @@ def pool_refresh_identity(conn):
     Returns ``None`` when no score job exists or its binding is absent/not a string."""
     rows = conn.execute(
         "SELECT idempotency_key, spec_json, created_at FROM jobs "
-        "WHERE kind = ? AND state = 'succeeded'",
-        (nightly._LEGACY_SCORE_KIND,)).fetchall()
+        "WHERE kind = ? AND state = 'succeeded' AND length(spec_json) <= ?",
+        (nightly._LEGACY_SCORE_KIND, MAX_SPEC_BYTES)).fetchall()
     candidates = []
     for row in rows:
         parsed = nightly._session_scope_from_score_key(row["idempotency_key"])
@@ -58,7 +68,13 @@ def pool_refresh_identity(conn):
     if not candidates:
         return None
     session, _, _scope, spec_json = max(candidates, key=lambda item: item[:3])
-    parameters = json.loads(spec_json).get("parameters") or {}
+    try:
+        document = json.loads(spec_json)
+    except ValueError:
+        return None
+    if not isinstance(document, Mapping):
+        return None
+    parameters = document.get("parameters") or {}
     manifest_id = (parameters.get("input_bindings") or {}).get("legacy_manifest.json")
     if not isinstance(manifest_id, str) or not manifest_id:
         return None
@@ -96,6 +112,21 @@ def _implementation_ref(code_source):
     return content_hash(worker_source_manifest(code_source))
 
 
+def _require_bounded_pointer(deployment_root):
+    """Refuse a ``DEPLOYED`` pointer that is not a bounded regular file.
+
+    A missing pointer is fine (``current_pointer`` then yields ``None``); a
+    symlink, FIFO, directory or oversize regular file is refused before any
+    read so a planted pointer cannot steer or exhaust the per-tick read."""
+    path = Path(deployment_root) / "DEPLOYED"
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_POINTER_BYTES:
+        raise fail("VALIDATION_FAILED", "deployment pointer is not a bounded regular file")
+
+
 def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_root, *,
                                          code_source, clock):
     """Submit at most the ready phase of the pool-nightly cycle; returns this call's
@@ -108,7 +139,9 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
         return []
     session, manifest_id = identity
     tag = manifest_tag(manifest_id)
-    pointer = deployment.current_pointer(Path(release_root) / "deployment")
+    deployment_root = Path(release_root) / "deployment"
+    _require_bounded_pointer(deployment_root)
+    pointer = deployment.current_pointer(deployment_root)
     if pointer is None:
         return []
     prior = pointer.release_id

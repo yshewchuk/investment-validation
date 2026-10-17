@@ -484,7 +484,9 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   production_deployment_root`/`deployment.MissingReleaseRoot` from
   `promote_plan` — NOT `production_release_root` directly: `promote_plan`
   hands its resolved value straight to `deployment.promote`, which takes
-  the `deployment/` directory itself as `root`). Neither `nightly.py`,
+  the `deployment/` directory itself as `root`); `engine/v2/ops/pool_refresh.py`
+  and `supervisor.py` (`deployment.production_release_root`/`current_pointer`
+  for the §2.3 sidecar). Neither `nightly.py`,
   `worker.py` nor `stages.py` import this package's deployment surface
   directly.
 - `engine.v2.serving` — `engine/v2/serving/operations.py` reads the
@@ -554,7 +556,8 @@ pointer or history.
 This record is separate from the immutable model manifest. Staging alone never
 writes it. `checks/phase5_acceptance.py` publishes it only after all release
 subjects pass (`RELEASE_PASS` without a Phase 4 corpus, or `PASS` with one),
-then writes successful evidence. A publication refusal leaves no evidence for
+then writes successful evidence; the `phase5_state_stage` worker (§2.2)
+publishes it for a nightly pool candidate after its light checks. A publication refusal leaves no evidence for
 that attempt that claims acceptance succeeded. Preparation invalidates the
 candidate record before replacing its content. An invalid, failed, or stale
 record is never inferred from pointer/history entries or a manifest hash alone;
