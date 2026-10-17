@@ -121,6 +121,54 @@ size check. Existing callers omitting the ceiling retain their read contract.
 | Object at/below the ceiling | Existing byte-hash, canonical-hash and typed validation apply |
 | Cache, retry, transaction, partial write | Existing per-loader content-hash cache; no retries or writes; failure returns no partial state |
 
+### Snapshot-pinned D14 monthly datasets
+
+`training.build_d14_dataset` builds only the `implied_t1` and `runup_move`
+monthly inputs from explicit catalog/store/snapshot/receipt identifiers.
+It verifies provenance before calling `d14_dataset.calculate_frame`.
+That public helper checks snapshot identity for direct callers but does not
+certify calendar provenance or attach `training_inputs`. Its bounded-read,
+decision and daily-state helpers are declared in the training README.
+Bounded native Repository scans pin earnings,
+daily state and the stored `feature_panel` history block to one SnapshotRef.
+History is left-joined by ticker/event date; earnings defines decision membership.
+Stored history values and missingness are retained from the historical producer,
+without reconstruction through `scan_panel_row`.
+This is root §5's named compatibility-history exception for these two recipes,
+not a claim of native historical production or source availability/finality.
+Only daily features at the D14 entry and labels at the session-aware exit are
+calculated. The original calendar is read from one explicit committed import
+receipt, verified against the snapshot and object hash, with native projection
+math. The consumed calendar bytes are hash-verified and capped at 16 MiB.
+No mutable calendar file, head resolution or legacy reader is used.
+
+The opt-in `python -m tools.phase5_d14_inputs` CLI has no nightly or ops caller.
+It requires explicit catalog, artifact root, snapshot and import-receipt
+identifiers, delegating to that same public API. The fixed
+2017–2026 event window is the current monthly recipe population, with daily
+history from 2016. Snapshot coverage does not widen that recipe contract.
+The existing preparation, fold planning and label/membership receipts remain
+unchanged. `run_training_job(input_identity=...)` additionally binds the pinned
+source identity in `job.json`: `schema_version`, `snapshot_id`, `receipt_id`,
+`calendar_hash` and `table_versions`. Changed sources refuse resume even if values
+match. Champion jobs, scheduling, source-finality admission, historical panel
+reconstruction, held-out residual pools and serving publication are separate.
+No eligible decisions refuse before history/daily reads, preventing a zero-fold
+success. An absent panel history row stays missing; missing quotes retain legacy as-of
+and positional-lag behavior. Nonpositive prices produce missing move labels.
+
+| Condition | Outcome |
+| --- | --- |
+| Input exceeds table, ticker or calendar-byte bound | `RESULT_LIMIT_EXCEEDED` |
+| Snapshot identity or committed receipt association differs | `IDENTITY_CONFLICT` |
+| Committed receipt has no pinned reference inputs | `SNAPSHOT_NOT_READY` |
+| Explicit snapshot identifier is absent from the catalog | `SNAPSHOT_NOT_FOUND` |
+| Null session or fewer than 14 prior calendar sessions | Event excluded, matching legacy membership |
+| Catalog, required table/calendar, non-null session outside AMC/BMO, role, integer history or decision population invalid | `CONTRACT_MISMATCH` |
+| Calendar object bytes differ from their registered hash/size | `OBJECT_CORRUPT` |
+| CLI output is inside configured data root or input store | argparse exit 2 before reads/writes |
+| CLI receives a typed data/training refusal | stderr refusal detail and exit 2; no traceback |
+
 ### 2.1 Pool release assembly
 
 `checks/phase5_release_assembly.py`, beside the catalog in `checks/phase5_release.py`:

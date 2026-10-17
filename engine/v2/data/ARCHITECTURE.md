@@ -365,6 +365,8 @@ supplies a candidate `fence_check`; Massive acquisition fences raw receipts). `e
 (7.0) imports `repository.Repository`. `engine.v2.research` (6.0/7.0) reads
 pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 (no `fence_check`) and `incremental_tables.revision_hash`/`GenericRevision`.
+`engine.v2.models.training` uses `errors`, `Repository`, `reference_catalog` and
+`computed_moves` for snapshot/receipt-pinned D14 datasets and calendar sessions.
 `tools/*`, `checks/*`, `tests/test_v2_data_*.py` exercise this package
 directly.
 

@@ -90,7 +90,9 @@ is an ordinary downward import, never the reverse. The serving-side
 `engine.v2.features` reads one pinned ticker/date window through `Repository`
 for the session-only daily-state input adapter.
 
-<!-- consumers: engine.v2.ops, engine.v2.serving, engine.v2.research, engine.v2.features -->
+`engine.v2.models.training` reads pinned D14 dataset inputs and typed refusals.
+
+<!-- consumers: engine.v2.ops, engine.v2.serving, engine.v2.research, engine.v2.features, engine.v2.models.training -->
 
 ## Usage
 
