@@ -17,7 +17,7 @@ settlement lag); the user should confirm.
 | Object | Nightly (slices 3-4) | Monthly retrain (this design) |
 |---|---|---|
 | Board analog pool, paired residual pool, trailing cutoff | Advanced every night to the settled-event cutoff | Unchanged (still nightly) |
-| Three driver residual pools, chooser analog pool | Carried (same hash, recorded at the prior `pool_cutoff`) | Regenerated at the month-end cutoff |
+| Three driver residual pools, chooser analog pool | Carried (same hash, recorded at the prior `pool_cutoff`) | Driver pools: regenerated, content changes only with models; chooser pool: advances to the month-end cutoff |
 | Champion and gate models | Carried (bindings unchanged) | Retrained (D1) |
 | Chooser row | Carried | Regenerated with the chooser pool |
 
@@ -55,17 +55,17 @@ state each tick, with no in-memory phase cache. A crash between "retrain
 succeeded" and "stage submitted" is recovered by the next tick: the stage key
 is `retrain-stage:{M}:{incumbent_release_id}` and the reconcile submits it when
 the retrain job succeeded and either no stage key exists for `M` under any
-incumbent, or the only
-one is followed by a promote job that failed `ConcurrentPromote` (§4). Later
-steps are keyed `retrain-accept:{M}:{candidate_release_id}`,
-`retrain-check:{M}:{candidate_release_id}` and
-`retrain-promote:{M}:{candidate_release_id}`; the reconcile submits the first
-step with no succeeded key. Any failed key is terminal for that candidate;
-stage attempts are bounded at two per `M`; any failure other than a
+incumbent, or the only one is followed by a promote job that failed
+`ConcurrentPromote` (§4). The candidate release id is
+`{M}-{incumbent_release_id}-{n}` (n = stage attempt, 1 or 2), so a crash is
+recovered by recomputing it. Later steps: `retrain-accept:{M}:{candidate_release_id}`,
+`retrain-check:…` and `retrain-promote:…` (same suffix); the reconcile submits
+the first step with no succeeded key. A failed key is terminal for that
+candidate; stage attempts are bounded at two per `M`; any failure other than a
 `ConcurrentPromote` on promote is terminal for `M`.
 
-**Retry.** A hard failure is terminal for `retrain:{M}`. No automatic
-replacement key. Recovery is operator-driven (open gap #154, not closed here).
+**Retry.** A hard failure is terminal for `retrain:{M}`, with no automatic
+replacement key (operator recovery; open gap #154, not closed here).
 A failed retrain costs stale driver pools/models, not a stale board; a *running*
 one delays the next session's heavy steps, including scoring (§6, D6).
 
@@ -87,8 +87,9 @@ admits no row dated after `M_end` and reads no live registry.
    applied: no training code reads them, and they scope experiment research, not
    the deployed model. Whether production training should exclude them is D7.
 2. **Regenerate** the three `driver_residual_pool:{size,implied_t1,runup_move}`
-   pools and the chooser analog pool at `M_end` from the retrained models; with
-   unchanged models the content equals the carried pools (D1).
+   pools from the retrained models (cutoff-independent: with unchanged models the
+   hash equals the carried pool) and the chooser analog pool at `M_end` (keyed
+   `(pool_id, cutoff)`, rows closed before the cutoff, so it advances regardless).
 3. **Stage** one candidate release: the six pool members plus chooser row via
    `phase5_state_stage`, retrained models bound, all other bindings carried.
 
@@ -160,7 +161,7 @@ Any other failure at 1-3 leaves the candidate staged and unpromoted, the
 incumbent deployed, and a failure receipt (job result naming step and refusal
 code, e.g. `StaleReleaseHash`); no automatic action, operator recovery as in §2.
 
-**Rollback.** `deployment.rollback` undoes one promotion per call (models doc
+**Rollback.** `rollback` undoes one promotion per call (models doc
 §7.2). Nightly promotions follow the retrain's, so one rollback undoes only the
 latest nightly (D3). Designed path: forward-promote a release re-derived from
 the pre-retrain models; the next nightly re-advances the board pool.
@@ -202,7 +203,7 @@ waits for admission rather than being denied. Consequences, stated once:
   (including required-graph ones) wait for admission until it ends; non-heavy
   steps proceed (rare at a monthly cadence).
 - `bounded_run` only blocks and has no deadline. The probe candidate is
-  `ops/scheduler.py`'s claim-or-queue decision (`_claim_row`,
+  `engine/v2/ops/scheduler.py`'s claim-or-queue decision (`_claim_row`,
   `HEAVY_SLOT_HELD`); slice 4 decides whether to call it, and owns the D6(b)
   start window. The job envelope has `deadline_at` (`contracts/jobs.py`) but
   nothing enforces it; enforcement (terminal failure) is a deliverable of slice
@@ -220,19 +221,18 @@ Slice 3 records peak memory and wall time as a receipt; job budgets come from it
 - The retrain starts only after the session's required graph (which holds the
   score job) finishes (§2 c), so promotion follows that session's scoring; the
   release in force at score time is the one recorded.
-- Legacy rebuilds its pools live every run and does not retrain monthly; a
-  mismatch that first appears on a `release_changed` session and persists is a
-  real divergence to investigate, not an expected retrain effect. Whether a
-  retrain inside a qualification window resets the session count is D4.
+- Legacy rebuilds pools live and does not retrain monthly; a mismatch that
+  appears on a `release_changed` session and persists is a real divergence, not
+  an expected retrain effect. Reset of the session count is D4.
 
 ## 8. Open decisions (hand-back, not decided here)
 
 - **D1 Scope of the first retrain.** The driver residual pools are frozen
-  champion residuals (models doc §1), so regenerating them with unchanged models
-  changes no content; they refresh only when models retrain. (a) *Plumbing
-  first*: slices 1-4 build and exercise the monthly path with models unchanged
-  (output hashes equal the carried ones, proving trigger, keys and staging),
-  then 5a-6 add the model retrain that makes content change; (b) *models and
+  champion residuals (models doc §2.1; `training/residuals.py`), so unchanged
+  models give the same hash; the chooser pool advances with its cutoff. (a)
+  *Plumbing first*: slices 1-4 run the monthly path with models unchanged
+  (driver hashes equal the carried ones, the chooser pool advances, proving
+  trigger, keys and staging), then 5a-6 add the model retrain; (b) *models and
   pools together from the start*: one usable path, but nothing merges until the
   acceptance + non-regression gate (§4) exists. (a) de-risks the reconcile,
   (b) is the only content-changing path sooner. Recommendation: (a).
@@ -246,8 +246,7 @@ Slice 3 records peak memory and wall time as a receipt; job budgets come from it
   models-doc invariant. Recommendation: (a).
 - **D4 Qualification across a retrain.** (a) *Count continues*, retrain sessions
   reported separately (keeps momentum); (b) *count resets* at a model-changing
-  release (qualified release = live release). Recommendation: (b), model-changing
-  retrains only (so with D1(a) nothing resets).
+  release (qualified = live release). Recommendation: (b), model-changing only.
 - **D6 Retrain vs next session's scoring.** A running retrain delays heavy
   scoring unboundedly until a deadline exists. (a) *Deadline only* (slices 3/5a
   fail the job at a receipt-sized limit); (b) *start only in a window* leaving
@@ -272,8 +271,9 @@ Sizes: non-test code / test / doc lines, estimated.
 
 1. **Catalog `retrain_cutoff`.** `sources.retrain_cutoff` and per-member cutoff
    checks in `derive_catalog`/`carry_forward_release`; `CUTOFF_NOT_ADVANCED` for
-   retrain members; stage input contract (`classify`, `prior_carry_set`, models
-   doc §2.2). 90-130 / 100-140 / 30-40. Depends on #806 and #192 slice 2.
+   retrain members (boundary named per member: rows inclusive, pools exclusive);
+   stage input contract (`classify`, `prior_carry_set`, models doc §2.2) and the
+   models doc §2.1 chooser line. 90-130 / 100-140 / 30-40. Depends on #806 and #192 slice 2.
 2. **Due-month decision.** A pure function over session date, settled-event
    cutoff and durable job state returning `NOT_DUE | DUE(M) | SUPERSEDE(M…)`;
    the `retrain:{M}` and `superseded:{M}` key shapes. 80-110 / 100-140 / 20-30.
