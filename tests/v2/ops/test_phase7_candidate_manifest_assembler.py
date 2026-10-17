@@ -427,7 +427,7 @@ def test_git_calls_pass_a_timeout(monkeypatch):
 @pytest.mark.parametrize("failing_arg, code, message", [
     ("rev-parse", 1, r"git rev-parse HEAD failed \(exit 1\)"),
     ("ls-files", 1, r"git ls-files failed \(exit 1\)"),
-    ("diff-index", 2, r"git diff-index failed \(exit 2\)")])
+    ("diff", 2, r"git diff failed \(exit 2\)")])
 def test_git_nonzero_return_is_a_spec_error(monkeypatch, failing_arg, code, message):
     real_run = subprocess.run
 
@@ -634,3 +634,16 @@ def test_commit_refuses_ignored_python_source_in_scanned_tree(tmp_path):
     (repo / "tools" / "diag.py").write_text("print(1)\n")
     with pytest.raises(asm.SpecError, match="uncommitted tracked changes or untracked"):
         _REAL_COMMIT({"commit": head}, repo)
+
+
+def test_touched_but_identical_tracked_file_is_clean(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.txt").write_text("1")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-q", "-m", "x")
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    (repo / "a.txt").write_text("1")  # same content, new mtime
+    assert _REAL_COMMIT({"commit": head}, repo) == head

@@ -138,7 +138,7 @@ def check_commit(spec: dict, root: Path) -> str:
         raise SpecError("commit: does not equal this checkout's HEAD, so the registry and "
                         "inventory would describe a different commit")
     # Plumbing, not a hand-parsed status: untracked files under the scanned trees, and any
-    # difference between the index/work tree and HEAD (diff-index exits 1 on a difference).
+    # difference between the work tree and HEAD (git diff compares content, so a file with only stale stat data is clean; diff-index would flag it).
     untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z", "--",
                      *_SCANNED_TREES)
     if untracked.returncode != 0:
@@ -151,9 +151,9 @@ def check_commit(spec: dict, root: Path) -> str:
         raise SpecError(f"commit: git ls-files failed (exit {ignored.returncode})")
     ignored_sources = [p for p in ignored.stdout.split("\0")
                        if p.endswith(".py") and "__pycache__/" not in p]
-    tracked = _git(root, "diff-index", "--quiet", "HEAD", "--")
+    tracked = _git(root, "diff", "--quiet", "HEAD", "--")
     if tracked.returncode not in (0, 1):
-        raise SpecError(f"commit: git diff-index failed (exit {tracked.returncode})")
+        raise SpecError(f"commit: git diff failed (exit {tracked.returncode})")
     changed = bool(untracked.stdout.strip("\0")) or bool(ignored_sources) or tracked.returncode == 1
     if changed:
         raise SpecError("commit: the checkout has uncommitted tracked changes or untracked "
