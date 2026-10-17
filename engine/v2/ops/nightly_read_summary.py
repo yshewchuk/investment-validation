@@ -20,10 +20,12 @@ class ReadTracker:
             self._cpu0 = time.process_time()
         except Exception:
             self._cpu0 = None
+        self._needs_rebase = False
         try:
             self._last = counters.snapshot()
         except Exception:
             self._last = {}
+            self._needs_rebase = True
         self._steps: list[dict[str, Any]] = []
 
     def delta(self) -> dict[str, dict[str, float]]:
@@ -32,6 +34,10 @@ class ReadTracker:
         updates the last-seen snapshot. Degrades to ``{}`` on any error."""
         try:
             current = self._counters.snapshot()
+            if self._needs_rebase:
+                self._last = current
+                self._needs_rebase = False
+                return {}
             previous, self._last = self._last, current
             delta: dict[str, dict[str, float]] = {}
             for table, row in current.items():
@@ -43,6 +49,7 @@ class ReadTracker:
             ranked = sorted(delta.items(), key=lambda item: (-item[1]["rows_decoded"], item[0]))
             return dict(ranked[:3])
         except Exception:
+            self._needs_rebase = True
             return {}
 
     def record(self, step_name: str, seconds: float, reads: dict[str, Any]) -> None:

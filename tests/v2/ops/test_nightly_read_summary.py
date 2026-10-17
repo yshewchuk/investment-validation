@@ -497,3 +497,24 @@ def test_producer_unaffected_by_read_counters_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(repository, "read_counters", Blank(), raising=False)
     reference = _build(repository, snapshot)
     assert degraded == reference
+
+
+def test_delta_rebases_after_a_failed_snapshot():
+    class _Flaky:
+        def __init__(self):
+            self._i = 0
+
+        def snapshot(self):
+            self._i += 1
+            if self._i == 1:
+                return {"t": {"rows_decoded": 1, "bytes_read": 1}}
+            if self._i == 2:
+                raise RuntimeError("snapshot failed")
+            if self._i == 3:
+                return {"t": {"rows_decoded": 11, "bytes_read": 11}}
+            return {"t": {"rows_decoded": 13, "bytes_read": 14}}
+
+    t = ReadTracker(_Flaky())
+    assert t.delta() == {}
+    assert t.delta() == {}
+    assert t.delta() == {"t": {"rows_decoded": 2, "bytes_read": 3}}
