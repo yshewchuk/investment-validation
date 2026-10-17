@@ -206,6 +206,37 @@ def test_catalog_cap_constant_and_regular_file_guard(tmp_path):
     assert release_objects.read_regular_file(small, 8) == b"x" * 8
     with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
         release_objects.read_regular_file(small, 7)
+    for bad in (-1, -2, None, 1.5, True):
+        with pytest.raises(layout.ReleaseLayoutError, match="non-negative integer"):
+            release_objects.read_regular_file(tmp_path / "absent", bad)
+    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
+        release_objects.read_regular_file(small, 0)
+
+
+def test_read_regular_file_requests_at_most_limit_plus_one(tmp_path, monkeypatch):
+    path = tmp_path / "data.bin"
+    path.write_bytes(b"x" * 20)
+    sizes = []
+    real_fdopen = release_objects.os.fdopen
+
+    class Spy:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def read(self, size=-1):
+            sizes.append(size)
+            return self._handle.read(size)
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+    monkeypatch.setattr(release_objects.os, "fdopen", lambda *a, **k: Spy(real_fdopen(*a, **k)))
+    assert release_objects.read_regular_file(path, 20) == b"x" * 20
+    assert sizes == [21]
 
 
 def test_read_regular_file_refuses_fifo_without_blocking(tmp_path):

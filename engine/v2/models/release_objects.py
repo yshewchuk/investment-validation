@@ -71,8 +71,10 @@ def write_object(release_root: Path, payload: bytes) -> tuple[str, str]:
 
 def read_regular_file(path: Path, limit: int) -> bytes | None:
     """Bytes of a regular file opened no-follow: None when absent; ReleaseLayoutError when not a
-    regular file, when longer than ``limit``; a symlink raises OSError
-    (callers wrap it)."""
+    regular file, when longer than ``limit``, or when ``limit`` is not a non-negative integer; a
+    symlink raises OSError (callers wrap it)."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+        raise ReleaseLayoutError("read limit must be a non-negative integer")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
