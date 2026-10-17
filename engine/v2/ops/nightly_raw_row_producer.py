@@ -254,6 +254,7 @@ def build_native_score_batch_events(
     build (``scan_chain_slices``); a repository error there fails the build and
     never falls back to per-key scans.
     """
+    tracker = ReadTracker(getattr(repository, "read_counters", None))
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
     refusals: dict[int, dict[str, Any]] = {}
@@ -291,7 +292,8 @@ def build_native_score_batch_events(
     chains = scan_chain_slices(repository, snapshot, {key.ticker for _, key in admitted},
                                decision_session=decision_session)
     events = _compose_admitted(repository, snapshot, admitted, decision_session=decision_session,
-                               calendar=calendar, panels=panels, chains=chains, refusals=refusals)
+                               calendar=calendar, panels=panels, chains=chains,
+                               refusals=refusals, tracker=tracker)
     return events, _refusals_document(ordered())
 
 
@@ -300,9 +302,10 @@ def _compose_admitted(repository: Repository, snapshot: SnapshotRef,
                       decision_session: str, calendar: Any,
                       panels: dict[tuple[str, str, str], PanelRowInputs],
                       chains: Mapping[str, Sequence[Mapping[str, Any]]],
-                      refusals: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+                      refusals: dict[int, dict[str, Any]],
+                      tracker: ReadTracker) -> list[dict[str, Any]]:
     """Compose every admitted request's event, mutating ``refusals`` for each in-place refusal."""
-    tracker = ReadTracker(getattr(repository, "read_counters", None))
+    tracker.delta()  # discard: reset the baseline so step 1's reads cover only step 1
     events: list[dict[str, Any]] = []
     try:
         for done, (position, key) in enumerate(admitted, 1):
