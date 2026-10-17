@@ -765,6 +765,10 @@ change their arithmetic or imply that source receipt production is available.
   override. `tools/phase6_inventory.py` currently does this
   (`ROOT = Path(__file__).resolve().parents[1]`) — treat that as the
   pattern to avoid, not to copy, when adding a sibling tool.
+  Exception: `experiments.native_sweep_collection` derives its installed
+  implementation root from `__file__` solely to compare the collector's
+  on-disk source snapshot. Caller data, store and snapshot paths still use
+  their explicit roots; this neither attests loaded bytecode nor bounds code resources.
 - **Failure semantics are stated, not implied.** Every new or changed
   stage/effect states its behaviour for: a missing input, a cache, a retry,
   a transaction, a partial write, and idempotency (the 4c R1–R6 template —

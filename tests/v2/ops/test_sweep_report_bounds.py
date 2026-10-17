@@ -7,9 +7,14 @@ import pytest
 
 from engine.v2.ops.errors import OpsError
 from experiments import native_outcomes as outcomes
+from tests.v2.ops.native_bounds_support import (
+    assert_identity_refusal,
+    assert_objects_preserved,
+    catalog_rows,
+    object_bytes,
+    register_native_case,
+)
 from tests.v2.ops.test_sweep_native_bounds import ACTIONS, CAP, REPORT, forbid, invoke
-from tests.v2.research.test_native_outcomes import _assert_conflict, _assert_objects_preserved
-from tests.v2.research.test_native_registration import _call, _catalog, _objects
 from tests.v2.research.test_native_registration import source as source
 
 
@@ -45,7 +50,7 @@ def forbid_report_reads(monkeypatch, path):
 @pytest.mark.parametrize("excess", [1, CAP * 32], ids=["one-extra-byte", "large-file"])
 def test_oversized_existing_report_refuses_before_reads_or_effects(
         source, tmp_path, monkeypatch, action, completed, no_ledger, excess):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     if completed:
         invoke(ACTIONS[0], source, registration, ledger, no_ledger=no_ledger)
@@ -54,7 +59,7 @@ def test_oversized_existing_report_refuses_before_reads_or_effects(
     with path.open("wb") as report:
         report.write(REPORT.encode())
         report.truncate(len(REPORT.encode()) + excess)
-    catalog, objects = _catalog(source.conn), _objects(source.store)
+    catalog, objects = catalog_rows(source.conn), object_bytes(source.store)
     ledger_bytes = ledger.read_bytes() if ledger.exists() else None
     real_publish, schemas = source.store.publish_bytes, []
 
@@ -71,10 +76,10 @@ def test_oversized_existing_report_refuses_before_reads_or_effects(
         with pytest.raises(OpsError) as captured:
             invoke(action, source, registration, ledger, no_ledger=no_ledger,
                    max_evidence_bytes=CAP)
-    _assert_conflict(source, captured, registration)
+    assert_identity_refusal(source, captured, registration)
     assert schemas == ["native_experiment_refusal.v1.0"]
-    assert _catalog(source.conn) == catalog
-    _assert_objects_preserved(source, objects)
+    assert catalog_rows(source.conn) == catalog
+    assert_objects_preserved(source, objects)
     assert (ledger.read_bytes() if ledger.exists() else None) == ledger_bytes
     assert path.stat().st_size == len(REPORT.encode()) + excess
     assert not source.conn.in_transaction
@@ -84,13 +89,13 @@ def test_oversized_existing_report_refuses_before_reads_or_effects(
 @pytest.mark.parametrize("no_ledger", [False, True], ids=["recorded", "smoke"])
 def test_late_export_collision_is_refused_without_reading_or_replacing_it(
         source, tmp_path, monkeypatch, collision, no_ledger):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     invoke(ACTIONS[0], source, registration, ledger, no_ledger=no_ledger)
     path = report_path(source, registration, no_ledger)
     foreign = tmp_path / "foreign-report.md"
     foreign.write_text(REPORT)
-    catalog, objects = _catalog(source.conn), _objects(source.store)
+    catalog, objects = catalog_rows(source.conn), object_bytes(source.store)
     ledger_bytes = ledger.read_bytes() if ledger.exists() else None
     real_link, collisions = os.link, []
 
@@ -112,11 +117,11 @@ def test_late_export_collision_is_refused_without_reading_or_replacing_it(
         with pytest.raises(OpsError) as captured:
             invoke(ACTIONS[2], source, registration, ledger, no_ledger=no_ledger,
                    max_evidence_bytes=CAP)
-    _assert_conflict(source, captured, registration)
+    assert_identity_refusal(source, captured, registration)
     assert len(collisions) == 1
     assert path.lstat() == collisions[0]
-    assert _catalog(source.conn) == catalog
-    _assert_objects_preserved(source, objects)
+    assert catalog_rows(source.conn) == catalog
+    assert_objects_preserved(source, objects)
     assert (ledger.read_bytes() if ledger.exists() else None) == ledger_bytes
     assert foreign.read_text() == REPORT
     assert not list(path.parent.glob(".REPORT.*"))
@@ -198,7 +203,7 @@ def test_report_growth_after_descriptor_precheck_reads_only_expected_plus_one(tm
 @pytest.mark.parametrize("operation", ["open", "fstat", "read"])
 def test_report_io_errors_stay_retryable_without_publication_effects(
         source, tmp_path, monkeypatch, action, operation):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     if action != ACTIONS[0]:
         invoke(ACTIONS[0], source, registration, ledger)
@@ -206,7 +211,7 @@ def test_report_io_errors_stay_retryable_without_publication_effects(
     path.parent.mkdir(parents=True)
     path.write_text(REPORT)
     identity = path.stat().st_dev, path.stat().st_ino
-    catalog, objects = _catalog(source.conn), _objects(source.store)
+    catalog, objects = catalog_rows(source.conn), object_bytes(source.store)
     ledger_bytes = ledger.read_bytes() if ledger.exists() else None
     real_operation, real_fstat, failed = getattr(os, operation), os.fstat, []
 
@@ -231,8 +236,8 @@ def test_report_io_errors_stay_retryable_without_publication_effects(
     assert captured.value.code == "RESOURCE_UNAVAILABLE"
     assert captured.value.problem.retryable is True
     assert len(failed) == 1
-    assert _catalog(source.conn) == catalog
-    assert _objects(source.store) == objects
+    assert catalog_rows(source.conn) == catalog
+    assert object_bytes(source.store) == objects
     assert (ledger.read_bytes() if ledger.exists() else None) == ledger_bytes
     assert path.read_text() == REPORT
     if operation != "open":
@@ -244,7 +249,7 @@ def test_report_io_errors_stay_retryable_without_publication_effects(
 @pytest.mark.parametrize("action", ACTIONS)
 @pytest.mark.parametrize("options", [{}, {"max_evidence_bytes": None}], ids=["omitted", "explicit-none"])
 def test_default_report_comparison_keeps_path_reader(source, tmp_path, monkeypatch, action, options):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     invoke(ACTIONS[0], source, registration, ledger)
     path = invoke(ACTIONS[2], source, registration, ledger)
@@ -269,7 +274,7 @@ def test_default_report_comparison_keeps_path_reader(source, tmp_path, monkeypat
 @pytest.mark.parametrize("mismatch", ["short", "same-length"])
 def test_bounded_report_comparison_refuses_different_content_before_effects(
         source, tmp_path, monkeypatch, action, mismatch):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     if action != ACTIONS[0]:
         invoke(ACTIONS[0], source, registration, ledger)
@@ -277,7 +282,7 @@ def test_bounded_report_comparison_refuses_different_content_before_effects(
     path.parent.mkdir(parents=True)
     data = REPORT.encode()[:-1] if mismatch == "short" else b"!" + REPORT.encode()[1:]
     path.write_bytes(data)
-    catalog, objects = _catalog(source.conn), _objects(source.store)
+    catalog, objects = catalog_rows(source.conn), object_bytes(source.store)
     ledger_bytes = ledger.read_bytes() if ledger.exists() else None
     real_publish = source.store.publish_bytes
 
@@ -291,15 +296,15 @@ def test_bounded_report_comparison_refuses_different_content_before_effects(
         patch.setattr(outcomes, "_reserve", forbid)
         with pytest.raises(OpsError) as captured:
             invoke(action, source, registration, ledger, max_evidence_bytes=CAP)
-    _assert_conflict(source, captured, registration)
+    assert_identity_refusal(source, captured, registration)
     assert path.read_bytes() == data
-    assert _catalog(source.conn) == catalog
-    _assert_objects_preserved(source, objects)
+    assert catalog_rows(source.conn) == catalog
+    assert_objects_preserved(source, objects)
     assert (ledger.read_bytes() if ledger.exists() else None) == ledger_bytes
 
 
 def test_exact_existing_report_can_exceed_metadata_budget(source, tmp_path):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     report = REPORT + "漢" * CAP
     path = report_path(source, registration)

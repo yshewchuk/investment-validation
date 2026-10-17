@@ -10,7 +10,11 @@ from engine.v2.foundation import artifact_reference, canonical_json, from_docume
 from engine.v2.ops import checkpoints
 from engine.v2.ops.errors import OpsError, make_problem
 from experiments import native_outcomes as outcomes
-from tests.v2.research.test_native_registration import _call, _evidence, _ref
+from tests.v2.ops.native_bounds_support import (
+    native_evidence,
+    register_native_case,
+    registration_ref,
+)
 from tests.v2.research.test_native_registration import source as source
 
 CAP = 8192
@@ -52,7 +56,7 @@ def assert_conflict(call):
 
 @pytest.mark.parametrize("no_ledger", [False, True])
 def test_bounded_publication_replay_and_export_preserve_exact_results(source, tmp_path, no_ledger):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     options = {"no_ledger": no_ledger, "max_evidence_bytes": CAP}
     # Reports are not JSON evidence: the opt-in metadata limit must not cap them.
@@ -64,7 +68,7 @@ def test_bounded_publication_replay_and_export_preserve_exact_results(source, tm
     assert path.read_text() == report
     assert ledger.exists() is not no_ledger
     key = "native_smoke" if no_ledger else "native_outcome"
-    evidence = _evidence(source, registration.run_id)
+    evidence = native_evidence(source, registration.run_id)
     for name in (key, key + "_receipt"):
         ref = from_document(ArtifactRef, evidence[name])
         assert ref.byte_size <= CAP
@@ -74,8 +78,8 @@ def test_bounded_publication_replay_and_export_preserve_exact_results(source, tm
 
 @pytest.mark.parametrize("options", [{}, {"max_evidence_bytes": None}], ids=["omitted", "explicit-none"])
 def test_bounds_are_opt_in_for_all_public_outcome_apis(source, tmp_path, monkeypatch, options):
-    registration = _call(source)
-    evidence = pad_evidence(_evidence(source, registration.run_id), CAP + 1, "漢")
+    registration = register_native_case(source)
+    evidence = pad_evidence(native_evidence(source, registration.run_id), CAP + 1, "漢")
     save_evidence(source, registration, evidence)
     ledger = tmp_path / "ledger.csv"
     first = invoke(ACTIONS[0], source, registration, ledger, **options)
@@ -91,21 +95,21 @@ def test_bounds_are_opt_in_for_all_public_outcome_apis(source, tmp_path, monkeyp
 
 @pytest.mark.parametrize("character", ["x", "漢"])
 def test_exact_catalog_evidence_bound_replays_and_exports(source, tmp_path, character):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     first = invoke(ACTIONS[0], source, registration, ledger)
-    evidence = pad_evidence(_evidence(source, registration.run_id), CAP, character)
+    evidence = pad_evidence(native_evidence(source, registration.run_id), CAP, character)
     save_evidence(source, registration, evidence)
     assert invoke(ACTIONS[1], source, registration, ledger, max_evidence_bytes=CAP) == first
     assert invoke(ACTIONS[2], source, registration, ledger, max_evidence_bytes=CAP).read_text() == REPORT
-    assert _evidence(source, registration.run_id) == evidence
+    assert native_evidence(source, registration.run_id) == evidence
 
 
 @pytest.mark.parametrize("action", ACTIONS)
 def test_registration_size_is_checked_before_verified_read(source, tmp_path, monkeypatch, action):
-    registration = _call(source)
-    cap = _ref(source, registration).byte_size - 1
-    assert len(canonical_json(_evidence(source, registration.run_id)).encode()) <= cap
+    registration = register_native_case(source)
+    cap = registration_ref(source, registration).byte_size - 1
+    assert len(canonical_json(native_evidence(source, registration.run_id)).encode()) <= cap
     monkeypatch.setattr(source.store, "read_verified", forbid)
     monkeypatch.setattr(outcomes, "ledger_append", forbid)
     assert_conflict(lambda: invoke(action, source, registration, tmp_path / "ledger.csv",
@@ -113,19 +117,19 @@ def test_registration_size_is_checked_before_verified_read(source, tmp_path, mon
 
 
 def test_exact_registration_artifact_bound_allows_empty_replay(source, tmp_path):
-    registration = _call(source)
+    registration = register_native_case(source)
     assert invoke(ACTIONS[1], source, registration, tmp_path / "ledger.csv",
-                  max_evidence_bytes=_ref(source, registration).byte_size) is None
+                  max_evidence_bytes=registration_ref(source, registration).byte_size) is None
 
 
 @pytest.mark.parametrize("slot", ["native_outcome", "native_outcome_receipt"])
 @pytest.mark.parametrize("action", ACTIONS)
 def test_oversized_outcome_and_completion_references_are_not_read(
         source, tmp_path, monkeypatch, slot, action):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     invoke(ACTIONS[0], source, registration, ledger)
-    evidence = _evidence(source, registration.run_id)
+    evidence = native_evidence(source, registration.run_id)
     schema = evidence[slot]["schema_ref"]
     oversized = source.store.publish_bytes(canonical_json({"padding": "x" * CAP}).encode(), schema_ref=schema)
     evidence[slot] = to_document(oversized)
@@ -141,8 +145,8 @@ def test_oversized_outcome_and_completion_references_are_not_read(
     monkeypatch.setattr(source.store, "read_verified", bounded_read)
     monkeypatch.setattr(outcomes, "ledger_append", forbid)
     assert_conflict(lambda: invoke(action, source, registration, ledger, max_evidence_bytes=CAP))
-    assert _ref(source, registration) in reads
-    assert _evidence(source, registration.run_id) == evidence
+    assert registration_ref(source, registration) in reads
+    assert native_evidence(source, registration.run_id) == evidence
     assert ledger.read_bytes() == before
 
 
@@ -151,7 +155,7 @@ def test_oversized_outcome_and_completion_references_are_not_read(
 @pytest.mark.parametrize("action", ACTIONS)
 def test_malformed_catalog_evidence_is_typed_before_artifact_reads(
         source, tmp_path, monkeypatch, payload, action):
-    registration = _call(source)
+    registration = register_native_case(source)
     source.conn.execute("UPDATE experiment_runs SET evidence_json=?", (payload,))
     monkeypatch.setattr(source.store, "read_verified", forbid)
     monkeypatch.setattr(outcomes, "ledger_append", forbid)
@@ -163,10 +167,10 @@ def test_malformed_catalog_evidence_is_typed_before_artifact_reads(
                          ids=["malformed", "null", "recursive"])
 @pytest.mark.parametrize("slot", ["native_outcome", "native_outcome_receipt"])
 def test_bounded_replay_refuses_malformed_json_artifacts(source, tmp_path, monkeypatch, payload, slot):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     invoke(ACTIONS[0], source, registration, ledger)
-    evidence = _evidence(source, registration.run_id)
+    evidence = native_evidence(source, registration.run_id)
     evidence[slot] = to_document(source.store.publish_bytes(payload, schema_ref=evidence[slot]["schema_ref"]))
     save_evidence(source, registration, evidence)
     monkeypatch.setattr(outcomes, "ledger_append", forbid)
@@ -175,10 +179,10 @@ def test_bounded_replay_refuses_malformed_json_artifacts(source, tmp_path, monke
 
 @pytest.mark.parametrize("slot", ["native_registration", "native_outcome", "native_outcome_receipt"])
 def test_bounded_replay_does_not_follow_json_artifact_symlinks(source, tmp_path, monkeypatch, slot):
-    registration = _call(source)
+    registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
     invoke(ACTIONS[0], source, registration, ledger)
-    ref = from_document(ArtifactRef, _evidence(source, registration.run_id)[slot])
+    ref = from_document(ArtifactRef, native_evidence(source, registration.run_id)[slot])
     path, outside = source.store.root / ref.storage_key, tmp_path / "foreign.json"
     path.rename(outside)
     expected = outside.read_bytes()
@@ -190,8 +194,8 @@ def test_bounded_replay_does_not_follow_json_artifact_symlinks(source, tmp_path,
 
 
 def test_oversized_outcome_write_refuses_before_publication_or_ledger(source, tmp_path, monkeypatch):
-    registration = _call(source)
-    before = _evidence(source, registration.run_id)
+    registration = register_native_case(source)
+    before = native_evidence(source, registration.run_id)
     problem = make_problem("EXPERIMENT_VARIANT_FAILED", "synthetic", details={"padding": "漢" * CAP})
     real_publish, schemas = source.store.publish_bytes, []
 
@@ -206,13 +210,13 @@ def test_oversized_outcome_write_refuses_before_publication_or_ledger(source, tm
                                   report=None, problem=problem, max_evidence_bytes=CAP))
     # The outcome writer refuses before publication; the public R6 boundary then publishes its private refusal.
     assert schemas == ["native_experiment_refusal.v1.0"]
-    assert _evidence(source, registration.run_id) == before
+    assert native_evidence(source, registration.run_id) == before
     assert not (tmp_path / "ledger.csv").exists()
 
 
 @pytest.mark.parametrize("options", [{}, {"max_evidence_bytes": None}], ids=["omitted", "explicit-none"])
 def test_default_publication_keeps_unbounded_failure_details(source, tmp_path, options):
-    registration = _call(source)
+    registration = register_native_case(source)
     problem = make_problem("EXPERIMENT_VARIANT_FAILED", "synthetic", details={"padding": "漢" * CAP})
     ledger = tmp_path / "ledger.csv"
     first = invoke(ACTIONS[0], source, registration, ledger, report=None, problem=problem, **options)
@@ -225,13 +229,13 @@ def test_default_publication_keeps_unbounded_failure_details(source, tmp_path, o
 
 
 def test_catalog_evidence_growth_refuses_without_reserving_partial_intent(source, tmp_path, monkeypatch):
-    registration = _call(source)
-    before = pad_evidence(_evidence(source, registration.run_id), CAP, "漢")
+    registration = register_native_case(source)
+    before = pad_evidence(native_evidence(source, registration.run_id), CAP, "漢")
     save_evidence(source, registration, before)
     monkeypatch.setattr(outcomes, "ledger_append", forbid)
     assert_conflict(lambda: invoke(ACTIONS[0], source, registration, tmp_path / "ledger.csv",
                                   max_evidence_bytes=CAP))
-    assert _evidence(source, registration.run_id) == before
+    assert native_evidence(source, registration.run_id) == before
     assert not source.conn.in_transaction
 
 

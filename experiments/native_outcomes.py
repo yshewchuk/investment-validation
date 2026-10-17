@@ -302,6 +302,7 @@ def export_native_report(conn, store, registration, *, no_ledger=False, ledger_p
                         max_evidence_bytes=max_evidence_bytes)
     ref = foundation.from_document(ArtifactRef, result["receipt"]["report_ref"])
     foundation.ensure_directory(path.parent)
+    # read_verified bounds this verified report artifact by ref.byte_size, not the JSON budget.
     data = store.read_verified(ref)
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".REPORT.", mode="wb") as staged:
         staged.write(data)

@@ -64,6 +64,7 @@ def _implementation(code_root):
 
 
 def _typed(action):
+    """Unlike native outcomes, unexpected structural/programming errors propagate."""
     @wraps(action)
     def call(*args, **kwargs):
         try:
