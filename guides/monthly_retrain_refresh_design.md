@@ -9,8 +9,9 @@ move the agreed contract into those docs in the same PR as the code.
 User decision 2026-10-16: objects that change only on a retrain are refreshed
 **monthly, inside the nightly, on the first nightly run after a calendar
 month completes, covering the previous month**. Not every night, and not by a
-separate manual job. "First run after the month completes" is refined in §2:
-the first run whose settled-event cutoff has reached the month end.
+separate manual job. §2 **changes** "first run after the month completes" to
+"first run whose settled-event cutoff has reached the month end" (later by the
+settlement lag); the user should confirm.
 
 ## 1. What changes and what does not
 
@@ -34,7 +35,7 @@ on any night. There is no second release-assembly path.
 
 **Due set.** For a refresh session dated `s`, the *completed* months are all
 calendar months before `s`'s month. Evaluate every completed month with no
-durable record (retrain or `superseded`; the first run marks all history before the first target `superseded`); the **target** is the latest due one,
+durable record (retrain or `superseded`; the first run, with no records, marks every month before the latest completed one `superseded`); the **target** is the latest due one,
 `M`. Its **retrain cutoff** is the last calendar day of `M` (`M_end`), a data
 date, fixed by `M` alone and independent of the night the job runs.
 
@@ -81,8 +82,10 @@ row filter on event and outcome data dates enforces the bound, so the retrain
 admits no row dated after `M_end` and reads no live registry.
 
 1. **Champion/gate/chooser retrain** (D1): the existing training kinds run with
-   `cutoff = M_end` over rows whose event and outcome data dates are on or before `M_end`. Fold and
-   holdout rules are the existing training contracts; this design adds none.
+   `cutoff = M_end` over rows whose event and outcome data dates are on or before `M_end`. Fold
+   rules are the existing training contracts. Experiment holdouts are not
+   applied: no training code reads them, and they scope experiment research, not
+   the deployed model. Whether production training should exclude them is D7.
 2. **Regenerate** the three `driver_residual_pool:{size,implied_t1,runup_move}`
    pools and the chooser analog pool at `M_end` from the incumbent models (retrained ones only under D1(b)).
 3. **Stage** one candidate release: the six pool members plus chooser row via
@@ -129,12 +132,13 @@ needs the full staging gate before it can be promoted:
    `ExperimentHoldouts(as_of_month=M)` (`engine/v2/foundation/experiment_holdouts.py`)
    every event in `M−5 … M` is "rolling" and later ones "ambiguous", so `C` is
    the newest month outside the rolling holdout. A **check candidate** (same
-   recipe, fit with training cutoff `C_start − 1`) and the incumbent both score
-   events dated within `C`, with every pool and the trailing cutoff pinned to
-   `C_start − 1` for both, so no scored event sits in a model or pool that scores
-   it. Events labelled "random" (3%) or "ambiguous" are excluded (about 97% of
+   recipe, fit with training cutoff `C_start − 1`, where `C_start` is the first
+   day of `C`) and a **check incumbent** (the incumbent's recipe refit the same
+   way, since the incumbent's own fit post-dates `C`) both score events dated
+   within `C`, with every pool and the trailing cutoff pinned to `C_start − 1`
+   for both, so no scored event sits in a model or pool that scores it. Events labelled "random" (3%) or "ambiguous" are excluded (about 97% of
    `C` remains); the check uses no holdout outcomes. Slice 5b tests assert both
-   pins and the exclusion. The extra fit counts in the heavy-job budget (§6). The check
+   pins and the exclusion. Both extra fits count in the heavy-job budget (§6). The check
    certifies the *recipe*, not the release fit: its receipt is bound to the
    check candidate hash, the release candidate hash and the incumbent id, and
    the promote step requires a receipt naming exactly the release hash being
@@ -196,8 +200,10 @@ waits for admission rather than being denied. Consequences, stated once:
   ends; non-heavy steps proceed. Accepted because a monthly cadence makes overlap
   rare.
 - Neither a wall-clock deadline nor a non-blocking admission probe exists today
-  (`bounded_run` only blocks; nearest is `ops/scheduler.py`). Both are new work:
-  the deadline (job timeout, terminal failure) is a deliverable of each job's
+  (`bounded_run` only blocks). Slice 4 decides whether the retrain is enqueued
+  through `ops/scheduler.py`'s admission decision or probed directly. The job
+  envelope already has `deadline_at` (`contracts/jobs.py`) but nothing enforces
+  it; enforcement (terminal failure) is a deliverable of each job's
   slice (3 for pools, 5a for models), sized from the receipt below; the probe
   and the D6(b) start window belong to slice 4.
 
@@ -230,7 +236,7 @@ job spec come from that measurement, not from this document.
   pools together from the start*: matches the PR-13b text, but needs the
   acceptance + non-regression gate (§4) before any slice can merge a usable
   path. Trade-off: (a) ships earlier and de-risks, (b) delivers the full intent
-  in one step. Recommendation: (a), with (b) as slices 4-5 below.
+  in one step. Recommendation: (a), with (b) as slices 5a-6 below.
 - **D2 Model-changing promotion.** (a) *Auto-promote after acceptance and the
   non-regression check* (matches "inside the nightly"). (b) *Stage and hold for
   an operator promote*. (a) removes manual work, (b) puts a human in front of an
@@ -252,6 +258,10 @@ job spec come from that measurement, not from this document.
   with enough hours before the next session's heavy steps; (c) *let scoring
   preempt*. (a) is simplest, (b) avoids the delay, (c) needs executor work.
   Recommendation: (a)+(b).
+- **D7 Experiment holdouts in production training.** (a) *Not applied* (§3):
+  the deployed model sees all data to `M_end`; (b) *exclude* random and rolling
+  holdouts from retrain rows so the holdouts stay clean for later experiments,
+  at the cost of a model that ignores the newest six months. Recommendation: (a).
 - **D5 Missed months.** Designed as latest-only with a `superseded` marker (§2);
   the alternative is to retrain each missed month in order. Recommendation:
   latest-only; ordering adds cost and no information.
