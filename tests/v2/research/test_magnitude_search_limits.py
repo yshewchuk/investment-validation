@@ -201,16 +201,12 @@ def test_public_fit_helper_honors_both_no_fit_guards_before_inputs(monkeypatch, 
         execution.run_fitted_trial(None, None, None, None, {**LIMITS, "cpu_id": 0}, None)
 
 
-@pytest.mark.parametrize("pin", ["lowest", "highest"])
-def test_fixed_worker_observes_requested_singleton_cpu_and_all_thread_limits(monkeypatch, tmp_path, pin):
+def observe_worker_containment(monkeypatch, tmp_path, cpu_id):
+    """Observe the real child while retaining launch and cleanup assertions."""
     allowed = os.sched_getaffinity(0)
-    if pin == "highest" and len(allowed) < 2:
-        pytest.skip("two allowed CPUs are needed to distinguish pinning from inherited affinity")
-    # The highest variant defeats hardcoded-lowest pinning; the lowest variant
-    # still checks real containment and thread limits on single-CPU hosts.
     resolved = execution.execution_limits(LIMITS)
     assert resolved["cpu_id"] == min(allowed)
-    limits = {**resolved, "cpu_id": max(allowed) if pin == "highest" else min(allowed)}
+    limits = {**resolved, "cpu_id": cpu_id}
     for name in THREAD_VARIABLES:
         monkeypatch.setenv(name, "23")
     observation = tmp_path / "worker-containment.json"
@@ -229,10 +225,25 @@ def emit(value):
 worker.emit = emit
 """)
     assert run(limits=limits) == SUCCESS
-    assert json.loads(observation.read_text()) == {
-        "affinity": [limits["cpu_id"]], "threads": dict.fromkeys(THREAD_VARIABLES, "1"),
-        "memory": [limits["memory_bytes"]] * 2,
-        "cpu": [limits["cpu_seconds"], limits["cpu_seconds"] + 1],
-    }
     assert os.sched_getaffinity(0) == allowed
     assert_cleaned(observed, len(json_bytes(request())))
+    return json.loads(observation.read_text()), limits
+
+
+@pytest.mark.parametrize("pin", ["lowest", "highest"])
+def test_fixed_worker_observes_requested_singleton_cpu(monkeypatch, tmp_path, pin):
+    allowed = os.sched_getaffinity(0)
+    if len(allowed) < 2:
+        pytest.skip("two allowed CPUs are needed to distinguish pinning from inherited affinity")
+    # Both variants distinguish pinning from inheritance; the highest variant
+    # also defeats hardcoded-lowest pinning.
+    cpu_id = max(allowed) if pin == "highest" else min(allowed)
+    actual, limits = observe_worker_containment(monkeypatch, tmp_path, cpu_id)
+    assert actual["affinity"] == [limits["cpu_id"]]
+
+
+def test_fixed_worker_observes_all_thread_and_resource_limits(monkeypatch, tmp_path):
+    actual, limits = observe_worker_containment(monkeypatch, tmp_path, min(os.sched_getaffinity(0)))
+    assert actual["threads"] == dict.fromkeys(THREAD_VARIABLES, "1")
+    assert actual["memory"] == [limits["memory_bytes"]] * 2
+    assert actual["cpu"] == [limits["cpu_seconds"], limits["cpu_seconds"] + 1]
