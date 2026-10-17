@@ -110,8 +110,13 @@ def _mode(no_ledger, ledger_path):
         path = Path(raw)
     except (ValueError, TypeError):
         raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must be a valid path") from None
-    if path.is_symlink() or path.is_dir():
-        raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must name a regular file")
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        pass  # The ledger sink creates absent destinations and parent directories.
+    else:
+        if not stat.S_ISREG(metadata.st_mode):
+            raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must name a regular file")
     return "recorded", path.resolve()
 
 
@@ -166,7 +171,7 @@ def _terminal(conn, store, job, registration):
         payload = attempt["failure_json"]
         try:
             if payload is None or len(payload.decode(encoding).encode("utf-8")) > MAX_FAILURE_BYTES:
-                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure exceeds its byte bound")
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure must be bounded text")
             if problem is None:
                 problem = from_document(Problem, json.loads(payload.decode(encoding)))
         except (ValueError, RecursionError):

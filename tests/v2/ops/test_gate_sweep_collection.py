@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import sqlite3
+import stat
 from dataclasses import asdict, replace
 from pathlib import Path
 from time import sleep
@@ -275,9 +276,68 @@ def test_pending_collection_binds_mode_and_does_not_freeze_index(source, tmp_pat
     assert not list(source.root.rglob("*.csv"))
     assert all(not any(key.endswith("_index") for key in evidence) for evidence in _evidence(source))
     before = scientific_rows(source)
+    jobs_before = [tuple(row) for row in source.conn.execute("SELECT * FROM jobs ORDER BY job_id")]
+    changes = source.conn.total_changes
     with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
         _collect(source, ledger_path=tmp_path / "different.csv")
     assert scientific_rows(source) == before and not (tmp_path / "different.csv").exists()
+    assert [tuple(row) for row in source.conn.execute("SELECT * FROM jobs ORDER BY job_id")] == jobs_before
+    assert source.conn.total_changes == changes
+    assert source.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 2
+    assert source.conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
+
+
+@pytest.mark.usefixtures("fixed_sweep_code")
+def test_retry_wait_receipt_stays_pending_without_recording(source, tmp_path, monkeypatch):
+    call_sweep(source)
+    call_sweep(source, sweep.submit_sweep)
+    clock, claim = _claimer(source)
+    attempt = claim()
+    # Native workers currently have a once-only policy. Model a persisted retry
+    # receipt explicitly; collection must not assume every failed attempt ended its job.
+    _finish(source, attempt, clock, problem=fail("RESOURCE_UNAVAILABLE", "synthetic retry").problem)
+    source.conn.execute("UPDATE jobs SET state='retry_wait' WHERE job_id=?", (attempt.job_id,))
+    before = scientific_rows(source)
+    for name in ("publish_native_outcome", "replay_native_outcome", "export_native_report", "ledger_append"):
+        monkeypatch.setattr(native_outcomes, name, forbid_effect)
+    ledger = tmp_path / "LEDGER.csv"
+    result = _collect(source, ledger_path=ledger)
+    assert result["index_ref"] is None and result["index"]["complete"] is False
+    assert result["index"]["attempted_variants"] == 1
+    arm = next(arm for arm in result["index"]["variants"] if arm["job_id"] == attempt.job_id)
+    assert arm["state"] == "retry_wait" and arm["attempted_variants"] == 1
+    assert all(arm[key] is None for key in ("attempt_id", "problem", "worker_problem", "report_ref", "outcome_ref", "completion_ref"))
+    assert not ledger.exists()
+    assert all(not {"native_outcome", "native_outcome_receipt", "native_sweep_recorded_index"} & item.keys()
+               for item in _evidence(source))
+    saved = scientific_rows(source)
+    assert saved != before  # Only the collection intent is newly bound.
+    assert _collect(source, ledger_path=ledger) == result and scientific_rows(source) == saved
+    job = submission.get_job(source.conn, attempt.job_id)
+    assert job.state == "retry_wait" and job.attempt_count == 1 and job.failure.code == "RESOURCE_UNAVAILABLE"
+
+
+@pytest.mark.usefixtures("fixed_sweep_code")
+def test_recorded_r4_cannot_later_be_replaced_by_success(source, tmp_path):
+    call_sweep(source)
+    call_sweep(source, sweep.submit_sweep)
+    clock, claim = _claimer(source)
+    failed = claim()
+    _finish(source, failed, clock, problem=fail("WORKER_FAILED", "synthetic worker failure").problem)
+    ledger = tmp_path / "LEDGER.csv"
+    result = _collect(source, ledger_path=ledger)
+    arm = next(arm for arm in result["index"]["variants"] if arm["job_id"] == failed.job_id)
+    assert arm["problem"]["code"] == "EXPERIMENT_VARIANT_FAILED"
+    assert [row["stage"] for row in _rows(ledger)] == ["failed"]
+    registration = next(item for item in _registrations(source) if item.variant_id == arm["variant_id"])
+    before, rows = scientific_rows(source), ledger.read_bytes()
+    with pytest.raises(OpsError) as error:
+        native_outcomes.publish_native_outcome(source.conn, source.store, registration,
+            report="A later successful report", attempted=True, ledger_path=ledger,
+            max_evidence_bytes=collection.MAX_GATE_RESULT_BYTES)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert scientific_rows(source) == before and ledger.read_bytes() == rows
+    assert _collect(source, ledger_path=ledger) == result
 
 
 def test_changed_collector_source_and_inputs_cannot_rebind_saved_intent(source, tmp_path, monkeypatch):
@@ -348,6 +408,25 @@ def test_interrupted_publication_reconciles_without_duplicate_rows(source, tmp_p
     assert result["index"]["complete"] and result["index_ref"] is not None
     assert len(_rows(ledger)) == 2
     assert _collect(source, ledger_path=ledger) == result and len(_rows(ledger)) == 2
+
+
+@pytest.mark.usefixtures("fixed_sweep_code")
+def test_collection_preserves_native_publication_runtime_error_policy(source, tmp_path, monkeypatch):
+    call_sweep(source)
+    _complete(source, call_sweep(source, sweep.submit_sweep))
+    ledger = tmp_path / "LEDGER.csv"
+    def interrupted(*args, **kwargs):
+        raise RuntimeError("private native publication interruption")
+    with monkeypatch.context() as patch:
+        patch.setattr(native_outcomes, "ledger_append", interrupted)
+        with pytest.raises(OpsError) as error:
+            _collect(source, ledger_path=ledger)
+    assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+    assert "private native" not in str(error.value)
+    assert not ledger.exists()
+    assert all("native_sweep_recorded_index" not in item for item in _evidence(source))
+    result = _collect(source, ledger_path=ledger)
+    assert result["index"]["complete"] and len(_rows(ledger)) == 2
 
 
 @pytest.mark.usefixtures("fixed_sweep_code")
@@ -760,6 +839,61 @@ def test_invalid_collection_mode_or_destination_refuses_before_submission(tmp_pa
         collection.collect_sweep(None, None, None, {}, code_root=REPO, as_of_month=MONTH, **arguments)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
     assert not target.exists()
+
+
+@pytest.mark.parametrize("kind", ["fifo", "device", "socket-mode"])
+def test_existing_nonregular_ledger_refuses_without_opening_or_submitting(tmp_path, monkeypatch, kind):
+    ledger = tmp_path / "ledger.csv"
+    if kind == "fifo":
+        os.mkfifo(ledger)
+    elif kind == "device":
+        ledger = Path(os.devnull)
+        assert stat.S_ISCHR(ledger.lstat().st_mode)
+    else:
+        # Socket creation is unavailable in some test sandboxes; exercise its
+        # lstat result without requiring permission to create a socket.
+        original = Path.lstat
+        def metadata(path, *args, **kwargs):
+            return SimpleNamespace(st_mode=stat.S_IFSOCK) if path == ledger else original(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "lstat", metadata)
+    monkeypatch.setattr(collection, "_implementation", forbid_effect)
+    monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "open", forbid_effect)
+        with pytest.raises(OpsError) as error:
+            collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                     code_root=REPO, as_of_month=MONTH, ledger_path=ledger)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("existing", [True, False])
+def test_ledger_preflight_accepts_regular_or_absent_nested_destination(tmp_path, monkeypatch, existing):
+    ledger = tmp_path / "ledger.csv" if existing else tmp_path / "missing-parent" / "ledger.csv"
+    if existing:
+        ledger.write_bytes(b"existing ledger bytes")
+    reached = RuntimeError("admitted ledger reached source verification")
+    def admitted(*args):
+        raise reached
+    monkeypatch.setattr(collection, "_implementation", admitted)
+    with pytest.raises(RuntimeError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, ledger_path=ledger)
+    assert error.value is reached
+    assert ledger.read_bytes() == b"existing ledger bytes" if existing else not ledger.parent.exists()
+
+
+@pytest.mark.parametrize("number", [errno.EACCES, errno.EPERM, errno.EIO, errno.EMFILE])
+def test_ledger_preflight_storage_error_remains_retryable(tmp_path, monkeypatch, number):
+    ledger = tmp_path / "ledger.csv"
+    def interrupted(*args, **kwargs):
+        raise OSError(number, "private ledger metadata failure")
+    monkeypatch.setattr(Path, "lstat", interrupted)
+    monkeypatch.setattr(collection, "_implementation", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, ledger_path=ledger)
+    assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+    assert "private ledger" not in str(error.value)
 
 
 def test_empty_ledger_path_refuses_as_invalid_text_before_filesystem_inspection(monkeypatch):
