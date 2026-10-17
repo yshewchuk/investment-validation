@@ -1550,6 +1550,7 @@ def test_other_code_root_coordinator_bytes_cannot_describe_installed_collector(t
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=checkout, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == "installed collector source cannot be verified"
 
 
 def test_unavailable_import_time_collector_snapshot_refuses_before_submission(monkeypatch):
@@ -1560,6 +1561,7 @@ def test_unavailable_import_time_collector_snapshot_refuses_before_submission(mo
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == "installed collector source cannot be verified"
 
 
 @pytest.mark.parametrize("number,retryable", [
@@ -1585,6 +1587,8 @@ def test_collector_source_reads_distinguish_resources_from_unverifiable_code(mon
     assert reads == [(target, "rb")]
     assert error.value.code == ("RESOURCE_UNAVAILABLE" if retryable else "EXPERIMENT_IDENTITY_CONFLICT")
     assert error.value.problem.retryable is retryable
+    assert error.value.problem.message == ("collector source verification was interrupted" if retryable
+                                           else "installed collector source cannot be verified")
     assert "private" not in canonical_json(to_document(error.value.problem))
 
 
@@ -1605,6 +1609,7 @@ def test_source_read_interruption_can_retry_without_replacing_import_snapshot(mo
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+    assert error.value.problem.message == "collector source verification was interrupted"
     with pytest.raises(RuntimeError) as retried:
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
@@ -1631,6 +1636,8 @@ def test_caller_source_read_errors_keep_the_same_policy_after_installed_verifica
                                  code_root=tmp_path, as_of_month=MONTH, no_ledger=True)
     assert reads == [target] and error.value.code == code
     assert error.value.problem.retryable is (number == errno.EIO)
+    assert error.value.problem.message == ("collector source verification was interrupted" if number == errno.EIO
+                                           else "installed collector source cannot be verified")
     assert "private" not in canonical_json(to_document(error.value.problem))
 
 
@@ -1647,6 +1654,7 @@ def test_changed_installed_source_refuses_before_caller_closure(monkeypatch):
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == "installed collector source cannot be verified"
     assert calls == [(collection._COLLECTOR_ROOT, collection._COLLECTOR_ENTRIES)]
 
 
@@ -1662,6 +1670,7 @@ def test_invalid_code_root_refuses_before_source_reads_or_submission(tmp_path, m
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=root, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
+    assert error.value.problem.message == "sweep code root must name an existing directory"
 
 
 def test_code_root_stat_io_is_retryable_before_source_reads_or_submission(monkeypatch):
@@ -1677,6 +1686,7 @@ def test_code_root_stat_io_is_retryable_before_source_reads_or_submission(monkey
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+    assert error.value.problem.message == "sweep collection publication was interrupted"
 
 
 @pytest.mark.parametrize("fault,code", [("io", "RESOURCE_UNAVAILABLE"), ("sqlite", "RESOURCE_UNAVAILABLE"),
