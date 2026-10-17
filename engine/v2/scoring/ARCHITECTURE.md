@@ -175,6 +175,26 @@ order. No eligible candidate yields a refused record with
 `NO_CHOOSER_CANDIDATE`. `score_batch` only preserves request order and never
 calls this menu resolver, so these interfaces do not enable nightly DYN-SV.
 
+`dynamic_outcomes` owns the separate pure accounting boundary: frozen
+`DynamicMenuIdentity` and `DynamicCandidateOutcome` summaries, validated by
+`validate_dynamic_menu` into registry order. Its callers supply complete shared
+event/session, snapshot/release/deployment, calendar/decision-clock, mode and
+fill/ATM policy identities. Exact comparisons never truncate an event instant.
+`event_revision` alone may be `None`; all other identity fields are nonblank text.
+A record summary retains its request/score IDs, validation/readiness, reasons
+and warnings; a producer/assembly refusal retains its code and optional request
+hash. The helper verifies summaries, not original records or policy hashes.
+
+| Condition | Outcome |
+| --- | --- |
+| Duplicate member/ID, record/refusal overlap, unknown member, malformed value or identity mismatch | `DynamicMenuRefusal` with `INVALID_CHOOSER_MENU`, before missing-member checks |
+| Otherwise valid menu missing a registered member | `DynamicMenuRefusal` with `CHOOSER_MENU_INCOMPLETE`, listing fixed registry names |
+| Complete mixed or all-refused menu | Return seven summaries in registry order; no eligibility, winner, margin or meta record |
+
+There is no I/O, retry, fitting or source/finality/causal-training admission.
+Only tests consume this preparatory interface; existing selection and nightly
+dispatch are unchanged. See README for fields and ownership obligations.
+
 **Forward forecast assembly (design; not implemented).** STR-THRU forward
 inputs use native market/history features from the pinned snapshot (cutover
 6c), plus the verified release. The full-refit `size:*` champion supplies
@@ -343,6 +363,7 @@ produces the same `ScoreRecord`, `identity.py`). Other typed refusals:
 `AnalogRefusal` (`native_analog.py`), `FrozenBindingConflict`
 (`application.py`, below), `NightlySourceBundleRefusal`
 (`nightly_source_bundle.py`, below).
+`DynamicMenuRefusal` (`dynamic_outcomes.py`) covers malformed or incomplete menus.
 
 **Quote age policy (issue #169).** When native input context supplies
 `quote_max_age_sessions`, it is the permitted age of the raw quote at
@@ -447,8 +468,8 @@ rather than its own. `native_score_batch` goes through `score_one`, never
 ### `release_bindings.py` (4c R1–R6)
 
 - **R1, missing input.** `resolve_release_binding(release_root)` validates
-  its argument, computes `<release_root>/deployment` inline (ported from
-  `checks/phase5_release.py`, not imported), then resolves the live pointer
+  its argument, computes `<release_root>/deployment` inline (the same literal as
+  `engine/v2/models/release_objects.py`, not imported), then resolves the live pointer
   and, once known, reads the staged manifest **exactly once** (never through
   the public `resolve_release()` wrapper, and never re-read for the hash
   check below):

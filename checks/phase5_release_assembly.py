@@ -1,7 +1,7 @@
 """Pool release assembly: carry a staged release's pool objects forward (#192 slice 2).
 
 Implements the contract in ``engine/v2/models/ARCHITECTURE.md`` section 2.1.
-The phase5 catalog and its layout helpers live in ``checks/phase5_release.py``;
+The phase5 catalog and its layout helpers live in ``engine/v2/models/release_layout.py``;
 this module only derives an in-memory candidate catalog and stages it under a
 new ``release_id``. ``derive_catalog`` is pure; nothing here ever touches
 ``DEPLOYED`` or promotes a release.
@@ -20,7 +20,9 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from checks.phase5_release import (
+from engine.v2.models import deployment, releases
+from engine.v2.models.deployment import MAX_MANIFEST_BYTES
+from engine.v2.models.release_layout import (
     MAX_CATALOG_BYTES,
     STAGED,
     STATE_SPECS,
@@ -36,8 +38,6 @@ from checks.phase5_release import (
     verify_staged,
     write_catalog,
 )
-from engine.v2.models import deployment, releases
-from engine.v2.models.deployment import MAX_MANIFEST_BYTES
 
 POOL_MEMBER_IDS: tuple[str, ...] = (
     "driver_residual_pool:size",

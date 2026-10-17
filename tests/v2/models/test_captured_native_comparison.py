@@ -12,7 +12,7 @@ import pytest
 from engine.v2.foundation import content_hash
 from engine.v2.serving.native_parity_projection import native_parity_summary
 from tools import captured_native_comparison as export
-from tests.test_phase4_targeted_replay import _clean_record, _native_record, _pair_doc, _write_corpus
+from tests.v2.models.test_phase4_targeted_replay import _clean_record, _native_record, _pair_doc, _write_corpus
 
 
 @pytest.fixture

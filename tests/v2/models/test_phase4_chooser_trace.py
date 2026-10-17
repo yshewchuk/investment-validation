@@ -420,7 +420,7 @@ def test_a_menu_row_with_a_frozen_chooser_traces_and_replays_identically(
 
 def _stage_everything(verified, corpus_root, release_root):
     """Stage every model member, the chooser pool and table: ``staged`` map."""
-    from checks import phase5_release as layout
+    from engine.v2.models import release_layout as layout
     from engine.v2.models.frozen_state import serialize_frozen_state
 
     staged = {}
@@ -446,7 +446,7 @@ def test_phase5_replay_serves_the_frozen_chooser_from_the_staged_release(
     k-NN pool and the n_admissible table to the staged release by content
     hash; the pair replays, and each missing piece is ``member_absent``."""
     from checks import phase5_phase4_replay as replay
-    from checks import phase5_release as layout
+    from engine.v2.models import release_layout as layout
 
     pair, _trace, _native = _menu_row_with_frozen_chooser(chooser_root, tmp_path, monkeypatch)
     corpus = tmp_path / "published"

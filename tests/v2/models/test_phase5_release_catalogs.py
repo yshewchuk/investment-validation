@@ -1,4 +1,5 @@
 """Catalog survival using the actual release and frozen-state producers."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -6,9 +7,10 @@ from pathlib import Path
 import pytest
 
 from checks import phase5_acceptance as acceptance
-from checks import phase5_release as layout
 from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
+from engine.v2.models import release_layout as layout
+from engine.v2.models import release_objects
 from engine.v2.models.analog_artifact import make_board_analog_pool_artifact
 from engine.v2.models.frozen_state import serialize_frozen_state
 from engine.v2.models.lineage import Lineage
@@ -17,7 +19,7 @@ from engine.v2.models.recalibration_artifact import (
     make_recalibration_map_artifact, serialize_recalibration_artifact,
 )
 from engine.v2.scoring.release_bindings import ModelNotReady, resolve_release_binding
-from tests.test_checks_phase5_acceptance import _models
+from tests.v2.models.test_checks_phase5_acceptance import _models
 from tools import phase5_prepare_release as prep
 from tools.phase5_calibration_keys import staged_keys
 
@@ -159,7 +161,7 @@ def test_unreadable_local_catalog_is_not_absence(tmp_path, monkeypatch):
         if Path(path) == _local(tmp_path):
             raise PermissionError("private path")
         return real_open(path, *args, **kwargs)
-    monkeypatch.setattr(layout.os, "open", unreadable)
+    monkeypatch.setattr(os, "open", unreadable)
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert "private path" not in str(error.value)
@@ -182,6 +184,108 @@ def test_directory_or_symlink_local_catalog_is_not_absence(tmp_path):
     local.symlink_to(target)
     with pytest.raises(layout.ReleaseLayoutError):
         layout.read_manifest(tmp_path)
+
+
+def test_catalog_size_bound_is_exact(tmp_path, monkeypatch):
+    _stage(tmp_path)
+    size = _local(tmp_path).stat().st_size
+    monkeypatch.setattr(layout, "MAX_CATALOG_BYTES", size)
+    body = layout.read_catalog(_local(tmp_path))
+    assert body["release_id"] == "A"
+    monkeypatch.setattr(layout, "MAX_CATALOG_BYTES", size - 1)
+    with pytest.raises(layout.ReleaseLayoutError, match="could not be read or validated"):
+        layout.read_catalog(_local(tmp_path))
+
+
+def test_catalog_cap_constant_and_regular_file_guard(tmp_path):
+    assert layout.MAX_CATALOG_BYTES == 64 * 1024 * 1024
+    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
+        release_objects.read_regular_file(tmp_path, 16)
+    assert release_objects.read_regular_file(tmp_path / "absent", 16) is None
+    small = tmp_path / "small.bin"
+    small.write_bytes(b"x" * 8)
+    assert release_objects.read_regular_file(small, 8) == b"x" * 8
+    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
+        release_objects.read_regular_file(small, 7)
+    for bad in (-1, -2, None, 1.5, True):
+        with pytest.raises(layout.ReleaseLayoutError, match="non-negative integer"):
+            release_objects.read_regular_file(tmp_path / "absent", bad)
+    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
+        release_objects.read_regular_file(small, 0)
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+    assert release_objects.read_regular_file(empty, 0) == b""
+
+
+def test_read_regular_file_requests_at_most_limit_plus_one(tmp_path, monkeypatch):
+    path = tmp_path / "data.bin"
+    path.write_bytes(b"x" * 20)
+    sizes = []
+    real_fdopen = release_objects.os.fdopen
+
+    class Spy:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def read(self, size=-1):
+            sizes.append(size)
+            return self._handle.read(size)
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+    monkeypatch.setattr(release_objects.os, "fdopen", lambda *a, **k: Spy(real_fdopen(*a, **k)))
+    assert release_objects.read_regular_file(path, 20) == b"x" * 20
+    assert sizes == [21]
+
+
+def test_read_regular_file_refuses_fifo_without_blocking(tmp_path):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo")
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
+        release_objects.read_regular_file(fifo, 16)
+
+
+def test_read_regular_file_refusals_do_not_leak_descriptors(tmp_path):
+    def open_fds():
+        return len(os.listdir("/proc/self/fd"))
+
+    if not os.path.isdir("/proc/self/fd"):
+        pytest.skip("no /proc/self/fd")
+    directory = tmp_path / "dir"
+    directory.mkdir()
+    fifo = tmp_path / "fifo"
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(fifo)
+    before = open_fds()
+    for _ in range(20):
+        with pytest.raises(layout.ReleaseLayoutError):
+            release_objects.read_regular_file(directory, 16)
+        if fifo.exists():
+            with pytest.raises(layout.ReleaseLayoutError):
+                release_objects.read_regular_file(fifo, 16)
+    assert open_fds() == before
+
+
+def test_write_object_accepts_empty_payload(tmp_path):
+    digest, rel = layout.write_object(tmp_path, b"")
+    assert (layout.deployment_root(tmp_path) / rel).read_bytes() == b""
+    assert digest == "sha256:" + hashlib.sha256(b"").hexdigest()
+
+
+def test_write_object_refuses_existing_larger_object(tmp_path):
+    digest, rel = layout.write_object(tmp_path, b"abc")
+    dest = layout.deployment_root(tmp_path) / rel
+    dest.write_bytes(b"abcdef")
+    with pytest.raises(layout.ObjectVerificationError):
+        layout.write_object(tmp_path, b"abc")
+    assert dest.read_bytes() == b"abcdef"
 
 
 def test_legacy_fallback_requires_matching_id_and_local_needs_no_root(tmp_path):
@@ -242,12 +346,13 @@ def test_copy_preflight_is_read_only_and_failed_destination_is_retryable(tmp_pat
     assert not destination.exists()
     _root(source).write_bytes(legacy)
     before = {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()}
-    real_write = deployment._atomic_write_bytes
+    real_write = deployment.atomic_write_bytes
 
     def forbid_source_write(path, data):
         assert source not in path.parents
         return real_write(path, data)
 
+    monkeypatch.setattr(deployment, "atomic_write_bytes", forbid_source_write)
     monkeypatch.setattr(deployment, "_atomic_write_bytes", forbid_source_write)
     prep._copy_incumbent(store, destination)
     assert _local(destination.parent).read_bytes() == legacy

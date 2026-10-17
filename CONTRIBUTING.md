@@ -26,7 +26,7 @@ the lines it adds or changes; anything that change makes wrong elsewhere
 the PR adds that cannot work against the current `main` as it stands
 (bring in what's missing rather than deferring it); and any part of a
 pre-existing defect that this PR's change makes worse or newly reachable.
-Fix all of these in the PR — deferring one of them is not allowed, except a non-blocking gate finding that meets the deferral condition in `AGENTS.md` and whose fix would significantly grow scope or complexity; defer that to an issue and note the reason in Gate notes.
+Fix all of these in the PR — deferring one of them is not allowed, except a Should fix or Consider fixing gate finding that the owner rule in `AGENTS.md` lets the owner skip; for a skipped Should fix item, file an issue and note its link and the reason in Gate notes.
 
 A review comment that is real but falls outside that scope — a
 pre-existing defect in code the PR doesn't touch and doesn't make worse or

@@ -481,6 +481,7 @@ tests = [
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_phase5_datasets.py",
     "tests/test_v2_models_releases.py",
+    "tests/v2/models/test_phase5_release_catalogs.py",
     "tests/test_v2_models_residual_artifact.py",
     "tests/test_v2_scoring_frozen_executor.py",
     "tests/test_v2_scoring_frozen_recipes.py",
@@ -488,7 +489,7 @@ tests = [
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
-    "tests/test_v2_scoring_release_bindings.py",
+    "tests/v2/scoring/test_v2_scoring_release_bindings.py",
     "tests/v2/scoring/test_release_gate_policy.py",
     "tests/v2/scoring/test_release_driver_pools.py",
     "tests/v2/scoring/test_release_chooser_states.py",
@@ -515,6 +516,7 @@ tests = [
 [modules.chooser]
 why = "Native DYN-SV chooser: its 67-column feature vector, the frozen chooser analog pool and the ranked choice; a slip changes which structure the board picks."
 mutate = [
+    "engine/v2/scoring/dynamic_outcomes.py",
     "engine/v2/scoring/chooser_inputs.py",
     "engine/v2/scoring/native_chooser.py",
     "engine/v2/scoring/native_chooser_features.py",
@@ -522,8 +524,9 @@ mutate = [
     "engine/v2/models/training/chooser_pool.py",
 ]
 tests = [
+    "tests/v2/scoring/test_dynamic_outcomes.py",
     "tests/test_phase4_capture_strict.py",
-    "tests/test_phase4_chooser_trace.py",
+    "tests/v2/models/test_phase4_chooser_trace.py",
     "tests/test_v2_models_chooser_analog_pool.py",
     "tests/test_v2_scoring_native_chooser_features.py",
     "tests/test_v2_scoring_source_inputs.py",
@@ -538,7 +541,7 @@ mutate = [
 ]
 tests = [
     "tests/test_v2_scoring_native_entry_rule.py",
-    "tests/test_checks_phase5_acceptance.py",
+    "tests/v2/models/test_checks_phase5_acceptance.py",
 ]
 
 [modules.scoring_stages]

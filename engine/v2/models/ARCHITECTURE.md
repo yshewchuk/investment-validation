@@ -171,7 +171,18 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
 
 ### 2.1 Pool release assembly
 
-`checks/phase5_release_assembly.py`, beside the catalog in `checks/phase5_release.py`:
+`release_objects.write_object` returns hash/path in the flat deployment layout; objects are durable before return and publication is create-only. Whole-release concurrency and root ownership stay with callers.
+
+| `write_object` condition | Outcome |
+|---|---|
+| New object | Durable before return; only invocation-owned staging is cleaned; no unbounded read or cross-filesystem copy fallback |
+| Existing/racing identical regular object, or retry | Verify exact bytes (allowance = payload length, including zero) and sync directories; keep the incumbent |
+| Wrong/oversized/unreadable bytes or symlink to a regular file | `ObjectVerificationError` (`ReleaseLayoutError`); incumbent retained |
+| `read_regular_file(path, limit)`: `limit` not a non-negative int (bool excluded) | `ReleaseLayoutError`; nothing is opened |
+| `read_regular_file`: absent path / regular file within `limit` (zero allowed) / directory, FIFO, or longer than `limit` | `None` / its bytes / `ReleaseLayoutError`; a symlink raises `OSError` (callers wrap it) |
+| Dangling/nonregular-target symlink, other collision or publication I/O failure | `ReleaseLayoutError` with original `OSError`; never replace; no catalog/pointer (a complete unreferenced object may remain) |
+
+`checks/phase5_release_assembly.py`, beside the catalog layout in `engine/v2/models/release_layout.py` (object hashing, `write_object` and the bounded catalog read live in `release_objects.py`, re-exported by `release_layout`; the `modules_available` probe stays in `checks/phase5_modules.py` because production code may not import dynamically):
 
 - `derive_catalog(prior_catalog, *, release_id, expected_prior_release_id, outputs, chooser, cutoff) -> dict`
   — pure. Returns the candidate catalog body: the six pool members
@@ -515,7 +526,7 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 - Every non-model frozen-state builder (`training/residuals.py`,
   `training/chooser_pool.py`, …) returns an immutable dataclass; the
   release/state catalog (`phase5_release.json`) is owned by
-  `checks/phase5_release.py` and stored beside each release manifest.
+  `engine/v2/models/release_layout.py` and stored beside each release manifest.
   The release-root copy selects the last staged candidate for existing
   tooling; it is not authority for a different deployed release.
 
@@ -526,6 +537,9 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 `deployment.py` additionally imports nothing outside this package and
 `engine.v2.foundation` (`Clock`, `SystemClock`, `content_hash`,
 `format_timestamp`, `from_document`, `fsync_directory`, `to_document`).
+`release_layout.py` and `release_objects.py` import only this package and `engine.v2.foundation`
+(`content_hash`, `ensure_directory`, `fsync_directory`); `release_objects.py` also uses
+`frozen_state_io.read_bounded_state`.
 
 **Callers** (real import edges, `from engine.v2.models import ...` /
 `from engine.v2.models import deployment`, checked against `README.md`'s
@@ -674,15 +688,15 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 Catalogs live at `<release_root>/deployment/releases/<release_id>/phase5_release.json`.
 Release IDs are validated before path construction; preservation requires
 a matching, hash-verified staged model manifest.
-`checks.phase5_release.read_manifest` selects a candidate using the root copy;
+`release_layout.read_manifest` selects a candidate using the root copy;
 production scoring instead selects the release named by `DEPLOYED`.
 
 | Condition | Outcome |
 |---|---|
 | Selected release-local catalog exists | It is authoritative; schema, self-hash and release identity must validate |
-| Cache | `checks.phase5_release.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
+| Cache | `release_layout.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
-| Local catalog corrupt or unreadable, a symlink or non-regular file, or over 64 MiB (`checks.phase5_release.read_manifest`; scoring `_read_state_catalog` likewise) | Refuse (`ReleaseLayoutError`, scoring `ModelNotReady`); never fall back to a valid root copy |
+| Local catalog corrupt or unreadable, a symlink or non-regular file, or over 64 MiB (`release_layout.read_manifest`; scoring `_read_state_catalog` likewise) | Refuse (`ReleaseLayoutError`, scoring `ModelNotReady`); never fall back to a valid root copy |
 | Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs; incumbent validation is read-only and precedes copying |
 | Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee, except `carry_forward_release` calls, which serialize on `deployment/.carry_forward.lock` (§2.1) |
 | Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |

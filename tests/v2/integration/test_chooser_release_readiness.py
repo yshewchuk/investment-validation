@@ -12,7 +12,7 @@ from engine.v2.scoring import release_bindings
 from engine.v2.scoring.release_bindings import ModelNotReady
 from tests.ops_support import POLICY, REGISTRY, catalog
 from tests.test_v2_ops_native_score_batch import _event_doc, _stage_release, _worker_parameters
-from tests.test_v2_scoring_release_bindings import _row, _write_catalog
+from tests.v2.scoring.test_v2_scoring_release_bindings import _row, _write_catalog
 from tests.v2.scoring.test_release_chooser_states import _artifact, _stored
 
 
