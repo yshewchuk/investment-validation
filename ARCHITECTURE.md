@@ -525,8 +525,8 @@ Only a tracked path absent from the worktree reads as empty.
   actually calls it." An architecture-doc update's production call path
   must trace the real chain — entrypoint → stage → module → new code — not
   cite a passing inventory row as proof.
-- **Native nightly pool/residual refresh (design, cutover PR-13a — proposed,
-  not yet implemented; split from cutover PR-13's original combined design,
+- **Native nightly pool/residual refresh (cutover PR-13a — slices 1–4
+  implemented, three advancing members only; split from cutover PR-13's original combined design,
   #90, after 3 Opus BLOCKs on the combined scope).** A frozen release
   (`engine/v2/models/deployment.py`) is staged and promoted only by an
   operator today; legacy instead rebuilds the analog/residual pools and the

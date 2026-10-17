@@ -1,0 +1,181 @@
+"""Pool-nightly refresh sidecar (#192 slice 4).
+
+Advances the three ``phase5_state_stage`` pool members (``paired_residual_pool``,
+``board_analog_matcher``, ``trailing_pnl_cutoff``) one cutoff per night: the session
+of the latest succeeded legacy ``score`` job. Contract: ARCHITECTURE.md
+"Pool-nightly refresh sidecar". Called from ``Service.tick()``; never a GRAPH node;
+a failure is reported, never raised. Reads durable state only (no memo): each phase
+key is checked against the ``jobs`` table every call, and phase N+1 is submitted
+only once every phase-N job has succeeded.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from engine.v2.foundation import content_hash
+from engine.v2.models import deployment
+from engine.v2.ops import nightly, state_stage, training
+from engine.v2.ops.errors import fail
+from engine.v2.ops.fingerprints import worker_source_manifest
+from engine.v2.ops.native_score_batch import _SHADOW_FILL_ALPHA
+from engine.v2.ops.plans import request_from_plan
+from engine.v2.ops.submission import job_id_for, submit
+
+PHASES = ("train-paired", "train-board", "train-trailing", "stage", "promote")
+TRAINING_PHASES = PHASES[:3]
+
+
+def phase_key(session, phase, prior):
+    return f"nightly:{session}:pool:{phase}:{prior}"
+
+
+def pool_refresh_identity(conn):
+    """``(session, manifest_id)`` from the latest succeeded legacy ``score`` job,
+    or ``None``. Mirrors ``nightly._native_score_batch_identity``: max by
+    (session, created_at, scope_hash) over parseable keys with a usable
+    ``created_at``; ``manifest_id`` is that job's ``legacy_manifest.json`` binding.
+    Returns ``None`` when no score job exists or its binding is absent/not a string."""
+    rows = conn.execute(
+        "SELECT idempotency_key, spec_json, created_at FROM jobs "
+        "WHERE kind = ? AND state = 'succeeded'",
+        (nightly._LEGACY_SCORE_KIND,)).fetchall()
+    candidates = []
+    for row in rows:
+        parsed = nightly._session_scope_from_score_key(row["idempotency_key"])
+        if parsed is None:
+            continue
+        created_at = row["created_at"]
+        if not created_at:
+            continue
+        candidates.append((parsed[0], created_at, parsed[1], row["spec_json"]))
+    if not candidates:
+        return None
+    session, _, _scope, spec_json = max(candidates, key=lambda item: item[:3])
+    parameters = json.loads(spec_json).get("parameters") or {}
+    manifest_id = (parameters.get("input_bindings") or {}).get("legacy_manifest.json")
+    if not isinstance(manifest_id, str) or not manifest_id:
+        return None
+    return session, manifest_id
+
+
+def _exists(conn, key):
+    return conn.execute(
+        "SELECT 1 FROM jobs WHERE job_id = ?",
+        (job_id_for("shadow", key),)).fetchone() is not None
+
+
+def _state(conn, key):
+    row = conn.execute(
+        "SELECT state FROM jobs WHERE job_id = ?",
+        (job_id_for("shadow", key),)).fetchone()
+    return None if row is None else row["state"]
+
+
+def _training_plans(session, manifest_id):
+    return {
+        "train-paired": training.training_plan(
+            mode="state", state="paired_residual_pool", cutoffs=(session,),
+            manifest_ref=manifest_id),
+        "train-board": training.training_plan(
+            mode="board_analog", alpha=_SHADOW_FILL_ALPHA, cutoffs=(session,),
+            manifest_ref=manifest_id),
+        "train-trailing": training.training_plan(
+            mode="trailing_cutoff", cutoffs=(session,), manifest_ref=manifest_id),
+    }
+
+
+def _implementation_ref(code_source):
+    return content_hash(worker_source_manifest(code_source))
+
+
+def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_root, *,
+                                         code_source, clock):
+    """Submit at most the ready phase of the pool-nightly cycle; returns this call's
+    JobReceipts (empty = waiting/idle). ``release_root`` is the store's parent; the
+    deployment dir lives under ``<release_root>/deployment``."""
+    if conn is None:
+        return []
+    identity = pool_refresh_identity(conn)
+    if identity is None:
+        return []
+    session, manifest_id = identity
+    pointer = deployment.current_pointer(Path(release_root) / "deployment")
+    if pointer is None:
+        return []
+    prior = pointer.release_id
+    release_id = f"pools-{session}"
+    if prior == release_id:
+        return []
+
+    built = _training_plans(session, manifest_id)
+    missing = [phase for phase in TRAINING_PHASES
+               if not _exists(conn, phase_key(session, phase, prior))]
+    if missing:
+        receipts = []
+        impl = _implementation_ref(code_source)
+        for phase in missing:
+            plan = built[phase]
+            plan["implementation_ref"] = impl
+            request = request_from_plan(plan, phase_key(session, phase, prior))
+            receipts.append(submit(conn, registry, policy, request, clock=clock))
+        return receipts
+    if any(_state(conn, phase_key(session, phase, prior)) != "succeeded"
+           for phase in TRAINING_PHASES):
+        return []
+
+    stage_key = phase_key(session, "stage", prior)
+    if not _exists(conn, stage_key):
+        state_refs = _state_refs(conn, session, prior, code_source)
+        plan = state_stage.state_stage_plan(
+            release_root=str(release_root), prior_release_id=prior,
+            release_id=release_id, cutoff=session, state_refs=state_refs,
+            source_root=code_source)
+        return [submit(conn, registry, policy,
+                       request_from_plan(plan, stage_key), clock=clock)]
+    if _state(conn, stage_key) != "succeeded":
+        return []
+
+    promote_key = phase_key(session, "promote", prior)
+    if _exists(conn, promote_key):
+        return []
+    plan = training.promote_plan(
+        release_root=str(Path(release_root) / "deployment"),
+        release_id=release_id, expected_previous_release_id=prior)
+    plan["implementation_ref"] = _implementation_ref(code_source)
+    return [submit(conn, registry, policy,
+                   request_from_plan(plan, promote_key), clock=clock)]
+
+
+def _state_refs(conn, session, prior, code_source):
+    """Latest succeeded attempt's plain ``training/*.json`` outputs across the three
+    training jobs, keyed by file remainder (``paired.json`` etc.). A duplicate name
+    or an empty set is ``VALIDATION_FAILED``; summaries (``*.summary.json``) and
+    nested (``__``) names are excluded."""
+    state_refs = {}
+    for phase in TRAINING_PHASES:
+        key = phase_key(session, phase, prior)
+        job_id = job_id_for("shadow", key)
+        attempt = conn.execute(
+            "SELECT attempt_id FROM attempts WHERE job_id = ? AND state = 'succeeded' "
+            "ORDER BY attempt_number DESC LIMIT 1", (job_id,)).fetchone()
+        if attempt is None:
+            raise fail("VALIDATION_FAILED", "a training job has no succeeded attempt",
+                       details={"job_id": job_id})
+        for name, _artifact in conn.execute(
+                "SELECT name, artifact_id FROM attempt_outputs WHERE attempt_id = ?",
+                (attempt["attempt_id"],)).fetchall():
+            if not name.startswith("training/") or not name.endswith(".json"):
+                continue
+            if name.endswith(".summary.json"):
+                continue
+            remainder = name[len("training/"):]
+            if "__" in remainder:
+                continue
+            if remainder in state_refs:
+                raise fail("VALIDATION_FAILED", "a state file name appears twice",
+                           details={"name": remainder})
+            state_refs[remainder] = f"{job_id}#{name}"
+    if not state_refs:
+        raise fail("VALIDATION_FAILED", "no training state files to stage")
+    return state_refs

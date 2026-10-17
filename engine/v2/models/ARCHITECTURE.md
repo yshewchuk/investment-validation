@@ -56,7 +56,7 @@ caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
 An automated nightly append cycle for the pool/residual/cutoff artifacts:
-release assembly is §2.1; the rest is design only — see #192.
+release assembly is §2.1, staging §2.2, and the three-phase tick sidecar is §2.3; see #192.
 
 ## 2. Primary contracts and public interfaces
 
@@ -217,6 +217,31 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 | R4 transaction | New objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `stage_result.json` follows the light checks |
 | R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
 | R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
+
+### 2.3 Pool-nightly refresh sidecar (`Service._reconcile_pool_nightly_refresh`, #192 slice 4)
+
+Called from `Service.tick()` beside the other sidecars (`engine/v2/ops/pool_refresh.py`); never a `GRAPH` node, and a
+failure never blocks required job dispatch. It advances only the three members `phase5_state_stage` stages
+(`paired_residual_pool`, `board_analog_matcher`, `trailing_pnl_cutoff`); driver pools and the chooser stay carried (monthly
+retrain is PR-13b, #805). It trains at one cutoff per night: the session of the latest succeeded legacy `score` job. Alpha is
+the shadow fill alpha 0.5 (`engine.fills.MID`, as `native_score_batch._SHADOW_FILL_ALPHA`); strategies are the board's
+registered set (the `strategies=()` default of the `board_analog` mode). Selection stays exact-key with no latest fallback: a
+row whose cutoff is not the session cutoff still needs a release carrying it, which this does not provide (follow-up #825:
+exact-cutoff payoff artifacts and per-row cutoffs).
+
+Phases, each only after the previous succeeded: (1) three `training` jobs (`state` `paired_residual_pool`, `board_analog`,
+`trailing_cutoff`) bound to the session's `legacy_manifest.json` artifact; (2) one `phase5_state_stage` job staging release
+`pools-<session>` over the deployed release, with state files taken from the training attempts' plain `training/*.json`
+outputs; (3) one `models_promote` job guarded by `expected_previous_release_id` = the prior release.
+
+| Rule | Behaviour |
+|---|---|
+| R1 verified input | session and manifest id from the latest succeeded `score` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing one submits nothing |
+| R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
+| R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls for operator recovery (#154) |
+| R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |
+| R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; the prior release stays deployed |
+| R6 idempotency | keys `nightly:<session>:pool:<phase>:<prior release id>` are stable; a deployed release already named `pools-<session>` ends the cycle |
 
 ## 3. Inputs
 
