@@ -225,7 +225,10 @@ def registry_jobs(owner: str, official_kinds=(), non_official_kinds=()) -> list[
     return rows
 
 
-def assemble(spec: dict, out_dir: Path) -> dict:
+_OUTPUT_NAMES = ("job_graph.json", "consumer_inventory.json", "manifest.json")
+
+
+def assemble(spec: dict, out_dir: Path, spec_path: Path | None = None) -> dict:
     spec = _obj("spec", spec)
     out_dir = Path(out_dir).resolve()
     if out_dir.is_relative_to(ROOT.resolve()):
@@ -273,6 +276,16 @@ def assemble(spec: dict, out_dir: Path) -> dict:
                                 agree=("schema_version", "status"))
                            for i, r in enumerate(evidence)],
     }
+    reserved = {(out_dir / name).resolve() for name in _OUTPUT_NAMES}
+    inputs = [Path(ref["path"]).resolve() for ref in (
+        *manifest["candidate"]["config"], manifest["data_snapshot"],
+        manifest["model_deployment"], *manifest["phase_evidence"])]
+    if spec_path is not None:
+        inputs.append(Path(spec_path).resolve())
+    clash = sorted(str(p) for p in reserved.intersection(inputs))
+    if clash:
+        raise SpecError(f"out-dir: output file(s) {clash} are also the spec or a referenced "
+                        "input; writing them would destroy the pinned evidence")
     try:
         found = discover_entrypoints(ROOT)
     except (SyntaxError, OSError, ValueError) as exc:
@@ -307,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        manifest = assemble(load_spec(args.spec), args.out_dir)
+        manifest = assemble(load_spec(args.spec), args.out_dir, spec_path=args.spec)
     except (SpecError, OSError, ValueError) as exc:
         print(f"spec unusable: {exc}", file=sys.stderr)
         return 2

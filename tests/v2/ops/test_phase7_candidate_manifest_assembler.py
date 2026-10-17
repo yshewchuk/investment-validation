@@ -690,3 +690,28 @@ def test_assemble_takes_no_root_override(spec, tmp_path):
 def test_registry_jobs_validates_input_shape_on_direct_calls(args, match):
     with pytest.raises(asm.SpecError, match=match):
         asm.registry_jobs(*args)
+
+
+@pytest.mark.parametrize("key, name", [
+    ("model_deployment", "manifest.json"),
+    ("data_snapshot", "job_graph.json"),
+])
+def test_output_may_not_overwrite_a_referenced_input(spec, tmp_path, key, name):
+    out = _out(tmp_path)
+    out.mkdir(parents=True, exist_ok=True)
+    target = out / name
+    target.write_text(Path(spec[key]["path"]).read_text())
+    spec[key]["path"] = str(target)
+    before = target.read_bytes()
+    with pytest.raises(asm.SpecError, match=r"also the spec or a referenced input"):
+        asm.assemble(spec, out)
+    assert target.read_bytes() == before
+
+
+def test_output_may_not_overwrite_the_spec_file(spec, tmp_path):
+    out = _out(tmp_path)
+    out.mkdir(parents=True, exist_ok=True)
+    spec_file = out / "manifest.json"
+    spec_file.write_text(json.dumps(spec))
+    assert asm.main(["--spec", str(spec_file), "--out-dir", str(out)]) == 2
+    assert json.loads(spec_file.read_text()) == spec
