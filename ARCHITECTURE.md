@@ -451,7 +451,8 @@ Only a tracked path absent from the worktree reads as empty.
 
 ## 4. Production entrypoints and the job graph
 
-- **Gate sweep staging — `python -m experiments.v2_gate_sweep register|submit --no-ledger`.** Explicit operator registration/submission; `ops serve` runs independent evaluation children. No scientific collection or completed sweep index; see the [sweep contract](experiments/ARCHITECTURE.md#sealed-gate-sweep-submission).
+- **Gate sweep staging — `python -m experiments.v2_gate_sweep register|submit --no-ledger`.** Explicit operator registration/submission; `ops serve` runs independent evaluation children. The staging commands do not collect scientific results or complete a sweep index; see the [sweep contract](experiments/ARCHITECTURE.md#sealed-gate-sweep-submission).
+- **Gate sweep collection — `python -m experiments.v2_gate_collect collect|run`.** Explicit observer/coordinator publication over those exact jobs; records or smoke-collects according to the [collection contract](experiments/ARCHITECTURE.md#scientific-gate-sweep-collection).
 - **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
 - **Massive acquisition — `python -m engine.v2.ops.massive_acquire`.** Explicit shadow-job submission; `ops serve` performs bounded, cache-first REST acquisition. See the [acquisition contract](engine/v2/ops/stores/massive/ARCHITECTURE.md).
 - **Massive snapshot — `python -m engine.v2.ops.massive_snapshot`.** A separate supervised offline job normalizes saved daily/action pins into a reconstructed native snapshot, optionally refreshing an explicit parent interval; research uses the data layer's bounded pinned reader. [Contract](engine/v2/ops/stores/massive/ARCHITECTURE.md#invariants).
@@ -767,6 +768,10 @@ change their arithmetic or imply that source receipt production is available.
   override. `tools/phase6_inventory.py` currently does this
   (`ROOT = Path(__file__).resolve().parents[1]`) — treat that as the
   pattern to avoid, not to copy, when adding a sibling tool.
+  Exception: `experiments.native_sweep_collection` derives its installed
+  implementation root from `__file__` solely to compare the collector's
+  on-disk source snapshot. Caller data, store and snapshot paths still use
+  their explicit roots; this neither attests loaded bytecode nor bounds code resources.
 - **Failure semantics are stated, not implied.** Every new or changed
   stage/effect states its behaviour for: a missing input, a cache, a retry,
   a transaction, a partial write, and idempotency (the 4c R1–R6 template —

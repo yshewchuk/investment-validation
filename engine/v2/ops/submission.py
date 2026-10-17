@@ -58,6 +58,7 @@ __all__ = [
     "NamespacePolicy",
     "RetryPolicy",
     "get_job",
+    "MAX_JOB_FAILURE_BYTES",
     "job_id_for",
     "request_digest",
     "submit",
@@ -67,6 +68,8 @@ __all__ = [
 
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _BLOCKING_PARENT_STATES = frozenset({"failed", "cancelled", "blocked"})
+# Same byte ceiling as executor result pipes; diagnostics belong in artifacts.
+MAX_JOB_FAILURE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -349,9 +352,28 @@ def _parents(conn: sqlite3.Connection, request: SubmitRequest,
 
 
 def get_job(conn: sqlite3.Connection, job_id: str) -> JobReceipt:
-    row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    """Read a receipt; cap failure text before transfer/decoding, never truncate."""
+    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
+    limit = MAX_JOB_FAILURE_BYTES * (2 if encoding.startswith("UTF-16") else 1)
+    row = conn.execute(
+        "SELECT job_id, namespace, idempotency_key, request_digest, kind, spec_hash, state, priority, "
+        "created_at, fence, attempt_count, active_attempt_id, next_eligible_at, queue_reason_json, "
+        "failure_json IS NOT NULL AS has_failure, CASE WHEN typeof(failure_json)='text' "
+        "AND length(CAST(failure_json AS BLOB))<=? THEN CAST(failure_json AS BLOB) END AS failure_json "
+        "FROM jobs WHERE job_id=?", (limit, job_id)).fetchone()
     if row is None:
         raise fail("INVALID_REQUEST", "unknown job", details={"reason": "not_found"})
+    failure = None
+    try:
+        if row["has_failure"]:
+            if row["failure_json"] is None:
+                raise fail("INTEGRITY_FAILED", "stored job failure requires bounded text")
+            failure = row["failure_json"].decode(encoding)
+            if len(failure.encode("utf-8")) > MAX_JOB_FAILURE_BYTES:
+                raise fail("INTEGRITY_FAILED", "stored job failure exceeds its UTF-8 byte bound")
+        failure = load_json(Problem, failure)
+    except (ValueError, RecursionError):
+        raise fail("INTEGRITY_FAILED", "stored job failure cannot be decoded") from None
     resources = None
     if row["active_attempt_id"] is not None:
         attempt = conn.execute("SELECT resources_json FROM attempts WHERE attempt_id = ?",
@@ -381,5 +403,5 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> JobReceipt:
         output_refs=tuple(row[0] for row in output_rows),
         latest_progress=None if progress is None else load_json(ProgressEvent,
                                                                 progress["body_json"]),
-        failure=load_json(Problem, row["failure_json"]),
+        failure=failure,
     )
