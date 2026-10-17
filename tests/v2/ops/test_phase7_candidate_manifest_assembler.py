@@ -678,3 +678,15 @@ def test_registry_jobs_validates_decisions_on_direct_calls():
 def test_assemble_takes_no_root_override(spec, tmp_path):
     with pytest.raises(TypeError):
         asm.assemble(spec, _out(tmp_path), root=tmp_path)
+
+
+@pytest.mark.parametrize("args, match", [
+    (("o", None, ()), r"official_registry_kinds: must be a list of registry"),
+    (("o", [["experiment"]], ()), r"official_registry_kinds: must be a list of registry"),
+    (("o", (), None), r"non_official_registry_kinds: must be a list of registry"),
+    ((None, (), ("experiment",)), r"registry_owner: required string"),
+    ((5, (), ("experiment",)), r"registry_owner: required string"),
+])
+def test_registry_jobs_validates_input_shape_on_direct_calls(args, match):
+    with pytest.raises(asm.SpecError, match=match):
+        asm.registry_jobs(*args)

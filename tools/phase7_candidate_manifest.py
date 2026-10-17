@@ -170,6 +170,14 @@ def check_commit(spec: dict, root: Path) -> str:
 _SAFE_NAMESPACES = frozenset({"shadow", "smoke"})
 
 
+def _kind_set(key: str, value) -> set:
+    known = set(stages.registry().names())
+    if not isinstance(value, (list, tuple, set, frozenset)) \
+            or not all(isinstance(k, str) and k in known for k in value):
+        raise SpecError(f"{key}: must be a list of registry job kind names")
+    return set(value)
+
+
 def registry_jobs(owner: str, official_kinds=(), non_official_kinds=()) -> list[dict]:
     """One row per job kind in the live registry. A kind is an official writer when
     its namespaces include ``official`` or the operator lists it in
@@ -187,13 +195,13 @@ def registry_jobs(owner: str, official_kinds=(), non_official_kinds=()) -> list[
     other namespace is refused unless listed in ``official_registry_kinds`` (then it is the
     official writer), and a shadow-only one may not be listed official."""
     reg, rows = stages.registry(), []
-    for key, decided in (("official_registry_kinds", official_kinds),
-                         ("non_official_registry_kinds", non_official_kinds)):
-        if not set(decided) <= set(reg.names()):
-            raise SpecError(f"{key}: must be a list of registry job kind names")
-    if set(official_kinds) & set(non_official_kinds):
+    if not isinstance(owner, str) or not owner:
+        raise SpecError("registry_owner: required string")
+    official_kinds = _kind_set("official_registry_kinds", official_kinds)
+    non_official_kinds = _kind_set("non_official_registry_kinds", non_official_kinds)
+    if official_kinds & non_official_kinds:
         raise SpecError("official_registry_kinds and non_official_registry_kinds overlap: "
-                        f"{sorted(set(official_kinds) & set(non_official_kinds))}")
+                        f"{sorted(official_kinds & non_official_kinds)}")
     for name in reg.names():
         kind = reg.get(name)
         writes_store = any(mode == "write" for _, mode in kind.store_domains)
@@ -217,13 +225,6 @@ def registry_jobs(owner: str, official_kinds=(), non_official_kinds=()) -> list[
     return rows
 
 
-def _kind_list(spec: dict, key: str) -> set:
-    value, known = spec.get(key, []), set(stages.registry().names())
-    if not isinstance(value, list) or not all(isinstance(k, str) and k in known for k in value):
-        raise SpecError(f"{key}: must be a list of registry job kind names")
-    return set(value)
-
-
 def assemble(spec: dict, out_dir: Path) -> dict:
     spec = _obj("spec", spec)
     out_dir = Path(out_dir).resolve()
@@ -231,14 +232,8 @@ def assemble(spec: dict, out_dir: Path) -> dict:
         raise SpecError("out-dir: must be outside the repository")
     commit = check_commit(spec, ROOT)  # the checkout whose registry is imported above
     owner = spec.get("registry_owner")
-    if not isinstance(owner, str) or not owner:
-        raise SpecError("registry_owner: required string")
-    official_kinds = _kind_list(spec, "official_registry_kinds")
-    non_official_kinds = _kind_list(spec, "non_official_registry_kinds")
-    if official_kinds & non_official_kinds:
-        raise SpecError("official_registry_kinds and non_official_registry_kinds overlap: "
-                        f"{sorted(official_kinds & non_official_kinds)}")
-    jobs = registry_jobs(owner, official_kinds, non_official_kinds)
+    jobs = registry_jobs(owner, spec.get("official_registry_kinds", []),
+                         spec.get("non_official_registry_kinds", []))
     seen = {j["id"] for j in jobs}
     for extra in _rows("extra_jobs", spec.get("extra_jobs", [])):
         jid = extra.get("id")
