@@ -99,9 +99,10 @@ evidence. See the models and data component contracts.
   owners (`engine.v2.ops.executor`, `engine.v2.ops.legacy_adapter`). A
   legacy module importing `checks/` or `tests/`, or shelling out from
   outside those two modules, is not enforced against by either rule.
-  Known exception: `engine.v2.ops.state_stage` reaches `checks/phase5_release*`
-  through `tools/phase5_state_stage_job.py` (no direct import); it ends when the release
-  catalog and assembly helpers move into `engine/v2/models` (#807).
+  Known exception: `engine.v2.ops.state_stage` reaches
+  `checks/phase5_release_assembly.py` through `tools/phase5_state_stage_job.py` (no direct
+  import); the catalog layout already lives in `engine/v2/models`, and the exception ends
+  when the assembly helpers move there too (#807).
 - **Operator CLIs and experiments.** These operator and research entrypoints
   may call into the legacy and v2 engines. They are not uniformly leaf-only:
   `engine.v2.ops.training` imports the `phase5_training_job` module while
@@ -510,7 +511,47 @@ Only a tracked path absent from the worktree reads as empty.
   never abort the required graph); `Service._reconcile_native_parity`,
   calling `nightly.submit_native_parity_if_ready`, submits
   `native_parity` the identical way; `Service._reconcile_pool_nightly_refresh`
-  submits the pool-refresh phases (training, stage, promote) one at a time.
+  submits the pool-refresh phases (training, stage, promote), each only after
+  the previous one succeeded.
+- **Assembling the P7-1 manifest.** `tools/phase7_candidate_manifest.py` is an
+  operator-run assembler (no production caller; listed here beside its
+  sibling Phase 6 inventory tool) for
+  `checks/phase7_candidate_manifest.py`. It takes one operator spec file
+  (path on the command line; keep it outside the repository, which nothing
+  enforces) with the commit, evidence paths, `authority` values and extra
+  jobs; the tool docstring lists the keys and size caps. The job graph comes
+  from the live `stages.registry()` and the consumer inventory from
+  `phase6_inventory.discover_entrypoints`, both of this checkout. It writes
+  the two documents plus `manifest.json` into `--out-dir` (created with its
+  parents) and nothing else; the manifest echoes `authority` and absolute
+  paths, so it is private like the spec. A kind that can run outside
+  `shadow`/`smoke`/`official` (today `experiment`) is refused until the spec lists it in
+  `official_registry_kinds` or `non_official_registry_kinds`. User sign-offs
+  (2026-10-16): consumer-inventory rows are exempt from the implicit-latest
+  rule (the dashboard reads the moving current-release pointer); and a kind
+  holding a store `write` lease (`models_promote`, `models_rollback`) is an
+  operator action of its side, not an official scheduled writer, allowed only
+  while its registry namespaces are within `shadow`/`smoke` and refused
+  otherwise unless listed official. That is the registry's declaration, not an
+  enforced guarantee: the plan builders still default an omitted release root
+  to the production root (issue #808), so a caller must pass a non-production
+  root.
+
+  | Condition | Outcome |
+  |---|---|
+  | spec missing/oversize/not a JSON object, a section of the wrong shape, a duplicate or colliding extra-job id, missing `commit` or `registry_owner`, a referenced file missing or over the cap | exit 2, nothing written for that run beyond files already produced |
+  | spec file unreadable, not decodable JSON, or an uncreatable `--out-dir` | exit 2 |
+  | `git` times out, is missing or fails during the commit check | exit 2 |
+  | the checker's input manifest is unreadable or larger than 256 MiB | checker exit 2 |
+  | spec `commit` differs from this checkout's `HEAD`, or tracked files are modified, or untracked files or ignored `*.py` sources sit under `engine/`, `tools/`, `dashboard/`, `checks/` or `experiments/` | exit 2 (registry and inventory would describe another commit) |
+  | a registry kind that can run outside `shadow`/`smoke`/`official` (today `experiment`) is in neither `official_registry_kinds` nor `non_official_registry_kinds` | exit 2 (fail closed) |
+  | a store-write-lease kind that can run outside `shadow`/`smoke` is not in `official_registry_kinds`, or a shadow-only one is | exit 2 |
+  | `--out-dir` inside the repository | exit 2 |
+  | any other registry kind | job kind `background` when it declares effects, else `reader`; `writes_official` false (`scheduled_writer`/true only for `official` or an operator-listed kind) |
+  | a rule only the checker owns is broken (phase outside 3B/4/5/6, `authority` sub-keys missing or blank, owner/schedule rules) | exit 1, manifest still written |
+  | the checker reports findings | exit 1, manifest still written |
+  | the checker passes | exit 0 |
+
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
@@ -682,6 +723,11 @@ change their arithmetic or imply that source receipt production is available.
   calculated answer in (a forbidden-field map) or that arrives with a
   prebuilt geometry or pricing object. Legacy records are expected values
   for a comparator only — never a native input.
+  This contract adds a migration exception: `training.build_d14_dataset` for monthly
+  `implied_t1`/`runup_move`: it retains imported `feature_panel` history
+  with explicit snapshot/receipt/calendar/table-version lineage.
+  This is compatibility history, not native historical production or proof of
+  EOD availability/finality. Native scoring/capture's answer-free rule is unchanged.
 - **Missing input → typed refusal, never a silent default.** A missing or
   unusable input produces an explicit withheld/refused status (see
   `Problem`/`FAILURE_CODES` in `engine/v2/contracts/operations.py`, and

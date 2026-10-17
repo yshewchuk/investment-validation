@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from checks import phase5_release
+from engine.v2.models import release_layout as phase5_release
 from checks import phase5_release_assembly as assembly
 from engine.v2.foundation import ArtifactError
 from engine.v2.models import (

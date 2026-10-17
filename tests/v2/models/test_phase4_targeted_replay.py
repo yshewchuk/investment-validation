@@ -15,7 +15,7 @@ Three things these prove, on small synthetic fixtures (never the real corpus):
 Stub shapes follow ``tests/test_phase4_real_row_evidence.py`` (only
 ``_verified_trace_bundle``/``_replayed_member`` are stubbed; the real
 ``_record_checks`` runs). The real-trace pair is built by the same
-``package_strict_trace`` recipe as ``tests/test_checks_phase5_phase4_replay.py``.
+``package_strict_trace`` recipe as ``tests/v2/models/test_checks_phase5_phase4_replay.py``.
 """
 from __future__ import annotations
 
@@ -503,9 +503,9 @@ def test_trace_verified_but_replay_refused_keeps_trace_verified(tmp_path, monkey
 
 def _strict_trace_corpus(tmp_path) -> Path:
     """One genuinely traced STR-THRU pair, built by Phase 4's own tooling
-    (adapted from tests/test_checks_phase5_phase4_replay.py::_corpus)."""
+    (adapted from tests/v2/models/test_checks_phase5_phase4_replay.py::_corpus)."""
     from checks.phase4_frozen_bridge import prepare_frozen_replay
-    from tests.test_checks_phase5_acceptance import CLOCK, _linear
+    from tests.v2.models.test_checks_phase5_acceptance import CLOCK, _linear
     from tools.capture_tier0_corpus import make_pair, package_strict_trace
     from tools.phase4_request_translation import canonical_request_from_legacy
     from tools.phase4_frozen_resources import package_frozen_resources

@@ -60,7 +60,9 @@ failure rather than a stale sentence.
 `engine/v2/ops` composes the panel row/anchor into native nightly raw-row events.
 `engine/v2/research` uses pure history arithmetic after its own input admission.
 
-<!-- consumers: engine.v2.ops, engine.v2.scoring, engine.v2.research -->
+`engine/v2/models/training` uses pure daily-state arithmetic for monthly D14 inputs.
+
+<!-- consumers: engine.v2.ops, engine.v2.scoring, engine.v2.research, engine.v2.models.training -->
 
 ## Usage
 

@@ -16,7 +16,6 @@ from types import SimpleNamespace
 import joblib
 import pytest
 
-from checks import phase5_release as layout
 from engine.v2.foundation import DocumentError, content_hash, from_document, to_document
 from engine.v2.models import (
     ArtifactMember,
@@ -25,6 +24,8 @@ from engine.v2.models import (
     ModelRelease,
     deployment,
     frozen_state_io,
+    release_layout as layout,
+    release_objects,
 )
 from engine.v2.models.serving_folds import (
     ChooserFoldPolicy,
@@ -32,7 +33,7 @@ from engine.v2.models.serving_folds import (
     ServingFoldDescriptor,
     SizeFoldPolicy,
 )
-from tests.test_phase5_pinned_panel import ALL_ONE, build_pinned
+from tests.v2.models.test_phase5_pinned_panel import ALL_ONE, build_pinned
 from tests.v2.models.serving_fold_support import (
     catalog_object,
     chooser_policy,
@@ -58,7 +59,7 @@ def test_shared_object_publication_orders_durability_and_preserves_retry(tmp_pat
     old_temp = dest.with_suffix(".tmp")
     old_temp.write_bytes(b"unrelated former temporary file")
     events = []
-    real_sync, real_link, real_dir_sync = os.fsync, os.link, layout.fsync_directory
+    real_sync, real_link, real_dir_sync = os.fsync, os.link, release_objects.fsync_directory
 
     def sync(fd):
         if stat.S_ISREG(os.fstat(fd).st_mode):
@@ -74,9 +75,9 @@ def test_shared_object_publication_orders_durability_and_preserves_retry(tmp_pat
         real_dir_sync(path)
         events.append(("directory", path))
 
-    monkeypatch.setattr(layout.os, "fsync", sync)
-    monkeypatch.setattr(layout.os, "link", link)
-    monkeypatch.setattr(layout, "fsync_directory", sync_directory)
+    monkeypatch.setattr(release_objects.os, "fsync", sync)
+    monkeypatch.setattr(release_objects.os, "link", link)
+    monkeypatch.setattr(release_objects, "fsync_directory", sync_directory)
     expected = ("sha256:" + digest, "objects/" + digest)
     assert layout.write_object(tmp_path, payload) == expected
     assert [event[0] for event in events] == ["file", "link", "directory", "directory"]
@@ -104,7 +105,7 @@ def test_shared_object_concurrent_publishers_use_unique_no_clobber_temps(tmp_pat
         barrier.wait(timeout=5)
         real_link(source, dest)
 
-    monkeypatch.setattr(layout.os, "link", concurrent_link)
+    monkeypatch.setattr(release_objects.os, "link", concurrent_link)
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda data: layout.write_object(tmp_path, data), payloads))
     assert len(set(sources)) == 2
@@ -127,7 +128,7 @@ def test_object_publication_failure_never_publishes_catalog_and_retry_is_safe(
     error = OSError(errno.EXDEV if failure == "link" else errno.EIO, "synthetic publication failure")
     handles = []
     real_open, real_fsync, real_link = Path.open, os.fsync, os.link
-    real_dir_sync = layout.fsync_directory
+    real_dir_sync = release_objects.fsync_directory
 
     class FileProbe:
         def __init__(self, handle):
@@ -177,9 +178,9 @@ def test_object_publication_failure_never_publishes_catalog_and_retry_is_safe(
 
     with monkeypatch.context() as patch:
         patch.setattr(Path, "open", open_file)
-        patch.setattr(layout.os, "fsync", sync)
-        patch.setattr(layout.os, "link", link)
-        patch.setattr(layout, "fsync_directory", sync_directory)
+        patch.setattr(release_objects.os, "fsync", sync)
+        patch.setattr(release_objects.os, "link", link)
+        patch.setattr(release_objects, "fsync_directory", sync_directory)
         with pytest.raises(layout.ReleaseLayoutError) as caught:
             prep.write_release(out, *release_inputs(role, cache), fold_states(role, cache))
     assert type(caught.value) is layout.ReleaseLayoutError
@@ -201,7 +202,7 @@ def test_object_publication_failure_never_publishes_catalog_and_retry_is_safe(
         real_dir_sync(path)
         synced.append(path)
 
-    monkeypatch.setattr(layout, "fsync_directory", retry_sync)
+    monkeypatch.setattr(release_objects, "fsync_directory", retry_sync)
     prep.write_release(out, *release_inputs(role, cache), fold_states(role, cache))
     _assert_published_descriptor(out, role, cache)
     assert synced == [dest.parent, dest.parent.parent]
@@ -232,7 +233,7 @@ def test_object_publication_never_clobbers_a_racing_destination(tmp_path, role, 
         planted.append((target, target.lstat()))
         real_link(source, target)
 
-    monkeypatch.setattr(layout.os, "link", collision)
+    monkeypatch.setattr(release_objects.os, "link", collision)
     expected = prep.PrepareRefused if shape in ("wrong", "symlink") else layout.ReleaseLayoutError
     with pytest.raises(expected) as caught:
         prep.write_release(out, *release_inputs(role, cache), fold_states(role, cache))
@@ -1103,7 +1104,7 @@ def test_direct_state_guards_refuse_before_any_publication(tmp_path, role, defec
 
 def test_existing_size_cli_case_with_synthetic_registered_producer(tmp_path, monkeypatch):
     from engine.data.features import tier4
-    from tests.test_phase5_serving_folds import test_cli_gets_explicit_registered_policy as original
+    from tests.v2.models.test_phase5_serving_folds import test_cli_gets_explicit_registered_policy as original
 
     cache = _cache("size")
     monkeypatch.setattr(tier4, "size_feature_model", lambda: SimpleNamespace(

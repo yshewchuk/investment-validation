@@ -19,12 +19,17 @@ Input manifest schema ``phase7_candidate_manifest.v1.0``
 --------------------------------------------------------
 Every key listed is required; an unknown key at any strict level is a
 finding (a typo must not silently disable a control). All identity strings
-must be exact: an empty value, or one of ``latest``/``current``/``newest``/
+(except consumer names, which are labels) must be exact: an empty value, or one of ``latest``/``current``/``newest``/
 ``head``/``main``/``master``/``trunk``/``stable``/``prod``/``production``/
 ``live``/``default`` — alone, as a ``:``-suffix (``deploy:current``,
 ``image:stable``), or as the last path segment — is rejected; trailing
 ``/`` and ``:`` separators are normalized away first, so ``refs/heads/main/``
 is caught exactly like ``refs/heads/main``.
+
+Every referenced file is read at most ``MAX_REF_BYTES`` (256 MiB) plus one
+byte in a single call; a larger file is refused with a ``P7_REF_MALFORMED``
+finding. A FIFO or device node is refused as missing (``is_file``); the residual is an ``is_file``-then-open race on operator-named paths.
+The manifest file itself is read under the same cap by ``load_manifest``; a larger one raises ``ManifestUnreadable`` (exit 2).
 
 ``candidate``: ``{"commit": "<40- or 64-hex git sha>", "config": [{"name", "path",
 "sha256"}]}`` — at least one config identity; every referenced file must
@@ -50,10 +55,17 @@ carries a string ``id``, a string ``schedule`` and a real JSON boolean
 are findings, never silently converted. The two job sets must agree exactly
 (id and schedule per id), so a scheduled job that exists but is not
 accounted for, or an accounted job the graph does not run, both fail.
+A graph row may also carry ``kind`` and ``owner`` (the assembler always writes
+them); when present they must equal the accounted job's, otherwise
+``P7_REF_MISMATCH``. They are optional because the v1.0 graph document schema
+is {id, schedule, writes_official}.
 
 ``consumer_inventory``: ``{"path", "sha256", "consumers": ["<name>", ...]}``
 — a non-empty list of name strings; a dict, list or other nonstring entry
-is a named finding. The referenced document must contain every declared
+is a named finding. Consumer names are labels, not pinned refs: by user decision (2026-10-16) a consumer
+row is exempt from the implicit-latest rule, because the dashboard legitimately reads the
+moving current-release pointer (e.g. ``GET /release/current``). Only a blank, non-string
+or repeated name is rejected. The referenced document must contain every declared
 consumer name (as an ``id``/``name``/``consumer`` value anywhere in it).
 
 ``authority``: ``{"old": {"schedule", "writer", "credential_owner"},
@@ -105,6 +117,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SCHEMA = "phase7_candidate_manifest.v1.0"
 JOB_KINDS = ("scheduled_writer", "background", "reader")
 REQUIRED_PHASES = ("3B", "4", "5", "6")
+MAX_REF_BYTES = 256 * 1024 * 1024
 
 #: Identity values that mean "whatever is live now" — exactly what P7-1
 #: forbids ("no implicit latest dependency").
@@ -273,7 +286,12 @@ def _read_verified(findings: _Findings, subject: str, path: Any, digest: Any,
     if target is None or want is None:
         return None
     try:
-        data = target.read_bytes()
+        with target.open("rb") as handle:
+            data = handle.read(MAX_REF_BYTES + 1)
+        if len(data) > MAX_REF_BYTES:
+            findings.add(REF_MALFORMED, subject,
+                         f"{target} exceeds the {MAX_REF_BYTES}-byte reference cap")
+            return None
     except OSError as exc:
         findings.add(REF_MISSING, subject, f"{target}: {type(exc).__name__}")
         return None
@@ -447,6 +465,10 @@ def _check_job_graph(graph: Mapping, findings: _Findings, root: Path) -> list[di
         if row.get("schedule") != job.get("schedule"):
             findings.add(REF_MISMATCH, f"job:{jid}", f"graph schedule {row.get('schedule')!r} "
                                                      f"!= accounted {job.get('schedule')!r}")
+        for field in ("kind", "owner"):
+            if field in row and row[field] != job.get(field):
+                findings.add(REF_MISMATCH, f"job:{jid}",
+                             f"graph {field} {row[field]!r} != accounted {job.get(field)!r}")
         official = row.get("writes_official")
         kind = job.get("kind")
         if official is True and kind != "scheduled_writer":
@@ -533,7 +555,11 @@ def _check_consumer_inventory(inv: Mapping, findings: _Findings, root: Path) -> 
             findings.add(BAD_CONSUMER, f"consumer_inventory.consumers[{i}]",
                          f"entry {name!r} is not a consumer name string")
             continue
-        _identity(findings, "consumer_inventory", "consumer", name)
+        # A consumer name is a label (a real route may end in ``/current``), not a pinned
+        # ref, so only emptiness is rejected; the implicit-latest rule applies to refs.
+        if not name.strip():
+            findings.add(MISSING_FIELD, "consumer_inventory", "consumer name is empty")
+            continue
         if name in seen:
             findings.add(DUPLICATE, f"consumer:{name}", "consumer listed twice")
         seen.add(name)
@@ -680,7 +706,11 @@ def validate(manifest: Any, root: Path | str = ROOT) -> dict:
 
 def load_manifest(path: Path | str) -> Any:
     try:
-        return json.loads(Path(path).read_text())
+        with Path(path).open("rb") as handle:
+            data = handle.read(MAX_REF_BYTES + 1)
+        if len(data) > MAX_REF_BYTES:
+            raise ValueError(f"manifest exceeds {MAX_REF_BYTES} bytes")
+        return json.loads(data)
     except (OSError, ValueError) as exc:
         raise ManifestUnreadable(f"{path}: {exc}") from exc
 

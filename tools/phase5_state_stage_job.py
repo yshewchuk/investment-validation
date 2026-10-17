@@ -86,7 +86,7 @@ def check_trailing_months(new: dict[str, dict[str, bytes]], cutoff: str) -> None
 
 def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
     """Re-read the candidate catalog and staged manifest; refuse unless it matches the request."""
-    from checks import phase5_release as rel
+    from engine.v2.models import release_layout as rel
 
     release_id = parameters["release_id"]
     try:
@@ -112,7 +112,7 @@ def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
 
 def stage_candidate(parameters, root: Path) -> dict:
     """Assemble and stage the candidate release; returns a JSON-safe summary."""
-    from checks import phase5_release as rel
+    from engine.v2.models import release_layout as rel
     from checks.phase5_release_assembly import (
         CHOOSER_MEMBER_ID,
         PoolOutput,

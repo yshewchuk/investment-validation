@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from checks.phase5_release import StateSpec, manifest_body, member_row
+from engine.v2.models.release_layout import StateSpec, manifest_body, member_row
 from engine.v2.foundation import content_hash
 from engine.v2.models import (
     ArtifactInventoryMember,

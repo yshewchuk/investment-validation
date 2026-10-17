@@ -517,3 +517,48 @@ Stored spec/source/snapshot/scope/environment identity is checked before populat
 admission, so a changed request cannot consume an original variant's refusal slot.
 A current holdout denial preserves R5 and its private receipt even when an earlier
 immutable completion prevents a second terminal CSV row; prior reports stay unchanged.
+
+## Exploratory RUNUP exit comparison
+
+`runup_exit_report.compare_runup_exits` and `python -m experiments.v2_runup_exits`
+compare a declared target/stop roster with the existing STR-RUNUP fixed-day control.
+They use the merged native population, calendar, entry selector and exit walker;
+there is no scheduler, model fitting, threshold search or production caller.
+The closed request requires explicit unique event IDs, one fill alpha, explicit
+`quote_price_times_quantity` threshold units and one to eight named target/stop arms.
+The CLI requires an exact snapshot ID and holdout as-of month; its JSON input
+must be a regular file bounded to 1 MiB. Admission precedes any quote read.
+`--no-ledger` is an accepted no-op; both CLI modes are equally read-only.
+
+The existing D−14 entry and last-pre-print exit use only observed snapshot sessions.
+All admitted events must plan successfully. Contracts are selected once from each
+entry chain using native STR-RUNUP (long ATM call/put, first expiry at least 30 DTE).
+Selected DTE must agree with expiry minus entry day; ATM ties use lower strikes.
+A fixed-day walk validates every held leg on every session through the common
+14-session horizon before any target/stop arm runs. Missing/ambiguous/unusable
+marks, expiry overrun or incomplete calendar refuse the entire cohort, including
+when an arm would have exited before the missing mark. No survivor subset returns.
+
+Every arm retains those exact contracts, quantities, entry dates and fill alpha.
+Daily crossing, equality and conservative ambiguous-stop behavior belong to
+`experiment_exits.walk_exit`; ambiguous stops use alpha zero at exit. Values are
+quote price × quantity: spread is modeled, commissions/fees and the option
+contract multiplier are absent. These are daily mark-based hypothetical results,
+not intraday execution, stop-price fills, realized returns or an optimized strategy.
+
+The JSON report contains paired per-event outcomes and deltas, all-arm counts,
+entry contracts, snapshot/holdout pins, full recipes, source closure and environment
+identity. Its canonical binding hash identifies reproducible inputs; a separate
+report hash covers the complete output. This is exploratory evidence, not a sealed
+preregistration, recorded hypothesis, immutable run or promotion authority.
+The CLI opens the catalog read-only and prints once; neither helper nor CLI writes
+reports, artifacts, ledger rows or orders. No refusal contains partial metrics.
+There is no retry, fallback source, projected calendar or partial-success mode.
+
+| Condition | Refusal and context |
+| --- | --- |
+| Malformed/duplicate-key, nonregular, oversized or invalid request | `INVALID_EXPERIMENT_SPEC` before repository access; no stage/counts. |
+| Holdout exclusion or invalid admission context | `HOLDOUT_ACCESS_DENIED`, population stage/counts. |
+| Entry selection, common coverage or pairing fails | `EXPERIMENT_VARIANT_FAILED`, current stage/counts; zero compared. |
+| Repository integrity or unresolved snapshot | Native code; stage/counts only after comparison admission starts. |
+| CLI filesystem or SQLite failure | `INPUT_CHANGED`, no stage/counts. |

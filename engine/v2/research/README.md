@@ -79,6 +79,11 @@ The replay half: `replay.replay`, `replay.replay_one`, `replay.ALPHA_GRID`,
 `_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`,
 `_pricing.trading_calendar_from_snapshot`, `_pricing.execution_variant_label`.
 
+The entry-selection surface also exposes `replay.clean_chain_rows` (drop invalid
+quotes without mutating the input) and `_pricing.MIN_MEANINGFUL_COST`,
+`ChainSnapshot`, `FillModel`, `StructureError`, `price_structure`: native
+selection and spread pricing, with no I/O or alternate pricing implementation.
+
 `experiment_trades.load_trades` is a second kind of entrypoint: a plain
 library call (no `tools/v2_*.py` CLI of its own) for a caller that already
 holds a `Repository` and a resolved `SnapshotRef` — today only
@@ -140,7 +145,7 @@ The manual no-ledger `experiments.v2_gate_variant` CLI consumes
 `experiments.gate_report` combines protected historical features, pinned
 calendar plans and fresh per-arm pricing for exploratory fold reports.
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_inputs.admit_stored -->
+<!-- public-interface: replay.clean_chain_rows, _pricing.MIN_MEANINGFUL_COST, _pricing.ChainSnapshot, _pricing.FillModel, _pricing.StructureError, _pricing.price_structure, signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_inputs.admit_stored -->
 
 ## Consumers
 
@@ -166,6 +171,9 @@ and `experiments/EXP-186_.../run.py` (for `_replay_run.events_frame`)
 
 `experiments/v2_gate_variant.py` also consumes the shared population loader,
 registered structures and replay interfaces for read-only smoke pricing.
+`experiments/runup_exit_report.py` consumes population admission, calendar/plan,
+chain index, the entry-selection surface above and `experiment_exits.walk_exit`
+for same-position, read-only fixed-day versus target/stop comparisons.
 `experiments/gate_report.py` consumes `experiment_population.load_population`,
 `_pricing.STRUCTURES`/`trading_calendar_from_snapshot`, `_plan.plan_events` and
 `event_history.load_event_history` for independently priced fold-local reports.
