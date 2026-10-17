@@ -544,7 +544,7 @@ immutable completion prevents a second terminal CSV row; prior reports stay unch
 `SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` is a library-only
 native caller of the existing recorder and `magnitude_fitted.fitted_forecasts`.
 It consumes one declared candidate and inner fold; it does not run outer evaluation,
-recover claims, change the selection policy, write a ledger or grant final-read authority.
+reclaim starts, change the selection policy, write a ledger or grant final-read authority.
 The source seal explicitly includes the fixed child and its transitive fitting sources.
 
 | Condition | Outcome |
@@ -556,18 +556,24 @@ The source seal explicitly includes the fixed child and its transitive fitting s
 | Serialized input or a buffered child-output record exceeds 16 MiB | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. |
 | Started trial with admitted cohort | A fixed fit-only subprocess receives stored features and qualified training targets, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
 | Child reaches a horizon fit | Parent independently reconstructs its matrix/event evidence and commits a non-replayable fit admission before acknowledging. Completion is separately acknowledged only after its immutable evidence commits. Counts distinguish admitted fit attempts from completed fits; an interrupted admission does not prove the estimator was entered. |
-| Child completes all fits | Publish execution receipt and complete forecasts before validation labels open through the internal native recorder path; original candidate/validation scoring policy applies. Public `record` cannot finish an unfinished native attempt. |
+| Child returns a checked result after exit and reap | Commit immutable `execution-result:<trial_id>` with the exact native result, original attempt/limits and admitted input hash before execution/forecast/scoring publication. Successful fits publish complete forecasts before validation labels open; original scoring policy applies. Public `record` cannot finish an unfinished native attempt. |
 | Candidate scoring refuses after successful native fits | Preserve the successful execution receipt and durable `refused` terminal. Initial scoring propagates `EXPERIMENT_VARIANT_FAILED`; replay returns the intact receipt without refitting or rescoring, and freeze excludes that candidate while retaining successful peers. |
 | Estimator-local `EXPERIMENT_VARIANT_FAILED` | Record the attempted/completed prefix and candidate failure. Other candidates and folds remain required by `freeze`. |
 | Memory, CPU or elapsed-time limit; launch/import/pipe/protocol/abnormal-exit failure | Limits refuse `RESOURCE_LIMIT_EXCEEDED`; invalid JSON, missing events, messages after a result or evidence/completion mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT`; unsupported events/progress envelopes, setup, I/O, missing results and other infrastructure failures refuse `RESOURCE_UNAVAILABLE`. Retain the unfinished claim and block freeze; never convert these failures into candidate exclusion or retry, even for retryable Problems. |
 | Resource enforcement | Child `RLIMIT_AS` bounds virtual address space and `RLIMIT_CPU` bounds process CPU time; the parent bounds child elapsed lifetime, including waits for journal acknowledgements. Parent I/O is not preempted; an expired child deadline is checked when it returns and after child exit, before accepting completion. These are per-process fit caps, not shared-host reservations or a cap on parent admission/journal I/O. Only fixed single-threaded native estimators run. |
-| Native completion replay/freeze | Revalidate every admitted/completed horizon, matrix digest, complete forecast digest and ordinary terminal chain; launch nothing and reopen no native labels/features. Changed limits, missing/corrupt evidence and caller-submitted terminals refuse native replay. |
-| Interrupted execution or label admission | Existing immutable start/forecast slots prevent restart; public recording cannot finish any unfinished native attempt, including a failed forecast publication. Receipt publication can precede a later failed forecast/terminal write; the unfinished trial remains blocking. |
+| Native completion replay/freeze | Revalidate the durable child result, every admitted/completed horizon, matrix digest, complete forecast digest and ordinary terminal chain; launch nothing and reopen no native labels/features. Changed limits, missing/corrupt evidence and caller-submitted terminals refuse native replay. |
+| Interrupted execution or publication without a committed child result | Immutable claims cannot restart. Reconciliation refuses missing/incomplete result evidence, including a failure before the result association commits; unreferenced artifact bytes confer no authority. Selection remains blocked. |
+| `SearchTrials.reconcile(outer_year, inner_year, candidate_id, limits=...)` | Revalidate the sealed source/plan, exact limits, admitted cohort, durable result and complete fit-marker prefix; idempotently finish only missing execution/forecast/validation/terminal writes. Conflicting existing evidence refuses. No child launch, fitting, claim deletion/reset, forecast replacement or candidate-count reduction; sealed retries remain zero. |
+| Reconciliation needs validation evidence | Reuse independently checked durable shared validation without reopening labels/features; otherwise revalidate current native inputs and publish forecasts before native validation-label reads. Shared-input/resource errors propagate without candidate exclusion. Only estimator-local failure or candidate scoring refusal creates a candidate terminal. |
+| Reconciliation after terminal publication | Verify and return the original receipt without writes or native reads, under both no-fit guards. A refused terminal retains its successful fit receipt and does not rescore. |
 | Fitting guard active | Both parent no-fit guards refuse before a new claim or subprocess launch; completed replay remains read-only. |
 
 The child uses standard-library subprocess, selectors, resource limits and JSON; no
 optimizer, alternate estimator pipeline or general-purpose scheduler is introduced.
 Execution uses ops thread-environment constants and existing foundation/journal publication.
+Reconciliation reuses those immutable SQLite/artifact primitives, not a new queue or retry engine.
+Historical journals sealed to older recorder sources are not automatically recoverable;
+missing native result/forecast bytes cannot be reconstructed or replaced by a new fit.
 Scratch inputs are removed when the call exits. Completed evidence is consistency-checked,
 not cryptographically authenticated against wholesale journal fabrication. Frozen selections
 retain their existing submitted-forecast label and confer no additional execution authority.
