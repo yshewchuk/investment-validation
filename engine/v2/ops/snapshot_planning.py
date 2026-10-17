@@ -88,12 +88,9 @@ def direct_scope_for(expected_population) -> dict:
     require_valid_population_keys(expected_population)
     tickers, years = set(), set()
     for key in expected_population:
-        parts = str(key).split("|")
-        if len(parts) != 3 or not parts[0] or not parts[2][:4].isdigit():
-            raise fail("INVALID_REQUEST", "planned population key is not ticker|strategy|event_date",
-                       details={"key": str(key)})
-        tickers.add(parts[0])
-        years.add(int(parts[2][:4]))
+        ticker, _, event_date = str(key).split("|")
+        tickers.add(ticker)
+        years.add(int(event_date[:4]))
     return {"tickers": sorted(tickers), "years": sorted(years)}
 
 

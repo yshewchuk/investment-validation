@@ -181,7 +181,7 @@ and an empty result skips the shard). `tests/v2/integration/test_ci_shards.py` c
 that every test file is in exactly one shard and that no pattern is dead or shadowed.
 The required check `test` is an aggregator job that fails unless the plan job and
 every shard job succeeded. To rebalance, move a pattern between shards; keep each
-shard under about 10 minutes of wall time.
+shard under about 15 minutes of pytest wall time on CI.
 
 ### PR test selection
 

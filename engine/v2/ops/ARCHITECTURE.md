@@ -55,7 +55,7 @@ Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`, `NO_JOB_STAGES`
 `build_legacy_job_requests`, `_stage_sequence` (see "Diagrams" below); `supervisor.Service`/`serve`; the
 coordinator-effect functions in `effects_graph.py`; `training.py`'s `training_job_kind`/`promote_job_kind` (registered in
 `stages.py::_core_kinds`, not in `supervisor._COORDINATOR_EFFECT_KINDS`), `training_plan`/`promote_plan`,
-`run_training_worker`/`run_promote_worker`; `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
+`run_training_worker`/`run_promote_worker`; `state_stage.py` (`phase5_state_stage`); `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
 (`native_board_universe.py`) — `board_requests` emits one `BoardRequest` — the pure key `(ticker, strategy, event_date, session)` — per event ×
 native-covered strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
 `computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
@@ -930,7 +930,7 @@ waits without submitting until its paired succeeded inputs are ready.
   commit layer's own equality check decides this, never key presence in the
   parent).
 - `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not
-  `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes.
+  `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes (so does `phase5_state_stage`, registry-added, via `tools/phase5_state_stage_job.py`: models doc §2.2).
   `run_training_worker` calls one of four `tools/phase5_training_job.py`
   functions and writes `training_result.json`; `run_promote_worker` calls `deployment.promote`;
   `run_rollback_worker` uses its plan-pinned incumbent and target, then writes
@@ -1058,7 +1058,7 @@ already excludes both disabled strategies by construction, so no legacy read is 
 
 **Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
 `experiments/native_registration.py` imports ops `catalog.transaction`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`,
-`experiments.NATIVE_GATE_RUNNERS`/`NATIVE_GATE_WORKER`/`NATIVE_GATE_ENTRYPOINT`, `fingerprints.environment_identity`/`source_closure`, and `native_registration.verified_registration_bytes`/`magnitude_execution_document`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
+`experiments.NATIVE_GATE_RUNNERS`/`NATIVE_GATE_WORKER`/`NATIVE_GATE_ENTRYPOINT`, `fingerprints.environment_identity`/`source_closure` (failure semantics: a missing declared file, or a `.py` over 8 MiB, refuses `INPUT_CHANGED`, while an unresolved import is omitted without refusal; the capped read at open feeds both the digest and the parse, and a non-`.py` file keeps the streamed `file_hash` with no cap and no import expansion; an undecodable or unparseable `.py` lets the builtin error escape), and `native_registration.verified_registration_bytes`/`magnitude_execution_document`; it owns the `catalog.transaction` around `register_hypothesis_in_transaction`.
 That unlayered caller also imports research's `_pricing.STRUCTURES`, `experiment_population.load_population` and `magnitude_folds.magnitude_window`/`plan_magnitude_folds`; these are caller dependencies, not ops-to-research edges.
 The shared verifier accepts magnitude v1.2/v1.3/v1.4/v1.5 only with closed request/plan envelopes, intact digests and matching snapshot/holdout/event/fold identities. v1.3 requires the exact `magnitude_execution_document` policy, canonical evaluation cutoff after every evaluation event, seed zero and empty economics; v1.4 additionally cross-links its exact history request, feature pin, producer context and fixed history policy. v1.5 adds the closed original-unit fitted recipe; malformed/hybrid schemas refuse `EXPERIMENT_IDENTITY_CONFLICT`.
 `magnitude_execution_document`, `magnitude_history_execution_document`, `magnitude_fitted_execution_document` and `magnitude_history_request` construct closed policies from canonical explicit inputs, refusing `INVALID_EXPERIMENT_SPEC`. `validate_magnitude_execution` checks v1.3; `validate_magnitude_history_execution` checks v1.4 and `validate_magnitude_fitted_execution` v1.5, refusing `EXPERIMENT_IDENTITY_CONFLICT`. These pure checks neither grant reads nor reconstruct plans; registration owns the recipe data without importing research, training or sklearn. The experiment caller passes the admitted recipe to guarded fitting. Old wire policies remain unchanged; source fingerprints still track changed implementation.
@@ -1164,7 +1164,7 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | a training-tool refusal, or `deployment.DeploymentError` (including a superseded release hash, `ConcurrentPromote` (`CONCURRENT_PROMOTE`) for a missing/stale expected incumbent when the target is not already live, or `NoPriorRelease` when rollback history has no earlier incumbent) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a stale rollback plan writes no successful output or pointer/history change |
 | no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset, or `ops plan promote` supplies a blank `--expected-previous-release-id` | `INVALID_REQUEST` at plan time; no empty `release_root` reaches the worker, and only an absent incumbent option means no guard |
 | a recipe job's `pairs_path` does not resolve beneath the attempt's own pinned legacy root | `INPUT_CHANGED` at execution, even after passing plan-time validation |
-| any `models_promote` or `models_rollback` claim | serialized globally by one write lease on the deployment pointer; resubmission with the same namespace and idempotency key returns the existing job |
+| any `models_promote`, `models_rollback` or `phase5_state_stage` (failure rows: models doc 2.2) claim | serialized globally by one write lease on the deployment pointer; resubmission with the same namespace and idempotency key returns the existing job |
 
 ### `native_score_batch.py`
 

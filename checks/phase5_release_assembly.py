@@ -79,6 +79,7 @@ class PoolOutput:
     content_hash: str
     cutoff: str
     payload_bytes: int
+    carried: bool = False
 
 
 def _content_hash_valid(value: object) -> bool:
@@ -108,6 +109,8 @@ def _admit(output: object, code: str) -> PoolOutput:
     if (not isinstance(output.payload_bytes, int) or isinstance(output.payload_bytes, bool)
             or output.payload_bytes < 0):
         raise ReleaseAssemblyRefusal(code, "an object payload_bytes is not a non-negative int")
+    if not isinstance(output.carried, bool):
+        raise ReleaseAssemblyRefusal(code, "an object carried flag is not a bool")
     return output
 
 
@@ -153,6 +156,21 @@ def _outputs_by_member(outputs: object) -> dict[str, tuple[PoolOutput, ...]]:
                 raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "an output hash is malformed")
     return {member_id: tuple(sorted(member_outputs, key=lambda output: output.name))
             for member_id, member_outputs in by_member.items()}
+
+
+def _check_carried(output: PoolOutput, cutoff_day: date, prior_rows: dict) -> None:
+    """A carried object's cutoff must be an ISO date not after ``cutoff`` and the object must equal
+    a prior-row object; it is recorded at the prior ``pool_cutoff``."""
+    if _parse_day(output.cutoff, "CUTOFF_MISMATCH", "a carried object cutoff is not an ISO date") > cutoff_day:
+        raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "a carried object cutoff is after cutoff")
+    code = "CHOOSER_MISMATCH" if output.member_id == CHOOSER_MEMBER_ID else "POOL_SET_MISMATCH"
+    row = prior_rows.get(output.member_id)
+    objects = row.get("objects") if isinstance(row, dict) else None
+    if not isinstance(objects, list) or not any(
+            isinstance(item, dict) and item.get("name") == output.name
+            and item.get("content_hash") == output.content_hash
+            and item.get("bytes") == output.payload_bytes for item in objects):
+        raise ReleaseAssemblyRefusal(code, "a carried object is not in the prior row")
 
 
 def _prior_pool_rows(members: object) -> None:
@@ -226,11 +244,14 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
         chooser_names.add(output.name)
 
     cutoff_day = _parse_day(cutoff, "CUTOFF_MISMATCH", "cutoff is not an ISO date")
-    for output in (*_all_outputs(by_member), *chooser_objects):
-        if output.cutoff != cutoff:
-            raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "an object cutoff disagrees with cutoff")
+    prior_rows = {row["member_id"]: row for row in prior["members"]}
     if cutoff_day <= prior_day:
         raise ReleaseAssemblyRefusal("CUTOFF_NOT_ADVANCED", "cutoff is not after the prior pool_cutoff")
+    for output in (*_all_outputs(by_member), *chooser_objects):
+        if output.carried:
+            _check_carried(output, cutoff_day, prior_rows)
+        elif output.cutoff != cutoff:
+            raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "an object cutoff disagrees with cutoff")
 
     all_by_member = {**by_member, CHOOSER_MEMBER_ID: chooser_objects}
     rows = copy.deepcopy(prior["members"])
@@ -399,6 +420,36 @@ def _publication_lock(store: Path):
             os.close(fd)
 
 
+def prior_carry_set(release_root: Path, prior_release_id: str) -> tuple[str, tuple[PoolOutput, ...]]:
+    """The prior ``sources.pool_cutoff`` and every prior pool/chooser object as ``carried`` outputs.
+
+    Each object keeps the prior release's pool cutoff as its recorded cutoff.
+    Malformed or missing prior input refuses ``PRIOR_MISMATCH``.
+    """
+    try:
+        _require_safe_id(prior_release_id, "PRIOR_MISMATCH", "prior release id is not a safe string")
+        prior = _load_catalog(catalog_path(Path(release_root), prior_release_id), prior_release_id,
+                              "PRIOR_MISMATCH", "prior catalog could not be read or validated")
+        if prior is None:
+            raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "no prior catalog exists for that release id")
+        _prior_pool_rows(prior.get("members"))
+        pool_cutoff = prior["sources"]["pool_cutoff"]
+        _parse_day(pool_cutoff, "PRIOR_MISMATCH", "prior pool_cutoff is not an ISO date")
+        carried = []
+        for row in prior["members"]:
+            if row.get("member_id") not in _REQUIRED_MEMBER_IDS:
+                continue
+            for item in row.get("objects", ()):
+                carried.append(PoolOutput(row["member_id"], item["name"], item["content_hash"],
+                                          pool_cutoff, item["bytes"], carried=True))
+        return pool_cutoff, tuple(carried)
+    except ReleaseAssemblyRefusal:
+        raise
+    except _STRAY_ERRORS as exc:
+        raise ReleaseAssemblyRefusal(
+            "PRIOR_MISMATCH", "prior catalog rows or identity are malformed") from exc
+
+
 def carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
                           inventory, outputs, chooser: object, cutoff: str) -> Path:
     """Verify, re-stage the prior model bindings and write the candidate catalog.
@@ -526,5 +577,5 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
 __all__ = [
     "CHOOSER_MEMBER_ID", "LOCK_WAIT_S", "MAX_OBJECT_BYTES",
     "POOL_MEMBER_IDS", "PoolOutput", "ReleaseAssemblyRefusal", "carry_forward_release",
-    "derive_catalog",
+    "derive_catalog", "prior_carry_set",
 ]
