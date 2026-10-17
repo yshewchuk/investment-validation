@@ -51,6 +51,12 @@ from tests.v2.ops.gate_sweep_support import (
     sweep_request,
     terminal_case,
 )
+from tests.v2.ops.gate_sweep_support import (
+    fixed_sweep_code as fixed_sweep_code,
+)
+from tests.v2.ops.gate_sweep_support import (
+    fixed_sweep_code_maps as fixed_sweep_code_maps,
+)
 from tests.v2.ops.native_bounds_support import BoundedSqlRows
 from tests.v2.research.test_gate_report import MONTH, REPO, build_gate_spec
 from tests.v2.research.test_gate_report import source as source
@@ -122,6 +128,32 @@ def _complete(source, jobs):
     clock, claim = _claimer(source)
     for _ in jobs:
         _finish(source, claim(), clock)
+
+
+@pytest.mark.usefixtures("fixed_sweep_code")
+def test_fixed_source_inputs_return_independent_real_maps(fixed_sweep_code_maps):
+    closures, manifest = fixed_sweep_code_maps
+    for module in (collection, native_registration, sweep):
+        for entries, expected in closures.items():
+            first = module.source_closure(REPO, entries)
+            assert first == expected and first is not expected
+            first.clear()
+            assert module.source_closure(REPO, entries) == expected
+    first = sweep.worker_source_manifest(REPO)
+    assert first == manifest and first is not manifest
+    first.clear()
+    assert sweep.worker_source_manifest(REPO) == manifest
+
+
+@pytest.mark.usefixtures("fixed_sweep_code")
+@pytest.mark.parametrize("target", ["other-root", "unknown-entry", "worker-root"])
+def test_fixed_source_inputs_refuse_unexpected_discovery(tmp_path, target):
+    with pytest.raises(AssertionError, match="fixed source fixture received"):
+        if target == "worker-root":
+            sweep.worker_source_manifest(tmp_path)
+        else:
+            collection.source_closure(tmp_path if target == "other-root" else REPO,
+                                      ("experiments/v2_gate.py" if target == "other-root" else "unknown.py",))
 
 
 def test_real_run_records_independent_arms_and_exact_replay(source, tmp_path, monkeypatch):
@@ -229,6 +261,7 @@ def test_real_mixed_success_unexpected_failure_and_holdout_reconcile_once(source
     assert source.conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 3
 
 
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_pending_collection_binds_mode_and_does_not_freeze_index(source, tmp_path):
     call_sweep(source)
     smoke = _collect(source, no_ledger=True)
@@ -285,6 +318,7 @@ def test_caller_coordinator_entry_must_match_installed_source(source, tmp_path, 
 
 
 @pytest.mark.parametrize("failure", ["ledger", "receipt", "export", "index"])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_interrupted_publication_reconciles_without_duplicate_rows(source, tmp_path, monkeypatch, failure):
     call_sweep(source)
     jobs = call_sweep(source, sweep.submit_sweep)
@@ -316,6 +350,7 @@ def test_interrupted_publication_reconciles_without_duplicate_rows(source, tmp_p
     assert _collect(source, ledger_path=ledger) == result and len(_rows(ledger)) == 2
 
 
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_preexisting_different_arm_outcome_is_not_blindly_replayed(source, tmp_path):
     call_sweep(source)
     jobs = call_sweep(source, sweep.submit_sweep)
@@ -333,6 +368,7 @@ def test_preexisting_different_arm_outcome_is_not_blindly_replayed(source, tmp_p
 
 
 @pytest.mark.parametrize("damage", ["identity", "wrong-schema", "matched-wrong-schema", "wrong-name", "no-output", "terminal-attempt"])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_terminal_output_is_exact_and_missing_result_is_r4(source, tmp_path, damage):
     call_sweep(source)
     jobs = call_sweep(source, sweep.submit_sweep)
@@ -390,6 +426,7 @@ def test_run_rejects_bad_deadline_before_inputs(timeout, monkeypatch):
 
 
 @pytest.mark.parametrize("state", ["queued-cancel", "live-cancel", "recovered-cancel", "lease-lost"])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_cancellation_and_recovery_use_exact_fenced_terminal_attempt(source, tmp_path, state):
     call_sweep(source)
     jobs = call_sweep(source, sweep.submit_sweep)
@@ -425,6 +462,7 @@ def test_cancellation_and_recovery_use_exact_fenced_terminal_attempt(source, tmp
     assert _collect(source, ledger_path=ledger) == result and len(_rows(ledger)) == 1
 
 
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_partial_collection_keeps_successful_sibling_and_registered_retryable_refusal(source, tmp_path):
     call_sweep(source)
     call_sweep(source, sweep.submit_sweep)
@@ -447,6 +485,7 @@ def test_partial_collection_keeps_successful_sibling_and_registered_retryable_re
     assert _collect(source, ledger_path=ledger) == final
 
 
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_blocked_job_is_terminal_and_freezes_an_incomplete_index(source, tmp_path):
     call_sweep(source)
     jobs = call_sweep(source, sweep.submit_sweep)
@@ -470,6 +509,7 @@ def test_blocked_job_is_terminal_and_freezes_an_incomplete_index(source, tmp_pat
     assert _collect(source, ledger_path=ledger) == result and len(_rows(ledger)) == 1
 
 
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_observer_timeout_never_claims_or_cancels_jobs(source, monkeypatch):
     call_sweep(source)
     pending = _collect(source, no_ledger=True)
@@ -745,6 +785,7 @@ def test_active_transaction_refuses_before_submission_without_ending_caller_tran
 
 
 @pytest.mark.parametrize("exception", [OSError, sqlite3.OperationalError])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_collection_io_interruptions_are_exactly_retryable_resource_failures(monkeypatch, exception):
     def interrupted(*args, **kwargs):
         raise exception("synthetic temporary interruption")
@@ -756,6 +797,7 @@ def test_collection_io_interruptions_are_exactly_retryable_resource_failures(mon
 
 
 @pytest.mark.parametrize("code", ["INPUT_CHANGED", "RESOURCE_UNAVAILABLE"])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_collection_preserves_delegated_typed_submission_refusal(monkeypatch, code):
     original = fail(code, "delegated submission refusal", details={"data_failure_code": "OperationalError"})
     def refused(*args, **kwargs):
@@ -770,6 +812,7 @@ def test_collection_preserves_delegated_typed_submission_refusal(monkeypatch, co
 
 
 @pytest.mark.parametrize("exception", [ValueError, TypeError, KeyError, RecursionError, SyntaxError, RuntimeError])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_collect_preserves_unexpected_delegate_programming_errors(monkeypatch, exception):
     original = exception("unexpected implementation defect")
     def damaged(*args, **kwargs):
@@ -797,6 +840,7 @@ def test_terminal_preserves_unexpected_reader_programming_errors(terminal, monke
     assert error.value is original
 
 
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_collect_preserves_key_error_from_inside_terminal_reader(source, monkeypatch):
     call_sweep(source)
     _complete(source, call_sweep(source, sweep.submit_sweep))
@@ -811,6 +855,7 @@ def test_collect_preserves_key_error_from_inside_terminal_reader(source, monkeyp
 
 @pytest.mark.parametrize("reader", ["collector", "observer"])
 @pytest.mark.parametrize("exception", [TypeError, KeyError])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_collection_job_read_preserves_programming_errors(source, monkeypatch, reader, exception):
     original = exception("unexpected receipt reader implementation defect")
     def damaged(*args, **kwargs):
@@ -875,6 +920,7 @@ def test_bind_rejects_oversized_reference_before_any_object_read(terminal, monke
 @pytest.mark.parametrize("schema", ["native_gate_collection.v1.0", "native_experiment_report.v1.0",
                                     "native_gate_sweep_index.v1.0"])
 @pytest.mark.parametrize("code", ["INTEGRITY_FAILED", "UNSAFE_PATH"])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_collect_preserves_delegated_artifact_publication_error_identity(source, monkeypatch, schema, code):
     call_sweep(source)
     _complete(source, call_sweep(source, sweep.submit_sweep))
@@ -893,6 +939,7 @@ def test_collect_preserves_delegated_artifact_publication_error_identity(source,
     assert not any("native_sweep_smoke_index" in evidence for evidence in _evidence(source))
 
 
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_collect_types_raw_catalog_integrity_constraints(monkeypatch):
     def damaged(*args, **kwargs):
         raise sqlite3.IntegrityError("private catalog detail")
@@ -937,6 +984,7 @@ def test_observer_types_polling_interruptions_without_retrying(monkeypatch, exce
 
 
 @pytest.mark.parametrize("race", ["changed-variant", "different-reference", "same-reference"])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_bind_reservation_race_preserves_the_committed_winner(source, monkeypatch, race):
     call_sweep(source)
     anchor = _registrations(source)[0]
@@ -1106,6 +1154,7 @@ def test_job_failure_is_bounded_before_decode_on_all_receipt_paths(tmp_path, mon
         job.conn.close()
 
 
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_oversized_job_failure_refuses_public_collect_before_intent_or_ledger(source, tmp_path, monkeypatch):
     call_sweep(source)
     jobs = call_sweep(source, sweep.submit_sweep)
@@ -1317,6 +1366,7 @@ def test_terminal_refuses_unencodable_stored_artifact_path(terminal):
 
 
 @pytest.mark.parametrize("payload", ["{broken", "[]", "null", '{"nested":' + "[" * 2000 + "]" * 2000 + "}"])
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_malformed_native_evidence_refuses_before_collection_effects(source, tmp_path, payload):
     call_sweep(source)
     source.conn.execute("UPDATE experiment_runs SET evidence_json=?", (payload,))
@@ -1329,6 +1379,7 @@ def test_malformed_native_evidence_refuses_before_collection_effects(source, tmp
     assert source.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
 
+@pytest.mark.usefixtures("fixed_sweep_code")
 def test_submit_evidence_cap_is_opt_in_and_forwarded_before_staging(source, monkeypatch):
     call_sweep(source)
     anchor = _registrations(source)[0]

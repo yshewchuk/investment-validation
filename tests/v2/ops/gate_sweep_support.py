@@ -2,20 +2,57 @@
 import json
 import sqlite3
 from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from engine.v2.foundation import ArtifactStore, SystemClock, canonical_json
 from engine.v2.ops.checkpoints import register_artifact
-from engine.v2.ops.fingerprints import snapshot_code, worker_source_manifest
+from engine.v2.ops.fingerprints import snapshot_code, source_closure, worker_source_manifest
 from engine.v2.ops.migrations import migrate
 from engine.v2.ops.schema import MIGRATIONS, OWNER
 from engine.v2.ops.submission import submit
+from experiments import native_registration, native_sweep_collection
 from experiments import v2_gate_sweep as sweep
 from experiments.native_registration import NativeRegistration
 from tests.ops_support import POLICY, REGISTRY, request
 from tests.v2.research.test_gate_report import MONTH, REPO, build_gate_spec
+
+
+@pytest.fixture(scope="session")
+def fixed_sweep_code_maps():
+    """Real source maps, once per worker, for this unchanged test checkout."""
+    entries = (("experiments/v2_gate.py",), ("experiments/v2_gate_sweep.py",),
+               ("experiments/native_sweep_collection.py", "experiments/v2_gate_collect.py"))
+    return {entry: source_closure(REPO, entry) for entry in entries}, worker_source_manifest(REPO)
+
+
+@pytest.fixture
+def fixed_sweep_code(monkeypatch, fixed_sweep_code_maps):
+    """Opt-in source inputs for synthetic receipt tests, not source-discovery tests.
+
+    Only the real, unchanged repository and declared entries are supported. The
+    real-child and source-change/read-error tests never request this fixture.
+    Admission, submissions, catalog/artifact reads and publication remain real.
+    """
+    closures, manifest = fixed_sweep_code_maps
+
+    def closure(root, entries):
+        assert Path(root) == REPO, "fixed source fixture received another checkout"
+        entries = tuple(entries)
+        assert entries in closures, "fixed source fixture received unknown entrypoints"
+        return dict(closures[entries])
+
+    def worker_manifest(root):
+        assert Path(root) == REPO, "fixed source fixture received another checkout"
+        return dict(manifest)
+
+    with monkeypatch.context() as patch:
+        for module in (sweep, native_registration, native_sweep_collection):
+            patch.setattr(module, "source_closure", closure)
+        patch.setattr(sweep, "worker_source_manifest", worker_manifest)
+        yield
 
 
 def sweep_request():
