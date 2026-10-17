@@ -1,7 +1,9 @@
 """Bounded real native fits, causal ordering, sealed zero-retry and crash controls."""
 # ruff: noqa: F811
+import json
 import signal
 import subprocess
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -58,6 +60,7 @@ def test_real_ridge_accounting_forecasts_before_labels_and_zero_work_replay(case
         return original(*a, **kw)
     monkeypatch.setattr(trials, "load_magnitude_targets", labels)
     result = case.recorder.execute(*args, limits=LIMITS)
+    assert result["evaluation_authority"] == "none"
     assert result["fit_attempt_count"] == result["completed_fit_count"] == 3
     assert [fit["horizon_sessions"] for fit in result["fits"]] == [5, 3, 1]
     assert result["terminal"]["metrics"] == {"count": 12, "rmse": pytest.approx(39 ** 0.5), "mae": 5.5}
@@ -81,6 +84,7 @@ def test_candidate_fit_failure_retains_exact_prefix_and_replays(case, monkeypatc
         "    return [2.0] * len(test)\n")
     args = trial_cases(case)[0]
     result = case.recorder.execute(*args, limits=LIMITS)
+    assert result["evaluation_authority"] == "none"
     assert result["fit_attempt_count"] == number
     assert result["completed_fit_count"] == number - 1
     assert result["status"] == result["terminal"]["status"] == "failed"
@@ -88,8 +92,50 @@ def test_candidate_fit_failure_retains_exact_prefix_and_replays(case, monkeypatc
         fail("EXPERIMENT_VARIANT_FAILED", "search trial did not complete").problem)
     assert "private" not in str(result)
     before = trial_slots(case)
-    assert case.recorder.execute(*args, limits=LIMITS) == result
+    replay = case.recorder.execute(*args, limits=LIMITS)
+    assert replay["evaluation_authority"] == "none"
+    assert replay == result
     assert trial_slots(case) == before
+
+
+def test_actual_fit_entry_observes_committed_admission_before_child_ack(case, monkeypatch, tmp_path):
+    catalog = next(row[2] for row in case.source.conn.execute("PRAGMA database_list") if row[1] == "main")
+    observed = tmp_path / "fit-entry.jsonl"
+    run_id = case.recorder.registration.run_id
+    inject_child(monkeypatch, f"""
+def injected(recipe, train, labels, test):
+    import json
+    import sqlite3
+    from pathlib import Path
+    with sqlite3.connect(Path({catalog!r}).as_uri() + '?mode=ro', uri=True) as conn:
+        slots = [row[0] for row in conn.execute(
+            'SELECT slot FROM magnitude_search_records WHERE run_id=?', ({run_id!r},))]
+    counts = [sum(slot.startswith(prefix) for slot in slots)
+              for prefix in ('fit-started:', 'fit-completed:')]
+    with open({str(observed)!r}, 'a') as output:
+        output.write(json.dumps(counts) + '\\n')
+    return [2.0] * len(test)
+""")
+    append = case.recorder._append
+    admissions = 0
+
+    def delay_admission(slot, body, **kwargs):
+        nonlocal admissions
+        if slot.startswith("fit-started:"):
+            admissions += 1
+            # Without the worker's ACK wait, the child can enter and capture the
+            # uncommitted count before this deliberately delayed write proceeds.
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                if observed.exists() and len(observed.read_text().splitlines()) >= admissions:
+                    break
+                time.sleep(0.01)
+        return append(slot, body, **kwargs)
+
+    monkeypatch.setattr(case.recorder, "_append", delay_admission)
+    result = case.recorder.execute(*trial_cases(case)[0], limits=LIMITS)
+    assert result["completed_fit_count"] == 3
+    assert [json.loads(line) for line in observed.read_text().splitlines()] == [[1, 0], [2, 1], [3, 2]]
 
 
 @pytest.mark.parametrize("kind", ["memory", "allocation", "io", "runtime", "wall", "cpu"])

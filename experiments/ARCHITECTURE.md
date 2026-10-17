@@ -528,9 +528,9 @@ The source seal explicitly includes the fixed child and its transitive fitting s
 
 | Condition | Outcome |
 |---|---|
-| Explicit positive integer `memory_bytes`, `cpu_seconds`, `wall_seconds` | Bind these limits to the immutable trial execution start. Linux child affinity uses one currently allowed CPU; numerical thread variables are one. |
+| Explicit positive integer `memory_bytes`, `cpu_seconds`, `wall_seconds` | Bind these limits to the immutable trial execution start. Linux child affinity uses the lowest currently allowed CPU; numerical thread variables are one. This selects a core without reserving it from other host work. |
 | Missing/extra limit keys, Boolean/noninteger/nonpositive or platform-unrepresentable values | `INVALID_EXPERIMENT_SPEC` before a claim or subprocess launch. |
-| Linux affinity unavailable or empty | `RESOURCE_UNAVAILABLE` before a claim or subprocess launch. |
+| Parent Linux affinity query unavailable or empty | `RESOURCE_UNAVAILABLE` before a claim or subprocess launch. Child limit/affinity setup failure instead preserves the post-claim unfinished attempt and refuses `RESOURCE_UNAVAILABLE`. |
 | Serialized input or a buffered child-output record exceeds 16 MiB | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. |
 | Started trial with admitted cohort | A fixed fit-only subprocess receives stored features and qualified training targets, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
 | Child reaches a horizon fit | Parent independently reconstructs its matrix/event evidence and commits a non-replayable fit admission before acknowledging. Completion is separately acknowledged only after its immutable evidence commits. Counts distinguish admitted fit attempts from completed fits; an interrupted admission does not prove the estimator was entered. |

@@ -100,8 +100,11 @@ evidence. See the models and data component contracts.
   legacy module importing `checks/` or `tests/`, or shelling out from
   outside those two modules, is not enforced against by either rule.
   `experiments.magnitude_search_execution` separately owns its fixed bounded
-  fit-only child: a synchronous research call needs no ops job/recovery lifecycle.
-  This experiment owner is outside that v2-only enforcement.
+  fit-only child with per-fit journal acknowledgements, outside the ops job/recovery
+  lifecycle and this v2-only enforcement.
+  Known exception: `engine.v2.ops.state_stage` reaches `checks/phase5_release*`
+  through `tools/phase5_state_stage_job.py` (no direct import); it ends when the release
+  catalog and assembly helpers move into `engine/v2/models` (#807).
 - **Operator CLIs and experiments.** These operator and research entrypoints
   may call into the legacy and v2 engines. They are not uniformly leaf-only:
   `engine.v2.ops.training` imports the `phase5_training_job` module while

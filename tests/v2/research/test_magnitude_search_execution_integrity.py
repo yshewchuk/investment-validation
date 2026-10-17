@@ -152,7 +152,7 @@ def test_native_failure_still_requires_all_planned_candidates(native, monkeypatc
     assert frozen["selections"][0]["scores"][0] == {"candidate_id": "z-last", "metrics": None}
 
 
-@pytest.mark.parametrize("error", [MemoryError(), OSError(), RuntimeError("thread creation failed")])
+@pytest.mark.parametrize("error", [MemoryError(), OSError(), RuntimeError("thread creation failed"), ArithmeticError()])
 def test_strict_fit_failure_policy_is_opt_in(native, monkeypatch, error):
     import pandas as pd
 
@@ -168,9 +168,14 @@ def test_strict_fit_failure_policy_is_opt_in(native, monkeypatch, error):
     with pytest.raises(OpsError) as caught:
         magnitude_fitted.fitted_forecasts(*arguments)
     assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem
-    with pytest.raises(type(error)) as caught:
-        magnitude_fitted.fitted_forecasts(*arguments, strict_failures=True)
-    assert caught.value is error
+    if isinstance(error, ArithmeticError):
+        with pytest.raises(OpsError) as caught:
+            magnitude_fitted.fitted_forecasts(*arguments, strict_failures=True)
+        assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem
+    else:
+        with pytest.raises(type(error)) as caught:
+            magnitude_fitted.fitted_forecasts(*arguments, strict_failures=True)
+        assert caught.value is error
 
 
 def test_public_record_cannot_recover_failed_native_forecast_publication(native, monkeypatch):
@@ -188,6 +193,36 @@ def test_public_record_cannot_recover_failed_native_forecast_publication(native,
         native.recorder.record("2024", "2023", "a-first", forecasts=rows(2.0))
     assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "native execution must finish before recording").problem
     key = content_hash(["plan", "2024", "2023", "a-first"])
+    assert native.recorder._read("forecasts:" + key) is None
+    assert native.recorder._read("terminal:" + key) is None
+
+
+@pytest.mark.parametrize("submission", ["forecasts", "failure"])
+def test_crash_between_native_start_slots_cannot_publish_public_terminal(native, monkeypatch, submission):
+    append = native.recorder._append
+    error = fail("RESOURCE_UNAVAILABLE", "synthetic execution claim interruption")
+
+    def refuse(slot, body, **kwargs):
+        if slot.startswith("execution-start:"):
+            raise error
+        return append(slot, body, **kwargs)
+
+    monkeypatch.setattr(native.recorder, "_append", refuse)
+    with pytest.raises(OpsError) as caught:
+        native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    assert caught.value is error
+    key = content_hash(["plan", "2024", "2023", "a-first"])
+    assert native.recorder._read("start:" + key)["execution"]["limits"] == LIMITS
+    assert native.recorder._read("execution-start:" + key) is None
+    assert native.recorder._read("inputs:" + key) is None
+    before = native.conn.total_changes
+    monkeypatch.setattr(native.recorder, "_append", append)
+    supplied = {"forecasts": rows(2.0)} if submission == "forecasts" else {
+        "failure": fail("EXPERIMENT_VARIANT_FAILED", "candidate failure").problem}
+    with pytest.raises(OpsError) as caught:
+        native.recorder.record("2024", "2023", "a-first", **supplied)
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs").problem
+    assert native.conn.total_changes == before
     assert native.recorder._read("forecasts:" + key) is None
     assert native.recorder._read("terminal:" + key) is None
 

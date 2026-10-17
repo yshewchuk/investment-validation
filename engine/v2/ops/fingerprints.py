@@ -30,6 +30,10 @@ def file_hash(path, *, keepalive: Callable[[], None] | None = None):
     return "sha256:" + digest.hexdigest()
 
 
+#: Largest declared `.py` file `source_closure` will read (the repo's largest is far below it).
+_MAX_SOURCE_BYTES = 8 * 1024 * 1024
+
+
 def source_closure(root, entries):
     """Resolve local static imports; callers also declare runtime/configuration edges."""
     pending, found = list(entries), {}
@@ -41,9 +45,16 @@ def source_closure(root, entries):
         path = root / rel
         if not path.is_file():
             raise fail("INPUT_CHANGED", "declared implementation file is missing")
-        found[rel] = file_hash(path)
         if path.suffix == ".py":
-            pending.extend(_imports(root, rel, path.read_text()))
+            # One bounded read: the digest and the parsed imports describe the same bytes.
+            with path.open("rb") as stream:
+                data = stream.read(_MAX_SOURCE_BYTES + 1)
+            if len(data) > _MAX_SOURCE_BYTES:
+                raise fail("INPUT_CHANGED", "declared implementation file exceeds the size bound")
+            found[rel] = "sha256:" + hashlib.sha256(data).hexdigest()
+            pending.extend(_imports(root, rel, data.decode("utf-8")))
+        else:
+            found[rel] = file_hash(path)
     return dict(sorted(found.items()))
 
 
@@ -202,8 +213,20 @@ def _module_files(root, name):
     return found
 
 
-def _imports(root, rel, source):
-    package = rel.removesuffix(".py").replace("/", ".").split(".")[:-1]
+#: Parsed import names by (sha256 of source text, package parts). A pure function
+#: of (text, package parts), so a hit can never go stale; the whole-repo closure
+#: is rebuilt many times per process and the AST parse dominated its cost.
+#: Bounded: cleared when full. Hand-rolled rather than functools.lru_cache so the
+#: key is a digest and the cache never retains the source text itself.
+_IMPORT_NAMES: dict[tuple[bytes, tuple[str, ...]], tuple[str, ...]] = {}
+_IMPORT_NAMES_LIMIT = 20000
+
+
+def _import_names(source, package):
+    key = (hashlib.sha256(source.encode("utf-8")).digest(), tuple(package))
+    cached = _IMPORT_NAMES.get(key)
+    if cached is not None:
+        return cached
     names = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -212,8 +235,17 @@ def _imports(root, rel, source):
             prefix = package[:len(package) - node.level + 1] if node.level else []
             base = ".".join(prefix + ([node.module] if node.module else []))
             names.extend([base, *(base + "." + alias.name for alias in node.names)])
+    result = tuple(names)
+    if len(_IMPORT_NAMES) >= _IMPORT_NAMES_LIMIT:
+        _IMPORT_NAMES.clear()
+    _IMPORT_NAMES[key] = result
+    return result
+
+
+def _imports(root, rel, source):
+    package = rel.removesuffix(".py").replace("/", ".").split(".")[:-1]
     paths = set()
-    for name in names:
+    for name in _import_names(source, package):
         paths.update(_module_files(root, name))
     return sorted(paths)
 

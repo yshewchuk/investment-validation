@@ -131,10 +131,20 @@ size check. Existing callers omitting the ceiling retain their read contract.
   `trailing_pnl_cutoff`, `board_analog_matcher`) and `chooser_analog_pool` each
   get the full set of supplied objects (`outputs` holds one or more
   `PoolOutput` per pool member; `chooser` is one or more; object names are
-  unique within a member, and every object carries `cutoff`), replacing that
+  unique within a member, and every non-carried object carries `cutoff`), replacing that
   row's objects wholesale; every other member row is copied unchanged;
   `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
-  the prior release id.
+  the prior release id. A `PoolOutput` may be `carried=True` (default
+  `False`): an object that only changes on a retrain (driver residual pools,
+  chooser row) is re-supplied unchanged. It carries a
+  caller-supplied `cutoff` (an extended ISO date not after `cutoff`; catalog rows
+  record none, `prior_carry_set` supplies the prior `pool_cutoff`) and must equal an object of the
+  same member in the prior row (name, `content_hash`, `payload_bytes`). Every
+  non-carried object must carry `cutoff` exactly. `prior_carry_set(release_root,
+  prior_release_id) -> (pool_cutoff, tuple[PoolOutput])` returns every prior
+  pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
+  (`PRIOR_MISMATCH` on a missing prior or structurally malformed rows, object keys or `pool_cutoff`;
+  wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`, or `CHOOSER_MISMATCH` for the chooser).
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
@@ -147,10 +157,10 @@ publish `OSError` to `PUBLICATION_FAILED`).
 | Condition | Code |
 |---|---|
 | Prior release id empty, not a string or unsafe (`/`, `\`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest, model payload or untouched STAGED row object missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
-| Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
-| Chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
-| An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
-| `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
+| Outputs do not cover exactly the six pool members; a carried object absent from the prior row of its member; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
+| A carried chooser object absent from the prior chooser row; chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
+| A non-carried object's `cutoff` differs from `cutoff`; a carried object's cutoff is not an extended date or is after `cutoff`; `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
+| `cutoff` is not strictly after the prior's (checked before any per-object `CUTOFF_MISMATCH`) | `CUTOFF_NOT_ADVANCED` |
 | Supplied object missing, unreadable, not a regular file, `payload_bytes` above `MAX_OBJECT_BYTES`, longer than its claim, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
 | Candidate id empty, unsafe or equal to the prior's; inventory `release_id` differs from it; candidate catalog or staged manifest exists with different or corrupt content | `ID_CONFLICT` |
 | Inventory missing, malformed, member hashes differ from the prior payloads, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
@@ -173,6 +183,40 @@ content succeeds and different content refuses `ID_CONFLICT`.
 | R4 transaction | Candidate artifacts are written only under the new candidate id (objects are content-addressed); the only other write is the `deployment/.carry_forward.lock` coordination file |
 | R5 partial failure | Orphaned objects or a staged manifest without a catalog may remain and a retry completes it; no catalog, nothing promoted |
 | R6 idempotency | Identical inputs give identical catalog bytes (no clock in the catalog); same id with different content refuses `ID_CONFLICT` |
+
+### 2.2 `phase5_state_stage` job (nightly pool staging)
+
+An ops job kind (`engine/v2/ops/state_stage.py`; logic in `tools/phase5_state_stage_job.py`
+because the assembly helpers live in `checks/`; `delivery` class, write lease on
+`deployment_pointer`; `state_stage_plan` builds the plan, nothing submits it yet). It
+stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
+
+- Parameters: `release_root` (the store's parent; empty resolves the production root at
+  plan time), `prior_release_id`, `release_id`, `cutoff` (extended ISO), `state_files` and
+  `input_bindings` (file name -> `training` output id, equal key sets; the job framework requires
+  the producing job to have succeeded).
+- The bound files must cover exactly the advancing members `paired_residual_pool`,
+  `board_analog_matcher`, `trailing_pnl_cutoff`. Paired and board objects carry `cutoff` as
+  the last name segment; trailing objects are stamped with `cutoff`.
+- Every other prior pool/chooser object, and every prior object of an advancing member not
+  re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
+  driver pools and the chooser keep their hash until a retrain re-supplies them.
+- Output: a re-verified candidate release (never `DEPLOYED`) and `stage_result.json`. The
+  inventory comes from the legacy champion registry under the new id; drift refuses before any write.
+- Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
+  `ReleaseAssemblyRefusal`, `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
+  carries `problems`). A trailing object's month may not start after `cutoff`. An unreadable prior
+  refuses "prior release could not be read"; an inventory artifact or registry that is a symlink,
+  not a regular file, or over its size cap refuses "release inventory could not be built". One attempt only.
+
+| Rule | Behaviour |
+|---|---|
+| R1 verified input | Bound files are bounded regular files, re-classified by schema and member (self-consistency only: the loader hashes the bytes it read, no recorded hash is compared); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
+| R2 cache | None; bound files, prior catalog and inventory are re-read each call |
+| R3 retry | One attempt (`RetryPolicy("none", 1)`); a failed job is not retried |
+| R4 transaction | New objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `stage_result.json` follows the light checks |
+| R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
+| R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
 
 ## 3. Inputs
 
@@ -346,7 +390,7 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 
 - **`current_release_inventory` (`inventory.py`)**: the champion registry
   (`engine.models.registry`) and the real files under `data/models/*` —
-  content hashes, never values.
+  content hashes, never values; a symlink, non-regular or oversize file raises `ValueError`.
 - **`deployment.stage_release`**: a caller-built `ModelRelease` +
   `ModelReleaseInventory` (already validated against each other by every
   training/preparation tool) plus a `{content_hash: bytes}` payload map for
