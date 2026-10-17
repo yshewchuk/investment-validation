@@ -201,7 +201,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
   the last name segment; trailing objects are stamped with `cutoff`.
 - Every other prior pool/chooser object, and every prior object of an advancing member not
   re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
-  driver pools and the chooser keep their hash until a retrain re-supplies them.
+  driver pools and the chooser keep their hash until the monthly refresh (§2.3) re-supplies them.
 - Output: a re-verified candidate release (never `DEPLOYED`) and `stage_result.json`. The
   inventory comes from the legacy champion registry under the new id; drift refuses before any write.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
@@ -227,10 +227,10 @@ Once per calendar month, inside the nightly, the chooser analog pool advances an
 |---|---|---|
 | Board analog, paired residual pools, trailing cutoff | Advance to the settled-event cutoff | Unchanged |
 | Three driver residual pools | Carried | Regenerated; content changes only if models retrain (cutoff-independent) |
-| Chooser analog pool and row | Carried | Advances to `M_end`: keyed `(pool_id, cutoff)`, rows closed before the cutoff |
+| Chooser analog pool and row | Carried | Advances to the exclusive cutoff `M_end + 1 day`: keyed `(pool_id, cutoff)`, rows closed before the cutoff |
 | Champion and gate models | Carried | Retrained if the models decision (D1) says so |
 
-**Trigger.** Completed months are all calendar months before the session's month. Each with no durable record (retrain or `superseded`) is due; the target `M` is the latest due, with cutoff `M_end` its last calendar day (a data date fixed by `M`). `M` runs on the first nightly where the settled-event cutoff has reached `M_end` (pending D9: the user's wording was "first run after month end"), the session's required graph and nightly pool refresh succeeded, and no heavy job runs. Older due months get a durable `superseded:{M1}` marker naming `M`, once (a first run supersedes all earlier due months).
+**Trigger.** Completed months are all calendar months before the session's month. Each with no durable record (retrain or `superseded`) is due; the target `M` is the latest due, with cutoff `M_end` its last calendar day (a data date fixed by `M`). `M` runs on the first nightly where the settled-event cutoff (the nightly's exclusive pool cutoff) has reached `M_end + 1 day`, so every `M_end` event is settled (pending D9: the user's wording was "first run after month end"), the session's required graph and nightly pool refresh succeeded, and no heavy job runs. Older due months get a durable `superseded:{M1}` marker naming `M`, once (a first run supersedes all earlier due months).
 
 **Idempotency.** Job key `retrain:{M}`; a key in any state is never resubmitted and a failed key is terminal for `M` (operator recovery, open gap #154). State is derived from durable job and release state each tick. Stage key `retrain-stage:{M}:{n}` (n = attempt, 1 or 2); candidate release id `retrain-{M}-{n}`, recomputable after a crash. The stage job reads `prior_release_id` at stage time (a slice 1 change; today fixed at submit), carries the nightly-advanced members from that base and records it as `sources.carried_from`; the promote guard checks that recorded id. Later steps `retrain-accept|check|promote:{candidate_release_id}`; the reconcile submits the next step in order only when no key exists for it, and a failed key is never resubmitted. The one exception is not a resubmission: when the promote job fails `ConcurrentPromote` (branch key `details.exception_class`), the reconcile starts a new candidate `retrain-{M}-2` with new step keys; that failed promote key stays failed. Every other failure is terminal for `M`.
 
