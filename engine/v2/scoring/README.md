@@ -97,7 +97,12 @@ production for eligible pinned-snapshot identities. See
 `ARCHITECTURE.md` for what
 runs in production today versus only in tests.
 
-<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
+`dynamic_outcomes` provides `DynamicMenuIdentity`, `DynamicCandidateOutcome`,
+`validate_dynamic_menu` and `DynamicMenuRefusal`; its closed refusal vocabulary
+is `DYNAMIC_MENU_REFUSAL_CODES`. These are pure preparatory accounting contracts,
+currently consumed only by focused tests. No runtime dispatcher uses them.
+
+<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
 
 ## Consumers
 
@@ -155,6 +160,34 @@ answers. Do not bypass the boundary by hand-constructing `NativeScoreInputs`
 from legacy-selected contracts, forecasts, prices, simulation results, gate
 decisions or diagnostics. Legacy records are expected values for the
 comparator only.
+
+### Immutable DYN-SV outcome accounting
+
+`validate_dynamic_menu(expected, outcomes)` accepts a list or tuple of neutral
+`DynamicCandidateOutcome` summaries, returning all seven in `DYNAMIC_MENU`
+order. It never accepts a mapping that could conceal duplicates. Each summary
+names either a record (request hash, score ID, validation status and readiness)
+or an explicit refusal code (request hash optional); reasons and warnings are
+copied into immutable tuples, preserving their order and duplicates.
+Producer/assembly refusal codes are preserved nonblank text; this boundary does
+not validate them against a producer-code registry.
+
+The caller supplies `DynamicMenuIdentity` from pinned context: ticker, exact
+event date/instant, session, event ID/revision, calendar revision, snapshot,
+release/deployment, decision clock/instant, mode and full fill/ATM policy hashes.
+`event_revision` may be `None`; every other identity field requires nonblank text.
+Use the existing foundation content hash for policies. This helper compares
+opaque identities exactly; it neither derives dates nor verifies those hashes.
+Duplicate members or candidate IDs, record/refusal overlap, unexpected members,
+malformed values and identity mismatches raise `INVALID_CHOOSER_MENU`. Missing
+members raise `CHOOSER_MENU_INCOMPLETE` with their fixed registry names.
+Invalid joins take precedence over missing membership in every input order.
+
+All-refused and mixed menus are valid accounting; statuses and causes
+are retained without eligibility or ranking decisions. These summaries do not
+verify their original records or establish source admission, finality or causal
+training. No I/O, scoring, fitting, retries or partial publication occurs here.
+Existing direct selection and nightly DYN-SV refusal remain unchanged.
 
 ## Feature-change contract
 
