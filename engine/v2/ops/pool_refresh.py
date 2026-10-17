@@ -18,12 +18,13 @@ from engine.v2.models import deployment
 from engine.v2.ops import nightly, state_stage, training
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import worker_source_manifest
-from engine.v2.ops.native_score_batch import _SHADOW_FILL_ALPHA
 from engine.v2.ops.plans import request_from_plan
 from engine.v2.ops.submission import job_id_for, submit
 
 PHASES = ("train-paired", "train-board", "train-trailing", "stage", "promote")
 TRAINING_PHASES = PHASES[:3]
+
+FILL_ALPHA = 0.5  # engine.fills.MID.alpha, the shadow fill alpha native_score_batch scores with
 
 
 def phase_key(session, phase, prior):
@@ -72,17 +73,18 @@ def _state(conn, key):
     return None if row is None else row["state"]
 
 
-def _training_plans(session, manifest_id):
-    return {
-        "train-paired": training.training_plan(
+def _training_plans(session, manifest_id, phases):
+    builders = {
+        "train-paired": lambda: training.training_plan(
             mode="state", state="paired_residual_pool", cutoffs=(session,),
             manifest_ref=manifest_id),
-        "train-board": training.training_plan(
-            mode="board_analog", alpha=_SHADOW_FILL_ALPHA, cutoffs=(session,),
+        "train-board": lambda: training.training_plan(
+            mode="board_analog", alpha=FILL_ALPHA, cutoffs=(session,),
             manifest_ref=manifest_id),
-        "train-trailing": training.training_plan(
+        "train-trailing": lambda: training.training_plan(
             mode="trailing_cutoff", cutoffs=(session,), manifest_ref=manifest_id),
     }
+    return {phase: builders[phase]() for phase in phases}
 
 
 def _implementation_ref(code_source):
@@ -108,10 +110,10 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
     if prior == release_id:
         return []
 
-    built = _training_plans(session, manifest_id)
     missing = [phase for phase in TRAINING_PHASES
                if not _exists(conn, phase_key(session, phase, prior))]
     if missing:
+        built = _training_plans(session, manifest_id, missing)
         receipts = []
         impl = _implementation_ref(code_source)
         for phase in missing:
@@ -151,7 +153,7 @@ def _state_refs(conn, session, prior, code_source):
     """Latest succeeded attempt's plain ``training/*.json`` outputs across the three
     training jobs, keyed by file remainder (``paired.json`` etc.). A duplicate name
     or an empty set is ``VALIDATION_FAILED``; summaries (``*.summary.json``) and
-    nested (``__``) names are excluded."""
+    non-``.json`` names are excluded."""
     state_refs = {}
     for phase in TRAINING_PHASES:
         key = phase_key(session, phase, prior)
@@ -170,8 +172,6 @@ def _state_refs(conn, session, prior, code_source):
             if name.endswith(".summary.json"):
                 continue
             remainder = name[len("training/"):]
-            if "__" in remainder:
-                continue
             if remainder in state_refs:
                 raise fail("VALIDATION_FAILED", "a state file name appears twice",
                            details={"name": remainder})

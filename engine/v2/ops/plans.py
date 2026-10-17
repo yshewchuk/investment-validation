@@ -201,11 +201,19 @@ def request_from_plan(plan, key):
         raise fail("INVALID_REQUEST", "plan has unsupported schema or blocked prerequisites")
     if plan["kind"] not in _ENABLED_PLAN_KINDS or plan["effects"] != _ENABLED_PLAN_KINDS[plan["kind"]]:
         raise fail("INVALID_REQUEST", "plan kind is not enabled for submission")
+    input_refs = tuple(plan["input_refs"])
+    dependency_job_ids: tuple[str, ...] = ()
+    retry_policy_ref = "bounded"
+    if plan["kind"] == "phase5_state_stage":
+        input_refs = ()
+        dependency_job_ids = tuple(sorted({ref.partition("#")[0] for ref in plan["input_refs"]}))
+        retry_policy_ref = "none"
     job = JobSpec(kind=_PLAN_JOB_KINDS.get(plan["kind"], plan["kind"]),
                   implementation_ref=plan["implementation_ref"],
                   spec_hash=plan.get("spec_hash"), environment_ref=plan["environment_ref"],
-                  parameters=plan["parameters"], input_refs=tuple(plan["input_refs"]),
+                  parameters=plan["parameters"], input_refs=input_refs,
+                  dependency_job_ids=dependency_job_ids,
                   output_namespace=plan["mode"], resource_class=plan["resource_class"],
-                  retry_policy_ref="bounded",
+                  retry_policy_ref=retry_policy_ref,
                   checkpoint_contract_ref=_PLAN_CHECKPOINT_CONTRACTS[plan["kind"]])
     return SubmitRequest(namespace=plan["mode"], idempotency_key=key, principal="operator", job=job)

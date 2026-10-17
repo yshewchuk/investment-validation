@@ -9,9 +9,11 @@ graceful degradation.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import sqlite3
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,10 +21,11 @@ import pytest
 
 from engine.v2.models import deployment
 from engine.v2.ops import pool_refresh
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.plans import request_from_plan as real_request_from_plan
+from engine.v2.ops.stages import registry
 from engine.v2.ops.state_stage import state_stage_plan
-from engine.v2.ops.submission import job_id_for
+from engine.v2.ops.submission import NamespacePolicy, job_id_for, validate_request
 from engine.v2.ops.supervisor import Service
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -62,14 +65,18 @@ def _add_training(conn, phase, *, session=SESSION, prior=PRIOR, state="queued"):
     return job_id
 
 
-def _succeeded_training(conn, phase, outputs, *, session=SESSION, prior=PRIOR):
-    job_id = _add_training(conn, phase, session=session, prior=prior, state="succeeded")
-    attempt_id = f"att-{phase}"
+def _add_attempt(conn, job_id, attempt_id, attempt_number, outputs, *, state="succeeded"):
     conn.execute("INSERT INTO attempts (attempt_id, job_id, state, attempt_number) "
-                 "VALUES (?, ?, 'succeeded', 1)", (attempt_id, job_id))
+                 "VALUES (?, ?, ?, ?)", (attempt_id, job_id, state, attempt_number))
     for name in outputs:
         conn.execute("INSERT INTO attempt_outputs (attempt_id, name, artifact_id) "
                      "VALUES (?, ?, 'a')", (attempt_id, name))
+    return attempt_id
+
+
+def _succeeded_training(conn, phase, outputs, *, session=SESSION, prior=PRIOR):
+    job_id = _add_training(conn, phase, session=session, prior=prior, state="succeeded")
+    _add_attempt(conn, job_id, f"att-{phase}", 1, outputs)
     return job_id
 
 
@@ -79,7 +86,7 @@ def _wire(monkeypatch, *, pointer=PRIOR):
 
     def training_plan(**kwargs):
         rec.training.append(kwargs)
-        return {"kind": "training", **kwargs}
+        return {"kind": "training", "mode": "shadow", "parameters": dict(kwargs)}
 
     def promote_plan(**kwargs):
         rec.promote.append(kwargs)
@@ -174,8 +181,14 @@ def test_all_training_phases_missing_submit_three(monkeypatch, tmp_path):
     for call in rec.training:
         assert call["cutoffs"] == (SESSION,)
         assert call["manifest_ref"] == MANIFEST
-    board = next(call for call in rec.training if call["mode"] == "board_analog")
-    assert board["alpha"] == 0.5
+    modes = {call["mode"]: call for call in rec.training}
+    assert modes["state"]["state"] == "paired_residual_pool"
+    assert "board_analog" in modes and "trailing_cutoff" in modes
+    board = modes["board_analog"]
+    assert board["alpha"] == pool_refresh.FILL_ALPHA == 0.5
+    for plan, _key in rec.requests:
+        assert plan["mode"] == "shadow"
+        assert plan["implementation_ref"] == "impl"
 
 
 # --------------------------------------------------------------------------
@@ -210,6 +223,20 @@ def test_waiting_while_a_training_job_runs(monkeypatch, tmp_path):
     assert rec.submits == []
 
 
+def test_plans_are_built_lazily_only_for_missing_phases(monkeypatch, tmp_path):
+    _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn)
+    for phase in pool_refresh.TRAINING_PHASES:
+        _add_training(conn, phase, state="running")
+
+    def _boom(**kwargs):
+        raise AssertionError("training_plan must not be built when nothing is missing")
+
+    monkeypatch.setattr(pool_refresh.training, "training_plan", _boom)
+    assert _submit(conn, tmp_path) == []
+
+
 # --------------------------------------------------------------------------
 # 6. all training succeeded -> one stage carrying only plain state refs
 # --------------------------------------------------------------------------
@@ -219,11 +246,15 @@ def test_all_training_succeeded_submits_the_stage_with_plain_refs(monkeypatch, t
     rec = _wire(monkeypatch)
     conn = _db()
     _add_score(conn)
+    board_file = "board_analog_matcher__STR-THRU__0.5000__2026-10-01.json"
     paired = _succeeded_training(
         conn, "train-paired",
-        ["training/paired.json", "training/paired.summary.json", "training/nested__x.json"])
-    board = _succeeded_training(conn, "train-board", ["training/board.json"])
-    trailing = _succeeded_training(conn, "train-trailing", ["training/trailing.json"])
+        ["training/paired_residual_pool.json", "training/paired_residual_pool.summary.json"])
+    board = _succeeded_training(
+        conn, "train-board",
+        [f"training/{board_file}", "training/board_analog_matcher.summary.json"])
+    trailing = _succeeded_training(
+        conn, "train-trailing", ["training/trailing_pnl_cutoff__2026-10.json"])
 
     assert _submit(conn, tmp_path) == ["receipt"]
     assert len(rec.stage) == 1
@@ -231,11 +262,31 @@ def test_all_training_succeeded_submits_the_stage_with_plain_refs(monkeypatch, t
     assert stage["prior_release_id"] == PRIOR
     assert stage["release_id"] == f"pools-{SESSION}"
     assert stage["cutoff"] == SESSION
+    assert stage["release_root"] == str(tmp_path)
     assert stage["state_refs"] == {
-        "paired.json": f"{paired}#training/paired.json",
-        "board.json": f"{board}#training/board.json",
-        "trailing.json": f"{trailing}#training/trailing.json"}
+        "paired_residual_pool.json": f"{paired}#training/paired_residual_pool.json",
+        board_file: f"{board}#training/{board_file}",
+        "trailing_pnl_cutoff__2026-10.json":
+            f"{trailing}#training/trailing_pnl_cutoff__2026-10.json"}
+    assert "board_analog_matcher.summary.json" not in stage["state_refs"]
     assert rec.requests[-1][1] == pool_refresh.phase_key(SESSION, "stage", PRIOR)
+
+
+def test_state_refs_use_only_the_latest_succeeded_attempt(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn)
+    job_id = _add_training(conn, "train-paired", state="succeeded")
+    _add_attempt(conn, job_id, "att-1", 1, ["training/paired_residual_pool__old.json"])
+    _add_attempt(conn, job_id, "att-2", 2, ["training/paired_residual_pool.json"])
+    _succeeded_training(conn, "train-board", ["training/board.json"])
+    _succeeded_training(conn, "train-trailing", ["training/trailing.json"])
+
+    assert _submit(conn, tmp_path) == ["receipt"]
+    refs = rec.stage[0]["state_refs"]
+    assert refs["paired_residual_pool.json"] == (
+        f"{job_id}#training/paired_residual_pool.json")
+    assert "paired_residual_pool__old.json" not in refs
 
 
 # --------------------------------------------------------------------------
@@ -287,6 +338,16 @@ def test_stage_that_is_not_yet_succeeded_waits(monkeypatch, tmp_path):
     assert rec.submits == [] and rec.promote == []
 
 
+def test_failed_stage_job_blocks_promote(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn)
+    _all_training_succeeded(conn)
+    _add_training(conn, "stage", state="failed")
+    assert _submit(conn, tmp_path) == []
+    assert rec.promote == [] and rec.submits == []
+
+
 def test_stage_succeeded_submits_a_guarded_promote(monkeypatch, tmp_path):
     rec = _wire(monkeypatch)
     conn = _db()
@@ -298,6 +359,7 @@ def test_stage_succeeded_submits_a_guarded_promote(monkeypatch, tmp_path):
     assert len(rec.promote) == 1
     assert rec.promote[0]["expected_previous_release_id"] == PRIOR
     assert rec.promote[0]["release_id"] == f"pools-{SESSION}"
+    assert rec.promote[0]["release_root"] == str(Path(tmp_path) / "deployment")
     assert rec.requests[-1][1] == pool_refresh.phase_key(SESSION, "promote", PRIOR)
 
 
@@ -319,10 +381,15 @@ def test_existing_promote_is_idempotent(monkeypatch, tmp_path):
 
 def test_real_request_from_plan_accepts_a_state_stage_plan(tmp_path):
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="a", release_id="b",
-                            cutoff="2026-10-01", state_refs={"x.json": "j#o"},
+                            cutoff="2026-10-01",
+                            state_refs={"x.json": "job_abc#training/x.json"},
                             source_root=REPO_ROOT)
     request = real_request_from_plan(plan, "nightly:2026-10-01:pool:stage:a")
     assert request.job.kind == "phase5_state_stage"
+    validate_request(registry(), NamespacePolicy({"operator": frozenset({"shadow"})}), request)
+    assert request.job.dependency_job_ids == ("job_abc",)
+    assert request.job.input_refs == ()
+    assert request.job.retry_policy_ref == "none"
 
 
 # --------------------------------------------------------------------------
@@ -339,16 +406,31 @@ def test_reconcile_swallows_missing_root_and_reports_once(monkeypatch, capsys):
 
     monkeypatch.setattr(deployment, "production_release_root", _missing)
     assert Service._reconcile_pool_nightly_refresh(service) is None
+    assert capsys.readouterr().out == ""
+    assert service._last_pool_refresh_problem is None
 
     monkeypatch.setattr(deployment, "production_release_root", lambda: "/somewhere")
 
     def _boom(*args, **kwargs):
-        raise RuntimeError("planted pool refresh failure")
+        raise fail("INPUT_CHANGED", "planted pool refresh failure")
 
     monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready", _boom)
     Service._reconcile_pool_nightly_refresh(service)
     Service._reconcile_pool_nightly_refresh(service)
-    assert service._last_pool_refresh_problem is not None
-    assert capsys.readouterr().out.count("pool_nightly_refresh_reconcile_failed") == 1
+    assert service._last_pool_refresh_problem == ("INPUT_CHANGED", "planted pool refresh failure")
+    out = capsys.readouterr().out
+    assert out.count("pool_nightly_refresh_reconcile_failed") == 1
+    assert "INPUT_CHANGED" in out and "planted pool refresh failure" in out
 
-    assert "_reconcile_pool_nightly_refresh()" in inspect.getsource(Service.tick)
+    monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready",
+                        lambda *args, **kwargs: [])
+    Service._reconcile_pool_nightly_refresh(service)
+    assert service._last_pool_refresh_problem is None
+
+
+def test_tick_calls_reconcile_pool_nightly_refresh():
+    tree = ast.parse(textwrap.dedent(inspect.getsource(Service.tick)))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and node.func.attr == "_reconcile_pool_nightly_refresh"]
+    assert calls

@@ -509,7 +509,8 @@ Only a tracked path absent from the worktree reads as empty.
   `submit_graph`, so an optional stage's own submission problem can
   never abort the required graph); `Service._reconcile_native_parity`,
   calling `nightly.submit_native_parity_if_ready`, submits
-  `native_parity` the identical way.
+  `native_parity` the identical way; `Service._reconcile_pool_nightly_refresh`
+  submits the pool-refresh phases (training, stage, promote) one at a time.
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
@@ -525,29 +526,19 @@ Only a tracked path absent from the worktree reads as empty.
   actually calls it." An architecture-doc update's production call path
   must trace the real chain — entrypoint → stage → module → new code — not
   cite a passing inventory row as proof.
-- **Native nightly pool/residual refresh (cutover PR-13a — slices 1–4
-  implemented, three advancing members only; split from cutover PR-13's original combined design,
-  #90, after 3 Opus BLOCKs on the combined scope).** A frozen release
-  (`engine/v2/models/deployment.py`) is staged and promoted only by an
-  operator today; legacy instead rebuilds the analog/residual pools and the
-  trailing entry-rule cutoff live, every scoring run
-  (`engine/v2/models/inventory.py`'s "What is NOT in the release" note;
-  `engine/pnl_sim.py`'s `trailing_cutoff`/`ResidualPool`). This design adds
-  one more `Service.tick()`-time reconcile, the same shape as
-  `_reconcile_computed_moves_refresh` above (per #54) — never a `nightly.py`
-  `GRAPH`/`_DAG_STAGES` node — that nightly appends newly-settled events
-  into the board-analog and paired residual pools, advances the trailing
-  cutoff, re-verifies the chooser-analog pool and the three driver residual
-  pools (which do not themselves grow with new events — see the models doc
-  finding), and produces a new, gated, auto-promoted release that carries
-  every model binding over unchanged.
-  Retraining the champion/gate/chooser models themselves, monthly, is
-  cutover PR-13b; a native producer for the Tier-4 forecasts table native
-  currently only imports from a legacy snapshot is cutover PR-13c. Forward
-  inference instead uses the design in `engine/v2/scoring/ARCHITECTURE.md`;
-  it needs no stored forward row. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
-  pool/residual refresh", `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
-  issue #192 for the full design.
+- **Native nightly pool/residual refresh.** A frozen release
+  (`engine/v2/models/deployment.py`) carries the pools legacy instead
+  rebuilds live every scoring run (`engine/v2/models/inventory.py`'s "What
+  is NOT in the release" note; `engine/pnl_sim.py`'s
+  `trailing_cutoff`/`ResidualPool`). One more `Service.tick()` sidecar,
+  `Service._reconcile_pool_nightly_refresh` — never a `nightly.py`
+  `GRAPH`/`_DAG_STAGES` node — trains the board-analog and paired residual
+  pools and the trailing cutoff at the session cutoff, stages a candidate
+  release and promotes it behind an expected-incumbent guard; driver pools
+  and the chooser stay carried. Contract: `engine/v2/models/ARCHITECTURE.md`
+  §2.3. Monthly retraining of the champion/gate/chooser models is cutover
+  PR-13b; a native Tier-4 forecasts producer is PR-13c. Forward inference
+  uses `engine/v2/scoring/ARCHITECTURE.md`.
 - **Captured native comparison export (tools, read-only inputs).**
   `tools/captured_native_comparison.py` exports one explicitly selected,
   manifest-declared STR-THRU replay into the existing parity-report shape.

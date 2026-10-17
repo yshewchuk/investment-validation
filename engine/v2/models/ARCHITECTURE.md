@@ -238,7 +238,7 @@ outputs; (3) one `models_promote` job guarded by `expected_previous_release_id` 
 |---|---|
 | R1 verified input | session and manifest id from the latest succeeded `score` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing one submits nothing |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
-| R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls for operator recovery (#154) |
+| R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); a changed incumbent gives new keys, so a new cycle |
 | R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |
 | R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; the prior release stays deployed |
 | R6 idempotency | keys `nightly:<session>:pool:<phase>:<prior release id>` are stable; a deployed release already named `pools-<session>` ends the cycle |
