@@ -41,7 +41,7 @@ from tests.ops_support import POLICY as TINY_POLICY
 from tests.ops_support import REGISTRY as TINY_REGISTRY
 from tests.ops_support import TEST_POLICY, FakeClock, catalog, request, run_until, sample
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 
 #: Three ordered steps, then a deterministic non-retryable failure -- the
