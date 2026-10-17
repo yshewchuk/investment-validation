@@ -210,12 +210,12 @@ def training_commands(by_member: Mapping[str, list[Key]], train_root: Path, *,
 
 def staged_keys(release_root: Path) -> dict[str, set[Key]]:
     """The ``(strategy, alpha, cutoff)`` keys a staged release holds, per member."""
-    from checks.phase5_release import deployment_root, read_manifest
     from engine.v2.models.payoff_artifact import PayoffArtifactLoader, PayoffArtifactRef
     from engine.v2.models.recalibration_artifact import (
         RecalibrationArtifactLoader,
         RecalibrationArtifactRef,
     )
+    from engine.v2.models.release_layout import deployment_root, read_manifest
 
     manifest = read_manifest(Path(release_root))
     base = deployment_root(Path(release_root))

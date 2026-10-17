@@ -1,8 +1,9 @@
 """P5-6 staged-release layout and the required-member catalog.
 
-Shared by ``tools/phase5_prepare_release.py`` (writes a staged release) and
-``checks/phase5_acceptance.py`` (verifies one). Checks never import tools, so
-the schema lives here.
+Shared, among others, by ``tools/phase5_prepare_release.py`` (writes a staged release),
+``checks/phase5_acceptance.py`` (verifies one) and
+``checks/phase5_release_assembly.py``; it lives in
+``engine.v2.models`` so checks and tools import it directly.
 
 A staged release root holds two things:
 
@@ -29,24 +30,27 @@ The public helpers for a staged release are ``catalog_path``, ``validate_catalog
 """
 from __future__ import annotations
 
-import hashlib
-import importlib
 import json
-import os
-import stat
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from engine.v2.foundation import content_hash, ensure_directory, fsync_directory
+from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
-from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
+from engine.v2.models.release_objects import (  # noqa: F401  (re-exported)
+    DEPLOYMENT_DIR,
+    OBJECTS_DIR,
+    ObjectVerificationError,
+    ReleaseLayoutError,
+    deployment_root,
+    object_relpath,
+    read_regular_file,
+    sha256_bytes,
+    write_object,
+)
 
 PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
 MANIFEST_NAME = "phase5_release.json"
-DEPLOYMENT_DIR = "deployment"
-OBJECTS_DIR = "objects"
 
 STAGED = "STAGED"
 MISSING = "MISSING"
@@ -142,71 +146,6 @@ STATE_SPECS: tuple[StateSpec, ...] = (
 )
 
 
-class ReleaseLayoutError(ValueError):
-    """The staged release root is malformed."""
-
-
-class ObjectVerificationError(ReleaseLayoutError):
-    """Existing or published object bytes failed bounded verification."""
-
-
-def modules_available(modules: tuple[str, ...]) -> tuple[bool, str]:
-    """``(True, "")`` if every module imports, else ``(False, first missing)``."""
-    for name in modules:
-        try:
-            importlib.import_module(name)
-        except ImportError:
-            return False, name
-    return True, ""
-
-
-def sha256_bytes(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
-def object_relpath(member_hash: str) -> str:
-    """The deployment store's own content-addressed object path."""
-    return f"{OBJECTS_DIR}/" + member_hash.removeprefix("sha256:")
-
-
-def deployment_root(release_root: Path) -> Path:
-    return Path(release_root) / DEPLOYMENT_DIR
-
-
-def write_object(release_root: Path, payload: bytes) -> tuple[str, str]:
-    """Durably create or verify exact bytes, never replace an existing object."""
-    digest = sha256_bytes(payload)
-    rel = object_relpath(digest)
-    dest = deployment_root(release_root) / rel
-    try:
-        ensure_directory(dest.parent)
-        if not dest.is_file():
-            scratch = deployment_root(release_root) / "tmp"
-            ensure_directory(scratch)
-            with tempfile.TemporaryDirectory(prefix="phase5-object-", dir=scratch) as directory:
-                tmp = Path(directory) / "payload"
-                with tmp.open("xb") as handle:
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                try:
-                    os.link(tmp, dest)
-                except FileExistsError:
-                    if not dest.is_file():
-                        raise
-        try:
-            actual = read_bounded_state(dest, len(payload), no_follow=True)
-        except (BoundedStateReadError, OSError) as exc:
-            raise ObjectVerificationError("phase5 object bytes could not be verified") from exc
-        if actual != payload:
-            raise ObjectVerificationError("phase5 object bytes differ from payload")
-        fsync_directory(dest.parent)
-        fsync_directory(dest.parent.parent)
-    except OSError as exc:
-        raise ReleaseLayoutError("phase5 object could not be published") from exc
-    return digest, rel
-
-
 def manifest_body(release_id: str, deployment_id: str, members: list[dict],
                   sources: Mapping[str, Any]) -> dict:
     body = {
@@ -224,7 +163,7 @@ def _catalog_path(release_root: Path, release_id: str) -> Path:
     if not isinstance(release_id, str):
         raise ReleaseLayoutError("release_id must be a string")
     try:
-        return deployment._manifest_path(deployment_root(release_root), release_id).with_name(
+        return deployment.manifest_path(deployment_root(release_root), release_id).with_name(
             MANIFEST_NAME)
     except deployment.DeploymentError as exc:
         raise ReleaseLayoutError("unsafe release_id") from exc
@@ -248,22 +187,9 @@ MAX_CATALOG_BYTES = 64 * 1024 * 1024
 
 def _read_catalog(path: Path, expected_id: str | None = None) -> dict | None:
     try:
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        except FileNotFoundError:
+        data = read_regular_file(path, MAX_CATALOG_BYTES)
+        if data is None:
             return None
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode):
-                raise ReleaseLayoutError("phase5 catalog is not a bounded regular file")
-            handle = os.fdopen(fd, "rb")
-        except BaseException:
-            os.close(fd)
-            raise
-        with handle:
-            data = handle.read(MAX_CATALOG_BYTES + 1)
-        if len(data) > MAX_CATALOG_BYTES:
-            raise ReleaseLayoutError("phase5 catalog is not a bounded regular file")
         return _validate_catalog(json.loads(data), expected_id)
     except (OSError, ValueError, RecursionError) as exc:
         raise ReleaseLayoutError("phase5 catalog could not be read or validated") from exc
@@ -271,16 +197,16 @@ def _read_catalog(path: Path, expected_id: str | None = None) -> dict | None:
 
 def _verify_staged(store: Path, release_id: str) -> None:
     try:
-        manifest = deployment._read_manifest(store, release_id)
+        manifest = deployment.read_manifest(store, release_id)
         if (manifest is None or manifest.release.release_id != release_id
-                or not deployment._manifest_hash_matches(manifest)):
+                or not deployment.manifest_hash_matches(manifest)):
             raise ReleaseLayoutError("catalog requires a matching verified staged release")
     except (OSError, ValueError, deployment.DeploymentError) as exc:
         raise ReleaseLayoutError("catalog staged release could not be verified") from exc
 
 
 def _write_catalog(path: Path, body: Mapping[str, Any]) -> None:
-    deployment._atomic_write_bytes(
+    deployment.atomic_write_bytes(
         path, (json.dumps(body, indent=2, sort_keys=True) + "\n").encode())
 
 
@@ -290,7 +216,7 @@ def validate_legacy_manifest(store: Path, legacy_path: Path) -> None:
     if body is not None:
         release_id = body["release_id"]
         _verify_staged(store, release_id)
-        path = deployment._manifest_path(store, release_id).with_name(MANIFEST_NAME)
+        path = deployment.manifest_path(store, release_id).with_name(MANIFEST_NAME)
         _read_catalog(path, release_id)
 
 
@@ -349,12 +275,14 @@ def staged_manifest_path(store, release_id):
 
 __all__ = [
     "ANALOG_MODULES", "DEPLOYMENT_DIR", "EXPECTED_MODEL_BINDINGS", "MANIFEST_NAME",
-    "MAX_CATALOG_BYTES", "MEMBER_STATUSES", "MISSING", "OBJECTS_DIR", "PENDING",
+    "MAX_CATALOG_BYTES", "MEMBER_STATUSES", "MISSING", "OBJECTS_DIR",
+    "ObjectVerificationError", "PENDING",
     "PHASE5_RELEASE_SCHEMA",
     "RECALIBRATION_MODULES", "STAGED", "STATE_SPECS", "TIER4_ROLES",
     "TRAILING_CUTOFF_MODULES", "ReleaseLayoutError", "StateSpec", "catalog_path",
-    "deployment_root", "manifest_body", "member_row", "modules_available", "object_relpath",
-    "preserve_legacy_manifest", "read_catalog", "read_manifest", "sha256_bytes",
+    "deployment_root", "manifest_body", "member_row", "object_relpath",
+    "preserve_legacy_manifest", "read_catalog", "read_manifest", "read_regular_file",
+    "sha256_bytes",
     "staged_manifest_path", "validate_catalog", "validate_legacy_manifest", "verify_staged",
     "write_catalog", "write_manifest", "write_object",
 ]

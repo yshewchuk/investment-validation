@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.test_checks_phase5_acceptance import _release
+from tests.v2.models.test_checks_phase5_acceptance import _release
 from tools import phase5_calibration_keys as keys_tool
 
 
