@@ -3,7 +3,7 @@
 Advances the three ``phase5_state_stage`` pool members (``paired_residual_pool``,
 ``board_analog_matcher``, ``trailing_pnl_cutoff``) one cutoff per night: the session
 of the latest succeeded legacy ``score`` job. Contract:
-``engine/v2/models/ARCHITECTURE.md`` section 2.3. Called from ``Service.tick()``;
+``engine/v2/models/ARCHITECTURE.md`` section 2.2.1. Called from ``Service.tick()``;
 never a GRAPH node; the Service sidecar catches and reports any failure. Reads
 durable state only (no memo): each phase key is checked against the ``jobs`` table
 every call, and phase N+1 is submitted only once every phase-N job has succeeded.

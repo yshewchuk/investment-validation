@@ -935,7 +935,7 @@ waits without submitting until its paired succeeded inputs are ready.
   functions and writes `training_result.json`; `run_promote_worker` calls `deployment.promote`;
   `run_rollback_worker` uses its plan-pinned incumbent and target, then writes
   `pointer_state.json`. Recovery recognizes that exact prior swap without
-  moving the pointer again. None run in the nightly DAG; the pool sidecar (models doc §2.3) or operators submit with
+  moving the pointer again. None run in the nightly DAG; the pool sidecar (models doc §2.2.1) or operators submit with
   `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
   `operator`, namespace `shadow` and the caller idempotency key like promote.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
@@ -1224,7 +1224,7 @@ job.
 | `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; an eligible pinned-snapshot tick submits producer parameters and the worker produces both documents (R1–R6 above) | the specific succeeded score job read, not session alone |
 | `native_parity` | no paired, succeeded `native_score_batch`/`score` identity yet — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id`, skipping the artifact read and attempt spend on every later tick carrying it (the identity/existing-job lookup itself still runs on eligible ticks) | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
-| pool-nightly refresh | no succeeded `score` job, no deployed pointer, or no `legacy_manifest.json` binding on that job — returns without submitting (reported when the pointer or binding is unreadable) | one key per phase: `nightly:<session>:pool:<phase>`, scoped by prior release id (`Service._reconcile_pool_nightly_refresh`; contract in models doc §2.3) |
+| pool-nightly refresh | no succeeded `score` job, no deployed pointer, or no `legacy_manifest.json` binding on that job — returns without submitting (reported when the pointer or binding is unreadable) | one key per phase: `nightly:<session>:pool:<phase>`, scoped by prior release id (`Service._reconcile_pool_nightly_refresh`; contract in models doc §2.2.1) |
 
 ### `supervisor.py`: leases during a long single-attempt effect
 
