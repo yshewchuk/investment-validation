@@ -134,7 +134,13 @@ board references with no rendered file each raise a typed
 `LegacyBundleError` (`.code`) rather than being coerced or dropped.
 `load_score_document(path)` reads `score.json` with the same strictness:
 `rows`/`ladder`/`expected_population` required as lists, no unrecognized
-top-level key, no symlink. No legacy `engine.*` import, no `engine.v2.ops`
+top-level key, no symlink; it is `parse_score_document(read_score_bytes(path))`,
+where `read_score_bytes` refuses a symlink or missing file and reads through
+`read_capped_bytes` (`MAX_ARTIFACT_BYTES`, 64 MiB; a negative or non-int cap is a
+`ValueError`). `tools/v2_dashboard_project.py run_projection` reads the score once
+through `read_score_bytes` (the same bytes are hashed and parsed) and reports a
+`LegacyBundleError` from that read (symlink, missing file, over the cap) as `OpsError`
+`INVALID_REQUEST`; a malformed score document keeps its `LegacyBundleError`. No legacy `engine.*` import, no `engine.v2.ops`
 import — only bytes in, parsed JSON out.
 
 `projections` also carries the two additions P3-2 needed to serve §6's
@@ -310,7 +316,7 @@ the mock disagree, §6 wins":**
   src/api/client.ts` sends) succeeds on every route, not just proves the
   logic exists.
 
-<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, projection_binding, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, open_index_untranslated, legacy_bundle, load_legacy_bundle, load_score_document, LegacyBundleError, score_projection, legacy_score_projection -->
+<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, projection_binding, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, open_index_untranslated, legacy_bundle, load_legacy_bundle, load_score_document, parse_score_document, read_score_bytes, read_capped_bytes, MAX_ARTIFACT_BYTES, LegacyBundleError, score_projection, legacy_score_projection -->
 
 ## Consumers
 
@@ -326,6 +332,8 @@ surface, per its layer-8 "7 only" import rule.
 by `tests/v2/serving/test_v2_serving_api.py`; neither is a v2 package import, so
 neither appears in this directive (`checks/package_readmes.py` only tracks
 `engine/v2/**` packages as consumers). No v2 package imports `api` yet.
+`tools/v2_dashboard_project.py` (not a v2 package) imports `legacy_bundle`'s
+`load_legacy_bundle`, `parse_score_document`, `read_capped_bytes` and `read_score_bytes`.
 
 <!-- consumers: engine.v2.dashboard -->
 
@@ -387,7 +395,7 @@ the comparator, and assert it names **this package's stage** and that field
 path — not that "a row is red". A check that has never failed is not known to
 work.
 
-`tests/test_v2_serving_bridge.py` (P3-1a) and `tests/test_v2_serving_
+`tests/v2/serving/test_v2_serving_bridge.py` (P3-1a) and `tests/test_v2_serving_
 projections.py` (P3-1b) cover the offline bridge/index over synthetic
 `score.json`/bundle pairs and a synthetic Phase 2 catalog (real
 `earnings_events` fragments, never a real panel or renderer).
@@ -399,7 +407,7 @@ ticker file changing the manifest hash and the CLI's `release_id`; and every
 refusal (symlink, traversal, a ticker the board references with no file,
 duplicate ticker, malformed `.js` wrapper):
 
-    python3 -m pytest -q tests/test_v2_serving_bridge.py tests/test_v2_serving_projections.py tests/test_v2_serving_legacy_bundle.py
+    python3 -m pytest -q tests/v2/serving/test_v2_serving_bridge.py tests/test_v2_serving_projections.py tests/test_v2_serving_legacy_bundle.py
 
 `tests/v2/serving/test_v2_serving_api.py` (P3-2) builds a real `serving.sqlite` the
 same way and serves it over REAL HTTP — a real `uvicorn.Server` bound to an

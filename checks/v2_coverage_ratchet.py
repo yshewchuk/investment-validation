@@ -34,7 +34,7 @@ Bumped again to v3 by two independent same-day changes, merged together:
   was added to the glob for exactly this.
 * (P3-1a) the first real production module under ``engine/v2/serving``
   (``bridge.py``, plus its ``contracts/serving.py`` schemas) lands with its
-  own ``tests/test_v2_serving_bridge.py`` -- named for the *layer*
+  own ``tests/v2/serving/test_v2_serving_bridge.py`` -- named for the *layer*
   (``serving``), not the ops adapter, so it matched neither existing glob and
   would otherwise merge as permanently-uncovered ``engine.v2.serving`` source.
   ``phase1_suite()`` now also picks up ``tests/test_v2_serving_*.py``.
@@ -91,6 +91,11 @@ Bumped to v11: ``tests/test_v2_serving_fold_loader.py`` moved to
 the fixed selector retains that path and package counts remain historical,
 not a fresh coverage measurement.
 
+Bumped to v12: tests/test_v2_serving_bridge.py moved to tests/v2/serving/
+(registered through PHASE1_RENAMED). The declared file list and measurement
+identity change; package counts remain historical, not a fresh coverage
+measurement.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -116,7 +121,9 @@ to derive this from, unlike phase1/phase2), kept only if it exists on disk.
 produce the ``coverage_receipt_ref`` evidence document and
 ``rearchitecture_phase3_evidence.py`` calls ``phase3_coverage_findings`` to
 ratchet it, reusing this module's ``package_counts`` rather than
-reimplementing it.
+reimplementing it. The baseline schema was bumped to v1.1 when two
+fixed-suite paths relocated under tests/v2/serving/; counts remain
+historical.
 """
 from __future__ import annotations
 
@@ -182,7 +189,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v11"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v12"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
@@ -194,6 +201,7 @@ PHASE1_RENAMED = {
     "tests/test_v2_ops_price_history.py": "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/test_v2_data_computed_moves.py": "tests/v2/data/test_computed_moves.py",
     "tests/test_v2_data_computed_moves_table.py": "tests/v2/data/test_computed_moves_table.py",
+    "tests/test_v2_serving_bridge.py": "tests/v2/serving/test_v2_serving_bridge.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (
@@ -584,7 +592,7 @@ def phase2_validate_measurement(measured, root=ROOT, registry=None):
 
 PHASE3_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase3_baseline.json"
 PHASE3_COVERAGE_SCHEMA = "phase3_coverage.v1.0"
-PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.0"
+PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.1"
 
 #: A scope choice (no phase3_acceptance.json "tests" registry exists to
 #: derive this from, unlike phase1/phase2) -- every real test file that
@@ -593,14 +601,14 @@ PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.0"
 PHASE3_FIXED_SUITE = (
     "tests/v2/serving/test_v2_serving_api.py",
     "tests/v2/serving/test_serving_root_current.py",
-    "tests/test_v2_serving_bridge.py",
+    "tests/v2/serving/test_v2_serving_bridge.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
     "tests/test_v2_dashboard_preview.py",
     "tests/test_v2_dashboard_browser.py",
     "tests/v2/dashboard/test_v2_dashboard_integration.py",
-    "tests/test_checks_phase3_gate.py",
+    "tests/v2/serving/test_checks_phase3_gate.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
 )
 
