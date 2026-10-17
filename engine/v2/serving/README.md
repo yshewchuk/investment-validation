@@ -138,8 +138,9 @@ top-level key, no symlink; it is `parse_score_document(read_score_bytes(path))`,
 where `read_score_bytes` refuses a symlink or missing file and reads through
 `read_capped_bytes` (`MAX_ARTIFACT_BYTES`, 64 MiB; a negative or non-int cap is a
 `ValueError`). `tools/v2_dashboard_project.py run_projection` reads the score once
-through `read_score_bytes` (the same bytes are hashed and parsed) and reports any
-refusal as `OpsError` `INVALID_REQUEST`. No legacy `engine.*` import, no `engine.v2.ops`
+through `read_score_bytes` (the same bytes are hashed and parsed) and reports a
+`LegacyBundleError` from that read (symlink, missing file, over the cap) as `OpsError`
+`INVALID_REQUEST`; a malformed score document keeps its `LegacyBundleError`. No legacy `engine.*` import, no `engine.v2.ops`
 import — only bytes in, parsed JSON out.
 
 `projections` also carries the two additions P3-2 needed to serve §6's
@@ -332,7 +333,7 @@ by `tests/v2/serving/test_v2_serving_api.py`; neither is a v2 package import, so
 neither appears in this directive (`checks/package_readmes.py` only tracks
 `engine/v2/**` packages as consumers). No v2 package imports `api` yet.
 `tools/v2_dashboard_project.py` (not a v2 package) imports `legacy_bundle`'s
-`load_legacy_bundle`, `read_capped_bytes` and `read_score_bytes`.
+`load_legacy_bundle`, `parse_score_document`, `read_capped_bytes` and `read_score_bytes`.
 
 <!-- consumers: engine.v2.dashboard -->
 
