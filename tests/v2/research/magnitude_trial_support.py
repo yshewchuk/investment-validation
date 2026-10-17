@@ -218,3 +218,21 @@ def forbid_history_rebuild(monkeypatch):
         (event_history, "_assemble_history"), (magnitude_features, "load_magnitude_history"),
         (panel_math, "history_features")):
         monkeypatch.setattr(owner, name, forbid_access)
+
+
+def trial_cases(case):
+    return [(outer["outer"]["year"], inner["year"], candidate["candidate_id"])
+            for outer in case.plan["folds"] for inner in outer["inner"] for candidate in case.plan["candidates"]]
+
+
+def trial_forecasts(case, args, value=7):
+    outer, year, _ = args
+    fold = next(inner for item in case.plan["folds"] if item["outer"]["year"] == outer
+                for inner in item["inner"] if inner["year"] == year)
+    return [{"event_id": event, "horizon_sessions": horizon, "predicted_absolute_move_pct": value}
+            for event in fold["evaluation_event_ids"] for horizon in (5, 3, 1)]
+
+
+def trial_slots(case):
+    return [tuple(row) for row in case.source.conn.execute(
+        "SELECT slot, ref_json FROM magnitude_search_records ORDER BY slot")]

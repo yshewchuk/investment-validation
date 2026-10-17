@@ -187,6 +187,9 @@ and the history admission bridge uses `errors.fail`.
 `experiments/magnitude_search_trials.py` consumes `migrations.migrate`/`require_current`,
 `fingerprints.source_closure` and typed failures; `magnitude_search_records.py` consumes
 `migrations.Migration`, `catalog.transaction` and typed failures for the search-owned immutable journal. `experiments/magnitude_search_errors.py` consumes `errors.OpsError`/`fail` for shared artifact-failure classification.
+The trials caller uses legacy/v2 no-fit guards and `experiments.magnitude_search_execution`;
+that fixed-child supervisor consumes `executor.THREAD_VARIABLES` and `errors.fail`, not the ops job/retry lifecycle.
+`experiments/magnitude_search_worker.py` consumes `errors.OpsError` to distinguish estimator-local failures; `experiments/magnitude_fitted.py` consumes `errors.OpsError`/`fail` for strict propagation and legacy failure mapping.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection
