@@ -23,6 +23,7 @@ from tests.v2.research.test_magnitude_search_outer import (
     base_source,  # noqa: F401
     collect,
     expected_fits,
+    forbid_work,
     independent_metrics,
     journal_slots,
     known_targets,
@@ -159,6 +160,39 @@ def test_missing_or_submitted_only_native_evidence_cannot_launch(outer_case, mon
     assert case.conn.total_changes == before
 
 
+@pytest.mark.parametrize("missing", ["execution", "terminal"])
+@pytest.mark.parametrize("axis", ["fold", "candidate", "inner"])
+def test_later_missing_native_evidence_precedes_all_replays(outer_case, monkeypatch, missing, axis):
+    case = outer_case
+    fold = case.plan["folds"][-1 if axis in ("fold", "inner") else 0]
+    candidate = case.plan["candidates"][-1 if axis == "candidate" else 0]
+    inner = fold["inner"][-1 if axis == "inner" else 0]
+    args = fold["outer"]["year"], inner["year"], candidate["candidate_id"]
+    absent = missing + ":" + content_hash([case.plan["plan_id"], *args])
+    original = outer.read_record
+    hidden = []
+    def read(conn, store, run_id, name):
+        result = original(conn, store, run_id, name)
+        if name == absent:
+            assert isinstance(result, dict)
+            hidden.append(name)
+            return None
+        return result
+    monkeypatch.setattr(outer, "read_record", read)
+    forbidden = Mock(side_effect=AssertionError("incomplete native inventory crossed its admission boundary"))
+    for name in ("freeze", "execute"):
+        monkeypatch.setattr(trials.SearchTrials, name, forbidden)
+    for name in ("_inputs", "run_fitted_trial", "load_magnitude_targets", "append_record"):
+        monkeypatch.setattr(outer, name, forbidden)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", forbidden)
+    before = case.conn.total_changes, list(case.conn.iterdump())
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "outer evaluation requires completed native inner trials"):
+        run(case)
+    assert hidden == [absent]
+    forbidden.assert_not_called()
+    assert (case.conn.total_changes, list(case.conn.iterdump())) == before
+
+
 def test_valid_native_candidate_failure_is_excluded_without_blocking_outer(case, monkeypatch):  # noqa: F811
     original = trials.run_fitted_trial
     def failed(inputs, fold, plan, execution, limits, progress):
@@ -181,7 +215,8 @@ def test_valid_native_candidate_failure_is_excluded_without_blocking_outer(case,
 
 
 MUTATIONS = ["start_selection", "start_sources", "start_year", "start_missing_year", "inputs_features", "inputs_training",
-    "fit_started", "fit_completed", "execution_count", "execution_extra", "execution_forecasts",
+    "fit_started", "fit_completed", "fit_started_boolean", "fit_completed_boolean",
+    "execution_count", "execution_extra", "execution_forecasts",
     "forecasts_value", "forecasts_missing", "forecasts_boolean", "validation_cutoff", "validation_purpose",
     "validation_targets", "terminal_metrics", "terminal_candidate", "terminal_prospective", "terminal_extra"]
 
@@ -210,6 +245,9 @@ def test_valid_hash_outer_evidence_tampering_refuses_replay(outer_case, monkeypa
             body["prediction_matrix_id"] = "wrong"
         if name.startswith("outer-fit-completed:") and mutation == "fit_completed":
             return body
+        if any(name.startswith("outer-fit-" + state + ":1:") and mutation == "fit_" + state + "_boolean"
+               for state in ("started", "completed")):
+            body["horizon_sessions"] = True
         if name.startswith("outer-execution:"):
             if mutation == "execution_count":
                 body["completed_fit_count"] = True
@@ -253,6 +291,28 @@ def test_valid_hash_outer_evidence_tampering_refuses_replay(outer_case, monkeypa
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         run(case)
     assert case.conn.total_changes == before
+
+
+@pytest.mark.parametrize("state", ["started", "completed"])
+def test_stored_integer_valued_float_fit_horizon_is_canonical_identity(outer_case, monkeypatch, state):
+    case = outer_case
+    original = outer.append_record
+    changed = []
+    def append(conn, store, run_id, name, body, **kwargs):
+        if name.startswith("outer-fit-" + state + ":1:"):
+            body = {**body, "horizon_sessions": 1.0}
+            changed.append(name)
+        return original(conn, store, run_id, name, body, **kwargs)
+    monkeypatch.setattr(outer, "append_record", append)
+    result = run(case)
+    assert len(changed) == 1
+    marker = slot(case, "fit-" + state + ":1")
+    assert type(marker["horizon_sessions"]) is int
+    assert marker == expected_fits(case)[-1]
+    before = case.conn.total_changes, journal_slots(case)
+    forbid_work(monkeypatch)
+    assert run(case) == result
+    assert (case.conn.total_changes, journal_slots(case)) == before
 
 
 @pytest.mark.parametrize("missing", [False, True])
@@ -362,7 +422,8 @@ def assert_live_child_refusal(case, started, completed):
 
 @pytest.mark.parametrize("kind, started, completed", [
     ("wrong_matrix", 0, 0), ("wrong_horizon", 0, 0), ("completed_first", 0, 0),
-    ("duplicate_start", 1, 0), ("unknown_state", 1, 0), ("wrong_completion", 1, 0), ("overflow", 3, 3)])
+    ("duplicate_start", 1, 0), ("unknown_state", 1, 0), ("wrong_completion", 1, 0), ("overflow", 3, 3),
+    ("boolean_start", 2, 2), ("boolean_completion", 3, 2)])
 def test_fresh_child_progress_refuses_before_bad_event_publication(outer_case, monkeypatch, kind, started, completed):
     case = outer_case
     def fitted(inputs, fold, plan, execution, limits, progress):
@@ -377,7 +438,12 @@ def test_fresh_child_progress_refuses_before_bad_event_publication(outer_case, m
             fit = {**fit, "prediction_matrix_id": "wrong"}
         if kind == "wrong_horizon":
             fit = {**fit, "horizon_sessions": 1}
+        if kind.startswith("boolean"):
+            assert fits[-1]["horizon_sessions"] == 1
+            fit = {**fits[-1], "horizon_sessions": True}
         if kind in ("completed_first", "wrong_completion"):
+            state = "completed"
+        if kind == "boolean_completion":
             state = "completed"
         if kind == "unknown_state":
             state = "unexpected"
