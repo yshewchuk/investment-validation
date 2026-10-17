@@ -447,6 +447,9 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 `deployment.py` additionally imports nothing outside this package and
 `engine.v2.foundation` (`Clock`, `SystemClock`, `content_hash`,
 `format_timestamp`, `from_document`, `fsync_directory`, `to_document`).
+`release_layout.py` and `release_objects.py` import only this package and `engine.v2.foundation`
+(`content_hash`, `ensure_directory`, `fsync_directory`); `release_objects.py` also uses
+`frozen_state_io.read_bounded_state`.
 
 **Callers** (real import edges, `from engine.v2.models import ...` /
 `from engine.v2.models import deployment`, checked against `README.md`'s

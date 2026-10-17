@@ -1,4 +1,5 @@
 """Catalog survival using the actual release and frozen-state producers."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -248,10 +249,31 @@ def test_read_regular_file_refuses_fifo_without_blocking(tmp_path):
         release_objects.read_regular_file(fifo, 16)
 
 
+def test_read_regular_file_refusals_do_not_leak_descriptors(tmp_path):
+    def open_fds():
+        return len(os.listdir("/proc/self/fd"))
+
+    if not os.path.isdir("/proc/self/fd"):
+        pytest.skip("no /proc/self/fd")
+    directory = tmp_path / "dir"
+    directory.mkdir()
+    fifo = tmp_path / "fifo"
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(fifo)
+    before = open_fds()
+    for _ in range(20):
+        with pytest.raises(layout.ReleaseLayoutError):
+            release_objects.read_regular_file(directory, 16)
+        if fifo.exists():
+            with pytest.raises(layout.ReleaseLayoutError):
+                release_objects.read_regular_file(fifo, 16)
+    assert open_fds() == before
+
+
 def test_write_object_accepts_empty_payload(tmp_path):
     digest, rel = layout.write_object(tmp_path, b"")
     assert (layout.deployment_root(tmp_path) / rel).read_bytes() == b""
-    assert digest == layout.sha256_bytes(b"")
+    assert digest == "sha256:" + hashlib.sha256(b"").hexdigest()
 
 
 def test_legacy_fallback_requires_matching_id_and_local_needs_no_root(tmp_path):

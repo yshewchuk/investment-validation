@@ -1,6 +1,6 @@
 """P5-6 staged-release layout and the required-member catalog.
 
-Shared by ``tools/phase5_prepare_release.py`` (writes a staged release),
+Shared, among others, by ``tools/phase5_prepare_release.py`` (writes a staged release),
 ``checks/phase5_acceptance.py`` (verifies one) and
 ``checks/phase5_release_assembly.py``; it lives in
 ``engine.v2.models`` so checks and tools import it directly.
