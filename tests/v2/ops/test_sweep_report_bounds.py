@@ -313,8 +313,9 @@ def test_report_io_errors_stay_retryable_without_publication_effects(
 def test_default_report_comparison_keeps_path_reader(source, tmp_path, monkeypatch, action, options):
     registration = register_native_case(source)
     ledger = tmp_path / "ledger.csv"
-    invoke(ACTIONS[0], source, registration, ledger)
+    first = invoke(ACTIONS[0], source, registration, ledger)
     path = invoke(ACTIONS[2], source, registration, ledger)
+    ledger_bytes = ledger.read_bytes()
     real_read, real_open, reads = Path.read_bytes, os.open, []
 
     def read_bytes(candidate):
@@ -328,8 +329,10 @@ def test_default_report_comparison_keeps_path_reader(source, tmp_path, monkeypat
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes)
     monkeypatch.setattr(outcomes.os, "open", no_descriptor_report)
-    invoke(action, source, registration, ledger, **options)
+    result = invoke(action, source, registration, ledger, **options)
+    assert result == (path if action == ACTIONS[2] else first)
     assert reads
+    assert ledger.read_bytes() == ledger_bytes and path.read_text() == REPORT
 
 
 @pytest.mark.parametrize("action", ACTIONS)

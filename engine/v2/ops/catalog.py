@@ -31,9 +31,11 @@ __all__ = [
     "BUSY_TIMEOUT_MS",
     "backup_to",
     "connect",
+    "decode_bounded_text",
     "dumps",
     "integrity_errors",
     "load_json",
+    "sql_text_budget",
     "transaction",
 ]
 
@@ -111,3 +113,19 @@ def dumps(value: Any) -> str:
 def load_json(cls: type, text: str | None) -> Any:
     """Strictly decode a JSON column back into its contract type."""
     return None if text is None else from_document(cls, json.loads(text))
+
+
+def sql_text_budget(conn: sqlite3.Connection, max_utf8_bytes: int) -> tuple[str, int]:
+    """Encoding and SQL BLOB allowance for a caller's UTF-8 text budget."""
+    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
+    return encoding, max_utf8_bytes * (2 if encoding.startswith("UTF-16") else 1)
+
+
+def decode_bounded_text(payload: bytes | None, encoding: str, max_utf8_bytes: int) -> str:
+    """Admit a bounded SQL projection; the caller owns the refusal policy."""
+    if payload is None:
+        raise ValueError("stored text was not admitted by its SQL byte bound")
+    text = payload.decode(encoding)
+    if len(text.encode("utf-8")) > max_utf8_bytes:
+        raise ValueError("stored text exceeds its UTF-8 byte bound")
+    return text

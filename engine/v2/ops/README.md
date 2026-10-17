@@ -37,10 +37,11 @@ are internal to ops; production packages consume versioned artifacts instead
 of importing the supervisor.
 
 Native experiment registration also exposes these submodule APIs:
-`submission.get_job` returns a job receipt, bounding only `failure_json` before transfer/decoding by `submission.MAX_JOB_FAILURE_BYTES` (1 MiB UTF-8, matching executor result pipes); UTF-16 SQL transfer allows 2 MiB before the UTF-8 recheck. Oversized/wrong-type failure text refuses `INTEGRITY_FAILED`, never truncates. Malformed failure JSON also refuses `INTEGRITY_FAILED`; other receipt fields/lifecycle are unchanged; submission replay shares this reader.
+`submission.get_job` and `submit_graph` accept `max_failure_bytes=None` and `receipt_decode_failure_code=None`. The inherited default failure reader is uncapped, preserving historical coordinator failures and unrelated callers; this is not a general exemption from evidence bounds. An explicit positive exact-integer budget (at most `(2**63-1)//2`) caps failure text before SQL transfer/JSON decoding, with UTF-16 transfer allowance twice the UTF-8 budget and a UTF-8 recheck. Size refusal uses the explicit registered receipt code, otherwise `INTEGRITY_FAILED`; wrong-type, invalid-encoding or malformed failure JSON retains `INTEGRITY_FAILED`. The optional code also types only queue/resource/progress JSON decoder failures; other errors propagate. `validate_receipt_read_policy` rejects invalid code/budget with `INVALID_REQUEST` before reads, graph writes or sweep staging. Collection explicitly passes the fixed `MAX_JOB_FAILURE_BYTES` (1 MiB) and R6 throughout initial replay and observation; writer/lifecycle semantics are unchanged.
 `native_registration.read_native_evidence(conn, run_id, max_bytes=MAX_NATIVE_EVIDENCE_BYTES)` returns None or `(row, object)` from one capped SQL snapshot; `native_evidence_json(document, max_bytes=...)` returns matching bounded canonical object text. The default budget is 16 MiB UTF-8 (32 MiB SQL bytes for UTF-16 before UTF-8 recheck); malformed/oversized evidence refuses R6 and raw storage errors propagate. `verified_registration_bytes(max_evidence_bytes=None)` opts into these catalog/registration-object bounds only when supplied; existing callers retain their limits.
 `checkpoints.registered_artifact(max_metadata_bytes=None)` optionally caps reference JSON before transfer/decoding, refusing `INTEGRITY_FAILED` on non-text, oversized or invalid-encoding text; malformed JSON/contract decoding still raises raw `ValueError` (including `DocumentError`) or `RecursionError`. Its default remains unchanged and it never reads artifact content.
-`catalog.transaction`, `errors.OpsError`, `errors.fail`,
+`catalog.sql_text_budget` returns the catalog encoding and UTF-16-adjusted transfer allowance; `catalog.decode_bounded_text` decodes projected bytes and rechecks the caller's UTF-8 budget, raising `ValueError` on invalid evidence. Callers own SQL snapshots and typed refusal policy.
+The registration surface also includes `catalog.transaction`, `errors.OpsError`, `errors.fail`,
 `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`,
 `experiments.register_hypothesis_in_transaction`, `experiments.NATIVE_GATE_WORKER`, `experiments.NATIVE_GATE_ENTRYPOINT`, `experiments.NATIVE_GATE_RUNNERS`,
 `fingerprints.environment_identity`, `fingerprints.source_closure` (reads each `.py` once and refuses
@@ -62,7 +63,7 @@ Native prediction and reconstructed gate reporting consume the public fold-local
 The fixed native gate child consumes `worker.main(dispatcher=...)` for the unchanged launch/result protocol; ops never imports its pricing or evaluation adapters. Prediction and gate CLIs consume `catalog.connect` and `experiments.experiment_spec_from_document`
 to open an existing catalog and decode the same strict experiment specification.
 
-Native sweep coordination also exposes `submission.submit_graph`/`submission.NamespacePolicy`,
+Native sweep coordination also exposes `submission.submit_graph`/`submission.NamespacePolicy`/`submission.validate_receipt_read_policy`,
 `stages.registry`, `checkpoints.register_artifact`, `migrations.require_current`,
 `schema.OWNER`/`schema.MIGRATIONS`, and `fingerprints.worker_source_manifest`
 for current-schema admission, artifact registration, source binding and atomic job submission.
@@ -138,7 +139,7 @@ either required table. Their current consumer is
 
 `nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package and used by completion persistence in `supervisor.Service`; tests include `tests/v2/ops/test_nightly_session.py` and `tests/v2/ops/test_nightly_completion.py`. `nightly_completion` (run-scoped reports, #564 slice 7; exports `Disposition`, `SCHEMA`, `build_completion_report`, `record_completion`) is internal and consumed through `supervisor.Service`; `tests/v2/ops/test_nightly_completion.py` covers its report contract and persistence. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is imported by the production modules `nightly_chain`, `nightly_history`, and `nightly_repair`; `nightly_trigger` does not call it yet. `tests/v2/ops/test_nightly_receipts.py` covers its contract. `nightly_readiness` (legacy run-report readiness for a session, #564 slice 3; exports `LegacyReadiness`, `check_legacy_report`) is internal and uncalled by `nightly_trigger`; `tests/v2/ops/test_nightly_readiness.py` covers its contract. `nightly_chain` (snapshot import/refresh/moves/capture step chain over step receipts, #564 slice 4; exports `ChainResult`, `ChainStep`, `run_snapshot_chain`) is imported by production module `nightly_history`; `nightly_trigger` does not call it directly. `tests/v2/ops/test_nightly_chain.py` covers its contract.
 
-<!-- public-interface: Migration, migrate, magnitude_fitted_execution_document, validate_magnitude_fitted_execution, registered_artifact, register_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, magnitude_history_request, magnitude_history_execution_document, validate_magnitude_history_execution, environment_identity, source_closure, worker_source_manifest, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main, submit_graph, NamespacePolicy, registry, require_current, OWNER, MIGRATIONS, MAX_JOB_FAILURE_BYTES, get_job, MAX_NATIVE_EVIDENCE_BYTES, read_native_evidence, native_evidence_json -->
+<!-- public-interface: Migration, migrate, magnitude_fitted_execution_document, validate_magnitude_fitted_execution, registered_artifact, register_artifact, verify_eod_availability, transaction, sql_text_budget, decode_bounded_text, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, magnitude_history_request, magnitude_history_execution_document, validate_magnitude_history_execution, environment_identity, source_closure, worker_source_manifest, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main, submit_graph, validate_receipt_read_policy, NamespacePolicy, registry, require_current, OWNER, MIGRATIONS, MAX_JOB_FAILURE_BYTES, get_job, MAX_NATIVE_EVIDENCE_BYTES, read_native_evidence, native_evidence_json -->
 
 ## Consumers
 
@@ -154,15 +155,15 @@ failure rather than a stale sentence.
 `experiments/native_gate_entrypoint.py` consumes `worker.main` and injects only fixed pricing/evaluation callbacks.
 `experiments/native_gate_evaluation.py` consumes `stages.NativeGateParameters` and `errors.fail`; its admission/receipt helpers are owned by unlayered `experiments.native_gate_worker`, not ops.
 `tools/phase7_candidate_manifest.py` consumes `stages.registry` to build the job-graph rows of the P7-1 manifest (operator-run, read-only).
-`experiments/v2_gate_sweep.py` consumes `submission.submit_graph`/`NamespacePolicy`,
+`experiments/v2_gate_sweep.py` consumes `submission.submit_graph`/`NamespacePolicy`/`validate_receipt_read_policy`,
 `stages.registry`, `checkpoints.register_artifact`, `catalog.connect`/`transaction`,
 `migrations.require_current`, `schema.OWNER`/`MIGRATIONS`, `experiments.experiment_spec_from_document`, `errors.OpsError`/`fail` and `fingerprints.environment_identity`/`source_closure`/`worker_source_manifest`
 to submit an immutable common-snapshot roster atomically. Child artifacts are
 unrecorded evaluation evidence; operations success is not scientific sweep completion.
-`experiments/native_sweep_collection.py` consumes `catalog.transaction`,
+`experiments/native_sweep_collection.py` consumes `catalog.transaction`/`sql_text_budget`/`decode_bounded_text`,
 `checkpoints.registered_artifact`, `experiments.experiment_spec_from_document`,
 `fingerprints.source_closure`, `native_registration.read_native_evidence`/`native_evidence_json`/`MAX_NATIVE_EVIDENCE_BYTES`, `submission.get_job`/`MAX_JOB_FAILURE_BYTES` and `errors.OpsError`/`fail` for collection. It directly reads ops-owned `attempts` and `attempt_outputs` for the exact terminal attempt; `artifacts` remains accessed through `registered_artifact`.
-`experiments/v2_gate_collect.py` consumes `catalog.connect`, `submission.get_job` and `errors.OpsError`/`fail` for an observer-only CLI.
+`experiments/v2_gate_collect.py` consumes `catalog.connect`, `submission.get_job`/`MAX_JOB_FAILURE_BYTES` and `errors.OpsError`/`fail` for an observer-only CLI.
 
 No other production package imports ops. The CLI starts the coordinator, and
 serving reads a versioned health artifact without a peer-layer import. The one
