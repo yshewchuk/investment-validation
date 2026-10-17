@@ -443,6 +443,26 @@ This manual CLI is separate from the admitted smoke worker; neither authorizes p
 | Repeated call or failure | No cache, internal retry, transaction or publication; recompute from the same pin and never retain a partial result. |
 | CLI omits `--no-ledger` | Refuse before opening the catalog; recorded execution is unavailable. |
 
+## Scientific gate sweep collection
+
+`native_sweep_collection.collect_sweep` reuses sealed `submit_sweep` admission and exact job replay. `v2_gate_collect run` waits for the ordinary ops supervisor and then collects; `collect` returns immediately. Neither starts/stops workers or takes over supervisor ownership; timeout leaves jobs pending. No new scheduler. Both require the existing migrated catalog and seal, explicit source/holdout context, and either smoke opt-in or a ledger destination. Non-sweep purpose is refused before CLI catalog/input access. Workers retain no recording authority.
+
+The first canonical arm anchors immutable `native_sweep_{mode}_intent` and `native_sweep_{mode}_index` artifact references in existing registration evidence. An intent binds roster hash, collector-source closure, mode and normalized ledger address; its hash is the collection run ID. Other evidence is preserved. Smoke/recorded collection identities are separate; the exact staged jobs remain the same. Source/destination drift under an existing mode refuses R6. Complete content-addressed objects may remain unreferenced after interrupted reservation.
+
+| Boundary | Contract |
+| --- | --- |
+| Terminal lookup | Select the job's exact attempt number, never the union of all attempts' outputs. Verify terminal state and fencing; cancellation/recovery may advance the job fence. Success needs its sole named canonical `native_gate_result` and exact registered identity/provenance. |
+| Attempt count | Each admitted/dispatched variant counts once, regardless of success, refusal or failure. Queued/cancelled jobs without an attempt count zero; pending work cannot complete a run. |
+| Generic worker failure or missing result | Coordinator publishes immutable R4 (`EXPERIMENT_VARIANT_FAILED`) in recorded mode. The original ops problem/diagnostic reference remains in the index; worker records are not rewritten. |
+| Registered refusal | Preserve code, category and retryability. Native-supported R4/R5/feature refusals use existing outcomes; identity and infrastructure refusals remain indexed without fabricated scientific outcomes. |
+| Recorded success | Render the arm's own result, compare/publish the existing native outcome, reconcile its replay-keyed ledger row and export its report. A conflicting earlier single-arm outcome refuses R6. |
+| Smoke | Publish only mode-labelled report/index artifacts and sweep-specific metadata. Never call native outcome/replay/export APIs, write native smoke/outcome slots, or touch a ledger. |
+| Interrupted publication | Intent and per-arm native intents resume ledger/report reconciliation; no final index exists until every terminal arm's applicable publication finishes. |
+| Pending/failure | Return pending snapshots without freezing an index. Once all children are terminal, freeze an index with `complete=false` if any arm failed/refused, retaining successful siblings. |
+| Exact replay | Compare immutable index/result bytes; no fitting, job retry, duplicate recording or replacement of prior evidence. |
+
+SQLite transactions, foundation canonical JSON/content hashes, existing artifact verification and native publication own persistence; filesystem work stays outside catalog write transactions. Output artifact reads honor registered byte-size bounds. The collection does not grant final-read, promotion or winner authority. The existing reconstructed-history/holdout limitations remain unchanged.
+
 ## Evaluation recording and promotion receipts
 
 | Condition | Outcome |

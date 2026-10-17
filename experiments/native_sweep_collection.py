@@ -1,0 +1,188 @@
+"""Coordinator-only collection of sealed gate jobs and immutable run indexes."""
+import json
+import os
+import sqlite3
+from functools import wraps
+from pathlib import Path
+
+from engine.v2.contracts import FAILURE_CODES, ArtifactRef, Problem
+from engine.v2.foundation import (
+    ArtifactError,
+    artifact_reference,
+    canonical_json,
+    content_hash,
+    from_document,
+    to_document,
+)
+from engine.v2.ops.catalog import transaction
+from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.errors import fail
+from engine.v2.ops.experiments import experiment_spec_from_document
+from engine.v2.ops.fingerprints import source_closure
+from engine.v2.ops.submission import get_job
+from experiments import native_outcomes as outcomes
+from experiments import native_registration as native
+from experiments.gate_report import render_gate_report
+from experiments.v2_gate_sweep import submit_sweep
+
+TERMINAL = frozenset({"succeeded", "failed", "cancelled", "blocked"})
+
+
+def _typed(action):
+    @wraps(action)
+    def call(*args, **kwargs):
+        try:
+            return action(*args, **kwargs)
+        except (ArtifactError, ValueError, TypeError, KeyError, RecursionError, SyntaxError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection evidence cannot be verified") from None
+        except (OSError, sqlite3.Error):
+            raise fail("INPUT_CHANGED", "sweep collection inputs are unavailable") from None
+    return call
+
+
+def _mode(no_ledger, ledger_path):
+    if type(no_ledger) is not bool or (not no_ledger and ledger_path is None):
+        raise fail("INVALID_EXPERIMENT_SPEC", "recorded sweep collection requires a ledger destination")
+    if no_ledger:
+        return "smoke", None
+    raw = os.fspath(ledger_path)
+    path = Path(raw)
+    if not raw or path.is_symlink() or path.is_dir():
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must name a regular file")
+    return "recorded", path.resolve()
+
+
+def _publish(store, document):
+    return store.publish_bytes(canonical_json(document).encode(), schema_ref=document["schema_version"])
+
+
+def _bind(conn, store, anchor, key, document):
+    """Compare immutable intent/index bytes; preserve all other arm evidence."""
+    payload = canonical_json(document).encode()
+    expected = artifact_reference(payload, document["schema_version"])
+    with transaction(conn):
+        row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?", (anchor.run_id,)).fetchone()
+        evidence = json.loads(row[0])
+        existing = evidence.get(key)
+    if existing is not None:
+        ref = from_document(ArtifactRef, existing)
+        if ref != expected or store.read_verified(ref) != payload:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection identity already has different evidence")
+        return to_document(ref)
+    ref = _publish(store, document)
+    native.verify_native_registration(conn, store, anchor)
+    with transaction(conn):
+        row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?", (anchor.run_id,)).fetchone()
+        evidence = json.loads(row[0])
+        if evidence.get("variant_id") != anchor.variant_id or (key in evidence and evidence[key] != to_document(ref)):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection identity changed during publication")
+        evidence[key] = to_document(ref)
+        conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                     (canonical_json(evidence), anchor.run_id))
+    return to_document(ref)
+
+
+def _terminal(conn, store, job, registration):
+    """Never use JobReceipt.output_refs: it unions outputs from old attempts."""
+    attempt = conn.execute("SELECT * FROM attempts WHERE job_id=? AND attempt_number=?",
+                           (job.job_id, job.attempt_count)).fetchone()
+    if job.attempt_count and (attempt is None or attempt["state"] != job.state or attempt["ended_at"] is None
+            or attempt["fence"] > job.fence or (job.state == "succeeded" and attempt["fence"] != job.fence)):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep terminal attempt differs from its job")
+    outputs = [] if attempt is None else conn.execute(
+        "SELECT name, artifact_id FROM attempt_outputs WHERE attempt_id=?", (attempt["attempt_id"],)).fetchall()
+    result, problem = None, job.failure
+    if problem is None and attempt is not None and attempt["failure_json"] is not None:
+        problem = from_document(Problem, json.loads(attempt["failure_json"]))
+    if problem is None and job.state == "cancelled":
+        problem = fail("CANCELLED", "sweep child was cancelled").problem
+    worker_problem = problem
+    if job.state == "succeeded" and outputs:
+        if len(outputs) != 1 or outputs[0]["name"] != "native_gate_result":
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep terminal attempt has unexpected outputs")
+        ref = artifact(conn, store, outputs[0]["artifact_id"])
+        payload = store.read_verified(ref)
+        result = json.loads(payload)
+        if (ref.schema_ref != "native_gate_result.v1.0" or canonical_json(result).encode() != payload
+                or result["schema_version"] != ref.schema_ref or type(result["attempted_variants"]) is not int
+                or result["attempted_variants"] != 1 or result["variant_id"] != registration.variant_id
+                or result["run_id"] != registration.run_id
+                or canonical_json(result["provenance"]) != canonical_json(registration.document)):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep child result differs from its sealed arm")
+    elif outputs:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "failed sweep attempt has successful output")
+    if result is None:
+        if problem is None or problem.code == "WORKER_FAILED":
+            problem = fail("EXPERIMENT_VARIANT_FAILED", "sweep child produced no scientific result",
+                           details={"worker_failure_code": None if problem is None else problem.code}).problem
+        elif (problem.code not in FAILURE_CODES
+              or (problem.category, problem.retryable) != FAILURE_CODES[problem.code]):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep child refusal differs from its registered policy")
+    elif problem is not None:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "successful sweep child has a refusal")
+    return attempt, result, problem, worker_problem
+
+
+@_typed
+def collect_sweep(conn, store, repository, document, *, code_root, as_of_month,
+                  scope="shadow", event_ids=None, no_ledger=False, ledger_path=None):
+    """Submit/revalidate exact jobs, collect terminal arms, and resume publication.
+
+    Pending arms remain pending. Once all jobs terminate, the immutable index
+    stays incomplete if any arm failed/refused. Smoke creates sweep artifacts
+    only, never native outcome slots, CSV rows or native report exports.
+    """
+    mode, ledger_path = _mode(no_ledger, ledger_path)
+    if conn.in_transaction:
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep collection requires an idle catalog connection")
+    jobs = submit_sweep(conn, store, repository, document, code_root=code_root,
+                       as_of_month=as_of_month, scope=scope, event_ids=event_ids)
+    sealed = native.decode_native_gate_sweep(native.read_native_gate_sweep(
+        conn, document["variants"][0]["experiment_id"]))
+    registrations = [native.NativeRegistration(item["run_id"], canonical_json(item["binding"]).encode())
+                     for item in sealed["registrations"]]
+    intent = {"schema_version": "native_gate_collection.v1.0", "roster_id": content_hash(sealed),
+              "recording_mode": mode, "ledger_destination": None if no_ledger else content_hash(str(ledger_path)),
+              "collector_source": source_closure(Path(code_root), ["experiments/native_sweep_collection.py",
+                                                                 "experiments/v2_gate_collect.py"])}
+    key = "native_sweep_" + mode
+    _bind(conn, store, registrations[0], key + "_intent", intent)
+    arms, all_terminal = [], True
+    for job, registration, spec_document in zip(jobs, registrations, sealed["request"]["variants"], strict=True):
+        job = get_job(conn, job.job_id)
+        arm = {"variant_id": registration.variant_id, "arm_id": spec_document["primary_arm_id"],
+               "job_id": job.job_id, "attempted_variants": int(job.attempt_count > 0),
+               "state": job.state, "attempt_id": None, "problem": None, "worker_problem": None, "report_ref": None,
+               "outcome_ref": None, "completion_ref": None}
+        if job.state not in TERMINAL:
+            all_terminal = False
+            arms.append(arm)
+            continue
+        attempt, result, problem, worker_problem = _terminal(conn, store, job, registration)
+        arm["attempt_id"] = None if attempt is None else attempt["attempt_id"]
+        arm["problem"] = None if problem is None else to_document(problem)
+        arm["worker_problem"] = None if worker_problem is None else to_document(worker_problem)
+        if problem is not None:
+            arm["state"] = "failed" if problem.code == "EXPERIMENT_VARIANT_FAILED" else "refused"
+        report = None if result is None else render_gate_report(
+            registration, result, spec=experiment_spec_from_document(spec_document), no_ledger=no_ledger)
+        if no_ledger:
+            if report is not None:
+                arm["report_ref"] = to_document(store.publish_bytes(
+                    report.encode(), schema_ref="native_experiment_report.v1.0"))
+        elif result is not None or problem.code in outcomes.STAGES:
+            saved = outcomes.publish_native_outcome(conn, store, registration, report=report, problem=problem,
+                attempted=bool(arm["attempted_variants"]), ledger_path=ledger_path)
+            arm["report_ref"] = saved["outcome"]["report_ref"]
+            arm["outcome_ref"] = saved["receipt"]["outcome_ref"]
+            arm["completion_ref"] = saved["receipt_ref"]
+            if report is not None:
+                outcomes.export_native_report(conn, store, registration, ledger_path=ledger_path)
+        arms.append(arm)
+    index = {"schema_version": "native_gate_sweep_index.v1.0", "run_id": content_hash(intent),
+             "roster_id": intent["roster_id"], "recording_mode": mode,
+             "primary_comparison": sealed["request"]["primary_comparison"], "planned_variants": len(arms),
+             "attempted_variants": sum(arm["attempted_variants"] for arm in arms),
+             "complete": all(arm["state"] == "succeeded" for arm in arms), "variants": arms}
+    return {"index": index, "index_ref": _bind(conn, store, registrations[0], key + "_index", index)
+            if all_terminal else None}

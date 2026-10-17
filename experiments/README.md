@@ -37,6 +37,28 @@ before catalog access; shared admission repeats smoke validation for direct call
 Submission creates jobs; supervised execution produces staged child evidence.
 Neither grants scientific collection or ledger authority.
 
+## Scientific sweep collection
+
+After sealing a roster, `python -m experiments.v2_gate_collect run` accepts the
+same roster/catalog/store/source/holdout arguments and either `--no-ledger` or
+`--ledger PATH`. It submits the exact sealed jobs, waits for the ordinary running
+ops supervisor (up to `--timeout-seconds`, default 3600), and collects terminal
+attempts. `collect` submits/revalidates and collects immediately. Neither command
+starts or stops a supervisor; timeout leaves workers/jobs untouched.
+Both print an index plus its immutable artifact reference when terminal; exit 0
+requires every arm to succeed, while pending/incomplete results and refusals exit 2.
+
+`native_sweep_collection.collect_sweep` owns collection; `v2_gate_collect.run_sweep`
+adds only waiting on the ordinary supervisor. The collection intent binds mode, ledger
+address, sealed roster and collector sources before reading results. Recorded
+mode publishes each supported native outcome and successful report, using the
+existing replay-keyed CSV sink. Smoke publishes sweep metadata/report artifacts
+only, never native outcome/smoke slots, exported reports or CSV rows. Modes have
+distinct collection run IDs; their independent recording policy does not change
+or resubmit the already sealed child jobs. Repeating either API resumes partial
+publication without evaluating or counting any variant twice. A terminal failure
+retains completed siblings and permanently leaves that mode's index incomplete.
+
 ## RUNUP daily exit comparison
 
 Run `python -m experiments.v2_runup_exits --catalog CATALOG --store-root STORE
